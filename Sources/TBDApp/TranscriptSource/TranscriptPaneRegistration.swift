@@ -8,19 +8,23 @@ import Foundation
 /// the guarded path matters as much as registering on the happy one: a pane
 /// whose session loses its transcript path — or whose flag is turned off while
 /// it is open — must stop being polled, not merely stop being re-registered.
+///
+/// `token` identifies the calling pane on both branches, so the guarded one
+/// releases that pane's own hold and nobody else's — see `TranscriptPaneToken`.
 enum TranscriptPaneRegistration {
     static func apply(
         enabled: Bool,
         sessionID: String,
         path: String?,
         tier: TranscriptPollTier,
+        token: TranscriptPaneToken,
         scheduler: TranscriptPollScheduler
     ) async {
         guard enabled, let path, !path.isEmpty else {
-            await scheduler.deregister(sessionID: sessionID)
+            await scheduler.deregister(sessionID: sessionID, token: token)
             return
         }
-        await scheduler.register(sessionID: sessionID, path: path, tier: tier)
+        await scheduler.register(sessionID: sessionID, path: path, tier: tier, token: token)
     }
 }
 

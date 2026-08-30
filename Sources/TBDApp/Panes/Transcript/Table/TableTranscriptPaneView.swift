@@ -358,10 +358,16 @@ struct TableTranscriptPaneView: View {
                 state.touchSessionTranscript(sessionID)
             }
         }
+        // One token per run of this task, so the hold belongs to *this* pane.
+        // The deregistration at the bottom happens whenever this task notices
+        // its own cancellation, which can be well after a replacement pane for
+        // the same session has registered; the token is what keeps that late
+        // call from tearing the replacement's polling down.
+        let token = TranscriptPaneToken()
         var tier = currentPollTier()
         await TranscriptPaneRegistration.apply(
             enabled: true, sessionID: sid, path: path,
-            tier: tier, scheduler: scheduler)
+            tier: tier, token: token, scheduler: scheduler)
 
         // Publish once immediately so the pane is not blank until the first tick.
         await source.refresh(sessionID: sid, path: path)
@@ -376,9 +382,9 @@ struct TableTranscriptPaneView: View {
         // and re-declare the tier whenever this pane's visibility changes. A
         // pane the viewer-slot LRU keeps mounted after the selection moves
         // elsewhere must drop to the background cadence without being torn
-        // down; `register` replaces rather than duplicates, so re-declaring is
-        // exactly that gesture (the same one `setAppActive` makes for the whole
-        // registry).
+        // down; re-registering under the same token updates this pane's own
+        // hold rather than taking a second one, so re-declaring is exactly that
+        // gesture (the same one `setAppActive` makes for the whole registry).
         //
         // Polled here rather than watched with an `.onChange` in `body` for two
         // reasons: an observation dependency taken inside this task would not
@@ -395,9 +401,9 @@ struct TableTranscriptPaneView: View {
             let latest = currentPollTier()
             guard latest != tier else { continue }
             tier = latest
-            await scheduler.register(sessionID: sid, path: path, tier: tier)
+            await scheduler.register(sessionID: sid, path: path, tier: tier, token: token)
         }
-        await scheduler.deregister(sessionID: sid)
+        await scheduler.deregister(sessionID: sid, token: token)
     }
 
     /// This pane's cadence tier right now: foreground while its worktree is on

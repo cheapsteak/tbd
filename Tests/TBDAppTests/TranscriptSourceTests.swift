@@ -201,6 +201,68 @@ struct TranscriptSourceTests {
                                                                     "second"])
     }
 
+    /// A capture that always fails, standing in for the production race the
+    /// window cannot be captured through: the transcript replaced or removed in
+    /// the instant between the incremental read and the capture that follows
+    /// it. Bytes are consumed, and nothing is left to verify the next growth
+    /// against.
+    private let noTailCapture: @Sendable (String, UInt64) -> Data? = { _, _ in nil }
+
+    @Test("a failed tail capture forces a re-read rather than trusting the next growth")
+    func failedTailCaptureForcesReset() async throws {
+        let path = try tempFile(lineA + "\n")
+        let source = TranscriptSource(captureTail: noTailCapture)
+        _ = await source.refresh(sessionID: "s1", path: path)
+        #expect(promptTexts(await source.items(sessionID: "s1")) == ["hello"])
+
+        // A whole-file rewrite landing LARGER — size and mtime alone read
+        // exactly like an append, and the verification that would tell them
+        // apart has no captured window to work from.
+        try (lineC + "\n" + lineD + "\n").write(
+            to: URL(fileURLWithPath: path), atomically: true, encoding: .utf8)
+        try setModified(path, secondsFromNow: 5)
+        _ = await source.refresh(sessionID: "s1", path: path)
+        #expect(promptTexts(await source.items(sessionID: "s1")) == ["third prompt, deliberately long",
+                                                                    "fourth prompt, deliberately long"],
+                "an uncapturable window must force a full re-read, not an append onto stale rows")
+    }
+
+    @Test("a forced re-read whose read fails still retains the prior items")
+    func failedTailCaptureResetDoesNotBlank() async throws {
+        let path = try tempFile(lineA + "\n")
+        let source = TranscriptSource(captureTail: noTailCapture)
+        _ = await source.refresh(sessionID: "s1", path: path)
+
+        try append(lineB + "\n", to: path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path) }
+        try setModified(path, secondsFromNow: 5)
+
+        let change = await source.refresh(sessionID: "s1", path: path)
+        #expect(change == nil, "an unreadable file reports no change")
+        #expect(promptTexts(await source.items(sessionID: "s1")) == ["hello"],
+                "forcing a re-read means 'start from byte zero next time', never 'publish empty now'")
+    }
+
+    @Test("a read that consumed nothing still verifies, and the next growth appends")
+    func nothingConsumedStillVerifies() async throws {
+        let path = try tempFile("")
+        let source = TranscriptSource()
+        _ = await source.refresh(sessionID: "s1", path: path)
+        #expect(await source.items(sessionID: "s1").isEmpty)
+
+        try append(lineA + "\n", to: path)
+        let grown = await source.refresh(sessionID: "s1", path: path)
+        #expect(grown?.appended.count == 1,
+                "an empty capture is 'nothing to verify', which passes — not 'unverifiable'")
+        #expect(promptTexts(await source.items(sessionID: "s1")) == ["hello"])
+
+        try append(lineB + "\n", to: path)
+        let appended = await source.refresh(sessionID: "s1", path: path)
+        #expect(appended?.appended.count == 1, "the following tick must still read only the delta")
+        #expect(promptTexts(await source.items(sessionID: "s1")) == ["hello", "second"])
+    }
+
     @Test("forget drops retained state")
     func forgetDropsState() async throws {
         let path = try tempFile(lineA + "\n")

@@ -73,13 +73,14 @@ struct TranscriptPaneVisibilityTests {
     func declaredTierReachesTheScheduler() async {
         let scheduler = TranscriptPollScheduler(source: TranscriptSource())
         let worktree = UUID()
+        let pane = TranscriptPaneToken()
         await TranscriptPaneRegistration.apply(
             enabled: true, sessionID: "s1", path: "/tmp/tbd-tier-test-s1.jsonl",
             tier: TranscriptPaneVisibility.tier(
                 worktreeID: worktree, selectedWorktreeIDs: [UUID()]),
-            scheduler: scheduler)
+            token: pane, scheduler: scheduler)
         #expect(await scheduler.registeredTier(sessionID: "s1") == .background)
-        await scheduler.deregister(sessionID: "s1")
+        await scheduler.deregister(sessionID: "s1", token: pane)
     }
 
     /// Losing the selection must re-tier a live registration in place — the
@@ -90,12 +91,15 @@ struct TranscriptPaneVisibilityTests {
         let scheduler = TranscriptPollScheduler(source: TranscriptSource())
         let worktree = UUID()
         let path = "/tmp/tbd-tier-test-s2.jsonl"
+        // One pane across all three declarations, so it re-declares its own
+        // hold rather than piling up new ones.
+        let pane = TranscriptPaneToken()
 
         await TranscriptPaneRegistration.apply(
             enabled: true, sessionID: "s2", path: path,
             tier: TranscriptPaneVisibility.tier(
                 worktreeID: worktree, selectedWorktreeIDs: [worktree]),
-            scheduler: scheduler)
+            token: pane, scheduler: scheduler)
         #expect(await scheduler.registeredTier(sessionID: "s2") == .foreground)
 
         // Selection moves to another worktree; this pane stays mounted.
@@ -103,9 +107,11 @@ struct TranscriptPaneVisibilityTests {
             enabled: true, sessionID: "s2", path: path,
             tier: TranscriptPaneVisibility.tier(
                 worktreeID: worktree, selectedWorktreeIDs: [UUID()]),
-            scheduler: scheduler)
+            token: pane, scheduler: scheduler)
         #expect(await scheduler.registeredSessionIDs == ["s2"],
                 "re-declaring a tier must replace the registration, not duplicate it")
+        #expect(await scheduler.holderCount(sessionID: "s2") == 1,
+                "and the same pane must still be its only holder")
         #expect(await scheduler.registeredTier(sessionID: "s2") == .background)
 
         // And back again when the pane returns to screen.
@@ -113,8 +119,8 @@ struct TranscriptPaneVisibilityTests {
             enabled: true, sessionID: "s2", path: path,
             tier: TranscriptPaneVisibility.tier(
                 worktreeID: worktree, selectedWorktreeIDs: [worktree]),
-            scheduler: scheduler)
+            token: pane, scheduler: scheduler)
         #expect(await scheduler.registeredTier(sessionID: "s2") == .foreground)
-        await scheduler.deregister(sessionID: "s2")
+        await scheduler.deregister(sessionID: "s2", token: pane)
     }
 }
