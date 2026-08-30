@@ -217,6 +217,108 @@ struct PeerLinkSupervisorTests {
             "the link must be published down when the watchdog kills its child; got \(transitions)")
     }
 
+    /// **The watchdog's second stall shape, isolated.** `killIfStalled` has two
+    /// fatal conditions and a provider that simply goes quiet satisfies both at
+    /// once, so `silenceWatchdogKillsASilentChild` proves nothing about the
+    /// second: delete the handshake-age check and it still passes on silence.
+    /// This pins the case only that check can catch — an old shim, or one
+    /// speaking a protocol number this build does not, that keeps the stream
+    /// busy but never answers `hello`. Without it the link would sit down
+    /// forever, never reconnecting and never escalating.
+    ///
+    /// The stub echoes a `ping` for every line TBD writes it, so this side's own
+    /// keepalive is what keeps inbound traffic flowing. Those pings arrive ahead
+    /// of any `hello` and are counted as the protocol violations they are —
+    /// which is exactly why they are also the observable here: each one proves
+    /// the stream was carrying a line at that moment.
+    ///
+    /// **Silence is unmet by construction, not by luck.** Every round advances
+    /// both seams and then waits for a *new* inbound ping before the next one,
+    /// capped at four simulated seconds, so the stream is never quiet for longer
+    /// than four seconds against a six-second `silenceLimit` — and each round
+    /// starts from a ping that has just landed, so the gap never accumulates
+    /// across rounds. The connection's age, meanwhile, only grows. It is the
+    /// one condition left that can kill this child.
+    @Test func aHandshakeThatNeverCompletesIsKilledWhileTheStreamStaysBusy() async throws {
+        let stub = try Stub("handshake-stall", body: """
+            trap 'printf "%s\\n" terminated >> "$STDIN_LOG"; exit 143' TERM INT
+            while IFS= read -r line; do
+                printf "%s\\n" "$line" >> "$STDIN_LOG"
+                printf "%s\\n" '{"kind":"ping"}'
+            done
+            """)
+        defer { stub.remove() }
+        let clock = TestClock<Duration>()
+        let date = TestDateSource()
+        let recorder = LinkRecorder()
+        let supervisor = PeerLinkSupervisor(
+            config: stub.config, contractVersion: 2, origin: "acme-laptop",
+            handler: recorder, silenceLimit: 6, keepaliveInterval: 1,
+            healthyResetUptime: 3600, clock: clock, now: date.provider)
+        await supervisor.start()
+
+        _ = try await waitFor(
+            "the stalled provider to start",
+            observed: { "spawns=\(stub.spawnCount())" }) { stub.spawnCount() >= 1 }
+        let firstPID = try #require(stub.pids().first)
+
+        // Rounds, not one long advance: the cap on how long the stream may be
+        // quiet is the whole point, and only a wait that re-anchors on each
+        // fresh ping enforces it. The loop ends on the kill — by the stub's own
+        // TERM marker, by its process group going, or by the replacement child
+        // the supervisor spawns after it.
+        var rounds = 0
+        while rounds < 24 {
+            let terminated = stub.stdinLines().contains("terminated")
+            let replaced = stub.spawnCount() > 1
+            if terminated || replaced || kill(-firstPID, 0) != 0 { break }
+            let before = await supervisor.counters.linesBeforeHandshake
+            let progressed = await advanceLockstep(
+                clock, date, until: "the provider's next ping, or the watchdog's kill",
+                limit: 4,
+                observed: {
+                    let seen = await supervisor.counters.linesBeforeHandshake
+                    return "pings=\(seen) spawns=\(stub.spawnCount()) lines=\(stub.stdinLines().count)"
+                }
+            ) {
+                let pings = await supervisor.counters.linesBeforeHandshake
+                return pings > before
+                    || stub.stdinLines().contains("terminated")
+                    || stub.spawnCount() > 1
+                    || kill(-firstPID, 0) != 0
+            }
+            if progressed == nil { break }
+            rounds += 1
+        }
+
+        _ = try await waitFor(
+            "the stalled child's process group to die",
+            observed: { "group \(firstPID) alive=\(kill(-firstPID, 0) == 0)" }
+        ) { kill(-firstPID, 0) != 0 }
+        // Clock only, so the date stays where the rounds left it: a replacement
+        // spawned under an advancing date could be killed by the silence branch
+        // and muddy what this test is measuring.
+        _ = await advanceVirtualTime(
+            clock, until: "the watchdog to replace the stalled child", step: 0.5,
+            observed: { "spawns=\(stub.spawnCount())" }) { stub.spawnCount() >= 2 }
+
+        let pings = await supervisor.counters.linesBeforeHandshake
+        let transitions = await recorder.transitions
+        await stopDriven(supervisor, clock)
+
+        #expect(
+            transitions.isEmpty,
+            "the provider never answered hello, so the link must never have come up; got \(transitions)")
+        #expect(
+            pings >= 4,
+            """
+            the stream has to have been carrying inbound pings throughout, or \
+            this measures silence rather than a handshake that never completed; \
+            got \(pings) over \(rounds) rounds
+            """)
+        #expect(stub.spawnCount() >= 2, "the stalled child was killed but never replaced")
+    }
+
     /// The tighter limit is not a local constant. Both halves of the link read
     /// one number, and it is the codec's — a supervisor that redefined it would
     /// disagree with the frames it encodes and with any provider conforming to
@@ -416,6 +518,50 @@ struct PeerLinkSupervisorTests {
             !frames.contains(where: { $0.kind == .peer }),
             "a peer line ahead of the hello must never reach the handler; got \(frames)")
         #expect(prematureDrops == 1)
+    }
+
+    /// A `ping` is no exception to that gate. The contract's "neither side may
+    /// write any other line before it" names no kind, and a keepalive accepted
+    /// ahead of the handshake would let a link that never negotiated look alive
+    /// on the one signal this stream reads liveness from — while every other
+    /// kind arriving in the same window is counted as the violation it is.
+    ///
+    /// The ping *after* the `hello` is the control: it is received normally, so
+    /// what the drop below is attributable to is the first ping's position and
+    /// not to pings being refused wholesale.
+    @Test func aPingAheadOfTheHandshakeIsDroppedAndCounted() async throws {
+        let stub = try Stub("premature-ping", body: """
+            printf "%s\\n" '{"kind":"ping"}'
+            printf "%s\\n" '{"kind":"hello","origin":"acme-remote","protocol":1}'
+            printf "%s\\n" '{"kind":"ping"}'
+            exit 0
+            """)
+        defer { stub.remove() }
+        let clock = TestClock<Duration>()
+        let recorder = LinkRecorder()
+        let supervisor = PeerLinkSupervisor(
+            config: stub.config, contractVersion: 2, origin: "acme-laptop",
+            handler: recorder, healthyResetUptime: 3600, clock: clock,
+            now: TestDateSource().provider)
+        await supervisor.start()
+
+        _ = try await waitFor(
+            "the link to go up then down over one connection",
+            observed: { let seen = await recorder.transitions; return "transitions=\(seen)" }
+        ) { await recorder.transitions.count >= 2 }
+        // Captured before the stop, for the reason
+        // `linkGoesUpOnHelloExchangeAndDownOnChildExit` gives: advancing the
+        // clock can open a second connection, whose own premature ping would
+        // take both counts up by one.
+        let counters = await supervisor.counters
+        await stopDriven(supervisor, clock)
+
+        #expect(
+            counters.linesBeforeHandshake == 1,
+            "a ping ahead of the provider's hello is a protocol violation and must be counted as one; got \(counters)")
+        #expect(
+            counters.framesReceived == 2,
+            "the hello and the ping that followed it are the whole of what this connection legitimately received; got \(counters)")
     }
 
     // MARK: - Sending
@@ -801,8 +947,39 @@ struct PeerLinkSupervisorTests {
         }
 
         // Open the gate: the child starts draining and the stalled frame can
-        // finish. This is the first virtual time anything here spends.
+        // finish.
         #expect(FileManager.default.createFile(atPath: gate.path, contents: nil))
+
+        // REAL time first, virtual time only after — and the order is the whole
+        // point, not a stylistic preference.
+        //
+        // The child needs real time to notice the gate (it polls for the file
+        // every 0.02 s) and then exec `cat`. `advanceVirtualTime` spends
+        // virtual time as fast as the scheduler allows: it advances the clock
+        // one `step` per loop iteration for as long as any sleeper is armed,
+        // with essentially no wall-clock time in between. The stalled write's
+        // refill loop is BOUNDED — it sleeps `writeRetryInterval` on the
+        // injected clock between attempts and gives up after
+        // `writeStallLimit / writeRetryInterval` of them — so advancing the
+        // clock before the child is reading burns that entire budget in a few
+        // milliseconds and the write abandons the frame half-written. That is
+        // exactly what CI observed: `truncated(wrote: 65483, of: 131146)`, a
+        // pipe filled to 64 KB that never moved another byte, against a child
+        // log holding nothing at all.
+        //
+        // Waiting in real time here costs the writer nothing, because the ~64 KB
+        // already sitting in the pipe drains with NO virtual time whatsoever:
+        // the writer is parked inside `write`, not sleeping-then-writing, so
+        // `cat` alone moves those bytes and `stdinByteCount()` climbs on its
+        // own. Once it has climbed at all the child is demonstrably draining,
+        // and only then is it safe to let the writer spend its refill waits.
+        // Do not "simplify" this wait away by folding it into the advance below.
+        _ = try await waitFor(
+            "the child to start draining the pipe, before any virtual time is spent",
+            observed: { "stdinBytes=\(stub.stdinByteCount())" }
+        ) { stub.stdinByteCount() > 0 }
+
+        // Draining is underway; this is the first virtual time anything here spends.
         _ = await advanceVirtualTime(
             clock, until: "the stalled frame to finish crossing the pipe",
             observed: {
