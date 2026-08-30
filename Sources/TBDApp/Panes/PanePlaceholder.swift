@@ -674,7 +674,7 @@ struct EditableNoteTitle: View {
     @State private var editText = ""
     @FocusState private var isFocused: Bool
 
-    private var note: Note? {
+    private var note: NoteSummary? {
         appState.notes[worktreeID]?.first { $0.id == noteID }
     }
 

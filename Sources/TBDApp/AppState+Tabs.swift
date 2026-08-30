@@ -352,8 +352,8 @@ extension AppState {
         // the note has content; an empty note closes silently as before.
         if case .note(let noteID) = tab.content,
            let note = notes[worktreeID]?.first(where: { $0.id == noteID }),
-           !note.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           !noteCloseConfirmer(note) {
+           noteHasContent(worktreeID: worktreeID, noteID: noteID),
+           !noteCloseConfirmer(note, noteContentPathResolver(worktreeID, noteID)) {
             return
         }
 

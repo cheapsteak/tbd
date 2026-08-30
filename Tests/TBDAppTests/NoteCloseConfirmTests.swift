@@ -5,6 +5,11 @@ import TBDShared
 
 /// Closing a note tab hard-deletes the note row, so `closeTab` asks for
 /// confirmation when the note has content (empty notes close silently).
+/// The branch is driven by `AppState.noteHasContent`, the union of the polled
+/// summary's `hasLegacyContent` and a single stat of the content file — the
+/// daemon does no filesystem work for `note.list`, so `closeTab` cannot
+/// inspect the text and does not need to. These cases drive the legacy leg;
+/// the file leg needs no note row of its own, since a fresh UUID has no file.
 /// The confirmer is injectable (`AppState.noteCloseConfirmer`) so both
 /// branches run without a real modal NSAlert.
 ///
@@ -18,14 +23,28 @@ struct NoteCloseConfirmTests {
     private func withState(_ body: (AppState) -> Void) {
         let suiteName = "TBDAppTests.NoteCloseConfirm.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        body(AppState(userDefaults: defaults))
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-note-close-\(UUID().uuidString)")
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: dir)
+        }
+        let state = AppState(userDefaults: defaults)
+        // Point the file leg of `noteHasContent` at an empty temp directory,
+        // so these cases exercise the legacy leg alone and never depend on the
+        // process-global TBD_HOME (see NoteContentFileAccessTests).
+        state.noteContentPathResolver = { worktreeID, noteID in
+            dir.appendingPathComponent(worktreeID.uuidString)
+                .appendingPathComponent("\(noteID.uuidString).md").path
+        }
+        body(state)
     }
 
     private func makeNoteTab(
-        state: AppState, worktreeID: UUID, content: String
-    ) -> Note {
-        let note = Note(worktreeID: worktreeID, title: "Notes", content: content)
+        state: AppState, worktreeID: UUID, hasLegacyContent: Bool
+    ) -> NoteSummary {
+        let note = NoteSummary(worktreeID: worktreeID, title: "Notes",
+                               hasLegacyContent: hasLegacyContent)
         state.notes = [worktreeID: [note]]
         state.tabs = [worktreeID: [
             Tab(id: note.id, content: .note(noteID: note.id), label: nil)
@@ -36,9 +55,9 @@ struct NoteCloseConfirmTests {
     @Test func nonEmptyNoteDeclinedKeepsTab() {
         withState { state in
             let worktreeID = UUID()
-            let note = makeNoteTab(state: state, worktreeID: worktreeID, content: "important")
+            let note = makeNoteTab(state: state, worktreeID: worktreeID, hasLegacyContent: true)
             var asked = false
-            state.noteCloseConfirmer = { _ in
+            state.noteCloseConfirmer = { _, _ in
                 asked = true
                 return false
             }
@@ -54,8 +73,8 @@ struct NoteCloseConfirmTests {
     @Test func nonEmptyNoteConfirmedClosesTab() {
         withState { state in
             let worktreeID = UUID()
-            let note = makeNoteTab(state: state, worktreeID: worktreeID, content: "important")
-            state.noteCloseConfirmer = { _ in true }
+            let note = makeNoteTab(state: state, worktreeID: worktreeID, hasLegacyContent: true)
+            state.noteCloseConfirmer = { _, _ in true }
 
             state.closeTab(worktreeID: worktreeID, index: 0)
 
@@ -67,18 +86,18 @@ struct NoteCloseConfirmTests {
     @Test func emptyNoteClosesSilently() {
         withState { state in
             let worktreeID = UUID()
-            let note = makeNoteTab(state: state, worktreeID: worktreeID, content: "  \n")
+            let note = makeNoteTab(state: state, worktreeID: worktreeID, hasLegacyContent: false)
             var asked = false
-            state.noteCloseConfirmer = { _ in
+            state.noteCloseConfirmer = { _, _ in
                 asked = true
                 return false
             }
 
             state.closeTab(worktreeID: worktreeID, index: 0)
 
-            #expect(!asked, "an empty (whitespace-only) note must not prompt")
+            #expect(!asked, "a note with no content must not prompt")
             #expect(state.tabs[worktreeID]?.contains { $0.id == note.id } != true,
-                    "an empty note tab must close silently as before")
+                    "a contentless note tab must close silently as before")
         }
     }
 }

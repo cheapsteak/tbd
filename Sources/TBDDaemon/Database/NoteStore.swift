@@ -55,16 +55,36 @@ struct NoteRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
 /// file when it exists, writes go to the file only. Empty/whitespace-only
 /// content deletes the file (mirrors the app's `NotesFileStore` semantics),
 /// so a freshly auto-created empty note produces no file.
+///
+/// **`list` performs zero filesystem operations, by contract.** Not "fewer" —
+/// zero. It returns `NoteSummary`, fetches rows and maps them; it does not
+/// stat, enumerate, or open anything. The app polls it every two seconds, and
+/// a `list` that touched content made the endpoint's cost scale with the total
+/// bytes of every note on the machine (measured at 27% of all daemon
+/// filesystem operations). The app reads and writes the content file itself.
+///
+/// What is left of content in this type is the legacy DB column: `get(id:)`
+/// still overlays it for the few rows the startup export never drained, and
+/// `update(content:)` remains the one write path the app still delegates —
+/// emptying a note, which must delete the file and clear the column together.
 public struct NoteStore: Sendable {
     let writer: any DatabaseWriter
     /// Injection seam for tests (like `ThemeStore(themesDirectory:)`): nil
     /// resolves `TBDConstants.noteContentDir` (which honors TBD_HOME) at
     /// call time.
     let notesDirOverride: String?
+    /// Injection seam for tests: every content-file read goes through this,
+    /// so a test can count them and pin that `list` performs none.
+    let readContentFile: @Sendable (String) -> String?
 
-    init(writer: any DatabaseWriter, notesDir: String? = nil) {
+    init(writer: any DatabaseWriter,
+         notesDir: String? = nil,
+         readContentFile: @Sendable @escaping (String) -> String? = {
+             try? String(contentsOfFile: $0, encoding: .utf8)
+         }) {
         self.writer = writer
         self.notesDirOverride = notesDir
+        self.readContentFile = readContentFile
     }
 
     // MARK: - Content files
@@ -82,7 +102,7 @@ public struct NoteStore: Sendable {
     /// legacy rows that were never exported.
     private func overlayContent(_ note: Note) -> Note {
         let path = contentPath(worktreeID: note.worktreeID, noteID: note.id)
-        guard let fileContent = try? String(contentsOfFile: path, encoding: .utf8) else {
+        guard let fileContent = readContentFile(path) else {
             return note
         }
         var overlaid = note
@@ -135,23 +155,44 @@ public struct NoteStore: Sendable {
         return note.map(overlayContent)
     }
 
-    /// List notes, optionally filtered by worktree (content overlaid from
-    /// each note's file when one exists).
-    public func list(worktreeID: UUID? = nil) async throws -> [Note] {
+    /// List note METADATA, optionally filtered by worktree and/or by an
+    /// explicit set of worktrees (both filters apply when both are given).
+    ///
+    /// Touches no file — see the type's doc comment. `hasLegacyContent` comes
+    /// off the row that was fetched anyway.
+    public func list(worktreeID: UUID? = nil,
+                     worktreeIDs: [UUID]? = nil) async throws -> [NoteSummary] {
         let notes = try await writer.read { db in
             var request = NoteRecord.all()
             if let worktreeID {
                 request = request.filter(Column("worktreeID") == worktreeID.uuidString)
             }
-            return try request.fetchAll(db).compactMap { $0.toModel() }
+            if let worktreeIDs {
+                request = request.filter(worktreeIDs.map(\.uuidString).contains(Column("worktreeID")))
+            }
+            return try request.fetchAll(db)
         }
-        return notes.map(overlayContent)
+        return notes.compactMap { record in
+            guard let note = record.toModel() else { return nil }
+            return NoteSummary(
+                id: note.id,
+                worktreeID: note.worktreeID,
+                title: note.title,
+                createdAt: note.createdAt,
+                updatedAt: note.updatedAt,
+                hasLegacyContent: !record.content.isEmpty
+            )
+        }
     }
 
     /// Update a note's title and/or content. Title goes to the DB row;
     /// content goes to the file only. Exception: an explicit empty-content
     /// update also clears the DB column — the file is deleted, and a stale
     /// legacy column value would otherwise resurrect through the fallback.
+    ///
+    /// The app writes note content directly and calls this for titles; the one
+    /// content case it still routes here is exactly that emptying, because
+    /// deleting the file and clearing the column have to happen together.
     public func update(id: UUID, title: String? = nil, content: String? = nil) async throws -> Note {
         let updated = try await writer.write { db -> Note in
             guard var record = try NoteRecord.fetchOne(db, key: id.uuidString) else {

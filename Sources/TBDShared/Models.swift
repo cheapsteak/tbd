@@ -1677,6 +1677,67 @@ public struct Note: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
+/// A note's metadata, without its content.
+///
+/// `note.list` returns these rather than `Note` because the daemon is not in
+/// the note-content path at all: content is file-backed at
+/// `~/tbd/notes/<worktreeID>/<noteID>.md` and the APP reads and writes that
+/// file directly, the same way it reads a closed terminal's captured
+/// scrollback (`TerminalHistoryEntry`). `list` therefore performs zero
+/// filesystem operations, however many rows it returns.
+///
+/// A distinct type rather than a `Note` with `content` left empty: an emptied
+/// `Note` keeps every caller compiling while silently handing it `""`. This
+/// makes the compiler point at each site that needs content and forces it to
+/// say where the content comes from.
+public struct NoteSummary: Codable, Sendable, Identifiable, Equatable {
+    public let id: UUID
+    public var worktreeID: UUID
+    public var title: String
+    public var createdAt: Date
+    public var updatedAt: Date
+    /// Whether this note has content in the **legacy DB column**.
+    ///
+    /// Deliberately not named `hasContent`, and it does not mean that: a
+    /// file-backed note whose legacy column is empty reports `false`, which is
+    /// the ordinary case for every note written since content moved to files.
+    /// It is free — the row is already in hand — and it exists because the
+    /// column is still a live content route for the handful of rows the
+    /// startup export never drained. A reader that wants "does this note have
+    /// content" must take the union with the file on disk.
+    public var hasLegacyContent: Bool
+
+    public init(id: UUID = UUID(), worktreeID: UUID, title: String,
+                createdAt: Date = Date(), updatedAt: Date = Date(),
+                hasLegacyContent: Bool = false) {
+        self.id = id
+        self.worktreeID = worktreeID
+        self.title = title
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.hasLegacyContent = hasLegacyContent
+    }
+
+    /// Summarize a full `Note` the daemon just returned, so the app's polled
+    /// cache holds one shape only.
+    ///
+    /// `Note.content` is the daemon's OVERLAID content — the file when one
+    /// exists, else the column — so `hasLegacyContent` derived here is a
+    /// superset of the column and can over-report. It never under-reports, and
+    /// over-reporting costs at most one extra close-confirmation prompt, never
+    /// a silent delete. Prefer mutating an existing summary where you have one.
+    public init(from note: Note) {
+        self.init(
+            id: note.id,
+            worktreeID: note.worktreeID,
+            title: note.title,
+            createdAt: note.createdAt,
+            updatedAt: note.updatedAt,
+            hasLegacyContent: !note.content.isEmpty
+        )
+    }
+}
+
 /// Metadata for a closed terminal whose scrollback was captured at close time.
 /// The captured text is file-backed at
 /// `~/tbd/terminal-history/<worktreeID>/<terminalID>.txt`

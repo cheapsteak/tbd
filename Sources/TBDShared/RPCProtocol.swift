@@ -3023,7 +3023,15 @@ public struct NoteDeleteParams: Codable, Sendable {
 
 public struct NoteListParams: Codable, Sendable {
     public let worktreeID: UUID?
-    public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
+    /// Restrict the result to an explicit set of worktrees. The app passes the
+    /// worktrees it is about to render, so the daemon stops returning rows the
+    /// caller immediately discards. Optional and defaulted: an older client
+    /// that omits it still decodes.
+    public let worktreeIDs: [UUID]?
+    public init(worktreeID: UUID? = nil, worktreeIDs: [UUID]? = nil) {
+        self.worktreeID = worktreeID
+        self.worktreeIDs = worktreeIDs
+    }
 }
 
 // MARK: - Session Params

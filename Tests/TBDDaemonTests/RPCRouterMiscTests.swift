@@ -221,7 +221,9 @@ extension RPCRouterTests {
         let listResp = await router.handle(listReq)
         #expect(listResp.success)
 
-        let notes = try listResp.decodeResult([Note].self)
+        // `note.list` is a metadata endpoint — decoding it as `[Note]` would
+        // fail, because the response carries no `content`.
+        let notes = try listResp.decodeResult([NoteSummary].self)
         #expect(notes.count == 1)
     }
 

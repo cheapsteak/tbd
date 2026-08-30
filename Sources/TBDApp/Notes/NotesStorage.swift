@@ -59,17 +59,28 @@ struct NotesFileStore {
     /// Failures are logged (not surfaced) — mirrors the hooks storage pattern.
     func write(_ content: String, to path: String) {
         do {
-            if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                if FileManager.default.fileExists(atPath: path) {
-                    try FileManager.default.removeItem(atPath: path)
-                }
-                return
-            }
-            let dir = (path as NSString).deletingLastPathComponent
-            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            try content.write(toFile: path, atomically: true, encoding: .utf8)
+            try writeOrThrow(content, to: path)
         } catch {
             notesLogger.debug("notepad write failed at \(path, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// `write`, surfacing the failure instead of logging it at `.debug`.
+    ///
+    /// The notepad can afford a swallowed write — its text is still in the
+    /// editor and the next keystroke tries again. A per-note content file
+    /// cannot: since the daemon left the content path, this file is the only
+    /// copy of the text, so `AppState.saveNoteContent` needs to know a write
+    /// failed in order to log it at `.error`.
+    func writeOrThrow(_ content: String, to path: String) throws {
+        if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if FileManager.default.fileExists(atPath: path) {
+                try FileManager.default.removeItem(atPath: path)
+            }
+            return
+        }
+        let dir = (path as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try content.write(toFile: path, atomically: true, encoding: .utf8)
     }
 }
