@@ -551,3 +551,200 @@ struct PeerBridgeWiringTests {
         #expect(PeerLinkOrigin.local(hostName: "...") == PeerLinkOrigin.unknownHost)
     }
 }
+
+// MARK: - The repo-scope resolver
+
+/// A worktree read that can be made to fail on demand.
+///
+/// The whole point of `ProviderRepoScope` is what it does when this throws, so
+/// the failure has to be injectable — a real database would have to be broken
+/// to reach that branch, and a broken one is not a transient one.
+private final class StubWorktreeReads: @unchecked Sendable {
+    struct ReadFailure: Error, Sendable {}
+
+    private struct State {
+        var next: Result<[Worktree], ReadFailure>
+        var reads = 0
+    }
+
+    private let state: OSAllocatedUnfairLock<State>
+
+    init(_ next: Result<[Worktree], ReadFailure>) {
+        state = OSAllocatedUnfairLock(initialState: State(next: next))
+    }
+
+    var reads: Int { state.withLock { $0.reads } }
+
+    func succeed(_ rows: [Worktree]) {
+        state.withLock { $0.next = .success(rows) }
+    }
+
+    func fail() {
+        state.withLock { $0.next = .failure(ReadFailure()) }
+    }
+
+    func read() throws -> [Worktree] {
+        try state.withLock { inner in
+            inner.reads += 1
+            return try inner.next.get()
+        }
+    }
+}
+
+/// The scope resolver behind `Daemon.makePeerBridging`'s `repoScope` closure.
+///
+/// The bug these pin is a conflation: `(try? await …) ?? []` spelled "the read
+/// failed" and "this provider hosts no repositories" with the same value, and
+/// the two mean opposite things now that dropping a repository from the scope
+/// withdraws its roster registration and writes `peer-gone` for every session
+/// announced on it. Every test name below therefore says *which* nothing it is
+/// about.
+///
+/// Tier 1: no database, no filesystem, no process.
+@Suite("Provider repo scope")
+struct ProviderRepoScopeTests {
+
+    private static func lane(
+        repoID: UUID?, provider: String?, name: String = "useful-swallow"
+    ) -> Worktree {
+        let location: WorktreeLocation
+        if let provider {
+            location = .remote(provider: provider, sessionID: UUID().uuidString)
+        } else {
+            location = .local
+        }
+        return Worktree(
+            repoID: repoID,
+            name: name,
+            displayName: name,
+            branch: "tbd/\(name)",
+            path: location.storagePath ?? "/tmp/tbd-scope-fixture/\(name)",
+            tmuxServer: "tbd-scope-fixture",
+            location: location)
+    }
+
+    private static func resolver(
+        _ reads: StubWorktreeReads, provider: String = "cloud"
+    ) -> ProviderRepoScope {
+        ProviderRepoScope(provider: provider, listWorktrees: { try reads.read() })
+    }
+
+    // MARK: A read that works
+
+    @Test func aSuccessfulReadResolvesToThisProvidersRepositories() async {
+        let mine = UUID()
+        let theirs = UUID()
+        let reads = StubWorktreeReads(.success([
+            Self.lane(repoID: mine, provider: "cloud"),
+            // Another provider's lane, a purely local worktree, and a scratch
+            // space with no repo at all: none of them widen this scope.
+            Self.lane(repoID: theirs, provider: "other"),
+            Self.lane(repoID: theirs, provider: nil),
+            Self.lane(repoID: nil, provider: "cloud"),
+        ]))
+        let scope = Self.resolver(reads)
+        let expected: Set<UUID> = [mine]
+
+        #expect(await scope.resolve() == expected)
+        #expect(await scope.failedReads == 0)
+    }
+
+    /// The other half of the conflation, and the one that keeps the fix honest:
+    /// a provider that genuinely hosts nothing must still resolve to a real,
+    /// empty scope — `Set()`, not "no scope" — because that answer is what
+    /// legitimately retires a registration.
+    @Test func aSuccessfulReadFindingNoLanesResolvesToAnEmptyScopeNotToNoScope() async {
+        let reads = StubWorktreeReads(.success([Self.lane(repoID: UUID(), provider: "other")]))
+        let scope = Self.resolver(reads)
+
+        let resolved = await scope.resolve()
+        #expect(resolved != nil, "a read that succeeded always yields a scope")
+        #expect(resolved?.isEmpty == true)
+    }
+
+    // MARK: A read that fails after one that worked
+
+    /// The regression itself. One transient database error on a 30-second tick
+    /// used to resolve to `[]`, and an empty scope unannounces every repository
+    /// in it.
+    @Test func aFailedReadAfterASuccessfulOneKeepsThePreviousScopeRatherThanEmptyingIt() async {
+        let mine = UUID()
+        let reads = StubWorktreeReads(.success([Self.lane(repoID: mine, provider: "cloud")]))
+        let scope = Self.resolver(reads)
+        let expected: Set<UUID> = [mine]
+        #expect(await scope.resolve() == expected)
+
+        reads.fail()
+        #expect(await scope.resolve() == expected, "the last known good scope, not an empty one")
+        #expect(await scope.resolve() == expected, "and it survives a run of failures")
+
+        #expect(await scope.failedReads == 2)
+        #expect(await scope.consecutiveFailures == 2)
+        #expect(reads.reads == 3, "every resolve really did attempt a read")
+    }
+
+    @Test func aSuccessfulReadAfterAFailureReplacesTheStaleScopeAndClearsTheRun() async {
+        let first = UUID()
+        let second = UUID()
+        let reads = StubWorktreeReads(.success([Self.lane(repoID: first, provider: "cloud")]))
+        let scope = Self.resolver(reads)
+        let firstScope: Set<UUID> = [first]
+        let secondScope: Set<UUID> = [second]
+        #expect(await scope.resolve() == firstScope)
+
+        reads.fail()
+        #expect(await scope.resolve() == firstScope)
+
+        reads.succeed([Self.lane(repoID: second, provider: "cloud")])
+        #expect(await scope.resolve() == secondScope, "stale state is replaced, never merged")
+        #expect(await scope.consecutiveFailures == 0)
+        #expect(await scope.failedReads == 1, "the lifetime count still remembers the flicker")
+    }
+
+    /// A retirement that a read genuinely observed must still happen — the
+    /// guard holds the last *good* answer, not the widest one ever seen.
+    @Test func aSuccessfulReadThatLostARepositoryStillNarrowsTheScope() async {
+        let kept = UUID()
+        let dropped = UUID()
+        let reads = StubWorktreeReads(.success([
+            Self.lane(repoID: kept, provider: "cloud"),
+            Self.lane(repoID: dropped, provider: "cloud", name: "brisk-otter"),
+        ]))
+        let scope = Self.resolver(reads)
+        let both: Set<UUID> = [kept, dropped]
+        let narrowed: Set<UUID> = [kept]
+        #expect(await scope.resolve() == both)
+
+        reads.succeed([Self.lane(repoID: kept, provider: "cloud")])
+        #expect(await scope.resolve() == narrowed)
+    }
+
+    // MARK: A read that fails before any has ever worked
+
+    /// The second "nothing", and a different one: nothing has been announced
+    /// yet, so there is no scope to reconcile toward — which is not the same
+    /// claim as "the scope is empty". The wiring collapses this to `[]` at the
+    /// one call site where that is provably harmless.
+    @Test func aFailedFirstReadYieldsNoScopeRatherThanAnEmptyScope() async {
+        let reads = StubWorktreeReads(.failure(StubWorktreeReads.ReadFailure()))
+        let scope = Self.resolver(reads)
+
+        #expect(await scope.resolve() == nil)
+        #expect(await scope.resolve() == nil, "still nothing known after a second failure")
+        #expect(await scope.failedReads == 2)
+    }
+
+    @Test func aFirstSuccessAfterFailedReadsEndsTheNoScopeState() async {
+        let mine = UUID()
+        let reads = StubWorktreeReads(.failure(StubWorktreeReads.ReadFailure()))
+        let scope = Self.resolver(reads)
+        let expected: Set<UUID> = [mine]
+        #expect(await scope.resolve() == nil)
+
+        reads.succeed([Self.lane(repoID: mine, provider: "cloud")])
+        #expect(await scope.resolve() == expected)
+
+        reads.fail()
+        #expect(await scope.resolve() == expected, "and from here a failure is never nil again")
+    }
+}

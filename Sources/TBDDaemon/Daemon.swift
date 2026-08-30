@@ -4,6 +4,7 @@ import os
 
 private let daemonLogger = Logger(subsystem: "com.tbd.daemon", category: "startup")
 private let reconcileLogger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
+private let peerScopeLogger = Logger(subsystem: "com.tbd.daemon", category: "peer-bridge")
 
 struct RuntimeIntegrationRefresher {
     var writeFallbackSkill: () throws -> Void
@@ -50,6 +51,105 @@ struct RuntimeIntegrationRefresher {
         }
 
         writeClaudeHookOverlay()
+    }
+}
+
+/// The repositories one provider hosts sessions in, remembered across a failed
+/// read.
+///
+/// The scope is recomputed from the worktree table on every reconcile tick, and
+/// **scope retirement unannounces**: a repository leaving the scope withdraws
+/// its roster registration and writes `peer-gone` for every local session
+/// announced on it. A resolver that answered a transient database error with
+/// the empty set would therefore tear down every announced peer for the
+/// provider on one bad tick and rebuild them on the next. So "unknown" must not
+/// be spelled the same way as "hosts no repositories" — which is exactly what
+/// the `(try? ...) ?? []` this replaced did.
+///
+/// `resolve()` keeps the scope the last successful read produced and hands that
+/// back when a read fails, leaving the scope where it was. Before any read has
+/// ever succeeded it returns `nil` rather than `[]`: there is nothing to
+/// reconcile toward yet, which is a different statement from "the scope is
+/// empty" and the one the caller must not conflate.
+///
+/// Acting on stale state is a thing to be able to see, so it is counted and
+/// logged rather than absorbed: every failed read logs at `.error` with the run
+/// length and the size of the scope being replayed, and the read that recovers
+/// logs the far end of that window, so a stale span appears in the log as a
+/// span rather than as a silence. `failedReads` and `consecutiveFailures` are
+/// readable for the same reason — a future `peer.status` row is the natural
+/// place to surface them beside `linkState`.
+actor ProviderRepoScope {
+    /// The provider whose sessions this scope admits. Also what the log names,
+    /// because a stale scope is a per-provider condition.
+    private let provider: String
+
+    /// The worktree read. Injected, so the failure branch is reachable from a
+    /// test without a database that can be made to fail.
+    private let listWorktrees: @Sendable () async throws -> [Worktree]
+
+    /// The scope the last successful read produced; `nil` until one has
+    /// succeeded. The optionality *is* the fix — it is what keeps "no scope
+    /// known" distinguishable from "the scope is empty".
+    private var lastKnownGood: Set<UUID>?
+
+    /// Failed reads since the last successful one. Zero whenever the scope
+    /// last returned was freshly read.
+    private(set) var consecutiveFailures = 0
+
+    /// Failed reads over this resolver's whole life, so a scope that flickers
+    /// and recovers all day is still visible as one that is failing.
+    private(set) var failedReads = 0
+
+    init(
+        provider: String,
+        listWorktrees: @escaping @Sendable () async throws -> [Worktree]
+    ) {
+        self.provider = provider
+        self.listWorktrees = listWorktrees
+    }
+
+    /// The repositories this provider currently hosts sessions in, the last
+    /// known good set if this read failed, or `nil` if no read has ever
+    /// succeeded.
+    func resolve() async -> Set<UUID>? {
+        do {
+            let rows = try await listWorktrees()
+            let scope = Set(rows.compactMap { row in
+                row.providerBinding?.provider == provider ? row.repoID : nil
+            })
+            if consecutiveFailures > 0 {
+                peerScopeLogger.notice("""
+                    repo scope for provider \(self.provider, privacy: .public) is fresh again \
+                    after \(self.consecutiveFailures, privacy: .public) failed read(s); \
+                    \(scope.count, privacy: .public) repo(s) in scope
+                    """)
+            }
+            consecutiveFailures = 0
+            lastKnownGood = scope
+            return scope
+        } catch {
+            failedReads += 1
+            consecutiveFailures += 1
+            if let lastKnownGood {
+                peerScopeLogger.error("""
+                    repo scope read failed for provider \(self.provider, privacy: .public) \
+                    (\(self.consecutiveFailures, privacy: .public) in a row, \
+                    \(self.failedReads, privacy: .public) total): reusing the last known scope \
+                    of \(lastKnownGood.count, privacy: .public) repo(s) rather than retiring \
+                    every announced peer — \(String(describing: error), privacy: .public)
+                    """)
+            } else {
+                peerScopeLogger.error("""
+                    repo scope read failed for provider \(self.provider, privacy: .public) \
+                    (\(self.consecutiveFailures, privacy: .public) in a row, \
+                    \(self.failedReads, privacy: .public) total) and none has ever succeeded: \
+                    no scope is known, so nothing is announced yet — \
+                    \(String(describing: error), privacy: .public)
+                    """)
+            }
+            return lastKnownGood
+        }
     }
 }
 
@@ -479,7 +579,10 @@ public final class Daemon: Sendable {
     /// The scope closure is the design's outward scoping rule, expressed once:
     /// TBD's own sessions are announced to a provider only for the
     /// repositories that provider actually hosts sessions in, so a remote lane
-    /// in one project can never reach local sessions in another.
+    /// in one project can never reach local sessions in another. It resolves
+    /// through a `ProviderRepoScope`, so a database read that fails replays the
+    /// last known scope instead of reporting an empty one — see that type for
+    /// why the difference is load-bearing.
     static func makePeerBridging(
         database: TBDDatabase,
         roster: PeerRosterRunner,
@@ -494,6 +597,15 @@ public final class Daemon: Sendable {
                     ?? Config.remotePeerMessagingDefault
             },
             make: { config, contractVersion in
+                // One resolver per bridge, living exactly as long as the
+                // bridge does. Last-known-good is per-provider state and the
+                // provider is fixed the moment the bridge is built, so this is
+                // the narrowest scope that can hold it.
+                let scope = ProviderRepoScope(
+                    provider: config.name,
+                    listWorktrees: {
+                        try await database.worktrees.list(excludeArchived: true)
+                    })
                 let bridge = PeerBridge.make(
                     config: config,
                     contractVersion: contractVersion,
@@ -511,11 +623,14 @@ public final class Daemon: Sendable {
                     roster: roster,
                     bridges: bridges,
                     repoScope: {
-                        let rows =
-                            (try? await database.worktrees.list(excludeArchived: true)) ?? []
-                        return Set(rows.compactMap { row in
-                            row.providerBinding?.provider == config.name ? row.repoID : nil
-                        })
+                        // The single place "unknown" has to become a set, and
+                        // it is safe here in a way `try?` was not: a resolver
+                        // that has never read successfully has never produced
+                        // a registration either, so reconciling toward the
+                        // empty set retires nothing. After one good read the
+                        // resolver never answers nil again — a later failure
+                        // replays the previous scope instead of collapsing it.
+                        await scope.resolve() ?? []
                     })
                 return bridge
             })
