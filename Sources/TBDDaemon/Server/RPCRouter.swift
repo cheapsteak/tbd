@@ -702,6 +702,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteReportAttachExit(request.paramsData)
             case RPCMethod.configSetRemoteBackends:
                 return try await handleConfigSetRemoteBackends(request.paramsData)
+            case RPCMethod.configSetRemotePeerMessagingEnabled:
+                return try await handleConfigSetRemotePeerMessagingEnabled(request.paramsData)
             case RPCMethod.peerStatus:
                 return try await handlePeerStatus()
             case RPCMethod.gcList:

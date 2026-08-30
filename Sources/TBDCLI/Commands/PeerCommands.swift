@@ -6,8 +6,61 @@ struct PeerCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "peer",
         abstract: "Inspect the cross-session peer registry",
-        subcommands: [PeerList.self]
+        subcommands: [PeerList.self, PeerMessaging.self]
     )
+}
+
+// MARK: - peer messaging
+
+/// The soak switch for remote peer messaging — the single opt-in for shadow
+/// peers and for a provider's `messages` stream.
+///
+/// It lives here rather than under `tbd config set` because the flag is about
+/// peers: the command that reports the gate is `tbd peer list`, and the one
+/// that moves it should be its sibling under the same noun. It exists at all
+/// because a default-off flag with no way to turn it on is enabled only by
+/// hand-editing `~/tbd/state.db`, which the project's own rules put out of
+/// bounds.
+struct PeerMessaging: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "messaging",
+        abstract: "Enable or disable remote peer messaging (default off)",
+        discussion: """
+            Remote peer messaging lets a session on this machine address a session \
+            on another one: TBD publishes a shadow peer for each remote session a \
+            provider announces, and opens the provider's `messages` stream.
+
+            It ships off and is opted into by hand. `tbd peer list` reports the \
+            resolved gate, every provider's half of the bridge, and what a listing \
+            could not establish.
+
+            \(peerMessagingRestartCaveat)
+            """
+    )
+
+    @Argument(help: "on or off")
+    var value: OnOffArgument
+
+    /// What the command says it did.
+    ///
+    /// Pure, and separated from the call so the sentence can be read — and
+    /// tested — against the branch actually taken. Both branches carry the
+    /// restart caveat, because both are subject to it: the gate is read where a
+    /// provider's streams are armed, so neither direction moves a bridge that
+    /// is already running.
+    static func confirmation(value: OnOffArgument) -> String {
+        """
+        Set remote peer messaging to \(value.rawValue) \
+        (config remote_peer_messaging_enabled). \(peerMessagingRestartCaveat)
+        """
+    }
+
+    mutating func run() async throws {
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetRemotePeerMessagingEnabled,
+            params: ConfigSetRemotePeerMessagingEnabledParams(enabled: value.boolValue))
+        print(Self.confirmation(value: value))
+    }
 }
 
 // MARK: - peer list

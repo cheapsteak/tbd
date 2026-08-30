@@ -12,6 +12,22 @@ import TBDShared
 // Design: docs/specs/2026-08-29-remote-peer-messaging-design.md
 // § "Reclamation and detection" → "`tbd peer list`".
 
+/// When a change to `remote_peer_messaging_enabled` actually takes hold.
+///
+/// One sentence in one place, because two commands say it: `tbd peer list`
+/// names it when a provider that declares `messages` has no bridge, and
+/// `tbd peer messaging` names it right after writing the flag. Two phrasings of
+/// the same fact drift apart, and the one that drifts is the one a user reads
+/// while wondering why nothing happened.
+///
+/// It is written for either direction on purpose. The gate is consulted where a
+/// provider's poll loops are armed, so turning it on builds no bridge for a
+/// provider already running, and turning it off leaves a running bridge up.
+let peerMessagingRestartCaveat = """
+    The gate is read when a provider's streams are armed, so a change made since \
+    then takes effect at the next daemon restart.
+    """
+
 /// nil for nil, and nil for empty. An empty string in somebody else's record is
 /// an absent value wearing a present one, and every read below wants the same
 /// answer for both.
@@ -692,9 +708,8 @@ private func peerListingWarnings(
             warnings.append("""
                 \(gated.joined(separator: ", ")) \
                 \(gated.count == 1 ? "declares" : "declare") the `messages` capability \
-                and \(gated.count == 1 ? "has" : "have") no bridge running. The gate is \
-                read when a provider's streams are armed, so a flag turned on since then \
-                takes effect at the next daemon restart.
+                and \(gated.count == 1 ? "has" : "have") no bridge running. \
+                \(peerMessagingRestartCaveat)
                 """)
         }
         for provider in bridge.providers where !provider.unmirroredHandles.isEmpty {

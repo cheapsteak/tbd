@@ -325,6 +325,13 @@ public enum RPCMethod {
     ]
 
     public static let configSetRemoteBackends = "config.setRemoteBackends"
+    /// The remote peer-messaging gate (`remote_peer_messaging_enabled`) — the
+    /// feature's only opt-in, and the write half of what `peer.status` reports.
+    /// Reading needs no method of its own: `config.get` already carries the
+    /// resolved value, and `peer.status` carries it beside the link states it
+    /// explains.
+    public static let configSetRemotePeerMessagingEnabled =
+        "config.setRemotePeerMessagingEnabled"
     /// Everything TBD knows about the peer-messaging bridge, for `tbd peer list`.
     /// Read-only and unaddressed: it takes no params and never actuates.
     public static let peerStatus = "peer.status"
@@ -1587,6 +1594,17 @@ public struct RemoteRenameParams: Codable, Sendable {
 }
 
 public struct ConfigSetRemoteBackendsParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setRemotePeerMessagingEnabled` — the remote peer
+/// messaging gate (default OFF during soak), which is the single opt-in for
+/// shadow peers and for a provider's `messages` stream. Writing either value is
+/// the explicit gesture that lifts the column out of its NULL "never chose"
+/// state, so an operator who turns the feature off stays off when the shipped
+/// default graduates.
+public struct ConfigSetRemotePeerMessagingEnabledParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
