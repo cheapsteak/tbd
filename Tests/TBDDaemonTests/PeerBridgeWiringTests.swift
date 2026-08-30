@@ -83,6 +83,45 @@ private actor FakePeerLink: PeerLinkDriving {
     func send(_ frame: PeerBridgeFrame) async throws { sent.append(frame) }
 }
 
+/// Every link-state transition the fanout delivered, in the order it delivered
+/// them, from both of the parties it delivers to.
+private actor TransitionLog {
+    private(set) var entries: [String] = []
+
+    func append(_ entry: String) { entries.append(entry) }
+}
+
+/// Stands in for the party the fanout *forwards* to — `ShadowPeerManager` in
+/// production, which empties its handle table on the transition.
+private struct LoggingLinkHandler: PeerLinkHandler {
+    let log: TransitionLog
+
+    func handle(_ frame: PeerBridgeFrame) async {}
+
+    func linkStateChanged(to state: PeerLinkState) async {
+        await log.append("forwarded:\(state.diagnosticName)")
+    }
+}
+
+/// A stream factory that spawns nothing and keeps the handler it was handed.
+///
+/// That handler is the whole point: `PeerBridge.make` composes a
+/// `PeerLinkStateFanout` and gives it to the stream, and holding it is what
+/// lets a test deliver a transition the way a real reconnect delivers one —
+/// through the wiring rather than by calling the two observers by hand.
+private final class CapturingLinkFactory: @unchecked Sendable {
+    let link = FakePeerLink()
+    private let captured = OSAllocatedUnfairLock<(any PeerLinkHandler)?>(initialState: nil)
+
+    /// The handler `make` built and handed to the stream.
+    var handler: (any PeerLinkHandler)? { captured.withLock { $0 } }
+
+    func makeLink(_ handler: any PeerLinkHandler) -> any PeerLinkDriving {
+        captured.withLock { $0 = handler }
+        return link
+    }
+}
+
 /// A helper handle that is not a process. Enough to make the manager's publish
 /// path complete so the reclaimer's inventory has something to see.
 private final class StubHelper: ShadowPeerHelperHandle, @unchecked Sendable {
@@ -537,6 +576,100 @@ struct PeerBridgeWiringTests {
         #expect(await harness.link.linkState() == .up, "the stream is what stayed open")
 
         await harness.bridge.stop()
+    }
+
+    // MARK: - What `make` wires, as opposed to what a test assembles
+
+    /// The fanout copies a transition onward **after** the handler it forwards
+    /// to, and it must stay that way.
+    ///
+    /// In production the forwarded-to party is `ShadowPeerManager`, which
+    /// empties its handle table, and the observer is the bridge, which forgets
+    /// what the roster told each link. Reversed, the roster would be reset
+    /// while the table it mirrors still held the old handles, and the next scan
+    /// would re-announce them — the divergence in the other direction.
+    @Test func theFanoutCopiesATransitionOnwardAfterTheHandlerItForwardsTo() async {
+        let log = TransitionLog()
+        let fanout = PeerLinkStateFanout(forwardingTo: LoggingLinkHandler(log: log))
+        fanout.bind { state in
+            await log.append("observer:\(state.diagnosticName)")
+        }
+
+        await fanout.linkStateChanged(to: .down)
+        await fanout.linkStateChanged(to: .up)
+
+        #expect(await log.entries == [
+            "forwarded:down", "observer:down", "forwarded:up", "observer:up",
+        ])
+    }
+
+    /// **The wiring, driven the way production drives it.**
+    ///
+    /// Every other assertion in this section builds a `PeerBridge` directly,
+    /// which means none of them touches the one thing `PeerBridge.make` does
+    /// that a hand-assembled bridge does not: bind the fanout so a link
+    /// transition reaches the bridge as well as the manager. Deleting that bind
+    /// — or letting its `[weak bridge]` capture go nil — left the whole suite
+    /// green while the handle churn came back in production, which is how it
+    /// shipped the first time.
+    ///
+    /// So the transition is delivered here through the handler `make` composed
+    /// and handed to the stream, and both legs are read off the wire: the
+    /// manager's, because a handle table that was emptied mints a *new* handle
+    /// for the same live session; and the bridge's, because a roster that was
+    /// reset announces that handle with no `peer-gone` beside it.
+    ///
+    /// Tier 1: the stream is injected, so nothing forks a provider child.
+    @Test func aTransitionThroughTheWiringMakeBuiltResetsBothHalves() async throws {
+        let directory = try Self.scratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Self.writeRegistryRecord(in: directory)
+
+        let repo = UUID()
+        let scope: Set<UUID> = [repo]
+        let livePIDs: [pid_t: String] = [4242: Self.liveProcStart]
+        let watcher = RosterWatcher(
+            sessionsDirectory: directory,
+            sessions: SpawnedSessions([Self.localSession(repoID: repo)]),
+            origin: "laptop",
+            // Long enough that nothing ticks on its own; every scan below is
+            // one this test asked for.
+            interval: .seconds(3600),
+            procStartForPID: { livePIDs[$0] })
+        let factory = CapturingLinkFactory()
+        let bridge = PeerBridge.make(
+            config: RemoteProviderConfig(name: "cloud", exec: "/bin/true"),
+            contractVersion: 1,
+            origin: "laptop",
+            siteResolver: StubSiteResolver(path: directory.path),
+            artifactRecorder: UnrecordedShadowPeerArtifacts(),
+            sessionsDirectory: directory,
+            roster: PeerRosterRunner(roster: watcher),
+            bridges: ShadowPeerBridgeRegistry(),
+            repoScope: { scope },
+            makeLink: { factory.makeLink($0) })
+
+        await bridge.start()
+        let first = try #require(Self.announcedHandles(await factory.link.sent).last)
+
+        // The stream dropped and came back. Nothing here touches the manager or
+        // the bridge by hand — the only thing this test holds is the handler
+        // `make` gave the stream, which is what a real supervisor calls.
+        let handler = try #require(factory.handler)
+        await handler.linkStateChanged(to: .down)
+        await handler.linkStateChanged(to: .up)
+        await watcher.refresh()
+
+        let frames = await factory.link.sent
+        let second = try #require(Self.announcedHandles(frames).last)
+        #expect(
+            second != first,
+            "the manager leg: the transition emptied its handle table, so the same session is minted a fresh handle")
+        #expect(
+            Self.goneHandles(frames).isEmpty,
+            "the bridge leg: the roster forgot what it had told this link, so the fresh handle is announced with no withdrawal beside it")
+
+        await bridge.stop()
     }
 
     // MARK: - The origin label

@@ -211,6 +211,17 @@ actor PeerBridge: PeerBridging {
     /// then the supervisor against the manager, then the bind. Nothing is
     /// started here — `start()` is a separate step so a caller can install the
     /// bridge in its own table before any frame can arrive.
+    ///
+    /// - Parameter makeLink: builds the stream around the handler this method
+    ///   composed, and exists so the wiring below can be tested. The one thing
+    ///   `make` does that no assembled-by-hand bridge does is bind
+    ///   `PeerLinkStateFanout` to *both* the manager and the bridge, and that
+    ///   binding is what carries a reconnect to `resetAnnouncements`; a test
+    ///   that constructs `PeerBridge(...)` directly cannot fail when it is
+    ///   deleted. Passing a stream that spawns nothing hands the test the very
+    ///   handler the default hands `PeerLinkSupervisor`, so a transition can be
+    ///   delivered through it without forking a provider child. Nil in
+    ///   production, which is the only shape the daemon uses.
     static func make(
         config: RemoteProviderConfig,
         contractVersion: Int,
@@ -221,7 +232,8 @@ actor PeerBridge: PeerBridging {
         roster: PeerRosterRunner,
         bridges: ShadowPeerBridgeRegistry,
         repoScope: @escaping @Sendable () async -> Set<UUID>,
-        clock: any Clock<Duration> = ContinuousClock()
+        clock: any Clock<Duration> = ContinuousClock(),
+        makeLink: (@Sendable (any PeerLinkHandler) -> any PeerLinkDriving)? = nil
     ) -> PeerBridge {
         let late = LatePeerLink()
         let manager = ShadowPeerManager(
@@ -234,17 +246,22 @@ actor PeerBridge: PeerBridging {
         // transitions onward, so the bridge learns about a reconnect at the
         // moment the manager forgets its handles rather than a tick later.
         let fanout = PeerLinkStateFanout(forwardingTo: manager)
-        let supervisor = PeerLinkSupervisor(
-            config: config,
-            contractVersion: contractVersion,
-            origin: origin,
-            handler: fanout,
-            clock: clock)
-        late.bind(supervisor)
+        let stream: any PeerLinkDriving
+        if let makeLink {
+            stream = makeLink(fanout)
+        } else {
+            stream = PeerLinkSupervisor(
+                config: config,
+                contractVersion: contractVersion,
+                origin: origin,
+                handler: fanout,
+                clock: clock)
+        }
+        late.bind(stream)
         let bridge = PeerBridge(
             provider: config.name,
             manager: manager,
-            link: supervisor,
+            link: stream,
             roster: roster,
             bridges: bridges,
             repoScope: repoScope,

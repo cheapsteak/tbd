@@ -722,8 +722,38 @@ public actor RosterWatcher {
                 socketsByHandle[handle] = entry.socketPath
             }
 
-            guard var state = links[linkID] else { continue }
-            var frames: [PeerBridgeFrame] = []
+            guard var state = links[linkID] else {
+                // **The link was retired while this pass was minting for it.**
+                // `removeLink` runs at any of the suspensions above — an actor
+                // is re-entrant at every `await` — and it withdraws the sockets
+                // the link's *previous* state remembered. A session admitted
+                // for the first time in this pass is in neither set: the link
+                // had never been told about it, and the loop above has just
+                // minted a handle for it. Left here it would sit in the table
+                // that minted it with nothing that will ever withdraw it.
+                //
+                // Not a trust hole — handles are random rather than derived
+                // from the socket, so a handle that reached no wire is one the
+                // far side cannot address — but the table is the daemon's for
+                // its whole life, so it is a per-retirement leak that only
+                // grows.
+                //
+                // Withdrawing here is safe by `removeLink`'s own argument: a
+                // session belongs to exactly one repository and a bridge
+                // registers one link per repository, so no other registration
+                // sharing this handle registry can be announcing these
+                // sockets. `refresh()` serializes passes, so no *other* pass
+                // can have bound them either.
+                for socketPath in Set(socketsByHandle.values).sorted() {
+                    _ = await registration.handles.withdrawLocalPeer(at: socketPath)
+                }
+                continue
+            }
+            // Withdrawals and announcements are accumulated apart because they
+            // go on the wire in that order, whatever order they are computed
+            // in. See the send loop below.
+            var goneFrames: [PeerBridgeFrame] = []
+            var peerFrames: [PeerBridgeFrame] = []
             var withdrawn: [String] = []
             // Every socket this pass just resolved a handle for. **Nothing in
             // here may be withdrawn, whatever `state` remembers.**
@@ -748,11 +778,11 @@ public actor RosterWatcher {
             for (handle, line) in lines.sorted(by: { $0.value.name < $1.value.name })
             where state.announced[handle] != line {
                 state.announced[handle] = line
-                frames.append(.peer(line))
+                peerFrames.append(.peer(line))
             }
             for handle in state.announced.keys.sorted() where lines[handle] == nil {
                 state.announced[handle] = nil
-                frames.append(.peerGone(handle: handle))
+                goneFrames.append(.peerGone(handle: handle))
                 if let socketPath = state.socketsByHandle[handle],
                    !boundSockets.contains(socketPath) {
                     withdrawn.append(socketPath)
@@ -765,7 +795,24 @@ public actor RosterWatcher {
             for socketPath in withdrawn {
                 _ = await registration.handles.withdrawLocalPeer(at: socketPath)
             }
-            for frame in frames {
+            // **Withdrawals go out before announcements, never the other way.**
+            // A re-mint announces one session under a new handle while the old
+            // handle for that same session is being announced gone, and the
+            // name on both lines is the same name. A far side that saw the
+            // `peer` first would be holding two peers under one name for as
+            // long as the pair took to arrive — which
+            // `docs/remote-provider-contract.md` forbids it to do ("never
+            // publish two peers under one name"), a collision there being a
+            // misdelivery rather than a display glitch. Withdrawal first makes
+            // the overlap unrepresentable on the wire instead of merely
+            // short-lived.
+            for frame in goneFrames + peerFrames {
+                // The link can be retired mid-send, and `removeLink` writes
+                // `peer-gone` for everything this pass just recorded as
+                // announced. Anything written after that would leave the far
+                // side holding a handle that has already been withdrawn from
+                // the table which resolves it — a ghost until the stream ends.
+                guard links[linkID] != nil else { break }
                 await registration.send(frame)
             }
         }

@@ -631,6 +631,28 @@ struct RosterWatcherTickTests {
 
 // MARK: - Reconnects, scope changes, and one pass at a time
 
+/// A hook a test arms and the roster trips exactly once, from inside a
+/// suspension the roster genuinely has.
+///
+/// An actor is re-entrant at every `await`, so "another call landed in the
+/// middle of this pass" is a real interleaving rather than an exotic one. This
+/// is how a test occupies one of those windows deterministically instead of
+/// racing two tasks and hoping the machine schedules them the awkward way.
+private actor OneShotHook {
+    private var action: (@Sendable () async -> Void)?
+
+    func arm(_ action: @escaping @Sendable () async -> Void) { self.action = action }
+
+    /// Runs the armed action, at most once. Unarmed, it does nothing — so the
+    /// same hook can sit on a path a test walks several times and fire only on
+    /// the pass it is about.
+    func fire() async {
+        guard let action else { return }
+        self.action = nil
+        await action()
+    }
+}
+
 /// A handle registry whose table can be emptied underneath the roster, which is
 /// what `ShadowPeerManager` does to its own on `linkStateChanged(to: .down)`.
 ///
@@ -638,10 +660,20 @@ struct RosterWatcherTickTests {
 /// say *which* mint it is looking at, and `mints` makes "the roster minted a
 /// third handle for a session that never changed" — the churn — directly
 /// observable.
+///
+/// `onMint` fires inside a *fresh* mint, after the entry is recorded — the
+/// state the production registry is in at exactly that suspension, and the
+/// window in which a link can be retired out from under the pass minting for
+/// it.
 private actor ResettableHandleRegistry: LocalPeerHandleRegistry {
     private var handlesBySocket: [String: String] = [:]
     private var socketsByHandle: [String: String] = [:]
     private(set) var mints = 0
+    private let onMint: OneShotHook?
+
+    init(onMint: OneShotHook? = nil) {
+        self.onMint = onMint
+    }
 
     func handle(forLocalPeerAt socketPath: String, name: String) async -> String {
         if let existing = handlesBySocket[socketPath] { return existing }
@@ -649,6 +681,7 @@ private actor ResettableHandleRegistry: LocalPeerHandleRegistry {
         let handle = "h\(mints)"
         handlesBySocket[socketPath] = handle
         socketsByHandle[handle] = socketPath
+        await onMint?.fire()
         return handle
     }
 
@@ -666,6 +699,11 @@ private actor ResettableHandleRegistry: LocalPeerHandleRegistry {
     }
 
     func socketPath(forHandle handle: String) -> String? { socketsByHandle[handle] }
+
+    /// Every socket still bound. The leak these tests pin is an entry nothing
+    /// will ever withdraw, so the assertion has to be about the whole table
+    /// rather than about one handle a test happened to predict.
+    func boundSocketPaths() -> Set<String> { Set(handlesBySocket.keys) }
 }
 
 /// TBD's bookkeeping, instrumented to notice two roster passes overlapping.
@@ -806,6 +844,174 @@ struct RosterWatcherReconnectTests {
             // the registry behind it is `ShadowPeerManager`, which empties both
             // halves of its own table on the `.down` that ended the stream.
             #expect(await handles.socketPath(forHandle: handle) != nil)
+        }
+    }
+
+    /// **A withdrawal goes on the wire before the announcement it makes room
+    /// for, never after it.**
+    ///
+    /// A re-mint produces both lines in one pass for one session, and both
+    /// carry the same composed name. Announcing first asks the far side to hold
+    /// two peers under that one name until the `peer-gone` arrives, and
+    /// `docs/remote-provider-contract.md` forbids it to do that — "never
+    /// publish two peers under one name", a collision there being a
+    /// misdelivery rather than a display glitch. The overlap was brief and
+    /// harmless in the case that produces re-mints today (a reconnect, where
+    /// the far side has already unlinked everything), which is exactly why the
+    /// ordering needs pinning rather than leaving to the next reader.
+    @Test func aReMintWithdrawsTheOldHandleBeforeAnnouncingTheNewOne() async throws {
+        try await withRegistry { directory in
+            try write(registryRecord(), pid: 4242, in: directory)
+            let sink = FrameSink()
+            let handles = ResettableHandleRegistry()
+            let subject = watcher(
+                directory: directory, sessions: FakeSessionDirectory([spawnedSession()]))
+            await subject.addLink(link(handles: handles, sink: sink))
+            let first = try #require(peers(await sink.drain()).first?.handle)
+
+            // The handle table was emptied under the roster — what
+            // `ShadowPeerManager` does on every link-down — so the same live
+            // session is minted a second handle.
+            await handles.forgetEverything()
+            await subject.refresh()
+
+            let frames = await sink.drain()
+            #expect(frames.map(\.kind) == [.peerGone, .peer])
+            #expect(goneHandles(frames) == [first])
+            let second = try #require(peers(frames).first)
+            #expect(second.handle != first)
+            // Both lines really are about one session, which is what makes the
+            // order matter rather than being a cosmetic preference.
+            #expect(second.name == "laptop:useful-swallow %3541")
+        }
+    }
+
+    /// **A link retired while a pass is minting for it leaves nothing in the
+    /// handle table.**
+    ///
+    /// `removeLink(because: .stillOpen)` withdraws the sockets the link's
+    /// previous state remembered. A session admitted for the first time in the
+    /// pass that is running is in neither set — the link was never told about
+    /// it, and the pass has just minted a handle for it — so the entry used to
+    /// stay in the manager's table with nothing left to withdraw it, once per
+    /// retirement, for the life of the daemon.
+    ///
+    /// Not a trust hole: a handle is random rather than derived from its
+    /// socket, so one that reached no wire is one the far side cannot address.
+    /// A leak all the same.
+    @Test func aLinkRetiredMidMintLeavesNoHandleBehindInTheTable() async throws {
+        try await withRegistry { directory in
+            // Named so it sorts *after* the session already announced: the
+            // mint loop walks names in order, so the established session is
+            // memoized before the newcomer is minted, and the retirement lands
+            // in the newcomer's mint — the window where the pass holds a
+            // binding the link's own state has never heard of.
+            let second = spawnedSession(
+                displayName: "zesty-otter",
+                worktreePath: "/tmp/tbd-roster-fixture/zesty-otter",
+                pane: "%3542",
+                claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000")
+            try write(registryRecord(), pid: 4242, in: directory)
+            let sink = FrameSink()
+            let mintHook = OneShotHook()
+            let handles = ResettableHandleRegistry(onMint: mintHook)
+            let registration = link(handles: handles, sink: sink)
+            let subject = watcher(
+                directory: directory,
+                sessions: FakeSessionDirectory([spawnedSession(), second]))
+            await subject.addLink(registration)
+            #expect(peers(await sink.drain()).count == 1)
+
+            // A second session appears, so the next pass mints for it — the
+            // first session's handle is memoized and mints nothing.
+            try write(
+                registryRecord(
+                    sessionID: second.claudeSessionID,
+                    cwd: second.worktreePath,
+                    socket: "/tmp/cc-socks/4343.sock",
+                    tmux: "main:@3542.%3542"),
+                pid: 4343, in: directory)
+            await mintHook.arm {
+                await subject.removeLink(id: registration.id, because: .stillOpen)
+            }
+
+            await subject.refresh()
+
+            #expect(await handles.mints == 2, "the pass must really have minted for the newcomer")
+            #expect(
+                await handles.boundSocketPaths().isEmpty,
+                "a retired link leaves nothing bound — including what the pass it interrupted minted")
+            let frames = await sink.drain()
+            #expect(goneHandles(frames) == ["h1"], "the retirement withdraws what the link was told")
+            #expect(peers(frames).isEmpty, "and the interrupted pass announces nothing after it")
+        }
+    }
+
+    /// **A link retired mid-send is written into no further.**
+    ///
+    /// The mirror of the case above, on the other side of the pass:
+    /// `removeLink` announces gone everything the pass has just recorded as
+    /// announced, and a `peer` line written afterwards would leave the far
+    /// side holding a handle already withdrawn from the table that resolves
+    /// it — a ghost that lasts until the stream ends.
+    @Test func aLinkRetiredMidSendIsWrittenIntoNoFurther() async throws {
+        try await withRegistry { directory in
+            let brisk = spawnedSession(
+                displayName: "brisk-otter",
+                worktreePath: "/tmp/tbd-roster-fixture/brisk-otter",
+                pane: "%3542",
+                claudeSessionID: "BBBBBBBB-0000-0000-0000-000000000000")
+            let cheerful = spawnedSession(
+                displayName: "cheerful-moth",
+                worktreePath: "/tmp/tbd-roster-fixture/cheerful-moth",
+                pane: "%3543",
+                claudeSessionID: "CCCCCCCC-0000-0000-0000-000000000000")
+            try write(registryRecord(), pid: 4242, in: directory)
+
+            let sink = FrameSink()
+            let sendHook = OneShotHook()
+            let handles = ResettableHandleRegistry()
+            let linkID = UUID()
+            let registration = RosterLinkRegistration(
+                id: linkID, repoID: repoA, peerProtocol: 1, handles: handles
+            ) { frame in
+                await sink.append(frame)
+                await sendHook.fire()
+            }
+            let subject = watcher(
+                directory: directory,
+                sessions: FakeSessionDirectory([spawnedSession(), brisk, cheerful]),
+                livePIDs: [4242: liveProcStart, 4343: liveProcStart, 4444: liveProcStart])
+            await subject.addLink(registration)
+            #expect(peers(await sink.drain()).map(\.handle) == ["h1"])
+
+            // Two newcomers, so the pass writes two `peer` lines and the
+            // retirement can land between them. They are minted in name order,
+            // so `brisk-otter` is h2 and `cheerful-moth` is h3.
+            try write(
+                registryRecord(
+                    sessionID: brisk.claudeSessionID, cwd: brisk.worktreePath,
+                    socket: "/tmp/cc-socks/4343.sock", tmux: "main:@3542.%3542"),
+                pid: 4343, in: directory)
+            try write(
+                registryRecord(
+                    sessionID: cheerful.claudeSessionID, cwd: cheerful.worktreePath,
+                    socket: "/tmp/cc-socks/4444.sock", tmux: "main:@3543.%3543"),
+                pid: 4444, in: directory)
+            await sendHook.arm {
+                await subject.removeLink(id: linkID, because: .stillOpen)
+            }
+
+            await subject.refresh()
+
+            let frames = await sink.drain()
+            #expect(
+                peers(frames).map(\.handle) == ["h2"],
+                "the line already in flight lands; nothing is written after the retirement")
+            #expect(
+                goneHandles(frames) == ["h1", "h2", "h3"],
+                "and the retirement withdraws every handle the pass had recorded")
+            #expect(await handles.boundSocketPaths().isEmpty)
         }
     }
 
