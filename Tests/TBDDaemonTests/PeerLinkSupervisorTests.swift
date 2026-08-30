@@ -233,6 +233,114 @@ struct PeerLinkSupervisorTests {
         #expect(PeerBridgeFrameCodec.silenceLimit < 90)
     }
 
+    // MARK: - Keepalive cadence
+
+    /// **A frame that lands mid-interval must MOVE the next ping, not skip
+    /// it.** The obligation is one outbound line at least every
+    /// `keepaliveInterval` while otherwise idle, against a far-side silence
+    /// limit of three times that.
+    ///
+    /// A keepalive that woke on a fixed cadence and merely returned early
+    /// whenever the link had been quiet for less than a full interval spent
+    /// that whole margin. This is the shape that did it: a frame goes out just
+    /// after one wake, the wake after it still sees less than a full interval
+    /// of silence and skips, and the ping does not come until the wake after
+    /// *that* — nearly two intervals between outbound lines, a 1:1.5 safety
+    /// factor rather than 1:3.
+    ///
+    /// The numbers, at a 10 s interval and a frame 4 s into the first one: the
+    /// wake at 10 s sees 6 s of silence, so a rescheduling keepalive waits the
+    /// remaining 4 and pings at 14 — ten seconds after the frame, exactly the
+    /// obligation — while a fixed cadence skips to 20 and pings there, sixteen.
+    /// The assertion sits between the two.
+    ///
+    /// Driven on **both** seams. The keepalive sleeps on the clock and measures
+    /// idleness on the date source, so moving only one would prove nothing
+    /// about a keepalive that read the wall clock. `silenceLimit` is widened
+    /// well past the interval so the watchdog cannot kill the child part-way
+    /// through the window this measures — the cadence is what is under test
+    /// here, and the watchdog has its own test above.
+    @Test func aMidIntervalFrameMovesTheNextPingRatherThanSkippingIt() async throws {
+        let stub = try Stub("keepalive-cadence", body: """
+            printf '%s\\n' '{"kind":"hello","origin":"acme-remote","protocol":1}'
+            while IFS= read -r line; do printf '%s\\n' "$line" >> "$STDIN_LOG"; done
+            """)
+        defer { stub.remove() }
+        let clock = TestClock<Duration>()
+        let date = TestDateSource()
+        let supervisor = PeerLinkSupervisor(
+            config: stub.config, contractVersion: 2, origin: "acme-laptop",
+            handler: LinkRecorder(), silenceLimit: 120, keepaliveInterval: 10,
+            healthyResetUptime: 3600, clock: clock, now: date.provider)
+        await supervisor.start()
+
+        _ = try await waitFor(
+            "the link to come up on the provider's hello",
+            observed: { let seen = await supervisor.state; return "state=\(seen)" }
+        ) { await supervisor.state == .up }
+
+        // The first ping, which is what anchors everything after it: a wake
+        // that pings stamps the link's last outbound write at that instant, so
+        // the interval this test places a frame inside starts exactly there —
+        // no arithmetic about when the supervisor first armed its wait.
+        let toFirstPing = await advanceLockstep(
+            clock, date, until: "the first keepalive ping on an idle link",
+            limit: 30,
+            observed: { "sent=\(await supervisor.counters.framesSent) lines=\(stub.stdinLines())" }
+        ) { await supervisor.counters.framesSent >= 2 }
+        // Recorded rather than required: `advanceLockstep` has already reported
+        // the miss, and throwing here would skip the `stop()` that takes the
+        // stub child down with it.
+        #expect(
+            toFirstPing != nil,
+            "an idle link never pinged, so there is no interval to place a frame inside")
+
+        // Four seconds into the interval that ping opened, an ordinary outbound
+        // frame — the mid-interval traffic the old cadence swallowed a whole
+        // interval for.
+        await advanceLockstep(clock, date, by: 4)
+        try await supervisor.send(.peer(PeerBridgePeer(
+            handle: "h-mid", name: "acme-laptop:mid-interval %1", status: "working",
+            peerProtocol: PeerBridgeFrameCodec.peerProtocol)))
+        let sentBeforeNextPing = await supervisor.counters.framesSent
+
+        let gap = await advanceLockstep(
+            clock, date, until: "the keepalive ping that follows the mid-interval frame",
+            limit: 18,
+            observed: { "sent=\(await supervisor.counters.framesSent) lines=\(stub.stdinLines())" }
+        ) { await supervisor.counters.framesSent > sentBeforeNextPing }
+
+        // The positive control, on real time rather than virtual: without it a
+        // supervisor that counted a frame it never wrote — or wrote something
+        // other than a ping — would satisfy every measurement above. Skipped
+        // when the measurement itself came back empty, where waiting out a full
+        // real-time deadline would only rediscover the failure `#require`
+        // already reports below.
+        if gap != nil {
+            _ = try await waitFor(
+                "both keepalive pings to reach the child's stdin",
+                observed: { "lines=\(stub.stdinLines())" }
+            ) { stub.stdinLines().filter { $0.contains("\"kind\":\"ping\"") }.count >= 2 }
+        }
+        let lines = stub.stdinLines()
+        let pings = lines.filter { $0.contains("\"kind\":\"ping\"") }.count
+
+        await stopDriven(supervisor, clock)
+
+        let measured = try #require(
+            gap, "no ping followed the mid-interval frame within 18 virtual seconds")
+        #expect(
+            measured < 13,
+            """
+            a mid-interval frame must move the next ping to one interval after \
+            itself, not defer it to the wake after next: measured \(measured)s \
+            against a 10 s keepalive interval and a 30 s far-side silence limit
+            """)
+        #expect(
+            pings >= 2,
+            "both keepalives must have reached the wire as pings; got \(lines)")
+    }
+
     // MARK: - Link state
 
     /// Link state is an output, not an internal detail: shadow peers must stop
@@ -1068,6 +1176,85 @@ private func advanceVirtualTime(
             what: what, advances: advances, virtualSeconds: virtual, observed: seen),
         sourceLocation: sourceLocation)
     return nil
+}
+
+/// `advanceVirtualTime`'s two-seam sibling, for the keepalive — the one
+/// subsystem here that sleeps on the clock and then makes a decision by reading
+/// the date. Advances both together in `step`s until `condition` holds, and
+/// returns the virtual seconds it took (`nil` if `limit` virtual seconds or the
+/// real-time `timeout` ran out first).
+///
+/// Three properties, each load-bearing.
+///
+/// **Both seams move**, so a keepalive that consulted the wall clock instead of
+/// its injected date source could not pass — moving only the clock would leave
+/// every interval reading as zero idleness.
+///
+/// **The date moves first** within a step, so an interval that has just fully
+/// elapsed on the clock is never read as an idle gap one step short of it.
+///
+/// **Each step settles in real time before the next.** A woken sleeper re-arms
+/// at whatever `clock.now` says when it calls `sleep` again, so advancing
+/// before it gets there silently pushes its next deadline out and moves the
+/// beat this test computes its expectations from. The settle is what keeps the
+/// cadence deterministic rather than a race against the scheduler.
+@discardableResult
+private func advanceLockstep(
+    _ clock: TestClock<Duration>,
+    _ date: TestDateSource,
+    until what: String,
+    step: Double = 0.5,
+    limit: Double,
+    settle: Swift.Duration = .milliseconds(25),
+    timeout: Swift.Duration = .seconds(45),
+    observed: @Sendable () async -> String = { "nothing" },
+    sourceLocation: SourceLocation = #_sourceLocation,
+    _ condition: @Sendable () async -> Bool
+) async -> Double? {
+    let deadline = ContinuousClock.now.advanced(by: timeout)
+    var advances = 0
+    var virtual = 0.0
+    while virtual < limit, ContinuousClock.now < deadline {
+        if await condition() { return virtual }
+        guard await isArmed(clock) else {
+            try? await Task.sleep(for: settle)
+            continue
+        }
+        date.advance(by: step)
+        await clock.advance(by: .seconds(step))
+        advances += 1
+        virtual += step
+        try? await Task.sleep(for: settle)
+    }
+    if await condition() { return virtual }
+    let seen = await observed()
+    if await condition() { return virtual }
+    Issue.record(
+        PeerLinkAdvanceTimeout(
+            what: what, advances: advances, virtualSeconds: virtual, observed: seen),
+        sourceLocation: sourceLocation)
+    return nil
+}
+
+/// Moves both seams forward by a fixed amount, settling between steps for the
+/// reason above. Placement rather than a wait, so it asserts nothing: the
+/// caller is putting an event at a chosen offset inside an interval, not
+/// waiting for one.
+private func advanceLockstep(
+    _ clock: TestClock<Duration>,
+    _ date: TestDateSource,
+    by seconds: Double,
+    step: Double = 0.5,
+    settle: Swift.Duration = .milliseconds(25)
+) async {
+    var moved = 0.0
+    while moved < seconds {
+        let next = min(step, seconds - moved)
+        date.advance(by: next)
+        await clock.advance(by: .seconds(next))
+        moved += next
+        try? await Task.sleep(for: settle)
+    }
 }
 
 /// Whether a task is suspended on this clock right now. Detection is inverted

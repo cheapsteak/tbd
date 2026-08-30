@@ -747,24 +747,49 @@ public actor PeerLinkSupervisor: PeerLinkSending {
     /// Emits `ping` whenever this side has been quiet for a full keepalive
     /// interval. The contract requires one at least every 10 s while otherwise
     /// idle, and the far side's own watchdog kills the stream without it.
+    ///
+    /// **The wait is rescheduled, never fixed**, and that is what makes the
+    /// obligation hold. On a fixed cadence a frame that goes out just after one
+    /// check leaves the link quiet for the rest of that interval, is still short
+    /// of a full interval of silence at the next check, and defers the ping to
+    /// the check after that — nearly two intervals between outbound lines,
+    /// against a far-side `silenceLimit` of three. Asking `pingIfIdle` how long
+    /// is left instead means an outbound frame *moves* the next ping rather than
+    /// skipping it, and the documented 1:3 margin is what actually ships.
     private func startKeepalive(generation: Int) -> Task<Void, Never> {
         Task { [weak self, keepaliveInterval, clock] in
+            var wait = keepaliveInterval
             while !Task.isCancelled {
-                try? await clock.sleep(for: .seconds(keepaliveInterval))
+                try? await clock.sleep(for: .seconds(wait))
                 if Task.isCancelled { return }
                 guard let self else { return }
-                await self.pingIfIdle(generation: generation)
+                wait = await self.pingIfIdle(generation: generation)
             }
         }
     }
 
-    private func pingIfIdle(generation: Int) async {
-        guard generation == self.generation, let handle = stdinHandle,
-              now().timeIntervalSince(lastOutboundAt) >= keepaliveInterval else { return }
+    /// Pings if the link has been quiet for a full interval, and returns how
+    /// long to wait before asking again: a full interval after a ping, and the
+    /// remainder of the current one when a frame went out inside it.
+    ///
+    /// The remainder is strictly positive by construction — this branch is only
+    /// reached with less than an interval of idleness — so the loop above can
+    /// never spin. It is clamped to one interval so that a date source that
+    /// jumped backwards (`Date` is wall clock, and this one counts across system
+    /// sleep) cannot stretch the wait past the obligation.
+    private func pingIfIdle(generation: Int) async -> TimeInterval {
+        guard generation == self.generation, let handle = stdinHandle else {
+            return keepaliveInterval
+        }
+        let idle = now().timeIntervalSince(lastOutboundAt)
+        guard idle >= keepaliveInterval else {
+            return min(keepaliveInterval - idle, keepaliveInterval)
+        }
         // A failed keepalive is already counted and logged by `write`; there is
         // nothing further to do with it, and the watchdog covers a link that
         // stops carrying traffic in either direction.
         try? await write(.ping, to: handle)
+        return keepaliveInterval
     }
 
     /// Polls roughly three times per silence window, as on the `events` stream —
