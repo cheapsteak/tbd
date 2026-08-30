@@ -3766,14 +3766,24 @@ extension RPCRouter {
             await TranscriptParseCache.shared.put(filePath: filePath, result: parsed)
         }
 
-        await pendingQuestions.gcExpired(now: Date(), maxAge: .seconds(900))
+        // `gcExpired` reaps across every terminal, not just the polled one, so
+        // its reaped set is what has to be broadcast — a terminal whose entry
+        // this poll reaped gets no other retraction. `PendingQuestionExpirySweep`
+        // cannot cover for it: the sweep finds nothing left to reap and stays
+        // silent, leaving that terminal's pane rendering the entry forever.
+        // Unioned with the polled terminal so a terminal that both lost an
+        // expired entry and had one satisfied is still broadcast exactly once.
+        var affected = await pendingQuestions.gcExpired(now: Date(), maxAge: .seconds(900))
         let entries = await pendingQuestions.entries(forTerminal: params.terminalID)
         let merged = AskUserQuestionMerger.merge(jsonlItems: parsed, pending: entries)
         for satisfiedID in merged.satisfiedToolUseIDs {
             await pendingQuestions.clear(terminalID: params.terminalID, toolUseID: satisfiedID)
         }
         if !merged.satisfiedToolUseIDs.isEmpty {
-            await broadcastPendingQuestions(terminalID: params.terminalID)
+            affected.insert(params.terminalID)
+        }
+        for terminalID in affected {
+            await broadcastPendingQuestions(terminalID: terminalID)
         }
         let messages = merged.items
 
