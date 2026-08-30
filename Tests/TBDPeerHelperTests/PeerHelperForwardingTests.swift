@@ -165,8 +165,7 @@ struct CrossSessionWrapperStrippingTests {
     /// the tail of the sender's tag, socket path and all, in the body that is
     /// about to go on the wire.
     @Test func doesNotSplitInsideAQuotedAngleBracket() {
-        let content = "<cross-session-message from=\"uds:/tmp/cc-socks/a>b.sock\""
-            + " from-name=\"x\" from-mode=\"bypass\">\nthe body\n</cross-session-message>"
+        let content = "<cross-session-message from=\"uds:/tmp/cc-socks/a>b.sock\" from-name=\"x\" from-mode=\"bypass\">\nthe body\n</cross-session-message>"
         let stripped = PeerHelper.strippedOfSenderAttribution(content)
         #expect(stripped == "the body")
         #expect(!stripped.contains(".sock"))

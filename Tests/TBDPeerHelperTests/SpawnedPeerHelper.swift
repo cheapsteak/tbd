@@ -374,8 +374,7 @@ enum PeerHelperFixtureError: Error, CustomStringConvertible {
         case .socketWriteFailed(let code):
             return "could not write to the helper's socket: \(String(cString: strerror(code)))"
         case .nonBlockingFailed(let code):
-            return "could not make the helper's stdout non-blocking: "
-                + "\(String(cString: strerror(code)))"
+            return "could not make the helper's stdout non-blocking: \(String(cString: strerror(code)))"
         case .recordNotAnObject(let path):
             return "the record at \(path) is not a JSON object"
         }
@@ -408,8 +407,7 @@ enum CapturedAgentFrame {
 
     /// The wrapper the sender's own client composes, around `body`.
     static func wrapped(_ body: String) -> String {
-        "<cross-session-message from=\"\(senderAddress)\" from-name=\"\(senderName)\""
-            + " from-mode=\"\(senderMode)\">\n\(body)\n</cross-session-message>"
+        "<cross-session-message from=\"\(senderAddress)\" from-name=\"\(senderName)\" from-mode=\"\(senderMode)\">\n\(body)\n</cross-session-message>"
     }
 
     /// The whole frame, as it arrives on the socket: `body` inside the sender's

@@ -36,8 +36,7 @@ struct PeerHelperLifecycleTests {
 
         #expect(
             await helper.waitForPublication(),
-            "the helper never published both artifacts: socket \(helper.socketPath), "
-                + "record \(helper.recordPath)")
+            "the helper never published both artifacts: socket \(helper.socketPath), record \(helper.recordPath)")
 
         // The record has to describe the process that actually owns the socket:
         // the registry loader parses the pid out of the *filename*, so the
@@ -57,8 +56,7 @@ struct PeerHelperLifecycleTests {
         #expect(await helper.waitForExit(), "the helper outlived its stdin close")
         #expect(
             helper.exitStatus == 0,
-            "stdin EOF must exit through the ordinary return, which is what runs the "
-                + "unlink defers; got \(String(describing: helper.exitStatus))")
+            "stdin EOF must exit through the ordinary return, which is what runs the unlink defers; got \(String(describing: helper.exitStatus))")
         #expect(
             await helper.waitForReclamation(),
             "socket present: \(helper.socketExists), record present: \(helper.recordExists)")
@@ -97,17 +95,13 @@ struct PeerHelperLifecycleTests {
 
         #expect(
             await helper.waitForExit(),
-            "signal \(received) did not end the helper — it is wedged alive with its socket "
-                + "still bound and its record still published, which is a peer that lies "
-                + "about being reachable")
+            "signal \(received) did not end the helper — it is wedged alive with its socket still bound and its record still published, which is a peer that lies about being reachable")
         #expect(
             helper.exitStatus == 0,
-            "signal \(received) must reach the same ordinary return stdin EOF does, so the "
-                + "unlink defers run; got \(String(describing: helper.exitStatus))")
+            "signal \(received) must reach the same ordinary return stdin EOF does, so the unlink defers run; got \(String(describing: helper.exitStatus))")
         #expect(
             await helper.waitForReclamation(),
-            "signal \(received) left socket present: \(helper.socketExists), "
-                + "record present: \(helper.recordExists)")
+            "signal \(received) left socket present: \(helper.socketExists), record present: \(helper.recordExists)")
     }
 
     /// The third exit: the far side withdrew this shadow while the daemon is
@@ -194,14 +188,10 @@ struct PeerHelperLifecycleTests {
         let keysAfter = try helper.recordKeys()
         #expect(
             keysAfter == keysBefore,
-            "the rewrite changed the record's key set: added "
-                + "\(keysAfter.subtracting(keysBefore).sorted()), removed "
-                + "\(keysBefore.subtracting(keysAfter).sorted())")
+            "the rewrite changed the record's key set: added \(keysAfter.subtracting(keysBefore).sorted()), removed \(keysBefore.subtracting(keysAfter).sorted())")
         #expect(
             keysAfter.isSubset(of: ShadowPeerRecord.claudeCodeDefinedKeys),
-            "the record carries a key Claude Code does not define, which makes it invisible "
-                + "to every listing while surviving on disk: "
-                + "\(keysAfter.subtracting(ShadowPeerRecord.claudeCodeDefinedKeys).sorted())")
+            "the record carries a key Claude Code does not define, which makes it invisible to every listing while surviving on disk: \(keysAfter.subtracting(ShadowPeerRecord.claudeCodeDefinedKeys).sorted())")
         // Two keys are forbidden outright rather than merely undefined: a shadow
         // has no local terminal, and it has no session on Anthropic's relay.
         #expect(!keysAfter.contains("tmux"))
