@@ -149,7 +149,7 @@ actor DaemonClient {
     /// Try a single connection attempt (non-async).
     private func tryConnect() -> Bool {
         do {
-            _ = try sendRaw(RPCRequest(method: RPCMethod.daemonStatus))
+            try sendRaw(RPCRequest(method: RPCMethod.daemonStatus)).finish()
             connected = true
             return true
         } catch {
@@ -246,11 +246,34 @@ actor DaemonClient {
         return fd
     }
 
+    /// An `RPCResponse` paired with the still-open `RPCVolumeProbe`
+    /// measurement of the frame that carried it.
+    ///
+    /// The envelope decode in `sendRaw` is only the first half of a response's
+    /// cost: `RPCResponse.result` is a JSON *string*, so `decodeResult` runs a
+    /// SECOND full decode over the whole payload, and that second decode is
+    /// the expensive one this diagnostic exists to rank. Closing the
+    /// measurement in `sendRaw` would report the string unescape and miss the
+    /// structured parse entirely. So the measurement rides out to the caller
+    /// and `finish()` closes it — after the typed decode where there is one,
+    /// immediately where there is not (an error response, or a void call).
+    private struct MeasuredResponse: Sendable {
+        let response: RPCResponse
+        let method: String
+        let bytes: Int
+        let start: UInt64?
+
+        func finish() {
+            RPCVolumeProbe.shared.record(
+                start: start, kind: .response, type: method, bytes: bytes)
+        }
+    }
+
     /// Send an RPCRequest over a fresh POSIX Unix socket and return the RPCResponse.
     /// Wrapped in autoreleasepool to ensure ObjC-bridged objects (from JSON coding,
     /// FileManager, etc.) are freed immediately — prevents accumulation across
     /// the 2-second polling cycle.
-    private nonisolated func sendRaw(_ request: RPCRequest) throws -> RPCResponse {
+    private nonisolated func sendRaw(_ request: RPCRequest) throws -> MeasuredResponse {
         // The app is the operator's hand: every request it makes is declared
         // `{"kind":"app"}` at this one encode chokepoint rather than at each
         // of the ~200 call sites.
@@ -322,18 +345,17 @@ actor DaemonClient {
             }
 
             // Probe is default-off; when off `startMeasurement()` reads no
-            // clock and `record` returns on the nil start.
-            let probe = RPCVolumeProbe.shared
-            let started = probe.startMeasurement()
+            // clock and `record` returns on the nil start. The measurement is
+            // NOT closed here — see `MeasuredResponse`.
+            let started = RPCVolumeProbe.shared.startMeasurement()
             let decoder = JSONDecoder()
             let response = try decoder.decode(RPCResponse.self, from: responseData)
-            probe.record(
-                start: started,
-                kind: .response,
-                type: request.method,
-                bytes: responseData.count
+            return MeasuredResponse(
+                response: response,
+                method: request.method,
+                bytes: responseData.count,
+                start: started
             )
-            return response
         }
     }
 
@@ -342,36 +364,44 @@ actor DaemonClient {
         method: String, params: P, resultType: R.Type
     ) throws -> R {
         let request = try RPCRequest(method: method, params: params)
-        let response = try sendRaw(request)
+        let measured = try sendRaw(request)
+        let response = measured.response
         guard response.success else {
+            measured.finish()
             throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
+        defer { measured.finish() }
         return try response.decodeResult(resultType)
     }
 
     /// Send an RPC request with typed params that returns no meaningful result.
     private func callVoid<P: Encodable>(method: String, params: P) throws {
         let request = try RPCRequest(method: method, params: params)
-        let response = try sendRaw(request)
-        guard response.success else {
-            throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
+        let measured = try sendRaw(request)
+        measured.finish()   // no typed result to wait for
+        guard measured.response.success else {
+            throw DaemonClientError.rpcError(
+                measured.response.error ?? "Unknown error", code: measured.response.errorCode)
         }
     }
 
     /// Send an RPC request with no params and decode a typed result.
     private func callNoParams<R: Decodable>(method: String, resultType: R.Type) throws -> R {
         let request = RPCRequest(method: method)
-        let response = try sendRaw(request)
+        let measured = try sendRaw(request)
+        let response = measured.response
         guard response.success else {
+            measured.finish()
             throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
+        defer { measured.finish() }
         return try response.decodeResult(resultType)
     }
 
     // MARK: - Async RPC helpers (dispatch blocking recv off the cooperative thread pool)
 
     /// Wraps the blocking `sendRaw` in a detached task so it runs on a background thread.
-    private func sendRawAsync(_ request: RPCRequest) async throws -> RPCResponse {
+    private func sendRawAsync(_ request: RPCRequest) async throws -> MeasuredResponse {
         try await Task.detached(priority: .userInitiated) { [self] in
             try self.sendRaw(request)
         }.value
@@ -379,9 +409,11 @@ actor DaemonClient {
 
     private func callVoidAsync<P: Encodable>(method: String, params: P) async throws {
         let request = try RPCRequest(method: method, params: params)
-        let response = try await sendRawAsync(request)
-        guard response.success else {
-            throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
+        let measured = try await sendRawAsync(request)
+        measured.finish()   // no typed result to wait for
+        guard measured.response.success else {
+            throw DaemonClientError.rpcError(
+                measured.response.error ?? "Unknown error", code: measured.response.errorCode)
         }
     }
 
@@ -389,19 +421,25 @@ actor DaemonClient {
         method: String, params: P, resultType: R.Type
     ) async throws -> R {
         let request = try RPCRequest(method: method, params: params)
-        let response = try await sendRawAsync(request)
+        let measured = try await sendRawAsync(request)
+        let response = measured.response
         guard response.success else {
+            measured.finish()
             throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
+        defer { measured.finish() }
         return try response.decodeResult(resultType)
     }
 
     private func callNoParamsAsync<R: Decodable>(method: String, resultType: R.Type) async throws -> R {
         let request = RPCRequest(method: method)
-        let response = try await sendRawAsync(request)
+        let measured = try await sendRawAsync(request)
+        let response = measured.response
         guard response.success else {
+            measured.finish()
             throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
+        defer { measured.finish() }
         return try response.decodeResult(resultType)
     }
 
@@ -1842,10 +1880,13 @@ actor DaemonClient {
             method: RPCMethod.sessionMessages,
             params: SessionMessagesParams(filePath: filePath)
         )
-        let response = try await sendRawAsync(request)
+        let measured = try await sendRawAsync(request)
+        let response = measured.response
         guard response.success else {
+            measured.finish()
             throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
+        defer { measured.finish() }
         let bytes = response.result?.utf8.count ?? 0
         let decodeStart = ContinuousClock.now
         let result = try response.decodeResult([TranscriptItem].self)
@@ -1867,10 +1908,13 @@ actor DaemonClient {
             method: RPCMethod.terminalTranscript,
             params: TerminalTranscriptParams(terminalID: terminalID, tailLimit: tailLimit)
         )
-        let response = try await sendRawAsync(request)
+        let measured = try await sendRawAsync(request)
+        let response = measured.response
         guard response.success else {
+            measured.finish()
             throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
+        defer { measured.finish() }
         let bytes = response.result?.utf8.count ?? 0
         let decodeStart = ContinuousClock.now
         let result = try response.decodeResult(TerminalTranscriptResult.self)
@@ -1918,10 +1962,13 @@ actor DaemonClient {
     /// roundtrip-validated). Repo-level files are NEVER auto-modified.
     func removeLegacyGlobalHooks() async throws -> RemoveLegacyGlobalHooksResult {
         let request = RPCRequest(method: RPCMethod.daemonRemoveLegacyGlobalHooks)
-        let response = try await sendRawAsync(request)
+        let measured = try await sendRawAsync(request)
+        let response = measured.response
         guard response.success else {
+            measured.finish()
             throw DaemonClientError.rpcError(response.error ?? "Unknown error", code: response.errorCode)
         }
+        defer { measured.finish() }
         return try response.decodeResult(RemoveLegacyGlobalHooksResult.self)
     }
 }
