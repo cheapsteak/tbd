@@ -65,6 +65,18 @@ was observed, not inferred.
   therefore carries no field Claude Code does not already define**, and TBD
   cannot mark its own records from the inside.
 
+A later census over 84 live records added two facts the first pass missed, both
+recorded in `findings.md`. The record's real key set is wider than the sample
+that shaped this design — `nameSince` is on every record, `updatedAt` and
+`statusUpdatedAt` on nearly all — and **each peer carries a third durable
+artifact**, a `<pid>.<sha256(messagingSocketPath)>.key` token file, almost
+certainly the start token behind the recycled-pid refusal. A shadow peer
+publishes no token file and delivers fine without one, measured; the exposure is
+that a future Claude Code could begin requiring one, at which point every shadow
+would stop receiving silently. That is the sharpest version of the
+depend-on-internals risk this design carries, and the pinned shape test below is
+what would catch it.
+
 Incidental, and the reason for the socket sweep below: `/tmp/cc-socks` held 92
 socket files against roughly 80 records. Nothing unlinks a dead one — the same
 shape as the ~7,100 orphaned tmux sockets recorded in `CLAUDE.md`.
@@ -103,7 +115,8 @@ Line kinds on the stream, in both directions unless noted:
   its handle, display name, status, and peer protocol. Idempotent and complete,
   never a partial diff, following the `events` rule for `session`.
 - `peer-gone` — that handle is no longer addressable.
-- `message` — one frame for delivery, addressed by handle.
+- `message` — one frame for delivery, addressed by handle, and carrying an id
+  the sender mints for it. The id is diagnostic only — see Failure semantics.
 - `peer-inventory` — periodic, provider to TBD only: the handles the provider
   currently publishes on its side. TBD diffs it against what it asked for and
   surfaces the difference. This is what makes the far half's hygiene observable.
@@ -286,6 +299,24 @@ Loss is unreported to the sender in every case above, because the channel has no
 reply path. Every drop is logged and counted, and the counts surface in
 `tbd peer list`.
 
+**Every `message` carries a correlation id, and it is diagnostic only — never an
+acknowledgement.** Counts say how much was lost; they cannot say *which* frame,
+and with no reply path a drop at the far end is invisible from this one. So the
+sending side mints an id per frame and both sides log it, which is what lets one
+frame be named identically in both logs and a drop be attributed to a side
+rather than left as two unrelated tallies. It buys nothing else, and is not a
+first step toward anything else: nothing travels back, nothing is retried,
+nothing is deduplicated, and no side ever reports what it did with a frame. The
+clean-failure rule above is unchanged — a send on a down link still fails, and a
+frame lost in the in-flight window is still lost after the sender saw success. An
+id makes that window legible afterward; it does not narrow it. Store-and-forward
+and acks are rejected below and stay rejected.
+
+The id belongs to the hop, not to the message it carries: Claude Code's own
+`msg_id` rides inside `content`, composed by the delivering side, and is never
+read or required here. Correlating the hop therefore works even for content TBD
+does not look into.
+
 ## Shadow peer lifecycle
 
 One helper process per shadow peer, holding one socket, publishing one record
@@ -307,9 +338,12 @@ Required behaviors:
   from a marker inside the record, and never by inspecting a path. That
   bookkeeping must survive a daemon restart, because a shadow whose row is lost
   is a shadow nothing can recognise.
-- **`peerFeatures` advertises only what the bridge actually carries.** A feature
-  echoed from the far side that the bridge does not forward — idle notification,
-  say — would silently never fire.
+- **`peerFeatures` advertises only what the bridge actually carries**, which for
+  v1 is nothing, so the list is empty. A feature echoed from the far side that
+  the bridge does not forward — idle notification, say — would silently never
+  fire. An empty list was measured to list correctly, against a control record
+  differing only in carrying one feature: both appeared. So honesty here costs
+  nothing.
 - **The helper is the single writer of its own record**, taking control frames
   from the daemon over its stdin, and rewrites atomically by rename. A record
   published once and never updated shows a frozen status forever; status follows
@@ -321,6 +355,13 @@ Required behaviors:
   is the backstop for unclean exits, not the mechanism.
 - **Helpers carry distinctive argv** so `ps` reads sanely and no pattern-kill
   takes out a sibling.
+- **`cwd` names a directory that exists locally** — the adopted worktree. A
+  remote path resolves to nothing here, and a surface that filters on the
+  directory existing would drop the shadow.
+- **`version` is omitted rather than fabricated.** The contract carries no agent
+  version for a remote session, so the honest options were to invent one or
+  leave it out. An omission fails loudly and early; an invented version is a
+  quiet wrongness that would survive the whole soak.
 
 ## Reclamation and detection
 

@@ -55,6 +55,51 @@ rejects a record whose filename does not round-trip as an integer. `ListAgents`
 reads this directory and liveness-probes each `messagingSocketPath` with a
 connect-and-drop.
 
+### The sample above is not the whole key set — T1
+
+A census over 84 live records (2026-08-30) gives the real picture, and the
+single sample above is misleading in both directions: it shows a key carried by
+under a third of records and omits one carried by every single one.
+
+- **84/84** — `pid`, `sessionId`, `cwd`, `startedAt`, `procStart`,
+  `peerProtocol`, `peerFeatures`, `kind`, `entrypoint`, `messagingSocketPath`,
+  `name`, `nameSince`
+- **83/84** — `version`, `status`, `updatedAt`, `statusUpdatedAt`
+- **82/84** — `bridgeSessionId`
+- **80/84** — `tmux`. Four records carry none, independently corroborating that
+  a record without it is legal.
+- **63/84** — `pidDomain`. Absent from a quarter of records, so it is optional
+  rather than structural.
+- **24/84** — `nameSource`, the key the sample shows.
+- **6/84** — `waitingFor`.
+
+`procStart`'s format is `ctime(3)` — `"Fri Aug 28 17:20:19 2026"`.
+
+Two consequences for anything impersonating a record. Absence is broadly
+tolerated: probe records omitting `nameSince`, `updatedAt`, `statusUpdatedAt`
+and `bridgeSessionId` listed correctly. But `updatedAt` and `statusUpdatedAt`
+plausibly feed staleness in some surface, so a long-lived stand-in that never
+writes them may eventually read as stale even while it is answering — untested,
+and the first thing to suspect if shadows go quiet after hours rather than
+immediately.
+
+### There is a third per-peer artifact: a peer-token file — T1
+
+Alongside each record sits `<pid>.<sha256(messagingSocketPath)>.key`, mode 0600
+— 83 of them against 84 records. The filename's digest was confirmed to be
+sha256 of that record's own `messagingSocketPath` (6 of 6 sampled). Each holds a
+`peerToken` plus a `procStart` and `pidDomain` matching its record exactly.
+
+This is almost certainly the "start token" behind the uds-client's
+`not the process that wrote to us (start token differs — recycled pid)`
+refusal. **The token values are secrets and are not reproduced here.**
+
+It matters for two reasons. It is a **third durable artifact per peer**, so
+anything counting or reclaiming peer artifacts that knows only about records and
+sockets is incomplete. And a stand-in that publishes no token file delivers fine
+today — measured — but would stop silently if a future Claude Code began
+requiring one on the peer-send path.
+
 ### Transport is one JSON line per message — T1
 
 A `SOCK_STREAM` Unix socket at `/tmp/cc-socks/<pid>.sock`, mode `0600`, one
