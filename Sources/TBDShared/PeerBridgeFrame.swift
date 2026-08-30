@@ -97,6 +97,7 @@ public enum PeerBridgeFrame: Equatable, Sendable, Codable {
         case handles
         case name
         case status
+        case id
         case to
         case from
         case content
@@ -131,10 +132,11 @@ public enum PeerBridgeFrame: Equatable, Sendable, Codable {
             let handle = try c.decode(String.self, forKey: .handle)
             self = .peerGone(handle: handle)
         case .message:
+            let id = try c.decode(String.self, forKey: .id)
             let to = try c.decode(String.self, forKey: .to)
             let from = try c.decode(String.self, forKey: .from)
             let content = try c.decode(String.self, forKey: .content)
-            self = .message(PeerBridgeMessage(to: to, from: from, content: content))
+            self = .message(PeerBridgeMessage(id: id, to: to, from: from, content: content))
         case .peerInventory:
             let handles = try c.decode([String].self, forKey: .handles)
             self = .peerInventory(handles: handles)
@@ -158,6 +160,7 @@ public enum PeerBridgeFrame: Equatable, Sendable, Codable {
         case .peerGone(let handle):
             try c.encode(handle, forKey: .handle)
         case .message(let message):
+            try c.encode(message.id, forKey: .id)
             try c.encode(message.to, forKey: .to)
             try c.encode(message.from, forKey: .from)
             try c.encode(message.content, forKey: .content)
@@ -202,7 +205,7 @@ public struct PeerBridgePeer: Sendable, Equatable {
     }
 }
 
-/// One message frame for delivery, addressed by handle. Three fields, and the
+/// One message frame for delivery, addressed by handle. Four fields, and the
 /// absences are as load-bearing as the fields.
 ///
 /// **No attribution.** The `<cross-session-message>` wrapper's `from-name` and
@@ -217,6 +220,21 @@ public struct PeerBridgePeer: Sendable, Equatable {
 /// provider-facing contract, and would let the far side choose fields the
 /// receiver is answerable for.
 public struct PeerBridgeMessage: Sendable, Equatable {
+    /// Opaque id minted by the sending side, unique for the life of one
+    /// connection. **Diagnostic only, and never an acknowledgement.**
+    ///
+    /// Nothing on this stream is acked, so the channel's main failure mode is a
+    /// frame that is dropped somewhere and never mentioned again. Both sides log
+    /// this id, which is what lets one frame be named identically in both logs
+    /// and a drop be attributed to a side. It confers nothing else: no receipt
+    /// travels back, no side reports what it did with a frame, nothing is
+    /// retried, and a repeated id is not a replay to suppress. A receiver never
+    /// parses it or derives anything from it.
+    ///
+    /// It names this hop and nothing inside `content`: the agent's own frame
+    /// internals, its message id among them, are composed around `content` by
+    /// the delivering side and are never fields of this contract.
+    public let id: String
     /// Opaque handle of the addressee. A handle the receiver cannot look up
     /// resolves to nothing — it can never reach a session that was not mirrored.
     public let to: String
@@ -226,7 +244,8 @@ public struct PeerBridgeMessage: Sendable, Equatable {
     /// The message content, byte-verbatim. Never rewritten in transit.
     public let content: String
 
-    public init(to: String, from: String, content: String) {
+    public init(id: String, to: String, from: String, content: String) {
+        self.id = id
         self.to = to
         self.from = from
         self.content = content

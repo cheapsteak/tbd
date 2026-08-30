@@ -461,7 +461,7 @@ Line kinds:
 {"kind": "hello", "protocol": 1, "origin": "acme-laptop"}
 {"kind": "peer", "handle": "h-4f2a1c", "name": "acme-laptop:fix-flaky-ci %388", "status": "working", "protocol": 1}
 {"kind": "peer-gone", "handle": "h-4f2a1c"}
-{"kind": "message", "to": "h-9b71e0", "from": "h-4f2a1c", "content": "..."}
+{"kind": "message", "id": "m-8c31d4", "to": "h-9b71e0", "from": "h-4f2a1c", "content": "..."}
 {"kind": "peer-inventory", "handles": ["h-4f2a1c", "h-9b71e0"]}
 {"kind": "ping"}
 ```
@@ -469,7 +469,7 @@ Line kinds:
 - **`hello`** — both directions. The caller writes it first and the provider answers with its own. It declares the sender's origin label and the peer protocol it will speak. Neither side may write any other line before it.
 - **`peer`** — both directions. Announces or updates one session the sender can be asked to deliver to: its handle, its display name, its status, and the peer protocol it speaks. Like a `session` event on the `events` stream, a `peer` line carries that peer's **complete** state and never a partial diff, which makes it idempotent and safely replayable in any order relative to other `peer` lines.
 - **`peer-gone`** — both directions. That handle is no longer addressable. It means what `removed` means on `events`: stop tracking this, rather than any claim about the underlying session's liveness.
-- **`message`** — both directions. One frame for delivery, addressed to a handle the receiving side previously announced.
+- **`message`** — both directions. One frame for delivery, addressed to a handle the receiving side previously announced, and carrying an `id` the sender mints for it. Every field is required: a `message` missing one of them is malformed, and is dropped and counted like any other malformed line.
 - **`peer-inventory`** — provider to caller only. Periodic, and the complete set of handles the provider currently publishes on its own side. The caller diffs it against what it asked the provider to publish and surfaces the difference.
 - **`ping`** — both directions. Keepalive, as on `events`.
 
@@ -486,6 +486,8 @@ Line kinds:
 **Frames are capped at 512 KB**, measured as the encoded line without its terminating newline. A side that receives a longer line MUST drop it and count the drop rather than truncate it or parse a prefix; a side asked to send one MUST fail that frame rather than emit it. No line on this stream is fragmented or continued across lines.
 
 **Nothing here is acknowledged, and nothing is buffered.** There are no acks, no receipts, and no store-and-forward: a frame that cannot be delivered now is dropped and counted, not queued. A sender learns a peer is unreachable from that peer's `peer-gone` or from the stream ending, never from a per-frame result. A frame accepted for delivery on a link that dies before it lands is lost after the sender saw no error; that window is accepted rather than solved, because the alternative is a mailbox with its own durability, eviction, and reclamation story that messaging between two sessions on one machine does not have either.
+
+**The `id` on a `message` is diagnostic, and it is not an acknowledgement.** The sending side mints an opaque value that is unique for the life of one connection, and both sides MUST log it wherever they log the frame, including where they drop it. Its only purpose is that one frame can be named identically in both sides' logs: with nothing acknowledged, a frame that is dropped somewhere on the hop is this stream's characteristic failure, and an id is what lets two logs be read as one record of it rather than as two unrelated tallies. It carries no delivery semantics whatever. Nothing is ever returned for it — no receipt, no result, no report of what a receiver did with a frame — and a sender learns no more about whether a frame landed than it does without one. A receiver MUST NOT parse it, derive anything from it, retry or wait on anything keyed on it, or treat a repeated id as a replay to suppress; a sender MUST NOT expect any of those. It names one frame's hop across this stream and nothing inside `content`, whose interior this contract does not reach.
 
 ### Provider obligations on `messages`
 

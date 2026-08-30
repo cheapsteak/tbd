@@ -22,7 +22,8 @@ struct PeerBridgeFrameTests {
             status: "busy", peerProtocol: 1)),
         .peerGone(handle: "h-9f3a"),
         .message(PeerBridgeMessage(
-            to: "h-9f3a", from: "h-1b2c", content: "rebase landed, please re-run CI")),
+            id: "m-6d40", to: "h-9f3a", from: "h-1b2c",
+            content: "rebase landed, please re-run CI")),
         .peerInventory(handles: ["h-9f3a", "h-1b2c"]),
         .ping,
     ]
@@ -55,7 +56,7 @@ struct PeerBridgeFrameTests {
             .hello: ["kind", "origin", "protocol"],
             .peer: ["kind", "handle", "name", "status", "protocol"],
             .peerGone: ["kind", "handle"],
-            .message: ["kind", "to", "from", "content"],
+            .message: ["kind", "id", "to", "from", "content"],
             .peerInventory: ["kind", "handles"],
             .ping: ["kind"],
         ]
@@ -74,11 +75,28 @@ struct PeerBridgeFrameTests {
     @Test func contentSurvivesVerbatimAndNeverBreaksTheLineFraming() throws {
         let awkward = "line one\nline two\ttabbed \"quoted\" ünïcode /slashes/ \\ backslash"
         let frame = PeerBridgeFrame.message(
-            PeerBridgeMessage(to: "h-1", from: "h-2", content: awkward))
+            PeerBridgeMessage(id: "m-6d40", to: "h-1", from: "h-2", content: awkward))
         let line = try PeerBridgeFrameCodec.encodeLine(frame)
         #expect(line.hasSuffix("\n"))
         #expect(line.filter { $0 == "\n" }.count == 1)
         #expect(PeerBridgeFrameCodec.decode(line: line, negotiatedProtocol: 1) == .frame(frame))
+    }
+
+    /// The correlation id rides across verbatim and is what tells two otherwise
+    /// identical frames apart, which is the whole of what it buys: on a stream
+    /// with no acks it is how one frame is named the same way in both sides'
+    /// logs. Nothing here asserts a receiver answers one, and nothing should
+    /// grow to — an id is diagnostic, never a receipt.
+    @Test func theIdIsCarriedVerbatimAndSeparatesOtherwiseIdenticalFrames() throws {
+        let first = PeerBridgeFrame.message(PeerBridgeMessage(
+            id: "m-6d40", to: "h-9f3a", from: "h-1b2c", content: "please re-run CI"))
+        let second = PeerBridgeFrame.message(PeerBridgeMessage(
+            id: "m-9b71", to: "h-9f3a", from: "h-1b2c", content: "please re-run CI"))
+        #expect(first != second)
+        for frame in [first, second] {
+            let line = try PeerBridgeFrameCodec.encodeLine(frame)
+            #expect(PeerBridgeFrameCodec.decode(line: line, negotiatedProtocol: 1) == .frame(frame))
+        }
     }
 
     @Test func peerInventoryIsTheOnlyProviderToTBDOnlyKind() {
@@ -92,11 +110,11 @@ struct PeerBridgeFrameTests {
     /// a smaller frame that looks valid and says something the sender did not.
     @Test func anOversizedFrameIsRefusedOnEncode() throws {
         let overhead = try PeerBridgeFrameCodec.encode(
-            .message(PeerBridgeMessage(to: "t", from: "f", content: ""))).count
+            .message(PeerBridgeMessage(id: "m-1", to: "t", from: "f", content: ""))).count
         let oneTooLong = String(
             repeating: "a", count: PeerBridgeFrameCodec.maxFrameBytes - overhead + 1)
         let frame = PeerBridgeFrame.message(
-            PeerBridgeMessage(to: "t", from: "f", content: oneTooLong))
+            PeerBridgeMessage(id: "m-1", to: "t", from: "f", content: oneTooLong))
         do {
             _ = try PeerBridgeFrameCodec.encode(frame)
             Issue.record("a frame one byte over the cap was encoded rather than refused")
@@ -109,10 +127,10 @@ struct PeerBridgeFrameTests {
     /// pass the refusal test above.
     @Test func aFrameExactlyAtTheCapEncodes() throws {
         let overhead = try PeerBridgeFrameCodec.encode(
-            .message(PeerBridgeMessage(to: "t", from: "f", content: ""))).count
+            .message(PeerBridgeMessage(id: "m-1", to: "t", from: "f", content: ""))).count
         let exact = String(repeating: "a", count: PeerBridgeFrameCodec.maxFrameBytes - overhead)
         let frame = PeerBridgeFrame.message(
-            PeerBridgeMessage(to: "t", from: "f", content: exact))
+            PeerBridgeMessage(id: "m-1", to: "t", from: "f", content: exact))
         let data = try PeerBridgeFrameCodec.encode(frame)
         #expect(data.count == PeerBridgeFrameCodec.maxFrameBytes)
     }
@@ -121,7 +139,7 @@ struct PeerBridgeFrameTests {
     /// it, so a huge line costs one rejection rather than a parse.
     @Test func anOversizedLineIsRejectedOnDecode() {
         let prefix = #"{"content":""#
-        let suffix = #"","from":"h-2","kind":"message","to":"h-1"}"#
+        let suffix = #"","from":"h-2","id":"m-1","kind":"message","to":"h-1"}"#
         let padding = String(
             repeating: "a",
             count: PeerBridgeFrameCodec.maxFrameBytes - prefix.utf8.count - suffix.utf8.count + 1)
@@ -188,9 +206,10 @@ struct PeerBridgeFrameTests {
     /// `hello` already matched — so it is delivered whatever number the link
     /// settled on, and carries no agent frame internals to disagree about.
     @Test func aMessageCarriesNoProtocolOfItsOwn() {
-        let line = #"{"kind":"message","to":"h-1","from":"h-2","content":"hi","msgV":9}"#
+        let line = #"{"kind":"message","id":"m-1","to":"h-1","from":"h-2","content":"hi","msgV":9}"#
         #expect(PeerBridgeFrameCodec.decode(line: line, negotiatedProtocol: 7)
-            == .frame(.message(PeerBridgeMessage(to: "h-1", from: "h-2", content: "hi"))))
+            == .frame(.message(
+                PeerBridgeMessage(id: "m-1", to: "h-1", from: "h-2", content: "hi"))))
     }
 
     // MARK: - Malformed input
@@ -205,6 +224,7 @@ struct PeerBridgeFrameTests {
             #"{"kind":"peer","name":"no handle","status":"idle","protocol":1}"#,
             "{not json at all",
             #"{"kind":"hello","origin":"acme-laptop"}"#,
+            #"{"kind":"message","to":"h-1","from":"h-2","content":"no id"}"#,
             #"["kind","message"]"#,
             #"{"kind":42}"#,
             #"{"kind":"peer-gone","handle":"h-1"}"#,
@@ -214,6 +234,7 @@ struct PeerBridgeFrameTests {
         }
         #expect(outcomes == [
             .frame(.ping),
+            .rejected(.malformed),
             .rejected(.malformed),
             .rejected(.malformed),
             .rejected(.malformed),
