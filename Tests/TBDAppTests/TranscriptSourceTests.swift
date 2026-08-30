@@ -152,6 +152,55 @@ struct TranscriptSourceTests {
                 "the transcript must be the new file's content, with no row from the old one")
     }
 
+    /// Both longer than `lineA`, so a file rewritten to the two of them lands
+    /// LARGER than the one-line original — the case size and mtime alone cannot
+    /// tell apart from an append.
+    private let lineC = #"{"type":"user","uuid":"c","timestamp":"2026-08-26T11:00:00.000Z","message":{"role":"user","content":"third prompt, deliberately long"}}"#
+    private let lineD = #"{"type":"user","uuid":"d","timestamp":"2026-08-26T11:00:01.000Z","message":{"role":"user","content":"fourth prompt, deliberately long"}}"#
+
+    @Test("a whole-file rewrite that lands larger is re-read, not appended to")
+    func largerRewriteResets() async throws {
+        let original = lineA + "\n"
+        let replacement = lineC + "\n" + lineD + "\n"
+        #expect(replacement.utf8.count > original.utf8.count,
+                "the fixture only exercises the bug if the rewrite is LARGER")
+
+        let path = try tempFile(original)
+        let source = TranscriptSource()
+        _ = await source.refresh(sessionID: "s1", path: path)
+        #expect(promptTexts(await source.items(sessionID: "s1")) == ["hello"])
+
+        // A whole-file rewrite — a /compact whose summary outweighs the session
+        // it replaced. Larger, newer mtime: byte-for-byte indistinguishable
+        // from an append unless the already-consumed bytes are re-checked.
+        try replacement.write(to: URL(fileURLWithPath: path), atomically: true, encoding: .utf8)
+        try setModified(path, secondsFromNow: 5)
+        _ = await source.refresh(sessionID: "s1", path: path)
+        #expect(promptTexts(await source.items(sessionID: "s1")) == ["third prompt, deliberately long",
+                                                                    "fourth prompt, deliberately long"],
+                "a larger rewrite must be re-read whole, with no row from the old transcript surviving")
+    }
+
+    @Test("a larger rewrite followed by an append stays aligned")
+    func largerRewriteThenAppend() async throws {
+        let path = try tempFile(lineA + "\n")
+        let source = TranscriptSource()
+        _ = await source.refresh(sessionID: "s1", path: path)
+
+        try (lineC + "\n" + lineD + "\n").write(
+            to: URL(fileURLWithPath: path), atomically: true, encoding: .utf8)
+        try setModified(path, secondsFromNow: 5)
+        _ = await source.refresh(sessionID: "s1", path: path)
+
+        try append(lineB + "\n", to: path)
+        try setModified(path, secondsFromNow: 10)
+        let change = await source.refresh(sessionID: "s1", path: path)
+        #expect(change?.appended.count == 1, "the append after a reset must still read only the delta")
+        #expect(promptTexts(await source.items(sessionID: "s1")) == ["third prompt, deliberately long",
+                                                                    "fourth prompt, deliberately long",
+                                                                    "second"])
+    }
+
     @Test("forget drops retained state")
     func forgetDropsState() async throws {
         let path = try tempFile(lineA + "\n")
