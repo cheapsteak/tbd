@@ -91,8 +91,11 @@ public enum PeerLinkSendFailure: LocalizedError, Equatable, Sendable {
     /// continued — the next `hello` resyncs everything.
     ///
     /// An ordinary large frame does **not** come here: `write` refills the pipe
-    /// as it drains, so this means a provider that stopped reading in the
-    /// middle of one frame and stayed stopped.
+    /// as it drains. Reaching this means the far side did not take the rest of
+    /// one frame inside that frame's whole write budget — it stopped reading
+    /// and stayed stopped, or it read the whole time but slower than
+    /// `writeStallLimit` allows for a frame this size. See that property for
+    /// the floor and why it bounds the frame rather than each stall.
     case truncated(wrote: Int, of: Int)
     /// A kind this side may not send. `peer-inventory` is provider-to-TBD only.
     case notOutbound(PeerBridgeFrame.Kind)
@@ -242,10 +245,42 @@ public actor PeerLinkSupervisor: PeerLinkSending {
     /// advances instead of two hundred (`Tests/CLAUDE.md`, "Keep advance chains
     /// short").
     ///
-    /// The default buys 200 refill waits, where a frame at the codec's 512 KB
-    /// cap needs about eight against a 64 KB pipe. It is generous on purpose:
-    /// the alternative to waiting is a torn-down link and every shadow peer for
-    /// this provider unpublished, which costs far more than a millisecond.
+    /// **Total seconds of backpressure per frame, not per stall.** The stall
+    /// counter is never reset when bytes make progress, so the default's 200
+    /// waits at the 5 ms retry step are shared across every time that one frame
+    /// has to wait for room — not granted afresh each time.
+    ///
+    /// How far that goes is set by how the far side reads, and the two shapes
+    /// differ by more than they look:
+    ///
+    /// - **A provider that drains the pipe between waits** returns the whole
+    ///   buffer each time, so a frame at the codec's 512 KB cap crosses a 64 KB
+    ///   pipe in about eight waits. The default is roughly twenty-five times
+    ///   that, which is the headroom it is chosen for.
+    /// - **A provider that reads steadily but slowly** is bounded by its own
+    ///   rate: at 2 KB a wait, that same frame needs ~256 waits, runs out of
+    ///   budget with `sent > 0`, and lands on `truncated` — which tears the
+    ///   link down and unpublishes every shadow peer for the provider. So this
+    ///   knob is not only a wedged-provider guard; it is also a **throughput
+    ///   floor**, and a reader below it loses its link rather than merely
+    ///   running slowly.
+    ///
+    /// The floor is per frame, so it scales with the frame: `bytes /
+    /// writeStallLimit`, which at the default is ~512 KB/s for a frame at the
+    /// cap and ~8 KB/s for an 8 KB one. Ordinary message traffic therefore
+    /// never approaches it; only a near-cap frame to a slow reader does.
+    ///
+    /// A second's budget is generous against the shape it is really defending
+    /// against — the alternative to waiting is a torn-down link and every
+    /// shadow peer for this provider unpublished, which costs far more than a
+    /// millisecond. Resetting the counter on progress is the obvious way to
+    /// exempt a slow reader, and it is not what this does, because the frame in
+    /// flight holds `writeInFlightGeneration` for its whole transfer: every
+    /// other frame on the link is refused until it finishes, so an unbounded
+    /// frame is unbounded head-of-line blocking on the channel rather than one
+    /// slow message. The bound on the *whole* frame is what keeps that finite.
+    /// If a slow reader needs more room, the lever is this number — or making
+    /// it proportional to the frame — and not the reset.
     let writeStallLimit: TimeInterval
     private let clock: any Clock<Duration>
     /// The date seam. Separate from `clock` for the reason the root `CLAUDE.md`
@@ -533,10 +568,11 @@ public actor PeerLinkSupervisor: PeerLinkSending {
     /// - **A frame that never got a byte across is a would-block.** The pipe
     ///   was full for the whole budget; the frame is dropped and counted and
     ///   the link stays up, because nothing reached the wire to resync from.
-    /// - **A frame that got partway and then stalled out is fatal**, as before:
-    ///   NDJSON cannot retract half a line. That path is now reached only by a
-    ///   provider that stops reading in the middle of one frame for the whole
-    ///   budget, rather than by every large frame.
+    /// - **A frame that got partway and then ran out of budget is fatal**:
+    ///   NDJSON cannot retract half a line. No ordinary large frame reaches
+    ///   that path — only one whose far side did not take the remainder within
+    ///   `writeStallLimit`, which the budget bounds per frame rather than per
+    ///   stall (see that property).
     /// - **The wait is on the injected clock**, never on a blocking write or a
     ///   `poll` with a timeout: both park the executor thread, which is the
     ///   starvation this file avoids everywhere. (A zero-timeout `poll` would

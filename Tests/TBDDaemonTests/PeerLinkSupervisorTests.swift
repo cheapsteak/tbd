@@ -577,6 +577,297 @@ struct PeerLinkSupervisorTests {
         #expect(alive, "the child's process group must survive a refused frame")
     }
 
+    /// **Two concurrent sends must never interleave their bytes.** `write`
+    /// suspends between chunks of a frame the pipe cannot take whole, and an
+    /// actor is re-entrant across every suspension — so without
+    /// `writeInFlightGeneration` a `send` arriving in that window splices its
+    /// own line into the middle of the stalled one and produces exactly the
+    /// desynced NDJSON the refill loop exists to prevent. Nothing else in this
+    /// suite opens that window.
+    ///
+    /// **The window is held open by the stub, not by timing.** The child reads
+    /// nothing until this test creates a gate file, so whichever frame reaches
+    /// the pipe first fills it and stays stalled there for as long as the test
+    /// wants, and the other necessarily arrives mid-transfer. Both frames are
+    /// twice the most a Darwin pipe ever buffers, so neither can slip across
+    /// whole — which is what makes both orderings equivalent, and why nothing
+    /// below has to know which of the two won the race.
+    ///
+    /// The clock is deliberately left alone until the gate opens: the stalled
+    /// frame cannot spend a single one of its refill waits while the second
+    /// send is being judged, so the refusal observed here is the guard's and
+    /// not the stall budget's.
+    ///
+    /// Against an unguarded `write` this fails twice over — the second send
+    /// parks in the refill loop instead of coming back at once, and once the
+    /// gate opens the two frames land spliced together, so the decode
+    /// assertion goes red as well.
+    @Test func concurrentSendsNeverInterleaveIntoOneFrame() async throws {
+        // Created by the test once both sends are in play. Until then the child
+        // reads nothing, so the pipe fills and stays full.
+        let gate = FileManager.default.temporaryDirectory
+            .appendingPathComponent("peer-link-gate-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: gate) }
+        let stub = try Stub("interleave", body: """
+            printf '%s\\n' '{"kind":"hello","origin":"acme-remote","protocol":1}'
+            while [ ! -e "\(gate.path)" ]; do sleep 0.02; done
+            cat >> "$STDIN_LOG"
+            """)
+        defer { stub.remove() }
+        let clock = TestClock<Duration>()
+        let recorder = LinkRecorder()
+        let supervisor = PeerLinkSupervisor(
+            config: stub.config, contractVersion: 2, origin: "acme-laptop",
+            handler: recorder, healthyResetUptime: 3600, clock: clock,
+            now: TestDateSource().provider)
+        await supervisor.start()
+        _ = try await waitFor(
+            "the link to come up",
+            observed: { let seen = await supervisor.state; return "state=\(seen)" }) { await supervisor.state == .up }
+
+        // Same length on the wire, so the refusal's reported byte count is the
+        // same whichever of the two is refused.
+        func bigFrame(id: String) -> PeerBridgeFrame {
+            .message(PeerBridgeMessage(
+                id: id, to: "h-far", from: "h-near",
+                content: String(repeating: "a", count: 128 * 1024)))
+        }
+        let alphaID = "m-one"
+        let betaID = "m-two"
+        let alpha = bigFrame(id: alphaID)
+        let beta = bigFrame(id: betaID)
+        let encoded = try PeerBridgeFrameCodec.encodeLine(alpha)
+        #expect(
+            encoded.utf8.count > 64 * 1024,
+            "each frame must exceed any Darwin pipe buffer, or neither send ever stalls and this test proves nothing")
+        let betaEncoded = try PeerBridgeFrameCodec.encodeLine(beta)
+        #expect(
+            betaEncoded.utf8.count == encoded.utf8.count,
+            "the two frames must weigh the same on the wire, so the refusal's byte count is the same either way")
+
+        func sendInBackground(_ frame: PeerBridgeFrame, into outcome: SendOutcome) -> Task<Void, Never> {
+            Task {
+                do {
+                    try await supervisor.send(frame)
+                    await outcome.record(nil)
+                } catch {
+                    await outcome.record(error)
+                }
+            }
+        }
+        let alphaOutcome = SendOutcome()
+        let betaOutcome = SendOutcome()
+        let alphaSender = sendInBackground(alpha, into: alphaOutcome)
+        let betaSender = sendInBackground(beta, into: betaOutcome)
+
+        // No clock advance anywhere in this stretch: the loser must come back on
+        // the guard alone.
+        _ = try await waitFor(
+            "the send that arrived mid-transfer to be refused at once",
+            observed: {
+                let a = await alphaOutcome.finished
+                let b = await betaOutcome.finished
+                return "alphaFinished=\(a) betaFinished=\(b)"
+            }
+        ) { (await alphaOutcome.finished) || (await betaOutcome.finished) }
+        let alphaWasRefused = await alphaOutcome.finished
+        let betaWasRefused = await betaOutcome.finished
+        #expect(
+            alphaWasRefused != betaWasRefused,
+            "only the frame that lost the race to the pipe may come back while the other is still mid-transfer")
+        let earlyFailure = alphaWasRefused ? await alphaOutcome.failure : await betaOutcome.failure
+        let refusal = try #require(
+            earlyFailure as? PeerLinkSendFailure,
+            "a send arriving mid-transfer must be refused, never queued behind the frame in flight")
+        if case .wouldBlock(let bytes) = refusal {
+            #expect(bytes == encoded.utf8.count, "the whole frame is refused, not a remainder of it")
+        } else {
+            Issue.record(
+                "a send arriving mid-transfer must be refused as a would-block; got \(refusal)")
+        }
+
+        // Open the gate: the child starts draining and the stalled frame can
+        // finish. This is the first virtual time anything here spends.
+        #expect(FileManager.default.createFile(atPath: gate.path, contents: nil))
+        _ = await advanceVirtualTime(
+            clock, until: "the stalled frame to finish crossing the pipe",
+            observed: {
+                let a = await alphaOutcome.finished
+                let b = await betaOutcome.finished
+                return "alphaFinished=\(a) betaFinished=\(b) bytes=\(stub.stdinByteCount())"
+            }
+        ) { (await alphaOutcome.finished) && (await betaOutcome.finished) }
+        await alphaSender.value
+        await betaSender.value
+        _ = try await waitFor(
+            "the surviving frame's whole line to reach the child's log",
+            observed: { "bytes=\(stub.stdinByteCount()) of \(encoded.utf8.count)" }
+        ) { stub.stdinLines().contains { $0.utf8.count >= encoded.utf8.count - 1 } }
+
+        // Captured before the stop, as `linkGoesUpOnHelloExchangeAndDownOnChildExit`
+        // explains: `stopDriven` advances the clock and can open a connection.
+        let survivorFailure = alphaWasRefused ? await betaOutcome.failure : await alphaOutcome.failure
+        let lines = stub.stdinLines()
+        let sent = await supervisor.counters.framesSent
+        let dropped = await supervisor.counters.sendsDropped
+        let transitions = await recorder.transitions
+        let spawns = stub.spawnCount()
+        await stopDriven(supervisor, clock)
+
+        #expect(
+            survivorFailure == nil,
+            "the frame that was mid-transfer must still be delivered whole; got \(String(describing: survivorFailure))")
+        // The property this test exists for: every line the child received is a
+        // frame, entire. A splice shows up here as a line that will not decode.
+        let undecodable = lines.filter { line in
+            guard case .frame = PeerBridgeFrameCodec.decode(
+                line: line, negotiatedProtocol: PeerBridgeFrameCodec.peerProtocol) else { return true }
+            return false
+        }
+        #expect(
+            undecodable.isEmpty,
+            """
+            every line the child receives must decode as a whole frame; \(undecodable.count) of \
+            \(lines.count) did not — first offender begins \(undecodable.first?.prefix(120) ?? "")
+            """)
+        #expect(
+            lines.count == 2,
+            "the hello and exactly one message, with nothing spliced between them; got \(lines.count) line(s)")
+        let refusedID = alphaWasRefused ? alphaID : betaID
+        #expect(
+            !lines.contains(where: { $0.contains(refusedID) }),
+            "a refused frame is dropped, never written in pieces; \(refusedID) reached the child")
+        let survivor = alphaWasRefused ? beta : alpha
+        let survivorLine = try #require(
+            lines.first(where: { $0.contains(alphaWasRefused ? betaID : alphaID) }),
+            "the surviving frame never reached the child; the log holds \(stub.stdinByteCount()) bytes")
+        #expect(
+            PeerBridgeFrameCodec.decode(
+                line: survivorLine, negotiatedProtocol: PeerBridgeFrameCodec.peerProtocol) == .frame(survivor),
+            "the surviving frame must arrive byte-identical, not clipped or padded by the refused one")
+        #expect(sent == 2, "the opening hello and the surviving message, and nothing else; got \(sent)")
+        #expect(dropped == 1, "exactly the refused frame is counted as loss")
+        #expect(
+            transitions == [.up],
+            "refusing a concurrent send costs one frame, never the link; got \(transitions)")
+        #expect(spawns == 1, "nothing may have torn the connection down and reconnected")
+    }
+
+    /// **A stalled write must never resume onto an fd its own connection has
+    /// already closed.** `write` captures the file descriptor once and then
+    /// suspends between chunks; `runOnce`'s teardown closes that handle and
+    /// hands the fd *number* back to the process, where anything else in the
+    /// daemon may be given it. The post-sleep recheck of `generation` and
+    /// `stdinHandle` identity is what stops the remaining bytes going there.
+    ///
+    /// Three things make this deterministic rather than a race:
+    ///
+    /// - the stub consumes exactly 1000 bytes off its stdin and then stops
+    ///   reading, so the log reaching 1000 bytes is positive proof the frame is
+    ///   **mid-transfer** rather than not yet started. Without that proof the
+    ///   test would pass for the wrong reason: a send that has not started yet
+    ///   fails at `send`'s own `state == .up` gate and never reaches the
+    ///   recheck at all;
+    /// - the stub then closes its stdout while staying alive — the documented
+    ///   "provider that closes stdout but keeps running" case. The line stream
+    ///   ends, `runOnce` tears the connection down, and because that is driven
+    ///   by the readability handler rather than by the clock, `.down` is
+    ///   observable with nothing advanced. The child staying alive is what
+    ///   keeps the stdin pipe's read end open, so the only thing wrong with the
+    ///   captured fd is that this side closed it;
+    /// - only then is the clock advanced, so the stalled frame's very first act
+    ///   on resuming is the recheck.
+    ///
+    /// It must come back `linkDown`: the connection ended under the frame, so
+    /// there is no stream left to resync and nothing to tear down. Against an
+    /// unguarded `write` the resumed loop writes into the closed descriptor and
+    /// the failure is a `writeFailed(EBADF)` instead.
+    ///
+    /// The recheck is one `guard` over two facts, and this reaches it by the
+    /// handle-identity half — teardown nils `stdinHandle` while `generation`
+    /// still matches. The generation half covers the same window one connection
+    /// later and cannot be separated from it here: both sleep on the same
+    /// clock, and the stalled frame's 5 ms retry always fires before a
+    /// reconnect's backoff.
+    @Test func aStalledWriteRefusesToResumeOntoAClosedConnection() async throws {
+        let stub = try Stub("stall-across-teardown", body: """
+            printf '%s\\n' '{"kind":"hello","origin":"acme-remote","protocol":1}'
+            dd bs=1 count=1000 >> "$STDIN_LOG" 2>/dev/null
+            exec 1>&-
+            sleep 300 &
+            child=$!
+            trap 'kill "$child" 2>/dev/null; exit 143' TERM INT
+            wait "$child"
+            """)
+        defer { stub.remove() }
+        let clock = TestClock<Duration>()
+        let recorder = LinkRecorder()
+        let supervisor = PeerLinkSupervisor(
+            config: stub.config, contractVersion: 2, origin: "acme-laptop",
+            handler: recorder, healthyResetUptime: 3600, clock: clock,
+            now: TestDateSource().provider)
+        await supervisor.start()
+        _ = try await waitFor(
+            "the link to come up",
+            observed: { let seen = await supervisor.state; return "state=\(seen)" }) { await supervisor.state == .up }
+
+        let big = PeerBridgeFrame.message(PeerBridgeMessage(
+            id: "m-stalled", to: "h-far", from: "h-near",
+            content: String(repeating: "a", count: 128 * 1024)))
+        let encoded = try PeerBridgeFrameCodec.encodeLine(big)
+        #expect(
+            encoded.utf8.count > 64 * 1024,
+            "the frame must exceed any Darwin pipe buffer, or it never stalls and this test proves nothing")
+
+        let outcome = SendOutcome()
+        let sender = Task {
+            do {
+                try await supervisor.send(big)
+                await outcome.record(nil)
+            } catch {
+                await outcome.record(error)
+            }
+        }
+        // 1000 bytes off the pipe is more than the opening hello, so the frame
+        // has begun; it is far less than the frame, and the child reads no more
+        // after this, so the frame cannot have finished.
+        _ = try await waitFor(
+            "the frame to be mid-transfer, proven by the bytes the child consumed",
+            observed: {
+                let finished = await outcome.finished
+                return "consumed=\(stub.stdinByteCount()) of \(encoded.utf8.count) finished=\(finished)"
+            }
+        ) { stub.stdinByteCount() >= 1000 }
+        _ = try await waitFor(
+            "the connection to end under the stalled frame",
+            observed: { let seen = await supervisor.state; return "state=\(seen)" }
+        ) { await supervisor.state == .down }
+        let finishedBeforeAnyAdvance = await outcome.finished
+        #expect(
+            finishedBeforeAnyAdvance == false,
+            "the frame must still be parked mid-transfer: nothing has advanced the clock it sleeps on")
+
+        _ = await advanceVirtualTime(
+            clock, until: "the stalled frame to notice its connection is gone",
+            observed: { let finished = await outcome.finished; return "finished=\(finished)" }
+        ) { await outcome.finished }
+        await sender.value
+
+        // Captured before the stop, which advances the clock and can reconnect.
+        let failure = await outcome.failure
+        let dropped = await supervisor.counters.sendsDropped
+        await stopDriven(supervisor, clock)
+
+        let refusal = failure as? PeerLinkSendFailure
+        #expect(
+            refusal == .linkDown,
+            """
+            a write that stalls across its own connection's teardown must give up rather than \
+            resume onto the fd that teardown closed; got \(String(describing: failure))
+            """)
+        #expect(dropped == 1, "the lost frame is counted as loss exactly once")
+    }
+
     // MARK: - Teardown
 
     /// `stop()` is deterministic: when it returns the child tree is dead, the

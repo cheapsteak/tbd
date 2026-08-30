@@ -79,6 +79,23 @@ struct RuntimeIntegrationRefresher {
 /// span rather than as a silence. `failedReads` and `consecutiveFailures` are
 /// readable for the same reason — a future `peer.status` row is the natural
 /// place to surface them beside `linkState`.
+///
+/// **Nothing bounds how long a scope may stay stale, and that is the accepted
+/// trade rather than an oversight.** The counters above are the whole response
+/// to a failing read: no expiry, no ceiling, no degraded mode. A read that
+/// fails permanently — a schema break rather than a hiccup — therefore freezes
+/// the scope at its last good value for as long as the daemon runs, and this
+/// scope is a trust boundary, deciding which local sessions a remote host can
+/// reach. It is accepted because of what the frozen value can and cannot be: a
+/// scope only ever comes from a read that succeeded, so retaining one keeps
+/// announcing into repositories the provider genuinely hosted sessions in at
+/// that moment. Staleness can go on admitting a repository that should have
+/// left the scope, and can miss one that should have joined it; it can never
+/// admit one that was never in it, so no amount of it becomes a cross-project
+/// leak. An expiry that bounded it would buy nothing against that and would
+/// cost the failure this type exists to prevent — on the one signal it cannot
+/// tell apart from a hiccup, it would retire every announced peer for the
+/// provider.
 actor ProviderRepoScope {
     /// The provider whose sessions this scope admits. Also what the log names,
     /// because a stale scope is a per-provider condition.
