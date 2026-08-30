@@ -201,7 +201,7 @@ pair of shims, not a protocol.
 The UDS client verifies its peer via `SO_PEERCRED` and refuses to write on
 mismatch, with distinct errors:
 
-```
+```text
 [uds-client] connected endpoint is pid <X>, expected <Y> — refusing to write
 [uds-client] connected endpoint is owned by uid <U>, not ours — refusing to write
 [uds-client] connected endpoint pid <X> is not the process that wrote to us
@@ -227,7 +227,7 @@ TCP only (**T2**). So the hop is UDS → TCP → UDS. Nothing else changes — f
 addressing, record format and delivery semantics all travel unmodified. A JSON
 frame was round-tripped laptop → box → laptop over the provider's port-forward:
 
-```
+```text
 recv: b'BOX-SAW:{"msgV":1,"probe":"laptop->box over SSM"}\n'
 ```
 

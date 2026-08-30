@@ -139,7 +139,7 @@ beyond whatever `state` says.
 **What they are.** Two new optional verbs, each declared by a capability string
 of the same name:
 
-```
+```sh
 p archive <id>
 p unarchive <id>
 ```
@@ -242,7 +242,7 @@ is the sole place in v2 where the two majors differ in what a caller may assume.
 
 **What it is.** A new declared capability:
 
-```
+```sh
 p transcript <id> [--since <cursor>]
 ```
 
@@ -297,7 +297,7 @@ Everything else is unaffected.
 
 **What it is.** A new declared capability:
 
-```
+```sh
 p land <id>
 ```
 
@@ -495,7 +495,7 @@ own.
 **What it is.** A new declared capability, and one new optional field on the
 Session object.
 
-```
+```sh
 p messages
 ```
 
