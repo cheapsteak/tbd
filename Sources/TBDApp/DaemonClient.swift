@@ -321,8 +321,19 @@ actor DaemonClient {
                 throw DaemonClientError.invalidResponse
             }
 
+            // Probe is default-off; when off `startMeasurement()` reads no
+            // clock and `record` returns on the nil start.
+            let probe = RPCVolumeProbe.shared
+            let started = probe.startMeasurement()
             let decoder = JSONDecoder()
-            return try decoder.decode(RPCResponse.self, from: responseData)
+            let response = try decoder.decode(RPCResponse.self, from: responseData)
+            probe.record(
+                start: started,
+                kind: .response,
+                type: request.method,
+                bytes: responseData.count
+            )
+            return response
         }
     }
 
@@ -1493,6 +1504,7 @@ actor DaemonClient {
 
         var accumulated = Data()
         let decoder = JSONDecoder()
+        let probe = RPCVolumeProbe.shared
 
         while !Task.isCancelled {
             let bytesRead = recv(fd, buffer, bufferSize, 0)
@@ -1514,16 +1526,35 @@ actor DaemonClient {
                 let lineData = accumulated[accumulated.startIndex..<newlineIndex]
                 accumulated = accumulated[accumulated.index(after: newlineIndex)...]
 
+                // Measured from here so the recorded cost is the WHOLE frame's
+                // decode, including the ack probe below that fails on every
+                // real delta. That failed attempt is a genuine per-delta cost
+                // of this path and hiding it would understate the total.
+                let started = probe.startMeasurement()
+
                 // Skip the initial ack from SocketServer's subscription handler.
                 // This is the only RPC that sends an RPCResponse with success=true
                 // and no result — all other RPCs include a result payload.
                 if let response = try? decoder.decode(RPCResponse.self, from: Data(lineData)),
                    response.success && response.result == nil {
+                    probe.record(start: started, kind: .delta, type: "(ack)", bytes: lineData.count)
                     continue
                 }
 
                 if let delta = try? decoder.decode(StateDelta.self, from: Data(lineData)) {
+                    probe.record(
+                        start: started,
+                        kind: .delta,
+                        type: delta.rpcVolumeTypeName,
+                        bytes: lineData.count
+                    )
                     onDelta(delta)
+                } else {
+                    // Bytes that cost two failed decodes and are then dropped:
+                    // a delta case this app build does not know, or a response
+                    // that carries a result. Counting them keeps the probe's
+                    // byte total equal to what the socket actually delivered.
+                    probe.record(start: started, kind: .delta, type: "(undecodable)", bytes: lineData.count)
                 }
             }
         }
