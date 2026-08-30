@@ -245,8 +245,15 @@ final class ShadowPeerHelperProcess: ShadowPeerHelperHandle, @unchecked Sendable
     private let reader: ShadowPeerLineReader
     private let exitGrace: Duration
     private let clock: any Clock<Duration>
-    private let lock = NSLock()
-    private var stdinClosed = false
+
+    /// Everything `send` and `terminate` race each other over. Scoped locking
+    /// rather than a bare `NSLock`: both callers are `async`, where
+    /// `lock()`/`unlock()` are unavailable, and `withLock` releases on the
+    /// throwing path in `send` for free.
+    private struct StdinState {
+        var closed = false
+    }
+    private let stdinState = OSAllocatedUnfairLock(initialState: StdinState())
 
     init(
         handle: String, process: Process, stdin: FileHandle, stdoutHandle: FileHandle,
@@ -276,36 +283,41 @@ final class ShadowPeerHelperProcess: ShadowPeerHelperHandle, @unchecked Sendable
 
     func send(_ frame: PeerBridgeFrame) async throws {
         let line = try PeerBridgeFrameCodec.encodeLine(frame)
-        lock.lock()
-        defer { lock.unlock() }
-        guard !stdinClosed else { throw ShadowPeerHelperError.stdinGone(handle: handleName) }
-        let data = Data(line.utf8)
-        var offset = 0
-        try data.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return }
-            while offset < raw.count {
-                let written = Darwin.write(
-                    stdinHandle.fileDescriptor, base.advanced(by: offset),
-                    raw.count - offset)
-                if written > 0 {
-                    offset += written
-                    continue
+        try stdinState.withLock { state in
+            guard !state.closed else {
+                throw ShadowPeerHelperError.stdinGone(handle: self.handleName)
+            }
+            let data = Data(line.utf8)
+            var offset = 0
+            try data.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress else { return }
+                while offset < raw.count {
+                    let written = Darwin.write(
+                        self.stdinHandle.fileDescriptor, base.advanced(by: offset),
+                        raw.count - offset)
+                    if written > 0 {
+                        offset += written
+                        continue
+                    }
+                    if written < 0 && errno == EINTR { continue }
+                    if written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        throw ShadowPeerHelperError.stdinWouldBlock(handle: self.handleName)
+                    }
+                    throw ShadowPeerHelperError.stdinGone(handle: self.handleName)
                 }
-                if written < 0 && errno == EINTR { continue }
-                if written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    throw ShadowPeerHelperError.stdinWouldBlock(handle: handleName)
-                }
-                throw ShadowPeerHelperError.stdinGone(handle: handleName)
             }
         }
     }
 
     func terminate() async {
-        lock.lock()
-        let alreadyClosed = stdinClosed
-        stdinClosed = true
-        lock.unlock()
-        if !alreadyClosed {
+        // The state transition is guarded; the `close()` deliberately is not —
+        // no I/O while holding the lock.
+        let needsClose = stdinState.withLock { state -> Bool in
+            let alreadyClosed = state.closed
+            state.closed = true
+            return !alreadyClosed
+        }
+        if needsClose {
             try? stdinHandle.close()
         }
 
