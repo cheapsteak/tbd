@@ -52,6 +52,56 @@ public enum StateDelta: Codable, Sendable {
     /// (→ waiting_input or → exited). Banner-only: remote sessions have no
     /// worktree, so this does not ride `NotificationDelta`.
     case remoteSessionAttention(RemoteSessionAttentionDelta)
+    /// A terminal's in-flight `AskUserQuestion` capture set changed. Appended
+    /// last on purpose — `StateDelta`'s Codable synthesis keys on case name,
+    /// but the order is still the record of how the protocol grew.
+    case terminalPendingQuestionsChanged(TerminalPendingQuestionsDelta)
+}
+
+/// The complete set of in-flight `AskUserQuestion` captures for one terminal.
+///
+/// Whole-set rather than incremental on purpose: the set is tiny — one entry
+/// per question the `PreToolUse` hook saw before its `tool_use` line reached
+/// the JSONL — and a whole set cannot drift out of sync the way an add/remove
+/// stream can. An empty array is a retraction.
+public struct TerminalPendingQuestionsDelta: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    public let pending: [PendingQuestionPayload]
+    /// The daemon's per-terminal mutation counter at the moment this set was
+    /// read, so a receiver can order two deltas for the same terminal.
+    ///
+    /// Publishing takes two hops — mutate the store, then read it back and
+    /// send — and the store's actor orders only the first. Two mutations of
+    /// one terminal can therefore reach the wire in the opposite order, and a
+    /// receiver that replaces its whole list per delta would resurrect a
+    /// question the user already answered. Comparing revisions makes the loser
+    /// of that race droppable.
+    ///
+    /// Optional because a daemon that predates the field encodes no key, and
+    /// an existing subscriber's JSON must still decode. `nil` means "no
+    /// ordering available" — a receiver applies it, which is the behaviour
+    /// that daemon already produced.
+    public let revision: UInt64?
+    public init(terminalID: UUID, pending: [PendingQuestionPayload], revision: UInt64? = nil) {
+        self.terminalID = terminalID
+        self.pending = pending
+        self.revision = revision
+    }
+}
+
+/// Wire form of one `PendingAskUserQuestion`. Separate from the in-memory type
+/// because that one is deliberately not `Codable`: it is a pure value the
+/// merger consumes, and giving it a wire encoding would invite the two to
+/// drift into one another.
+public struct PendingQuestionPayload: Codable, Sendable, Equatable {
+    public let toolUseID: String
+    public let inputJSON: String
+    public let timestamp: Date
+    public init(toolUseID: String, inputJSON: String, timestamp: Date) {
+        self.toolUseID = toolUseID
+        self.inputJSON = inputJSON
+        self.timestamp = timestamp
+    }
 }
 
 /// Delta payload for a terminal's hibernation state change (hibernate / wake)

@@ -344,6 +344,7 @@ extension StateDelta {
         case .terminalSessionUpdated: return "terminalSessionUpdated"
         case .terminalActivityUpdated: return "terminalActivityUpdated"
         case .terminalAwaitingInputChanged: return "terminalAwaitingInputChanged"
+        case .terminalPendingQuestionsChanged: return "terminalPendingQuestionsChanged"
         case .terminalProfileChanged: return "terminalProfileChanged"
         case .watchDeskRolesChanged: return "watchDeskRolesChanged"
         case .worktreeMoved: return "worktreeMoved"

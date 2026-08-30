@@ -1,8 +1,7 @@
 import Foundation
 import Testing
-import TBDShared
 
-@testable import TBDDaemonLib
+@testable import TBDShared
 
 @Suite("TranscriptParser")
 struct TranscriptParserTests {
@@ -210,7 +209,7 @@ struct TranscriptParserTests {
     }
 
     @Test func skill_body_emits_systemReminder_with_skillBody_kind() throws {
-        let body = "Base directory for this skill: /Users/chang/.claude/skills/pr\n\n# Commit, Push, and Open a PR\n\n## Step 1: ..."
+        let body = "Base directory for this skill: /Users/me/.claude/skills/pr\n\n# Commit, Push, and Open a PR\n\n## Step 1: ..."
         let escaped = body.replacingOccurrences(of: "\n", with: "\\n")
         let line = "{\"type\":\"user\",\"uuid\":\"u1\",\"timestamp\":\"2026-05-05T10:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"\(escaped)\"}}"
         let tmp = try writeTempJSONL(line)
@@ -583,8 +582,8 @@ struct TranscriptParserTests {
         let line = try attachmentLine(uuid: "att-mem", [
             "type": "nested_memory",
             "displayPath": ".github/CLAUDE.md",
-            "path": "/Users/dev/acme-prod/.github/CLAUDE.md",
-            "content": ["path": "/Users/dev/acme-prod/.github/CLAUDE.md",
+            "path": "/Users/me/acme-prod/.github/CLAUDE.md",
+            "content": ["path": "/Users/me/acme-prod/.github/CLAUDE.md",
                         "type": "nested_memory",
                         "content": "# acme-prod workflow rules"]
         ])
@@ -628,7 +627,7 @@ struct TranscriptParserTests {
             "displayPath": "src/acme/deploy.swift",
             "filename": "deploy.swift",
             "content": ["type": "text",
-                        "file": ["filePath": "/Users/dev/acme-prod/src/acme/deploy.swift",
+                        "file": ["filePath": "/Users/me/acme-prod/src/acme/deploy.swift",
                                  "content": "func deployAcme() {}\n"]]
         ])
         let tmp = try writeTempJSONL(line)
@@ -756,10 +755,10 @@ struct TranscriptParserTests {
         // REPLACED an oversized payload. Only the hac row renders; every item
         // stays addressable by `lookupFullBody`.
         let emitted = "acme skill rules apply"
-        let stdout = try String(
-            decoding: JSONSerialization.data(
+        let stdout = try #require(String(
+            bytes: JSONSerialization.data(
                 withJSONObject: ["hookSpecificOutput": ["additionalContext": emitted]]),
-            as: UTF8.self)
+            encoding: .utf8))
         let lines = [
             try attachmentLine(uuid: "hs-1", [
                 "type": "hook_success", "hookName": "SessionStart", "content": "", "stdout": stdout

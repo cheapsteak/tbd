@@ -189,4 +189,80 @@ extension RPCRouterTests {
         let response = await sendCleared(terminalID: UUID())
         #expect(response.success)
     }
+
+    // MARK: - Satisfied (app-side transcript read)
+
+    private func sendSatisfied(
+        terminalID: UUID,
+        toolUseIDs: [String]
+    ) async -> RPCResponse {
+        let params = TerminalAskUserQuestionSatisfiedParams(
+            terminalID: terminalID, toolUseIDs: toolUseIDs)
+        let request = try! RPCRequest(
+            method: RPCMethod.terminalAskUserQuestionSatisfied, params: params)
+        return await router.handle(request)
+    }
+
+    @Test("askUserQuestion.satisfied drops exactly the reported captures")
+    func askUserQuestionSatisfiedClearsStore() async throws {
+        let (_, worktreeID) = try await makeRepoAndWorktree()
+        let terminal = try await db.terminals.create(
+            worktreeID: worktreeID,
+            tmuxWindowID: "@mock-satisfied",
+            tmuxPaneID: "%mock-satisfied"
+        )
+        _ = await sendPending(
+            terminalID: terminal.id, toolUseID: "toolu_a", inputJSON: #"{"questions":[]}"#)
+        _ = await sendPending(
+            terminalID: terminal.id, toolUseID: "toolu_b", inputJSON: #"{"questions":[]}"#)
+        #expect(await router.pendingQuestions.entries(forTerminal: terminal.id).count == 2)
+
+        let response = await sendSatisfied(terminalID: terminal.id, toolUseIDs: ["toolu_a"])
+        #expect(response.success)
+
+        let remaining = await router.pendingQuestions.entries(forTerminal: terminal.id)
+        #expect(remaining.map(\.toolUseID) == ["toolu_b"],
+                "only the reported capture is cleared")
+    }
+
+    /// A satisfied report is a store mutation, and this repo's rule is that
+    /// every one owes subscribers a retraction — otherwise the pane keeps
+    /// rendering a question the daemon no longer holds.
+    @Test("askUserQuestion.satisfied bumps the terminal's broadcast revision")
+    func askUserQuestionSatisfiedBroadcastsRetraction() async throws {
+        let (_, worktreeID) = try await makeRepoAndWorktree()
+        let terminal = try await db.terminals.create(
+            worktreeID: worktreeID,
+            tmuxWindowID: "@mock-satisfied-rev",
+            tmuxPaneID: "%mock-satisfied-rev"
+        )
+        _ = await sendPending(
+            terminalID: terminal.id, toolUseID: "toolu_a", inputJSON: #"{"questions":[]}"#)
+        let before = await router.pendingQuestions.snapshot(forTerminal: terminal.id).revision
+
+        _ = await sendSatisfied(terminalID: terminal.id, toolUseIDs: ["toolu_a"])
+
+        let after = await router.pendingQuestions.snapshot(forTerminal: terminal.id)
+        #expect(after.revision > before)
+        #expect(after.entries.isEmpty)
+    }
+
+    @Test("askUserQuestion.satisfied with an empty list changes nothing")
+    func askUserQuestionSatisfiedEmptyIsNoOp() async throws {
+        let (_, worktreeID) = try await makeRepoAndWorktree()
+        let terminal = try await db.terminals.create(
+            worktreeID: worktreeID,
+            tmuxWindowID: "@mock-satisfied-empty",
+            tmuxPaneID: "%mock-satisfied-empty"
+        )
+        _ = await sendPending(
+            terminalID: terminal.id, toolUseID: "toolu_a", inputJSON: #"{"questions":[]}"#)
+        let before = await router.pendingQuestions.snapshot(forTerminal: terminal.id)
+
+        let response = await sendSatisfied(terminalID: terminal.id, toolUseIDs: [])
+        #expect(response.success)
+
+        let after = await router.pendingQuestions.snapshot(forTerminal: terminal.id)
+        #expect(after == before, "an empty report must cost subscribers nothing")
+    }
 }

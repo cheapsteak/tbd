@@ -1,12 +1,11 @@
 import Foundation
-import TBDShared
 
 /// Determines whether a decoded JSONL line is a real user-authored message
 /// vs. a tool result, system reminder, or other system-generated content.
 ///
 /// This is the single place to update detection heuristics. The fixture at
 /// Tests/Fixtures/sample-session.jsonl documents the classification decisions.
-enum UserMessageClassifier {
+public enum UserMessageClassifier {
 
     /// Prefixes that mark system-generated content in the user role.
     private static let systemPrefixes: [String] = [
@@ -29,7 +28,7 @@ enum UserMessageClassifier {
     ]
 
     /// Returns true if the parsed JSONL object is a real user message.
-    static func isRealUserMessage(_ line: [String: Any]) -> Bool {
+    public static func isRealUserMessage(_ line: [String: Any]) -> Bool {
         guard
             line["type"] as? String == "user",
             let message = line["message"] as? [String: Any],
@@ -65,14 +64,14 @@ enum UserMessageClassifier {
     /// `queued_command` attachment carrying the raw text. Both shapes must
     /// classify identically, so the rule lives here on the text and the
     /// dictionary-shaped entry points above delegate to it.
-    static func isRealUserMessage(text: String) -> Bool {
+    public static func isRealUserMessage(text: String) -> Bool {
         !hasSystemPrefix(text)
     }
 
     /// Extracts display text from a real user message line. Returns nil if empty.
     /// Precondition: call only on lines that pass `isRealUserMessage` — behavior
     /// on other line types is undefined.
-    static func extractText(_ line: [String: Any]) -> String? {
+    public static func extractText(_ line: [String: Any]) -> String? {
         guard let message = line["message"] as? [String: Any] else { return nil }
 
         if let text = message["content"] as? String {
@@ -99,7 +98,7 @@ enum UserMessageClassifier {
     /// more than one text block, so joining is a strict repair there too.
     ///
     /// Returns nil when no non-empty text block is present.
-    static func joinTextBlocks(_ blocks: [[String: Any]]) -> String? {
+    public static func joinTextBlocks(_ blocks: [[String: Any]]) -> String? {
         let texts = blocks
             .filter { $0["type"] as? String == "text" }
             .compactMap { $0["text"] as? String }
@@ -110,7 +109,7 @@ enum UserMessageClassifier {
     /// Returns the typed system kind for a user-role JSONL line if it's a
     /// system-injected envelope rather than a real user prompt; returns nil
     /// for real user messages.
-    static func classify(_ line: [String: Any]) -> SystemKind? {
+    public static func classify(_ line: [String: Any]) -> SystemKind? {
         guard
             line["type"] as? String == "user",
             let message = line["message"] as? [String: Any],
@@ -137,7 +136,7 @@ enum UserMessageClassifier {
     /// real user prompt. See `isRealUserMessage(text:)` for why the rule lives
     /// on the text: a queued prompt never gets a `type:"user"` line, so the
     /// only thing the two recording shapes share is the body itself.
-    static func classify(text: String) -> SystemKind? {
+    public static func classify(text: String) -> SystemKind? {
         // Background-task notifications are harness-injected into the user role.
         // Surface them as a dedicated system kind so they render as a clickable
         // activity row (with the full text available in the detail overlay).

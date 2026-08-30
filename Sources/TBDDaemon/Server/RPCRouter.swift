@@ -529,6 +529,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalAskUserQuestionPending(request.paramsData)
             case RPCMethod.terminalAskUserQuestionCleared:
                 return try await handleTerminalAskUserQuestionCleared(request.paramsData)
+            case RPCMethod.terminalAskUserQuestionSatisfied:
+                return try await handleTerminalAskUserQuestionSatisfied(request.paramsData)
             case RPCMethod.modelProfileList:
                 return try await handleModelProfileList()
             case RPCMethod.modelProfileAdd:

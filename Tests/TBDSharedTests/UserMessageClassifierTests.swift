@@ -1,7 +1,6 @@
 import Testing
 import Foundation
 import TBDShared
-@testable import TBDDaemonLib
 
 @Suite("UserMessageClassifier")
 struct UserMessageClassifierTests {
@@ -195,7 +194,7 @@ struct UserMessageClassifierClassifyTests {
     }
 
     @Test func skill_body_returns_skillBody() {
-        let line = userLine("Base directory for this skill: /Users/chang/.claude/skills/pr\n\n# Commit, Push, and Open a PR\n\n## Step 1: …")
+        let line = userLine("Base directory for this skill: /Users/me/.claude/skills/pr\n\n# Commit, Push, and Open a PR\n\n## Step 1: …")
         #expect(UserMessageClassifier.classify(line) == .skillBody)
     }
 

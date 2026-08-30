@@ -15,6 +15,14 @@ private let askUserQuestionMessageMaxLength = 120
 private let askUserQuestionFallbackMessage = "Claude is waiting for your answer"
 
 extension RPCRouter {
+    /// Publish this terminal's current pending-question set to subscribers.
+    /// See `StateSubscriptionManager.broadcastPendingQuestions` for why every
+    /// mutation of the store owes the app one of these.
+    func broadcastPendingQuestions(terminalID: UUID) async {
+        await subscriptions.broadcastPendingQuestions(
+            terminalID: terminalID, from: pendingQuestions)
+    }
+
     /// Stores the pending question payload for a terminal so the merger
     /// inside `handleTerminalTranscript` can synthesize a transcript item
     /// before the assistant `tool_use` line is flushed to the JSONL.
@@ -33,6 +41,7 @@ extension RPCRouter {
             timestamp: Date(timeIntervalSince1970: TimeInterval(p.timestampMillis) / 1000)
         )
         await pendingQuestions.set(terminalID: p.terminalID, pending)
+        await broadcastPendingQuestions(terminalID: p.terminalID)
         // §13's hook-event rate. Keyed on the claimed terminal ID rather than a
         // resolved row: this is a count of hook traffic, and traffic naming a
         // terminal that has since been deleted still happened. `retain` drops
@@ -94,6 +103,28 @@ extension RPCRouter {
                 askUserQuestionLog.debug("markRead failed: \(String(describing: error), privacy: .public)")
             }
         }
+        return .ok()
+    }
+
+    /// Clears captures the app has seen satisfied in the JSONL.
+    ///
+    /// `handleTerminalTranscript` does this for itself off its own parse, but
+    /// with `appSideTranscriptRead` on that handler never runs and the app is
+    /// the only party parsing the file. Without this call the entry would sit
+    /// in the store until `PendingQuestionExpirySweep` reaped it — up to
+    /// fifteen minutes of the card rendering a question already answered.
+    ///
+    /// One broadcast for the whole batch, and none at all for an empty list:
+    /// the app calls this only when its merge reported something, but a
+    /// malformed or duplicated request must not cost subscribers a delta.
+    func handleTerminalAskUserQuestionSatisfied(_ paramsData: Data) async throws -> RPCResponse {
+        let p = try decoder.decode(TerminalAskUserQuestionSatisfiedParams.self, from: paramsData)
+        guard !p.toolUseIDs.isEmpty else { return .ok() }
+        for toolUseID in p.toolUseIDs {
+            await pendingQuestions.clear(terminalID: p.terminalID, toolUseID: toolUseID)
+        }
+        await broadcastPendingQuestions(terminalID: p.terminalID)
+        askUserQuestionLog.debug("satisfied cleared terminalID=\(p.terminalID.uuidString, privacy: .public) count=\(p.toolUseIDs.count, privacy: .public)")
         return .ok()
     }
 

@@ -26,6 +26,11 @@ struct TableTranscriptPaneView: View {
     /// unchanged bottom via the existing `.rebuild` path.
     private let tailLimit = 60
 
+    /// Gates the app-side read path. Default spelled with the AppState
+    /// constant so this and every other read site cannot disagree.
+    @AppStorage(AppState.appSideTranscriptReadKey)
+    private var appSideTranscriptRead: Bool = AppState.appSideTranscriptReadDefault
+
     @State private var loadError: String?
     @State private var hasShownInitialMessages = false
     /// False until the full transcript has been fetched for the current session.
@@ -125,7 +130,10 @@ struct TableTranscriptPaneView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: TaskKey(terminalID: terminalID, sessionID: currentSessionID, retryToken: retryToken)) {
+        .task(id: TaskKey(
+            terminalID: terminalID, sessionID: currentSessionID, retryToken: retryToken,
+            appSideTranscriptRead: appSideTranscriptRead
+        )) {
             await pollLoop()
         }
         .onAppear { recordWatchdogContext(count: displayedMessages.count) }
@@ -304,6 +312,12 @@ struct TableTranscriptPaneView: View {
     // MARK: - Polling
 
     private func pollLoop() async {
+        let transport = TranscriptPaneTransport.resolve(
+            appSideEnabled: appSideTranscriptRead, path: terminal?.transcriptPath)
+        if case .appSide(let path) = transport {
+            await appSideLoop(path: path)
+            return
+        }
         var consecutiveFailures = 0
         while !Task.isCancelled {
             await pollOnce(failureCount: &consecutiveFailures)
@@ -314,6 +328,121 @@ struct TableTranscriptPaneView: View {
             // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
             try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
         }
+    }
+
+    /// Registers this pane with the poll scheduler and publishes into
+    /// `AppState.sessionTranscripts` whenever the source reports a change. The
+    /// three view consumers — this pane, the history pane and the overlay —
+    /// read that store already, so nothing downstream changes.
+    ///
+    /// `path` is the already-resolved, non-empty transcript path chosen by
+    /// `TranscriptPaneTransport.resolve` — passed in rather than re-read here so
+    /// the "no path" case cannot recur inside this loop and strand the pane.
+    ///
+    /// The pane also *declares* its cadence tier (`currentPollTier`) and
+    /// re-declares it whenever its visibility changes; the scheduler never
+    /// derives one.
+    private func appSideLoop(path: String) async {
+        guard let sid = currentSessionID else { return }
+        let scheduler = appState.transcriptPollScheduler
+        let source = appState.transcriptSource
+        let state = appState
+
+        await scheduler.setOnChange { [weak state] sessionID in
+            guard let state else { return }
+            let raw = await source.items(sessionID: sessionID)
+            let items = await Self.mergePendingQuestions(
+                sessionID: sessionID, raw: raw, state: state)
+            await MainActor.run {
+                state.sessionTranscripts[sessionID] = items
+                state.touchSessionTranscript(sessionID)
+            }
+        }
+        var tier = currentPollTier()
+        await TranscriptPaneRegistration.apply(
+            enabled: true, sessionID: sid, path: path,
+            tier: tier, scheduler: scheduler)
+
+        // Publish once immediately so the pane is not blank until the first tick.
+        await source.refresh(sessionID: sid, path: path)
+        let raw = await source.items(sessionID: sid)
+        let items = await Self.mergePendingQuestions(
+            sessionID: sid, raw: raw, state: appState)
+        appState.sessionTranscripts[sid] = items
+        appState.touchSessionTranscript(sid)
+        if !items.isEmpty { hasShownInitialMessages = true }
+
+        // Hold the task open so `.task(id:)` teardown deregisters on disappear,
+        // and re-declare the tier whenever this pane's visibility changes. A
+        // pane the viewer-slot LRU keeps mounted after the selection moves
+        // elsewhere must drop to the background cadence without being torn
+        // down; `register` replaces rather than duplicates, so re-declaring is
+        // exactly that gesture (the same one `setAppActive` makes for the whole
+        // registry).
+        //
+        // Polled here rather than watched with an `.onChange` in `body` for two
+        // reasons: an observation dependency taken inside this task would not
+        // fire anyway, and keeping the watch inside this function leaves the
+        // daemon-poll path — which never reaches `appSideLoop` — with the body
+        // it always had. A second of stale cadence after a selection change
+        // costs at most a handful of extra `stat`s.
+        //
+        // `clock.sleep`, never `Task.sleep`: the latter is a lint error here.
+        let clock = ContinuousClock()
+        while !Task.isCancelled {
+            try? await clock.sleep(for: .seconds(1))
+            if Task.isCancelled { break }
+            let latest = currentPollTier()
+            guard latest != tier else { continue }
+            tier = latest
+            await scheduler.register(sessionID: sid, path: path, tier: tier)
+        }
+        await scheduler.deregister(sessionID: sid)
+    }
+
+    /// This pane's cadence tier right now: foreground while its worktree is on
+    /// screen, background while the keep-alive LRU is merely holding its view
+    /// tree alive. See `TranscriptPaneVisibility` for why the selection set is
+    /// the on-screen test.
+    private func currentPollTier() -> TranscriptPollTier {
+        TranscriptPaneVisibility.tier(
+            worktreeID: worktreeID,
+            selectedWorktreeIDs: appState.selectedWorktreeIDs)
+    }
+
+    /// Folds the daemon's pending `AskUserQuestion` captures into a freshly
+    /// read transcript, and reports back whichever the JSONL has now caught up
+    /// with.
+    ///
+    /// A question the `PreToolUse` hook captured renders before its `tool_use`
+    /// line reaches the file, so the merge is what makes the card appear at
+    /// all. The report is the other half of that same call: on the RPC path
+    /// `terminal.transcript` clears a satisfied capture off its own parse, and
+    /// here nobody else parses the file, so without it the card would keep
+    /// rendering an answered question until the expiry sweep reaped it.
+    ///
+    /// Skipping both on an empty capture set keeps the common tick off the
+    /// (cheap but non-zero) index build and off the socket entirely.
+    /// `nonisolated` on purpose: `View` carries `@MainActor`, and inheriting it
+    /// here would drag the merge's index build onto the main actor. Only the
+    /// `AppState` read needs main, and it says so.
+    private nonisolated static func mergePendingQuestions(
+        sessionID: String,
+        raw: [TranscriptItem],
+        state: AppState
+    ) async -> [TranscriptItem] {
+        let capture = await MainActor.run {
+            state.pendingQuestionCaptureForSession(sessionID).map {
+                ($0.terminalID, $0.entries, state.askUserQuestionSatisfaction)
+            }
+        }
+        guard let (terminalID, pending, reporter) = capture else { return raw }
+        let merged = AskUserQuestionMerger.merge(jsonlItems: raw, pending: pending)
+        await reporter.report(
+            terminalID: terminalID,
+            pendingToolUseIDs: Set(pending.map(\.toolUseID)),
+            satisfiedToolUseIDs: merged.satisfiedToolUseIDs)
+        return merged.items
     }
 
     private func pollOnce(failureCount: inout Int) async {
@@ -410,10 +539,15 @@ struct TableTranscriptPaneView: View {
     }
 }
 
+/// Identity of the poll task. Includes `appSideTranscriptRead` so flipping the
+/// setting while a pane is open cancels the running transport and starts the
+/// other one, rather than leaving the pane on whichever loop it happened to
+/// begin with until something else rebuilds it.
 private struct TaskKey: Equatable {
     let terminalID: UUID
     let sessionID: String?
     let retryToken: Int
+    let appSideTranscriptRead: Bool
 }
 
 /// SwiftUI identity for the table transcript representable. Composes the terminal

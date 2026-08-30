@@ -69,14 +69,16 @@ struct BashCardBody: View {
 
     private func fetchFull() async {
         guard let terminalID else { return }
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: id) {
+        let path = appState.transcriptPath(forTerminal: terminalID)
+        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: id, path: path) {
             await MainActor.run { fullResultText = r.text }
         }
     }
 
     private func fetchFullInput() async {
         guard let terminalID else { return }
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: "\(id)#input") {
+        let path = appState.transcriptPath(forTerminal: terminalID)
+        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: "\(id)#input", path: path) {
             await MainActor.run { fullInputJSON = r.text }
         }
     }

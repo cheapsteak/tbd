@@ -167,6 +167,7 @@ final class AppStateEmissionTracker {
         _ = state.selectedSessionIDs
         _ = state.sessionTranscripts
         _ = state.sessionTranscriptLoading
+        _ = state.pendingQuestions
         _ = state.closedTerminalHistories
         _ = state.selectedClosedTerminalIDs
         _ = state.closedTerminalContents
@@ -275,6 +276,7 @@ final class AppStateEmissionTracker {
         "selectedSessionIDs",
         "sessionTranscripts",
         "sessionTranscriptLoading",
+        "pendingQuestions",
         "closedTerminalHistories",
         "selectedClosedTerminalIDs",
         "closedTerminalContents",

@@ -1227,6 +1227,36 @@ final class AppState {
         }
     }
 
+    /// The pending `AskUserQuestion` captures for whichever terminal owns
+    /// `sessionID`, or an empty array.
+    ///
+    /// The poll scheduler is keyed on the Claude session id while the daemon
+    /// keys its store on terminal id, so the terminal collection is the join.
+    /// The empty store — overwhelmingly the common case — short-circuits
+    /// before any scan.
+    func pendingQuestionsForSession(_ sessionID: String) -> [PendingAskUserQuestion] {
+        pendingQuestionCaptureForSession(sessionID)?.entries ?? []
+    }
+
+    /// As `pendingQuestionsForSession`, but keeps the owning terminal id.
+    ///
+    /// The app-side read path needs it: the daemon's store is keyed on
+    /// terminal, so telling it which captures the JSONL has satisfied means
+    /// naming the terminal the session belongs to.
+    func pendingQuestionCaptureForSession(
+        _ sessionID: String
+    ) -> (terminalID: UUID, entries: [PendingAskUserQuestion])? {
+        guard !pendingQuestions.isEmpty else { return nil }
+        for rows in terminals.values {
+            for terminal in rows where terminal.claudeSessionID == sessionID {
+                if let entries = pendingQuestions[terminal.id], !entries.isEmpty {
+                    return (terminal.id, entries)
+                }
+            }
+        }
+        return nil
+    }
+
     /// Selected archived worktree per repo (left rail of the archived view's nested master-detail).
     var selectedArchivedWorktreeIDs: [UUID: UUID] = [:]
 
@@ -1278,6 +1308,40 @@ final class AppState {
     /// Lives here — not on any view — so SwiftUI view destruction cannot tear
     /// down an active reader. Keyed by `FDVendHeader.routingKey`.
     let controlModeReaders = ControlModeReaderRegistry()
+    /// The app's own transcript reader, exercised only while
+    /// `appSideTranscriptReadKey` is on. Constructed unconditionally — it costs
+    /// nothing until a pane registers, and it stats no file until then.
+    let transcriptSource = TranscriptSource()
+    /// In-flight `AskUserQuestion` captures by terminal, mirrored from the
+    /// daemon's `PendingQuestionStore` over `.terminalPendingQuestionsChanged`.
+    /// Merged into that terminal's session transcript so a question renders
+    /// before its `tool_use` line reaches the JSONL — the job the daemon's
+    /// `terminal.transcript` handler did before the app read transcripts
+    /// itself. Mirrored, never derived: the daemon is the only writer.
+    var pendingQuestions: [UUID: [PendingAskUserQuestion]] = [:]
+    /// Last `TerminalPendingQuestionsDelta.revision` applied per terminal.
+    ///
+    /// The daemon publishes in two hops — mutate the store, then read it back
+    /// and send — so two deltas for one terminal can reach the wire, and this
+    /// `MainActor` hop, out of order; without ordering a late `set` would
+    /// resurrect a question a `clear` already retracted. Bookkeeping, not UI
+    /// state, so it stays out of Observation: a view that renders
+    /// `pendingQuestions` must not also re-render on this.
+    @ObservationIgnored var pendingQuestionRevisions: [UUID: UInt64] = [:]
+    /// Reports app-observed satisfied captures back to the daemon, which owns
+    /// the store. Only the `appSideTranscriptRead` path drives it — with the
+    /// flag off `terminal.transcript` still clears off its own parse. Lazy so
+    /// an app that never opens a transcript pane never builds it.
+    @ObservationIgnored lazy var askUserQuestionSatisfaction =
+        AskUserQuestionSatisfactionReporter { [daemonClient] terminalID, toolUseIDs in
+            try? await daemonClient.terminalAskUserQuestionSatisfied(
+                terminalID: terminalID, toolUseIDs: toolUseIDs)
+        }
+    /// Drives `transcriptSource` at the cadence each registered pane declares.
+    /// Lazy so the (equally inert) scheduler is not built for app launches that
+    /// never open a transcript pane.
+    @ObservationIgnored lazy var transcriptPollScheduler =
+        TranscriptPollScheduler(source: transcriptSource)
     /// Feature flags fetched from the daemon at connect time. Nil until the
     /// first successful fetch — treated as "control mode off". The app cannot
     /// derive these locally: it is launched via `open`, which drops shell env.
@@ -2073,6 +2137,11 @@ final class AppState {
     /// Start listening for real-time state deltas from the daemon.
     func startSubscription() {
         subscriptionTask?.cancel()
+        // A new subscription is a new ordering domain. The daemon's
+        // `PendingQuestionStore` is memory-only, so a restarted daemon counts
+        // from zero again; keeping the old high-water marks would make the app
+        // drop every delta it then sends.
+        pendingQuestionRevisions.removeAll()
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
             await self.daemonClient.subscribe { [weak self] delta in
@@ -2118,6 +2187,8 @@ final class AppState {
             applyTerminalActivityDelta(d)
         case .terminalAwaitingInputChanged(let d):
             applyTerminalAwaitingInputDelta(d)
+        case .terminalPendingQuestionsChanged(let d):
+            applyPendingQuestionsDelta(d)
         case .terminalProfileChanged(let d):
             applyTerminalProfileDelta(d)
         case .watchDeskRolesChanged(let d):
@@ -2413,6 +2484,37 @@ final class AppState {
         // that read `terminals`, and this delta arrives on every
         // `Notification` hook of every class.
         terminals[delta.worktreeID]?[idx] = terminal
+    }
+
+    /// Mirror one terminal's pending-question set, newest revision wins.
+    ///
+    /// Each delta carries the daemon's whole set, so applying an out-of-order
+    /// one is not a merge error but a rollback: a `clear` that overtakes an
+    /// earlier `set` would be undone by that `set` landing second, and the
+    /// answered question renders forever. The revision is the daemon's
+    /// per-terminal mutation counter, so "older" is decidable here.
+    ///
+    /// A terminal with no recorded revision accepts its first delta whatever
+    /// the revision — the counters restart with the daemon's memory-only
+    /// store, and `startSubscription` clears this map for the same reason.
+    /// A `nil` revision (a daemon that predates the field) is always applied.
+    func applyPendingQuestionsDelta(_ delta: TerminalPendingQuestionsDelta) {
+        if let revision = delta.revision {
+            if let applied = pendingQuestionRevisions[delta.terminalID], revision < applied {
+                return
+            }
+            pendingQuestionRevisions[delta.terminalID] = revision
+        }
+        if delta.pending.isEmpty {
+            pendingQuestions.removeValue(forKey: delta.terminalID)
+        } else {
+            pendingQuestions[delta.terminalID] = delta.pending.map {
+                PendingAskUserQuestion(
+                    toolUseID: $0.toolUseID,
+                    inputJSON: $0.inputJSON,
+                    timestamp: $0.timestamp)
+            }
+        }
     }
 
     /// Seamless in-place "Switch account": the terminal row is unchanged except
@@ -3519,6 +3621,29 @@ final class AppState {
     /// with the helper is invisible (both compile, both "work") and silently
     /// makes the pane appear enabled to one caller and disabled to another.
     static let enableTranscriptDefault = true
+
+    /// UserDefaults key gating whether the app reads Claude transcript JSONL
+    /// itself instead of asking the daemon for a parsed copy. Default OFF: this
+    /// wholesale-replaces a load-bearing render path, so it soaks behind a flag
+    /// before graduating.
+    static let appSideTranscriptReadKey = "appSideTranscriptRead"
+
+    /// The one default for `appSideTranscriptReadKey`. Spell the default with
+    /// this constant at every read site — helper and `@AppStorage` alike. An
+    /// `@AppStorage` default that disagrees with the helper is invisible: both
+    /// compile, both "work", and two callers silently get different answers.
+    ///
+    /// Graduation is a one-line change here. Nothing writes the key on anyone's
+    /// behalf, so `object(forKey:)` stays nil for everyone who never touched the
+    /// toggle — flipping this reaches them while preserving every explicit
+    /// opt-out.
+    static let appSideTranscriptReadDefault = false
+
+    /// Read of the app-side transcript toggle for non-View callers (the View
+    /// layer uses `@AppStorage` directly).
+    static func appSideTranscriptReadEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: appSideTranscriptReadKey) as? Bool ?? appSideTranscriptReadDefault
+    }
 
     /// UserDefaults key for the usage reset-time display preference
     /// (Settings → Claude → "Usage reset times"). Stores the raw value of

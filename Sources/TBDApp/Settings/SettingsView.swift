@@ -40,6 +40,8 @@ struct GeneralSettingsTab: View {
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = AppState.enableTranscriptDefault
+    @AppStorage(AppState.appSideTranscriptReadKey)
+    private var appSideTranscriptRead: Bool = AppState.appSideTranscriptReadDefault
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.chevronBeforeProjectNameKey)
@@ -203,6 +205,8 @@ struct GeneralSettingsTab: View {
                 .help("When a turn dies on a transient API error (connection drop, server error, overload), TBD types \"continue\" after a backoff (60s, 2m, 5m, 10m) and gives up after 4 straight failures. Off by default. Auth and billing errors are never retried.")
                 Toggle("Live transcript pane", isOn: $enableTranscript)
                     .help("Show a chat-style live transcript pane for Claude sessions, following the session's conversation as it streams. On by default; turn it off to keep the pane out of new tabs.")
+                Toggle("Read transcripts in the app", isOn: $appSideTranscriptRead)
+                    .help("Parse Claude session files directly instead of asking the daemon for a parsed copy. Faster on large sessions. Off by default while it soaks.")
                 Toggle("Show usage tooltip on Claude tabs", isOn: $showClaudeTabUsageTooltip)
                     .help("Show a hover card on Claude tabs with the session's account, profile, 5h/weekly usage, and spawn time.")
                 Picker("Usage reset times", selection: $usageResetTimeStyle) {

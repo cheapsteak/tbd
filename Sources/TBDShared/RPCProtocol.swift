@@ -208,6 +208,7 @@ public enum RPCMethod {
     public static let terminalNotificationEvent = "terminal.notificationEvent"
     public static let terminalAskUserQuestionPending = "terminal.askUserQuestionPending"
     public static let terminalAskUserQuestionCleared = "terminal.askUserQuestionCleared"
+    public static let terminalAskUserQuestionSatisfied = "terminal.askUserQuestionSatisfied"
     public static let appSetForegroundState = "app.setForegroundState"
     public static let repoRelocate = "repo.relocate"
     public static let repoRename = "repo.rename"
@@ -3452,6 +3453,28 @@ public struct TerminalAskUserQuestionClearedParams: Codable, Sendable {
     public init(terminalID: UUID, toolUseID: String) {
         self.terminalID = terminalID
         self.toolUseID = toolUseID
+    }
+}
+
+/// Reports that the app observed a pending capture's `tool_use` line in the
+/// JSONL, so the daemon can drop it from `PendingQuestionStore`.
+///
+/// This is the lazy clean-up `terminal.transcript` performs for itself, made
+/// callable by the reader that replaces it: with `appSideTranscriptRead` on,
+/// the app is the only party that parses the JSONL, so it is the only party
+/// that can see a capture become satisfied.
+///
+/// Distinct from `terminal.askUserQuestionCleared`, which is the
+/// `PostToolUse` hook bridge and deliberately does *not* touch the store —
+/// that event fires before Claude flushes the matching JSONL line, and
+/// clearing on it flickers the card away and back. This one fires *because*
+/// the line is already there.
+public struct TerminalAskUserQuestionSatisfiedParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let toolUseIDs: [String]
+    public init(terminalID: UUID, toolUseIDs: [String]) {
+        self.terminalID = terminalID
+        self.toolUseIDs = toolUseIDs
     }
 }
 

@@ -2,8 +2,6 @@ import Foundation
 import Testing
 import TBDShared
 
-@testable import TBDDaemonLib
-
 /// Tier 1. Pure function over one decoded JSONL row — no filesystem beyond
 /// reading the committed fixture, no clock, no process.
 @Suite("PeerOriginExtractor")
