@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -20,9 +21,9 @@ import TBDShared
 @Suite("Remote session navigation")
 struct RemoteSessionNavigationTests {
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.RemoteSessionNavigation.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("RemoteSessionNavigation")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         body(AppState(userDefaults: defaults))
     }
 

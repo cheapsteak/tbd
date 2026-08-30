@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 import SwiftUI
 @testable import TBDApp
 
@@ -26,9 +27,9 @@ import SwiftUI
 struct SendImmediatelyPreferenceTests {
     @Test("an absent key follows the shipped default, whatever it is")
     func absentKeyResolvesToShippedDefault() {
-        let suiteName = "send-immediately-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("send-immediately")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         #expect(defaults.object(forKey: QueuedPromptComposer.sendImmediatelyKey) == nil)
         #expect(
@@ -44,9 +45,9 @@ struct SendImmediatelyPreferenceTests {
 
     @Test("an explicit false is a stored choice, not the absent case")
     func explicitFalseIsDistinctFromAbsent() {
-        let suiteName = "send-immediately-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("send-immediately")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         defaults.set(false, forKey: QueuedPromptComposer.sendImmediatelyKey)
 
@@ -61,9 +62,9 @@ struct SendImmediatelyPreferenceTests {
 
     @Test("an explicit true reads true")
     func explicitTrueReadsTrue() {
-        let suiteName = "send-immediately-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("send-immediately")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         defaults.set(true, forKey: QueuedPromptComposer.sendImmediatelyKey)
 
@@ -94,9 +95,9 @@ struct SendImmediatelyPreferenceTests {
     /// Tier 1.
     @Test("@AppStorage resolves the key the way the contract says it does")
     func appStorageAgreesWithResolverAcrossAllThreeStates() {
-        let suiteName = "send-immediately-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("send-immediately")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         let key = QueuedPromptComposer.sendImmediatelyKey
 
@@ -143,9 +144,9 @@ struct SendImmediatelyPreferenceTests {
     /// Tier 1.
     @Test("writing through @AppStorage persists the choice to the store")
     func appStorageWriteReachesTheStore() {
-        let suiteName = "send-immediately-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("send-immediately")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         let key = QueuedPromptComposer.sendImmediatelyKey
         let storage = AppStorage(wrappedValue: false, key, store: defaults)

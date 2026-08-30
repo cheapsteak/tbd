@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDApp
 @testable import TBDShared
 
@@ -7,9 +8,9 @@ import Foundation
 @Suite("showScratchSection setting")
 struct ShowScratchSectionSettingTests {
     @Test func defaultsToOn() {
-        let suiteName = "scratch-\(UUID().uuidString)"
-        let d = UserDefaults(suiteName: suiteName)!
-        defer { d.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("ShowScratchSectionSetting-scratch")
+        defer { defaultsSuite.tearDown() }
+        let d = defaultsSuite.defaults
         // No stored value → @AppStorage default (true) applies at the view; assert
         // the key convention and both explicit branches persist as written.
         #expect(d.object(forKey: AppState.showScratchSectionKey) == nil)

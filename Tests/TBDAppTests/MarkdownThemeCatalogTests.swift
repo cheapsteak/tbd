@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 
@@ -22,9 +23,9 @@ struct MarkdownThemeCatalogTests {
     }
 
     private func withDefaults<T>(_ body: (UserDefaults) throws -> T) throws -> T {
-        let name = "com.tbd.tests.markdown-theme-catalog.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: name))
-        defer { defaults.removePersistentDomain(forName: name) }
+        let defaultsSuite = TestDefaultsSuite("markdown-theme-catalog")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         return try body(defaults)
     }
 

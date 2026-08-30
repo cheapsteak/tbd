@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -614,9 +615,9 @@ struct TranscriptEstimatorAccuracyTests {
 
         var measurements: [Measurement] = []
         for width in widths {
-            let suiteName = "estimator-accuracy-\(UUID().uuidString)"
-            let defaults = try #require(UserDefaults(suiteName: suiteName))
-            defer { defaults.removePersistentDomain(forName: suiteName) }
+            let defaultsSuite = TestDefaultsSuite("estimator-accuracy")
+            defer { defaultsSuite.tearDown() }
+            let defaults = defaultsSuite.defaults
             let appState = AppState(userDefaults: defaults)
 
             let nodes = characterizationNodes(imagePath: imagePath)

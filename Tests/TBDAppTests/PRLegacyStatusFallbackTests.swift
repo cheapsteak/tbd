@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 @testable import TBDShared
@@ -187,9 +188,9 @@ struct PRLegacyStatusFallbackTests {
     /// developer's real `TBDApp.plist`.
     @MainActor
     private func withAppState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.PRLegacyFallback.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("PRLegacyFallback")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         body(AppState(userDefaults: defaults))
     }
 

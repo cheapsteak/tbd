@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -14,9 +15,9 @@ struct PreSessionAppStateTests {
     /// Build an isolated AppState (never `UserDefaults.standard` — that's the
     /// developer's real TBDApp.plist) and tear the suite down afterward.
     private func withAppState(_ body: (AppState) throws -> Void) rethrows {
-        let suiteName = "PreSessionAppStateTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("PreSessionAppStateTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         try body(AppState(userDefaults: defaults))
     }
 
@@ -414,9 +415,9 @@ struct PreSessionAppStateTests {
 
     /// Tier 1: deterministic in-process state only.
     @Test func mergeCreatedTerminalReconcilesStoredOrderOnlyOnInsertion() async {
-        let suiteName = "PreSessionAppStateTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("PreSessionAppStateTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let state = AppState(userDefaults: defaults)
         let worktreeID = seedWorktree(state, status: .creating).id
         let pre = seedPreSessionOnly(state, worktreeID: worktreeID)

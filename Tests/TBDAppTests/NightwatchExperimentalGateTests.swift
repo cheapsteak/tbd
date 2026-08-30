@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 
@@ -20,11 +21,9 @@ struct NightwatchExperimentalGateTests {
         seed: Bool?,
         _ body: (UserDefaults) -> Void
     ) {
-        let suiteName = "TBDAppTests.NightwatchExperimental.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let suite = TestDefaultsSuite("NightwatchExperimental")
+        defer { suite.tearDown() }
+        let defaults = suite.defaults
         if let seed {
             defaults.set(seed, forKey: key)
         }

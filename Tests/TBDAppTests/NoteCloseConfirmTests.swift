@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -16,9 +17,9 @@ import TBDShared
 struct NoteCloseConfirmTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.NoteCloseConfirm.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("NoteCloseConfirm")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         body(AppState(userDefaults: defaults))
     }
 

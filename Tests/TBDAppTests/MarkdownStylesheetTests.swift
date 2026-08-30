@@ -28,9 +28,9 @@ struct MarkdownStylesheetTests {
 
     /// A throwaway defaults suite, torn down with `removePersistentDomain`.
     private func withDefaults<T>(_ body: (UserDefaults) throws -> T) throws -> T {
-        let name = "com.tbd.tests.markdown-stylesheet.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: name))
-        defer { defaults.removePersistentDomain(forName: name) }
+        let defaultsSuite = TestDefaultsSuite("markdown-stylesheet")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         return try body(defaults)
     }
 

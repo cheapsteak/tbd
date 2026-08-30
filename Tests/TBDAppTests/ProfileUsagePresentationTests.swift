@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -893,9 +894,9 @@ struct MergingUsageSnapshotsTests {
 @Suite("AppState skipAccountPicker persistence")
 struct SkipAccountPickerPersistenceTests {
     private func withIsolatedDefaults(_ body: (UserDefaults) -> Void) {
-        let suiteName = "TBDAppTests.SkipAccountPicker.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("SkipAccountPicker")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         body(defaults)
     }
 

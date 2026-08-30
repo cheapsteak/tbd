@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -650,9 +651,9 @@ struct RemoteRefreshTests {
 
     @Test("a refresh that returns exactly what is already published")
     func idempotentRemoteRefresh() async {
-        let suiteName = "TBDAppTests.AppStateEmissions.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("AppStateEmissions")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let state = AppState(userDefaults: defaults)
         state.remoteProvidersFetcher = { RemoteProvidersResult(providers: []) }
         state.remoteSessionsFetcher = { RemoteSessionsResult(sessions: []) }

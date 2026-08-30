@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -42,9 +43,9 @@ private func referenceChildren(_ state: AppState, of parentID: UUID) -> [Worktre
 
 @MainActor
 private func withState(_ body: (AppState) -> Void) {
-    let suiteName = "TBDAppTests.AppStateDerivedCache.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
-    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let defaultsSuite = TestDefaultsSuite("AppStateDerivedCache")
+    defer { defaultsSuite.tearDown() }
+    let defaults = defaultsSuite.defaults
     body(AppState(userDefaults: defaults))
 }
 
@@ -320,9 +321,12 @@ struct SelectionOrderWriteCoalescingTests {
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
 
     private func withCountingState(_ body: (AppState, WriteCountingUserDefaults) -> Void) {
-        let suiteName = "TBDAppTests.SelectionOrderWrites.\(UUID().uuidString)"
+        // A `UserDefaults` subclass, so this is the one site that pairs
+        // `TestDefaults.makeSuiteName` with the teardown primitive directly
+        // instead of using `TestDefaultsSuite`.
+        let suiteName = TestDefaults.makeSuiteName(label: "SelectionOrderWrites")
         let defaults = WriteCountingUserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { TestDefaults.tearDown(suiteName: suiteName, defaults: defaults) }
         let state = AppState(userDefaults: defaults)
         // `persistSelectionOrder` is gated on this; startup must not clobber a
         // saved value before the restore has run.

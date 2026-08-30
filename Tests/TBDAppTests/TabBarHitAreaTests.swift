@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -12,12 +13,11 @@ struct TabBarHitAreaTests {
         let worktreeID = UUID()
         let terminalID = UUID()
         let tab = TBDShared.Tab(id: terminalID, content: .terminal(terminalID: terminalID), label: "A")
-        let suiteName = "TabBarHitAreaTests-\(UUID().uuidString)"
-
         do {
-            let defaults = UserDefaults(suiteName: suiteName)!
+            let defaultsSuite = TestDefaultsSuite("TabBarHitArea")
+            defer { defaultsSuite.tearDown() }
+            let defaults = defaultsSuite.defaults
             defaults.set(true, forKey: "probe")
-            defer { defaults.removePersistentDomain(forName: suiteName) }
             let appState = AppState(userDefaults: defaults)
             appState.terminals[worktreeID] = [
                 Terminal(

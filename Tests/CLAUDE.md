@@ -105,11 +105,57 @@ that turned the decoy loop into `chmod 000` on the developer's real `~/tbd` and
 owns them and can chmod them back.
 
 Two things the fence does *not* cover, so the existing disciplines stay
-load-bearing: `UserDefaults` (resolved by `cfprefsd` over XPC, hence the
-`AppState(userDefaults:)` rule in the root `CLAUDE.md`) and the Keychain, which
+load-bearing: `UserDefaults` and the Keychain, which
 breaks rather than redirects under `CFFIXED_USER_HOME` — Keychain-touching code
 must be reached through an injection seam such as
-`ClaudeCredentialsKeychainDeleting`. Account-database home lookups
+`ClaudeCredentialsKeychainDeleting`.
+
+**The `UserDefaults` half of that sentence was here all along and the suite
+leaked ~520,000 files anyway, so it is worth stating the consequence and not
+just the hazard.** `cfprefsd` resolves preferences over XPC and honours neither
+`HOME` nor `CFFIXED_USER_HOME`, so a suite's backing plist is written to the
+**real** `~/Library/Preferences` no matter what the wrapper exports. Minting a
+UUID-named suite and tearing it down with `removePersistentDomain(forName:)` —
+which is what the root `CLAUDE.md` used to prescribe and what 123 call sites
+did — clears the values and leaves the file: a 42-byte `bplist00` husk, one per
+test, forever. Across ~40 worktrees running the suite continuously that reached
+~2.1 GB.
+
+Three measured facts decide the remedy, and each is easy to get wrong:
+
+- **No teardown order wins.** Six orderings were tried, ten trials each —
+  remove-then-sync-then-unlink, unlink first, polling until the empty write
+  lands, `removeSuite(named:)` first, per-key removal first, and an
+  `atexit`-registered second unlink. All 60 files were back after the process
+  exited. `cfprefsd` keeps the domain cached and flushes it on client
+  disconnect, which is strictly after any handler the process can run.
+- **A `/` in the suite name contains the damage.** `cfprefsd` writes such a
+  domain into a *subdirectory* of `~/Library/Preferences`, creating it if
+  absent. Every test suite is therefore named
+  `TBDTests.suites/<label>.<uuid>`, so every backing file — resurrections
+  included — lands in one directory that can be reclaimed by one `removeItem`
+  on one exact path.
+- **The real home must be resolved through `getpwuid`.** `NSHomeDirectory()`
+  and `$HOME` both point at the scratch home under the fence, so an unlink
+  aimed at either silently targets nothing. This is the one place the
+  `no_passwd_home_lookup` rule's premise is inverted on purpose: the file to
+  delete is outside the fence whether we like it or not.
+
+So use `TestDefaultsSuite` / `withTestDefaults`
+(`Tests/TestSupport/UserDefaultsTestSupport.swift`) and never
+`UserDefaults(suiteName:)` directly. The helper owns the whole lifecycle —
+mint, unlink at teardown, and a once-per-process reclaim of the container
+directory that sweeps up whatever the previous run's `cfprefsd` wrote after
+that run had already exited. `UserDefaultsTestSupportTests` asserts on the
+exact composed path, because "the domain reads empty afterwards" passes
+against the broken behaviour and proves nothing.
+
+**And never enumerate `~/Library/Preferences` to check any of this.** It holds
+enough entries that a bare `ls -f` does not complete, and walking it adds
+exactly the churn under investigation. Stat one exact path, or list the
+container directory, which is small and ours.
+
+Account-database home lookups
 (`getpwuid`/`getpwnam`/`getpwent`, `NSHomeDirectoryForUser(_:)`,
 `FileManager.homeDirectory(forUser:)`) and hardcoded `/Users/<name>/` paths
 escape both variables outright and are rejected mechanically by the
@@ -137,7 +183,7 @@ before trusting it: the home value has to be visible near the append, so a path
 built from a `home` that arrived as a parameter matches nothing. It narrows the
 shape rather than closing it.
 
-The wrapper's last layer, a before/after fingerprint of the four real
+The wrapper's last layer, a before/after fingerprint of the five real
 directories, is on when `$CI` is set and off otherwise; `--fingerprint` opts in
 locally and `--no-fingerprint` forces it off. The default follows the argument
 rather than contradicting it: a live daemon and sibling worktrees write to
@@ -147,6 +193,14 @@ agent session starting in a new directory mints a fresh
 not the primary guard: it compares directory *listings*, so a leak that writes
 to a fixed path — or one that cleans up after itself in a `defer` — is invisible
 to it, while the tripwire fails on the permission check every run regardless.
+
+The fifth root, `~/Library/Preferences`, is the asymmetric one: it has a
+detector arm and **no fence half**, because `cfprefsd` ignores `HOME` and
+`CFFIXED_USER_HOME` (above). For the other four the fingerprint is a backstop
+behind a fence; for this one it is the only mechanical guard there is, which is
+why the discipline it watches — always mint through `TestDefaultsSuite` — has
+to hold at every call site rather than most of them.
+
 Full rationale is in the wrapper's header.
 
 The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which

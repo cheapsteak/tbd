@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -16,9 +17,9 @@ struct ReviveConversationFreshAppStateTests {
     private func withAppState(
         _ body: @MainActor (AppState, UserDefaults) async throws -> Void
     ) async rethrows {
-        let suiteName = "TBDAppTests.ReviveConversationFresh.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("ReviveConversationFresh")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         try await body(AppState(userDefaults: defaults), defaults)
     }
 

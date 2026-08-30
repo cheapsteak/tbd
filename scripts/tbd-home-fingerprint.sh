@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 #
-# Prints a stable fingerprint of the REAL `~/tbd`, `~/.claude`, `~/.codex` and
-# tmux socket directory — deliberately `$HOME/...` and the CALLER's
-# `$TMUX_TMPDIR`, never `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME` /
+# Prints a stable fingerprint of the REAL `~/tbd`, `~/.claude`, `~/.codex`, the
+# tmux socket directory and `~/Library/Preferences` — deliberately `$HOME/...`
+# and the CALLER's `$TMUX_TMPDIR`, never `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME` /
 # `$TBD_TEST_CODEX_HOME` or the fenced socket dir, because the whole point is
 # to observe the directories a test run is supposed to leave alone even while
 # those overrides point somewhere else.
+#
+# The last of those five is the one no override could have redirected anyway:
+# `cfprefsd` resolves preference paths over XPC and ignores both home variables,
+# so a leaked `UserDefaults(suiteName:)` plist lands in the developer's real
+# `~/Library/Preferences` however the run is fenced. Its two arms at the bottom
+# are the only layer that can see one — and the second half of that guard is
+# the container reclaim in `scripts/test.sh`, which is what keeps the count at
+# zero rather than merely reporting it.
 #
 # Bracket a test run with two calls and diff them: any added or removed entry
 # means something wrote into a real store the run should not have touched, which
@@ -213,3 +221,143 @@ if [ -d "$real_tmux" ]; then
 else
   echo "<tmux-sockets> <absent>"
 fi
+
+# ~/Library/Preferences — the fifth root, and the only one the fence cannot
+# reach at all. `UserDefaults(suiteName: "X")` is backed by
+# `$HOME/Library/Preferences/X.plist` (never `ByHost/`, measured at the
+# CFPreferences level), and that `~` is the REAL user home whatever this run's
+# `HOME` and `CFFIXED_USER_HOME` say: `cfprefsd` resolves preference paths over
+# XPC, in its own process, so both variables are simply not in the lookup.
+# `Tests/CLAUDE.md` had said so all along and the leak shipped anyway —
+# ~520,000 orphaned files, ~2.1 GB, accumulated over months.
+#
+# THE SHAPE THIS WATCHES IS A CONTAINER, NOT A SCATTER, and that is what makes
+# the arm affordable. `Tests/TestSupport/UserDefaultsTestSupport.swift` names
+# every suite `TBDTests.suites/<label>.<uuid>`; a `/` in a suite name makes
+# `cfprefsd` write into a SUBDIRECTORY of `~/Library/Preferences`, so every
+# backing file this repo can produce lands in one directory that can be read,
+# and reclaimed, without ever enumerating the parent.
+#
+# WHY THE FILES OUTLIVE THE TEST PROCESS AT ALL, which is the fact the whole
+# design turns on: no in-process teardown order can win. Six orderings were
+# measured, ten trials each — remove/sync/unlink, unlink-first, poll-until-
+# flushed, `removeSuite(named:)`, per-key `removeObject`, and an
+# `atexit`-registered second unlink — and all 60 files were back after the
+# process exited. `cfprefsd` holds the domain in memory and flushes it when its
+# client DISCONNECTS, strictly after every `atexit` handler a process can run.
+# The unlink is real (the file is gone the moment teardown returns); it is just
+# never the last word. So the reclaim has to happen after the test process is
+# gone, which is `scripts/test.sh`'s job, and this arm is what proves it did it.
+#
+# THE SHAPE, AS OBSERVED rather than assumed — read out of a binary compiled
+# from the committed helper:
+#
+#   containerDirectory = <real home>/Library/Preferences/TBDTests.suites
+#   suite.name         = TBDTests.suites/<label>.<uuid>
+#   backingPlistPath   = <containerDirectory>/<label>.<uuid>.plist
+#   container is a DIR = true
+#   depth-1 TBDTests.* = ["TBDTests.suites"]  ← exactly one match, the container
+#
+# That last line is why the obvious arm does not work. A flat
+# `-name 'TBDTests.*'` count at depth 1 reads 1 before the run and 1 after it,
+# forever, and can never go red: the only thing it can see is the container
+# directory, which is not the population. The count has to go INSIDE.
+#
+# TWO ARMS, AND THEY ASK DIFFERENT QUESTIONS AT DIFFERENT PRICES.
+#
+#   `<preferences>/TBDTests.suites` — how many suite plists are in the
+#   container. The steady state is 0, on BOTH sides: `scripts/test.sh` reclaims
+#   the container before the first snapshot and again after the run, so a
+#   non-zero count here means the reclaim did not happen or could not finish.
+#   This is the arm that sees the leak this file exists for, and it is CHEAP —
+#   it reads one small directory we own, never the parent.
+#
+#   `<preferences> stray TBDTests.*` — a depth-1 `TBDTests.*` entry that is NOT
+#   the container: a suite minted with the historical flat name, by hand,
+#   without the helper. The reclaim cannot remove one (it deletes exactly one
+#   path and never a glob), so this count is not self-clearing, and a stray is
+#   permanent litter until somebody removes it. This is the EXPENSIVE arm, and
+#   the only expensive thing this script does to `~/Library/Preferences`: the
+#   filter still costs one readdir of a directory that holds tens of thousands
+#   of entries on an ordinary box. It earns that: it is the only thing standing
+#   between one hand-rolled `UserDefaults(suiteName:)` and another half-million
+#   files.
+#
+# COUNTS, NOT LISTINGS, in both arms — the one deliberate departure from every
+# other arm in this file. `~/Library/Preferences` holds tens of thousands of
+# entries on an ordinary box and half a million on a box that has been leaking;
+# printing them would bury the diff and the report both. A leak reads as
+# `count=0` becoming `count=1`, which is all a bracketing comparison needs.
+#
+# AND AN ABSENT CONTAINER IS `count=0`, NOT `<absent>` — the second departure,
+# and it is deliberate. Every other arm treats "the directory is not there" as
+# its own state, because a run that CREATES `~/tbd` must go red. Here the
+# reclaim's success IS the directory being gone, so `<absent>` would be the
+# steady state; and an empty container (a concurrent run that just minted one
+# and leaked nothing) would then differ from an absent one and redden a run
+# that did nothing wrong. Absent and empty are the same fact — no test
+# preference files exist — so they get the same line.
+#
+# WHAT IT CANNOT SEE, stated plainly rather than dressed up:
+#
+#   - WHICH suite leaked. The count says a leak happened, not who did it. The
+#     names are in the container when it goes red; read them there, from the
+#     one directory it is safe to list.
+#   - A suite minted with neither the helper nor the `TBDTests.` prefix. The
+#     patterns are exact, and they have to be: `com.apple.*` and every other
+#     domain on the box churn continuously while a run is in flight, so an arm
+#     that counted them would report the machine rather than the run and be
+#     switched off within a week. The helper in `Tests/TestSupport` is
+#     therefore the only sanctioned way to mint a suite, and this arm covers
+#     TBD's own tests exactly to the extent that rule is followed.
+#   - Anything at all under CONCURRENCY. ~40 worktrees share one real
+#     `~/Library/Preferences`, and one run's `fingerprint_after` can see
+#     another run's in-flight container files. Wiping the container underneath a
+#     live run is safe — `cfprefsd` serves a live domain from memory, measured —
+#     but the COUNT is shared state, so a developer box can read a number that
+#     belongs to somebody else's run. That is one more reason detection is
+#     CI-only, where there is one run per machine.
+#   - A non-`.plist` entry inside the container. The count is narrowed to
+#     `*.plist` so a temp file cfprefsd is midway through writing — one of
+#     ~40 concurrent worktrees, on a developer box — is not read as a leak.
+#     Anything else in there is still REMOVED by the reclaim, which deletes the
+#     directory wholesale and does not care what it is named; it is just not
+#     counted.
+#   - Anything quickly, on a box that already has a pile — for the stray arm
+#     only. It has to readdir the whole parent to filter it, and a bare `ls -f`
+#     on the leaking box above took over two minutes. The container arm reads
+#     one small directory and is free anywhere. On a runner both are free.
+real_prefs="${HOME}/Library/Preferences"
+# DUPLICATED FROM SWIFT, DELIBERATELY, AND PINNED BY A TEST. The name lives in
+# `TestDefaults.containerName` (`Tests/TestSupport/UserDefaultsTestSupport.swift`)
+# and is repeated here and in `scripts/test.sh`, because the only ways to
+# derive it at runtime are worse than the duplication: reading the Swift file
+# needs a repo-relative path this script does not have (the harness runs
+# mutated COPIES of it from a temp directory), and an environment override
+# would make a guard that a caller can silently disarm.
+# `scripts/test.test.sh`'s `test_the_container_name_matches_the_swift_helper`
+# asserts all three copies agree, so a rename reddens the `lint` job rather
+# than quietly emptying this arm.
+prefs_container_name='TBDTests.suites'
+prefs_container="$real_prefs/$prefs_container_name"
+
+# `-name '*.plist'` doubles as the reason no `-mindepth` is needed: the
+# container directory does not match its own filter.
+if [ -d "$prefs_container" ]; then
+  prefs_container_count="$(find "$prefs_container" -maxdepth 1 -name '*.plist' -print 2>/dev/null | wc -l | tr -d ' ')"
+else
+  prefs_container_count=0
+fi
+echo "<preferences>/$prefs_container_name count=$prefs_container_count"
+
+# The container is excluded only when it is the DIRECTORY it is supposed to be:
+# a regular file sitting at that exact path is not a container, it is litter,
+# and the arm above cannot see it either.
+if [ -d "$real_prefs" ]; then
+  prefs_stray_count="$(find "$real_prefs" -mindepth 1 -maxdepth 1 \
+      -name 'TBDTests.*' ! \( -name "$prefs_container_name" -a -type d \) -print 2>/dev/null \
+    | wc -l | tr -d ' ')"
+else
+  prefs_stray_count=0
+fi
+echo "<preferences> stray TBDTests.* count=$prefs_stray_count"

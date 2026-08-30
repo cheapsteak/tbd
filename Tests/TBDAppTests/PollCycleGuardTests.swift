@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 
@@ -17,16 +18,15 @@ import Testing
 @Suite("Poll cycle guard")
 struct PollCycleGuardTests {
 
-    private func makeState() -> (AppState, String, UserDefaults) {
-        let suiteName = "TBDAppTests.PollCycleGuard.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        return (AppState(userDefaults: defaults), suiteName, defaults)
+    private func makeState() -> (AppState, TestDefaultsSuite) {
+        let suite = TestDefaultsSuite("PollCycleGuard")
+        return (AppState(userDefaults: suite.defaults), suite)
     }
 
     // Idle path: a fresh AppState runs the body and reports it ran; no skips.
     @Test func idleCycle_runsBody_andReturnsTrue() async {
-        let (state, suiteName, defaults) = makeState()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
 
         var didRun = false
         let ran = await state.runPollCycleIfIdle {
@@ -43,8 +43,8 @@ struct PollCycleGuardTests {
     // bump skippedPollCycles. After the first completes, a third call runs again
     // — proving the in-flight flag was cleared by the `defer`.
     @Test func overlappingCycle_isSkipped_thenFlagClears() async {
-        let (state, suiteName, defaults) = makeState()
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
 
         // Coordinates handoff between the test and the first (suspended) cycle
         // without sleeps: the first cycle signals it has entered (so the flag is

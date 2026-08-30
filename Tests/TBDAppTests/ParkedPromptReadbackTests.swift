@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -52,9 +53,9 @@ struct ParkedPromptReadbackTests {
     }
 
     private func withAppState(_ body: (AppState, Harness) async throws -> Void) async rethrows {
-        let suiteName = "TBDAppTests.ParkedPromptReadback.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("ParkedPromptReadback")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let state = AppState(userDefaults: defaults)
         let harness = Harness()
         state.pendingPromptSetter = { @MainActor worktreeID, text, submit in

@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -23,9 +24,9 @@ private func makeWorktree(id: UUID, repoID: UUID?, status: WorktreeStatus = .act
 /// real `TBDApp.plist`.
 @MainActor
 private func withState(_ body: (AppState) -> Void) {
-    let suiteName = "TBDAppTests.FindWorktreeScratch.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
-    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let defaultsSuite = TestDefaultsSuite("FindWorktreeScratch")
+    defer { defaultsSuite.tearDown() }
+    let defaults = defaultsSuite.defaults
     body(AppState(userDefaults: defaults))
 }
 
@@ -177,10 +178,9 @@ struct ArchiveShortcutRouteTests {
 struct RenameScratchTests {
 
     private func makeState() -> (AppState, () -> Void) {
-        let suiteName = "TBDAppTests.RenameScratch.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        let state = AppState(userDefaults: defaults)
-        return (state, { defaults.removePersistentDomain(forName: suiteName) })
+        let suite = TestDefaultsSuite("RenameScratch")
+        let state = AppState(userDefaults: suite.defaults)
+        return (state, { suite.tearDown() })
     }
 
     @Test func pendingPlaceholderRenamesLocallyWithoutRPC() async {
@@ -301,9 +301,9 @@ struct RenameScratchTests {
 struct CreationPlaceholderRenameTests {
 
     @Test func renamedPlaceholderCarriesNameOntoDaemonRow() async {
-        let suiteName = "TBDAppTests.CreationPlaceholderRename.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("CreationPlaceholderRename")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let state = AppState(userDefaults: defaults)
 
         let repoID = UUID()
@@ -341,9 +341,9 @@ struct CreationPlaceholderRenameTests {
     /// isn't wired to a seam (its `daemonClient.createWorktree` has no
     /// override), so this reproduces the post-swap state directly.
     @Test func createPathPersistRollsBackAndAlertsWhenRenameRPCFails() async {
-        let suiteName = "TBDAppTests.CreationPlaceholderRename.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("CreationPlaceholderRename")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let state = AppState(userDefaults: defaults)
 
         struct RenameError: Error {}

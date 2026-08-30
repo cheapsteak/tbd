@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -669,9 +670,9 @@ struct RowActionMenuPinTests {
 struct RowActionMenuCallSiteTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.RowActionMenuCallSite.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("RowActionMenuCallSite")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         body(AppState(userDefaults: defaults))
     }
 

@@ -1,4 +1,5 @@
 import AppKit
+import TestSupport
 import Testing
 @testable import TBDApp
 
@@ -49,7 +50,8 @@ struct TerminalKeyEquivalentTests {
     @MainActor
     @Test("close tab action invokes external tab cleanup")
     func closeTabActionInvokesExternalTabCleanup() {
-        let view = makeTerminalView()
+        let (view, suite) = makeTerminalView()
+        defer { suite.tearDown() }
         var closeCount = 0
         view.onCloseTab = { closeCount += 1 }
 
@@ -58,15 +60,19 @@ struct TerminalKeyEquivalentTests {
         #expect(closeCount == 1)
     }
 
+    /// The suite is returned alongside the view so the caller can tear it
+    /// down: this call site used a fixed suite name and never tore it down at
+    /// all, which is why it leaked a file that outlived every run.
     @MainActor
-    private func makeTerminalView() -> TBDTerminalView {
+    private func makeTerminalView() -> (TBDTerminalView, TestDefaultsSuite) {
+        let suite = TestDefaultsSuite("TerminalKeyEquivalent")
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 640, height: 480),
             font: TBDTerminalView.defaultMonospaceFont,
-            appearance: AppearanceSettings(defaults: UserDefaults(suiteName: "TerminalKeyEquivalentTests.clearAction")!)
+            appearance: AppearanceSettings(defaults: suite.defaults)
         )
         view.resize(cols: 10, rows: 5)
-        return view
+        return (view, suite)
     }
 
     private func keyEvent(characters: String, modifiers: NSEvent.ModifierFlags) -> NSEvent {

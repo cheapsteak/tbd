@@ -38,7 +38,7 @@ struct AppearanceDebounceTests {
     /// real `TBDApp.plist`, so the suite name must be unique and torn down.
     @MainActor
     private final class Harness {
-        let suiteName: String
+        let suite: TestDefaultsSuite
         let defaults: UserDefaults
         let appearance: AppearanceSettings
         let clock = EventDrivenTestClock()
@@ -47,8 +47,8 @@ struct AppearanceDebounceTests {
         var subscription: AnyCancellable?
 
         init() {
-            suiteName = "TBDAppTests.AppearanceDebounce.\(UUID().uuidString)"
-            defaults = UserDefaults(suiteName: suiteName)!
+            suite = TestDefaultsSuite("AppearanceDebounce")
+            defaults = suite.defaults
             // `userThemesDirectory` is the injection seam named in the root
             // CLAUDE.md; without it `init` stats the developer's real `~/tbd`.
             // A non-existent temp path is the point — the lookup must miss
@@ -72,7 +72,7 @@ struct AppearanceDebounceTests {
 
         func tearDown() {
             subscription?.cancel()
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
         }
     }
 
@@ -233,9 +233,9 @@ struct AppearanceDebounceTests {
     /// exactly the window the guard exists for.
     @Test("a cancel landing after the sleep resumes still suppresses the fire")
     func cancelAfterSleepResumesSuppressesFire() async {
-        let suiteName = "TBDAppTests.AppearanceDebounce.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("AppearanceDebounce")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appearance = AppearanceSettings(
             defaults: defaults,
             userThemesDirectory: FileManager.default.temporaryDirectory

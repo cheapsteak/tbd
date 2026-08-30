@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 import SwiftTerm
 @testable import TBDApp
@@ -9,9 +10,9 @@ struct AppearanceSettingsTests {
     /// Run a body with an isolated UserDefaults suite so we never touch
     /// the live `TBDApp.plist` (see Tests/TBDAppTests/AutoSuspendPreferenceTests.swift).
     private func withIsolatedDefaults(_ body: (UserDefaults) -> Void) {
-        let suiteName = "TBDAppTests.Appearance.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("Appearance")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         body(defaults)
     }
 
@@ -179,9 +180,9 @@ struct AppearanceSettingsTests {
 
     @Test("currentColorFgBg uses user-theme bg luminance when a user theme is active")
     func currentColorFgBgForUserTheme() throws {
-        let suiteName = "tbd.test.fgbg-user.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("fgbg-user")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         let store = ThemeStore()
         let lightUser = TerminalColorScheme(

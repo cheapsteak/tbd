@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import SwiftUI
 import Testing
 
@@ -153,9 +154,9 @@ struct PRFreshnessTests {
         // The layer between the RPC and the views. Merging them — dropping an
         // observation because there is no status, or vice versa — is the same
         // collapse one layer further out.
-        let suiteName = "TBDAppTests.PRFreshness.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("PRFreshness")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let state = AppState(userDefaults: defaults)
         let withValue = UUID()
         let noValue = UUID()

@@ -1,20 +1,20 @@
 import Testing
 import Foundation
+import TestSupport
 import TBDShared
 @testable import TBDApp
 
 // MARK: - Helpers
 
 @MainActor
-private func makeIsolatedAppState() -> (AppState, String) {
-    let suiteName = "com.tbd.tests.deeplink.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
-    return (AppState(userDefaults: defaults), suiteName)
+private func makeIsolatedAppState() -> (AppState, TestDefaultsSuite) {
+    let suite = TestDefaultsSuite("DeepLinkHandler")
+    return (AppState(userDefaults: suite.defaults), suite)
 }
 
 @MainActor
-private func tearDown(_ suiteName: String) {
-    UserDefaults().removePersistentDomain(forName: suiteName)
+private func tearDown(_ suite: TestDefaultsSuite) {
+    suite.tearDown()
 }
 
 // MARK: - Tests

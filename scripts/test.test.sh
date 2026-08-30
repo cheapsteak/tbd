@@ -95,10 +95,16 @@ rmfix()           { chmod -R u+rwx "$1" 2>/dev/null; rm -rf "$1"; }
 # swift. Echoes the fixture root.
 mkfix() {
   local d; d="$(mktmpd)"
+  # `Library/Preferences` is populated with an unrelated domain because that is
+  # what the real directory looks like: tens of thousands of plists nothing in
+  # this repo owns. An arm that reddened on those would be reporting the
+  # machine rather than the run.
   mkdir -p "$d/home/tbd/worktrees/slot" \
            "$d/home/.claude/projects/-acme-repo" \
            "$d/home/.codex/plugins/cache" \
+           "$d/home/Library/Preferences" \
            "$d/tmp" "$d/bin"
+  : > "$d/home/Library/Preferences/com.acme.unrelated.plist"
   : > "$d/home/tbd/state.db"
   mkdir -p "$d/home/tbd/worktrees/slot/existing-worktree"
   cat > "$d/bin/fake-swift" <<'STUB'
@@ -137,6 +143,16 @@ fake_swift_invocation="$(wc -l < "$FAKE_SWIFT_DUMP.count" | tr -d ' ')"
 if [ -n "${FAKE_SWIFT_DISARM:-}" ]; then chmod 755 "$HOME/$FAKE_SWIFT_DISARM"; fi
 # Write into the fixture's real home, as a leak that escaped the fence would.
 if [ -n "${FAKE_SWIFT_LEAK:-}" ]; then mkdir -p "$FAKE_SWIFT_LEAK"; fi
+# The same thing for a leak that is a FILE rather than a directory — a stray
+# `~/Library/Preferences/TBDTests.<label>.<uuid>.plist` is a file, and
+# `mkdir -p` would model it as a directory the Preferences arm counts anyway,
+# proving less than it looks. Space-separated absolute paths; parents created.
+if [ -n "${FAKE_SWIFT_LEAK_FILE:-}" ]; then
+  for leaked_file in $FAKE_SWIFT_LEAK_FILE; do
+    mkdir -p "$(dirname "$leaked_file")"
+    : > "$leaked_file"
+  done
+fi
 # Leave sockets where the run's tmux servers would leave them. tmux creates
 # `$TMUX_TMPDIR/tmux-<uid>` itself and never unlinks a socket on server exit,
 # so this is what the directory looks like when the suite finishes — dead
@@ -211,7 +227,7 @@ run_script() {
                  -u TBD_TEST_CODEX_HOME -u TBD_SWIFT_LOCK_PATH -u CFFIXED_USER_HOME \
                  -u TBD_SWIFT_JOBS -u TBD_SWIFT_LOCK_TIMEOUT_SECONDS \
                  -u TBD_SWIFT_HEARTBEAT_SECONDS -u TBD_SWIFT_ALLOW_ORPHAN \
-                 -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_RC \
+                 -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_LEAK_FILE -u FAKE_SWIFT_RC \
                  -u FAKE_SWIFT_TMUX_SOCKETS -u FAKE_SWIFT_TEST_COUNT \
                  -u TBD_REMOTE_VERIFY -u TBD_REMOTE_VERIFY_YIELD_SECONDS \
                  -u TBD_SWIFT_QUEUE_YIELD_SECONDS \
@@ -249,6 +265,16 @@ mutant_of() {
 
 dump_of()      { cat "$1/swift-invocation" 2>/dev/null; }
 fake_home_of() { echo "$1/tmp/tbd-test-fakehome.$(id -u)"; }
+
+# The preferences container, under the fixture's REAL home — the one `cfprefsd`
+# would write to. `run_script` points `HOME` there, so the wrapper's own
+# `$HOME/Library/Preferences/TBDTests.suites` resolves to exactly this path and
+# the fingerprint arm reads it on both sides. The literal is spelled out rather
+# than sourced from either script, so a case cannot agree with a rename by
+# construction; `test_the_container_name_matches_the_swift_helper` is what
+# pins the three real copies together.
+prefs_container_of() { echo "$1/home/Library/Preferences/TBDTests.suites"; }
+exists_of()          { if [ -e "$1" ]; then echo true; else echo false; fi; }
 
 # How many times the fenced invocation actually ran. The valve's fallback is
 # the only thing that makes this exceed 1, and asserting the COUNT is what
@@ -435,6 +461,14 @@ test_decoy_replaced_by_a_symlink_during_the_run_fails_the_run() {
 # 3. Fingerprint diffing, through the wrapper
 # ---------------------------------------------------------------------------
 
+# THE REPORT'S BANNER, COMPOSED RATHER THAN GREPPED FOR A FRAGMENT. It wraps
+# onto two lines because it names five roots, and a case that matched only the
+# first line would keep passing if the second were dropped — which is exactly
+# how a root can fall out of the report while every case stays green.
+LEAK_BANNER="$(printf '%s\n%s' \
+  "  THE TEST RUN WROTE INTO A REAL STORE: ~/tbd, ~/.claude, ~/.codex," \
+  "  /tmp/tmux-<uid> OR ~/Library/Preferences")"
+
 # Each arm leaks one entry into the fixture's real home — the shape a leak that
 # got past the fence would take — and must be named in the diff.
 _assert_leak_is_detected() {
@@ -443,7 +477,7 @@ _assert_leak_is_detected() {
   run_wrapper "$fix" --fingerprint
   RUN_ENV=()
   assert_nonzero "$label fails the run" "$RUN_RC"
-  assert_contains "$label is reported" "$RUN_OUT" "THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex OR /tmp/tmux-<uid>"
+  assert_contains "$label is reported" "$RUN_OUT" "$LEAK_BANNER"
   # `+  ` — the two spaces are the rendering: `sed 's/^>/  + /'` over a diff
   # line that already carries `> `. Pinned as-is so a reformat is visible.
   assert_contains "$label names the entry" "$RUN_OUT" "+  $expected"
@@ -471,6 +505,187 @@ test_fingerprint_detects_a_new_claude_projects_entry() {
 
 test_fingerprint_detects_a_new_codex_entry() {
   _assert_leak_is_detected "a new ~/.codex entry" ".codex/leaked" "~/.codex/leaked"
+}
+
+# THE FIFTH ROOT, AND THE ONLY ONE NO FENCE VARIABLE REACHES. `cfprefsd`
+# resolves `UserDefaults(suiteName:)` over XPC, in its own process, so a backing
+# plist lands in the REAL `~/Library/Preferences` however `HOME` and
+# `CFFIXED_USER_HOME` are pointed — which is why the leak ran for months with
+# every other layer green.
+#
+# AND IT IS THE ONLY ROOT WITH A RECLAIMER RATHER THAN A FENCE, because a fence
+# is impossible here: no in-process teardown order can win. Six were measured,
+# ten trials each, and all 60 files were back after the process exited —
+# `cfprefsd` flushes the cached domain when its client disconnects, strictly
+# after every `atexit` handler. So the suite helper's job is to make the files
+# COLLECTABLE (one container, `TBDTests.suites/<label>.<uuid>`) and the
+# wrapper's job is to collect them once the process is gone. These cases drive
+# both halves: the reclaim keeping the count at zero, and the arm seeing what
+# the reclaim could not take.
+#
+# The leaks are FILES rather than directories, because that is what a plist is;
+# see `FAKE_SWIFT_LEAK_FILE` in the stub.
+
+# THE HAPPY PATH, WHICH IS ALSO THE POST-RUN RECLAIM'S OWN CASE. A run whose
+# suites all landed in the container leaves nothing behind and says nothing.
+test_the_container_is_reclaimed_after_the_run() {
+  local fix container; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  RUN_ENV=(FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist")
+  run_wrapper "$fix" --fingerprint
+  RUN_ENV=()
+  assert_ok "a run whose suite files landed in the container is green" "$RUN_RC"
+  assert_missing "and reports nothing" "$RUN_OUT" "THE TEST RUN WROTE INTO"
+  assert_eq "the container is gone afterwards" "false" "$(exists_of "$container")"
+  chmod -R 755 "$fix/tmp" 2>/dev/null
+  rmfix "$fix"
+}
+
+# MUTATION, AND THE ARM'S END-TO-END EVIDENCE IN ONE CASE. Drop the post-run
+# reclaim and the same fixture goes red, with the container's count naming what
+# was left. Deleting the ARM instead would take the case the other way — green,
+# with the files still on disk — which is what makes the pair discriminating.
+test_the_post_run_reclaim_is_load_bearing() {
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mutant="$(mutant_of "$SCRIPT" '/^reclaim_preferences_container "\$preferences_container" "after the run"$/d')"
+  RUN_ENV=(FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist")
+  run_script "$mutant" "$fix" --fingerprint
+  RUN_ENV=()
+  assert_nonzero "without the post-run reclaim the run fails" "$RUN_RC"
+  assert_contains "it is reported" "$RUN_OUT" "$LEAK_BANNER"
+  assert_contains "the container count before is named" "$RUN_OUT" \
+    "-  <preferences>/TBDTests.suites count=0"
+  assert_contains "the container count after is named" "$RUN_OUT" \
+    "+  <preferences>/TBDTests.suites count=1"
+  assert_contains "and the remediation reads the container line" "$RUN_OUT" \
+    "test suites were minted"
+  assert_contains "and says an unlink alone would not have helped" "$RUN_OUT" \
+    "unlinking the file yourself is NOT sufficient"
+  assert_eq "the files are still there to be read" "true" \
+    "$(exists_of "$container/AppState.6F2C1A.plist")"
+  chmod -R 755 "$fix/tmp" 2>/dev/null
+  rmfix "$fix"
+}
+
+# THE PRE-RUN RECLAIM'S OWN CASE, AND IT IS NOT A DUPLICATE OF THE ONE ABOVE.
+# `cfprefsd` writes a run's last domains AFTER that run has exited, so files
+# from somebody else's finished run are a legitimate starting state. They must
+# not be charged to this run.
+test_a_previous_runs_leftovers_do_not_redden_this_run() {
+  local fix container; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mkdir -p "$container"; : > "$container/Leftover.CAFE.plist"
+  run_wrapper "$fix" --fingerprint
+  assert_ok "leftovers from a previous run do not fail this one" "$RUN_RC"
+  assert_missing "and are not reported" "$RUN_OUT" "THE TEST RUN WROTE INTO"
+  assert_eq "they are swept rather than tolerated" "false" "$(exists_of "$container")"
+  rmfix "$fix"
+}
+
+# MUTATION. Drop the pre-run reclaim and the leftovers are counted before the
+# run and swept after it, so the diff reports a REMOVAL — a red run over files
+# this run never created. That is the spurious red the first call exists to
+# prevent, and a guard that reddens spuriously gets switched off within a week.
+test_the_pre_run_reclaim_is_load_bearing() {
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mutant="$(mutant_of "$SCRIPT" '/^reclaim_preferences_container "\$preferences_container" "before the run"$/d')"
+  mkdir -p "$container"; : > "$container/Leftover.CAFE.plist"
+  run_script "$mutant" "$fix" --fingerprint
+  assert_nonzero "without the pre-run reclaim the leftovers fail this run" "$RUN_RC"
+  assert_contains "the count they were counted at is named" "$RUN_OUT" \
+    "-  <preferences>/TBDTests.suites count=1"
+  assert_contains "and the zero they were swept to" "$RUN_OUT" \
+    "+  <preferences>/TBDTests.suites count=0"
+  rmfix "$fix"
+}
+
+# THE OTHER ARM, AND THE ONE NO SWEEP CAN CLEAR. A suite minted with a flat
+# `TBDTests.<something>` name instead of through the helper writes outside the
+# container, where the reclaim deliberately does not reach — it removes one
+# exact path and never a glob. So this is permanent litter, and the arm is the
+# only thing standing between one hand-rolled call site and another half-million
+# files.
+test_fingerprint_detects_a_stray_test_suite_plist() {
+  local fix stray; fix="$(mkfix)"
+  stray="$fix/home/Library/Preferences/TBDTests.HandRolled.6F2C1A.plist"
+  RUN_ENV=(FAKE_SWIFT_LEAK_FILE="$stray")
+  run_wrapper "$fix" --fingerprint
+  RUN_ENV=()
+  assert_nonzero "a stray flat-named suite plist fails the run" "$RUN_RC"
+  assert_contains "it is reported" "$RUN_OUT" "$LEAK_BANNER"
+  assert_contains "the stray count before is named" "$RUN_OUT" \
+    "-  <preferences> stray TBDTests.* count=0"
+  assert_contains "the stray count after is named" "$RUN_OUT" \
+    "+  <preferences> stray TBDTests.* count=1"
+  assert_contains "and the remediation reads the stray line" "$RUN_OUT" \
+    "a suite was minted with a flat name"
+  assert_contains "and the fix is named" "$RUN_OUT" "mint the suite through the Tests/TestSupport"
+  # NOT self-clearing, and the case says so: the reclaim leaves it exactly where
+  # it is, which is why the count does not come back down on the next run.
+  assert_eq "the reclaim does not remove it" "true" "$(exists_of "$stray")"
+  chmod -R 755 "$fix/tmp" 2>/dev/null
+  rmfix "$fix"
+}
+
+# THE NEGATIVE HALF, AND IT IS WHAT KEEPS BOTH ARMS USABLE. `com.apple.*` and
+# every other domain on the box are rewritten continuously while a run is in
+# flight; an arm that reddened on those would be reporting the machine rather
+# than the run, and would be switched off inside a week — the same argument the
+# `~/.claude` and tmux arms are shaped by.
+test_fingerprint_ignores_an_unrelated_preferences_plist() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(FAKE_SWIFT_LEAK_FILE="$fix/home/Library/Preferences/com.acme.someapp.plist")
+  run_wrapper "$fix" --fingerprint
+  RUN_ENV=()
+  assert_ok "a plist outside both patterns passes with detection on" "$RUN_RC"
+  assert_missing "and reports nothing" "$RUN_OUT" "THE TEST RUN WROTE INTO"
+  chmod -R 755 "$fix/tmp" 2>/dev/null
+  rmfix "$fix"
+}
+
+# THE RECLAIM IS THE ONLY THING IN THIS WRAPPER THAT DELETES ANYTHING OUTSIDE
+# ITS OWN SCRATCH DIRS, and it points at a directory inside the developer's real
+# `~/Library/Preferences`. The `case` guard is what bounds the blast radius to
+# one name, so it is exercised directly — through the sourced helper, the way
+# the uid arm is — with a path that is one component short of the container.
+test_the_reclaim_refuses_a_path_outside_the_container() {
+  local fix victim out; fix="$(mkfix)"
+  victim="$fix/home/Library/Preferences"
+  out="$(reclaim_preferences_container "$victim" "a direct call" 2>&1)"
+  assert_contains "a path outside the container is refused" "$out" \
+    "refusing to reclaim '$victim' a direct call"
+  assert_contains "and the refusal says why" "$out" "it does not end"
+  assert_eq "the directory survives" "true" "$(exists_of "$victim")"
+  assert_eq "and so does what was in it" "true" \
+    "$(exists_of "$victim/com.acme.unrelated.plist")"
+
+  # MUTATION. Widen the pattern to accept anything and the same call takes the
+  # whole of `~/Library/Preferences` with it — which is the accident this guard
+  # exists to make impossible.
+  local mutant; mutant="$(mutant_of "$SCRIPT" 's|\*/"\$PREFERENCES_CONTAINER_NAME"\)|*)|')"
+  # shellcheck source=/dev/null
+  ( source "$mutant"; reclaim_preferences_container "$victim" "a direct call" ) >/dev/null 2>&1
+  assert_eq "without the guard the same call removes it" "false" "$(exists_of "$victim")"
+  rmfix "$fix"
+}
+
+# THE NAME IS A CONTRACT BETWEEN THREE FILES, so it is pinned rather than
+# trusted. `TestDefaults.containerName` decides where `cfprefsd` writes; the
+# wrapper deletes that path; the fingerprint counts inside it. A rename in one
+# place alone is silent in the worst way — the reclaim would remove an empty
+# path, the arm would count an empty path, and the files would pile up with
+# every case still green. Pinned as three literals rather than derived, because
+# the two ways to derive it at runtime (reading the Swift file from a script the
+# harness runs mutated copies of; an environment override) are both worse than a
+# case that reddens in the `lint` job. A reformat of the Swift declaration reds
+# this too — that is the cheap direction.
+test_the_container_name_matches_the_swift_helper() {
+  local swift_helper="$HERE/../Tests/TestSupport/UserDefaultsTestSupport.swift"
+  local swift_source; swift_source="$(cat "$swift_helper" 2>/dev/null)"
+  assert_contains "the Swift helper names the container" "$swift_source" \
+    'containerName = "TBDTests.suites"'
+  assert_contains "the wrapper reclaims that name" "$(cat "$SCRIPT")" \
+    'PREFERENCES_CONTAINER_NAME="TBDTests.suites"'
+  assert_contains "and the fingerprint counts inside that name" "$(cat "$FINGERPRINT")" \
+    "prefs_container_name='TBDTests.suites'"
 }
 
 test_fingerprint_passes_on_an_unchanged_tree() {
@@ -520,13 +735,16 @@ test_fingerprint_comparison_is_load_bearing() {
 fingerprint_with_home() { HOME="$1" TMUX_TMPDIR="$1/tmux-tmpdir" bash "$2"; }
 
 # ARMS, NOT ROOTS — the two counts differ and the smaller one is the tempting
-# mistake. There are four roots (`~/tbd`, `~/.claude`, `~/.codex`, the tmux
-# socket dir) but SIX arms, because `~/.claude` and `~/.codex` are each read
-# twice: a `-maxdepth 1` pass over the store itself, then a second pass at a
-# nested directory the depth limit puts out of the first one's reach. An arm
-# with no assertion here can be deleted wholesale and this file stays green —
-# that is how the `~/.codex/plugins/cache` arm went untested — so the
-# enumeration IS the coverage. Count in arms, and add a line when you add one.
+# mistake. There are five roots (`~/tbd`, `~/.claude`, `~/.codex`, the tmux
+# socket dir, `~/Library/Preferences`) but EIGHT arms. `~/.claude` and
+# `~/.codex` are each read twice: a `-maxdepth 1` pass over the store itself,
+# then a second pass at a nested directory the depth limit puts out of the
+# first one's reach. `~/Library/Preferences` is read twice for a different
+# reason — the container and the strays outside it are different questions with
+# different answers, one self-clearing and one not. An arm with no assertion
+# here can be deleted wholesale and this file stays green — that is how the
+# `~/.codex/plugins/cache` arm went untested — so the enumeration IS the
+# coverage. Count in arms, and add a line when you add one.
 test_fingerprint_script_covers_every_arm() {
   local d; d="$(mktmpd)"
   local out; out="$(fingerprint_with_home "$d" "$FINGERPRINT")"
@@ -536,6 +754,16 @@ test_fingerprint_script_covers_every_arm() {
   assert_contains "absent ~/.codex is a marker" "$out" "~/.codex <absent>"
   assert_contains "absent ~/.codex/plugins/cache is a marker" "$out" "~/.codex/plugins/cache <absent>"
   assert_contains "absent socket dir is a marker" "$out" "<tmux-sockets> <absent>"
+  # THE TWO PREFERENCES ARMS COUNT INSTEAD OF MARKING, and an absent directory
+  # reads `count=0` rather than `<absent>`. That is deliberate: the reclaim's
+  # success IS the container being gone, so `<absent>` would be the steady
+  # state, and an empty container — a concurrent run that minted one and leaked
+  # nothing — would then differ from an absent one and redden a run that did
+  # nothing wrong. Absent and empty are the same fact, so they get the same line.
+  assert_contains "an absent container counts zero" "$out" \
+    "<preferences>/TBDTests.suites count=0"
+  assert_contains "an absent preferences dir has no strays" "$out" \
+    "<preferences> stray TBDTests.* count=0"
   rmfix "$d"
 }
 
@@ -573,6 +801,72 @@ test_fingerprint_script_sees_a_claude_projects_entry() {
   assert_eq "without the projects arm the snapshots are identical" "$mutant_before" "$mutant_after"
   rmfix "$fix"
 }
+
+# WHICH ARM CAUGHT IT. The end-to-end cases above cannot say — one over-broad
+# arm would satisfy them all — so each preferences arm is deleted in turn here
+# and the two snapshots must become identical without it.
+
+test_fingerprint_script_sees_a_file_in_the_container() {
+  local fix container; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  # MUTATION: point this arm's existence test at a path that never exists, so
+  # it always takes the zero branch and its line stops varying.
+  local no_arm; no_arm="$(mutant_of "$FINGERPRINT" 's|-d "\$prefs_container"|-d "/no/such/path"|')"
+  local before mutant_before
+  before="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  mutant_before="$(fingerprint_with_home "$fix/home" "$no_arm")"
+  # AN EMPTY CONTAINER IS NOT A LEAK. A concurrent run mints the directory
+  # without leaving anything in it, and reddening on that would report the
+  # machine rather than the run.
+  mkdir -p "$container"
+  local empty; empty="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  # NARROWED TO `*.plist`, so a temp file one of ~40 concurrent worktrees'
+  # cfprefsd is midway through writing is not read as a leak. The reclaim
+  # removes it regardless — it deletes the directory wholesale — so this
+  # narrowing costs coverage of nothing that outlives a run.
+  : > "$container/half-written.plist.tmp"
+  local nonplist; nonplist="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  : > "$container/SomeSuite.0F1E2D.plist"
+  local after mutant_after
+  after="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  mutant_after="$(fingerprint_with_home "$fix/home" "$no_arm")"
+  assert_contains "an absent container reads count=0" "$before" \
+    "<preferences>/TBDTests.suites count=0"
+  assert_eq "an empty container reads the same as an absent one" "$before" "$empty"
+  assert_eq "a non-plist entry does not move the count" "$before" "$nonplist"
+  assert_contains "a suite plist in the container reads count=1" "$after" \
+    "<preferences>/TBDTests.suites count=1"
+  assert_eq "without the arm the snapshots are identical" "$mutant_before" "$mutant_after"
+  rmfix "$fix"
+}
+
+# The second preferences arm, and the legs are what separate it from an arm
+# that counts everything: an unrelated domain must not move it, and the
+# container directory itself must not be counted as one of the strays it sits
+# among — otherwise the count flips 0↔1 as concurrent runs mint and reclaim it.
+test_fingerprint_script_sees_a_stray_test_suite_plist() {
+  local fix; fix="$(mkfix)"
+  # MUTATION: the stray arm's own existence test, which is a different `-d`
+  # from the container arm's.
+  local no_arm; no_arm="$(mutant_of "$FINGERPRINT" 's|-d "\$real_prefs"|-d "/no/such/path"|')"
+  local before mutant_before
+  before="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  mutant_before="$(fingerprint_with_home "$fix/home" "$no_arm")"
+  : > "$fix/home/Library/Preferences/com.acme.another.plist"
+  mkdir -p "$(prefs_container_of "$fix")"
+  local unrelated; unrelated="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  : > "$fix/home/Library/Preferences/TBDTests.HandRolled.0F1E2D.plist"
+  local after mutant_after
+  after="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  mutant_after="$(fingerprint_with_home "$fix/home" "$no_arm")"
+  assert_contains "no strays reads count=0" "$before" "<preferences> stray TBDTests.* count=0"
+  assert_eq "an unrelated domain and the container itself move nothing" \
+    "$before" "$unrelated"
+  assert_contains "a flat-named suite plist reads count=1" "$after" \
+    "<preferences> stray TBDTests.* count=1"
+  assert_eq "without the arm the snapshots are identical" "$mutant_before" "$mutant_after"
+  rmfix "$fix"
+}
+
 
 test_fingerprint_script_prunes_volatile_runtime_contents() {
   local fix; fix="$(mkfix)"
@@ -903,8 +1197,7 @@ test_fingerprint_detects_a_leaked_tmux_socket() {
   run_wrapper "$fix" --fingerprint
   RUN_ENV=()
   assert_nonzero "a leaked tmux socket fails the run" "$RUN_RC"
-  assert_contains "it is reported" "$RUN_OUT" \
-    "THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex OR /tmp/tmux-<uid>"
+  assert_contains "it is reported" "$RUN_OUT" "$LEAK_BANNER"
   assert_contains "the entry is named" "$RUN_OUT" "+  <tmux-sockets>/tbd-leaked-socket"
   assert_contains "and the fix is named" "$RUN_OUT" "the fix is TMUX_TMPDIR"
   rmfix "$fix"

@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 import TBDShared
 @testable import TBDApp
@@ -15,9 +16,9 @@ import TBDShared
 @Suite("AppState UserDefaults isolation")
 struct AppStateUserDefaultsIsolationTests {
     private func withIsolatedDefaults(_ body: (UserDefaults) -> Void) {
-        let suiteName = "TBDAppTests.AppStateIsolation.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("AppStateIsolation")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         body(defaults)
     }
 

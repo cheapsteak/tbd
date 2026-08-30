@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDApp
 import TBDShared
 
@@ -17,9 +18,9 @@ private func writeSavedSelection(_ ids: [UUID], to defaults: UserDefaults) {
 @Suite("Selection Persistence")
 struct SelectionPersistenceTests {
     private func withIsolatedDefaults(_ body: (UserDefaults) -> Void) {
-        let suiteName = "TBDAppTests.SelectionPersistence.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("SelectionPersistence")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         body(defaults)
     }
 
