@@ -425,6 +425,7 @@ public final class Daemon: Sendable {
     /// (`start()`) never passes either and behavior there is unchanged.
     static func makeRemoteProviderManager(
         database: TBDDatabase, subs: StateSubscriptionManager, actuationLog: ActuationLog,
+        peerBridging: PeerBridgeWiring? = nil,
         registryURL: URL = URL(fileURLWithPath: TBDConstants.agentProvidersPath),
         subprocess: any RemoteProviderInvoking = ProviderRunner(),
         resolveClaudeExecutable: () throws -> String = { try ClaudeExecutableResolver.resolve() }
@@ -460,8 +461,64 @@ public final class Daemon: Sendable {
             runner: ProviderDispatcher(subprocess: subprocess, builtIns: builtIns),
             registryURL: registryURL,
             actuationLog: actuationLog,
-            builtInProviders: builtInConfigs)
+            builtInProviders: builtInConfigs,
+            peerBridging: peerBridging)
         return (manager, !builtIns.isEmpty)
+    }
+
+    /// Everything a peer-messaging bridge needs, assembled at the one place the
+    /// daemon knows all of it.
+    ///
+    /// The gate itself is NOT here. `remote_peer_messaging_enabled` is read
+    /// through `isEnabled`, at the moment a provider's streams are armed, next
+    /// to the `events` capability gate it mirrors — so a provider that declares
+    /// `messages` while the flag is off gets nothing built at all: no helper
+    /// spawned, no record published, no stream opened. What this function
+    /// decides is only *how* to build one when both gates pass.
+    ///
+    /// The scope closure is the design's outward scoping rule, expressed once:
+    /// TBD's own sessions are announced to a provider only for the
+    /// repositories that provider actually hosts sessions in, so a remote lane
+    /// in one project can never reach local sessions in another.
+    static func makePeerBridging(
+        database: TBDDatabase,
+        roster: PeerRosterRunner,
+        bridges: ShadowPeerBridgeRegistry,
+        sessionsDirectory: URL,
+        origin: String = PeerLinkOrigin.local()
+    ) -> PeerBridgeWiring {
+        PeerBridgeWiring(
+            isEnabled: {
+                let config = try? await database.config.get()
+                return config?.remotePeerMessagingEnabled
+                    ?? Config.remotePeerMessagingDefault
+            },
+            make: { config, contractVersion in
+                let bridge = PeerBridge.make(
+                    config: config,
+                    contractVersion: contractVersion,
+                    origin: origin,
+                    siteResolver: WorktreeShadowPeerSiteResolver(
+                        provider: config.name,
+                        worktrees: database.worktrees,
+                        repos: database.repos),
+                    // The real ledger, never `UnrecordedShadowPeerArtifacts`: a
+                    // shadow published through that recorder is one nothing can
+                    // recognise afterwards, so its helper, socket and record
+                    // would be unreclaimable by construction.
+                    artifactRecorder: database.shadowPeerArtifacts,
+                    sessionsDirectory: sessionsDirectory,
+                    roster: roster,
+                    bridges: bridges,
+                    repoScope: {
+                        let rows =
+                            (try? await database.worktrees.list(excludeArchived: true)) ?? []
+                        return Set(rows.compactMap { row in
+                            row.providerBinding?.provider == config.name ? row.repoID : nil
+                        })
+                    })
+                return bridge
+            })
     }
 
     /// Recreate the base scratch directory if it's missing. Safe to call every startup.
@@ -673,8 +730,28 @@ public final class Daemon: Sendable {
         var remoteManager: RemoteProviderManager?
         var claudeCloudLive = false
         if mockMode == nil {
+            // The reclaimer's registry and the outward roster are built HERE,
+            // ahead of the provider manager, because a peer bridge needs both
+            // at construction and the manager is what constructs one. The
+            // reconciler that reads the registry is armed later (step
+            // 11a-shadow) off this same instance — two registries would mean a
+            // sweep that could never see a live shadow and would count every
+            // row as unvouched-for.
+            let bridgeRegistry = ShadowPeerBridgeRegistry()
+            self.shadowPeerBridges = bridgeRegistry
+            let peerRecordStore = ShadowPeerRecordStore()
+            let peerRoster = PeerRosterRunner(roster: RosterWatcher(
+                sessionsDirectory: peerRecordStore.sessionsDirectory,
+                sessions: DatabaseLocalSessionDirectory(
+                    worktrees: database.worktrees, terminals: database.terminals),
+                origin: PeerLinkOrigin.local()))
             let outcome = await Self.makeRemoteProviderManager(
-                database: database, subs: subs, actuationLog: actuationLog)
+                database: database, subs: subs, actuationLog: actuationLog,
+                peerBridging: Self.makePeerBridging(
+                    database: database,
+                    roster: peerRoster,
+                    bridges: bridgeRegistry,
+                    sessionsDirectory: peerRecordStore.sessionsDirectory))
             remoteManager = outcome.manager
             claudeCloudLive = outcome.claudeCloudLive
             self.remoteManager = outcome.manager
@@ -950,11 +1027,20 @@ public final class Daemon: Sendable {
             // empty on any install that never published a shadow, and gating it
             // would strand every artifact the moment somebody turned the
             // feature off.
-            let shadowPeerBridges = ShadowPeerBridgeRegistry()
+            // The instance the provider manager's bridges register with, built
+            // above alongside them. The fallback constructs an empty registry
+            // rather than trapping — it is unreachable while both halves sit
+            // under this same `mockMode == nil` guard, and a daemon that
+            // refused to boot over a wiring slip would be worse than one whose
+            // sweep is conservative.
+            let shadowPeerBridges = self.shadowPeerBridges ?? ShadowPeerBridgeRegistry()
             self.shadowPeerBridges = shadowPeerBridges
             let shadowPeerReconciler = ShadowPeerReconciler(
                 artifacts: database.shadowPeerArtifacts, bridges: shadowPeerBridges)
             self.shadowPeerReconciler = shadowPeerReconciler
+            // `peer.status` reports what the last sweep found. Read-only: no
+            // RPC triggers or steers a sweep.
+            rpcRouter.shadowPeerReconciler = shadowPeerReconciler
             self.shadowPeerReconcilerTask = Task { await shadowPeerReconciler.run() }
 
             // 11a-gc. Orphan maintenance: reap abandoned agent worktrees + scratchpads

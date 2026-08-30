@@ -84,6 +84,49 @@ struct PeerListTests {
         return fields
     }
 
+    /// One row of the durable shadow-peer ledger, as `peer.status` hands it
+    /// over. **This is the only thing that makes a record a shadow**, so every
+    /// shadow fixture below has to build one.
+    private static func shadowRow(
+        pid: Int32,
+        provider: String = "acme-cloud",
+        handle: String = "h-abc",
+        name: String,
+        remoteSessionID: String?,
+        live: Bool = true
+    ) -> PeerShadowArtifactRow {
+        PeerShadowArtifactRow(
+            pid: pid,
+            provider: provider,
+            handle: handle,
+            name: name,
+            recordSessionID: "record-\(pid)",
+            remoteSessionID: remoteSessionID,
+            socketPath: "/opt/peertest/socks/\(pid).sock",
+            recordPath: "\(registryPath)/\(pid).json",
+            daemonGeneration: "gen-1",
+            publishedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            live: live)
+    }
+
+    private static func bridge(
+        messagingEnabled: Bool = true,
+        providers: [PeerProviderBridgeStatus] = [
+            PeerProviderBridgeStatus(
+                provider: "acme-cloud", declaresMessages: true, bridged: true,
+                linkState: "up")
+        ],
+        shadows: [PeerShadowArtifactRow] = [],
+        lastSweep: PeerShadowSweep? = nil
+    ) -> PeerBridgeStatus {
+        PeerBridgeStatus(
+            messagingEnabled: messagingEnabled,
+            remoteBackendsLive: true,
+            providers: providers,
+            shadows: shadows,
+            lastSweep: lastSweep)
+    }
+
     /// Compose against a fleet, with every pid alive and every advertised
     /// socket present unless the test says otherwise.
     private static func compose(
@@ -191,13 +234,16 @@ struct PeerListTests {
 
     // MARK: - Shadow rows
 
-    @Test func shadowRowNamesTheProviderSessionAndSaysItsLinkIsUnknown() throws {
+    /// A shadow is recognised by a pid lookup in TBD's own ledger, and the
+    /// remote session it stands for and the state of its link both come off
+    /// that answer rather than out of the record.
+    @Test func shadowRowNamesTheProviderSessionAndItsLinkState() throws {
         let remote = Self.worktree(
             displayName: "api-lane",
             path: "",
             location: .remote(provider: "acme-cloud", sessionID: "sess-42"))
-        // A shadow carries no `tmux` key by construction, and its name is the
-        // one TBD composed from the worktree row above.
+        // A shadow carries no `tmux` key by construction, and no marker of
+        // TBD's either — the ledger row below is the whole recognition.
         let scan = PeerRegistryScan(entries: [
             PeerRegistryEntry(pid: 5001, record: try Self.record(Self.liveSessionFields(
                 cwd: Self.laneAPath, name: "acme-cloud:api-lane",
@@ -205,13 +251,21 @@ struct PeerListTests {
         ])
 
         let result = Self.compose(
-            scan: scan, fleet: PeerListFleet(reachable: true, worktrees: [remote]))
+            scan: scan,
+            fleet: PeerListFleet(
+                reachable: true, worktrees: [remote],
+                bridge: Self.bridge(shadows: [Self.shadowRow(
+                    pid: 5001, name: "acme-cloud:api-lane",
+                    remoteSessionID: "sess-42")])))
 
         let row = try #require(result.peers.first)
         #expect(row.kind == .shadow)
         #expect(row.provider == "acme-cloud")
         #expect(row.providerSessionID == "sess-42")
-        #expect(row.linkState == PeerRow.unknownLinkState)
+        #expect(row.linkState == "up")
+        // The remote session id is an identity join back to the lane, not a
+        // name match.
+        #expect(row.worktreeID == remote.id)
         // A shadow is not a local lane: it has no terminal and no pane, and the
         // listing must not invent either.
         #expect(row.terminalID == nil)
@@ -219,16 +273,15 @@ struct PeerListTests {
 
         let behind = peerBehindColumn(row)
         #expect(behind.contains("acme-cloud session sess-42"))
-        #expect(behind.contains("link unknown"))
-
-        // The gap is stated rather than papered over.
-        #expect(result.warnings.contains { $0.contains("link state is not reported") })
+        #expect(behind.contains("link up"))
     }
 
-    /// The `tmux` key is what tells a shadow from a local row that happens to
-    /// be named like one. A record carrying remote coordinates would look
-    /// joinable against local panes, so it is never treated as a shadow.
-    @Test func aRecordCarryingTmuxIsNeverTreatedAsAShadow() throws {
+    /// **The mutation check on the classification.** The old rule was a name
+    /// match: a record with no `tmux` whose name composed back to a remote
+    /// worktree was called a shadow. That rule cannot tell a real shadow from
+    /// anything else publishing a record under the same name, so it is gone —
+    /// and this is the fixture it used to accept.
+    @Test func aRecordNamedLikeAShadowIsNotOneWithoutALedgerRow() throws {
         let remote = Self.worktree(
             displayName: "api-lane",
             path: "",
@@ -236,15 +289,71 @@ struct PeerListTests {
         let scan = PeerRegistryScan(entries: [
             PeerRegistryEntry(pid: 5002, record: try Self.record(Self.liveSessionFields(
                 cwd: "/opt/peertest/elsewhere", name: "acme-cloud:api-lane",
-                pane: "%9", socket: "/opt/peertest/socks/5002.sock")))
+                pane: nil, socket: "/opt/peertest/socks/5002.sock")))
+        ])
+
+        let result = Self.compose(
+            scan: scan,
+            fleet: PeerListFleet(
+                reachable: true, worktrees: [remote], bridge: Self.bridge()))
+
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .external)
+        #expect(row.provider == nil)
+    }
+
+    /// A daemon that cannot answer `peer.status` leaves every shadow
+    /// unrecognisable, and the listing says so rather than quietly downgrading
+    /// a live shadow to an ordinary peer.
+    @Test func withNoLedgerAnswerNoRowIsCalledAShadow() throws {
+        let remote = Self.worktree(
+            displayName: "api-lane",
+            path: "",
+            location: .remote(provider: "acme-cloud", sessionID: "sess-42"))
+        let scan = PeerRegistryScan(entries: [
+            PeerRegistryEntry(pid: 5003, record: try Self.record(Self.liveSessionFields(
+                cwd: Self.laneAPath, name: "acme-cloud:api-lane",
+                pane: nil, socket: "/opt/peertest/socks/5003.sock")))
         ])
 
         let result = Self.compose(
             scan: scan, fleet: PeerListFleet(reachable: true, worktrees: [remote]))
 
-        let row = try #require(result.peers.first)
-        #expect(row.kind == .external)
-        #expect(row.provider == nil)
+        #expect(result.peers.first?.kind == .external)
+        #expect(result.warnings.contains { $0.contains("did not answer peer.status") })
+    }
+
+    /// The stale-shim answer. An old shim never declares `messages`, so TBD
+    /// never invokes it — and the whole feature then does nothing, silently.
+    /// With the flag on, that silence is a line somebody reads.
+    @Test func aProviderThatDoesNotDeclareMessagesIsNamed() {
+        let result = Self.compose(
+            scan: PeerRegistryScan(),
+            fleet: PeerListFleet(
+                reachable: true,
+                remotePeerMessagingEnabled: true,
+                bridge: Self.bridge(providers: [
+                    PeerProviderBridgeStatus(
+                        provider: "old-shim", declaresMessages: false, bridged: false)
+                ])))
+
+        #expect(result.warnings.contains {
+            $0.contains("old-shim") && $0.contains("`messages`")
+        })
+    }
+
+    /// The mirror image: a provider that does declare it and is bridged draws
+    /// no complaint. Without this, a warning that fired unconditionally would
+    /// pass the test above and mean nothing.
+    @Test func aBridgedProviderDrawsNoStaleShimWarning() {
+        let result = Self.compose(
+            scan: PeerRegistryScan(),
+            fleet: PeerListFleet(
+                reachable: true,
+                remotePeerMessagingEnabled: true,
+                bridge: Self.bridge()))
+
+        #expect(!result.warnings.contains { $0.contains("`messages`") })
     }
 
     // MARK: - External rows
@@ -426,7 +535,9 @@ struct PeerListTests {
         let result = Self.compose(
             scan: scan,
             fleet: PeerListFleet(
-                reachable: true, worktrees: [worktree, remote], terminals: [terminal]),
+                reachable: true, worktrees: [worktree, remote], terminals: [terminal],
+                bridge: Self.bridge(shadows: [Self.shadowRow(
+                    pid: 9002, name: "acme-cloud:api-lane", remoteSessionID: "sess-1")])),
             socketFilesOnDisk: [
                 "/opt/peertest/socks/9001.sock",
                 "/opt/peertest/socks/9002.sock",
@@ -480,7 +591,9 @@ struct PeerListTests {
         let result = Self.compose(
             scan: scan,
             fleet: PeerListFleet(
-                reachable: true, worktrees: [worktree, remote], terminals: [terminal]))
+                reachable: true, worktrees: [worktree, remote], terminals: [terminal],
+                bridge: Self.bridge(shadows: [Self.shadowRow(
+                    pid: 2, name: "acme-cloud:api-lane", remoteSessionID: "sess-1")])))
 
         #expect(result.peers.map(\.kind) == [.local, .shadow, .external])
     }

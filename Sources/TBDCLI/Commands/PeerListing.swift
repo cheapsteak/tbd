@@ -165,6 +165,12 @@ struct PeerListFleet: Equatable, Sendable {
     /// or nil when the config could not be read. Nil is not "off" — the whole
     /// point of that tri-state column is that nobody has to guess.
     var remotePeerMessagingEnabled: Bool?
+    /// The daemon's answer to `peer.status`: the durable shadow-peer ledger,
+    /// each provider's link state, and whether each provider declared the
+    /// `messages` capability. Nil when the daemon did not answer that call —
+    /// an older daemon, or one that refused it — which narrows the listing
+    /// (shadows fall back to being unrecognisable) rather than failing it.
+    var bridge: PeerBridgeStatus?
     /// Why the daemon did not answer, when it did not. Carried so the warning
     /// can name the cause: "the daemon is not running" and "the daemon refused
     /// this call" send an operator to different places.
@@ -175,12 +181,14 @@ struct PeerListFleet: Equatable, Sendable {
         worktrees: [Worktree] = [],
         terminals: [Terminal] = [],
         remotePeerMessagingEnabled: Bool? = nil,
+        bridge: PeerBridgeStatus? = nil,
         unreachableReason: String? = nil
     ) {
         self.reachable = reachable
         self.worktrees = worktrees
         self.terminals = terminals
         self.remotePeerMessagingEnabled = remotePeerMessagingEnabled
+        self.bridge = bridge
         self.unreachableReason = unreachableReason
     }
 
@@ -270,11 +278,17 @@ struct PeerRow: Encodable, Equatable, Sendable {
 
     // Shadow rows: the provider session behind the shadow, and the link state.
     let provider: String?
+    /// The **remote** session this shadow stands for, as the daemon's live link
+    /// reports it. Nil when no live link vouches for the row — a shadow left
+    /// over from a link that has since dropped, awaiting the sweep. Never
+    /// filled in from the ledger's own `recordSessionID`, which is the id of
+    /// the record published on *this* machine and names a different thing.
     let providerSessionID: String?
-    /// Always `"unknown"` today: the daemon exposes no peer-link state over
-    /// RPC, so a shadow's link cannot be reported. Carried as a field rather
-    /// than omitted so that the day it can be reported, the shape does not
-    /// change under a program already reading it.
+    /// `"up"` / `"down"` from `peer.status`, or `"unknown"` when the daemon did
+    /// not answer that call — an older daemon, or one that refused it. Never a
+    /// guess: a shadow whose link state cannot be established says so, because
+    /// the whole cost of a stale link is a peer that lies about being
+    /// reachable.
     let linkState: String?
 
     /// The name a nameless record is listed under. Deliberately not a guess at
@@ -347,6 +361,11 @@ struct PeerListResult: Encodable, Equatable, Sendable {
     /// The resolved `remote_peer_messaging_enabled` gate, or nil when the
     /// config could not be read.
     let remotePeerMessagingEnabled: Bool?
+    /// What the last `ShadowPeerReconciler` pass found, or nil when the daemon
+    /// has not swept in this lifetime (or did not answer). Reported because
+    /// every unbounded leak in this repo's history went unnoticed for want of
+    /// a count somebody could read.
+    let lastSweep: PeerShadowSweep?
 }
 
 // MARK: - Composition
@@ -434,8 +453,9 @@ func composePeerListing(
         registryPath: registryPath,
         peers: peers,
         orphans: orphans,
-        warnings: peerListingWarnings(scan: scan, fleet: fleet, peers: peers),
-        remotePeerMessagingEnabled: fleet.remotePeerMessagingEnabled)
+        warnings: peerListingWarnings(scan: scan, fleet: fleet),
+        remotePeerMessagingEnabled: fleet.remotePeerMessagingEnabled,
+        lastSweep: fleet.bridge?.lastSweep)
 }
 
 /// The joins, over TBD's own rows.
@@ -451,15 +471,29 @@ private struct PeerFleetIndex {
     private let worktreesByID: [UUID: Worktree]
     /// (worktree, normalised pane) → terminal.
     private let terminalsByWorktreeAndPane: [PaneKey: Terminal]
-    /// `<provider>:<display name>` → the worktree row that composed it. TBD
-    /// composes a shadow's name from a worktree row it owns
-    /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Addressing
-    /// and naming"), so the name joins back to that row.
-    private let remoteWorktreesByComposedName: [String: Worktree]
+    /// Helper pid → the shadow-peer ledger row filed under it. **This is the
+    /// whole of how a shadow is recognised**, and it is TBD's own durable
+    /// bookkeeping rather than an inference: a shadow's record carries no field
+    /// Claude Code does not define (an unknown key was measured to make a
+    /// record invisible to every listing), so there is nothing inside one to
+    /// look for, and a path tells you nothing either.
+    private let shadowRowsByPID: [pid_t: PeerShadowArtifactRow]
+    /// The link state the daemon reported per provider, so a shadow row can
+    /// name its link without the listing inferring one.
+    private let linkStateByProvider: [String: String]
+    /// `(provider, remote session id)` → the worktree row TBD adopted that
+    /// session into. An identity join on the key TBD itself stored, never a
+    /// join on a composed name.
+    private let remoteWorktreesByProviderSession: [ProviderSessionKey: Worktree]
 
     private struct PaneKey: Hashable {
         let worktreeID: UUID
         let pane: String
+    }
+
+    private struct ProviderSessionKey: Hashable {
+        let provider: String
+        let sessionID: String
     }
 
     init(fleet: PeerListFleet) {
@@ -482,19 +516,31 @@ private struct PeerFleetIndex {
 
         var byPath: [String: Worktree] = [:]
         var byID: [UUID: Worktree] = [:]
-        var byComposedName: [String: Worktree] = [:]
+        var byProviderSession: [ProviderSessionKey: Worktree] = [:]
         for worktree in fleet.worktrees {
             let path = PeerJoinKeys.normalizedPath(worktree.localPath)
             if byPath[path] == nil { byPath[path] = worktree }
             byID[worktree.id] = worktree
             if let binding = worktree.providerBinding {
-                let composed = "\(binding.provider):\(worktree.displayName)"
-                if byComposedName[composed] == nil { byComposedName[composed] = worktree }
+                let key = ProviderSessionKey(
+                    provider: binding.provider, sessionID: binding.sessionID)
+                if byProviderSession[key] == nil { byProviderSession[key] = worktree }
             }
         }
         self.worktreesByPath = byPath
         self.worktreesByID = byID
-        self.remoteWorktreesByComposedName = byComposedName
+        self.remoteWorktreesByProviderSession = byProviderSession
+
+        var shadowRows: [pid_t: PeerShadowArtifactRow] = [:]
+        var linkStates: [String: String] = [:]
+        for row in fleet.bridge?.shadows ?? [] {
+            shadowRows[pid_t(row.pid)] = row
+        }
+        for provider in fleet.bridge?.providers ?? [] {
+            if let state = provider.linkState { linkStates[provider.provider] = state }
+        }
+        self.shadowRowsByPID = shadowRows
+        self.linkStateByProvider = linkStates
     }
 
     func row(for entry: PeerRegistryEntry, socketExists: (String) -> Bool) -> PeerRow {
@@ -504,28 +550,33 @@ private struct PeerFleetIndex {
         var kind = PeerRowKind.unattributed
         var worktree: Worktree?
         var terminal: Terminal?
+        var provider: String?
+        var providerSessionID: String?
+        var linkState: String?
 
         if reachable {
-            if let joined = localTerminal(for: record) {
+            // **The ledger is asked first**, and it is the only thing that can
+            // answer. A shadow's record is indistinguishable from any other
+            // session's by construction — TBD may put no marker inside one —
+            // so recognition comes from TBD's own durable bookkeeping, keyed on
+            // the pid the record's filename already names.
+            if let row = shadowRowsByPID[entry.pid] {
+                kind = .shadow
+                provider = row.provider
+                providerSessionID = row.remoteSessionID
+                linkState = linkStateByProvider[row.provider] ?? PeerRow.unknownLinkState
+                if let sessionID = row.remoteSessionID {
+                    worktree = remoteWorktreesByProviderSession[ProviderSessionKey(
+                        provider: row.provider, sessionID: sessionID)]
+                }
+            } else if let joined = localTerminal(for: record) {
                 kind = .local
                 terminal = joined
                 worktree = worktreesByID[joined.worktreeID]
-            } else if let shadowed = shadowWorktree(for: record) {
-                kind = .shadow
-                worktree = shadowed
             } else {
                 kind = .external
             }
         }
-
-        var provider: String?
-        var providerSessionID: String?
-        var linkState: String?
-        if kind == .shadow, let binding = worktree?.providerBinding {
-            provider = binding.provider
-            providerSessionID = binding.sessionID
-        }
-        if kind == .shadow { linkState = PeerRow.unknownLinkState }
 
         // Set for a shadow as well as for a local row: a shadow was sited into
         // a worktree TBD adopted, and naming it is how an operator gets from a
@@ -580,39 +631,11 @@ private struct PeerFleetIndex {
         else { return nil }
         return terminalsByWorktreeAndPane[PaneKey(worktreeID: worktree.id, pane: pane)]
     }
-
-    /// The shadow join.
-    ///
-    /// Two conditions, and both are needed. A shadow **MUST NOT** carry a
-    /// `tmux` field — remote coordinates would look joinable against local
-    /// panes and would join to the wrong terminal — so a record carrying one is
-    /// not a shadow whatever it is called. And a shadow's name is
-    /// `<provider>:<worktree display name>`, composed by TBD from a worktree
-    /// row it owns, so the name joins back to that row's provider binding.
-    ///
-    /// **This is weaker than the recognition `ShadowPeerReconciler` uses, and
-    /// deliberately so.** The design's rule is that TBD identifies its own
-    /// shadows *only* from its own durable bookkeeping — the pid-keyed process,
-    /// socket and record whitelist `ShadowPeerArtifactStore` holds — and the
-    /// daemon exposes none of that over RPC today, while the CLI reaches the
-    /// daemon over a socket and never opens its database. What this join uses
-    /// instead is still TBD's own data (a worktree row and its provider
-    /// binding), never a marker inside the record and never a path sniff; what
-    /// it cannot do is tell a real shadow from something else publishing a
-    /// record under the same composed name. This is a listing that reclaims
-    /// nothing, so the cost of that gap is a mislabelled row rather than a
-    /// deleted listener — and it closes the day an RPC hands the CLI that
-    /// whitelist, at which point the classification becomes a pid lookup and
-    /// `provider` / `providerSessionID` come off the artifact row directly.
-    private func shadowWorktree(for record: PeerRegistryRecord) -> Worktree? {
-        guard record.tmux == nil, let name = nonEmptyPeerField(record.name) else { return nil }
-        return remoteWorktreesByComposedName[name]
-    }
 }
 
 /// Everything the listing could not establish, said out loud.
 private func peerListingWarnings(
-    scan: PeerRegistryScan, fleet: PeerListFleet, peers: [PeerRow]
+    scan: PeerRegistryScan, fleet: PeerListFleet
 ) -> [String] {
     var warnings: [String] = []
     if scan.directoryUnreadable {
@@ -628,11 +651,12 @@ private func peerListingWarnings(
             worktree, terminal or remote session. Every row below is listed unattributed.
             """)
     }
-    if peers.contains(where: { $0.kind == .shadow }) {
+    if fleet.reachable, fleet.bridge == nil {
         warnings.append("""
-            link state is not reported: the daemon exposes no peer-link state over RPC, \
-            so a shadow row names the remote session it stands for but not whether its \
-            link is up.
+            the daemon did not answer peer.status, so no shadow peer could be recognised \
+            and no link state could be reported. A shadow is recognised only from TBD's \
+            own durable bookkeeping — its record carries no marker of TBD's — so without \
+            that answer a live shadow lists as an ordinary external peer.
             """)
     }
     if fleet.remotePeerMessagingEnabled == false {
@@ -640,6 +664,56 @@ private func peerListingWarnings(
             remote peer messaging is off (config remote_peer_messaging_enabled), so TBD \
             publishes no shadow peers — a fleet with remote sessions still lists none here.
             """)
+    }
+    // The stale-shim answer. An old shim never declares `messages`, so TBD
+    // never invokes it and the feature simply does nothing — which is the
+    // failure this contract's users have been bitten by before, and the reason
+    // the silence is answered here rather than accepted.
+    if let bridge = fleet.bridge, bridge.messagingEnabled {
+        let silent = bridge.providers
+            .filter { !$0.declaresMessages }
+            .map(\.provider)
+            .sorted()
+        if !silent.isEmpty {
+            warnings.append("""
+                remote peer messaging is on, but \(silent.joined(separator: ", ")) \
+                \(silent.count == 1 ? "does" : "do") not declare the `messages` \
+                capability, so TBD opens no stream to \
+                \(silent.count == 1 ? "it" : "them") and mirrors none of \
+                \(silent.count == 1 ? "its" : "their") sessions. That shim predates \
+                remote peer messaging; update it.
+                """)
+        }
+        let gated = bridge.providers
+            .filter { $0.declaresMessages && !$0.bridged }
+            .map(\.provider)
+            .sorted()
+        if !gated.isEmpty {
+            warnings.append("""
+                \(gated.joined(separator: ", ")) \
+                \(gated.count == 1 ? "declares" : "declare") the `messages` capability \
+                and \(gated.count == 1 ? "has" : "have") no bridge running. The gate is \
+                read when a provider's streams are armed, so a flag turned on since then \
+                takes effect at the next daemon restart.
+                """)
+        }
+        for provider in bridge.providers where !provider.unmirroredHandles.isEmpty {
+            warnings.append("""
+                \(provider.provider) announced \(provider.unmirroredHandles.count) peer(s) \
+                TBD could not site and therefore did not mirror: a `peer` line carrying no \
+                session id, or one naming a session TBD adopted no worktree row for.
+                """)
+        }
+        for provider in bridge.providers
+        where !provider.inventorySurplus.isEmpty || !provider.inventoryMissing.isEmpty {
+            warnings.append("""
+                \(provider.provider)'s own peer inventory diverges from what TBD asked it \
+                to publish: \(provider.inventorySurplus.count) it publishes that TBD did \
+                not ask for, \(provider.inventoryMissing.count) TBD asked for that it does \
+                not publish. TBD cannot sweep the far host; this difference is the only \
+                view of its hygiene.
+                """)
+        }
     }
     return warnings
 }
@@ -678,6 +752,18 @@ func renderPeerListing(_ result: PeerListResult) -> String {
             lines.append(
                 "  \(orphan.kind.label)  \(abbreviatedPeerPath(orphan.path)) — \(orphan.detail)")
         }
+    }
+
+    if let sweep = result.lastSweep {
+        lines.append("")
+        lines.append("""
+            Last shadow-peer sweep: reclaimed \(sweep.reclaimedArtifacts) artifact(s) \
+            (helpers \(sweep.helpersKilled), records \(sweep.recordsUnlinked), \
+            sockets \(sweep.socketsUnlinked)); kept \(sweep.liveShadowsKept) live, \
+            \(sweep.withinGrace) within grace, \(sweep.unvouchedFor) unvouched-for, \
+            left \(sweep.foreignArtifactsLeftAlone) foreign artifact(s) alone, \
+            deferred \(sweep.deferred).
+            """)
     }
 
     lines.append("")

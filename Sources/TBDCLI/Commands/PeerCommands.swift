@@ -37,18 +37,22 @@ struct PeerList: AsyncParsableCommand {
 
             It keeps working where the pane join cannot reach. A shadow peer carries
             no `tmux` field by design — remote coordinates would look joinable
-            against local panes and would join to the wrong terminal — so it is
-            recognised by the name TBD composed for it instead.
+            against local panes and would join to the wrong terminal — and it carries
+            no marker of TBD's either, because one unknown key makes a record
+            invisible to every listing. It is therefore recognised the only way it
+            can be: by looking its pid up in TBD's own durable shadow-peer ledger,
+            which the daemon answers with over `peer.status`.
 
-            Two things this command deliberately does not claim:
+            One thing this command deliberately does not claim:
 
             - **No `[ref]`.** Claude Code mints a ref per record and never writes it
               to disk, so no reader of the registry can produce one. Read a ref from
               `ListAgents` inside a session; the session id printed here is the value
               that is actually on disk.
-            - **No link state.** The daemon exposes no peer-link state over RPC yet,
-              so a shadow row names the remote session behind it and says its link is
-              unknown rather than guessing.
+
+            It also says what it could not establish. A provider that has not declared
+            the `messages` capability while the flag is on is named as such — an old
+            shim is never invoked, so the feature would otherwise do nothing, silently.
 
             Orphans are listed, never reclaimed — `ShadowPeerReconciler` owns
             reclamation, and it sweeps against TBD's own bookkeeping rather than
@@ -192,11 +196,18 @@ func readPeerListFleet(client: SocketClient) -> PeerListFleet {
             params: TerminalListParams(),
             resultType: [Terminal].self)
         let config = try? client.call(method: RPCMethod.configGet, resultType: Config.self)
+        // Also not an input to the join, and also degrading rather than fatal: a
+        // daemon that predates `peer.status`, or one that refuses it, leaves
+        // every shadow unrecognisable and every link state unknown — which the
+        // listing says out loud rather than papering over.
+        let bridge = try? client.call(
+            method: RPCMethod.peerStatus, resultType: PeerBridgeStatus.self)
         return PeerListFleet(
             reachable: true,
             worktrees: worktrees,
             terminals: terminals,
-            remotePeerMessagingEnabled: config?.remotePeerMessagingEnabled)
+            remotePeerMessagingEnabled: config?.remotePeerMessagingEnabled,
+            bridge: bridge)
     } catch {
         return .unreachable(reason: String(describing: error))
     }

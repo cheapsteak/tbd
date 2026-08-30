@@ -916,7 +916,8 @@ struct ShadowPeerManagerTests {
 
         #expect(await harness.manager.artifacts() == [ShadowPeerSummary(
             handle: "remote-1", name: "cloud:fix-ci", status: "idle",
-            pid: helper.pid, socketPath: helper.socketPath, recordPath: helper.recordPath)])
+            pid: helper.pid, socketPath: helper.socketPath, recordPath: helper.recordPath,
+            remoteSessionID: Self.remoteSessionID)])
     }
 
     /// The helper's argv leads with `--handle`, because argv is a user-visible

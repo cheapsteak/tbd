@@ -145,10 +145,21 @@ public struct ShadowPeerSummary: Sendable, Equatable {
     public let pid: pid_t
     public let socketPath: String
     public let recordPath: String
+    /// The **provider's** session id — the remote session this shadow stands
+    /// for, taken off the `peer` line that sited it.
+    ///
+    /// Deliberately not on the durable artifact row, which carries the id of
+    /// the record the helper publishes here instead. The two are different
+    /// identities and neither can stand in for the other: the record's id is
+    /// what proves ownership before an unlink, and this is what names the
+    /// session on the far host. This one is held for the life of one
+    /// connection, exactly like the handle beside it, because that is how long
+    /// the announcement that supplied it is good for.
+    public let remoteSessionID: String?
 
     public init(
         handle: String, name: String, status: String, pid: pid_t,
-        socketPath: String, recordPath: String
+        socketPath: String, recordPath: String, remoteSessionID: String? = nil
     ) {
         self.handle = handle
         self.name = name
@@ -156,6 +167,7 @@ public struct ShadowPeerSummary: Sendable, Equatable {
         self.pid = pid
         self.socketPath = socketPath
         self.recordPath = recordPath
+        self.remoteSessionID = remoteSessionID
     }
 }
 
@@ -259,6 +271,10 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         var name: String
         var status: String
         let peerProtocol: Int
+        /// The provider's session id this shadow was sited by. `let`, because
+        /// a handle names one session for the life of one connection and that
+        /// session never becomes a different one.
+        let remoteSessionID: String?
         let helper: any ShadowPeerHelperHandle
         var reader: Task<Void, Never>?
     }
@@ -492,7 +508,8 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         }
         shadows[peer.handle] = Shadow(
             handle: peer.handle, name: name, status: peer.status,
-            peerProtocol: peer.peerProtocol, helper: helper, reader: reader)
+            peerProtocol: peer.peerProtocol, remoteSessionID: peer.sessionID,
+            helper: helper, reader: reader)
         unmirrored.remove(peer.handle)
         shadowPeerLogger.info("""
             published shadow \(name, privacy: .public) for \(peer.handle, privacy: .public) as \
@@ -871,7 +888,8 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
             return ShadowPeerSummary(
                 handle: shadow.handle, name: shadow.name, status: shadow.status,
                 pid: shadow.helper.pid, socketPath: shadow.helper.socketPath,
-                recordPath: shadow.helper.recordPath)
+                recordPath: shadow.helper.recordPath,
+                remoteSessionID: shadow.remoteSessionID)
         }
     }
 

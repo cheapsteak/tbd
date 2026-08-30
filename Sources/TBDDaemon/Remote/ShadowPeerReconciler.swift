@@ -244,6 +244,15 @@ public actor ShadowPeerReconciler {
     private let graceAttempts: Int
     private let pollInterval: Duration
     private let clock: any Clock<Duration>
+    /// The last pass, kept so `tbd peer list` can answer "what did the sweep
+    /// find?" in one command rather than sending an operator to `log show`.
+    ///
+    /// In memory, and deliberately: it describes this daemon's own sweeping,
+    /// and a persisted copy would outlive the process whose behavior it
+    /// reports. Nil until the first pass completes, which is the honest answer
+    /// for a daemon that has not swept yet — never a zeroed result, which would
+    /// read as "swept, found nothing".
+    private var lastResult: (result: ShadowPeerSweepResult, at: Date)?
 
     public init(
         artifacts: ShadowPeerArtifactStore,
@@ -273,6 +282,11 @@ public actor ShadowPeerReconciler {
         self.clock = clock
     }
 
+    /// The most recent pass and when it finished, or nil before the first one.
+    public func lastSweep() -> (result: ShadowPeerSweepResult, at: Date)? {
+        lastResult
+    }
+
     /// Sweep once at startup — the pass that reclaims a dead daemon's leavings
     /// — then on its own tick until cancelled.
     public func run() async {
@@ -289,8 +303,19 @@ public actor ShadowPeerReconciler {
     }
 
     /// One pass over the whitelist.
+    ///
+    /// Every pass is recorded, including the two that give up early: a sweep
+    /// that could not load the whitelist is a fact an operator needs, and one
+    /// that reported nothing would be indistinguishable from a sweep that never
+    /// ran.
     @discardableResult
     public func sweep() async -> ShadowPeerSweepResult {
+        let result = await performSweep()
+        lastResult = (result, now())
+        return result
+    }
+
+    private func performSweep() async -> ShadowPeerSweepResult {
         var result = ShadowPeerSweepResult()
 
         // **The whitelist is read first, and the live inventory second.** The
