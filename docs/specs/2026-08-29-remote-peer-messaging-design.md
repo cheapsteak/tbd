@@ -187,6 +187,12 @@ is otherwise ownerless.
   peer links whose remote session resolves to the same repository. The two
   scoping rules from Trust are enforced here, at the point of announcement,
   rather than anywhere downstream.
+- **A provider hosts sessions in several repositories, and that set moves.** A
+  roster registration is per repository, so the bridge keeps one registration per
+  repository a provider currently has lanes in, and reconciles that set on a tick
+  — nothing notifies it when a lane appears or retires. Scope is therefore
+  eventually correct rather than instantaneously so, which is the right trade for
+  a set that changes at human speed.
 - A session appearing, exiting, or changing status produces a `peer` or
   `peer-gone` line on each link that carries it. A session that exits while a
   link is down needs no catch-up: the far side unlinks every shadow when the
@@ -239,6 +245,10 @@ therefore **always present**, never added on collision — a name that changes w
 some other session appears is worse than one that occasionally needs a ref. The
 pane is TBD's own documented join key, so a remote agent naming one names
 something `tbd terminal list` can resolve.
+
+The origin label is the sanitized local host name. It only has to be stable and
+distinct between the machines bridging to one host, which is what the
+multi-tenancy rule below needs it for.
 
 **Origins must be namespaced, and TBD does the namespacing.** A remote host is
 multi-tenant: two laptops bridging to it would otherwise publish colliding names
@@ -398,9 +408,11 @@ Required behaviors:
   Against an `idle` control that rendered its status, that isolates the
   behavior. So a shadow whose remote status has no local equivalent loses the
   status display and nothing else.
-- **`cwd` names a directory that exists locally** — the adopted worktree. A
-  remote path resolves to nothing here, and a surface that filters on the
-  directory existing would drop the shadow.
+- **`cwd` names a directory that exists locally** — the **repository's** local
+  path, verified to exist. Not the worktree row's own path: a remote lane's
+  `localPath` is the synthetic `remote://` URI, so there is no local directory on
+  the row itself. A remote path resolves to nothing here, and a surface that
+  filters on the directory existing would drop the shadow.
 - **`version` is omitted rather than fabricated.** The contract carries no agent
   version for a remote session, so the honest options were to invent one or
   leave it out. An omission fails loudly and early; an invented version is a
