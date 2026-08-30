@@ -185,6 +185,45 @@ struct ShadowPeerReconcilerTests {
             pid: pid, handle: handle, recordPath: recordPath, socketPath: socketPath)
     }
 
+    /// Plant a **neighbour's** two artifacts at the pid-named paths with **no
+    /// ledger row at all** — a real Claude Code session that happens to sit in
+    /// the same registry directory and the same socket directory, which is
+    /// every session on this machine.
+    ///
+    /// Nothing recorded these, so nothing may reclaim them. That is the whole
+    /// of "MUST NOT reclaim by inference", expressed as files on disk.
+    private static func plantUnrecordedNeighbour(
+        directory: URL, pid: pid_t
+    ) throws -> PlantedShadow {
+        let recordStore = ShadowPeerRecordStore(sessionsDirectory: directory)
+        let socketPath = directory.appendingPathComponent("\(pid).sock").path
+        try recordStore.write(ShadowPeerRecord(
+            pid: pid,
+            procStart: "Sat Aug 29 10:00:00 2026",
+            messagingSocketPath: socketPath,
+            name: "acme-laptop:somebody-elses-session %3",
+            status: "idle",
+            peerProtocol: 1,
+            cwd: directory.path,
+            sessionID: "a-session-tbd-never-published"))
+        #expect(FileManager.default.createFile(atPath: socketPath, contents: Data()))
+        return PlantedShadow(
+            pid: pid, handle: "not-a-shadow",
+            recordPath: recordStore.recordURL(pid: pid).path, socketPath: socketPath)
+    }
+
+    /// A write-temp beside the record for `pid`, named by the same rule
+    /// `ShadowPeerRecordStore.write` names its own — a daemon that died between
+    /// the write and the `rename(2)` leaves exactly this.
+    @discardableResult
+    private static func plantWriteTemp(directory: URL, forPID pid: pid_t) -> String {
+        let path = directory.appendingPathComponent(
+            ".\(pid).json.\(UUID().uuidString).tmp").path
+        #expect(FileManager.default.createFile(
+            atPath: path, contents: Data(#"{"pid":"#.utf8)))
+        return path
+    }
+
     private static func makeReconciler(
         store: ShadowPeerArtifactStore,
         bridge: FakeBridge,
@@ -268,6 +307,55 @@ struct ShadowPeerReconcilerTests {
         #expect(signaller.isAlive(903))
         #expect(Self.exists(live.recordPath))
         #expect(Self.exists(live.socketPath))
+    }
+
+    /// **The discriminator for "MUST NOT reclaim by inference", and the test
+    /// the rest of this file cannot be.**
+    ///
+    /// Every other planted shadow here has a ledger row, so an implementation
+    /// that globbed `<int>.json` / `<int>.sock` and unlinked whatever refused a
+    /// connect would pass all of them. This plants a neighbour's record, socket
+    /// and write-temp with **no row at all**, beside a ghost that has one, and
+    /// asserts the sweep takes the ghost's three and leaves the neighbour's
+    /// three exactly where they are. `/tmp/cc-socks` and the session registry
+    /// are shared with every Claude Code session on the machine; a sweep that
+    /// reclaimed by shape would delist live teammates.
+    @Test func artifactsWithNoLedgerRowSurviveThePassThatReclaimsTheRecordedOnes() async throws {
+        let directory = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let db = try TBDDatabase(inMemory: true)
+        let store = db.shadowPeerArtifacts
+
+        let ghost = try await Self.plant(
+            directory: directory, store: store, pid: 801, handle: "remote-dead")
+        let ghostTemp = Self.plantWriteTemp(directory: directory, forPID: 801)
+        let neighbour = try Self.plantUnrecordedNeighbour(directory: directory, pid: 802)
+        let neighbourTemp = Self.plantWriteTemp(directory: directory, forPID: 802)
+
+        // Both pids are gone and neither socket has a listener, so nothing but
+        // the ledger distinguishes the two.
+        let signaller = FakeSignaller(alive: [])
+        let bridge = FakeBridge(inventories: [
+            ShadowPeerBridgeInventory(provider: "cloud", pidsByHandle: [:]),
+        ])
+        let reconciler = Self.makeReconciler(
+            store: store, bridge: bridge, signaller: signaller)
+
+        let result = await reconciler.sweep()
+
+        #expect(result.recordsUnlinked == 1)
+        #expect(result.socketsUnlinked == 1)
+        #expect(result.recordTemporariesUnlinked == 1)
+        #expect(!Self.exists(ghost.recordPath))
+        #expect(!Self.exists(ghost.socketPath))
+        #expect(!Self.exists(ghostTemp))
+
+        #expect(Self.exists(neighbour.recordPath),
+                "a record no ledger row names is somebody else's and must never be unlinked")
+        #expect(Self.exists(neighbour.socketPath),
+                "a socket no ledger row names is somebody else's, listener or not")
+        #expect(Self.exists(neighbourTemp),
+                "a write-temp no ledger row leads to is somebody else's half-written record")
     }
 
     // MARK: - The recycled-pid ghost
@@ -403,6 +491,224 @@ struct ShadowPeerReconcilerTests {
         #expect(Self.exists(ghost.socketPath))
         let remaining = try await store.all().map(\.pid)
         #expect(remaining == [961])
+    }
+
+    // MARK: - Undecided is its own answer
+
+    /// **A live helper whose start time was never recorded is not a ghost.**
+    ///
+    /// The store deliberately records NULL when the kernel refuses the
+    /// start-time read at publication, so "alive, and no recorded start time"
+    /// is TBD's own running helper as often as it is anything else. Reading it
+    /// as the recycled-pid case is the worst outcome this sweep can produce: no
+    /// kill (correctly), and then the record path decodes the live helper's own
+    /// record, finds the session id this very row published, and unlinks it —
+    /// the shadow vanishes from every `ListAgents` while its socket keeps
+    /// accepting and discarding. The socket then reads as somebody else's, the
+    /// row is counted settled and retired, and one pass has destroyed live
+    /// state *and* created an orphan nothing can recognise.
+    @Test func aLiveHelperWithNoRecordedStartTimeIsLeftEntirelyAlone() async throws {
+        let directory = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let db = try TBDDatabase(inMemory: true)
+        let store = db.shadowPeerArtifacts
+
+        let live = try await Self.plant(
+            directory: directory, store: store, pid: 4242, handle: "remote-null-start",
+            procStart: nil)
+
+        // The link is up and publishing nothing — the remote session ended and
+        // the manager has not caught up — which is the scenario that puts an
+        // empty inventory in front of a live helper.
+        let signaller = FakeSignaller(alive: [4242])
+        let bridge = FakeBridge(inventories: [
+            ShadowPeerBridgeInventory(provider: "cloud", pidsByHandle: [:]),
+        ])
+        let reconciler = Self.makeReconciler(
+            store: store, bridge: bridge, signaller: signaller,
+            procStarts: [4242: "Sat Aug 29 22:07:57 2026"])
+
+        let result = await reconciler.sweep()
+
+        #expect(result.deferred == 1)
+        #expect(result.reclaimedArtifacts == 0)
+        #expect(result.recordsUnlinked == 0)
+        #expect(result.foreignArtifactsLeftAlone == 0,
+                "an unprovable pid is undecided, never demonstrably somebody else's")
+        #expect(signaller.terminated.isEmpty)
+        #expect(signaller.forceKilled.isEmpty)
+        #expect(Self.exists(live.recordPath),
+                "the live helper's own record was unlinked out from under it")
+        #expect(Self.exists(live.socketPath))
+        let remaining = try await store.all().map(\.pid)
+        #expect(remaining == [4242], "the row is the only recognition TBD has; it must survive")
+    }
+
+    /// The mirror image, and the same answer: the row has a start time but the
+    /// kernel will not give one **now**. A comparison with a missing side
+    /// proves nothing in either direction.
+    @Test func aLivePIDTheKernelWillNotDateIsLeftEntirelyAlone() async throws {
+        let directory = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let db = try TBDDatabase(inMemory: true)
+        let store = db.shadowPeerArtifacts
+
+        let live = try await Self.plant(
+            directory: directory, store: store, pid: 4243, handle: "remote-undatable")
+
+        let signaller = FakeSignaller(alive: [4243])
+        let bridge = FakeBridge(inventories: [
+            ShadowPeerBridgeInventory(provider: "cloud", pidsByHandle: [:]),
+        ])
+        // No entry for 4243: the read fails this time round.
+        let reconciler = Self.makeReconciler(
+            store: store, bridge: bridge, signaller: signaller, procStarts: [:])
+
+        let result = await reconciler.sweep()
+
+        #expect(result.deferred == 1)
+        #expect(result.reclaimedArtifacts == 0)
+        #expect(signaller.terminated.isEmpty)
+        #expect(Self.exists(live.recordPath))
+        #expect(Self.exists(live.socketPath))
+        let remaining = try await store.all().map(\.pid)
+        #expect(remaining == [4243])
+    }
+
+    /// A record TBD cannot read is not a record it has proved belongs to
+    /// somebody else. Collapsing the two retires the row — the only entry
+    /// naming the file — while leaving the file on disk, so nothing can ever
+    /// recognise it again. The socket and the row both wait for the next pass.
+    @Test func anUndecodableRecordDefersTheRowRatherThanRetiringIt() async throws {
+        let directory = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let db = try TBDDatabase(inMemory: true)
+        let store = db.shadowPeerArtifacts
+
+        let ghost = try await Self.plant(
+            directory: directory, store: store, pid: 962, handle: "remote-torn-record")
+        // Whatever is at the recorded path now, it is not something this build
+        // can decode — a truncated read, a half-written file, a schema change.
+        try Data("not a shadow record".utf8)
+            .write(to: URL(fileURLWithPath: ghost.recordPath))
+
+        let signaller = FakeSignaller(alive: [])
+        let bridge = FakeBridge(inventories: [
+            ShadowPeerBridgeInventory(provider: "cloud", pidsByHandle: [:]),
+        ])
+        let reconciler = Self.makeReconciler(
+            store: store, bridge: bridge, signaller: signaller)
+
+        let result = await reconciler.sweep()
+
+        #expect(result.deferred == 1)
+        #expect(result.recordsUnlinked == 0)
+        #expect(result.foreignArtifactsLeftAlone == 0,
+                "unreadable is not proof of a recycled pid, and the log must not say it is")
+        #expect(result.rowsForgotten == 0)
+        #expect(result.socketsUnlinked == 0, "an undecided record settles nothing after it")
+        #expect(Self.exists(ghost.recordPath))
+        #expect(Self.exists(ghost.socketPath))
+        let remaining = try await store.all().map(\.pid)
+        #expect(remaining == [962])
+    }
+
+    // MARK: - The record's write-temps
+
+    /// The fourth durable artifact. `ShadowPeerRecordStore` stages every record
+    /// rewrite through a hidden `.<pid>.json.<uuid>.tmp` sibling and removes it
+    /// only on its throwing paths, so a death between the write and the
+    /// `rename(2)` strands one — and a shadow's record is rewritten on every
+    /// status change, for its whole life. The leading dot keeps it out of every
+    /// glob and the registry loader reads `<int>.json` and nothing else, so
+    /// this sweep is the only thing that will ever collect one.
+    @Test func aStrandedWriteTempIsReclaimedWithTheRecordItBelongsTo() async throws {
+        let directory = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let db = try TBDDatabase(inMemory: true)
+        let store = db.shadowPeerArtifacts
+
+        let ghost = try await Self.plant(
+            directory: directory, store: store, pid: 971, handle: "remote-torn-write")
+        let first = Self.plantWriteTemp(directory: directory, forPID: 971)
+        let second = Self.plantWriteTemp(directory: directory, forPID: 971)
+        // A temp for a different record, in the same directory. The rule is
+        // "this row's record path", never "anything shaped like a temp".
+        let strangers = Self.plantWriteTemp(directory: directory, forPID: 972)
+
+        let signaller = FakeSignaller(alive: [])
+        let bridge = FakeBridge(inventories: [
+            ShadowPeerBridgeInventory(provider: "cloud", pidsByHandle: [:]),
+        ])
+        let reconciler = Self.makeReconciler(
+            store: store, bridge: bridge, signaller: signaller)
+
+        let result = await reconciler.sweep()
+
+        #expect(result.recordTemporariesUnlinked == 2)
+        #expect(!Self.exists(first))
+        #expect(!Self.exists(second))
+        #expect(Self.exists(strangers))
+        #expect(!Self.exists(ghost.recordPath))
+        #expect(result.rowsForgotten == 1)
+    }
+
+    /// A helper this pass killed leaves its own stranded temp, and liveness is
+    /// re-read after the kill so the same pass takes it back. Reusing the
+    /// liveness read from before the kill would skip it and then retire the row
+    /// that named it.
+    @Test func aWriteTempTheSweepsOwnKillStrandedIsReclaimedInTheSamePass() async throws {
+        let directory = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let db = try TBDDatabase(inMemory: true)
+        let store = db.shadowPeerArtifacts
+
+        try await Self.plant(
+            directory: directory, store: store, pid: 973, handle: "remote-orphan-writer")
+        let temp = Self.plantWriteTemp(directory: directory, forPID: 973)
+
+        let signaller = FakeSignaller(alive: [973])
+        let bridge = FakeBridge(inventories: [
+            ShadowPeerBridgeInventory(provider: "cloud", pidsByHandle: [:]),
+        ])
+        let reconciler = Self.makeReconciler(
+            store: store, bridge: bridge, signaller: signaller,
+            procStarts: [973: "Sat Aug 29 22:07:57 2026"])
+
+        let result = await reconciler.sweep()
+
+        #expect(result.helpersKilled == 1)
+        #expect(result.recordTemporariesUnlinked == 1)
+        #expect(!Self.exists(temp))
+    }
+
+    /// A temp beside a pid somebody else now holds is left alone: that process
+    /// can be halfway through the `rename(2)` this file is the source of, and
+    /// unlinking it would tear a live session's record write in half.
+    @Test func aWriteTempBesideAStrangersLivePIDIsLeftAlone() async throws {
+        let directory = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let db = try TBDDatabase(inMemory: true)
+        let store = db.shadowPeerArtifacts
+
+        try await Self.plant(
+            directory: directory, store: store, pid: 974, handle: "remote-recycled-writer",
+            sessionID: "ours", recordSessionID: "someone-elses")
+        let temp = Self.plantWriteTemp(directory: directory, forPID: 974)
+
+        let signaller = FakeSignaller(alive: [974])
+        let bridge = FakeBridge(inventories: [
+            ShadowPeerBridgeInventory(provider: "cloud", pidsByHandle: [:]),
+        ])
+        let reconciler = Self.makeReconciler(
+            store: store, bridge: bridge, signaller: signaller,
+            procStarts: [974: "Sun Aug 30 09:15:02 2026"])
+
+        let result = await reconciler.sweep()
+
+        #expect(result.recordTemporariesUnlinked == 0)
+        #expect(Self.exists(temp))
+        #expect(signaller.terminated.isEmpty)
     }
 
     // MARK: - Never reclaim what nothing can vouch for

@@ -412,7 +412,66 @@ public struct ShadowPeerRecordStore: Sendable {
     /// record would list a second, half-written peer for the instant it exists.
     func temporaryURL(for destination: URL) -> URL {
         destination.deletingLastPathComponent().appendingPathComponent(
-            ".\(destination.lastPathComponent).\(UUID().uuidString).tmp")
+            Self.temporaryFileName(forRecordNamed: destination.lastPathComponent,
+                                   token: UUID().uuidString))
+    }
+
+    // MARK: - The write-temp's name, and who reclaims one
+
+    /// The naming rule for a write-temp, in exactly one place.
+    ///
+    /// Two things depend on it and they are in different modules: `write`
+    /// creates these files, and `ShadowPeerReconciler` reclaims the ones a
+    /// death mid-write stranded. A temp is created on **every** record rewrite
+    /// — a shadow's status changes for its whole life — and is removed only on
+    /// `write`'s throwing paths, so a daemon killed between the `synchronize`
+    /// and the `rename(2)` leaves one behind that nothing else on the machine
+    /// will ever collect: the leading dot keeps it out of every glob, and the
+    /// registry loader reads `<int>.json` and nothing else.
+    ///
+    /// Composed rather than parsed, and recognised by the same two affixes, so
+    /// the creating and reclaiming sides cannot drift apart silently.
+    static func temporaryFileName(forRecordNamed recordFileName: String, token: String) -> String {
+        "\(temporaryPrefix)\(recordFileName).\(token)\(temporarySuffix)"
+    }
+
+    private static let temporaryPrefix = "."
+    private static let temporarySuffix = ".tmp"
+
+    /// Whether `fileName` is one of this store's write-temps for the record
+    /// file `recordFileName`.
+    ///
+    /// Deliberately narrow: it matches only the temps of one *named* record, so
+    /// a caller can never turn it into "every dotfile ending in `.tmp`" — the
+    /// registry directory is shared with every Claude Code session on the
+    /// machine, and reclaiming by shape there is the inference the design
+    /// forbids.
+    public static func isTemporaryFileName(
+        _ fileName: String, forRecordNamed recordFileName: String
+    ) -> Bool {
+        let prefix = "\(temporaryPrefix)\(recordFileName)."
+        return fileName.count > prefix.count + temporarySuffix.count
+            && fileName.hasPrefix(prefix)
+            && fileName.hasSuffix(temporarySuffix)
+    }
+
+    /// Every write-temp for the record at `recordPath` that is on disk now, in
+    /// a stable order.
+    ///
+    /// The directory comes from the caller's own path and is never resolved
+    /// from the environment here — the store deliberately has no static helper
+    /// that builds its own registry path (see the type's doc comment), and this
+    /// is not one.
+    public static func temporaryFiles(forRecordAt recordPath: String) -> [URL] {
+        let record = URL(fileURLWithPath: recordPath)
+        let directory = record.deletingLastPathComponent()
+        let recordFileName = record.lastPathComponent
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        else { return [] }
+        return names
+            .filter { isTemporaryFileName($0, forRecordNamed: recordFileName) }
+            .sorted()
+            .map { directory.appendingPathComponent($0) }
     }
 }
 

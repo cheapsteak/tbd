@@ -53,6 +53,9 @@ private final class FakeShadowPeerHelper: ShadowPeerHelperHandle, @unchecked Sen
         var recordedControlFrames: [PeerBridgeFrame] = []
         var terminationCount = 0
         var sendFailure: (any Error)?
+        /// What `terminate()` reports. `.clean` by default, which is what a
+        /// helper that honoured stdin EOF or SIGTERM does.
+        var termination: ShadowPeerHelperTermination = .clean
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
 
@@ -86,11 +89,30 @@ private final class FakeShadowPeerHelper: ShadowPeerHelperHandle, @unchecked Sen
         if let failure { throw failure }
     }
 
-    func terminate() async {
+    /// Make `terminate()` report that the process had to be `SIGKILL`ed. A
+    /// killed helper runs no `defer`, so its socket and its record are still on
+    /// disk when the call returns.
+    func reportUncleanTermination() {
+        state.withLock { $0.termination = .unclean }
+    }
+
+    /// The helper dies with nobody asking it to — a crash, a stray kill, a
+    /// listener it could not bind on the way up. All the daemon ever sees is
+    /// its stdout closing, so that is all this does.
+    func exitOnItsOwn() {
+        continuation.finish()
+    }
+
+    @discardableResult
+    func terminate() async -> ShadowPeerHelperTermination {
         // The count is guarded; finishing the stream deliberately is not — no
         // work beyond the state change happens while the lock is held.
-        state.withLock { $0.terminationCount += 1 }
+        let outcome = state.withLock { state -> ShadowPeerHelperTermination in
+            state.terminationCount += 1
+            return state.termination
+        }
         continuation.finish()
+        return outcome
     }
 
     var controlFrames: [PeerBridgeFrame] { state.withLock { $0.recordedControlFrames } }
@@ -107,11 +129,18 @@ private actor FakeShadowPeerSpawner: ShadowPeerHelperSpawning {
     private var nextPID: pid_t = 900
     private var failure: (any Error)?
     private var gated = false
+    private var uncleanTermination = false
     private var waiting: [CheckedContinuation<Void, Never>] = []
 
     func failNextSpawn(with error: any Error) {
         failure = error
     }
+
+    /// Every helper minted from here on reports an unclean exit. Set before the
+    /// spawn rather than on the handle afterwards, because the paths worth
+    /// testing terminate the helper inside the same call that created it —
+    /// there is no moment in between for a test to reach the handle.
+    func mintUncleanlyTerminatingHelpers() { uncleanTermination = true }
 
     /// Hold every spawn open until `releaseSpawns()`. A real spawn is a
     /// suspension point, and what happens to the daemon's table during it is
@@ -147,6 +176,7 @@ private actor FakeShadowPeerSpawner: ShadowPeerHelperSpawning {
                 .appendingPathComponent("\(pid).sock").path,
             recordPath: invocation.sessionsDirectory
                 .appendingPathComponent("\(pid).json").path)
+        if uncleanTermination { helper.reportUncleanTermination() }
         helpers[invocation.handle] = helper
         return helper
     }
@@ -372,6 +402,90 @@ struct ShadowPeerManagerTests {
         await harness.manager.handle(.peerGone(handle: "remote-1"))
 
         #expect(await harness.recorder.forgotten == [901])
+    }
+
+    /// **A helper that had to be killed keeps its row**, and that is the whole
+    /// difference between a leak and an unreclaimable one.
+    ///
+    /// `terminate()` escalates to `SIGKILL`, and a `SIGKILL`ed process runs no
+    /// `defer` — so the socket it bound and the record it published are still
+    /// on disk when the call returns. Retiring the whitelist row there would
+    /// delete the only entry naming them: nothing inside a shadow's record
+    /// marks it as TBD's, both files sit in directories every session on the
+    /// machine writes into, and `ShadowPeerReconciler` is forbidden from
+    /// reclaiming by inference. The two files would be orphans by construction,
+    /// forever.
+    @Test func aHelperThatHadToBeKilledKeepsItsWhitelistRowForTheSweep() async throws {
+        let harness = Self.makeHarness()
+        await harness.manager.handle(.peer(Self.remotePeer()))
+        let helper = try #require(await harness.spawner.helper(for: "remote-1"))
+        helper.reportUncleanTermination()
+
+        await harness.manager.handle(.peerGone(handle: "remote-1"))
+
+        #expect(helper.terminations == 1)
+        #expect(await harness.recorder.forgotten.isEmpty,
+                "the row names two files a SIGKILLed helper left on disk; retiring it makes them unreclaimable")
+        // The shadow itself is gone from every surface, so the sweep sees a row
+        // no inventory vouches for and reclaims what is left of it.
+        #expect(await harness.manager.snapshot().shadows.isEmpty)
+        #expect(await harness.manager.artifacts().isEmpty)
+    }
+
+    /// The same rule on the other race: a link drop mid-spawn reclaims the
+    /// helper it just started, and a kill there strands the same two files.
+    @Test func aHelperKilledDuringTheSpawnRaceAlsoKeepsItsRow() async throws {
+        let harness = Self.makeHarness()
+        await harness.spawner.mintUncleanlyTerminatingHelpers()
+        await harness.spawner.gateSpawns()
+        let announcing = Task { await harness.manager.handle(.peer(Self.remotePeer())) }
+        try await waitFor("the spawn is in flight") { await harness.spawner.entered == 1 }
+
+        await harness.manager.linkStateChanged(to: .down)
+        await harness.spawner.releaseSpawns()
+        await announcing.value
+
+        #expect(await harness.recorder.forgotten.isEmpty)
+        #expect(await harness.manager.snapshot().shadows.isEmpty)
+    }
+
+    /// **Nothing else notices a helper dying on its own.** Its stdout closing
+    /// is the only notice, and a reader task that returned silently would leave
+    /// the shadow in the table — and therefore in `artifacts()`, and therefore
+    /// in the inventory the reclaimer vouches against, where the sweep skips it
+    /// "whatever the process table says". Socket and record that neither
+    /// collector will take, while `tbd peer list` reports a live shadow that
+    /// does not exist.
+    @Test func aHelperThatExitsOnItsOwnIsWithdrawnRatherThanVouchedForForever() async throws {
+        let harness = Self.makeHarness()
+        await harness.manager.handle(.peer(Self.remotePeer()))
+        let helper = try #require(await harness.spawner.helper(for: "remote-1"))
+        try #require(await harness.manager.artifacts().count == 1)
+
+        helper.exitOnItsOwn()
+
+        try await waitFor("the shadow left the table") {
+            await harness.manager.snapshot().shadows.isEmpty
+        }
+        #expect(await harness.manager.artifacts().isEmpty,
+                "a shadow the reclaimer is told is live is a shadow the sweep will never reclaim")
+        // This fake reports a clean exit, so the row retires — the artifacts it
+        // named are gone with the process that unlinked them.
+        #expect(await harness.recorder.forgotten == [901])
+    }
+
+    /// A handle that never sited is still withdrawn when the far side says the
+    /// session is gone. `unmirrored` is a warning surface — `tbd peer list`
+    /// prints it — and one that only ever grows keeps warning about remote
+    /// sessions retired long ago, until the link happens to drop.
+    @Test func peerGoneClearsAHandleThatNeverManagedToSite() async {
+        let harness = Self.makeHarness(site: { _ in nil })
+        await harness.manager.handle(.peer(Self.remotePeer()))
+        #expect(await harness.manager.snapshot().unmirroredHandles == ["remote-1"])
+
+        await harness.manager.handle(.peerGone(handle: "remote-1"))
+
+        #expect(await harness.manager.snapshot().unmirroredHandles.isEmpty)
     }
 
     /// A link that drops takes every shadow with it — and every row too. The

@@ -496,8 +496,8 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         // way, overwriting or inserting would leak a listener nothing else
         // would ever close.
         guard generation == linkGeneration, shadows[peer.handle] == nil else {
-            await helper.terminate()
-            await artifactRecorder.forgetPublished(pid: helper.pid)
+            let termination = await helper.terminate()
+            await retireRow(handle: peer.handle, pid: helper.pid, after: termination)
             return
         }
 
@@ -505,6 +505,22 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
             for await line in lines {
                 await self?.helperEmitted(line, from: peer.handle)
             }
+            // **The stream ending is the only notice a helper's own death
+            // gives.** Its stdout closes when the process exits, however it
+            // exited — a crash, a stray kill, a `bindListener` that failed on
+            // the way up. Returning silently here would leave the shadow in
+            // `shadows`, and therefore in `artifacts()` and in the inventory
+            // the reclaimer vouches against: the sweep skips a vouched-for row
+            // "whatever the process table says", so neither collector would
+            // ever take the socket and record, while `tbd peer list` went on
+            // reporting a live shadow that does not exist.
+            //
+            // Cancellation is the one ending that is not news: a withdrawal
+            // cancels this task itself, and the withdrawal it would call is
+            // already in progress.
+            guard !Task.isCancelled else { return }
+            await self?.withdrawShadow(
+                handle: peer.handle, because: "its helper exited on its own")
         }
         shadows[peer.handle] = Shadow(
             handle: peer.handle, name: name, status: peer.status,
@@ -858,21 +874,67 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     ///
     /// The `peer-gone` control frame is a courtesy that buys a better log line
     /// on the helper's side; `terminate()` is what actually guarantees the
-    /// socket and record are unlinked, and it does not depend on the frame
-    /// having landed.
+    /// process is gone, and it does not depend on the frame having landed.
+    ///
+    /// It does **not** guarantee the socket and record are unlinked. Those go
+    /// with the helper's own `defer`s, which stdin EOF and `SIGTERM` reach and
+    /// `SIGKILL` does not — so `terminate()` reports which happened and
+    /// `retireRow` decides the row's fate on that answer.
     private func withdrawShadow(handle: String, because reason: String) async {
+        // Cleared first and unconditionally, because a handle in `unmirrored`
+        // is by definition a handle that never reached `shadows` — it failed to
+        // site, so no helper was ever spawned for it. Doing this after the
+        // guard below would mean a `peer-gone` for such a handle returned
+        // without ever clearing it, and `tbd peer list` would go on warning
+        // about a remote session retired long ago until the link dropped.
+        unmirrored.remove(handle)
         guard let shadow = shadows.removeValue(forKey: handle) else { return }
         shadow.reader?.cancel()
         try? await shadow.helper.send(.peerGone(handle: handle))
-        await shadow.helper.terminate()
-        // The row goes only after the helper is confirmed gone: it names the
-        // artifacts, so retiring it first would drop the whitelist entry for
-        // anything the teardown failed to clean up.
-        await artifactRecorder.forgetPublished(pid: shadow.helper.pid)
+        let termination = await shadow.helper.terminate()
+        await retireRow(
+            handle: shadow.handle, pid: shadow.helper.pid, after: termination)
         shadowPeerLogger.info("""
             unpublished shadow \(shadow.name, privacy: .public) \
             (\(handle, privacy: .public)) because \(reason, privacy: .public)
             """)
+    }
+
+    /// Retire the whitelist row **only when the helper cleaned up after
+    /// itself**, and leave it for the sweep otherwise.
+    ///
+    /// The row is the only recognition TBD has: a shadow's record carries no
+    /// field Claude Code does not define, and both file artifacts sit in
+    /// directories every session on the machine writes into, so a path proves
+    /// nothing. A `SIGKILL`ed helper runs no `defer`, which leaves its socket
+    /// and record on disk — and retiring the row in that state would delete the
+    /// entry naming them while the reconciler is forbidden from finding them by
+    /// inference. Unreclaimable, permanently, by construction.
+    ///
+    /// **Keeping the row rather than unlinking the two paths from here** is the
+    /// reconciliation-over-rollback doctrine (root `CLAUDE.md`, "Every durable
+    /// external resource needs a named reconciler"), and it is also the only
+    /// correct choice on the facts: `kill(2)` returns before the kernel has
+    /// reaped the process, so a daemon-side unlink races the helper's own last
+    /// record rewrite, and proving ownership before an unlink — the session id
+    /// inside the record, a connect that refuses on the socket — is precisely
+    /// the logic `ShadowPeerReconciler` already implements. The shadow has
+    /// already left `shadows`, so it is out of `artifacts()` and out of the
+    /// inventory the sweep vouches against; the next pass sees a row nothing
+    /// vouches for and reclaims whatever is left of it.
+    private func retireRow(
+        handle: String, pid: pid_t, after termination: ShadowPeerHelperTermination
+    ) async {
+        switch termination {
+        case .clean:
+            await artifactRecorder.forgetPublished(pid: pid)
+        case .unclean:
+            shadowPeerLogger.error("""
+                shadow peer helper \(handle, privacy: .public) (pid \(pid, privacy: .public)) \
+                did not exit cleanly, so it ran no cleanup; keeping its whitelist row so \
+                ShadowPeerReconciler can reclaim the socket and record it left behind
+                """)
+        }
     }
 
     // MARK: - Diagnostics

@@ -257,6 +257,64 @@ struct ShadowPeerRecordStoreTests {
         }
     }
 
+    /// **The creating side and the reclaiming side must recognise the same
+    /// files.** `write` composes the temp's name; `ShadowPeerReconciler`
+    /// reclaims the ones a death mid-write stranded, and it finds them through
+    /// `temporaryFiles(forRecordAt:)`. If the two ever drifted apart the temps
+    /// would go uncollected in silence — the leading dot keeps them out of
+    /// every glob, and the registry loader reads `<int>.json` and nothing else.
+    /// So the round trip is asserted rather than assumed.
+    @Test("a write-temp is recognisable as one, for its own record only")
+    func aWriteTempIsRecognisedByTheReclaimingSide() throws {
+        try withTemporaryDirectory { directory in
+            let store = ShadowPeerRecordStore(sessionsDirectory: directory)
+            let destination = store.recordURL(pid: 4242)
+            let temporary = store.temporaryURL(for: destination)
+
+            #expect(ShadowPeerRecordStore.isTemporaryFileName(
+                temporary.lastPathComponent, forRecordNamed: "4242.json"))
+            // A neighbour's temp, the record itself, and a bare `.tmp` are all
+            // somebody else's business.
+            #expect(!ShadowPeerRecordStore.isTemporaryFileName(
+                temporary.lastPathComponent, forRecordNamed: "4243.json"))
+            #expect(!ShadowPeerRecordStore.isTemporaryFileName(
+                "4242.json", forRecordNamed: "4242.json"))
+            #expect(!ShadowPeerRecordStore.isTemporaryFileName(
+                ".4242.json.tmp", forRecordNamed: "4242.json"))
+        }
+    }
+
+    /// The listing the reclaimer walks: every temp for one record, and nothing
+    /// else in a directory shared with every session on the machine.
+    @Test("stranded write-temps are listed for their own record and no other")
+    func strandedTemporariesAreListedPerRecord() throws {
+        try withTemporaryDirectory { directory in
+            let store = ShadowPeerRecordStore(sessionsDirectory: directory)
+            let destination = store.recordURL(pid: 4242)
+            let mine = [store.temporaryURL(for: destination),
+                        store.temporaryURL(for: destination)]
+            let neighbour = store.temporaryURL(for: store.recordURL(pid: 4243))
+            for url in mine + [neighbour, destination] {
+                #expect(FileManager.default.createFile(atPath: url.path, contents: Data()))
+            }
+
+            let found = ShadowPeerRecordStore.temporaryFiles(forRecordAt: destination.path)
+
+            #expect(Set(found.map(\.lastPathComponent))
+                == Set(mine.map(\.lastPathComponent)))
+            #expect(found == found.sorted { $0.path < $1.path }, "a stable order, so a log reads the same way twice")
+        }
+    }
+
+    /// A directory with nothing in it, and one that is not there at all, both
+    /// list nothing rather than throwing: a sweep must not die on a registry
+    /// directory that has yet to be created.
+    @Test("listing write-temps tolerates an absent directory")
+    func listingTemporariesToleratesAnAbsentDirectory() {
+        #expect(ShadowPeerRecordStore.temporaryFiles(
+            forRecordAt: "/tmp/tbd-no-such-directory-\(UUID().uuidString)/4242.json").isEmpty)
+    }
+
     @Test("two writes to the same pid produce different temporaries")
     func temporariesAreUnique() throws {
         let store = ShadowPeerRecordStore(

@@ -85,6 +85,30 @@ public struct ShadowPeerHelperInvocation: Sendable, Equatable {
 
 // MARK: - Seams
 
+/// How a helper's life ended, and therefore **whether its own cleanup ran**.
+///
+/// The distinction is load-bearing rather than diagnostic. `TBDPeerHelper`
+/// unlinks its socket and its record from `defer` blocks, and stdin EOF,
+/// `SIGTERM`, `SIGINT` and `SIGHUP` all reach them — the helper's signal
+/// handler pokes a self-pipe and shuts down through the same path every other
+/// exit takes. `SIGKILL` and a crash reach none of them, so both file artifacts
+/// stay on disk after the process is gone.
+///
+/// The owner needs that answer because it is what decides whether the
+/// reclaimer's whitelist row may be retired: a row retired after an unclean
+/// exit is the entry that named the two files nothing on the machine can
+/// recognise afterwards, and the reconciler is forbidden from finding them by
+/// inference.
+public enum ShadowPeerHelperTermination: Sendable, Equatable {
+    /// The process exited through its own shutdown path, so its socket and
+    /// record are already unlinked.
+    case clean
+    /// The process was `SIGKILL`ed, died on an uncaught signal, or is still
+    /// running past every escalation. Its socket and record — if it got as far
+    /// as creating them — are still on disk and are the reconciler's to reclaim.
+    case unclean
+}
+
 /// One running helper, as its owner sees it.
 ///
 /// The manager holds this and nothing about `Process`, so every routing,
@@ -110,7 +134,14 @@ public protocol ShadowPeerHelperHandle: Sendable {
     /// EOF is the load-bearing signal — the kernel delivers it even to a
     /// `SIGKILL`ed daemon's children — and the signal escalation behind it is
     /// only for a helper that ignores it.
-    func terminate() async
+    ///
+    /// **Returns whether the helper cleaned up after itself**, because the
+    /// caller cannot tell from the outside and gets the decision wrong in the
+    /// unrecoverable direction: a `SIGKILL`ed helper runs no `defer`, so its
+    /// socket and record outlive it, and a caller that assumed otherwise would
+    /// retire the only whitelist row naming them.
+    @discardableResult
+    func terminate() async -> ShadowPeerHelperTermination
 }
 
 /// Starts one helper.
@@ -309,7 +340,8 @@ final class ShadowPeerHelperProcess: ShadowPeerHelperHandle, @unchecked Sendable
         }
     }
 
-    func terminate() async {
+    @discardableResult
+    func terminate() async -> ShadowPeerHelperTermination {
         // The state transition is guarded; the `close()` deliberately is not —
         // no I/O while holding the lock.
         let needsClose = stdinState.withLock { state -> Bool in
@@ -322,7 +354,9 @@ final class ShadowPeerHelperProcess: ShadowPeerHelperHandle, @unchecked Sendable
         }
 
         // Stdin EOF is the mechanism; the escalation below is the backstop for
-        // a helper wedged somewhere it cannot notice.
+        // a helper wedged somewhere it cannot notice. `SIGTERM` is still clean:
+        // the helper's handler pokes a self-pipe and its poll loop shuts down
+        // through the same `defer`s stdin EOF reaches.
         if process.isRunning {
             try? await clock.sleep(for: exitGrace)
         }
@@ -334,6 +368,7 @@ final class ShadowPeerHelperProcess: ShadowPeerHelperHandle, @unchecked Sendable
             kill(pid, SIGTERM)
             try? await clock.sleep(for: exitGrace)
         }
+        var forced = false
         if process.isRunning {
             shadowPeerLogger.error("""
                 shadow peer helper \(self.handleName, privacy: .public) ignored SIGTERM; \
@@ -341,9 +376,29 @@ final class ShadowPeerHelperProcess: ShadowPeerHelperHandle, @unchecked Sendable
                 reclaim
                 """)
             kill(pid, SIGKILL)
+            forced = true
+            // Waited out so `terminationReason` is readable and the answer
+            // describes a process that is really gone. `SIGKILL` is delivered
+            // synchronously but the exit is not observable until the kernel has
+            // reaped the child.
+            try? await clock.sleep(for: exitGrace)
         }
         stdoutHandle.readabilityHandler = nil
         reader.finish(handle: stdoutHandle)
+        return outcome(forced: forced)
+    }
+
+    /// **Unclean unless the exit is provably clean.** Every ambiguity resolves
+    /// to `.unclean`, and the asymmetry is deliberate: an unclean answer costs
+    /// one extra sweep over a row whose artifacts are already gone, while a
+    /// wrongly-clean answer retires the row that names two files nothing can
+    /// recognise afterwards.
+    private func outcome(forced: Bool) -> ShadowPeerHelperTermination {
+        guard !process.isRunning else { return .unclean }
+        guard !forced else { return .unclean }
+        // Covers the crash as well as our own escalation: a helper that died on
+        // `SIGSEGV` ran no `defer` either.
+        return process.terminationReason == .uncaughtSignal ? .unclean : .clean
     }
 }
 

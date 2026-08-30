@@ -103,7 +103,13 @@ private final class StubHelper: ShadowPeerHelperHandle, @unchecked Sendable {
 
     func send(_ frame: PeerBridgeFrame) async throws {}
 
-    func terminate() async { continuation.finish() }
+    /// `.clean` because a stub has no artifacts to leave behind: it never
+    /// bound a socket or published a record, so there is nothing for the
+    /// reclaimer's row to name afterwards.
+    func terminate() async -> ShadowPeerHelperTermination {
+        continuation.finish()
+        return .clean
+    }
 }
 
 private actor StubSpawner: ShadowPeerHelperSpawning {
@@ -132,11 +138,30 @@ private actor StubLocalDelivery: LocalPeerDelivering {
     func deliver(_ payload: Data, toSocketPath path: String) async throws {}
 }
 
-/// TBD's own bookkeeping about the sessions it spawned. Empty: the roster's
-/// admission rule is exercised in `RosterWatcherTests`, and what matters here
-/// is which links it is asked to announce on.
-private struct NoSpawnedSessions: LocalSessionDirectory {
-    func spawnedSessions() async -> [TBDSpawnedSession] { [] }
+/// TBD's own bookkeeping about the sessions it spawned. Empty for the tests
+/// about *which links* the roster is asked to announce on — the admission rule
+/// itself is exercised in `RosterWatcherTests` — and populated for the two that
+/// need a real session to follow all the way onto the wire.
+private struct SpawnedSessions: LocalSessionDirectory {
+    let sessions: [TBDSpawnedSession]
+
+    init(_ sessions: [TBDSpawnedSession] = []) {
+        self.sessions = sessions
+    }
+
+    func spawnedSessions() async -> [TBDSpawnedSession] { sessions }
+}
+
+/// The provider's repository scope, movable mid-test. The production closure
+/// reads TBD's own rows, and what those rows say changes when a remote lane is
+/// created or archived.
+private actor MutableRepoScope {
+    private var repos: Set<UUID>
+
+    init(_ repos: Set<UUID>) { self.repos = repos }
+
+    func current() -> Set<UUID> { repos }
+    func set(_ repos: Set<UUID>) { self.repos = repos }
 }
 
 // MARK: - The gate
@@ -261,11 +286,19 @@ struct PeerBridgeWiringTests {
         let manager: ShadowPeerManager
         let registry: ShadowPeerBridgeRegistry
         let roster: PeerRosterRunner
+        /// The watcher inside `roster`, so a test can drive a scan itself
+        /// rather than waiting on a tick that is deliberately an hour away.
+        let watcher: RosterWatcher
+        let scope: MutableRepoScope
         let link: FakePeerLink
         let directory: URL
     }
 
-    private static func makeBridge(repos: Set<UUID>) throws -> BridgeHarness {
+    private static func makeBridge(
+        repos: Set<UUID>,
+        spawned: [TBDSpawnedSession] = [],
+        livePIDs: [pid_t: String] = [:]
+    ) throws -> BridgeHarness {
         let directory = try scratchDirectory()
         let link = FakePeerLink()
         let manager = ShadowPeerManager(
@@ -277,23 +310,84 @@ struct PeerBridgeWiringTests {
             socketDirectory: directory,
             sessionsDirectory: directory)
         let registry = ShadowPeerBridgeRegistry()
-        let roster = PeerRosterRunner(roster: RosterWatcher(
+        let watcher = RosterWatcher(
             sessionsDirectory: directory,
-            sessions: NoSpawnedSessions(),
+            sessions: SpawnedSessions(spawned),
             origin: "laptop",
             // Long enough that nothing ticks during a test; the initial refresh
             // `addLink` performs is what these assertions ride on.
-            interval: .seconds(3600)))
+            interval: .seconds(3600),
+            // Liveness is injected, so nothing here reads a real process table.
+            procStartForPID: { livePIDs[$0] })
+        let roster = PeerRosterRunner(roster: watcher)
+        let scope = MutableRepoScope(repos)
         let bridge = PeerBridge(
             provider: "cloud",
             manager: manager,
             link: link,
             roster: roster,
             bridges: registry,
-            repoScope: { repos })
+            repoScope: { await scope.current() })
         return BridgeHarness(
             bridge: bridge, manager: manager, registry: registry,
-            roster: roster, link: link, directory: directory)
+            roster: roster, watcher: watcher, scope: scope,
+            link: link, directory: directory)
+    }
+
+    /// The instant the fixture session started, and the two renderings of it.
+    /// The record carries the literal; the injected kernel lookup answers with
+    /// the production formatter's output, so the comparison the roster makes is
+    /// between two independently produced values rather than one with itself.
+    private static let liveStartedAt = Date(timeIntervalSince1970: 1_788_041_277)
+    private static let recordedProcStart = "Sat Aug 29 22:07:57 2026"
+    private static var liveProcStart: String {
+        ProcessStartTime.format(liveStartedAt) ?? "unrenderable"
+    }
+    private static let fixtureSocketPath = "/tmp/cc-socks/4242.sock"
+    private static let fixtureSessionID = "4E12DD65-92B8-4D8E-9920-214C6553FC63"
+
+    /// One local session TBD spawned, and the registry record describing it —
+    /// the two halves the roster's admission rule joins.
+    private static func localSession(repoID: UUID) -> TBDSpawnedSession {
+        TBDSpawnedSession(
+            worktreeID: UUID(),
+            repoID: repoID,
+            terminalID: UUID(),
+            displayName: "useful-swallow",
+            worktreePath: "/tmp/tbd-peer-bridge-fixture/useful-swallow",
+            tmuxPaneID: "%3541",
+            claudeSessionID: fixtureSessionID)
+    }
+
+    private static func writeRegistryRecord(in directory: URL) throws {
+        let fields: [String: Any] = [
+            "sessionId": fixtureSessionID,
+            "cwd": "/tmp/tbd-peer-bridge-fixture/useful-swallow",
+            "messagingSocketPath": fixtureSocketPath,
+            // The link negotiates this side's protocol, and a session speaking
+            // another one is deliberately not announced — so the fixture has to
+            // read it from the codec rather than hardcode a number.
+            "peerProtocol": PeerBridgeFrameCodec.peerProtocol,
+            "status": "busy",
+            "tmux": "main:@3541.%3541",
+            "procStart": recordedProcStart,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])
+        try data.write(to: directory.appendingPathComponent("4242.json"))
+    }
+
+    private static func announcedHandles(_ frames: [PeerBridgeFrame]) -> [String] {
+        frames.compactMap { frame -> String? in
+            guard case .peer(let peer) = frame else { return nil }
+            return peer.handle
+        }
+    }
+
+    private static func goneHandles(_ frames: [PeerBridgeFrame]) -> [String] {
+        frames.compactMap { frame -> String? in
+            guard case .peerGone(let handle) = frame else { return nil }
+            return handle
+        }
     }
 
     /// **This is what completes the reclaim path.** Until a bridge registers,
@@ -354,6 +448,95 @@ struct PeerBridgeWiringTests {
         #expect(await harness.link.starts == 1)
         await harness.bridge.stop()
         #expect(await harness.link.stops == 1)
+    }
+
+    // MARK: - Reconnects and scope changes
+
+    /// **A reconnect must not leave the far side holding a handle nothing can
+    /// resolve.**
+    ///
+    /// The manager empties both halves of its handle table on `.down`. Nothing
+    /// used to clear what the roster remembered telling the link, so the next
+    /// scan minted a fresh handle and announced it while the stale one beside
+    /// it was announced gone — taking the freshly bound socket with it. The far
+    /// side then held a handle absent from `localPeers`, so every inbound frame
+    /// dropped as an unknown handle and every reply had no sender to resolve,
+    /// on a link reporting `up` throughout. And it repeated every tick.
+    ///
+    /// No test drove a transition before this one, which is why it shipped.
+    @Test func aReconnectReAnnouncesTheRosterWithoutChurningItsHandles() async throws {
+        let repo = UUID()
+        let harness = try Self.makeBridge(
+            repos: [repo],
+            spawned: [Self.localSession(repoID: repo)],
+            livePIDs: [4242: Self.liveProcStart])
+        defer { try? FileManager.default.removeItem(at: harness.directory) }
+        try Self.writeRegistryRecord(in: harness.directory)
+
+        await harness.bridge.start()
+        let first = try #require(Self.announcedHandles(await harness.link.sent).last)
+        #expect(await harness.manager.snapshot().localHandles == [first])
+
+        // The stream dropped and came back, in the order the supervisor
+        // publishes it: the manager first, then the observer `make` binds.
+        await harness.manager.linkStateChanged(to: .down)
+        await harness.bridge.linkStateChanged(to: .down)
+        await harness.manager.linkStateChanged(to: .up)
+        await harness.bridge.linkStateChanged(to: .up)
+
+        await harness.watcher.refresh()
+        let afterReconnect = try #require(Self.announcedHandles(await harness.link.sent).last)
+        // The fresh connection is told about the session again — the far side
+        // unlinked every shadow when the stream ended — and the handle it was
+        // told still resolves in the table that minted it.
+        #expect(afterReconnect != first)
+        #expect(await harness.manager.snapshot().localHandles == [afterReconnect])
+
+        // And it settles: further scans announce nothing, mint nothing, and
+        // withdraw nothing. Before the fix this grew by a `peer` and a
+        // `peer-gone` on every single scan, forever.
+        let quiescent = await harness.link.sent.count
+        await harness.watcher.refresh()
+        await harness.watcher.refresh()
+        #expect(await harness.link.sent.count == quiescent)
+        #expect(await harness.manager.snapshot().localHandles == [afterReconnect])
+
+        await harness.bridge.stop()
+    }
+
+    /// **Retiring a repository's scope has to unreach its sessions.**
+    ///
+    /// A provider hosting lanes in two repositories loses one when its last
+    /// lane there is archived. The registration was dropped in silence, so the
+    /// far host kept its shadows for that repository's local sessions and their
+    /// handles kept resolving — a remote session with no lane in the project
+    /// could still message into it, which the design's Trust section forbids.
+    /// It was invisible too: `applyInventory` diffs against `localPeers`, which
+    /// still held the handles, so not even the divergence warning fired.
+    @Test func retiringARepositoryScopeWithdrawsAndAnnouncesItsSessionsGone() async throws {
+        let repo = UUID()
+        let harness = try Self.makeBridge(
+            repos: [repo],
+            spawned: [Self.localSession(repoID: repo)],
+            livePIDs: [4242: Self.liveProcStart])
+        defer { try? FileManager.default.removeItem(at: harness.directory) }
+        try Self.writeRegistryRecord(in: harness.directory)
+
+        await harness.bridge.start()
+        let handle = try #require(Self.announcedHandles(await harness.link.sent).last)
+        #expect(await harness.manager.snapshot().localHandles == [handle])
+
+        // The lane in that repository is archived, so the repository leaves the
+        // provider's scope. The stream stays open throughout.
+        await harness.scope.set([])
+        await harness.bridge.reconcileRepoScope()
+
+        #expect(await harness.bridge.announcedRepoIDsForTests().isEmpty)
+        #expect(Self.goneHandles(await harness.link.sent) == [handle])
+        #expect(await harness.manager.snapshot().localHandles.isEmpty)
+        #expect(await harness.link.linkState() == .up, "the stream is what stayed open")
+
+        await harness.bridge.stop()
     }
 
     // MARK: - The origin label

@@ -164,6 +164,11 @@ public struct ShadowPeerSweepResult: Sendable, Equatable {
     public var helpersKilled = 0
     public var recordsUnlinked = 0
     public var socketsUnlinked = 0
+    /// Write-temps stranded beside a recorded record path — the fourth durable
+    /// artifact, created by `ShadowPeerRecordStore.write` on every status
+    /// rewrite and cleaned up only on its throwing paths, so a daemon or helper
+    /// death mid-write leaves one behind forever.
+    public var recordTemporariesUnlinked = 0
     /// Whitelist rows retired, once everything they named was settled.
     public var rowsForgotten = 0
     /// Rows a live link vouched for, left completely untouched.
@@ -186,14 +191,15 @@ public struct ShadowPeerSweepResult: Sendable, Equatable {
 
     /// The headline number: artifacts this pass took back.
     public var reclaimedArtifacts: Int {
-        helpersKilled + recordsUnlinked + socketsUnlinked
+        helpersKilled + recordsUnlinked + socketsUnlinked + recordTemporariesUnlinked
     }
 }
 
 // MARK: - The reconciler
 
-/// The named reconciler for a shadow peer's three durable artifacts — the
-/// helper process, its socket, and its record.
+/// The named reconciler for a shadow peer's durable artifacts — the helper
+/// process, its socket, its record, and the write-temps that record's saves
+/// stage through.
 ///
 /// Per the doctrine in the root `CLAUDE.md`, creation against the process table
 /// and the filesystem cannot be transactional, so the standing guarantee is a
@@ -216,6 +222,13 @@ public struct ShadowPeerSweepResult: Sendable, Equatable {
 ///   liveness and nothing else (measured),
 /// - a socket TBD created with nothing listening,
 /// - anything TBD published under a previous daemon generation.
+///
+/// A fourth artifact rides along with the record: `ShadowPeerRecordStore.write`
+/// stages every rewrite through a hidden `.<pid>.json.<uuid>.tmp` sibling in the
+/// registry directory and removes it only on its throwing paths, so a death
+/// between the write and the `rename(2)` strands one permanently. It is
+/// reclaimed here — see `unlinkStrandedRecordTemporaries` for why that is still
+/// ledger-derived rather than the forbidden inference.
 ///
 /// **Ownership is proved before every unlink.** A pid outlives the process TBD
 /// filed under it: `<pid>.json` and `<pid>.sock` can be re-created by a real
@@ -396,6 +409,7 @@ public actor ShadowPeerReconciler {
             helpers=\(result.helpersKilled, privacy: .public) \
             records=\(result.recordsUnlinked, privacy: .public) \
             sockets=\(result.socketsUnlinked, privacy: .public) \
+            write-temps=\(result.recordTemporariesUnlinked, privacy: .public) \
             rows=\(result.rowsForgotten, privacy: .public); kept \
             \(result.liveShadowsKept, privacy: .public) live, \
             \(result.withinGrace, privacy: .public) within grace, \
@@ -420,12 +434,12 @@ public actor ShadowPeerReconciler {
 
         let alive = signaller.isAlive(row.pid)
         let currentStart = alive ? procStart(row.pid) : nil
-        // Ours only when the kernel's start time for that pid is the one
-        // recorded at publication. A missing value on either side proves
-        // nothing, and proving nothing means never signalling.
-        let isOurHelper = alive && row.procStart != nil && currentStart == row.procStart
 
-        if isOurHelper {
+        switch occupancy(of: row, alive: alive, currentStart: currentStart) {
+        case .gone:
+            break  // nothing to signal; the artifacts below are all that is left
+
+        case .ourHelper:
             reconcilerLogger.info("""
                 reclaiming shadow \(row.name, privacy: .public) (\(row.handle, privacy: .public)): \
                 helper pid \(row.pid, privacy: .public) is running with \
@@ -441,7 +455,8 @@ public actor ShadowPeerReconciler {
                     its row for the next sweep
                     """)
             }
-        } else if alive {
+
+        case .stranger:
             // The measured ghost: Claude Code's reaper checks pid liveness and
             // nothing else, so this record would survive it forever. Its pid
             // now belongs to an unrelated process, which must never be
@@ -452,6 +467,26 @@ public actor ShadowPeerReconciler {
                 is not the helper TBD recorded, so it is left running and only the artifacts are \
                 reclaimed
                 """)
+
+        case .undecided:
+            // **Undecided touches nothing at all** — not the process, not the
+            // record, not the socket, not the row. Falling through to the
+            // artifact paths here is how a live helper gets eaten: its own
+            // record decodes, carries the session id this row published, and
+            // gets unlinked out from under a running shadow, which then
+            // vanishes from every `ListAgents` while its socket keeps accepting
+            // and discarding. The socket probe would then read `.listening`,
+            // count as settled, and retire the row — live state destroyed and
+            // an unreclaimable orphan created in one pass.
+            result.deferred += 1
+            let missingSide = row.procStart == nil ? "the recorded" : "the kernel's"
+            reconcilerLogger.info("""
+                shadow \(row.handle, privacy: .public) (pid \(row.pid, privacy: .public)) left \
+                entirely alone: the pid is alive but no start time is available on \
+                \(missingSide, privacy: .public) side, so TBD can prove neither that this is its \
+                own helper nor that it is a stranger's process. Deferred to the next sweep
+                """)
+            return
         }
 
         if settled {
@@ -466,6 +501,19 @@ public actor ShadowPeerReconciler {
                 settled = false
                 result.deferred += 1
             }
+        }
+
+        // The record's write-temps, and **only when the pid is provably gone**.
+        // A dead pid cannot be halfway through a `rename(2)`, which is the one
+        // thing that would make a temp at this name somebody's live business
+        // rather than an orphan.
+        //
+        // Liveness is re-read rather than reused from the top of this call: a
+        // helper this pass has just killed leaves exactly the stranded temp
+        // this reclaims, and reusing the earlier `alive` would skip its own
+        // kill's leavings and then retire the row that named them.
+        if !signaller.isAlive(row.pid) {
+            result.recordTemporariesUnlinked += unlinkStrandedRecordTemporaries(row)
         }
 
         if settled {
@@ -494,6 +542,36 @@ public actor ShadowPeerReconciler {
         }
     }
 
+    /// Who holds the pid a row names.
+    ///
+    /// **Four answers, not two.** The pid alone is never the question — every
+    /// artifact this sweep touches is named after a number the kernel recycles
+    /// — so the discriminator is the kernel's start time for that pid against
+    /// the one recorded at publication. Both have to be present for a
+    /// comparison to mean anything, and a comparison that cannot be made is its
+    /// own answer rather than a default into either of the others.
+    private enum PIDOccupancy {
+        /// Nothing holds it.
+        case gone
+        /// The helper TBD spawned, still running.
+        case ourHelper
+        /// Alive, and demonstrably started at a different moment — the measured
+        /// recycled-pid ghost.
+        case stranger
+        /// Alive, and unprovable either way: the store records NULL when the
+        /// kernel refuses the start-time read at publication, and the read can
+        /// refuse again now.
+        case undecided
+    }
+
+    private func occupancy(
+        of row: ShadowPeerArtifact, alive: Bool, currentStart: String?
+    ) -> PIDOccupancy {
+        guard alive else { return .gone }
+        guard let recorded = row.procStart, let current = currentStart else { return .undecided }
+        return current == recorded ? .ourHelper : .stranger
+    }
+
     private enum ArtifactOutcome {
         case unlinked
         case absent
@@ -508,16 +586,42 @@ public actor ShadowPeerReconciler {
     /// The check is not ceremony. A record's filename is its pid, so a session
     /// that inherited a recycled pid writes its own record at exactly this
     /// path; unlinking on the strength of the path alone would delist a live
-    /// teammate. A file that does not decode as a shadow record is by the same
-    /// argument not the one TBD wrote — ours was written atomically by rename —
-    /// so it is left alone too.
+    /// teammate.
+    ///
+    /// **"Somebody else's" and "unreadable" are different answers, and only the
+    /// first is settled.** A read that failed or a file that did not decode
+    /// proves nothing about who wrote it — a transient `EINTR`, a partial read,
+    /// an `EACCES` — and answering `.foreign` there retires the row while
+    /// leaving the record on disk, which is the whitelist entry gone and the
+    /// artifact left with nothing able to recognise it afterwards. Only a
+    /// record that decodes and carries a *different* session id is proof of a
+    /// stranger. A file that stays undecodable forever therefore holds its row
+    /// forever too, visible as a `deferred` count every pass — which is the
+    /// counting this design exists for, and strictly better than discarding the
+    /// only recognition TBD has.
     private func unlinkRecordIfOurs(_ row: ShadowPeerArtifact) -> ArtifactOutcome {
         let url = URL(fileURLWithPath: row.recordPath)
         guard FileManager.default.fileExists(atPath: url.path) else { return .absent }
-        guard let data = try? Data(contentsOf: url),
-              let record = try? JSONDecoder().decode(ShadowPeerRecord.self, from: data),
-              record.sessionID == row.sessionID
-        else {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            reconcilerLogger.error("""
+                could not read the shadow record at \(row.recordPath, privacy: .public) \
+                (\(error.localizedDescription, privacy: .public)); leaving it and its row for the \
+                next sweep rather than assuming it is somebody else's
+                """)
+            return .undecided
+        }
+        guard let record = try? JSONDecoder().decode(ShadowPeerRecord.self, from: data) else {
+            reconcilerLogger.error("""
+                the file at \(row.recordPath, privacy: .public) did not decode as a shadow peer \
+                record; leaving it and its row for the next sweep, because a record TBD cannot \
+                read is one it cannot prove belongs to somebody else
+                """)
+            return .undecided
+        }
+        guard record.sessionID == row.sessionID else {
             reconcilerLogger.info("""
                 left the record at \(row.recordPath, privacy: .public) alone: it is not the one TBD \
                 published for shadow \(row.handle, privacy: .public), so its pid has been recycled \
@@ -535,6 +639,54 @@ public actor ShadowPeerReconciler {
                 """)
             return .undecided
         }
+    }
+
+    /// Unlink the write-temps stranded beside this row's record path. Returns
+    /// how many were taken back.
+    ///
+    /// **The record has a hidden fourth artifact.** `ShadowPeerRecordStore`
+    /// stages every write through `.<pid>.json.<uuid>.tmp` in the registry
+    /// directory and unlinks it only on its own throwing paths, so a helper or
+    /// daemon that dies between the write and the `rename(2)` strands one — and
+    /// records are rewritten on every status change, so the opportunity recurs
+    /// for the life of every shadow. Nothing else would ever collect it: the
+    /// name starts with a dot so it is out of every glob, the ledger records
+    /// only `socket_path` and `record_path`, and Claude Code's own reaper reads
+    /// `<int>.json` and nothing else. That is the same shape as the ~7,100
+    /// orphaned tmux sockets this repo accumulated — a resource with no
+    /// collector — so it gets one here.
+    ///
+    /// **This is still ledger-derived, not the forbidden inference.** The
+    /// candidate names are generated from this row's own recorded
+    /// `record_path` through the single naming rule that created them
+    /// (`ShadowPeerRecordStore.isTemporaryFileName`), never by scanning the
+    /// directory for a shape; and the pid the row names is checked dead first,
+    /// so no live process can be midway through the `rename(2)` that would make
+    /// one of these files somebody's business rather than an orphan.
+    ///
+    /// One residual leak is accepted rather than solved: a temp beside a pid a
+    /// stranger now holds is left where it is, because that process may be
+    /// writing it. If it was TBD's, it stays forever. There is no way to tell
+    /// the two apart from outside, and tearing a live session's record write in
+    /// half is much the worse error.
+    private func unlinkStrandedRecordTemporaries(_ row: ShadowPeerArtifact) -> Int {
+        var unlinked = 0
+        for url in ShadowPeerRecordStore.temporaryFiles(forRecordAt: row.recordPath) {
+            do {
+                try FileManager.default.removeItem(at: url)
+                unlinked += 1
+                reconcilerLogger.info("""
+                    unlinked a stranded shadow record write-temp at \(url.path, privacy: .public); \
+                    the daemon or helper that was writing it never finished the rename
+                    """)
+            } catch {
+                reconcilerLogger.error("""
+                    could not unlink the stranded shadow record write-temp at \
+                    \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)
+                    """)
+            }
+        }
+        return unlinked
     }
 
     /// Unlink the socket only when a connect proves nothing is behind it.
