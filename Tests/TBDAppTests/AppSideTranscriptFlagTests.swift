@@ -47,29 +47,31 @@ struct AppSideTranscriptFlagTests {
         let scheduler = TranscriptPollScheduler(source: TranscriptSource())
         await TranscriptPaneRegistration.apply(
             enabled: false, sessionID: "s1", path: "/tmp/whatever",
-            tier: .foreground, scheduler: scheduler)
+            tier: .foreground, token: TranscriptPaneToken(), scheduler: scheduler)
         #expect(await scheduler.registeredSessionIDs.isEmpty)
     }
 
     @Test("with the flag on the session registers")
     func flagOnRegisters() async {
         let scheduler = TranscriptPollScheduler(source: TranscriptSource())
+        let pane = TranscriptPaneToken()
         await TranscriptPaneRegistration.apply(
             enabled: true, sessionID: "s1", path: "/tmp/whatever",
-            tier: .foreground, scheduler: scheduler)
+            tier: .foreground, token: pane, scheduler: scheduler)
         #expect(await scheduler.registeredSessionIDs == ["s1"])
-        await scheduler.deregister(sessionID: "s1")
+        await scheduler.deregister(sessionID: "s1", token: pane)
     }
 
     @Test("a nil or empty path never registers, even with the flag on")
     func missingPathDoesNotRegister() async {
         let scheduler = TranscriptPollScheduler(source: TranscriptSource())
+        let pane = TranscriptPaneToken()
         await TranscriptPaneRegistration.apply(
             enabled: true, sessionID: "s1", path: nil,
-            tier: .foreground, scheduler: scheduler)
+            tier: .foreground, token: pane, scheduler: scheduler)
         await TranscriptPaneRegistration.apply(
             enabled: true, sessionID: "s2", path: "",
-            tier: .foreground, scheduler: scheduler)
+            tier: .foreground, token: pane, scheduler: scheduler)
         #expect(await scheduler.registeredSessionIDs.isEmpty)
     }
 
@@ -94,16 +96,19 @@ struct AppSideTranscriptFlagTests {
         #expect(TranscriptPaneTransport.resolve(appSideEnabled: false, path: nil) == .daemonPoll)
     }
 
+    /// The same pane on both sides — it is the flag under it that changed, so
+    /// it releases the hold it took, and the session stops being polled.
     @Test("turning the flag off deregisters a pane that had registered")
     func flagOffDeregistersAnExistingRegistration() async {
         let scheduler = TranscriptPollScheduler(source: TranscriptSource())
+        let pane = TranscriptPaneToken()
         await TranscriptPaneRegistration.apply(
             enabled: true, sessionID: "s1", path: "/tmp/whatever",
-            tier: .foreground, scheduler: scheduler)
+            tier: .foreground, token: pane, scheduler: scheduler)
         #expect(await scheduler.registeredSessionIDs == ["s1"])
         await TranscriptPaneRegistration.apply(
             enabled: false, sessionID: "s1", path: "/tmp/whatever",
-            tier: .foreground, scheduler: scheduler)
+            tier: .foreground, token: pane, scheduler: scheduler)
         #expect(await scheduler.registeredSessionIDs.isEmpty)
     }
 }
