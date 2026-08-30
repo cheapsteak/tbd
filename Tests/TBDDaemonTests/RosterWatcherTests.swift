@@ -1065,3 +1065,194 @@ struct RosterWatcherReconnectTests {
         }
     }
 }
+
+// MARK: - The real bookkeeping behind the roster
+
+/// `DatabaseLocalSessionDirectory` — the production `LocalSessionDirectory`,
+/// exercised against real `WorktreeStore` and `TerminalStore` rows rather than
+/// through the fake the suites above inject.
+///
+/// This is half of the admission gate: everything it returns is a candidate
+/// whose real unix socket path can be announced to a remote host. Its four
+/// conditions — the terminal is a Claude terminal, the worktree is local, the
+/// worktree is active or main, and the worktree belongs to a repository — are
+/// each pinned by a test where a session fails **only** that condition and is
+/// therefore the difference between the admitted set and the row set.
+///
+/// Every fixture goes through the stores' own creation paths against an
+/// in-memory database, so a change to what a `create` writes reaches these
+/// tests the way it reaches production.
+@Suite("Roster watcher — TBD's own bookkeeping")
+struct DatabaseLocalSessionDirectoryTests {
+    private func makeDB() throws -> TBDDatabase { try TBDDatabase(inMemory: true) }
+
+    private func directory(_ db: TBDDatabase) -> DatabaseLocalSessionDirectory {
+        DatabaseLocalSessionDirectory(worktrees: db.worktrees, terminals: db.terminals)
+    }
+
+    private func makeRepo(_ db: TBDDatabase) async throws -> Repo {
+        try await db.repos.create(
+            path: "/tmp/tbd-roster-repo-\(UUID().uuidString)",
+            displayName: "acme",
+            defaultBranch: "main")
+    }
+
+    /// A local, active, repo-owned worktree with one Claude terminal in it —
+    /// the shape every exclusion test below deviates from in exactly one way.
+    @discardableResult
+    private func makeAdmissibleSession(
+        _ db: TBDDatabase, repoID: UUID, name: String, pane: String,
+        claudeSessionID: String? = nil
+    ) async throws -> (worktree: Worktree, terminal: Terminal) {
+        let worktree = try await db.worktrees.create(
+            repoID: repoID, name: name, displayName: name, branch: "b-\(name)",
+            path: "/tmp/tbd-roster-wt/\(name)-\(UUID().uuidString)", tmuxServer: "srv")
+        let terminal = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: pane,
+            claudeSessionID: claudeSessionID, kind: .claude)
+        return (worktree, terminal)
+    }
+
+    /// All four conditions satisfied: the session is returned, and every field
+    /// the roster joins or names on comes from the rows rather than from a
+    /// default.
+    @Test func aClaudeSessionInALocalActiveRepoWorktreeIsReturned() async throws {
+        let db = try makeDB()
+        let repo = try await makeRepo(db)
+        let made = try await makeAdmissibleSession(
+            db, repoID: repo.id, name: "useful-swallow", pane: "%3541",
+            claudeSessionID: "4E12DD65-92B8-4D8E-9920-214C6553FC63")
+
+        let sessions = await directory(db).spawnedSessions()
+
+        #expect(sessions.count == 1)
+        let session = try #require(sessions.first)
+        #expect(session.worktreeID == made.worktree.id)
+        #expect(session.repoID == repo.id)
+        #expect(session.terminalID == made.terminal.id)
+        #expect(session.displayName == "useful-swallow")
+        #expect(session.worktreePath == made.worktree.localPath)
+        #expect(session.tmuxPaneID == "%3541")
+        #expect(session.claudeSessionID == "4E12DD65-92B8-4D8E-9920-214C6553FC63")
+    }
+
+    /// A session whose hook never fired carries no Claude session id, and is
+    /// still returned: the roster falls back to the cwd-plus-pane join, and a
+    /// directory that dropped these rows would take that whole join with it.
+    @Test func aClaudeSessionWithNoCapturedSessionIDIsStillReturned() async throws {
+        let db = try makeDB()
+        let repo = try await makeRepo(db)
+        try await makeAdmissibleSession(
+            db, repoID: repo.id, name: "quiet-heron", pane: "%1", claudeSessionID: nil)
+
+        let sessions = await directory(db).spawnedSessions()
+
+        #expect(sessions.count == 1)
+        #expect(sessions.first?.claudeSessionID == nil)
+    }
+
+    /// **Condition 1 — terminal kind.** A shell, a Codex terminal and a row
+    /// written before `kind` existed sit in the same local, active, repo-owned
+    /// worktree as an admissible Claude terminal. Only the Claude one comes
+    /// back, so dropping the kind guard turns one session into four.
+    @Test func onlyClaudeTerminalsAreReturned() async throws {
+        let db = try makeDB()
+        let repo = try await makeRepo(db)
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "useful-swallow", displayName: "useful-swallow",
+            branch: "b", path: "/tmp/tbd-roster-wt/\(UUID().uuidString)", tmuxServer: "srv")
+        let claude = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude)
+        _ = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .shell)
+        _ = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@3", tmuxPaneID: "%3", kind: .codex)
+        _ = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@4", tmuxPaneID: "%4", kind: nil)
+
+        let sessions = await directory(db).spawnedSessions()
+
+        #expect(sessions.map(\.terminalID) == [claude.id])
+    }
+
+    /// **Condition 2 — locality.** A remote lane's Claude terminal is active,
+    /// belongs to a repository, and differs from the admitted session only in
+    /// `location`. It has no socket on this machine to announce, and nothing
+    /// but this guard keeps it out.
+    @Test func aClaudeSessionInARemoteWorktreeIsNotReturned() async throws {
+        let db = try makeDB()
+        let repo = try await makeRepo(db)
+        let local = try await makeAdmissibleSession(
+            db, repoID: repo.id, name: "useful-swallow", pane: "%1")
+        let remote = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "cheerful-otter", displayName: "cheerful-otter",
+            branch: "b2", provider: "agentbox", sessionID: "session-\(UUID().uuidString)")
+        _ = try await db.terminals.create(
+            worktreeID: remote.id, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .claude)
+
+        let sessions = await directory(db).spawnedSessions()
+
+        #expect(sessions.map(\.terminalID) == [local.terminal.id])
+        #expect(!sessions.contains(where: { $0.worktreeID == remote.id }))
+    }
+
+    /// **Condition 3 — worktree status.** Archived and still-creating worktrees
+    /// hold Claude terminals that are local and repo-owned; only the status
+    /// column separates them from the admitted one, so removing the guard
+    /// admits all three.
+    @Test func aClaudeSessionInANonActiveWorktreeIsNotReturned() async throws {
+        let db = try makeDB()
+        let repo = try await makeRepo(db)
+        let active = try await makeAdmissibleSession(
+            db, repoID: repo.id, name: "useful-swallow", pane: "%1")
+        let archived = try await makeAdmissibleSession(
+            db, repoID: repo.id, name: "cheerful-otter", pane: "%2")
+        let creating = try await makeAdmissibleSession(
+            db, repoID: repo.id, name: "quiet-heron", pane: "%3")
+        try await db.worktrees.updateStatus(id: archived.worktree.id, status: .archived)
+        try await db.worktrees.updateStatus(id: creating.worktree.id, status: .creating)
+
+        let sessions = await directory(db).spawnedSessions()
+
+        #expect(sessions.map(\.terminalID) == [active.terminal.id])
+    }
+
+    /// The other half of that guard: a repository's `main` worktree is not
+    /// `.active` and is admitted anyway. A guard narrowed to `.active` alone
+    /// would silently stop announcing every session in a main checkout.
+    @Test func aClaudeSessionInTheMainWorktreeIsReturned() async throws {
+        let db = try makeDB()
+        let repo = try await makeRepo(db)
+        let main = try await db.worktrees.createMain(
+            repoID: repo.id, name: "acme", branch: "main",
+            path: "/tmp/tbd-roster-main-\(UUID().uuidString)", tmuxServer: "srv")
+        let terminal = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .claude)
+
+        let sessions = await directory(db).spawnedSessions()
+
+        #expect(sessions.map(\.terminalID) == [terminal.id])
+        #expect(sessions.first?.repoID == repo.id)
+    }
+
+    /// **Condition 4 — a repository to scope by.** A scratch worktree is local
+    /// and active and its Claude terminal is a real TBD-spawned session; it
+    /// has no `repoID`, so no link's repository can scope it and it is never
+    /// announced. Removing the guard would have to invent a repository for it.
+    @Test func aClaudeSessionInAScratchWorktreeIsNotReturned() async throws {
+        let db = try makeDB()
+        let repo = try await makeRepo(db)
+        let owned = try await makeAdmissibleSession(
+            db, repoID: repo.id, name: "useful-swallow", pane: "%1")
+        let scratch = try await db.worktrees.createScratch(
+            name: "scratch", displayName: "scratch",
+            path: "/tmp/tbd-roster-scratch-\(UUID().uuidString)", tmuxServer: "srv")
+        _ = try await db.terminals.create(
+            worktreeID: scratch.id, tmuxWindowID: "@2", tmuxPaneID: "%2", kind: .claude)
+
+        let sessions = await directory(db).spawnedSessions()
+
+        #expect(sessions.map(\.terminalID) == [owned.terminal.id])
+        #expect(!sessions.contains(where: { $0.worktreeID == scratch.id }))
+    }
+}
