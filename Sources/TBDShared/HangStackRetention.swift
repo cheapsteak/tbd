@@ -67,6 +67,21 @@ public enum HangStackRetention {
         return normalizedPath(url.deletingLastPathComponent()) == normalizedPath(directory)
     }
 
+    /// The spelling of a directory that everything enumerating or comparing it
+    /// should use: symlinks resolved, path standardized.
+    ///
+    /// Enumeration is the reason this is not merely tidiness.
+    /// `FileManager.contentsOfDirectory(at:)` yields **nothing** for a URL that
+    /// is itself a symlink to a directory, so a base handed in through a
+    /// symlinked path makes the sweep and the write-side trim silently reclaim
+    /// nothing — the failure looks exactly like an empty directory, which is
+    /// also what "working correctly" looks like. Resolving the base once, at
+    /// the boundary, is what makes that unrepresentable rather than a bug
+    /// waiting for the right filesystem layout.
+    public static func resolvedDirectory(_ url: URL) -> URL {
+        url.resolvingSymlinksInPath().standardizedFileURL
+    }
+
     private static func normalizedPath(_ url: URL) -> String {
         var path = url.resolvingSymlinksInPath().standardizedFileURL.path
         while path.count > 1, path.hasSuffix("/") { path.removeLast() }

@@ -191,10 +191,23 @@ final class HangStackWriter: @unchecked Sendable {
         let keys: [URLResourceKey] = [
             .contentModificationDateKey, .creationDateKey, .isRegularFileKey,
         ]
+        // Resolved once, for the same reason the collector resolves its base:
+        // `contentsOfDirectory(at:)` yields nothing for a URL that is itself a
+        // symlink to a directory, which would make this trim a silent no-op
+        // indistinguishable from an empty directory.
+        let resolvedBase = HangStackRetention.resolvedDirectory(baseDir)
         guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: baseDir, includingPropertiesForKeys: keys,
+            at: resolvedBase, includingPropertiesForKeys: keys,
             options: [.skipsSubdirectoryDescendants]
         ) else { return }
+
+        // The two files this trim must never delete, compared by resolved path
+        // rather than by `URL` equality: the enumeration above and these two
+        // URLs can spell the same file differently, and `==` on the raw URLs
+        // then quietly stops protecting them.
+        let protectedPaths = Set(
+            [justWritten, openFile].compactMap { $0?.resolvingSymlinksInPath().standardizedFileURL.path }
+        )
 
         var files: [(url: URL, date: Date)] = []
         for url in entries {
@@ -213,10 +226,11 @@ final class HangStackWriter: @unchecked Sendable {
 
         var removed = 0
         for entry in files.dropFirst(HangStackRetention.maxFiles) {
-            if entry.url == justWritten || entry.url == openFile { continue }
+            let resolved = entry.url.resolvingSymlinksInPath().standardizedFileURL.path
+            if protectedPaths.contains(resolved) { continue }
             // Anchored right before the delete, the same check the collector
             // makes: the path must resolve to an immediate child of the base.
-            guard HangStackRetention.isImmediateChild(entry.url, of: baseDir) else { continue }
+            guard HangStackRetention.isImmediateChild(entry.url, of: resolvedBase) else { continue }
             do {
                 try FileManager.default.removeItem(at: entry.url)
                 removed += 1

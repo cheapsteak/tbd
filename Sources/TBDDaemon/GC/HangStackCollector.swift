@@ -44,8 +44,12 @@ public struct HangStackCandidate: Sendable, Equatable {
 public struct HangStackCollector: Sendable {
     let base: URL
 
+    /// Resolves the base once, here, so enumeration and the per-delete anchor
+    /// check can never be looking at two spellings of the same directory. See
+    /// `HangStackRetention.resolvedDirectory` for why an unresolved base makes
+    /// this collector reclaim nothing while looking healthy.
     public init(base: URL) {
-        self.base = base
+        self.base = HangStackRetention.resolvedDirectory(base)
     }
 
     /// The files this sweep should delete, in the order they were ranked.
