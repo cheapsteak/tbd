@@ -55,9 +55,11 @@ actor TranscriptSource {
     /// Drops everything built for `sessionID`. The next `refresh` for that id
     /// starts over from byte zero.
     ///
-    /// `TranscriptPollScheduler.deregister` is the production caller, and the
-    /// only one: retention is scoped to registration, so no entry outlives the
-    /// pane that asked for it.
+    /// `TranscriptPollScheduler` is the only production caller, from two
+    /// places: `deregister`, and `finishTick` for a poll whose refresh landed
+    /// after its registration had already gone. Retention is scoped to
+    /// registration either way, so no entry outlives the pane that asked for
+    /// it.
     func forget(sessionID: String) {
         entries.removeValue(forKey: sessionID)
     }
