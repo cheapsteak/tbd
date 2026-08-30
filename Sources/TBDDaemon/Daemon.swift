@@ -4,6 +4,7 @@ import os
 
 private let daemonLogger = Logger(subsystem: "com.tbd.daemon", category: "startup")
 private let reconcileLogger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
+private let peerScopeLogger = Logger(subsystem: "com.tbd.daemon", category: "peer-bridge")
 
 struct RuntimeIntegrationRefresher {
     var writeFallbackSkill: () throws -> Void
@@ -53,6 +54,122 @@ struct RuntimeIntegrationRefresher {
     }
 }
 
+/// The repositories one provider hosts sessions in, remembered across a failed
+/// read.
+///
+/// The scope is recomputed from the worktree table on every reconcile tick, and
+/// **scope retirement unannounces**: a repository leaving the scope withdraws
+/// its roster registration and writes `peer-gone` for every local session
+/// announced on it. A resolver that answered a transient database error with
+/// the empty set would therefore tear down every announced peer for the
+/// provider on one bad tick and rebuild them on the next. So "unknown" must not
+/// be spelled the same way as "hosts no repositories" — which is exactly what
+/// the `(try? ...) ?? []` this replaced did.
+///
+/// `resolve()` keeps the scope the last successful read produced and hands that
+/// back when a read fails, leaving the scope where it was. Before any read has
+/// ever succeeded it returns `nil` rather than `[]`: there is nothing to
+/// reconcile toward yet, which is a different statement from "the scope is
+/// empty" and the one the caller must not conflate.
+///
+/// Acting on stale state is a thing to be able to see, so it is counted and
+/// logged rather than absorbed: every failed read logs at `.error` with the run
+/// length and the size of the scope being replayed, and the read that recovers
+/// logs the far end of that window, so a stale span appears in the log as a
+/// span rather than as a silence. `failedReads` and `consecutiveFailures` are
+/// readable for the same reason — a future `peer.status` row is the natural
+/// place to surface them beside `linkState`.
+///
+/// **Nothing bounds how long a scope may stay stale, and that is the accepted
+/// trade rather than an oversight.** The counters above are the whole response
+/// to a failing read: no expiry, no ceiling, no degraded mode. A read that
+/// fails permanently — a schema break rather than a hiccup — therefore freezes
+/// the scope at its last good value for as long as the daemon runs, and this
+/// scope is a trust boundary, deciding which local sessions a remote host can
+/// reach. It is accepted because of what the frozen value can and cannot be: a
+/// scope only ever comes from a read that succeeded, so retaining one keeps
+/// announcing into repositories the provider genuinely hosted sessions in at
+/// that moment. Staleness can go on admitting a repository that should have
+/// left the scope, and can miss one that should have joined it; it can never
+/// admit one that was never in it, so no amount of it becomes a cross-project
+/// leak. An expiry that bounded it would buy nothing against that and would
+/// cost the failure this type exists to prevent — on the one signal it cannot
+/// tell apart from a hiccup, it would retire every announced peer for the
+/// provider.
+actor ProviderRepoScope {
+    /// The provider whose sessions this scope admits. Also what the log names,
+    /// because a stale scope is a per-provider condition.
+    private let provider: String
+
+    /// The worktree read. Injected, so the failure branch is reachable from a
+    /// test without a database that can be made to fail.
+    private let listWorktrees: @Sendable () async throws -> [Worktree]
+
+    /// The scope the last successful read produced; `nil` until one has
+    /// succeeded. The optionality *is* the fix — it is what keeps "no scope
+    /// known" distinguishable from "the scope is empty".
+    private var lastKnownGood: Set<UUID>?
+
+    /// Failed reads since the last successful one. Zero whenever the scope
+    /// last returned was freshly read.
+    private(set) var consecutiveFailures = 0
+
+    /// Failed reads over this resolver's whole life, so a scope that flickers
+    /// and recovers all day is still visible as one that is failing.
+    private(set) var failedReads = 0
+
+    init(
+        provider: String,
+        listWorktrees: @escaping @Sendable () async throws -> [Worktree]
+    ) {
+        self.provider = provider
+        self.listWorktrees = listWorktrees
+    }
+
+    /// The repositories this provider currently hosts sessions in, the last
+    /// known good set if this read failed, or `nil` if no read has ever
+    /// succeeded.
+    func resolve() async -> Set<UUID>? {
+        do {
+            let rows = try await listWorktrees()
+            let scope = Set(rows.compactMap { row in
+                row.providerBinding?.provider == provider ? row.repoID : nil
+            })
+            if consecutiveFailures > 0 {
+                peerScopeLogger.notice("""
+                    repo scope for provider \(self.provider, privacy: .public) is fresh again \
+                    after \(self.consecutiveFailures, privacy: .public) failed read(s); \
+                    \(scope.count, privacy: .public) repo(s) in scope
+                    """)
+            }
+            consecutiveFailures = 0
+            lastKnownGood = scope
+            return scope
+        } catch {
+            failedReads += 1
+            consecutiveFailures += 1
+            if let lastKnownGood {
+                peerScopeLogger.error("""
+                    repo scope read failed for provider \(self.provider, privacy: .public) \
+                    (\(self.consecutiveFailures, privacy: .public) in a row, \
+                    \(self.failedReads, privacy: .public) total): reusing the last known scope \
+                    of \(lastKnownGood.count, privacy: .public) repo(s) rather than retiring \
+                    every announced peer — \(String(describing: error), privacy: .public)
+                    """)
+            } else {
+                peerScopeLogger.error("""
+                    repo scope read failed for provider \(self.provider, privacy: .public) \
+                    (\(self.consecutiveFailures, privacy: .public) in a row, \
+                    \(self.failedReads, privacy: .public) total) and none has ever succeeded: \
+                    no scope is known, so nothing is announced yet — \
+                    \(String(describing: error), privacy: .public)
+                    """)
+            }
+            return lastKnownGood
+        }
+    }
+}
+
 /// Top-level daemon orchestrator.
 ///
 /// Coordinates all subsystems: database, managers, servers, and subscriptions.
@@ -79,6 +196,19 @@ public final class Daemon: Sendable {
     /// it the same way they reach `rpcRouter.hibernationCoordinator`. `nil`
     /// in mock mode (never constructed).
     public nonisolated(unsafe) var orphanGC: OrphanGC?
+    /// The registry a live `ShadowPeerManager` registers itself with, so
+    /// `ShadowPeerReconciler` can tell a live shadow from an orphan. Owned here
+    /// because the two have opposite lifetimes: the reconciler runs for the
+    /// daemon's life, a manager comes and goes with its provider's peer link.
+    /// `nil` in mock mode.
+    public nonisolated(unsafe) var shadowPeerBridges: ShadowPeerBridgeRegistry?
+    /// The named reconciler for a shadow peer's helper process, socket and
+    /// record (`docs/specs/2026-08-29-remote-peer-messaging-design.md`,
+    /// "Reclamation and detection"). `nil` in mock mode.
+    public nonisolated(unsafe) var shadowPeerReconciler: ShadowPeerReconciler?
+    /// Its own tick — deliberately not folded into `gcTask`, whose hourly
+    /// cadence is far too slow for registry hygiene. `nil` in mock mode.
+    public nonisolated(unsafe) var shadowPeerReconcilerTask: Task<Void, Never>?
     /// Remote-backends actor (Task 7). Owned here so shutdown can reach it —
     /// the events supervisor's own supervision task retains the manager
     /// strongly, so without an explicit `shutdown()` call it (and its child
@@ -412,6 +542,7 @@ public final class Daemon: Sendable {
     /// (`start()`) never passes either and behavior there is unchanged.
     static func makeRemoteProviderManager(
         database: TBDDatabase, subs: StateSubscriptionManager, actuationLog: ActuationLog,
+        peerBridging: PeerBridgeWiring? = nil,
         registryURL: URL = URL(fileURLWithPath: TBDConstants.agentProvidersPath),
         subprocess: any RemoteProviderInvoking = ProviderRunner(),
         resolveClaudeExecutable: () throws -> String = { try ClaudeExecutableResolver.resolve() }
@@ -447,8 +578,79 @@ public final class Daemon: Sendable {
             runner: ProviderDispatcher(subprocess: subprocess, builtIns: builtIns),
             registryURL: registryURL,
             actuationLog: actuationLog,
-            builtInProviders: builtInConfigs)
+            builtInProviders: builtInConfigs,
+            peerBridging: peerBridging)
         return (manager, !builtIns.isEmpty)
+    }
+
+    /// Everything a peer-messaging bridge needs, assembled at the one place the
+    /// daemon knows all of it.
+    ///
+    /// The gate itself is NOT here. `remote_peer_messaging_enabled` is read
+    /// through `isEnabled`, at the moment a provider's streams are armed, next
+    /// to the `events` capability gate it mirrors — so a provider that declares
+    /// `messages` while the flag is off gets nothing built at all: no helper
+    /// spawned, no record published, no stream opened. What this function
+    /// decides is only *how* to build one when both gates pass.
+    ///
+    /// The scope closure is the design's outward scoping rule, expressed once:
+    /// TBD's own sessions are announced to a provider only for the
+    /// repositories that provider actually hosts sessions in, so a remote lane
+    /// in one project can never reach local sessions in another. It resolves
+    /// through a `ProviderRepoScope`, so a database read that fails replays the
+    /// last known scope instead of reporting an empty one — see that type for
+    /// why the difference is load-bearing.
+    static func makePeerBridging(
+        database: TBDDatabase,
+        roster: PeerRosterRunner,
+        bridges: ShadowPeerBridgeRegistry,
+        sessionsDirectory: URL,
+        origin: String = PeerLinkOrigin.local()
+    ) -> PeerBridgeWiring {
+        PeerBridgeWiring(
+            isEnabled: {
+                let config = try? await database.config.get()
+                return config?.remotePeerMessagingEnabled
+                    ?? Config.remotePeerMessagingDefault
+            },
+            make: { config, contractVersion in
+                // One resolver per bridge, living exactly as long as the
+                // bridge does. Last-known-good is per-provider state and the
+                // provider is fixed the moment the bridge is built, so this is
+                // the narrowest scope that can hold it.
+                let scope = ProviderRepoScope(
+                    provider: config.name,
+                    listWorktrees: {
+                        try await database.worktrees.list(excludeArchived: true)
+                    })
+                let bridge = PeerBridge.make(
+                    config: config,
+                    contractVersion: contractVersion,
+                    origin: origin,
+                    siteResolver: WorktreeShadowPeerSiteResolver(
+                        provider: config.name,
+                        worktrees: database.worktrees,
+                        repos: database.repos),
+                    // The real ledger, never `UnrecordedShadowPeerArtifacts`: a
+                    // shadow published through that recorder is one nothing can
+                    // recognise afterwards, so its helper, socket and record
+                    // would be unreclaimable by construction.
+                    artifactRecorder: database.shadowPeerArtifacts,
+                    sessionsDirectory: sessionsDirectory,
+                    roster: roster,
+                    bridges: bridges,
+                    repoScope: {
+                        // The single place "unknown" has to become a set, and
+                        // it is safe here in a way `try?` was not: a resolver
+                        // that has never read successfully has never produced
+                        // a registration either, so reconciling toward the
+                        // empty set retires nothing. After one good read the
+                        // resolver never answers nil again — a later failure
+                        // replays the previous scope instead of collapsing it.
+                        await scope.resolve() ?? []
+                    })
+                return bridge
+            })
     }
 
     /// Recreate the base scratch directory if it's missing. Safe to call every startup.
@@ -660,8 +862,28 @@ public final class Daemon: Sendable {
         var remoteManager: RemoteProviderManager?
         var claudeCloudLive = false
         if mockMode == nil {
+            // The reclaimer's registry and the outward roster are built HERE,
+            // ahead of the provider manager, because a peer bridge needs both
+            // at construction and the manager is what constructs one. The
+            // reconciler that reads the registry is armed later (step
+            // 11a-shadow) off this same instance — two registries would mean a
+            // sweep that could never see a live shadow and would count every
+            // row as unvouched-for.
+            let bridgeRegistry = ShadowPeerBridgeRegistry()
+            self.shadowPeerBridges = bridgeRegistry
+            let peerRecordStore = ShadowPeerRecordStore()
+            let peerRoster = PeerRosterRunner(roster: RosterWatcher(
+                sessionsDirectory: peerRecordStore.sessionsDirectory,
+                sessions: DatabaseLocalSessionDirectory(
+                    worktrees: database.worktrees, terminals: database.terminals),
+                origin: PeerLinkOrigin.local()))
             let outcome = await Self.makeRemoteProviderManager(
-                database: database, subs: subs, actuationLog: actuationLog)
+                database: database, subs: subs, actuationLog: actuationLog,
+                peerBridging: Self.makePeerBridging(
+                    database: database,
+                    roster: peerRoster,
+                    bridges: bridgeRegistry,
+                    sessionsDirectory: peerRecordStore.sessionsDirectory))
             remoteManager = outcome.manager
             claudeCloudLive = outcome.claudeCloudLive
             self.remoteManager = outcome.manager
@@ -923,6 +1145,35 @@ public final class Daemon: Sendable {
             )
             self.pendingQuestionExpirySweep = questionSweep
             await questionSweep.start()
+
+            // 11a-shadow. Reclaim the durable artifacts of shadow peers — a
+            // helper process, the socket it bound, and the record it published
+            // into the registry every Claude Code session on this machine
+            // reads. Sweeps once now (which is what reclaims a previous
+            // daemon's leavings, including the recycled-pid ghosts Claude
+            // Code's own reaper provably will not collect) and then on its own
+            // tick.
+            //
+            // Not gated on `remotePeerMessagingEnabled`: this is the
+            // reclaimer's ledger rather than the feature, its whitelist is
+            // empty on any install that never published a shadow, and gating it
+            // would strand every artifact the moment somebody turned the
+            // feature off.
+            // The instance the provider manager's bridges register with, built
+            // above alongside them. The fallback constructs an empty registry
+            // rather than trapping — it is unreachable while both halves sit
+            // under this same `mockMode == nil` guard, and a daemon that
+            // refused to boot over a wiring slip would be worse than one whose
+            // sweep is conservative.
+            let shadowPeerBridges = self.shadowPeerBridges ?? ShadowPeerBridgeRegistry()
+            self.shadowPeerBridges = shadowPeerBridges
+            let shadowPeerReconciler = ShadowPeerReconciler(
+                artifacts: database.shadowPeerArtifacts, bridges: shadowPeerBridges)
+            self.shadowPeerReconciler = shadowPeerReconciler
+            // `peer.status` reports what the last sweep found. Read-only: no
+            // RPC triggers or steers a sweep.
+            rpcRouter.shadowPeerReconciler = shadowPeerReconciler
+            self.shadowPeerReconcilerTask = Task { await shadowPeerReconciler.run() }
 
             // 11a-gc. Orphan maintenance: reap abandoned agent worktrees + scratchpads
             // and reconcile scratch terminals against their shared tmux server
@@ -1361,6 +1612,7 @@ public final class Daemon: Sendable {
         reaperTask?.cancel()
         hibernationSweepTask?.cancel()
         gcTask?.cancel()
+        shadowPeerReconcilerTask?.cancel()
 
         // Stop servers
         if let sock = socketServer {

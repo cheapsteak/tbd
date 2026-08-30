@@ -1400,6 +1400,24 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcOrphanProcessesEnabled: Bool
+    /// The single opt-in for remote peer messaging
+    /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
+    /// rollout"): publishing a shadow peer for each remote session and carrying
+    /// frames over the provider's `messages` stream. It ships OFF because the
+    /// bridge acts without a user gesture — helper processes, sockets and
+    /// records appear in `~/.claude/sessions` and `/tmp/cc-socks`, directories
+    /// shared with every Claude Code session on the machine.
+    ///
+    /// There is deliberately no per-worktree companion: a second gate under a
+    /// global one is the kind nobody tunes and everybody has to debug around.
+    ///
+    /// **Resolved, not stored**, like `gcOrphanProcessesEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `remote_peer_messaging_enabled ?? Config.remotePeerMessagingDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var remotePeerMessagingEnabled: Bool
     /// Machine-wide remote create-param defaults, keyed by the **provider's
     /// own** `create_params` field names — the fall-through level beneath
     /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
@@ -1448,6 +1466,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// change to this constant — no forcing `UPDATE` migration, and an explicit
     /// opt-out is left alone.
     public static let gcOrphanProcessesEnabledDefault = false
+    /// The shipped default for `remotePeerMessagingEnabled`, and the single
+    /// place it lives. The peer bridge ships off; graduation — after a soak in
+    /// which no ghost record outlives its daemon — is a change to this
+    /// constant, with no forcing `UPDATE` migration and every explicit opt-out
+    /// left alone.
+    public static let remotePeerMessagingDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1480,6 +1504,7 @@ public struct Config: Codable, Sendable, Equatable {
                 gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
                 gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
+                remotePeerMessagingEnabled: Bool = Config.remotePeerMessagingDefault,
                 remoteCreateDefaults: [String: String] = [:]) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
@@ -1512,6 +1537,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
         self.claudeCloudEnabled = claudeCloudEnabled
         self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
+        self.remotePeerMessagingEnabled = remotePeerMessagingEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
     }
 
@@ -1590,6 +1616,11 @@ public struct Config: Codable, Sendable, Equatable {
         // default rather than hardcoding `false`.
         gcOrphanProcessesEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcOrphanProcessesEnabled) ?? Config.gcOrphanProcessesEnabledDefault
+        // Same tri-state once more: absent means the sender knew nothing about
+        // the flag, which is the NULL column's situation — follow the shipped
+        // default rather than hardcoding `false`.
+        remotePeerMessagingEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remotePeerMessagingEnabled) ?? Config.remotePeerMessagingDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.

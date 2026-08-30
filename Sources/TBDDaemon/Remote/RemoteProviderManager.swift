@@ -31,7 +31,22 @@ public actor RemoteProviderManager {
     /// happen (`docs/specs/2026-08-16-remote-lane-archive-design.md`
     /// §"Never silent").
     private let actuationLog: ActuationLog?
+    /// Everything the remote peer-messaging bridge needs, or nil where nothing
+    /// may ever be bridged — mock mode, and the many fixtures that construct
+    /// this actor for mirror/adoption coverage. Nil is a stronger statement
+    /// than "the flag is off": it means no bridge can be built at all, so the
+    /// gate below is never even consulted.
+    private let peerBridging: PeerBridgeWiring?
     static let pollInterval: TimeInterval = 60
+    /// The capability a provider must declare in `describe` before TBD opens a
+    /// `messages` stream against it.
+    ///
+    /// **The safety half of the stale-shim problem is free**: a shim that
+    /// predates this feature declares nothing, so TBD never invokes a verb it
+    /// cannot implement. The cost is that the feature then does nothing, and
+    /// silently — which is why `peerBridgeReport()` reports the absence rather
+    /// than leaving an empty listing to be interpreted.
+    static let messagesCapability = "messages"
     /// How many times one provider may be enrolled post-boot before this
     /// actor stops trying.
     ///
@@ -84,6 +99,11 @@ public actor RemoteProviderManager {
     private var snapshotFreshnessUnreadable: Set<String> = []
     private var loops: [String: Task<Void, Never>] = [:]
     private var supervisors: [String: ProviderEventsSupervisor] = [:]
+    /// The peer-messaging bridge per provider, or empty when nothing is
+    /// bridged. Lives beside `supervisors` because it has the same lifetime and
+    /// the same owner: one per provider, armed by `startLoop`, torn down by
+    /// `stopAll()` under the reconfigure lock.
+    private var peerBridges: [String: any PeerBridging] = [:]
     /// The most recent post-boot enrollment task per provider — see
     /// `enrollIfNeeded`. Retained after completion so `shutdown()` can cancel
     /// AND await it; the burst guard is `enrollmentsInFlight` and the retry
@@ -138,6 +158,7 @@ public actor RemoteProviderManager {
         runner: any RemoteProviderInvoking, registryURL: URL,
         actuationLog: ActuationLog? = nil,
         builtInProviders: [RemoteProviderConfig] = [],
+        peerBridging: PeerBridgeWiring? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.db = db
@@ -146,6 +167,7 @@ public actor RemoteProviderManager {
         self.runner = runner
         self.registryURL = registryURL
         self.actuationLog = actuationLog
+        self.peerBridging = peerBridging
         self.builtInProviders = builtInProviders
         self.clock = clock
         // RPC becomes available before `start()` runs, so seed the registry
@@ -320,6 +342,14 @@ public actor RemoteProviderManager {
         loops.removeAll()
         for supervisor in supervisors.values { await supervisor.stop() }
         supervisors.removeAll()
+        // Torn down last and awaited: a bridge owns helper processes, sockets
+        // and registry records, and `stop()` returns only once they are gone.
+        // Dropping the reference without awaiting would leave listeners bound
+        // that nothing on the machine could close.
+        for bridge in peerBridges.values.sorted(by: { $0.provider < $1.provider }) {
+            await bridge.stop()
+        }
+        peerBridges.removeAll()
     }
 
     /// Guarded daemon-shutdown entry point. `stopAll()` itself is not safe
@@ -380,6 +410,29 @@ public actor RemoteProviderManager {
             // one is still in flight.
             await supervisor.start()
         }
+
+        // The peer-messaging bridge, behind two gates that answer different
+        // questions. The **flag** (`remote_peer_messaging_enabled`, default
+        // off) is the user's consent: a provider that declares the capability
+        // while it is off gets nothing — no helper spawned, no record
+        // published, no stream opened — because nothing is constructed at all.
+        // The **capability** is the provider's own declaration: an old shim
+        // never declares `messages`, and invoking a verb it cannot implement
+        // would spawn a child that fails on every reconnect forever.
+        //
+        // Read here rather than at boot, alongside the events gate it mirrors,
+        // so both live at the one place a provider's streams are armed.
+        if let peerBridging,
+           describes[config.name]?.capabilities.contains(Self.messagesCapability) == true,
+           await peerBridging.isEnabled(),
+           let bridge = await peerBridging.make(config, contractMajor(for: config.name)) {
+            // Installed before `start()` for the reason the events supervisor
+            // documents above: `start()` suspends this actor's executor, and a
+            // bridge nothing holds is one `stopAll()` could never reach.
+            peerBridges[config.name] = bridge
+            await bridge.start()
+        }
+
         loops[config.name] = Task { [weak self, clock] in
             while !Task.isCancelled {
                 await self?.pollOnce(provider: config)
@@ -982,6 +1035,38 @@ public actor RemoteProviderManager {
     private func sweepFilingDecisions(now: Date) {
         let cutoff = now.addingTimeInterval(-2 * Self.pollInterval)
         filingDecisions = filingDecisions.filter { $0.value >= cutoff }
+    }
+
+    /// One row per registered provider for `peer.status`, plus the live-shadow
+    /// join `tbd peer list` cannot make for itself.
+    ///
+    /// **Every provider appears, bridged or not.** A provider that declares no
+    /// `messages` capability is exactly the stale shim the design's Conformance
+    /// section names, and the whole point is that its silence becomes a line
+    /// somebody reads rather than an empty listing somebody misreads.
+    func peerBridgeReport() async -> PeerBridgeReport {
+        var report = PeerBridgeReport()
+        for name in providers.keys.sorted() {
+            if let bridge = peerBridges[name] {
+                report.providers.append(await bridge.status())
+                report.liveShadowsByPID.merge(await bridge.liveShadows()) { current, _ in current }
+            } else {
+                report.providers.append(PeerProviderBridgeStatus(
+                    provider: name,
+                    declaresMessages: describes[name]?
+                        .capabilities.contains(Self.messagesCapability) == true,
+                    bridged: false))
+            }
+        }
+        return report
+    }
+
+    /// Test seam: whether a peer bridge currently exists for `name`. The gate
+    /// in `startLoop` has three branches — flag off, capability absent, both
+    /// satisfied — and this is what makes each of them observable without
+    /// spawning anything.
+    func hasPeerBridge(named name: String) -> Bool {
+        peerBridges[name] != nil
     }
 
     /// Test seam: whether a supervisor currently exists for `name` — used

@@ -62,6 +62,12 @@ public final class RPCRouter: Sendable {
     /// The `gc.*` handlers return an error response rather than crashing when
     /// this is nil.
     public nonisolated(unsafe) var orphanGC: OrphanGC?
+    /// The named reconciler for a shadow peer's helper process, socket and
+    /// record. Read-only from here: `peer.status` reports what its last sweep
+    /// found, and nothing on the RPC surface triggers or steers a sweep.
+    /// `nil` in mock mode / unit tests, where the answer simply carries no
+    /// sweep — which is honest, since none has run.
+    public nonisolated(unsafe) var shadowPeerReconciler: ShadowPeerReconciler?
     /// Remote-backends actor. Constructed at boot ONLY when
     /// `config.remoteBackendsEnabled` is true (see `Daemon.swift`); `nil`
     /// otherwise, including when a user flips the flag on without
@@ -696,6 +702,10 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteReportAttachExit(request.paramsData)
             case RPCMethod.configSetRemoteBackends:
                 return try await handleConfigSetRemoteBackends(request.paramsData)
+            case RPCMethod.configSetRemotePeerMessagingEnabled:
+                return try await handleConfigSetRemotePeerMessagingEnabled(request.paramsData)
+            case RPCMethod.peerStatus:
+                return try await handlePeerStatus()
             case RPCMethod.gcList:
                 return try await handleGCList(request.paramsData)
             case RPCMethod.gcRestore:

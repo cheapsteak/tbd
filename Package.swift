@@ -139,6 +139,27 @@ let package = Package(
             ],
             path: "Sources/TBDCLI"
         ),
+        // One process per shadow peer (docs/specs/2026-08-29-remote-peer-messaging-design.md
+        // § "Shadow peer lifecycle"). Spawned by the daemon, one per remote
+        // session it mirrors: it binds that shadow's socket, publishes and
+        // rewrites that shadow's registry record, and exits when its stdin
+        // closes. A separate executable rather than a thread in the daemon
+        // because the record's pid is parsed from its *filename*, so one process
+        // can publish exactly one valid record — and because stdin EOF is then a
+        // cleanup signal the kernel delivers even to a SIGKILLed daemon's
+        // children.
+        //
+        // Deliberately NOT linked against TBDDaemonLib: the helper needs the
+        // record shape and the frame codec, both of which live in TBDShared, and
+        // nothing else. Its output is os.Logger, not stdout — stdout is the
+        // frame channel back to the daemon.
+        .executableTarget(
+            name: "TBDPeerHelper",
+            dependencies: [
+                "TBDShared",
+            ],
+            path: "Sources/TBDPeerHelper"
+        ),
         .systemLibrary(
             name: "CComrakFFI",
             path: "Sources/CComrakFFI"
@@ -240,6 +261,26 @@ let package = Package(
             name: "TBDCLITests",
             dependencies: [
                 "TBDCLI",
+                "TBDShared",
+            ]
+        ),
+        // The shadow peer helper's own suite. It depends on the EXECUTABLE
+        // target for two reasons: `@testable import` reaches the parsing and
+        // attribution-stripping helpers, and — the load-bearing one — the
+        // integration tests spawn the real `TBDPeerHelper` binary, bind its
+        // real socket and read its real record, so the product has to be built
+        // and sit in the same products directory as the test bundle.
+        //
+        // Left in the fast PARALLEL pass deliberately, though it spawns a
+        // child: `Tests/CLAUDE.md` § "Test tiers" makes the failure asymmetry
+        // the tie-breaker — leaving a heavy suite in the parallel pass is the
+        // status quo, while moving a suite into the serial pass taxes every PR
+        // forever. The suite is `.serialized`, each helper lives for
+        // milliseconds, and every wait is a bounded poll.
+        .testTarget(
+            name: "TBDPeerHelperTests",
+            dependencies: [
+                "TBDPeerHelper",
                 "TBDShared",
             ]
         ),

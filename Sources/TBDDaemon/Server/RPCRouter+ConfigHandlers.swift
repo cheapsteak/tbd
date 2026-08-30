@@ -293,4 +293,30 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
+
+    /// Persist the remote peer-messaging gate — the default-off soak switch for
+    /// shadow peers and the provider `messages` stream. This is how the soak is
+    /// turned on: the flag is the feature's only opt-in, and leaving it
+    /// reachable only by hand-editing `~/tbd/state.db` would put the sole way
+    /// to enable it behind a database the project's own rules say not to go
+    /// into.
+    ///
+    /// **It does not take effect until the daemon restarts.** The gate is read
+    /// where a provider's streams are armed (`RemoteProviderManager`), so
+    /// flipping it on builds no bridge for a provider whose loops are already
+    /// running, and flipping it off leaves a running bridge up. `tbd peer list`
+    /// and `peer.status` are what say whether a restart is still owed.
+    ///
+    /// The column is written on every call, because writing either value is the
+    /// explicit gesture that lifts it out of NULL forever after.
+    func handleConfigSetRemotePeerMessagingEnabled(
+        _ paramsData: Data
+    ) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetPeerMessagingEnabledParams.self, from: paramsData)
+        try await db.config.setRemotePeerMessagingEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
 }

@@ -325,6 +325,16 @@ public enum RPCMethod {
     ]
 
     public static let configSetRemoteBackends = "config.setRemoteBackends"
+    /// The remote peer-messaging gate (`remote_peer_messaging_enabled`) — the
+    /// feature's only opt-in, and the write half of what `peer.status` reports.
+    /// Reading needs no method of its own: `config.get` already carries the
+    /// resolved value, and `peer.status` carries it beside the link states it
+    /// explains.
+    public static let configSetRemotePeerMessagingEnabled =
+        "config.setRemotePeerMessagingEnabled"
+    /// Everything TBD knows about the peer-messaging bridge, for `tbd peer list`.
+    /// Read-only and unaddressed: it takes no params and never actuates.
+    public static let peerStatus = "peer.status"
     public static let panelGet = "panel.get"
     public static let panelApply = "panel.apply"
     public static let panelImportLegacy = "panel.importLegacy"
@@ -1588,6 +1598,17 @@ public struct ConfigSetRemoteBackendsParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setRemotePeerMessagingEnabled` — the remote peer
+/// messaging gate (default OFF during soak), which is the single opt-in for
+/// shadow peers and for a provider's `messages` stream. Writing either value is
+/// the explicit gesture that lifts the column out of its NULL "never chose"
+/// state, so an operator who turns the feature off stays off when the shipped
+/// default graduates.
+public struct ConfigSetPeerMessagingEnabledParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Result of a `gc.sweepNow` sweep (dry-run or real). Also the direct return
 /// type of `OrphanGC.sweep(dryRun:)` in TBDDaemon — one type, no daemon-side
 /// mirror.
@@ -1598,6 +1619,222 @@ public struct GCSweepResult: Codable, Sendable, Equatable {
     public init(planned: [String], reaped: Int) {
         self.planned = planned
         self.reaped = reaped
+    }
+}
+
+// MARK: - peer.status
+
+/// Everything TBD knows about the remote peer-messaging bridge, in one answer.
+///
+/// The command that reads it (`tbd peer list`) reaches the daemon over a socket
+/// and never opens its database, so the facts a listing needs that live only
+/// daemon-side travel here: the durable shadow-peer ledger, the last sweep over
+/// it, and the state of each provider's peer link.
+///
+/// **The last pair is the answer to the stale-shim problem.** An old shim never
+/// declares the `messages` capability, so TBD never invokes it and the feature
+/// silently does nothing — the failure this contract's users have been bitten
+/// by. `messagingEnabled` plus each provider's `declaresMessages` makes that
+/// visible instead of silent
+/// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, § "Conformance").
+///
+/// Every field is a fact TBD holds, never an inference: nothing here is derived
+/// from a record's contents or from a path.
+public struct PeerBridgeStatus: Codable, Sendable, Equatable {
+    /// Resolved `remote_peer_messaging_enabled` — the config value, or the
+    /// shipped default when nobody has chosen.
+    public let messagingEnabled: Bool
+    /// True when the daemon has a remote-provider manager at all. False means
+    /// `remote_backends_enabled` was off at boot, so no provider is described
+    /// and `providers` is empty for that reason rather than for want of one.
+    public let remoteBackendsLive: Bool
+    public let providers: [PeerProviderBridgeStatus]
+    /// The shadow-peer ledger, in pid order — TBD's own durable bookkeeping,
+    /// and the ONLY way a reader recognises a shadow peer. A shadow's record
+    /// carries no field Claude Code does not define (an unknown key was
+    /// measured to make a record invisible to every listing), so there is no
+    /// marker inside a record to look for and no path to sniff.
+    public let shadows: [PeerShadowArtifactRow]
+    /// The most recent `ShadowPeerReconciler` pass, or nil when none has run
+    /// in this daemon's lifetime.
+    public let lastSweep: PeerShadowSweep?
+
+    public init(
+        messagingEnabled: Bool,
+        remoteBackendsLive: Bool,
+        providers: [PeerProviderBridgeStatus],
+        shadows: [PeerShadowArtifactRow],
+        lastSweep: PeerShadowSweep?
+    ) {
+        self.messagingEnabled = messagingEnabled
+        self.remoteBackendsLive = remoteBackendsLive
+        self.providers = providers
+        self.shadows = shadows
+        self.lastSweep = lastSweep
+    }
+}
+
+/// One provider's half of the bridge.
+public struct PeerProviderBridgeStatus: Codable, Sendable, Equatable {
+    public let provider: String
+    /// Whether this provider's `describe` declared the `messages` capability.
+    /// **False is the stale-shim signal**, and it is reported rather than
+    /// inferred from an empty listing.
+    public let declaresMessages: Bool
+    /// Whether a bridge is constructed for it right now. False with
+    /// `declaresMessages == true` and the flag on means the gate refused for
+    /// another reason — most plausibly a flag flipped after the last time poll
+    /// loops were armed, which a daemon restart resolves.
+    public let bridged: Bool
+    /// `"up"` / `"down"`, or nil when nothing is bridged.
+    public let linkState: String?
+    /// The origin label the far side declared in its `hello`, or nil before one
+    /// arrived.
+    public let remoteOrigin: String?
+    /// Shadows this link is publishing right now.
+    public let shadowCount: Int
+    /// Handles the far side announced that TBD could not site, and therefore
+    /// never mirrored — a `peer` line carrying no session id, or one naming a
+    /// session TBD adopted no worktree row for.
+    public let unmirroredHandles: [String]
+    /// The divergence between the provider's own `peer-inventory` and what TBD
+    /// asked it to publish. TBD cannot sweep the far host, so this is the
+    /// mitigation: a provider that leaks is visible as a difference.
+    public let inventorySurplus: [String]
+    public let inventoryMissing: [String]
+    /// Frames dropped since the bridge was built, by reason. Loss on this
+    /// channel is never reported to the sender, so a count is the only trace.
+    public let drops: [String: Int]
+
+    public init(
+        provider: String,
+        declaresMessages: Bool,
+        bridged: Bool,
+        linkState: String? = nil,
+        remoteOrigin: String? = nil,
+        shadowCount: Int = 0,
+        unmirroredHandles: [String] = [],
+        inventorySurplus: [String] = [],
+        inventoryMissing: [String] = [],
+        drops: [String: Int] = [:]
+    ) {
+        self.provider = provider
+        self.declaresMessages = declaresMessages
+        self.bridged = bridged
+        self.linkState = linkState
+        self.remoteOrigin = remoteOrigin
+        self.shadowCount = shadowCount
+        self.unmirroredHandles = unmirroredHandles
+        self.inventorySurplus = inventorySurplus
+        self.inventoryMissing = inventoryMissing
+        self.drops = drops
+    }
+}
+
+/// One row of the shadow-peer ledger, as a reader outside the daemon sees it.
+public struct PeerShadowArtifactRow: Codable, Sendable, Equatable {
+    /// The helper process's own real pid. Both file artifacts are named after
+    /// it, and it is what a reader of the registry joins a record to.
+    public let pid: Int32
+    public let provider: String
+    public let handle: String
+    /// `<provider>:<worktree display name>` — what the record was published as.
+    public let name: String
+    /// The `sessionId` **inside the published record**: minted locally, stable
+    /// across the shadow's rewrites, and the proof of ownership the sweep
+    /// unlinks against. It is emphatically not the remote session's id.
+    public let recordSessionID: String
+    /// The provider's own session id — the remote session this shadow stands
+    /// for, and the key TBD sited it by.
+    ///
+    /// Carried separately because `recordSessionID` cannot stand in for it, and
+    /// a reader that guessed one from the other would name the wrong session.
+    /// Nil for a row no live link vouches for: the join is held by the bridge
+    /// for the life of one connection, so a row left over from a link that has
+    /// since dropped has no remote id to report, and saying nothing is the
+    /// honest answer.
+    public let remoteSessionID: String?
+    public let socketPath: String
+    public let recordPath: String
+    public let daemonGeneration: String
+    public let publishedAt: Date
+    /// Whether a live peer link is publishing this shadow right now. False is a
+    /// row awaiting reclamation, not a peer.
+    public let live: Bool
+
+    public init(
+        pid: Int32,
+        provider: String,
+        handle: String,
+        name: String,
+        recordSessionID: String,
+        remoteSessionID: String?,
+        socketPath: String,
+        recordPath: String,
+        daemonGeneration: String,
+        publishedAt: Date,
+        live: Bool
+    ) {
+        self.pid = pid
+        self.provider = provider
+        self.handle = handle
+        self.name = name
+        self.recordSessionID = recordSessionID
+        self.remoteSessionID = remoteSessionID
+        self.socketPath = socketPath
+        self.recordPath = recordPath
+        self.daemonGeneration = daemonGeneration
+        self.publishedAt = publishedAt
+        self.live = live
+    }
+}
+
+/// The last `ShadowPeerReconciler` pass.
+///
+/// Every unbounded leak in this repo's history went unnoticed because nothing
+/// counted it. This is the counting, made answerable in one command rather than
+/// only in a log line nobody reads until afterwards.
+public struct PeerShadowSweep: Codable, Sendable, Equatable {
+    public let at: Date
+    public let helpersKilled: Int
+    public let recordsUnlinked: Int
+    public let socketsUnlinked: Int
+    public let rowsForgotten: Int
+    public let liveShadowsKept: Int
+    public let withinGrace: Int
+    /// Current-generation rows whose provider nothing answered for. **A wiring
+    /// gap shows up here as a number rather than as a silence.**
+    public let unvouchedFor: Int
+    public let foreignArtifactsLeftAlone: Int
+    public let deferred: Int
+
+    public init(
+        at: Date,
+        helpersKilled: Int,
+        recordsUnlinked: Int,
+        socketsUnlinked: Int,
+        rowsForgotten: Int,
+        liveShadowsKept: Int,
+        withinGrace: Int,
+        unvouchedFor: Int,
+        foreignArtifactsLeftAlone: Int,
+        deferred: Int
+    ) {
+        self.at = at
+        self.helpersKilled = helpersKilled
+        self.recordsUnlinked = recordsUnlinked
+        self.socketsUnlinked = socketsUnlinked
+        self.rowsForgotten = rowsForgotten
+        self.liveShadowsKept = liveShadowsKept
+        self.withinGrace = withinGrace
+        self.unvouchedFor = unvouchedFor
+        self.foreignArtifactsLeftAlone = foreignArtifactsLeftAlone
+        self.deferred = deferred
+    }
+
+    /// The headline number: artifacts that pass took back.
+    public var reclaimedArtifacts: Int {
+        helpersKilled + recordsUnlinked + socketsUnlinked
     }
 }
 

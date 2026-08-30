@@ -124,6 +124,8 @@ every TBD-spawned row prints `tmux <server>:<window>.<pane>`, and
 `tbd terminal list <worktree-id>` prints that worktree's own window and pane, so
 the two join whatever the row is named. `tbd worktree list --json` is where the
 worktree id and the directory slug come from.
+`tbd peer list` does that join for you — every peer TBD can see, with the
+worktree, terminal or remote session behind it.
 
 Address a peer you have not messaged before as `name [ref]`:
 a bare name may be refused with an error naming the ref you need, even when

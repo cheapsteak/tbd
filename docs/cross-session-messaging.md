@@ -14,6 +14,46 @@ throttling, and inbound-safety rails — belongs to Claude Code. Upstream
 reference: [Message your other Claude Code
 sessions](https://code.claude.com/docs/en/cross-session-messaging).
 
+## What a peer is
+
+A **peer** is one live Claude Code session that another session can
+address by name. It is not a worktree, not a terminal tab, not a
+repository, and not a machine.
+
+Three things follow from "one live session", and each of them catches
+someone out eventually.
+
+- **A worktree can hold several peers.** Every Claude session TBD spawns
+  in a worktree takes that worktree's display name, so a worktree running
+  three Claudes contributes three peers answering to one name. The tmux
+  pane on each row is what tells them apart — see [Addressing a
+  peer](#addressing-a-peer).
+- **A peer lasts exactly as long as its process.** A session that exits
+  stops being a peer at once and is gone from the next listing. Resuming
+  or respawning that work produces a *new* peer — a new registry row and
+  a new `[ref]` — even when the conversation it continues is the same
+  one.
+- **Not every session is a peer.** Registration depends on messaging
+  being active. A CLI below 2.1.224 never registers, and neither does a
+  session whose environment carries one of the
+  [killswitches](#killswitches). Such a session runs perfectly well and
+  is simply not addressable.
+
+Mechanically, a peer is a registry record plus a socket that answers a
+connect ([The peer registry](#the-peer-registry)). That is the whole
+membership test: anything publishing both is a peer, and a record whose
+socket has stopped answering is not one, whatever the record says.
+
+**Subagents are not peers.** A subagent has no registry row of its own.
+When it sends a cross-session message the message goes out under its
+parent session's address, and any reply is delivered to the parent's
+conversation rather than to the subagent.
+
+**Peer does not mean remote.** Every session in the pool is a peer,
+including the one you are sitting in front of. The boundary that decides
+the pool is the OS user, not distance and not the Anthropic account —
+see [Reach](#reach).
+
 ## Versions
 
 Two different floors apply, and they are not the same number.
@@ -178,6 +218,14 @@ tbd terminal list <worktree-id>   # WINDOW and PANE columns for that worktree
 Join the two on the window and pane (`@388` / `%388` above): the row that
 matches is the lane you meant, whatever it happens to be called. Address
 it as `name [ref]` with the name the listing actually shows.
+
+`tbd peer list` does that join for you — every peer TBD can see, with the
+worktree, terminal or remote session behind it. It also reaches the rows
+the pane join cannot: a peer with no tmux coordinates has no pane to join
+on, and a shadow peer standing in for a session on another machine carries
+none by design. It prints no `[ref]`, because Claude Code mints one per
+record and never writes it to disk — that value comes from `ListAgents`
+and nowhere else.
 
 ## Reach
 
