@@ -380,7 +380,8 @@ public struct RosterScanReport: Sendable, Equatable {
     /// roster down with it.
     public var skippedMalformed = 0
     /// Records that decoded but were missing something the roster cannot
-    /// proceed without — a socket path or a peer protocol.
+    /// proceed without — a socket path, a peer protocol, or the process start
+    /// time admission checks the pid against.
     public var skippedIncomplete = 0
     /// Records for sessions TBD did not spawn: a plain-terminal `claude`, a
     /// session on a profile TBD does not manage, or any other user of this
@@ -840,6 +841,25 @@ public actor RosterWatcher {
     /// Both joins fail closed. A TBD session whose hook never fired and whose
     /// worktree row has moved on is not announced — it stays local, which is
     /// the harmless direction.
+    ///
+    /// **So does the liveness check, and it requires the record's own
+    /// `procStart`.** A record that carries no start time is not admitted at
+    /// all, rather than admitted on pid liveness alone: the pid being alive is
+    /// exactly what a recycled-pid ghost also looks like, and with no claim to
+    /// compare against there is nothing left that could tell the two apart.
+    /// Admitting one would announce a real unix socket path outward on the
+    /// strength of a number the kernel hands out again after every exit. The
+    /// census in `docs/research/2026-08-29-cross-machine-messaging/findings.md`
+    /// found `procStart` on 84 of 84 records, so refusing without it costs
+    /// nothing a real registry produces.
+    ///
+    /// `ShadowPeerReconciler.occupancy(of:alive:currentStart:)` reads the same
+    /// missing field the same way — as unverifiable identity — and stops for
+    /// the same reason, though the action it declines is the opposite one:
+    /// there, unverified identity means *do not reclaim*, because deleting a
+    /// live peer's artifacts is irreversible; here it means *do not announce*,
+    /// because publishing a local socket exposes it. When identity cannot be
+    /// established, neither side takes the step it could not take back.
     private func admit(
         pid: pid_t,
         record: LocalPeerRegistryRecord,
@@ -847,7 +867,8 @@ public actor RosterWatcher {
         report: inout RosterScanReport
     ) -> RosterEntry? {
         guard let socketPath = record.messagingSocketPath, !socketPath.isEmpty,
-              let peerProtocol = record.peerProtocol
+              let peerProtocol = record.peerProtocol,
+              let claimedProcStart = record.procStart
         else {
             report.skippedIncomplete += 1
             return nil
@@ -861,11 +882,9 @@ public actor RosterWatcher {
         // Liveness, and the recycled-pid ghost in the same check: a dead pid
         // has no start time, and a live pid whose start time is not the one the
         // record claims is a different process wearing a dead session's row.
-        guard let liveProcStart = procStartForPID(pid) else {
-            report.skippedNotLive += 1
-            return nil
-        }
-        if let claimed = record.procStart, claimed != liveProcStart {
+        // One comparison decides both, because a record with no claim never
+        // reaches here — it was counted incomplete above.
+        guard procStartForPID(pid) == claimedProcStart else {
             report.skippedNotLive += 1
             return nil
         }

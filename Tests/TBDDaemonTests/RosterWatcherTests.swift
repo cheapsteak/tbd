@@ -569,6 +569,30 @@ struct RosterWatcherLivenessTests {
         }
     }
 
+    /// A record that claims no start time at all is not announced either, and
+    /// is counted incomplete rather than admitted on pid liveness alone. The
+    /// pid here is live, and the session joins TBD's bookkeeping — everything
+    /// the pre-fix guard looked at says yes. What is missing is the only fact
+    /// that could separate this record from the ghost above: with no claimed
+    /// start time there is nothing to compare the kernel's answer against, so
+    /// admitting it would announce a real socket path on the strength of a
+    /// number the kernel reissues after every exit.
+    @Test func aRecordWithNoClaimedStartTimeIsNotAnnounced() async throws {
+        try await withRegistry { directory in
+            try write(registryRecord(procStart: nil), pid: 4242, in: directory)
+            let sink = FrameSink()
+            let subject = watcher(
+                directory: directory, sessions: FakeSessionDirectory([spawnedSession()]))
+            await subject.addLink(link(sink: sink))
+
+            #expect(await sink.drain().isEmpty)
+            let report = await subject.lastScanReport()
+            #expect(report.admitted == 0)
+            #expect(report.skippedIncomplete == 1)
+            #expect(report.skippedNotLive == 0)
+        }
+    }
+
     /// The fixture's own contract, and the one assertion this suite could not
     /// make while a single literal was fed to both sides of every comparison:
     /// what a **record** claims and what the **kernel lookup** answers agree
