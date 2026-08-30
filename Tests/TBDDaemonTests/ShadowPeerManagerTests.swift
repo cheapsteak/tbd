@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Testing
 
 @testable import TBDDaemonLib
@@ -43,10 +44,17 @@ private final class FakeShadowPeerHelper: ShadowPeerHelperHandle, @unchecked Sen
     let lines: AsyncStream<String>
 
     private let continuation: AsyncStream<String>.Continuation
-    private let lock = NSLock()
-    private var recordedControlFrames: [PeerBridgeFrame] = []
-    private var terminationCount = 0
-    private var sendFailure: (any Error)?
+
+    /// Everything `send`, `terminate` and the two readers race each other over.
+    /// Scoped locking rather than a bare `NSLock`, for the reason
+    /// `ShadowPeerHelperProcess` documents: `send` and `terminate` are `async`,
+    /// where `lock()`/`unlock()` are unavailable.
+    private struct State {
+        var recordedControlFrames: [PeerBridgeFrame] = []
+        var terminationCount = 0
+        var sendFailure: (any Error)?
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     init(pid: pid_t, socketPath: String, recordPath: String) {
         self.pid = pid
@@ -64,37 +72,30 @@ private final class FakeShadowPeerHelper: ShadowPeerHelperHandle, @unchecked Sen
     }
 
     func failSends(with error: any Error) {
-        lock.lock()
-        sendFailure = error
-        lock.unlock()
+        state.withLock { $0.sendFailure = error }
     }
 
     func send(_ frame: PeerBridgeFrame) async throws {
-        lock.lock()
-        let failure = sendFailure
-        if failure == nil { recordedControlFrames.append(frame) }
-        lock.unlock()
+        // The recorded failure is read out and thrown *after* the lock is
+        // released, exactly as the `unlock()`-then-`throw` shape did.
+        let failure = state.withLock { state -> (any Error)? in
+            let failure = state.sendFailure
+            if failure == nil { state.recordedControlFrames.append(frame) }
+            return failure
+        }
         if let failure { throw failure }
     }
 
     func terminate() async {
-        lock.lock()
-        terminationCount += 1
-        lock.unlock()
+        // The count is guarded; finishing the stream deliberately is not — no
+        // work beyond the state change happens while the lock is held.
+        state.withLock { $0.terminationCount += 1 }
         continuation.finish()
     }
 
-    var controlFrames: [PeerBridgeFrame] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recordedControlFrames
-    }
+    var controlFrames: [PeerBridgeFrame] { state.withLock { $0.recordedControlFrames } }
 
-    var terminations: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return terminationCount
-    }
+    var terminations: Int { state.withLock { $0.terminationCount } }
 }
 
 private actor FakeShadowPeerSpawner: ShadowPeerHelperSpawning {
@@ -167,42 +168,26 @@ private struct FakeSiteResolver: ShadowPeerSiteResolving {
 /// Records every session id the manager asked about, so a test can assert what
 /// the join key actually was rather than infer it from the outcome.
 private final class SiteRequests: @unchecked Sendable {
-    private let lock = NSLock()
-    private var ids: [String] = []
+    private let ids = OSAllocatedUnfairLock(initialState: [String]())
 
     func record(_ sessionID: String) {
-        lock.lock()
-        ids.append(sessionID)
-        lock.unlock()
+        ids.withLock { $0.append(sessionID) }
     }
 
-    var asked: [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return ids
-    }
+    var asked: [String] { ids.withLock { $0 } }
 }
 
 /// A worktree display name a test can change between two `peer` lines, so a
 /// rename is modelled where it now happens — on TBD's own row — rather than on
 /// the name the far side asserts, which no longer composes anything.
 private final class MutableDisplayName: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stored: String
+    private let stored: OSAllocatedUnfairLock<String>
 
-    init(_ initial: String) { stored = initial }
+    init(_ initial: String) { stored = OSAllocatedUnfairLock(initialState: initial) }
 
     var value: String {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return stored
-        }
-        set {
-            lock.lock()
-            stored = newValue
-            lock.unlock()
-        }
+        get { stored.withLock { $0 } }
+        set { stored.withLock { $0 = newValue } }
     }
 }
 
@@ -225,14 +210,14 @@ private actor FakeLocalDelivery: LocalPeerDelivering {
 /// Deterministic handle minting, so a test can name the handle TBD minted
 /// instead of matching a random one.
 private final class HandleCounter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var next = 0
+    private let next = OSAllocatedUnfairLock(initialState: 0)
     var mint: @Sendable () -> String {
-        { [self] in
-            lock.lock()
-            defer { lock.unlock() }
-            next += 1
-            return "local-\(next)"
+        { [next] in
+            let minted = next.withLock { value -> Int in
+                value += 1
+                return value
+            }
+            return "local-\(minted)"
         }
     }
 }
