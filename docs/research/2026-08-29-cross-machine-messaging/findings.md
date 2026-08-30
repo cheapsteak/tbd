@@ -32,7 +32,7 @@ inventing a protocol**.
 {
   "pid": 46403,
   "sessionId": "4E12DD65-92B8-4D8E-9920-214C6553FC63",
-  "cwd": "/Users/chang/tbd/worktrees/acme-app/20260829-useful-swallow",
+  "cwd": "/Users/me/tbd/worktrees/acme-app/20260829-useful-swallow",
   "startedAt": 1788041297648,
   "procStart": "Sat Aug 29 22:07:57 2026",
   "version": "2.1.251",

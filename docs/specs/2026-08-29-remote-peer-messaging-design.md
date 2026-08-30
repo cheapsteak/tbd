@@ -472,6 +472,28 @@ recorded:
 It **MUST NOT** reclaim by inference — never "any socket with nothing
 listening", which races a real session between `bind()` and `listen()`.
 
+One window is therefore uncovered, and it is inherent to the shape of the
+resource rather than an oversight. Both durable artifacts are named after the
+helper's pid, which does not exist until the process does, so there is no key to
+file a whitelist row under ahead of the spawn: "write the intent down first" is
+unavailable here. The row goes down as early as it can — the instant the spawn
+returns, ahead of the guards that decide whether the helper is installed at all
+— but the helper binds its socket and publishes its record the moment it starts,
+so between those two points the artifacts exist and the whitelist does not know
+them.
+
+Reaching that window takes a double failure, because the helper is the first
+line of defence and covers the daemon dying on its own: the kernel closes the
+helper's stdin when the daemon's pipe goes, and it unlinks its record and socket
+on the way out. What is needed is the daemon dying *and* the helper being unable
+to clean up after itself — host power loss, or something `SIGKILL`ing the helper
+out from under it. What survives that is a record and a socket with no whitelist
+row, and nothing can recognise them afterwards: a shadow's record is
+indistinguishable from any other session's by construction, since TBD puts no
+marker inside one, which is the reason the whitelist exists at all. The soak
+criterion — no ghost record outliving its daemon — is the field check that would
+surface it happening.
+
 Detection is the half that has historically been missing: every unbounded leak
 in this repo's history went unnoticed because nothing counted it. So each sweep
 logs a reclaimed count as an `os.Logger` info line, durable where signposts are
