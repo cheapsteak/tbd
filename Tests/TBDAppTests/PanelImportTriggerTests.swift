@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 import TBDShared
 @testable import TBDApp
@@ -15,9 +16,9 @@ struct PanelImportTriggerTests {
     // MARK: - buildPanelImportParams (pure)
 
     @Test func buildPanelImportParamsExcludesStaleWorktreeKeyedGridEntry() {
-        let suiteName = "PanelImportTriggerTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("PanelImportTriggerTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         let state = AppState(userDefaults: defaults)
         let worktreeID = UUID()
@@ -38,9 +39,9 @@ struct PanelImportTriggerTests {
     }
 
     @Test func buildPanelImportParamsFiltersOrphanedPaneHistories() {
-        let suiteName = "PanelImportTriggerTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("PanelImportTriggerTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         let state = AppState(userDefaults: defaults)
         let worktreeID = UUID()
@@ -67,9 +68,9 @@ struct PanelImportTriggerTests {
     }
 
     @Test func buildPanelImportParamsFlowsLabelOrderAndActiveTab() {
-        let suiteName = "PanelImportTriggerTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("PanelImportTriggerTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         let state = AppState(userDefaults: defaults)
         let worktreeID = UUID()
@@ -90,9 +91,9 @@ struct PanelImportTriggerTests {
     // MARK: - Trigger gating
 
     @Test func flagOffFiresNoImportCall() async {
-        let suiteName = "PanelImportTriggerTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("PanelImportTriggerTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         let state = AppState(userDefaults: defaults)
         state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: false, panelSurfaceEnabled: false)
@@ -112,9 +113,9 @@ struct PanelImportTriggerTests {
     @Test func flagUnknownCapabilitiesFiresNoImportCall() async {
         // Capabilities not yet fetched (nil) must behave like flag-off, not
         // opt in by accident.
-        let suiteName = "PanelImportTriggerTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("PanelImportTriggerTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         let state = AppState(userDefaults: defaults)
         #expect(state.daemonCapabilities == nil)
@@ -132,9 +133,9 @@ struct PanelImportTriggerTests {
     }
 
     @Test func flagOnFiresImportOnceAcrossRepeatedCalls() async {
-        let suiteName = "PanelImportTriggerTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("PanelImportTriggerTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         let state = AppState(userDefaults: defaults)
         state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: false, panelSurfaceEnabled: true)
@@ -166,9 +167,9 @@ struct PanelImportTriggerTests {
     /// depends on AppState's already-loaded in-memory state, not on this
     /// particular RPC's success.
     @Test func loadTabStatesFiresImportOnceWhenFlagOn() async {
-        let suiteName = "PanelImportTriggerTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("PanelImportTriggerTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         let state = AppState(userDefaults: defaults)
         state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: false, panelSurfaceEnabled: true)

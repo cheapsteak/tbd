@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -19,10 +20,9 @@ import TBDShared
 struct ClaudeCloudSettingsTests {
 
     private func withAppState(_ body: (AppState) async -> Void) async {
-        let name = "tbd-cloud-settings-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        await body(AppState(userDefaults: defaults))
-        defaults.removePersistentDomain(forName: name)
+        let suite = TestDefaultsSuite("cloud-settings")
+        defer { suite.tearDown() }
+        await body(AppState(userDefaults: suite.defaults))
     }
 
     // MARK: - The caption, one case per reachable (enabled, live, remoteBackendsEnabled) branch

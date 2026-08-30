@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 
@@ -32,11 +33,9 @@ struct TerminalAutoResizeFlagTests {
         _ enabled: Bool,
         _ body: (AppState, UserDefaults) throws -> Void
     ) rethrows {
-        let suiteName = "TBDAppTests.TerminalAutoResize.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let defaultsSuite = TestDefaultsSuite("TerminalAutoResize")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         defaults.set(enabled, forKey: key)
         let state = AppState(userDefaults: defaults)
         try body(state, defaults)

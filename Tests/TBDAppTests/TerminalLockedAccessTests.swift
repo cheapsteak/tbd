@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import TestSupport
 import SwiftTerm
 import Testing
 @testable import TBDApp
@@ -23,9 +24,9 @@ struct TerminalLockedAccessTests {
     /// developer's real TBDApp.plist (Tests-must-not-touch-~/tbd rule's
     /// UserDefaults twin). Same idiom as DragDropPasteRoutingTests.
     private func withView(_ body: (TBDTerminalView) throws -> Void) rethrows {
-        let suiteName = "TBDAppTests.LockedAccess.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("LockedAccess")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 600, height: 300),
             font: TBDTerminalView.defaultMonospaceFont,
@@ -34,9 +35,9 @@ struct TerminalLockedAccessTests {
     }
 
     private func makeView() -> TBDTerminalView {
-        let suiteName = "TBDAppTests.LockedAccess.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("LockedAccess")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         return TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 600, height: 300),
             font: TBDTerminalView.defaultMonospaceFont,

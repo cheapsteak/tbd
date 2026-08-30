@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import TestSupport
 import SwiftUI
 import Testing
 @testable import TBDApp
@@ -154,9 +155,9 @@ private func withHostedProbe(
     _ content: @MainActor (AppState) -> AnyView,
     _ body: (HostedProbe) -> Void
 ) {
-    let suiteName = "TBDAppTests.AppStateObservation.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
-    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let defaultsSuite = TestDefaultsSuite("AppStateObservation")
+    defer { defaultsSuite.tearDown() }
+    let defaults = defaultsSuite.defaults
     let state = AppState(userDefaults: defaults)
 
     // `.defaultAppStorage` on the whole tree, not per view: an `@AppStorage`
@@ -485,9 +486,9 @@ struct AppStateFocusedTabTrackingTests {
     /// `let lastFocused = focusedTabCloseContext` line and this fails.
     @Test("a focus change still reaches canCloseFocusedTab once a terminal view has registered")
     func focusChangeReachesTheMenuItemWithRegisteredTerminals() {
-        let suiteName = "TBDAppTests.FocusedTabTracking.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("FocusedTabTracking")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let state = AppState(userDefaults: defaults)
 
         // `resolvedFocusedTabCloseContext()` reaches `NSApp.keyWindow` on the

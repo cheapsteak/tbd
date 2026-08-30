@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import QuartzCore
 import Testing
 @testable import TBDApp
@@ -101,9 +102,9 @@ struct TerminalCommitLatencyProbeTests {
         seed: Bool?,
         _ body: (UserDefaults) -> Void
     ) {
-        let suiteName = "TBDAppTests.CommitLatency.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("CommitLatency")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         if let seed {
             defaults.set(seed, forKey: AppState.enableCommitLatencyDiagnosticKey)
         }

@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -32,9 +33,9 @@ private enum TestPinError: Error { case boom }
 struct RemoteAppStateTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.Remote.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("Remote")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         body(AppState(userDefaults: defaults))
     }
 
@@ -549,9 +550,9 @@ struct RemoteAppStateTests {
     // Helper: run an async body against a freshly-isolated AppState with
     // proper UserDefaults suite teardown (async variant of `withState`).
     private func withStateAsync(_ body: (AppState) async -> Void) async {
-        let suiteName = "TBDAppTests.Remote.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("Remote")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         await body(AppState(userDefaults: defaults))
     }
 }

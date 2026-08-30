@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -16,9 +17,9 @@ struct ReviveStateGatingTests {
     /// Build an isolated AppState (never `UserDefaults.standard` — that's the
     /// developer's real TBDApp.plist) and tear the suite down afterward.
     private func withAppState(_ body: (AppState) throws -> Void) rethrows {
-        let suiteName = "ReviveStateGatingTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("ReviveStateGatingTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         try body(AppState(userDefaults: defaults))
     }
 

@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -29,16 +30,16 @@ struct ActiveTabResolutionTests {
     /// Runs `body` against a fresh `AppState` backed by a throwaway defaults
     /// suite (never the developer's real `TBDApp.plist`), torn down afterwards.
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "ActiveTabResolutionTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("ActiveTabResolutionTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         body(makeState(defaults))
     }
 
     private func withState(_ body: (AppState) async -> Void) async {
-        let suiteName = "ActiveTabResolutionTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("ActiveTabResolutionTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         await body(makeState(defaults))
     }
 

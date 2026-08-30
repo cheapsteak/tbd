@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 
@@ -23,11 +24,9 @@ struct TranscriptFeatureFlagTests {
         seed: Bool?,
         _ body: (UserDefaults) -> Void
     ) {
-        let suiteName = "TBDAppTests.Transcript.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
+        let suite = TestDefaultsSuite("Transcript")
+        defer { suite.tearDown() }
+        let defaults = suite.defaults
         if let seed {
             defaults.set(seed, forKey: key)
         }

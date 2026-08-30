@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDApp
 @testable import TBDShared
 
@@ -16,10 +17,10 @@ import Foundation
     /// `UserDefaults.standard` on this unbundled executable is the developer's
     /// real `TBDApp.plist`, so every case gets its own named suite and tears it
     /// down.
-    private func withState(_ suiteName: String, _ body: (AppState) -> Void) {
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        body(AppState(userDefaults: defaults))
+    private func withState(_ label: String, _ body: (AppState) -> Void) {
+        let suite = TestDefaultsSuite(label)
+        defer { suite.tearDown() }
+        body(AppState(userDefaults: suite.defaults))
     }
 
     @Test func selectedLocalWorktreeIsNilForARemoteSelection() {

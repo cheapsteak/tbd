@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -58,9 +59,9 @@ struct TableTranscriptHarness {
         let items = try loadSession()
         #expect(!items.isEmpty, "session produced no items")
 
-        let suiteName = "table-harness-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         let scene = makeScene(items: items, appState: appState, fixedSize: true)
@@ -206,9 +207,9 @@ struct TableTranscriptHarness {
         let fm = FileManager.default
         try fm.createDirectory(atPath: Self.outputDir, withIntermediateDirectories: true)
 
-        let suiteName = "table-harness-kinds-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness-kinds")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         let items = Self.allKindsFixture()
@@ -289,9 +290,9 @@ struct TableTranscriptHarness {
         let nodes = transcriptRenderNodes(from: items)
         #expect(!nodes.isEmpty)
 
-        let suiteName = "table-harness-region-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness-region")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         // Region anchors.
@@ -822,9 +823,9 @@ struct TableTranscriptHarness {
         let fm = FileManager.default
         try fm.createDirectory(atPath: Self.outputDir, withIntermediateDirectories: true)
 
-        let suiteName = "table-harness-bubble-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness-bubble")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         let items = Self.bubbleFixture()
@@ -917,9 +918,9 @@ struct TableTranscriptHarness {
     /// headless: runs in normal `swift test`. (#129)
     @Test("table bubble: per-block heights are cached and feed the reused cell (no re-measure)")
     func tableBlockHeightsCachedOnReuse() throws {
-        let suiteName = "table-harness-blockcache-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness-blockcache")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         let items = Self.bubbleFixture()  // contains "b-table" (prose + GFM table + prose)
@@ -977,9 +978,9 @@ struct TableTranscriptHarness {
     /// the harness env gate: it only asks the coordinator for heights and cells.
     @Test("peer bubble: heightOfRow == realized, and a user row is unchanged")
     func peerBubbleRowMeasureEqualsRender() throws {
-        let suiteName = "table-harness-peer-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness-peer")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         let repoID = UUID()
@@ -1056,9 +1057,9 @@ struct TableTranscriptHarness {
     /// coordinator for cells, so it runs in normal `swift test`.
     @Test("native activity cells: Bash + systemReminder dispatch to ActivityRowCellView; AskUserQuestion stays hosted")
     func activityCellDispatch() {
-        let suiteName = "table-harness-activity-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness-activity")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         let items = Self.allKindsFixture()
@@ -1220,9 +1221,9 @@ struct TableTranscriptHarness {
     /// height corrections were the drift source).
     @Test("expanding a work group keeps the summary row anchored", arguments: [true, false])
     func expandingGroupKeepsSummaryAnchored(atBottom: Bool) async throws {
-        let suiteName = "table-harness-group-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness-group")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         // Shape of the fixture, both arms: more leading rows than the bottom-window
@@ -1403,9 +1404,9 @@ struct TableTranscriptHarness {
     /// this cache.
     @Test("a worktree root arriving late relinks rows composed against the empty root")
     func lateWorktreeRootRelinksComposedRows() throws {
-        let suiteName = "table-harness-linkroot-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness-linkroot")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -1457,9 +1458,9 @@ struct TableTranscriptHarness {
 
     @Test("a rebuild keeps exact heights for rows whose content did not change")
     func rebuildKeepsContentAddressedHeights() throws {
-        let suiteName = "table-harness-cachekeep-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness-cachekeep")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         // More rows than the bottom-window precompute measures, so a wipe cannot be
@@ -1508,9 +1509,9 @@ struct TableTranscriptHarness {
     /// rows; the prune keeps the total pinned to the live row count.
     @Test("cache growth stays bounded across repeated expand/collapse cycles")
     func cacheGrowthIsBounded() throws {
-        let suiteName = "table-harness-cachebound-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness-cachebound")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         let items = Self.activityGroupFixture(leadingBubbles: 30, groupSize: 4, trailingBubbles: 2)
@@ -1545,9 +1546,9 @@ struct TableTranscriptHarness {
     /// the bottom STILL follows the tail. Only a bumped toggle token suppresses it.
     @Test("a streaming append still follows the tail from the bottom")
     func streamingAppendStillFollowsTail() async throws {
-        let suiteName = "table-harness-tailfollow-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness-tailfollow")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         let items = Self.activityGroupFixture(leadingBubbles: 8, groupSize: 5, trailingBubbles: 1)
@@ -1691,9 +1692,9 @@ struct TableTranscriptHarness {
         }
         let fm = FileManager.default
         try fm.createDirectory(atPath: Self.outputDir, withIntermediateDirectories: true)
-        let suiteName = "table-harness-spot-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("table-harness-spot")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let appState = AppState(userDefaults: defaults)
 
         // Real session + a synthesized 347k-token badge bubble (the capture

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import TestSupport
 import SwiftTerm
 import Testing
 @testable import TBDApp
@@ -39,9 +40,9 @@ struct DragDropPasteRoutingTests {
         // Isolated defaults: AppearanceSettings must never read/write the
         // developer's real TBDApp.plist (Tests-must-not-touch-~/tbd rule's
         // UserDefaults twin).
-        let suiteName = "TBDAppTests.DragDropRouting.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("DragDropRouting")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 400, height: 200),
             font: TBDTerminalView.defaultMonospaceFont,

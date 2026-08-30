@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import TBDShared
 import Testing
 @testable import TBDApp
@@ -113,9 +114,9 @@ struct SleepSuspendHookTests {
         // AppState test-mode guard prevents auto-connect, so the client is
         // never connected. Assert the gated-off path is a no-op: it must not
         // throw, must not connect, and must complete synchronously.
-        let suiteName = "TBDAppTests.SleepSuspend.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("SleepSuspend")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         defaults.set(false, forKey: AppState.autoSuspendClaudeKey)
 
         let appState = AppState(userDefaults: defaults)

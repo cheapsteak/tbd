@@ -260,9 +260,9 @@ struct ArchivedSearchListStateTests {
 @MainActor
 @Suite("Archived snapshot resolution")
 struct ArchivedSnapshotResolutionTests {
-    private func makeState() -> (AppState, String) {
-        let suiteName = "TBDAppTests.ArchivedSnapshots.\(UUID().uuidString)"
-        return (AppState(userDefaults: UserDefaults(suiteName: suiteName)!), suiteName)
+    private func makeState() -> (AppState, TestDefaultsSuite) {
+        let suite = TestDefaultsSuite("ArchivedSnapshots")
+        return (AppState(userDefaults: suite.defaults), suite)
     }
 
     private func worktree(repoID: UUID?, name: String) -> Worktree {
@@ -314,7 +314,7 @@ struct ArchivedSnapshotResolutionTests {
     @Test("archivedSnapshot resolves a row present only in the search results")
     func archivedSnapshotResolvesSearchOnlyRow() {
         let (state, suite) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        defer { suite.tearDown() }
         let repoID = UUID()
         let loaded = worktree(repoID: repoID, name: "loaded")
         let searchOnly = worktree(repoID: repoID, name: "search-only")
@@ -334,7 +334,7 @@ struct ArchivedSnapshotResolutionTests {
     @Test("ensureArchivedSelectionValid keeps a selection on a search-only row")
     func selectionOnSearchOnlyRowSurvives() {
         let (state, suite) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        defer { suite.tearDown() }
         let repoID = UUID()
         let loaded = worktree(repoID: repoID, name: "loaded")
         let searchOnly = worktree(repoID: repoID, name: "search-only")

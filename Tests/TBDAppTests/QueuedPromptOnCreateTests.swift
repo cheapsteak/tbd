@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 import TBDShared
@@ -53,9 +54,9 @@ struct QueuedPromptOnCreateTests {
     private struct StubError: Error {}
 
     private func withAppState(_ body: (AppState) async throws -> Void) async rethrows {
-        let suiteName = "TBDAppTests.QueuedPromptOnCreate.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("QueuedPromptOnCreate")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         try await body(AppState(userDefaults: defaults))
     }
 

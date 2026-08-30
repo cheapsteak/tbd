@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 import TBDShared
 @testable import TBDApp
@@ -23,9 +24,9 @@ import TBDShared
 struct OpenPRTabTests {
 
     private func withAppState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.OpenPRTab.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("OpenPRTab")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         body(AppState(userDefaults: defaults))
     }
 

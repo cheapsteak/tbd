@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 @testable import TBDShared
@@ -65,9 +66,9 @@ struct PRBindingRefreshTests {
 
     @MainActor
     private func withStateAsync(_ body: (AppState) async -> Void) async {
-        let suiteName = "TBDAppTests.PRBindingRefresh.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("PRBindingRefresh")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         await body(AppState(userDefaults: defaults))
     }
 

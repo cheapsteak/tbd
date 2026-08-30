@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDApp
 
@@ -14,9 +15,9 @@ struct ChevronPlacementSettingTests {
     }
 
     @Test func storesBothBranches() {
-        let suiteName = "chevron-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("chevron")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         #expect(defaults.object(forKey: AppState.chevronBeforeProjectNameKey) == nil)
         defaults.set(true, forKey: AppState.chevronBeforeProjectNameKey)
@@ -103,9 +104,9 @@ struct ScratchSectionExpandedTests {
     }
 
     @Test func storesBothBranches() {
-        let suiteName = "scratch-expanded-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("scratch-expanded")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
 
         #expect(defaults.object(forKey: AppState.scratchSectionExpandedKey) == nil)
         defaults.set(false, forKey: AppState.scratchSectionExpandedKey)

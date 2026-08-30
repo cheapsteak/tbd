@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import TBDShared
 import Testing
 @testable import TBDApp
@@ -137,9 +138,9 @@ struct TmuxExecutableSettingsTests {
         path: String,
         _ body: (AppState) throws -> Void
     ) throws {
-        let suiteName = "TmuxExecutableSettingsTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaultsSuite = TestDefaultsSuite("TmuxExecutableSettingsTests")
+        defer { defaultsSuite.tearDown() }
+        let defaults = defaultsSuite.defaults
         let state = AppState(
             userDefaults: defaults,
             tmuxExecutableResolver: fixture.resolver(path: path)
