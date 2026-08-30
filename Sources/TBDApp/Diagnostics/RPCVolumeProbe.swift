@@ -54,12 +54,13 @@ enum RPCVolumeDiagnosticPreferences {
 /// be safe would discard exactly the messages under suspicion, and the
 /// denominators (total bytes, total decode ms, messages/second) would be lost.
 ///
-/// The window is closed **lazily, by the next record that finds it expired** —
-/// there is no timer, no `Task`, and therefore no sleeping and no `Clock`
-/// seam. The cost is that a window whose traffic stops is not emitted until
-/// traffic resumes, and the final partial window at app exit is dropped; for a
-/// diagnostic that only runs while traffic is flowing, that is the right
-/// trade against putting a scheduled wake-up inside the thing being measured.
+/// The window is closed **lazily, by the next record that finds it expired**
+/// (whose own message then opens the new window) — there is no timer, no
+/// `Task`, and therefore no sleeping and no `Clock` seam. The cost is that a
+/// window whose traffic stops is not emitted until traffic resumes, and the
+/// final partial window at app exit is dropped; for a diagnostic that only
+/// runs while traffic is flowing, that is the right trade against putting a
+/// scheduled wake-up inside the thing being measured.
 ///
 /// ## What is logged
 ///
@@ -74,6 +75,14 @@ enum RPCVolumeDiagnosticPreferences {
 /// work and never reach a log line. The `type` values are compile-time
 /// constants: an `RPCMethod` string for a response, a `StateDelta` case name
 /// for a delta.
+///
+/// ## What it does NOT see
+///
+/// `DaemonClient`'s two receive paths, and nothing else.
+/// `FDSidecarClient.handleFDVend` also decodes daemon-pushed JSON — a small
+/// `FDVendHeader` per control-mode attach, not a hot path — and is deliberately
+/// left uninstrumented, so the totals here are the app's RPC traffic rather
+/// than every byte the daemon sends it.
 final class RPCVolumeProbe: Sendable {
     /// Which receive path the message arrived on. The two have different
     /// fixes — a response is one call the app chose to make, a delta is
@@ -148,14 +157,33 @@ final class RPCVolumeProbe: Sendable {
     func record(start: UInt64?, kind: Kind, type: String, bytes: Int) {
         guard let start else { return }
         let end = now()
-        let decodeNanos = end >= start ? end - start : 0
+        let decodeNanos = Self.elapsed(from: start, to: end)
         let key = TypeKey(kind: kind.rawValue, type: type)
 
-        let closed: Window? = window.withLock { current in
+        let closed: Window? = window.withLock { current -> Window? in
+            // Roll BEFORE adding: this message arrived after the old window's
+            // span ended, so its bytes belong to the new one. Attributing them
+            // to a window whose `secs` does not cover them inflates that
+            // window's byte rate by exactly one message.
+            //
+            // The elapsed subtraction saturates rather than wrapping. `end` is
+            // read before the lock, so a thread descheduled between its clock
+            // read and its turn at the lock can arrive with a reading OLDER
+            // than a window another thread has already opened — and `sendRaw`
+            // on arbitrary detached threads runs concurrently with the
+            // long-lived `subscribe(onDelta:)` receive loop, which is exactly
+            // the contention this probe exists to observe. Unsigned wrapping
+            // would turn that into a near-`UInt64.max` elapsed, a spurious
+            // roll, and an astronomical `secs=` that drags the reader's rate
+            // denominators toward zero.
+            var finished: Window?
+            if Self.elapsed(from: current.startedAt, to: end) >= windowNanos {
+                // An expired window with nothing in it is a quiet stretch, not
+                // a measurement; replace it rather than logging an empty line.
+                if current.messages > 0 { finished = current }
+                current = Window(startedAt: end)
+            }
             current.add(key: key, bytes: bytes, decodeNanos: decodeNanos, latencySampleCap: latencySampleCap)
-            guard end &- current.startedAt >= windowNanos else { return nil }
-            let finished = current
-            current = Window(startedAt: end)
             return finished
         }
         if let closed { report(closed, endedAt: end) }
@@ -178,8 +206,13 @@ final class RPCVolumeProbe: Sendable {
 
     // MARK: - Reporting
 
+    /// Saturating monotonic difference. See the note in `record`.
+    private static func elapsed(from start: UInt64, to end: UInt64) -> UInt64 {
+        end >= start ? end - start : 0
+    }
+
     private func report(_ closed: Window, endedAt: UInt64) {
-        let seconds = Double(endedAt &- closed.startedAt) / 1e9
+        let seconds = Double(Self.elapsed(from: closed.startedAt, to: endedAt)) / 1e9
         let latencies = closed.latencies.sorted()
         emit(
             "rpc kind=window secs=\(fmt(seconds, 3)) msgs=\(closed.messages) bytes=\(closed.bytes) "

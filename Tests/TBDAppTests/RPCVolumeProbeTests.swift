@@ -181,10 +181,13 @@ struct RPCVolumeProbeTests {
             #expect(lines[2] == "rpc kind=delta type=terminalActivityUpdated n=3 bytes=3000 "
                                 + "decodems=6.000 maxms=2.000")
 
-            // The message that rolled the window belongs to the NEW one.
+            // The message that rolled the window belongs to the NEW one: its
+            // bytes arrived after the old window's span ended, so counting
+            // them there would inflate that window's byte rate.
             sink.append("--")
             probe.flush()
-            #expect(sink.all.last!.contains("n=1"))
+            #expect(sink.all.last! == "rpc kind=delta type=terminalActivityUpdated n=1 bytes=10 "
+                                     + "decodems=0.000 maxms=0.000")
         }
     }
 
@@ -272,6 +275,46 @@ struct RPCVolumeProbeTests {
             }
             #expect(sum("n") == 30)
             #expect(sum("bytes") == (1...30).reduce(0) { $0 + $1 * 1000 })
+        }
+    }
+
+    @Test("on: a clock reading older than the open window cannot wrap the elapsed time")
+    func onBranchSaturatesNonMonotonicReadings() {
+        withIsolatedDefaults(seed: true) { defaults in
+            let sink = Sink()
+            // Two records race: the first reads late and rolls the window to
+            // t=2000ms, the second was descheduled holding an OLDER reading and
+            // reaches the lock afterwards. Unsigned wrapping would make its
+            // elapsed ~UInt64.max, roll a second time, and emit an astronomical
+            // `secs=` that drags the reader's rate denominators toward zero.
+            let readings: [UInt64] = [
+                0,                    // init seeds the window
+                0, 2_000_000_000,     // first record: start, end -> rolls
+                0, 1_000_000_000      // second record: an older end than the new window
+            ]
+            let cursor = Counter()
+            let probe = RPCVolumeProbe(
+                defaults: defaults,
+                windowSeconds: 1.0,
+                now: {
+                    let i = cursor.value
+                    cursor.bump()
+                    return readings[min(i, readings.count - 1)]
+                },
+                emit: { sink.append($0) }
+            )
+
+            probe.record(start: probe.startMeasurement(), kind: .delta, type: "a", bytes: 1)
+            probe.record(start: probe.startMeasurement(), kind: .delta, type: "b", bytes: 1)
+            probe.flush()
+
+            let windows = sink.all.filter { $0.hasPrefix("rpc kind=window ") }
+            #expect(windows.count == 1, "the stale reading must not roll its own window")
+            // Sanity: no window may claim a span longer than the test itself.
+            for line in windows {
+                let secs = line.split(separator: " ").first { $0.hasPrefix("secs=") }!.dropFirst(5)
+                #expect(Double(secs)! < 60, "secs=\(secs) — the elapsed subtraction wrapped")
+            }
         }
     }
 
