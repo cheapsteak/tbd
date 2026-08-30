@@ -429,7 +429,12 @@ public enum PeerBridgeFrameCodec {
     /// rides a link whose `hello` matched, addressed to a handle a matching
     /// `peer` line announced.
     public static func decode(line: String, negotiatedProtocol: Int) -> PeerBridgeFrameDecoding {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        // `.whitespacesAndNewlines`, not `.whitespaces`: a line may still carry
+        // the newline that framed it, or a `\r\n` pair from a provider that
+        // terminates its NDJSON that way. Neither reduces to empty under
+        // `.whitespaces`, so a blank keepalive would decode as `.malformed` and
+        // be counted against the peer as a dropped frame.
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .skipped(.blankLine) }
         guard let data = trimmed.data(using: .utf8) else { return .rejected(.malformed) }
         // Checked before parsing: an oversized line is refused on its size, not

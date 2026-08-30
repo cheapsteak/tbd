@@ -235,6 +235,18 @@ struct PeerBridgeFrameTests {
             == .skipped(.blankLine))
     }
 
+    /// **A keepalive is not a dropped frame.** A blank line may still carry the
+    /// newline that framed it, or arrive `\r\n`-terminated from a provider that
+    /// writes its NDJSON that way. `.whitespaces` — which excludes `\n` and
+    /// `\r` — left those non-empty, so decoding proceeded and a keepalive came
+    /// back `.rejected(.malformed)`, inverting what `blankLine` documents and
+    /// counting the keepalive against the peer in `tbd peer list`.
+    @Test(arguments: ["\n", "\r\n", "\r", " \r\n", "\n\n"])
+    func aNewlineTerminatedBlankLineIsAKeepaliveNotDamage(_ line: String) {
+        #expect(PeerBridgeFrameCodec.decode(line: line, negotiatedProtocol: 1)
+            == .skipped(.blankLine))
+    }
+
     // MARK: - Protocol gate
 
     @Test func aHelloDeclaringAnotherProtocolIsRejected() {
