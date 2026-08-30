@@ -143,3 +143,135 @@ struct PendingQuestionDeltaTests {
         #expect(d.pending.map(\.toolUseID) == ["toolu_01"])
     }
 }
+
+/// Ordering. The daemon publishes in two hops — mutate the store, then read it
+/// back and send — and only the first hop is ordered, so two deltas for one
+/// terminal can arrive out of order. Since each delta carries the WHOLE set,
+/// applying a stale one is a rollback: a `set` landing after the `clear` that
+/// retracted it puts an answered question back on screen for good. The
+/// per-terminal revision the daemon stamps is what makes the loser droppable.
+@MainActor
+@Suite("pending question delta ordering")
+struct PendingQuestionDeltaOrderingTests {
+
+    private func withAppState(_ body: (AppState) -> Void) {
+        let suiteName = "TBDAppTests.PendingQuestionOrdering.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        body(AppState(userDefaults: defaults))
+    }
+
+    private func payload(_ toolUseID: String) -> PendingQuestionPayload {
+        PendingQuestionPayload(
+            toolUseID: toolUseID,
+            inputJSON: #"{"questions":[]}"#,
+            timestamp: Date(timeIntervalSince1970: 1000))
+    }
+
+    private func delta(
+        _ terminalID: UUID, _ pending: [PendingQuestionPayload], revision: UInt64?
+    ) -> StateDelta {
+        .terminalPendingQuestionsChanged(TerminalPendingQuestionsDelta(
+            terminalID: terminalID, pending: pending, revision: revision))
+    }
+
+    @Test("a set that loses the race to its own retraction is dropped")
+    func staleSetDoesNotResurrectAClearedQuestion() {
+        withAppState { state in
+            let terminalID = UUID()
+            // The clear was produced by the later mutation, but reached the
+            // app first — the exact interleaving the revision exists for.
+            state.handleDelta(delta(terminalID, [], revision: 2))
+            state.handleDelta(delta(terminalID, [payload("toolu_01")], revision: 1))
+            #expect(state.pendingQuestions[terminalID] == nil,
+                    "the stale set resurrected an answered question")
+        }
+    }
+
+    @Test("a newer revision applies")
+    func newerRevisionApplies() {
+        withAppState { state in
+            let terminalID = UUID()
+            state.handleDelta(delta(terminalID, [payload("toolu_01")], revision: 1))
+            #expect(state.pendingQuestions[terminalID]?.map(\.toolUseID) == ["toolu_01"])
+            state.handleDelta(delta(terminalID, [payload("toolu_02")], revision: 2))
+            #expect(state.pendingQuestions[terminalID]?.map(\.toolUseID) == ["toolu_02"])
+            state.handleDelta(delta(terminalID, [], revision: 3))
+            #expect(state.pendingQuestions[terminalID] == nil)
+        }
+    }
+
+    @Test("the first delta for an unknown terminal applies whatever its revision")
+    func firstDeltaAlwaysApplies() {
+        withAppState { state in
+            let terminalID = UUID()
+            // A daemon that has been running a while stamps a high revision;
+            // an app that just launched holds none. That must not read as
+            // stale.
+            state.handleDelta(delta(terminalID, [payload("toolu_01")], revision: 4096))
+            #expect(state.pendingQuestions[terminalID]?.map(\.toolUseID) == ["toolu_01"])
+        }
+    }
+
+    @Test("a repeated revision still applies")
+    func equalRevisionApplies() {
+        withAppState { state in
+            let terminalID = UUID()
+            state.handleDelta(delta(terminalID, [payload("toolu_01")], revision: 7))
+            state.handleDelta(delta(terminalID, [], revision: 7))
+            #expect(state.pendingQuestions[terminalID] == nil,
+                    "only a STRICTLY older revision is stale; equal is the same state, applied twice")
+        }
+    }
+
+    @Test("an unstamped delta is applied")
+    func nilRevisionApplies() {
+        withAppState { state in
+            let terminalID = UUID()
+            state.handleDelta(delta(terminalID, [payload("toolu_01")], revision: 9))
+            state.handleDelta(delta(terminalID, [], revision: nil))
+            #expect(state.pendingQuestions[terminalID] == nil,
+                    "a daemon that predates the field publishes no revision; dropping its deltas would break it")
+        }
+    }
+
+    @Test("terminals order independently")
+    func revisionsAreScopedToTheirTerminal() {
+        withAppState { state in
+            let busy = UUID()
+            let quiet = UUID()
+            state.handleDelta(delta(busy, [payload("toolu_busy")], revision: 50))
+            state.handleDelta(delta(quiet, [payload("toolu_quiet")], revision: 1))
+            #expect(state.pendingQuestions[quiet]?.map(\.toolUseID) == ["toolu_quiet"],
+                    "one terminal's high revision must not suppress another's first delta")
+        }
+    }
+
+    @Test("the revision survives a JSON round trip, and its absence decodes as nil")
+    func revisionRoundTrips() throws {
+        let terminalID = UUID()
+        let encoded = try JSONEncoder().encode(delta(terminalID, [payload("toolu_01")], revision: 12))
+        guard case .terminalPendingQuestionsChanged(let d) =
+            try JSONDecoder().decode(StateDelta.self, from: encoded) else {
+            Issue.record("decoded to the wrong case")
+            return
+        }
+        #expect(d.revision == 12)
+
+        // What a daemon that predates the field puts on the wire: the same
+        // delta with no `revision` key at all. Encoding an unstamped delta
+        // reproduces that payload — the key must be absent, not null — and it
+        // must decode back to nil rather than throwing.
+        let legacy = try JSONEncoder().encode(delta(terminalID, [payload("toolu_01")], revision: nil))
+        let legacyText = try #require(String(bytes: legacy, encoding: .utf8))
+        #expect(!legacyText.contains("revision"),
+                "an unstamped delta must omit the key entirely, which is what an older daemon sends")
+        guard case .terminalPendingQuestionsChanged(let legacyDelta) =
+            try JSONDecoder().decode(StateDelta.self, from: legacy) else {
+            Issue.record("legacy payload decoded to the wrong case")
+            return
+        }
+        #expect(legacyDelta.revision == nil)
+        #expect(legacyDelta.terminalID == terminalID)
+    }
+}

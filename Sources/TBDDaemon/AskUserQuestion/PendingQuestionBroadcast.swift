@@ -11,19 +11,27 @@ extension StateSubscriptionManager {
     /// avoid. It lives on the subscription manager rather than on one owner
     /// because the mutating sites are split between `RPCRouter` and
     /// `WorktreeLifecycle`, and both hold this.
+    ///
+    /// The set is read together with its revision in one actor call, and the
+    /// revision rides the delta. Reading them separately would let a
+    /// suspension between the two publish a set under someone else's stamp;
+    /// carrying the stamp is what lets the app drop a delta that lost the race
+    /// between the mutation and the send — the mutation and the send are two
+    /// hops, and the actor orders only the first.
     func broadcastPendingQuestions(
         terminalID: UUID,
         from store: PendingQuestionStore
     ) async {
-        let entries = await store.entries(forTerminal: terminalID)
+        let snapshot = await store.snapshot(forTerminal: terminalID)
         broadcast(delta: .terminalPendingQuestionsChanged(
             TerminalPendingQuestionsDelta(
                 terminalID: terminalID,
-                pending: entries.map {
+                pending: snapshot.entries.map {
                     PendingQuestionPayload(
                         toolUseID: $0.toolUseID,
                         inputJSON: $0.inputJSON,
                         timestamp: $0.timestamp)
-                })))
+                },
+                revision: snapshot.revision)))
     }
 }

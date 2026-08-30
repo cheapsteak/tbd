@@ -1308,6 +1308,15 @@ final class AppState {
     /// `terminal.transcript` handler did before the app read transcripts
     /// itself. Mirrored, never derived: the daemon is the only writer.
     var pendingQuestions: [UUID: [PendingAskUserQuestion]] = [:]
+    /// Last `TerminalPendingQuestionsDelta.revision` applied per terminal.
+    ///
+    /// The daemon publishes in two hops — mutate the store, then read it back
+    /// and send — so two deltas for one terminal can reach the wire, and this
+    /// `MainActor` hop, out of order; without ordering a late `set` would
+    /// resurrect a question a `clear` already retracted. Bookkeeping, not UI
+    /// state, so it stays out of Observation: a view that renders
+    /// `pendingQuestions` must not also re-render on this.
+    @ObservationIgnored var pendingQuestionRevisions: [UUID: UInt64] = [:]
     /// Drives `transcriptSource` at the cadence each registered pane declares.
     /// Lazy so the (equally inert) scheduler is not built for app launches that
     /// never open a transcript pane.
@@ -2108,6 +2117,11 @@ final class AppState {
     /// Start listening for real-time state deltas from the daemon.
     func startSubscription() {
         subscriptionTask?.cancel()
+        // A new subscription is a new ordering domain. The daemon's
+        // `PendingQuestionStore` is memory-only, so a restarted daemon counts
+        // from zero again; keeping the old high-water marks would make the app
+        // drop every delta it then sends.
+        pendingQuestionRevisions.removeAll()
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
             await self.daemonClient.subscribe { [weak self] delta in
@@ -2154,16 +2168,7 @@ final class AppState {
         case .terminalAwaitingInputChanged(let d):
             applyTerminalAwaitingInputDelta(d)
         case .terminalPendingQuestionsChanged(let d):
-            if d.pending.isEmpty {
-                pendingQuestions.removeValue(forKey: d.terminalID)
-            } else {
-                pendingQuestions[d.terminalID] = d.pending.map {
-                    PendingAskUserQuestion(
-                        toolUseID: $0.toolUseID,
-                        inputJSON: $0.inputJSON,
-                        timestamp: $0.timestamp)
-                }
-            }
+            applyPendingQuestionsDelta(d)
         case .terminalProfileChanged(let d):
             applyTerminalProfileDelta(d)
         case .watchDeskRolesChanged(let d):
@@ -2459,6 +2464,37 @@ final class AppState {
         // that read `terminals`, and this delta arrives on every
         // `Notification` hook of every class.
         terminals[delta.worktreeID]?[idx] = terminal
+    }
+
+    /// Mirror one terminal's pending-question set, newest revision wins.
+    ///
+    /// Each delta carries the daemon's whole set, so applying an out-of-order
+    /// one is not a merge error but a rollback: a `clear` that overtakes an
+    /// earlier `set` would be undone by that `set` landing second, and the
+    /// answered question renders forever. The revision is the daemon's
+    /// per-terminal mutation counter, so "older" is decidable here.
+    ///
+    /// A terminal with no recorded revision accepts its first delta whatever
+    /// the revision — the counters restart with the daemon's memory-only
+    /// store, and `startSubscription` clears this map for the same reason.
+    /// A `nil` revision (a daemon that predates the field) is always applied.
+    func applyPendingQuestionsDelta(_ delta: TerminalPendingQuestionsDelta) {
+        if let revision = delta.revision {
+            if let applied = pendingQuestionRevisions[delta.terminalID], revision < applied {
+                return
+            }
+            pendingQuestionRevisions[delta.terminalID] = revision
+        }
+        if delta.pending.isEmpty {
+            pendingQuestions.removeValue(forKey: delta.terminalID)
+        } else {
+            pendingQuestions[delta.terminalID] = delta.pending.map {
+                PendingAskUserQuestion(
+                    toolUseID: $0.toolUseID,
+                    inputJSON: $0.inputJSON,
+                    timestamp: $0.timestamp)
+            }
+        }
     }
 
     /// Seamless in-place "Switch account": the terminal row is unchanged except
