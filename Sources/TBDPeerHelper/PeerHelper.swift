@@ -15,6 +15,19 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "shadowPeerHe
 /// `poll(2)` loop — which is already watching stdin and the listener — wakes on
 /// that byte and shuts down through the same path every other exit takes. So
 /// `SIGTERM` reaches exactly the same cleanup as stdin EOF.
+///
+/// **That claim holds only because both ends of the pipe are `O_NONBLOCK`.**
+/// `run()` sets the flag, and `drain(fd:)` depends on it: this process holds the
+/// write end open for its whole life, so a blocking read on an empty pipe never
+/// returns, and Darwin's `signal(3)` installs handlers with `SA_RESTART`, so a
+/// later signal restarts that read rather than failing it with `EINTR`. A
+/// blocking read end therefore parks the helper inside its own shutdown path
+/// with the socket still bound and the record still published — a peer that
+/// answers every `connect()` and delivers nothing, which is the one failure
+/// (`docs/specs/2026-08-29-remote-peer-messaging-design.md` § "Failure
+/// semantics") this design exists to prevent. The write end is non-blocking for
+/// the mirror-image reason: a full pipe must fail the handler's `write(2)`
+/// rather than park a signal handler.
 nonisolated(unsafe) private var signalPipeWriteFD: Int32 = -1
 
 /// Async-signal-safe by construction: one `write(2)`, no allocation, no
@@ -133,6 +146,25 @@ final class PeerHelper {
         }
         let signalReadFD = pipeFDs[0]
         signalPipeWriteFD = pipeFDs[1]
+        // Non-blocking on both ends, and the read end's flag is load-bearing:
+        // see `signalPipeWriteFD`'s doc comment. A failure to set it is fatal
+        // rather than tolerated, because the shape it produces — a helper that
+        // wedges on its way out, still bound and still published — is worse
+        // than one that never starts.
+        for end in [signalReadFD, signalPipeWriteFD] {
+            let flags = fcntl(end, F_GETFL)
+            guard flags >= 0, fcntl(end, F_SETFL, flags | O_NONBLOCK) >= 0 else {
+                logger.error("""
+                    shadow peer helper \(self.options.handle, privacy: .public) could not make \
+                    its signal pipe non-blocking: \
+                    \(String(cString: strerror(errno)), privacy: .public)
+                    """)
+                Darwin.close(signalReadFD)
+                Darwin.close(signalPipeWriteFD)
+                signalPipeWriteFD = -1
+                return 1
+            }
+        }
         defer {
             Darwin.close(signalReadFD)
             Darwin.close(signalPipeWriteFD)
@@ -461,25 +493,53 @@ final class PeerHelper {
 
     /// Hand one message from a local session up to the daemon on stdout.
     ///
-    /// **This hop is inside the trust boundary and the wire is not.** The
-    /// sender's address here is a real `uds:` socket path, because that is what
-    /// Claude Code's frame carries and the daemon needs it to look the sender up
-    /// in the handle table it keeps privately. The daemon rewrites `from` to a
-    /// handle before anything leaves the machine; raw socket paths never travel.
+    /// **What travels is the message *body*, never the agent's frame.**
+    /// `PeerBridgeMessage.content` is defined as the thing the delivering side
+    /// composes an agent frame *around*, so putting the frame itself there
+    /// would mean a conforming provider mirroring TBD's own inbound behavior
+    /// handed its session a `<cross-session-message>` whose body is raw JSON.
+    /// It would also defeat the design's first trust property outright: the
+    /// frame carries `"from":"uds:/tmp/cc-socks/<pid>.sock"` at top level *and*
+    /// again inside the sender's own `<cross-session-message …>` wrapper, so a
+    /// `content` holding the whole frame smuggles across the wire the very path
+    /// the daemon rewrites `from` to hide — along with the local pid the socket
+    /// filename embeds and the permission class the sender claimed for itself
+    /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md` § "Trust";
+    /// `docs/research/2026-08-29-cross-machine-messaging/findings.md` § T1).
+    ///
+    /// So the body is lifted out of the frame and its opening wrapper is
+    /// stripped here, at the first hop, rather than anywhere later. Stripping
+    /// is what makes "no raw paths on the wire" true rather than nearly true,
+    /// and it costs nothing: attribution is stamped by the *delivering* side
+    /// from the handle a frame arrived on, and
+    /// `ShadowPeerAttribution.stamp`'s wrap branch composes a fresh wrapper
+    /// around a bare body. Only attribution is removed; the body itself passes
+    /// byte-verbatim.
+    ///
+    /// **This hop is inside the trust boundary and the wire is not.** `from` is
+    /// still a real `uds:` socket path, because that is the key the daemon
+    /// looks the sender up by in the handle table it keeps privately. The
+    /// daemon rewrites it to a handle before anything leaves the machine; that
+    /// field is the *only* place a path appears on this hop, and it appears
+    /// nowhere at all on the next one.
     private func forward(payload: Data) {
         // Failable rather than lossy, and that is the design's rule rather than
-        // a style choice: message content passes **byte-verbatim**, so a payload
-        // that is not UTF-8 is dropped and counted rather than re-encoded with
-        // replacement characters into something the sender did not write.
-        guard let content = String(bytes: payload, encoding: .utf8) else {
+        // a style choice: message content passes **byte-verbatim**, so a
+        // payload this build cannot read a body out of is dropped and counted
+        // rather than forwarded as something the sender did not write. The
+        // fallback that suggests itself — forward the raw bytes when the frame
+        // will not parse — is exactly the leak above, so there is none.
+        guard let inbound = Self.readAgentFrame(payload) else {
             droppedFrames += 1
             logger.error("""
                 shadow peer helper \(self.options.handle, privacy: .public) dropped an inbound \
-                message that was not valid UTF-8 rather than re-encoding it
+                message it could not read a body out of; forwarding the raw frame instead would \
+                put the sender's socket path on the wire
                 """)
             return
         }
-        let sender = Self.senderAddress(inAgentFrame: payload) ?? ""
+        let content = Self.strippedOfSenderAttribution(inbound.body)
+        let sender = inbound.sender
         if sender.isEmpty {
             logger.error("""
                 shadow peer helper \(self.options.handle, privacy: .public) received a message \
@@ -517,17 +577,115 @@ final class PeerHelper {
         }
     }
 
-    /// The `from` field of Claude Code's own frame — a `uds:` address. Read with
+    // MARK: - Reading the agent's frame
+
+    /// The two things this helper takes out of Claude Code's own message frame,
+    /// and the only two: who sent it, and what they wrote.
+    struct InboundAgentMessage: Equatable {
+        /// The frame's top-level `from` — a real `uds:` address. Local, and the
+        /// daemon's key into the handle table; rewritten to a handle before
+        /// anything leaves the machine.
+        let sender: String
+        /// `message.content`, exactly as it arrived: the sender's own
+        /// `<cross-session-message …>` wrapper still around it.
+        let body: String
+    }
+
+    /// Read the sender and the body out of one agent frame.
+    ///
     /// `JSONSerialization` rather than a typed decode because the frame's shape
-    /// belongs to the agent, not to this contract: everything except the field
-    /// that says who sent it travels verbatim.
-    private static func senderAddress(inAgentFrame payload: Data) -> String? {
+    /// belongs to the agent, not to this contract — a `Decodable` mirror of it
+    /// here would be a second copy of somebody else's schema, and would reject
+    /// a frame that grew a field. Only the two fields named above are read; the
+    /// rest is neither interpreted nor carried.
+    ///
+    /// Nil when the payload is not a JSON object, or carries no string body:
+    /// both are frames this build cannot forward, and neither is a reason to
+    /// fall back to shipping the raw bytes.
+    static func readAgentFrame(_ payload: Data) -> InboundAgentMessage? {
         guard let object = try? JSONSerialization.jsonObject(with: payload),
               let dictionary = object as? [String: Any],
-              let from = dictionary["from"] as? String,
-              !from.isEmpty
+              let message = dictionary["message"] as? [String: Any],
+              let body = message["content"] as? String
         else { return nil }
-        return from
+        let sender = (dictionary["from"] as? String) ?? ""
+        return InboundAgentMessage(sender: sender, body: body)
+    }
+
+    // MARK: - Stripping the sender's attribution
+
+    /// The wrapper's element name, without its closing angle bracket.
+    ///
+    /// **Deliberately a second copy of `ShadowPeerAttribution`'s constants and
+    /// tag scanner, not a shared one.** The helper links `TBDShared` and
+    /// nothing else, by design (see `Package.swift`), and the two halves sit on
+    /// opposite ends of the same contract the way `PeerHelperOptions.parse` and
+    /// `ShadowPeerHelperInvocation.arguments` already do: each is pinned by a
+    /// test on its own side. Widening the helper's dependency on the daemon to
+    /// share two string literals would cost more than the duplication does.
+    static let crossSessionOpenTagName = "<cross-session-message"
+    /// The wrapper's closing tag.
+    static let crossSessionCloseTag = "</cross-session-message>"
+
+    /// One message body with the sender's own attribution wrapper removed.
+    ///
+    /// The wrapper is composed by the *sender's* client, so it names the
+    /// sender's socket path, the name it chose for itself, and the permission
+    /// class it claims — none of which may cross the machine boundary
+    /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md` § "Trust"). The
+    /// receiving side stamps a wrapper of its own from the handle the frame
+    /// arrived on, so removing this one loses nothing and is what makes "raw
+    /// socket paths never travel" true of `content` as well as of `from`.
+    ///
+    /// The opening tag and its matching closing tag are removed **together**,
+    /// leaving a bare body: that is the shape `ShadowPeerAttribution.stamp`'s
+    /// wrap branch expects, and it reproduces the exact framing a real local
+    /// send composes. A body with no wrapper is returned untouched, and one
+    /// whose closing tag is missing keeps whatever it has after the opening
+    /// one. Nothing else is trimmed, re-indented or normalised, and the
+    /// interior is never searched — a body quoting a `</cross-session-message>`
+    /// of its own keeps it, because only a *trailing* one is paired with the
+    /// opening tag that was actually removed.
+    static func strippedOfSenderAttribution(_ body: String) -> String {
+        guard let end = openTagEnd(in: body) else { return body }
+        var stripped = String(body[body.index(after: end)...])
+        // The newline Claude Code's composer writes after the opening tag, and
+        // the one before the closing tag. Removed only when present, and only
+        // one each: they are framing, not content.
+        if stripped.hasPrefix("\n") { stripped.removeFirst() }
+        if stripped.hasSuffix(Self.crossSessionCloseTag) {
+            stripped.removeLast(Self.crossSessionCloseTag.count)
+            if stripped.hasSuffix("\n") { stripped.removeLast() }
+        }
+        return stripped
+    }
+
+    /// The index of the `>` that closes a leading opening tag, or nil when the
+    /// content does not begin with one.
+    ///
+    /// Quote-aware on purpose: an attribute value may legally contain `>`, and
+    /// a naive `firstIndex(of: ">")` would split inside one and spill the tail
+    /// of the sender's tag — socket path included — into the body this function
+    /// exists to clean.
+    static func openTagEnd(in content: String) -> String.Index? {
+        guard content.hasPrefix(Self.crossSessionOpenTagName) else { return nil }
+        var index = content.index(
+            content.startIndex, offsetBy: Self.crossSessionOpenTagName.count)
+        // `<cross-session-messageX` is a different element, not this one.
+        guard index < content.endIndex else { return nil }
+        let following = content[index]
+        guard following == ">" || following.isWhitespace else { return nil }
+        var quoted = false
+        while index < content.endIndex {
+            let character = content[index]
+            if character == "\"" {
+                quoted.toggle()
+            } else if character == ">" && !quoted {
+                return index
+            }
+            index = content.index(after: index)
+        }
+        return nil
     }
 
     /// Bind and listen on `path`.
@@ -625,9 +783,22 @@ final class PeerHelper {
 
     // MARK: - Descriptor helpers
 
+    /// Empty the self-pipe of every byte a signal handler has poked into it.
+    ///
+    /// **Terminating depends on the read end being `O_NONBLOCK`** — set in
+    /// `run()`, explained on `signalPipeWriteFD`. With the flag, an empty pipe
+    /// fails the read with `EAGAIN` and this returns; without it, the read
+    /// blocks forever and takes the helper's whole shutdown path with it.
+    /// `EINTR` is the one error worth retrying: everything else means there is
+    /// nothing more to read, and the caller is on its way out regardless.
     private func drain(fd: Int32) {
         var chunk = [UInt8](repeating: 0, count: 64)
-        while Darwin.read(fd, &chunk, chunk.count) > 0 { continue }
+        while true {
+            let count = Darwin.read(fd, &chunk, chunk.count)
+            if count > 0 { continue }
+            if count < 0 && errno == EINTR { continue }
+            return
+        }
     }
 
     /// Write every byte or report failure. A short write is normal on a pipe and

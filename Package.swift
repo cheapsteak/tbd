@@ -264,5 +264,25 @@ let package = Package(
                 "TBDShared",
             ]
         ),
+        // The shadow peer helper's own suite. It depends on the EXECUTABLE
+        // target for two reasons: `@testable import` reaches the parsing and
+        // attribution-stripping helpers, and — the load-bearing one — the
+        // integration tests spawn the real `TBDPeerHelper` binary, bind its
+        // real socket and read its real record, so the product has to be built
+        // and sit in the same products directory as the test bundle.
+        //
+        // Left in the fast PARALLEL pass deliberately, though it spawns a
+        // child: `Tests/CLAUDE.md` § "Test tiers" makes the failure asymmetry
+        // the tie-breaker — leaving a heavy suite in the parallel pass is the
+        // status quo, while moving a suite into the serial pass taxes every PR
+        // forever. The suite is `.serialized`, each helper lives for
+        // milliseconds, and every wait is a bounded poll.
+        .testTarget(
+            name: "TBDPeerHelperTests",
+            dependencies: [
+                "TBDPeerHelper",
+                "TBDShared",
+            ]
+        ),
     ]
 )
