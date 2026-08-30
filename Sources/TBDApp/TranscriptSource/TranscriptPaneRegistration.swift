@@ -44,3 +44,26 @@ enum TranscriptPaneTransport: Equatable {
         return .appSide(path: path)
     }
 }
+
+/// Which cadence tier a live transcript pane declares, as a pure function of
+/// the pane's worktree and the app's current selection.
+///
+/// Mounted is not the same as visible, and that difference is the whole point
+/// of the background tier. `TerminalContainerView` mounts every worktree in
+/// `AppState.keepAliveWorktreeIDs` — the selection plus a warm LRU of
+/// recently-visited ones — but only the selection is on screen: in
+/// single-select `WorktreePager` pages to the one selected id, and a
+/// multi-select renders exactly `selectionOrder`. Membership in
+/// `selectedWorktreeIDs` is therefore the on-screen test for a pane, and every
+/// other worktree the LRU is holding is alive but off screen. (Only the active
+/// tab's layout is mounted within a worktree, so a mounted pane is never
+/// hidden behind a background tab.)
+///
+/// Pure, and taking the selection set rather than an `AppState`, so the
+/// decision is assertable without a SwiftUI view tree — the same shape, and
+/// for the same reason, as `TranscriptPaneTransport.resolve`.
+enum TranscriptPaneVisibility {
+    static func tier(worktreeID: UUID, selectedWorktreeIDs: Set<UUID>) -> TranscriptPollTier {
+        selectedWorktreeIDs.contains(worktreeID) ? .foreground : .background
+    }
+}

@@ -338,6 +338,10 @@ struct TableTranscriptPaneView: View {
     /// `path` is the already-resolved, non-empty transcript path chosen by
     /// `TranscriptPaneTransport.resolve` — passed in rather than re-read here so
     /// the "no path" case cannot recur inside this loop and strand the pane.
+    ///
+    /// The pane also *declares* its cadence tier (`currentPollTier`) and
+    /// re-declares it whenever its visibility changes; the scheduler never
+    /// derives one.
     private func appSideLoop(path: String) async {
         guard let sid = currentSessionID else { return }
         let scheduler = appState.transcriptPollScheduler
@@ -354,9 +358,10 @@ struct TableTranscriptPaneView: View {
                 state.touchSessionTranscript(sessionID)
             }
         }
+        var tier = currentPollTier()
         await TranscriptPaneRegistration.apply(
             enabled: true, sessionID: sid, path: path,
-            tier: .foreground, scheduler: scheduler)
+            tier: tier, scheduler: scheduler)
 
         // Publish once immediately so the pane is not blank until the first tick.
         await source.refresh(sessionID: sid, path: path)
@@ -367,13 +372,42 @@ struct TableTranscriptPaneView: View {
         appState.touchSessionTranscript(sid)
         if !items.isEmpty { hasShownInitialMessages = true }
 
-        // Hold the task open so `.task(id:)` teardown deregisters on disappear.
+        // Hold the task open so `.task(id:)` teardown deregisters on disappear,
+        // and re-declare the tier whenever this pane's visibility changes. A
+        // pane the viewer-slot LRU keeps mounted after the selection moves
+        // elsewhere must drop to the background cadence without being torn
+        // down; `register` replaces rather than duplicates, so re-declaring is
+        // exactly that gesture (the same one `setAppActive` makes for the whole
+        // registry).
+        //
+        // Polled here rather than watched with an `.onChange` in `body` for two
+        // reasons: an observation dependency taken inside this task would not
+        // fire anyway, and keeping the watch inside this function leaves the
+        // daemon-poll path — which never reaches `appSideLoop` — with the body
+        // it always had. A second of stale cadence after a selection change
+        // costs at most a handful of extra `stat`s.
+        //
         // `clock.sleep`, never `Task.sleep`: the latter is a lint error here.
         let clock = ContinuousClock()
         while !Task.isCancelled {
             try? await clock.sleep(for: .seconds(1))
+            if Task.isCancelled { break }
+            let latest = currentPollTier()
+            guard latest != tier else { continue }
+            tier = latest
+            await scheduler.register(sessionID: sid, path: path, tier: tier)
         }
         await scheduler.deregister(sessionID: sid)
+    }
+
+    /// This pane's cadence tier right now: foreground while its worktree is on
+    /// screen, background while the keep-alive LRU is merely holding its view
+    /// tree alive. See `TranscriptPaneVisibility` for why the selection set is
+    /// the on-screen test.
+    private func currentPollTier() -> TranscriptPollTier {
+        TranscriptPaneVisibility.tier(
+            worktreeID: worktreeID,
+            selectedWorktreeIDs: appState.selectedWorktreeIDs)
     }
 
     /// Folds the daemon's pending `AskUserQuestion` captures into a freshly

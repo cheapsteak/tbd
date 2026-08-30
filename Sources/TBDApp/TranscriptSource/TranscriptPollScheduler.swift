@@ -62,6 +62,13 @@ actor TranscriptPollScheduler {
 
     var registeredSessionIDs: Set<String> { Set(registrations.keys) }
 
+    /// The tier a session is registered at right now, or nil when it is not
+    /// registered. Read-only — the scheduler still never derives a tier, it
+    /// only reports back the one the pane declared.
+    func registeredTier(sessionID: String) -> TranscriptPollTier? {
+        registrations[sessionID]?.tier
+    }
+
     func setOnChange(_ handler: @escaping @Sendable (String) async -> Void) {
         onChange = handler
     }
