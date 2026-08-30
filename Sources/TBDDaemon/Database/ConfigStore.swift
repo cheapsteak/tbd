@@ -80,6 +80,13 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// "off". Resolve it through `Config.gcOrphanProcessesEnabledDefault`,
     /// never through `?? false`.
     var gc_orphan_processes_enabled: Bool?
+    /// Gate for the hang-stack reclaimer
+    /// (design 2026-08-29). **Genuinely tri-state**, same shape as
+    /// `gc_orphan_processes_enabled`: the
+    /// `20260830021944_config_gc_hang_stacks` column carries no SQL default, so
+    /// `nil` here means "never chose" rather than "off". Resolve it through
+    /// `Config.gcHangStacksEnabledDefault`, never through `?? false`.
+    var gc_hang_stacks_enabled: Bool?
     /// JSON-encoded `[String: String]` remote create-param defaults (machine
     /// scope), keyed by the provider's own field names. Nil/absent means no
     /// opinion at this level — every field falls through to its
@@ -106,13 +113,17 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter gcOrphanProcessesDefault: same shape once more, for
     ///   `gc_orphan_processes_enabled` — the orphaned-process collector's soak
     ///   gate.
+    /// - Parameter gcHangStacksDefault: same shape once more, for
+    ///   `gc_hang_stacks_enabled` — the hang-stack reclaimer's soak gate,
+    ///   which also governs the app-side write-time cap.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
         supervisionEnabledDefault: Bool = Config.supervisionEnabledDefault,
         gcProfileDirsDefault: Bool = Config.gcProfileDirsEnabledDefault,
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
-        gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault
+        gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault,
+        gcHangStacksDefault: Bool = Config.gcHangStacksEnabledDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -167,6 +178,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // And once more, for the orphaned-process collector's gate —
             // NOT `?? false`.
             gcOrphanProcessesEnabled: gc_orphan_processes_enabled ?? gcOrphanProcessesDefault,
+            // And once more, for the hang-stack reclaimer's gate —
+            // NOT `?? false`.
+            gcHangStacksEnabled: gc_hang_stacks_enabled ?? gcHangStacksDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults)
         )
     }
@@ -549,6 +563,21 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_orphan_processes_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the hang-stack reclaimer gate (default OFF, soaking) — read on
+    /// top of the GC master switch, so both must be on for the phase to run.
+    /// The same flag is mirrored into the app's write-time cap, so this one
+    /// call governs both halves of the policy. The column is written on every
+    /// call, because writing either value is the explicit gesture that lifts it
+    /// out of NULL forever after.
+    public func setGCHangStacksEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET gc_hang_stacks_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

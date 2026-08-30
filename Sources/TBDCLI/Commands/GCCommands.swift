@@ -8,7 +8,7 @@ struct GCCommand: ParsableCommand {
         abstract: "Orphan GC: list reaps, restore a reaped agent worktree, trigger a sweep",
         subcommands: [
             GCList.self, GCRestore.self, GCSweep.self, GCProfileDirs.self,
-            GCOrphanProcesses.self,
+            GCOrphanProcesses.self, GCHangStacks.self,
         ]
     )
 }
@@ -54,6 +54,30 @@ struct GCOrphanProcesses: AsyncParsableCommand {
             method: RPCMethod.configSetGCOrphanProcessesEnabled,
             params: ConfigSetGCOrphanProcessesEnabledParams(enabled: enabled))
         print("Orphan-process GC \(enabled ? "enabled" : "disabled").")
+    }
+}
+
+/// The soak switch for the hang-stack reclaimer. It bounds
+/// `~/Library/Logs/TBD/hang-stacks/` to 14 days and 1000 files, and the same
+/// flag turns on the app's write-time cap — one switch for both halves. It
+/// deletes persisted state from a background sweep, so it ships off and is
+/// opted into by hand.
+struct GCHangStacks: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "hang-stacks",
+        abstract: "Enable or disable reclaiming old hang-stack diagnostics (default off)")
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetGCHangStacksEnabled,
+            params: ConfigSetGCHangStacksEnabledParams(enabled: enabled))
+        print("Hang-stack GC \(enabled ? "enabled" : "disabled").")
     }
 }
 

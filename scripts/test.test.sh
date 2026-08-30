@@ -8,8 +8,9 @@
 # (.github/workflows/test.yml).
 #
 # ZERO BUILDS, ZERO CPU LOAD, AND IT NEVER TOUCHES THE REAL ~/tbd, ~/.claude,
-# ~/.codex OR THE REAL TMUX SOCKET DIRECTORY. Every case here drives the wrapper
-# against a synthetic home under a throwaway fixture directory, with a stub
+# ~/.codex, ~/Library/Logs/TBD OR THE REAL TMUX SOCKET DIRECTORY. Every case
+# here drives the wrapper against a synthetic home under a throwaway fixture
+# directory, with a stub
 # standing in for `swift`, so the whole file runs in seconds on a shared box
 # while other agents are working.
 #
@@ -443,7 +444,7 @@ _assert_leak_is_detected() {
   run_wrapper "$fix" --fingerprint
   RUN_ENV=()
   assert_nonzero "$label fails the run" "$RUN_RC"
-  assert_contains "$label is reported" "$RUN_OUT" "THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex OR /tmp/tmux-<uid>"
+  assert_contains "$label is reported" "$RUN_OUT" "THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex, ~/Library/Logs/TBD OR /tmp/tmux-<uid>"
   # `+  ` — the two spaces are the rendering: `sed 's/^>/  + /'` over a diff
   # line that already carries `> `. Pinned as-is so a reformat is visible.
   assert_contains "$label names the entry" "$RUN_OUT" "+  $expected"
@@ -471,6 +472,17 @@ test_fingerprint_detects_a_new_claude_projects_entry() {
 
 test_fingerprint_detects_a_new_codex_entry() {
   _assert_leak_is_detected "a new ~/.codex entry" ".codex/leaked" "~/.codex/leaked"
+}
+
+# The fifth root, and the only one a sweep DELETES from: `OrphanGC`'s
+# hang-stack phase reclaims files under `~/Library/Logs/TBD/hang-stacks`, and
+# `HangStackWriter` creates them. `FAKE_SWIFT_LEAK` stands in for the create
+# direction; the arm sees a delete by the same mechanism, since either edits the
+# listing the two snapshots are diffed on.
+test_fingerprint_detects_a_new_hang_stack() {
+  _assert_leak_is_detected "a new hang stack" \
+    "Library/Logs/TBD/hang-stacks/hang-leaked.txt" \
+    "~/Library/Logs/TBD/hang-stacks/hang-leaked.txt"
 }
 
 test_fingerprint_passes_on_an_unchanged_tree() {
@@ -520,8 +532,9 @@ test_fingerprint_comparison_is_load_bearing() {
 fingerprint_with_home() { HOME="$1" TMUX_TMPDIR="$1/tmux-tmpdir" bash "$2"; }
 
 # ARMS, NOT ROOTS — the two counts differ and the smaller one is the tempting
-# mistake. There are four roots (`~/tbd`, `~/.claude`, `~/.codex`, the tmux
-# socket dir) but SIX arms, because `~/.claude` and `~/.codex` are each read
+# mistake. There are five roots (`~/tbd`, `~/.claude`, `~/.codex`, the tmux
+# socket dir, `~/Library/Logs/TBD/hang-stacks`) but SEVEN arms, because
+# `~/.claude` and `~/.codex` are each read
 # twice: a `-maxdepth 1` pass over the store itself, then a second pass at a
 # nested directory the depth limit puts out of the first one's reach. An arm
 # with no assertion here can be deleted wholesale and this file stays green —
@@ -536,6 +549,8 @@ test_fingerprint_script_covers_every_arm() {
   assert_contains "absent ~/.codex is a marker" "$out" "~/.codex <absent>"
   assert_contains "absent ~/.codex/plugins/cache is a marker" "$out" "~/.codex/plugins/cache <absent>"
   assert_contains "absent socket dir is a marker" "$out" "<tmux-sockets> <absent>"
+  assert_contains "absent hang-stacks is a marker" "$out" \
+    "~/Library/Logs/TBD/hang-stacks <absent>"
   rmfix "$d"
 }
 
@@ -904,7 +919,7 @@ test_fingerprint_detects_a_leaked_tmux_socket() {
   RUN_ENV=()
   assert_nonzero "a leaked tmux socket fails the run" "$RUN_RC"
   assert_contains "it is reported" "$RUN_OUT" \
-    "THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex OR /tmp/tmux-<uid>"
+    "THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex, ~/Library/Logs/TBD OR /tmp/tmux-<uid>"
   assert_contains "the entry is named" "$RUN_OUT" "+  <tmux-sockets>/tbd-leaked-socket"
   assert_contains "and the fix is named" "$RUN_OUT" "the fix is TMUX_TMPDIR"
   rmfix "$fix"

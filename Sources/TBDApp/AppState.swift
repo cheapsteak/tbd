@@ -2170,6 +2170,7 @@ final class AppState {
                 await self?.loadModelProfiles()
                 await self?.loadHibernationConfig()
                 await self?.loadSupervisionConfig()
+                await self?.loadHangStackRetentionConfig()
                 // The daemon reuses this delta for config changes including
                 // the control-mode toggle (handleConfigSetControlMode), so
                 // refresh capabilities too — a toggle from ANOTHER client
@@ -2817,6 +2818,7 @@ final class AppState {
             await loadModelProfiles()
             await loadHibernationConfig()
             await loadSupervisionConfig()
+            await loadHangStackRetentionConfig()
             await refreshRemote()
             startSubscription()
             await refreshPRStatuses()

@@ -668,6 +668,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetGCProfileDirsEnabled(request.paramsData)
             case RPCMethod.configSetGCOrphanProcessesEnabled:
                 return try await handleConfigSetGCOrphanProcessesEnabled(request.paramsData)
+            case RPCMethod.configSetGCHangStacksEnabled:
+                return try await handleConfigSetGCHangStacksEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:

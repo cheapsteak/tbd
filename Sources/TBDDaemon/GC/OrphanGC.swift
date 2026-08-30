@@ -62,6 +62,7 @@ public actor OrphanGC {
     private let scratchpadCollector: ScratchpadCollector
     private let deletionQueueCollector: DeletionQueueCollector
     private let profileDirCollector: ProfileDirCollector
+    private let hangStackCollector: HangStackCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
     /// keychain, which `scripts/test.sh` cannot fence.
@@ -107,6 +108,7 @@ public actor OrphanGC {
         scratchpadBase: URL? = nil,
         now: (@Sendable () -> Date)? = nil,
         profileDirBase: URL? = nil,
+        hangStackBase: URL? = nil,
         credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
         signaller: any ProcessSignaller = ProductionProcessSignaller()
     ) {
@@ -117,7 +119,8 @@ public actor OrphanGC {
         self.init(
             db: db, git: git, broadcast: broadcast, liveCWDsProvider: wrapped,
             scratchpadBase: scratchpadBase, now: now,
-            profileDirBase: profileDirBase, credentialsKeychain: credentialsKeychain,
+            profileDirBase: profileDirBase, hangStackBase: hangStackBase,
+            credentialsKeychain: credentialsKeychain,
             signaller: signaller
         )
     }
@@ -136,6 +139,7 @@ public actor OrphanGC {
         now: (@Sendable () -> Date)? = nil,
         beforeInterruptedArchiveReap: (@Sendable () async -> Void)? = nil,
         profileDirBase: URL? = nil,
+        hangStackBase: URL? = nil,
         credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
         beforeProfileDirReap: (@Sendable () async -> Void)? = nil,
         processCWDsProvider: (@Sendable () async -> [Int32: String]?)? = nil,
@@ -152,6 +156,10 @@ public actor OrphanGC {
         // read from it rather than rebuilt here.
         let resolvedProfileDirBase = profileDirBase
             ?? ClaudeProfileConfigDirManager().baseDirectory
+        // `HangStackRetention` owns where the app writes hang stacks, so the
+        // collector's base is read from it rather than rebuilt here — that is
+        // what keeps the writer's cap and this sweep pointed at one directory.
+        let resolvedHangStackBase = hangStackBase ?? HangStackRetention.defaultBaseDirectory
         let snap = ReapSnapshot(git: git)
 
         self.db = db
@@ -169,6 +177,7 @@ public actor OrphanGC {
         self.deletionQueueCollector = DeletionQueueCollector(git: git, now: resolvedNow)
         self.profileDirCollector = ProfileDirCollector(
             base: resolvedProfileDirBase, now: resolvedNow)
+        self.hangStackCollector = HangStackCollector(base: resolvedHangStackBase)
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -189,6 +198,12 @@ public actor OrphanGC {
     public func sweep(dryRun: Bool = false) async -> GCSweepResult {
         var planned: [String] = []
         var reaped = 0
+        // Counted separately from `reaped` on purpose: hang-stack files produce
+        // no `ReapRecord`, so they must NOT arm the `.reapRecordsChanged`
+        // broadcast below, which stays keyed to the record-producing phases.
+        // They are still added to the returned total so `tbd gc sweep` reports
+        // honestly.
+        var hangStacksReaped = 0
 
         guard let config = try? await db.config.get() else { return .init(planned: [], reaped: 0) }
         guard config.gcEnabled || dryRun else { return .init(planned: ["gc disabled"], reaped: 0) }
@@ -262,6 +277,10 @@ public actor OrphanGC {
             dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
+        await reclaimHangStacks(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &hangStacksReaped
+        )
+
         // Snapshot retention never runs in dryRun; the outer guard already
         // establishes gcEnabled for any non-dry run.
         if !dryRun {
@@ -269,7 +288,61 @@ public actor OrphanGC {
         }
 
         if reaped > 0 { broadcast(.reapRecordsChanged) }
-        return .init(planned: planned, reaped: reaped)
+        return .init(planned: planned, reaped: reaped + hangStacksReaped)
+    }
+
+    /// Reclaims hang-stack diagnostic files under
+    /// `~/Library/Logs/TBD/hang-stacks/` that are past the retention policy —
+    /// older than `HangStackRetention.maxAge`, or outside the newest
+    /// `HangStackRetention.maxFiles`
+    /// (`docs/specs/2026-08-29-hang-stack-reclaimer-design.md`).
+    ///
+    /// Gated by `gcHangStacksEnabled` on top of `gcEnabled`, the same shape
+    /// `reclaimProfileDirs` uses and for the same reason: this phase deletes
+    /// persisted state from a background sweep, which the house rule puts
+    /// behind a default-off flag until it has soaked. `dryRun` bypasses the
+    /// flag exactly as `sweep` lets it bypass `gcEnabled` — someone deciding
+    /// whether to enable a default-off flag needs to see what enabling it would
+    /// reclaim first — and touches nothing either way.
+    ///
+    /// **Reports in aggregate, and persists no `ReapRecord`.** A hang stack is
+    /// not restorable and belongs to no repo, so a record would never surface
+    /// anywhere; and one row per file would write tens of thousands of rows
+    /// into `reap_records` on a first sweep — a new unbounded table to record
+    /// the end of an unbounded directory. For the same reason the plan gets one
+    /// line rather than one per file: 25,000 lines in an RPC response is not a
+    /// plan anyone reads.
+    private func reclaimHangStacks(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        guard config.gcHangStacksEnabled || dryRun else { return }
+
+        let selected = hangStackCollector.candidates(
+            now: now(), graceSeconds: config.gcGraceSeconds)
+        guard !selected.isEmpty else { return }
+
+        let plannedBytes = selected.reduce(Int64(0)) { $0 + $1.sizeBytes }
+        // The COLLECTOR's base, never the one that was injected: it resolves
+        // its base at construction, so with a symlinked base the two spell
+        // different directories — and a plan line that names a directory the
+        // reap does not touch is the exact mismatch `resolvedDirectory` exists
+        // to kill.
+        planned.append("""
+        REAP hang-stacks \(hangStackCollector.base.path) files=\(selected.count) \
+        bytes=\(plannedBytes)
+        """)
+        // This phase's guard is `gcHangStacksEnabled || dryRun`, so every line
+        // below runs only with the flag actually on.
+        guard !dryRun else { return }
+
+        let result = hangStackCollector.reap(selected)
+        guard result.files > 0 else { return }
+        reaped += result.files
+        logger.info("""
+        gc: reaped \(result.files, privacy: .public) hang-stack file(s) \
+        (\(result.bytes, privacy: .public) bytes) from \
+        \(self.hangStackCollector.base.path, privacy: .public)
+        """)
     }
 
     /// Reclaims worktree directories that outlived their archive: entries

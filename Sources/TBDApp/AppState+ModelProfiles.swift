@@ -236,6 +236,27 @@ extension AppState {
         }
     }
 
+    /// Mirror the daemon's hang-stack reclaimer gate into
+    /// `HangStackWriter`'s write-time cap
+    /// (`docs/specs/2026-08-29-hang-stack-reclaimer-design.md`). Called on
+    /// launch and whenever a config-change delta arrives — the same two call
+    /// sites as `loadSupervisionConfig()`.
+    ///
+    /// One flag governs both halves of the policy, so the app has no toggle of
+    /// its own to keep in sync and nothing published here. A failed fetch
+    /// leaves the cap at whatever it was, which on launch is OFF: the
+    /// keep-biased direction, and the same answer the unset column gives.
+    ///
+    /// The value mirrored is `HangStackWriter.retentionArmed(for:)`, which
+    /// reads `gcHangStacksEnabled` **on top of** `gcEnabled` exactly as the
+    /// daemon's own phase does: the master switch has to master both halves of
+    /// one policy, or turning GC off in Settings would stop the sweep while the
+    /// app kept deleting.
+    func loadHangStackRetentionConfig() async {
+        guard let config = await fetchConfig() else { return }
+        HangStackWriter.shared.setRetentionEnabled(HangStackWriter.retentionArmed(for: config))
+    }
+
     /// Persist supervision's fleet-wide authority switch (design 2026-07-26
     /// §3, §7). `enabled: true` releases the fleet brake; `false` engages it.
     /// Shipped OFF (braked); for now inert, since the rest of the supervision

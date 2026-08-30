@@ -231,6 +231,26 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the hang-stack reclaimer gate — the default-off soak switch for
+    /// bounding `~/Library/Logs/TBD/hang-stacks/` by age and by count, read on
+    /// top of the GC master switch.
+    ///
+    /// The broadcast is load-bearing beyond refreshing a Settings toggle (there
+    /// is none for this flag): the app mirrors the resolved value into
+    /// `HangStackWriter`'s write-time cap, so this delta is how the write side
+    /// of the policy learns it was turned on without waiting for a relaunch.
+    ///
+    /// Like the master switch, flipping it off does not cancel an in-progress
+    /// sweep: `OrphanGC.sweep` re-reads the flag on its next pass.
+    func handleConfigSetGCHangStacksEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetGCHangStacksEnabledParams.self, from: paramsData)
+        try await db.config.setGCHangStacksEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the fleet supervision brake (design 2026-07-26 §3, §7) — the
     /// fleet-wide on/off switch for supervision. Shipped OFF; nothing in the
     /// daemon reads this column to gate an actuation yet, because the acting
