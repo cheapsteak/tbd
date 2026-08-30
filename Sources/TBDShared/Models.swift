@@ -1400,6 +1400,21 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcOrphanProcessesEnabled: Bool
+    /// Gate for the orphan-GC phase that reclaims hang-stack diagnostic files
+    /// under `~/Library/Logs/TBD/hang-stacks/`
+    /// (`docs/specs/2026-08-29-hang-stack-reclaimer-design.md`). Read on top of
+    /// `gcEnabled`: both must be on for the phase to run. It ships OFF because
+    /// it deletes persisted state from a background sweep, which is the house
+    /// default-off rule; the app mirrors the same resolved value into
+    /// `HangStackWriter`'s write-side cap, so one flag governs both halves.
+    ///
+    /// **Resolved, not stored**, like `gcOrphanProcessesEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `gc_hang_stacks_enabled ?? Config.gcHangStacksEnabledDefault`. NULL
+    /// means "never chose" and follows the shipped default wherever it goes;
+    /// `0`/`1` is an explicit gesture and is honored forever.
+    public var gcHangStacksEnabled: Bool
     /// Machine-wide remote create-param defaults, keyed by the **provider's
     /// own** `create_params` field names — the fall-through level beneath
     /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
@@ -1448,6 +1463,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// change to this constant — no forcing `UPDATE` migration, and an explicit
     /// opt-out is left alone.
     public static let gcOrphanProcessesEnabledDefault = false
+    /// The shipped default for `gcHangStacksEnabled`, and the single place it
+    /// lives. The hang-stack reclaimer ships off; graduating it is a change to
+    /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
+    /// is left alone.
+    public static let gcHangStacksEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1480,6 +1500,7 @@ public struct Config: Codable, Sendable, Equatable {
                 gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
                 gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
+                gcHangStacksEnabled: Bool = Config.gcHangStacksEnabledDefault,
                 remoteCreateDefaults: [String: String] = [:]) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
@@ -1512,6 +1533,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
         self.claudeCloudEnabled = claudeCloudEnabled
         self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
+        self.gcHangStacksEnabled = gcHangStacksEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
     }
 
@@ -1590,6 +1612,11 @@ public struct Config: Codable, Sendable, Equatable {
         // default rather than hardcoding `false`.
         gcOrphanProcessesEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcOrphanProcessesEnabled) ?? Config.gcOrphanProcessesEnabledDefault
+        // Same tri-state again: absent means the sender knew nothing about the
+        // flag, which is the NULL column's situation — follow the shipped
+        // default rather than hardcoding `false`.
+        gcHangStacksEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .gcHangStacksEnabled) ?? Config.gcHangStacksEnabledDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.

@@ -288,6 +288,7 @@ public enum RPCMethod {
     public static let configSetGCEnabled = "config.setGCEnabled"
     public static let configSetGCProfileDirsEnabled = "config.setGCProfileDirsEnabled"
     public static let configSetGCOrphanProcessesEnabled = "config.setGCOrphanProcessesEnabled"
+    public static let configSetGCHangStacksEnabled = "config.setGCHangStacksEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -2690,6 +2691,17 @@ public struct ConfigSetGCProfileDirsEnabledParams: Codable, Sendable {
 /// worktree they were rooted in (default OFF during soak, on top of the GC
 /// master switch). Design: `docs/specs/2026-08-18-orphan-process-gc-design.md`.
 public struct ConfigSetGCOrphanProcessesEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setGCHangStacksEnabled` — the gate for the hang-stack
+/// reclaimer, which bounds `~/Library/Logs/TBD/hang-stacks/` by age and by
+/// count (default OFF during soak, on top of the GC master switch). The same
+/// flag also governs the app-side write-time cap, so one switch answers "is the
+/// reclaimer on?". Design:
+/// `docs/specs/2026-08-29-hang-stack-reclaimer-design.md`.
+public struct ConfigSetGCHangStacksEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

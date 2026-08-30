@@ -1,5 +1,6 @@
 import Foundation
 import os
+import TBDShared
 
 /// Persists stack samples from hang events to disk in `~/Library/Logs/TBD/hang-stacks/`.
 /// One file per hang event. Supports appending resamples during sustained hangs.
@@ -17,18 +18,28 @@ final class HangStackWriter: @unchecked Sendable {
     /// Handle to the current hang file for appending.
     private var currentFileHandle: FileHandle?
 
-    /// Lock protecting the file handle and URL.
+    /// Whether the write-time retention cap is armed. Mirrors the daemon's
+    /// `Config.gcHangStacksEnabled`, pushed in by `AppState`.
+    ///
+    /// Starts `false` and stays `false` whenever the daemon is unreachable —
+    /// the keep-biased direction, and the same answer the unset column gives.
+    private var retentionEnabled = false
+
+    /// Lock protecting the file handle, the URL, and `retentionEnabled`.
     private let lock = OSAllocatedUnfairLock<()>(initialState: ())
 
     init(baseDir: URL? = nil) {
-        if let baseDir = baseDir {
-            self.baseDir = baseDir
-        } else {
-            // Default: ~/Library/Logs/TBD/hang-stacks/
-            let libraryURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
-                ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library")
-            self.baseDir = libraryURL.appendingPathComponent("Logs/TBD/hang-stacks")
-        }
+        // The default comes from `HangStackRetention` rather than being derived
+        // here, so this writer and the daemon's `HangStackCollector` can never
+        // end up bounding two different directories.
+        self.baseDir = baseDir ?? HangStackRetention.defaultBaseDirectory
+    }
+
+    /// Arm or disarm the write-time retention cap. Called by `AppState` with
+    /// the daemon's resolved `Config.gcHangStacksEnabled`, on launch and on
+    /// every config-change delta.
+    func setRetentionEnabled(_ enabled: Bool) {
+        lock.withLock { retentionEnabled = enabled }
     }
 
     deinit {
@@ -80,7 +91,7 @@ final class HangStackWriter: @unchecked Sendable {
                 try data.write(to: fileURL, options: [.atomic])
             }
 
-            return lock.withLock { () in
+            let opened: URL? = lock.withLock { () in
                 do {
                     currentHangFileURL = fileURL
                     currentFileHandle = try FileHandle(forWritingTo: fileURL)
@@ -91,6 +102,9 @@ final class HangStackWriter: @unchecked Sendable {
                     return nil
                 }
             }
+            guard let opened else { return nil }
+            trimToRetentionCap(keeping: opened)
+            return opened
         } catch {
             Self.logger.error("Failed to write hang stack: \(error.localizedDescription, privacy: .public)")
             return nil
@@ -151,6 +165,73 @@ final class HangStackWriter: @unchecked Sendable {
 
             currentFileHandle = nil
             currentHangFileURL = nil
+        }
+    }
+
+    /// Trims the hang-stacks directory to the newest `HangStackRetention.maxFiles`
+    /// files, after a new one has been written. No-op unless the mirrored
+    /// `Config.gcHangStacksEnabled` flag is armed.
+    ///
+    /// **Count only** — the age half of the policy belongs to the daemon's
+    /// hourly sweep, and the writer should do one cheap thing. This bound
+    /// exists because the hourly sweep genuinely leaves a gap: a hang storm can
+    /// write hundreds of files between two passes.
+    ///
+    /// Runs on the watchdog's background utility queue, never the main thread,
+    /// and in steady state enumerates a directory the sweep has already bounded
+    /// to ~1000 entries. The whitelist is the same one the collector uses, so
+    /// nothing the writer did not produce is ever a candidate; the file just
+    /// written and the one currently open for resamples are both excluded
+    /// explicitly, even though a newest-first ranking already puts them far
+    /// inside the cap.
+    private func trimToRetentionCap(keeping justWritten: URL) {
+        let (enabled, openFile) = lock.withLock { () in (retentionEnabled, currentHangFileURL) }
+        guard enabled else { return }
+
+        let keys: [URLResourceKey] = [
+            .contentModificationDateKey, .creationDateKey, .isRegularFileKey,
+        ]
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: baseDir, includingPropertiesForKeys: keys,
+            options: [.skipsSubdirectoryDescendants]
+        ) else { return }
+
+        var files: [(url: URL, date: Date)] = []
+        for url in entries {
+            guard HangStackRetention.isHangStackFilename(url.lastPathComponent) else { continue }
+            guard let values = try? url.resourceValues(forKeys: Set(keys)),
+                  values.isRegularFile == true,
+                  let date = values.contentModificationDate ?? values.creationDate else { continue }
+            files.append((url, date))
+        }
+        guard files.count > HangStackRetention.maxFiles else { return }
+
+        files.sort {
+            if $0.date != $1.date { return $0.date > $1.date }
+            return $0.url.lastPathComponent > $1.url.lastPathComponent
+        }
+
+        var removed = 0
+        for entry in files.dropFirst(HangStackRetention.maxFiles) {
+            if entry.url == justWritten || entry.url == openFile { continue }
+            // Anchored right before the delete, the same check the collector
+            // makes: the path must resolve to an immediate child of the base.
+            guard HangStackRetention.isImmediateChild(entry.url, of: baseDir) else { continue }
+            do {
+                try FileManager.default.removeItem(at: entry.url)
+                removed += 1
+            } catch {
+                Self.logger.debug("""
+                Failed to trim hang stack \(entry.url.lastPathComponent, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            }
+        }
+        if removed > 0 {
+            Self.logger.info("""
+            Trimmed \(removed, privacy: .public) hang-stack file(s) to the newest \
+            \(HangStackRetention.maxFiles, privacy: .public)
+            """)
         }
     }
 
