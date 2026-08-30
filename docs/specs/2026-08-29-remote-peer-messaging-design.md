@@ -435,9 +435,15 @@ not, and `tbd peer list` makes the state answerable in one command.
 
 Lists **every** peer TBD can see — peer means any addressable session, local or
 remote, so a command under that name that showed only shadows would misname
-itself. Each row carries the peer's name and ref, whether it is a local session
-or a shadow peer, the worktree and terminal behind a local one, the provider
-session and link state behind a shadow, and any orphan the sweep found.
+itself. Each row carries the peer's name, whether it is a local session or a
+shadow peer, the worktree and terminal behind a local one, the provider session
+and link state behind a shadow, and any orphan the sweep found.
+
+**It cannot show the `[ref]`.** Claude Code mints a ref per live record and
+stores it nowhere — a census over 84 records found no key carrying it — so no
+reader of the registry can produce one. The row carries the session id, which is
+on disk, and the listing says where refs actually come from. An always-empty ref
+column would read as "this peer has no ref", which is false for every row.
 
 This replaces a manual join the docs currently teach: pull
 `tbd worktree list --json`, pull `tbd terminal list`, join them on the tmux pane

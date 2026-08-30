@@ -61,6 +61,11 @@ import Foundation
     #expect(body.contains("tmux <server>:<window>.<pane>"))
     #expect(body.contains("tbd terminal list <worktree-id>"))
     #expect(body.contains("tbd worktree list --json"))
+    // …and the command that performs that join, so a session is not left
+    // hand-rolling it. It reaches rows the pane join cannot: a shadow peer
+    // standing in for a remote session carries no pane to join on.
+    #expect(body.contains("tbd peer list"))
+    #expect(body.contains("every peer TBD can see"))
     // Only rows for sessions running under tmux carry that pane — `cloud` and
     // remote-control rows do not — so the join is scoped to what TBD spawns.
     // Pin the scope, so a rewrite that promises it of every row reds.

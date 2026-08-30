@@ -219,6 +219,14 @@ Join the two on the window and pane (`@388` / `%388` above): the row that
 matches is the lane you meant, whatever it happens to be called. Address
 it as `name [ref]` with the name the listing actually shows.
 
+`tbd peer list` does that join for you — every peer TBD can see, with the
+worktree, terminal or remote session behind it. It also reaches the rows
+the pane join cannot: a peer with no tmux coordinates has no pane to join
+on, and a shadow peer standing in for a session on another machine carries
+none by design. It prints no `[ref]`, because Claude Code mints one per
+record and never writes it to disk — that value comes from `ListAgents`
+and nowhere else.
+
 ## Reach
 
 - **On this machine** — the boundary is the OS user, not the Anthropic
