@@ -340,6 +340,27 @@ public struct RosterLinkRegistration: Sendable {
     }
 }
 
+/// Why a link is being dropped, which decides whether the far side is told.
+///
+/// The two cases are not a preference. A link the roster stops announcing on
+/// while its **stream stays open** is a scope change on this side, and silence
+/// there leaves the far host holding shadows for sessions it may no longer
+/// reach — a remote lane in one project able to message local sessions in
+/// another, which is exactly what the design's Trust section forbids. Silence
+/// is correct only when the stream itself is over, because the contract then
+/// obliges the far side to unlink everything it published for it.
+public enum RosterLinkRemoval: Sendable, Equatable {
+    /// The stream is over — the bridge is stopping, or the connection ended.
+    /// No `peer-gone` is written and no handle is withdrawn: nothing can be
+    /// delivered into a closed stream, and the far side unlinks every shadow it
+    /// published for it.
+    case streamEnded
+    /// The stream is alive and keeps carrying traffic; this registration's
+    /// repository simply left the provider's scope. Every session announced
+    /// under it is withdrawn from the handle registry and announced gone.
+    case stillOpen
+}
+
 /// What one scan of the registry saw.
 ///
 /// **A partial roster is a correct roster of what TBD can see, and is reported
@@ -461,6 +482,12 @@ public actor RosterWatcher {
     /// itself, before any link scopes it.
     private var entries: [String: RosterEntry] = [:]
     private var lastReport = RosterScanReport()
+    /// The pass every new `refresh()` queues behind. See `refresh()`.
+    private var refreshChain: Task<RosterScanReport, Never>?
+    /// Tickets, so the caller nobody queued behind can tell that it is the last
+    /// one and release the chain. A `Task` has no identity to compare.
+    private var nextRefreshTicket = 0
+    private var lastQueuedRefresh = -1
 
     /// - Parameters:
     ///   - sessionsDirectory: the host registry — `~/.claude/sessions` in
@@ -504,10 +531,65 @@ public actor RosterWatcher {
         await refresh()
     }
 
-    /// Drop a link. No `peer-gone` lines are sent: the stream is over, and the
-    /// far side unlinks every shadow it published for it.
-    public func removeLink(id: UUID) {
-        links[id] = nil
+    /// Drop a link, telling the far side or not according to why.
+    ///
+    /// The default is silence, and it is only correct for the reason
+    /// `.streamEnded` names. See `RosterLinkRemoval`.
+    public func removeLink(id: UUID, because removal: RosterLinkRemoval = .streamEnded) async {
+        guard let state = links.removeValue(forKey: id) else { return }
+        guard case .stillOpen = removal else { return }
+
+        // Withdraw first, announce second — the order `announce` uses, and for
+        // the same reason. Withdrawing is what closes the hole: a handle that
+        // is no longer in the table that minted it resolves to nothing, so an
+        // inbound frame still addressed to it is dropped rather than delivered
+        // to a session this link may no longer reach. The `peer-gone` that
+        // follows is what stops the far side addressing it at all.
+        //
+        // Withdrawing every socket this link announced is safe because a
+        // session belongs to exactly one repository and a bridge registers one
+        // link per repository, so no other registration sharing this handle
+        // registry can be announcing the same socket. A second *provider*
+        // announcing the same session holds its own registry and is untouched.
+        for socketPath in Set(state.socketsByHandle.values).sorted() {
+            _ = await state.registration.handles.withdrawLocalPeer(at: socketPath)
+        }
+        let gone = state.announced.keys.sorted()
+        for handle in gone {
+            await state.registration.send(.peerGone(handle: handle))
+        }
+        logger.info("""
+            roster: link \(id.uuidString, privacy: .public) for repo \
+            \(state.registration.repoID.uuidString, privacy: .public) left this provider's \
+            scope; withdrew \(gone.count, privacy: .public) announced session(s)
+            """)
+    }
+
+    /// Forget everything a link has been told, so the next scan announces the
+    /// whole roster on it again from scratch.
+    ///
+    /// **The roster's half of a reconnect.** `ShadowPeerManager` empties both
+    /// halves of its handle table on `linkStateChanged(to: .down)` — a handle
+    /// names one session for the life of one connection and means nothing
+    /// outside it — and the roster's memory of what that link was told has to
+    /// go with it. Left behind, it describes handles the registry no longer
+    /// holds: the next scan mints a fresh handle for the same session and
+    /// announces it, while the withdraw loop still sees the stale one and would
+    /// (before the invariant in `announce`) tear the fresh binding straight
+    /// back out.
+    ///
+    /// Nothing is withdrawn from the handle registry here and no `peer-gone` is
+    /// written. The registry that minted those handles has already dropped
+    /// them, and the far side unlinks every shadow it published the moment the
+    /// stream ends — there is nobody left to tell.
+    public func resetAnnouncements(linkID: UUID) {
+        guard var state = links[linkID], !state.announced.isEmpty || !state.socketsByHandle.isEmpty
+        else { return }
+        state.announced.removeAll()
+        state.socketsByHandle.removeAll()
+        links[linkID] = state
+        logger.debug(
+            "roster: forgot what link \(linkID.uuidString, privacy: .public) was told; the next scan re-announces from scratch")
     }
 
     // MARK: Reads
@@ -539,8 +621,42 @@ public actor RosterWatcher {
     }
 
     /// One scan of the registry, and the announcements it implies.
+    ///
+    /// **Serialized, and it has to be.** This is public, it is called from the
+    /// tick *and* from `addLink`, and it suspends twice over state it then
+    /// overwrites — at `sessions.spawnedSessions()` and at every handle mint
+    /// inside `announce`. An actor is re-entrant at each of those, so two
+    /// unserialized passes interleave: the older one resumes holding a snapshot
+    /// taken before the newer one ran, overwrites `entries` with it, and
+    /// re-announces sessions the newer pass had just withdrawn. It self-corrects
+    /// on the following tick, which is precisely what makes it hard to see —
+    /// what it leaves behind is a wire and a `tbd peer list` that flap.
+    ///
+    /// Each call queues behind the pass already running rather than joining it:
+    /// a caller that has just registered a link, or just changed the roster's
+    /// inputs, needs a scan that *began* after its call, and a coalesced pass
+    /// that started earlier cannot promise that.
     @discardableResult
     public func refresh() async -> RosterScanReport {
+        let previous = refreshChain
+        let ticket = nextRefreshTicket
+        nextRefreshTicket &+= 1
+        let pass = Task { [self] in
+            // Suspends off the actor, so the pass ahead can finish.
+            _ = await previous?.value
+            return await self.scanAndAnnounce()
+        }
+        refreshChain = pass
+        lastQueuedRefresh = ticket
+        let report = await pass.value
+        // Only the caller nobody queued behind clears the chain; anyone who
+        // arrived while this pass ran is still waiting on it.
+        if lastQueuedRefresh == ticket { refreshChain = nil }
+        return report
+    }
+
+    /// The scan itself. Private, so the serialization above is the only way in.
+    private func scanAndAnnounce() async -> RosterScanReport {
         var report = RosterScanReport()
         let records = loadRecords(report: &report)
         let spawned = await sessions.spawnedSessions()
@@ -609,6 +725,25 @@ public actor RosterWatcher {
             guard var state = links[linkID] else { continue }
             var frames: [PeerBridgeFrame] = []
             var withdrawn: [String] = []
+            // Every socket this pass just resolved a handle for. **Nothing in
+            // here may be withdrawn, whatever `state` remembers.**
+            //
+            // The withdraw loop below walks handles, and a handle is not a
+            // session: the registry can hand a *different* handle back for the
+            // same socket, and does exactly that whenever its table was
+            // emptied under the roster — which is what `ShadowPeerManager`
+            // does on every link-down. The stale handle then has no line this
+            // pass, so it is announced gone and its socket queued for
+            // withdrawal — the same socket a handle minted moments earlier in
+            // this very pass is bound to. Withdrawing it deletes the fresh
+            // binding, so the next tick mints another, announces it, and
+            // deletes it again: a self-sustaining churn that leaves the far
+            // side holding a handle the registry cannot resolve, which drops
+            // every frame in both directions while the link reports `up`.
+            //
+            // `resetAnnouncements(linkID:)` removes the specific trigger. This
+            // is the invariant, and it holds however the divergence arose.
+            let boundSockets = Set(socketsByHandle.values)
 
             for (handle, line) in lines.sorted(by: { $0.value.name < $1.value.name })
             where state.announced[handle] != line {
@@ -618,7 +753,8 @@ public actor RosterWatcher {
             for handle in state.announced.keys.sorted() where lines[handle] == nil {
                 state.announced[handle] = nil
                 frames.append(.peerGone(handle: handle))
-                if let socketPath = state.socketsByHandle[handle] {
+                if let socketPath = state.socketsByHandle[handle],
+                   !boundSockets.contains(socketPath) {
                     withdrawn.append(socketPath)
                 }
                 state.socketsByHandle[handle] = nil

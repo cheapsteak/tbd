@@ -21,9 +21,28 @@ import TestSupport
 
 // MARK: - Fixtures
 
-/// The `procStart` a live pid reports in these tests. Its exact shape is
-/// `ctime(3)`'s, the one `ProcessStartTime.format` produces.
-private let liveProcStart = "Sat Aug 29 22:07:57 2026"
+/// The instant a live session in these tests started.
+private let liveStartedAt = Date(timeIntervalSince1970: 1_788_041_277)
+
+/// What a **record** claims for that instant: `ctime(3)`'s *layout* — with the
+/// day of month space-padded to two columns — rendered in **UTC**, which is
+/// what Claude Code writes.
+private let recordedProcStart = "Sat Aug 29 22:07:57 2026"
+
+/// What the **kernel lookup** answers for the same live pid, rendered by the
+/// production formatter rather than typed out beside the literal above.
+///
+/// The two sides of the comparison are deliberately produced differently. Every
+/// admission here turns on `record.procStart == procStartForPID(pid)`, and
+/// feeding one literal into both sides makes that a comparison of a value with
+/// itself: it agrees in every zone, on every machine, whatever the formatter
+/// does. That is exactly why a real bug shipped green through this suite —
+/// `ProcessStartTime.format` rendered `ctime_r`'s *local* time while Claude
+/// Code writes UTC, so on a machine at `-0400` all 12 live records disagreed by
+/// the offset and every live session was classified as a recycled-pid ghost.
+/// With the lookup side coming from production code, a zone regression reddens
+/// this suite instead of passing it.
+private let liveProcStart = ProcessStartTime.format(liveStartedAt) ?? "unrenderable"
 
 private let repoA = UUID()
 private let repoB = UUID()
@@ -57,7 +76,7 @@ private func registryRecord(
     peerProtocol: Int? = 1,
     status: String? = "busy",
     tmux: String? = "main:@3541.%3541",
-    procStart: String? = liveProcStart,
+    procStart: String? = recordedProcStart,
     version: String? = "2.1.251"
 ) -> [String: Any] {
     var fields: [String: Any] = [
@@ -549,6 +568,20 @@ struct RosterWatcherLivenessTests {
             #expect(await subject.lastScanReport().skippedNotLive == 1)
         }
     }
+
+    /// The fixture's own contract, and the one assertion this suite could not
+    /// make while a single literal was fed to both sides of every comparison:
+    /// what a **record** claims and what the **kernel lookup** answers agree
+    /// because `ProcessStartTime.format` renders UTC — the zone Claude Code
+    /// writes — and not because they were typed out as the same string.
+    ///
+    /// Every admission above rides on this. A formatter that went back to
+    /// `ctime_r`'s local time reds this test by name, and the rest of the suite
+    /// with it, instead of passing everywhere and failing only on machines
+    /// whose `TZ` is not UTC.
+    @Test func theTwoSidesOfTheLivenessComparisonAgreeBecauseTheFormatterIsUTC() {
+        #expect(liveProcStart == recordedProcStart)
+    }
 }
 
 // MARK: - The tick
@@ -592,6 +625,213 @@ struct RosterWatcherTickTests {
 
             #expect(announced)
             #expect(peers(await sink.frames).map(\.name) == ["laptop:useful-swallow %3541"])
+        }
+    }
+}
+
+// MARK: - Reconnects, scope changes, and one pass at a time
+
+/// A handle registry whose table can be emptied underneath the roster, which is
+/// what `ShadowPeerManager` does to its own on `linkStateChanged(to: .down)`.
+///
+/// Handles are minted as `h1`, `h2`, … rather than as UUIDs so an assertion can
+/// say *which* mint it is looking at, and `mints` makes "the roster minted a
+/// third handle for a session that never changed" — the churn — directly
+/// observable.
+private actor ResettableHandleRegistry: LocalPeerHandleRegistry {
+    private var handlesBySocket: [String: String] = [:]
+    private var socketsByHandle: [String: String] = [:]
+    private(set) var mints = 0
+
+    func handle(forLocalPeerAt socketPath: String, name: String) async -> String {
+        if let existing = handlesBySocket[socketPath] { return existing }
+        mints += 1
+        let handle = "h\(mints)"
+        handlesBySocket[socketPath] = handle
+        socketsByHandle[handle] = socketPath
+        return handle
+    }
+
+    func withdrawLocalPeer(at socketPath: String) async -> String? {
+        guard let handle = handlesBySocket.removeValue(forKey: socketPath) else { return nil }
+        socketsByHandle[handle] = nil
+        return handle
+    }
+
+    /// Both halves of the table go, exactly as they do on a link-down: a handle
+    /// names one session for the life of one connection.
+    func forgetEverything() {
+        handlesBySocket.removeAll()
+        socketsByHandle.removeAll()
+    }
+
+    func socketPath(forHandle handle: String) -> String? { socketsByHandle[handle] }
+}
+
+/// TBD's bookkeeping, instrumented to notice two roster passes overlapping.
+///
+/// `spawnedSessions()` is the roster's first suspension point, so a second pass
+/// entering while a first is parked here is exactly the re-entrancy an actor
+/// permits. The yields are what give it every opportunity to.
+private actor OverlappingSessionDirectory: LocalSessionDirectory {
+    private let sessions: [TBDSpawnedSession]
+    private var inFlight = 0
+    private(set) var maxOverlap = 0
+    private(set) var reads = 0
+
+    init(_ sessions: [TBDSpawnedSession]) {
+        self.sessions = sessions
+    }
+
+    func spawnedSessions() async -> [TBDSpawnedSession] {
+        reads += 1
+        inFlight += 1
+        maxOverlap = max(maxOverlap, inFlight)
+        for _ in 0..<8 { await Task.yield() }
+        inFlight -= 1
+        return sessions
+    }
+}
+
+@Suite("Roster watcher — reconnects and scope changes")
+struct RosterWatcherReconnectTests {
+    /// **The regression that made messaging fail in both directions after any
+    /// reconnect.**
+    ///
+    /// A link-down empties the handle registry. The next scan mints a fresh
+    /// handle for the same live session and announces it — and the stale handle
+    /// beside it, having no line this pass, is announced gone and its socket
+    /// queued for withdrawal. That socket is the one just re-bound, so the
+    /// withdrawal deleted a binding minted seconds earlier in the same pass:
+    /// the far side held a handle the registry could not resolve (every inbound
+    /// frame dropped as an unknown handle, every reply unable to name its
+    /// sender) and the next tick did it all again, forever, on a link reporting
+    /// `up`.
+    @Test func aReMintedHandleIsNotTornOutByTheStaleHandleBesideIt() async throws {
+        try await withRegistry { directory in
+            try write(registryRecord(), pid: 4242, in: directory)
+            let sink = FrameSink()
+            let handles = ResettableHandleRegistry()
+            let subject = watcher(
+                directory: directory, sessions: FakeSessionDirectory([spawnedSession()]))
+            await subject.addLink(link(handles: handles, sink: sink))
+            let first = try #require(peers(await sink.drain()).first?.handle)
+
+            await handles.forgetEverything()
+            await subject.refresh()
+
+            let frames = await sink.drain()
+            let second = try #require(peers(frames).first?.handle)
+            #expect(second != first)
+            #expect(goneHandles(frames) == [first])
+            // The binding minted in this very pass survives the withdraw loop.
+            #expect(await handles.socketPath(forHandle: second) == "/tmp/cc-socks/4242.sock")
+
+            // And the churn stops: a scan that changes nothing says nothing,
+            // and mints nothing.
+            await subject.refresh()
+            #expect(await sink.drain().isEmpty)
+            #expect(await handles.socketPath(forHandle: second) == "/tmp/cc-socks/4242.sock")
+            #expect(await handles.mints == 2)
+        }
+    }
+
+    /// The other half of the same fix: after a link transition, what the roster
+    /// remembers telling a link is void, so the next scan announces the whole
+    /// roster on it again. The far side unlinked every shadow when the stream
+    /// ended, so a roster that stayed quiet because "nothing changed" would
+    /// leave it with nothing.
+    @Test func resettingALinkReAnnouncesTheWholeRosterOnIt() async throws {
+        try await withRegistry { directory in
+            try write(registryRecord(), pid: 4242, in: directory)
+            let sink = FrameSink()
+            let registration = link(sink: sink)
+            let subject = watcher(
+                directory: directory, sessions: FakeSessionDirectory([spawnedSession()]))
+            await subject.addLink(registration)
+            let first = try #require(peers(await sink.drain()).first?.handle)
+
+            // Without the reset, this scan finds nothing changed and says
+            // nothing — which is what left a reconnected link empty.
+            await subject.resetAnnouncements(linkID: registration.id)
+            await subject.refresh()
+
+            let frames = await sink.drain()
+            #expect(peers(frames).map(\.handle) == [first])
+            #expect(goneHandles(frames).isEmpty)
+        }
+    }
+
+    /// Retiring a repository's registration **while the stream stays open**
+    /// withdraws every session it announced and tells the far side they are
+    /// gone. Silence there would leave that host holding shadows whose handles
+    /// still resolve — a remote lane in one project able to reach local
+    /// sessions in another, which the design's Trust section forbids.
+    @Test func droppingALinkWhoseStreamIsStillOpenWithdrawsAndAnnouncesGone() async throws {
+        try await withRegistry { directory in
+            try write(registryRecord(), pid: 4242, in: directory)
+            let sink = FrameSink()
+            let handles = MemoizingLocalPeerHandleRegistry()
+            let registration = link(handles: handles, sink: sink)
+            let subject = watcher(
+                directory: directory, sessions: FakeSessionDirectory([spawnedSession()]))
+            await subject.addLink(registration)
+            let handle = try #require(peers(await sink.drain()).first?.handle)
+
+            await subject.removeLink(id: registration.id, because: .stillOpen)
+
+            #expect(goneHandles(await sink.drain()) == [handle])
+            #expect(await handles.socketPath(forHandle: handle) == nil)
+        }
+    }
+
+    /// The other branch: a link whose **stream is over** is dropped in silence.
+    /// Nothing can be delivered into a closed stream, and the far side unlinks
+    /// every shadow it published for it.
+    @Test func droppingALinkWhoseStreamEndedSaysNothing() async throws {
+        try await withRegistry { directory in
+            try write(registryRecord(), pid: 4242, in: directory)
+            let sink = FrameSink()
+            let handles = MemoizingLocalPeerHandleRegistry()
+            let registration = link(handles: handles, sink: sink)
+            let subject = watcher(
+                directory: directory, sessions: FakeSessionDirectory([spawnedSession()]))
+            await subject.addLink(registration)
+            let handle = try #require(peers(await sink.drain()).first?.handle)
+
+            await subject.removeLink(id: registration.id)
+
+            #expect(await sink.drain().isEmpty)
+            // The handle table is not touched from here either. In production
+            // the registry behind it is `ShadowPeerManager`, which empties both
+            // halves of its own table on the `.down` that ended the stream.
+            #expect(await handles.socketPath(forHandle: handle) != nil)
+        }
+    }
+
+    /// `refresh()` is public, is called from the tick *and* from `addLink`, and
+    /// suspends twice over state it then overwrites. Two passes must not
+    /// interleave: the older one resumes holding a snapshot taken before the
+    /// newer one ran, overwrites the roster with it, and re-announces sessions
+    /// the newer pass had just withdrawn — a flap on the wire and in `tbd peer
+    /// list` that self-corrects on the next tick and so is never quite visible.
+    @Test func twoRefreshesDoNotInterleave() async throws {
+        try await withRegistry { directory in
+            try write(registryRecord(), pid: 4242, in: directory)
+            let sessions = OverlappingSessionDirectory([spawnedSession()])
+            let livePIDs: [pid_t: String] = [4242: liveProcStart]
+            let subject = RosterWatcher(
+                sessionsDirectory: directory,
+                sessions: sessions,
+                origin: "laptop",
+                procStartForPID: { livePIDs[$0] })
+
+            async let first = subject.refresh()
+            async let second = subject.refresh()
+            _ = await (first, second)
+
+            #expect(await sessions.reads == 2, "both passes must run — neither is coalesced away")
+            #expect(await sessions.maxOverlap == 1, "a pass must not begin inside another")
         }
     }
 }

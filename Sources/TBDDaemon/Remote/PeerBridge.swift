@@ -58,6 +58,49 @@ final class LatePeerLink: PeerLinkSending, @unchecked Sendable {
     }
 }
 
+/// The link's handler, with link-state transitions copied to a second observer.
+///
+/// **The same cycle `LatePeerLink` breaks, from the other side.** The
+/// supervisor takes its handler at construction and the bridge is built last,
+/// so the bridge cannot itself be the handler — and it needs the transitions:
+/// the manager empties its handle table on `.down`, and the roster's record of
+/// what each link was told has to go at the same moment or the two disagree
+/// (see `PeerBridge.linkStateChanged`).
+///
+/// Frames are forwarded untouched and transitions reach the manager *first*, so
+/// nothing observes a reset roster before the table it mirrors has been
+/// cleared. The observer is held as a closure capturing the bridge weakly: the
+/// bridge owns the supervisor that owns this, and a strong reference here would
+/// close that loop.
+///
+/// `OSAllocatedUnfairLock` with scoped `withLock` rather than a bare `NSLock`,
+/// for the reason `LatePeerLink` gives: `lock()`/`unlock()` are unavailable
+/// around an `async` call under Swift 6.
+final class PeerLinkStateFanout: PeerLinkHandler, @unchecked Sendable {
+    private let inner: any PeerLinkHandler
+    private let observer =
+        OSAllocatedUnfairLock<(@Sendable (PeerLinkState) async -> Void)?>(initialState: nil)
+
+    init(forwardingTo inner: any PeerLinkHandler) {
+        self.inner = inner
+    }
+
+    func bind(_ observer: @escaping @Sendable (PeerLinkState) async -> Void) {
+        self.observer.withLock { $0 = observer }
+    }
+
+    func handle(_ frame: PeerBridgeFrame) async {
+        await inner.handle(frame)
+    }
+
+    func linkStateChanged(to state: PeerLinkState) async {
+        await inner.linkStateChanged(to: state)
+        if let notify = self.observer.withLock({ $0 }) {
+            await notify(state)
+        }
+    }
+}
+
 // MARK: - What a bridge answers
 
 /// One provider's live bridge, as the diagnostics path reads it.
@@ -187,14 +230,18 @@ actor PeerBridge: PeerBridging {
             siteResolver: siteResolver,
             sessionsDirectory: sessionsDirectory,
             artifactRecorder: artifactRecorder)
+        // The manager is still the handler; the fanout only copies link-state
+        // transitions onward, so the bridge learns about a reconnect at the
+        // moment the manager forgets its handles rather than a tick later.
+        let fanout = PeerLinkStateFanout(forwardingTo: manager)
         let supervisor = PeerLinkSupervisor(
             config: config,
             contractVersion: contractVersion,
             origin: origin,
-            handler: manager,
+            handler: fanout,
             clock: clock)
         late.bind(supervisor)
-        return PeerBridge(
+        let bridge = PeerBridge(
             provider: config.name,
             manager: manager,
             link: supervisor,
@@ -202,6 +249,11 @@ actor PeerBridge: PeerBridging {
             bridges: bridges,
             repoScope: repoScope,
             clock: clock)
+        fanout.bind { [weak bridge] state in
+            guard let bridge else { return }
+            await bridge.linkStateChanged(to: state)
+        }
+        return bridge
     }
 
     // MARK: Lifecycle
@@ -251,7 +303,9 @@ actor PeerBridge: PeerBridging {
         for (_, registrationID) in registrationsByRepo.sorted(by: {
             $0.key.uuidString < $1.key.uuidString
         }) {
-            await roster.removeLink(id: registrationID)
+            // Silence is correct *here* and only here: the stream is about to
+            // close, and the far side unlinks every shadow it published for it.
+            await roster.removeLink(id: registrationID, because: .streamEnded)
         }
         registrationsByRepo.removeAll()
         await roster.release()
@@ -282,9 +336,17 @@ actor PeerBridge: PeerBridging {
     ///
     /// Adding announces this link the whole roster for that repository from
     /// scratch, which is the design's resync rule rather than a convenience.
-    /// Dropping writes no `peer-gone`: the far side is told nothing because the
-    /// scope changed on *this* side, and the next tick of a link that still
-    /// carries the session announces it there.
+    ///
+    /// **Dropping writes `peer-gone` for everything it announced**, because the
+    /// stream is still open. A repository leaves this scope when its last
+    /// remote lane for the provider is archived, and the far host does not
+    /// unlink anything on that event — it unlinks when a *stream* ends. Dropping
+    /// the registration silently would leave that host holding shadows for the
+    /// repository's local sessions with their handles still resolving in the
+    /// manager's table, so a remote session with no lane in that project could
+    /// keep messaging into it. The design's Trust section forbids exactly that,
+    /// and the divergence is invisible from here — `applyInventory` diffs
+    /// against `localPeers`, which would still hold the handles.
     func reconcileRepoScope() async {
         let scope = await repoScope()
 
@@ -312,8 +374,43 @@ actor PeerBridge: PeerBridging {
         for (repoID, registrationID) in registrationsByRepo
         where !scope.contains(repoID) {
             registrationsByRepo[repoID] = nil
-            await roster.removeLink(id: registrationID)
+            await roster.removeLink(id: registrationID, because: .stillOpen)
         }
+    }
+
+    /// A link-state transition, delivered in stream order by the observer
+    /// `make` binds to this bridge.
+    ///
+    /// **The roster's half of what the manager already does.**
+    /// `ShadowPeerManager` empties both halves of its handle table on `.down`,
+    /// deliberately — a handle names one session for the life of one connection.
+    /// Nothing cleared the roster's record of what these links were told, so
+    /// after any reconnect the two disagreed: the next scan minted a fresh
+    /// handle for a session and announced it, while the stale handle beside it
+    /// had no line and was announced gone, taking the freshly bound socket with
+    /// it. Every reconnect therefore started a two-second churn that never
+    /// stopped and that dropped every message in both directions, on a link
+    /// reporting `up` throughout.
+    ///
+    /// Reset on **both** transitions, not just one. On `.down` because the
+    /// handles the roster remembers no longer resolve anywhere; on `.up`
+    /// because the far side unlinked every shadow when the stream ended, so
+    /// what it needs is the whole roster again — and a roster still holding the
+    /// lines it "sent" into a dead stream would announce nothing at all.
+    ///
+    /// Observed rather than polled: a link that dropped and came back between
+    /// two ticks of any timer here would be missed entirely, and that is the
+    /// common case — the supervisor reconnects with sub-second backoff.
+    func linkStateChanged(to state: PeerLinkState) async {
+        for registrationID in registrationsByRepo.values.sorted(by: {
+            $0.uuidString < $1.uuidString
+        }) {
+            await roster.resetAnnouncements(linkID: registrationID)
+        }
+        bridgeLogger.debug("""
+            peer bridge \(self.provider, privacy: .public) link \
+            \(state.diagnosticName, privacy: .public); the roster will re-announce from scratch
+            """)
     }
 
     // MARK: Diagnostics
@@ -452,8 +549,12 @@ actor PeerRosterRunner {
         await roster.addLink(registration)
     }
 
-    func removeLink(id: UUID) async {
-        await roster.removeLink(id: id)
+    func removeLink(id: UUID, because removal: RosterLinkRemoval) async {
+        await roster.removeLink(id: id, because: removal)
+    }
+
+    func resetAnnouncements(linkID: UUID) async {
+        await roster.resetAnnouncements(linkID: linkID)
     }
 
     /// Test seam: whether the tick is armed. The point of the refcount is that
