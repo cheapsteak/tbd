@@ -381,6 +381,29 @@ public actor PeerLinkSupervisor: PeerLinkSending {
         watchdog.cancel()
         exitWatcher.cancel()
         keepalive.cancel()
+        // Closed unconditionally, ahead of the generation guard: this handle
+        // belongs to THIS run whatever the current generation is, so skipping it
+        // would leak an fd for the daemon's lifetime. Closing the write end is
+        // also what a still-running child sees as EOF, and the far side's
+        // contract obligation is to unlink every peer it published for us when
+        // the stream ends.
+        try? writeHandle.close()
+        // Published BEFORE the kill below, not after it, because the link is
+        // down the moment the stream ends — which is what `state`'s own
+        // contract says. `killTree` spends up to `killGrace` between SIGTERM
+        // and SIGKILL, and holding the transition behind that grace leaves the
+        // link reporting `.up` with a live `stdinHandle` for half a second
+        // after the last frame it can ever carry: a `send` in that window is
+        // accepted and written into a child nobody is reading from. That is
+        // exactly the shadow-peer-lying-about-reachability window the tighter
+        // silence limit on this stream exists to bound, so it is closed here
+        // rather than widened by our own teardown. Same order, same reason, as
+        // `tearDownDesyncedStream`.
+        if generation == myGeneration {
+            currentProcess = nil
+            stdinHandle = nil
+            await publish(.down)
+        }
         // The stream is over, so this run is over: make sure the child tree is
         // actually gone before the outer loop can spawn a replacement (a
         // provider that closes stdout but keeps running would otherwise
@@ -389,17 +412,6 @@ public actor PeerLinkSupervisor: PeerLinkSending {
             await killTree(process)
         }
         endStream()
-        // Closed unconditionally, ahead of the generation guard: this handle
-        // belongs to THIS run whatever the current generation is, so skipping it
-        // would leak an fd for the daemon's lifetime. Closing the write end is
-        // also what a still-running child sees as EOF, and the far side's
-        // contract obligation is to unlink every peer it published for us when
-        // the stream ends.
-        try? writeHandle.close()
-        guard generation == myGeneration else { return }
-        currentProcess = nil
-        stdinHandle = nil
-        await publish(.down)
     }
 
     // MARK: Outbound
