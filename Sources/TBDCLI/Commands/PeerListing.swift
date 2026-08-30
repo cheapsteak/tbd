@@ -493,6 +493,12 @@ private struct PeerFleetIndex {
     /// Claude Code does not define (an unknown key was measured to make a
     /// record invisible to every listing), so there is nothing inside one to
     /// look for, and a path tells you nothing either.
+    ///
+    /// **Live rows only.** A row the daemon no longer vouches for is awaiting
+    /// reclamation, not a peer, and a pid it still names may since have been
+    /// recycled onto an unrelated session — indexing one would label that
+    /// session with a dead link's provider and site it into someone else's
+    /// lane. A record at a not-live row's pid falls through to the local join.
     private let shadowRowsByPID: [pid_t: PeerShadowArtifactRow]
     /// The link state the daemon reported per provider, so a shadow row can
     /// name its link without the listing inferring one.
@@ -549,7 +555,7 @@ private struct PeerFleetIndex {
 
         var shadowRows: [pid_t: PeerShadowArtifactRow] = [:]
         var linkStates: [String: String] = [:]
-        for row in fleet.bridge?.shadows ?? [] {
+        for row in fleet.bridge?.shadows ?? [] where row.live {
             shadowRows[pid_t(row.pid)] = row
         }
         for provider in fleet.bridge?.providers ?? [] {
@@ -576,6 +582,11 @@ private struct PeerFleetIndex {
             // session's by construction — TBD may put no marker inside one —
             // so recognition comes from TBD's own durable bookkeeping, keyed on
             // the pid the record's filename already names.
+            //
+            // Only rows a live link still publishes are in that index, so a pid
+            // matched here is one the daemon vouches for right now. A record
+            // sitting at a not-live row's pid falls through to the local join
+            // below and lists as whatever it actually is.
             if let row = shadowRowsByPID[entry.pid] {
                 kind = .shadow
                 provider = row.provider

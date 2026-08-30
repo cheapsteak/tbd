@@ -302,6 +302,46 @@ struct PeerListTests {
         #expect(row.provider == nil)
     }
 
+    /// A not-live ledger row is "awaiting reclamation, not a peer" — its own
+    /// field says so — and the pid it still names can since have been recycled
+    /// onto an ordinary local session. Indexing it would hand that session a
+    /// dead link's provider and site it into someone else's lane, so the row is
+    /// not consulted and the local join answers instead.
+    @Test func aNotLiveLedgerRowDoesNotMakeItsPIDAShadow() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let terminal = Self.terminal(
+            worktreeID: worktree.id, pane: "%88", claudeSessionID: "S-R")
+        let remote = Self.worktree(
+            displayName: "api-lane",
+            path: "",
+            location: .remote(provider: "acme-cloud", sessionID: "sess-42"))
+        // The recycled pid: a genuine local Claude Code session now running
+        // under the pid a retired shadow helper used to hold.
+        let scan = PeerRegistryScan(entries: [
+            PeerRegistryEntry(pid: 5004, record: try Self.record(Self.liveSessionFields(
+                sessionID: "S-R", cwd: Self.laneAPath, name: "lane-a",
+                pane: "%88", socket: "/opt/peertest/socks/5004.sock")))
+        ])
+
+        let result = Self.compose(
+            scan: scan,
+            fleet: PeerListFleet(
+                reachable: true, worktrees: [worktree, remote], terminals: [terminal],
+                bridge: Self.bridge(shadows: [Self.shadowRow(
+                    pid: 5004, name: "acme-cloud:api-lane",
+                    remoteSessionID: "sess-42", live: false)])))
+
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .local)
+        #expect(row.provider == nil)
+        #expect(row.providerSessionID == nil)
+        #expect(row.linkState == nil)
+        // The lane the row is sited into is the local one it really runs in,
+        // not the remote lane the retired row would have named.
+        #expect(row.worktreeID == worktree.id)
+        #expect(row.terminalID == terminal.id)
+    }
+
     /// A daemon that cannot answer `peer.status` leaves every shadow
     /// unrecognisable, and the listing says so rather than quietly downgrading
     /// a live shadow to an ordinary peer.
