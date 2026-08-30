@@ -38,7 +38,7 @@ struct RemotePeerMessagingRPCTests {
     private func setMessaging(_ router: RPCRouter, enabled: Bool) async throws {
         let request = try RPCRequest(
             method: RPCMethod.configSetRemotePeerMessagingEnabled,
-            params: ConfigSetRemotePeerMessagingEnabledParams(enabled: enabled))
+            params: ConfigSetPeerMessagingEnabledParams(enabled: enabled))
         let response = await router.handle(request)
         #expect(response.success)
     }

@@ -58,7 +58,7 @@ struct PeerMessaging: AsyncParsableCommand {
     mutating func run() async throws {
         try SocketClient().callVoid(
             method: RPCMethod.configSetRemotePeerMessagingEnabled,
-            params: ConfigSetRemotePeerMessagingEnabledParams(enabled: value.boolValue))
+            params: ConfigSetPeerMessagingEnabledParams(enabled: value.boolValue))
         print(Self.confirmation(value: value))
     }
 }

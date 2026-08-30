@@ -313,7 +313,7 @@ extension RPCRouter {
         _ paramsData: Data
     ) async throws -> RPCResponse {
         let params = try decoder.decode(
-            ConfigSetRemotePeerMessagingEnabledParams.self, from: paramsData)
+            ConfigSetPeerMessagingEnabledParams.self, from: paramsData)
         try await db.config.setRemotePeerMessagingEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)

@@ -1604,7 +1604,7 @@ public struct ConfigSetRemoteBackendsParams: Codable, Sendable {
 /// the explicit gesture that lifts the column out of its NULL "never chose"
 /// state, so an operator who turns the feature off stays off when the shipped
 /// default graduates.
-public struct ConfigSetRemotePeerMessagingEnabledParams: Codable, Sendable {
+public struct ConfigSetPeerMessagingEnabledParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
