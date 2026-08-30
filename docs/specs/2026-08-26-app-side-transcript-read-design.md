@@ -188,10 +188,34 @@ resolution of its own. This keeps `TBDAppTests` off the developer's real
 the test fence before.
 
 `session.messages` guards its path against `~/.claude/projects` because the app
-supplies it. Reading directly retires that guard. This is safe because both path
-sources originate from the daemon's own database rows and session records, so no
-untrusted input crosses the boundary — but it is a removed check and belongs in
-the record as a deliberate one.
+supplies it over RPC and a crafted request could otherwise name any readable
+file. Reading in-process retires that guard, and the two path sources are not
+equally trusted:
+
+- **`SessionSummary.filePath`** is daemon-computed. `ClaudeSessionScanner`
+  enumerates the Claude projects store and builds the path itself, so it cannot
+  point outside it.
+- **`terminal.transcriptPath`** is not. It is Claude Code's own
+  `transcript_path`, relayed verbatim by the `SessionStart` hook through
+  `tbd session-event` and stored after two checks only: non-empty, and
+  absolute. Nothing constrains it to the projects store.
+
+Retiring the guard is nevertheless the right call, because it protects nothing
+that is still protected elsewhere. `terminal.transcript` and
+`terminal.transcriptItemFullBody` already read that same column with no
+containment check, so the daemon parses whatever path the hook reported today;
+moving the read into the app relocates that exposure rather than widening it.
+Both processes run as the same user with the same file access, and both are
+downstream of a hook payload that only a process already inside the user's
+session can write. The guard's real subject is the RPC surface — a caller who
+can speak to the socket but is not the agent — and that surface keeps it for as
+long as `session.messages` exists.
+
+The residual risk is therefore pre-existing and unchanged, and worth naming:
+whoever can make Claude Code report a `transcript_path` chooses a file TBD will
+parse and render. Constraining `terminal.transcriptPath` to the projects store
+at the point it is stored would close it for both processes at once, and is the
+right shape for that fix — it belongs to the hook bridge, not to this change.
 
 ## Feature flag
 

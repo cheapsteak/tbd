@@ -7,10 +7,22 @@ import TBDShared
 /// static reads is the whole implementation.
 ///
 /// The daemon's `session.messages` guards its path against `~/.claude/projects`
-/// because the app supplies it over RPC. Reading here retires that guard, and
-/// deliberately: both path sources — a terminal's `transcriptPath` column and a
-/// `SessionSummary.filePath` record — are produced by the daemon itself, so no
-/// untrusted input reaches this call.
+/// because the app supplies it over RPC, where a crafted request could name any
+/// readable file. Reading here retires that guard, deliberately — but not
+/// because both path sources are trusted. Only one is: `SessionSummary.filePath`
+/// is computed by `ClaudeSessionScanner` from the projects store it enumerated.
+/// A terminal's `transcriptPath` is Claude Code's own `transcript_path`, relayed
+/// verbatim by the `SessionStart` hook and stored after a non-empty and
+/// absolute-path check only.
+///
+/// What makes retiring it safe is that the guard protects nothing still
+/// protected elsewhere: `terminal.transcript` and
+/// `terminal.transcriptItemFullBody` already read that same column unguarded,
+/// so this relocates a pre-existing exposure rather than opening one. Both
+/// processes run as the same user, and the guard's real subject — a caller who
+/// can reach the socket but is not the agent — is still covered by
+/// `session.messages` for as long as that RPC exists. Constraining
+/// `transcriptPath` where the hook bridge stores it would close it for both.
 enum TranscriptDetailReader {
 
     /// Matches the daemon's placeholder exactly, so the two paths are
