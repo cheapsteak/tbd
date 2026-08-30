@@ -21,6 +21,20 @@ public enum ShadowPeerDropReason: String, Sendable, CaseIterable, Codable {
     /// admitted. A handle outside the table resolves to nothing — never to a
     /// name match, a nearest match, or a broadcast.
     case unknownHandle
+    /// An outbound frame's content still carried a path into the local
+    /// peer-socket directory, so it was dropped instead of sent.
+    ///
+    /// **Defence in depth, and it should never fire.** The sender's own
+    /// attribution wrapper — which names its socket, the name it chose for
+    /// itself, and the permission class it claims — is removed by
+    /// `PeerHelper.strippedOfSenderAttribution` one hop earlier, and that strip
+    /// is anchored on the content beginning with a particular element. A
+    /// leading newline, a renamed element or a reshaped wrapper makes the strip
+    /// a silent no-op, and "raw socket paths never travel" is structural rather
+    /// than advisory. A count here means that anchor stopped matching: the
+    /// frame is lost, which is the cheap failure, and the regression is visible
+    /// in `tbd peer list` rather than silent on the wire.
+    case unstrippedAddress
     /// The link was down. Clean failure, no buffering: the send fails exactly
     /// as messaging a session that has exited fails.
     case linkDown
@@ -293,6 +307,14 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     private let siteResolver: any ShadowPeerSiteResolving
     private let delivery: any LocalPeerDelivering
     private let socketDirectory: URL
+    /// `socketDirectory.path`, held because every outbound frame's content is
+    /// checked against it.
+    ///
+    /// The configured path verbatim, never a resolved or standardized one: what
+    /// the check is looking for is the text a sender's own client wrote into a
+    /// message, and on macOS standardizing `/tmp/cc-socks` to `/private/tmp/...`
+    /// would leave it matching nothing.
+    private let socketDirectoryPath: String
     private let sessionsDirectory: URL
     private let grantedMode: String
     /// Mints opaque handles for local sessions. A seam so a test can pin them;
@@ -365,12 +387,34 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         self.spawner = spawner
         self.delivery = delivery
         self.socketDirectory = socketDirectory
+        self.socketDirectoryPath = socketDirectory.path
         self.sessionsDirectory = sessionsDirectory
         self.grantedMode = grantedMode
         self.mintHandle = mintHandle
         self.mintAgentMessageID = mintAgentMessageID
         self.mintSessionID = mintSessionID
         self.artifactRecorder = artifactRecorder
+    }
+
+    /// The shadow published under `handle`, but **only if it is still the one
+    /// running as `pid`** — otherwise nil.
+    ///
+    /// **The one check three suspended callers share, and the reason they share
+    /// it.** A handle belongs to the far side. The contract permits it to
+    /// retire one and announce the same string again over a link that never
+    /// dropped, so `shadows[handle]` after a suspension need not be the shadow
+    /// the suspending caller was holding — and every caller here suspends
+    /// before acting on what it read. Keyed on the pid because that is already
+    /// this file's identity for a shadow: it is what `retireRow` and the
+    /// reclaimer's whitelist rows are filed under, and a second notion of
+    /// identity beside it would be one more thing to keep in step.
+    ///
+    /// Three near-identical guards would drift apart. This one does not, and it
+    /// hands the *current* entry back rather than a bool so no caller is
+    /// tempted to act on the copy it took before it suspended.
+    private func currentShadow(handle: String, pid: pid_t) -> Shadow? {
+        guard let shadow = shadows[handle], shadow.helper.pid == pid else { return nil }
+        return shadow
     }
 
     /// An opaque handle. **Random, and it must stay that way**: the contract
@@ -416,7 +460,11 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     /// something that no longer exists.
     private func applyPeer(_ peer: PeerBridgePeer) async {
         let generation = linkGeneration
-        if var existing = shadows[peer.handle] {
+        if let existing = shadows[peer.handle] {
+            // The process this update is addressed to. Both awaits below let
+            // the table move on underneath it, and every decision after them is
+            // made against this identity rather than against the handle.
+            let helperPID = existing.helper.pid
             let name = await composedName(for: peer) ?? existing.name
             do {
                 try await existing.helper.send(.peer(PeerBridgePeer(
@@ -428,17 +476,33 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
                     shadow \(peer.handle, privacy: .public) could not be updated: \
                     \(error.localizedDescription, privacy: .public); tearing it down
                     """)
-                await withdrawShadow(handle: peer.handle, because: "its helper stopped answering")
+                // The teardown is for the helper that refused the frame, not
+                // for whatever holds the handle now: this write went to a copy
+                // taken before the `composedName` suspension, and a helper
+                // published during it is a live process this call never
+                // addressed.
+                if currentShadow(handle: peer.handle, pid: helperPID) != nil {
+                    await withdrawShadow(
+                        handle: peer.handle, because: "its helper stopped answering")
+                }
                 return
             }
-            // Re-checked after the awaits above: a link drop or a `peer-gone`
-            // can land in that window, and writing the local copy back would
-            // resurrect a shadow whose helper is already terminated — a row in
-            // the table pointing at a process that no longer exists.
-            guard generation == linkGeneration, shadows[peer.handle] != nil else { return }
-            existing.name = name
-            existing.status = peer.status
-            shadows[peer.handle] = existing
+            // **Re-read, never written back from the copy.** A link drop or a
+            // `peer-gone` and a fresh announcement can both land in the window
+            // above, and writing `existing` back over the result would do three
+            // things at once: evict a live helper from the table — out of
+            // `artifacts()`, so the sweep's vouched-for inventory never sees it
+            // and only the ledger row is left of a process nothing can reclaim
+            // — publish a shadow whose own process is already terminated, and
+            // leave the far side addressing a handle that now resolves to
+            // nothing. The status and name this line carries belong to the
+            // entry that is there now, or to nothing at all.
+            guard generation == linkGeneration,
+                  var current = currentShadow(handle: peer.handle, pid: helperPID)
+            else { return }
+            current.name = name
+            current.status = peer.status
+            shadows[peer.handle] = current
             return
         }
 
@@ -501,9 +565,15 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
             return
         }
 
+        // The identity of the process this reader is reading, carried into
+        // the completion below. A handle is the far side's to reuse, and the
+        // pid is what the rest of this file already treats as a shadow's
+        // identity — it is the key the reclaimer's whitelist rows are filed
+        // under.
+        let helperPID = helper.pid
         let reader = Task { [weak self, lines = helper.lines] in
             for await line in lines {
-                await self?.helperEmitted(line, from: peer.handle)
+                await self?.helperEmitted(line, from: peer.handle, pid: helperPID)
             }
             // **The stream ending is the only notice a helper's own death
             // gives.** Its stdout closes when the process exits, however it
@@ -514,13 +584,7 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
             // "whatever the process table says", so neither collector would
             // ever take the socket and record, while `tbd peer list` went on
             // reporting a live shadow that does not exist.
-            //
-            // Cancellation is the one ending that is not news: a withdrawal
-            // cancels this task itself, and the withdrawal it would call is
-            // already in progress.
-            guard !Task.isCancelled else { return }
-            await self?.withdrawShadow(
-                handle: peer.handle, because: "its helper exited on its own")
+            await self?.helperStreamEnded(handle: peer.handle, pid: helperPID)
         }
         shadows[peer.handle] = Shadow(
             handle: peer.handle, name: name, status: peer.status,
@@ -665,8 +729,19 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     /// hop is inside the trust boundary and it is what Claude Code's own frame
     /// carries. Rewriting it to a handle here is what keeps raw socket paths
     /// off the wire.
-    private func helperEmitted(_ line: String, from handle: String) async {
-        guard let shadow = shadows[handle] else {
+    ///
+    /// **Attributed by the identity of the process that wrote it, not by the
+    /// handle it was written under.** A line is decoded against its shadow's
+    /// negotiated protocol and forwarded under its shadow's name, and this
+    /// design refuses to let anyone else choose that attribution — so a line
+    /// from a helper that is no longer the one published under `handle` is
+    /// counted as loss rather than credited to the process that replaced it.
+    /// The stream buffers, so a dead helper's last lines can arrive after its
+    /// replacement took the handle.
+    ///
+    /// Not `private` for the reason `helperStreamEnded` gives below.
+    func helperEmitted(_ line: String, from handle: String, pid: pid_t) async {
+        guard let shadow = currentShadow(handle: handle, pid: pid) else {
             drops.record(.helperGone)
             return
         }
@@ -714,6 +789,34 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
                 dropped message \(message.id, privacy: .public) to \
                 \(shadow.name, privacy: .public): its sender is not a session TBD announced on \
                 this link, so it has no handle and its address must not travel
+                """)
+            return
+        }
+
+        // **The last check before the content leaves the machine, and the one
+        // that trusts nothing outside this actor.** `from` is rewritten to a
+        // handle above, so the only way a socket path reaches the wire now is
+        // inside `content` — which is forwarded byte-verbatim, and whose
+        // sender-composed attribution wrapper (the sender's socket, the name it
+        // chose for itself, the permission class it claims) was removed a hop
+        // earlier by a strip anchored on that wrapper's exact opening element.
+        // A leading newline, a renamed element or a reshaped wrapper turns that
+        // strip into a silent no-op. "Raw socket paths never travel" is
+        // structural, so it does not get to rest on one unverified prefix in
+        // another module.
+        //
+        // A guard, deliberately, and not a second stripper: re-parsing content
+        // that already defeated one parser is how a half-repaired frame arrives
+        // looking valid while saying something the sender did not. The frame is
+        // dropped whole and counted, so a regression in the strip surfaces in
+        // `tbd peer list` instead of on the network.
+        guard !message.content.contains(socketDirectoryPath) else {
+            drops.record(.unstrippedAddress)
+            shadowPeerLogger.error("""
+                dropped message \(message.id, privacy: .public) to shadow \
+                \(shadow.handle, privacy: .public): its content still names the local peer \
+                socket directory, so the sender's own attribution was not stripped and a socket \
+                path would have reached the wire
                 """)
             return
         }
@@ -867,6 +970,40 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         for handle in handles {
             await withdrawShadow(handle: handle, because: reason)
         }
+    }
+
+    /// The reader task's one and only continuation: the helper behind `handle`
+    /// closed its stdout, so that process is gone and the shadow it stood for
+    /// must go with it.
+    ///
+    /// **Keyed on the pid, not on the handle, and that is the whole of it.**
+    /// This runs after an actor hop the reader has no control over, and
+    /// `shadows[handle]` seconds later need not be the shadow this reader was
+    /// reading: a handle belongs to the far side, which may retire one and
+    /// announce the same string again over a link that never dropped. A
+    /// completion that keyed on the handle alone would then withdraw a helper
+    /// spawned after it died — terminating a live shadow while the far side
+    /// went on addressing the handle, every frame dropping as an unknown one
+    /// until the provider re-announced. `Task.isCancelled` cannot stand in for
+    /// this check: it is read before the hop, so a `cancel()` arriving during
+    /// the hop is never observed.
+    ///
+    /// A pid that no longer matches means somebody else already owns the entry
+    /// and has already dealt with this process, so there is nothing to do.
+    /// Withdrawing twice is separately harmless — `withdrawShadow` no-ops on an
+    /// entry that is already gone — so this needs no guard of its own for that.
+    ///
+    /// **Not `private`, and this is the only reason**: the two interleavings
+    /// this and `helperEmitted` exist to survive both need a reader to reach
+    /// the actor *after* a replacement was installed, and no test can order
+    /// that on demand — the old cancellation check was read before the hop, a
+    /// window a few instructions wide. `ShadowPeerManagerTests` builds the
+    /// state through the manager's real paths and then calls the reader's own
+    /// entry point; calling `withdrawShadow` instead would bypass the guard
+    /// under test and prove nothing.
+    func helperStreamEnded(handle: String, pid: pid_t) async {
+        guard currentShadow(handle: handle, pid: pid) != nil else { return }
+        await withdrawShadow(handle: handle, because: "its helper exited on its own")
     }
 
     /// Unpublish one shadow: tell the helper it is finished, stop reading it,
