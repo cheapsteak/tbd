@@ -130,7 +130,10 @@ struct TableTranscriptPaneView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: TaskKey(terminalID: terminalID, sessionID: currentSessionID, retryToken: retryToken)) {
+        .task(id: TaskKey(
+            terminalID: terminalID, sessionID: currentSessionID, retryToken: retryToken,
+            appSideTranscriptRead: appSideTranscriptRead
+        )) {
             await pollLoop()
         }
         .onAppear { recordWatchdogContext(count: displayedMessages.count) }
@@ -309,8 +312,10 @@ struct TableTranscriptPaneView: View {
     // MARK: - Polling
 
     private func pollLoop() async {
-        if appSideTranscriptRead {
-            await appSideLoop()
+        let transport = TranscriptPaneTransport.resolve(
+            appSideEnabled: appSideTranscriptRead, path: terminal?.transcriptPath)
+        if case .appSide(let path) = transport {
+            await appSideLoop(path: path)
             return
         }
         var consecutiveFailures = 0
@@ -329,9 +334,12 @@ struct TableTranscriptPaneView: View {
     /// `AppState.sessionTranscripts` whenever the source reports a change. The
     /// three view consumers — this pane, the history pane and the overlay —
     /// read that store already, so nothing downstream changes.
-    private func appSideLoop() async {
+    ///
+    /// `path` is the already-resolved, non-empty transcript path chosen by
+    /// `TranscriptPaneTransport.resolve` — passed in rather than re-read here so
+    /// the "no path" case cannot recur inside this loop and strand the pane.
+    private func appSideLoop(path: String) async {
         guard let sid = currentSessionID else { return }
-        let path = terminal?.transcriptPath
         let scheduler = appState.transcriptPollScheduler
         let source = appState.transcriptSource
         let state = appState
@@ -358,17 +366,15 @@ struct TableTranscriptPaneView: View {
             tier: .foreground, scheduler: scheduler)
 
         // Publish once immediately so the pane is not blank until the first tick.
-        if let path, !path.isEmpty {
-            await source.refresh(sessionID: sid, path: path)
-            let raw = await source.items(sessionID: sid)
-            let pending = appState.pendingQuestionsForSession(sid)
-            let items = pending.isEmpty
-                ? raw
-                : AskUserQuestionMerger.merge(jsonlItems: raw, pending: pending).items
-            appState.sessionTranscripts[sid] = items
-            appState.touchSessionTranscript(sid)
-            if !items.isEmpty { hasShownInitialMessages = true }
-        }
+        await source.refresh(sessionID: sid, path: path)
+        let raw = await source.items(sessionID: sid)
+        let pending = appState.pendingQuestionsForSession(sid)
+        let items = pending.isEmpty
+            ? raw
+            : AskUserQuestionMerger.merge(jsonlItems: raw, pending: pending).items
+        appState.sessionTranscripts[sid] = items
+        appState.touchSessionTranscript(sid)
+        if !items.isEmpty { hasShownInitialMessages = true }
 
         // Hold the task open so `.task(id:)` teardown deregisters on disappear.
         // `clock.sleep`, never `Task.sleep`: the latter is a lint error here.
@@ -473,10 +479,15 @@ struct TableTranscriptPaneView: View {
     }
 }
 
+/// Identity of the poll task. Includes `appSideTranscriptRead` so flipping the
+/// setting while a pane is open cancels the running transport and starts the
+/// other one, rather than leaving the pane on whichever loop it happened to
+/// begin with until something else rebuilds it.
 private struct TaskKey: Equatable {
     let terminalID: UUID
     let sessionID: String?
     let retryToken: Int
+    let appSideTranscriptRead: Bool
 }
 
 /// SwiftUI identity for the table transcript representable. Composes the terminal

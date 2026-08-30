@@ -73,6 +73,27 @@ struct AppSideTranscriptFlagTests {
         #expect(await scheduler.registeredSessionIDs.isEmpty)
     }
 
+    @Test("the flag alone does not choose the app-side transport: a path is required")
+    func transportFallsBackToTheDaemonWithoutAPath() {
+        #expect(TranscriptPaneTransport.resolve(appSideEnabled: true, path: nil) == .daemonPoll,
+                "a nil path must fall through to the daemon, which resolves the file server-side")
+        #expect(TranscriptPaneTransport.resolve(appSideEnabled: true, path: "") == .daemonPoll,
+                "an empty path must fall through to the daemon, not strand the pane")
+    }
+
+    @Test("the flag plus a usable path chooses the app-side transport")
+    func transportChoosesAppSideWithAPath() {
+        #expect(TranscriptPaneTransport.resolve(appSideEnabled: true, path: "/tmp/session.jsonl")
+                == .appSide(path: "/tmp/session.jsonl"))
+    }
+
+    @Test("with the flag off the daemon transport is chosen whatever the path")
+    func transportIgnoresThePathWhenTheFlagIsOff() {
+        #expect(TranscriptPaneTransport.resolve(appSideEnabled: false, path: "/tmp/session.jsonl")
+                == .daemonPoll)
+        #expect(TranscriptPaneTransport.resolve(appSideEnabled: false, path: nil) == .daemonPoll)
+    }
+
     @Test("turning the flag off deregisters a pane that had registered")
     func flagOffDeregistersAnExistingRegistration() async {
         let scheduler = TranscriptPollScheduler(source: TranscriptSource())

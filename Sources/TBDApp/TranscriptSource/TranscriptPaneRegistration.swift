@@ -23,3 +23,24 @@ enum TranscriptPaneRegistration {
         await scheduler.register(sessionID: sessionID, path: path, tier: tier)
     }
 }
+
+/// Which transport a live transcript pane should use for one evaluation.
+///
+/// The decision is a pure function of the flag and the path so it can be
+/// asserted directly, rather than only through the behaviour of a SwiftUI
+/// `.task`. A pane whose terminal has no usable `transcriptPath` must fall
+/// back to the daemon poll — the daemon resolves the session file server-side
+/// from the terminal id, so it can render a transcript the app-side reader has
+/// no path for. Taking the app-side branch there would leave the pane waiting
+/// forever.
+enum TranscriptPaneTransport: Equatable {
+    /// Read the file in-process, from this path.
+    case appSide(path: String)
+    /// Poll the daemon over RPC.
+    case daemonPoll
+
+    static func resolve(appSideEnabled: Bool, path: String?) -> TranscriptPaneTransport {
+        guard appSideEnabled, let path, !path.isEmpty else { return .daemonPoll }
+        return .appSide(path: path)
+    }
+}
