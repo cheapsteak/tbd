@@ -1,0 +1,14 @@
+-- Remote peer messaging (design 2026-08-29 "Flag and rollout"): the single
+-- opt-in for publishing shadow peers and carrying frames over a provider's
+-- `messages` stream. Default OFF — the feature acts without a user gesture and
+-- writes records and sockets into a directory shared with every Claude Code
+-- session on the machine.
+--
+-- No SQL `DEFAULT` clause, deliberately: NULL means "nobody has chosen" and
+-- resolves through `Config.remotePeerMessagingDefault`, while `0`/`1` records a
+-- gesture that is honored forever. Graduation is then a one-line change to that
+-- constant, reaching everyone who never touched the toggle without disturbing a
+-- single explicit opt-out. A `DEFAULT` here would backfill every existing row
+-- and destroy that distinction on write — the `auto_hibernate_enabled` mistake
+-- the root CLAUDE.md records.
+ALTER TABLE config ADD COLUMN remote_peer_messaging_enabled INTEGER;

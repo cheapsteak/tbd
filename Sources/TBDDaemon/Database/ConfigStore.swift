@@ -80,6 +80,13 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// "off". Resolve it through `Config.gcOrphanProcessesEnabledDefault`,
     /// never through `?? false`.
     var gc_orphan_processes_enabled: Bool?
+    /// The remote peer messaging gate (design 2026-08-29, "Flag and
+    /// rollout"). **Genuinely tri-state**, same shape as
+    /// `gc_orphan_processes_enabled`: the
+    /// `20260830003851_config_remote_peer_messaging` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.remotePeerMessagingDefault`, never through `?? false`.
+    var remote_peer_messaging_enabled: Bool?
     /// JSON-encoded `[String: String]` remote create-param defaults (machine
     /// scope), keyed by the provider's own field names. Nil/absent means no
     /// opinion at this level — every field falls through to its
@@ -106,13 +113,17 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter gcOrphanProcessesDefault: same shape once more, for
     ///   `gc_orphan_processes_enabled` — the orphaned-process collector's soak
     ///   gate.
+    /// - Parameter remotePeerMessagingDefault: same shape once more, for
+    ///   `remote_peer_messaging_enabled` — the remote peer messaging bridge's
+    ///   soak gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
         supervisionEnabledDefault: Bool = Config.supervisionEnabledDefault,
         gcProfileDirsDefault: Bool = Config.gcProfileDirsEnabledDefault,
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
-        gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault
+        gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault,
+        remotePeerMessagingDefault: Bool = Config.remotePeerMessagingDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -167,6 +178,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // And once more, for the orphaned-process collector's gate —
             // NOT `?? false`.
             gcOrphanProcessesEnabled: gc_orphan_processes_enabled ?? gcOrphanProcessesDefault,
+            // And once more, for the remote peer messaging bridge's gate —
+            // NOT `?? false`.
+            remotePeerMessagingEnabled: remote_peer_messaging_enabled ?? remotePeerMessagingDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults)
         )
     }
@@ -549,6 +563,19 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_orphan_processes_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the remote peer messaging gate (default OFF, soaking) — the
+    /// single opt-in for shadow peers and the provider `messages` stream. The
+    /// column is written on every call, because writing either value is the
+    /// explicit gesture that lifts it out of NULL forever after.
+    public func setRemotePeerMessagingEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET remote_peer_messaging_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }
