@@ -48,6 +48,15 @@ public struct IncrementalTranscript: Sendable {
     /// this a `Sendable` value type without a lock or an `@unchecked`
     /// conformance, and costs one JSON round-trip per late tool result rather
     /// than per line.
+    ///
+    /// A row lives here only while its call is **unresolved**. A tool call's
+    /// row is often the largest line in a transcript (the whole tool input), so
+    /// keeping resolved ones would roughly double the memory the tool-call
+    /// portion costs, for no reachable use: `buildItems` consumes the result
+    /// exactly once, and a `tool_use_id` is answered exactly once. Rows are
+    /// therefore never retained for a call whose result is already in
+    /// `toolResultsByID`, and are dropped as soon as a late result patches the
+    /// item in. What remains is bounded by the calls still in flight.
     private var toolCallRowByID: [String: RetainedRow] = [:]
     /// Lines ingested so far, for the `line-N` stable-id fallback. Must count
     /// the same lines the whole-file parser counts, or ids diverge.
@@ -59,6 +68,11 @@ public struct IncrementalTranscript: Sendable {
         let line: String
         let stableID: String
     }
+
+    /// How many tool-call rows are still held for a possible later patch —
+    /// i.e. how many calls are still unanswered. Internal and read-only, so
+    /// `@testable` can assert the bound and nothing public can depend on it.
+    var retainedToolCallRowCount: Int { toolCallRowByID.count }
 
     public init() {}
 
@@ -103,8 +117,14 @@ public struct IncrementalTranscript: Sendable {
         // Index the tool calls this batch produced, retaining their rows so a
         // later result can rebuild them. One assistant row can carry several
         // tool_use blocks, so map every id the row declares.
+        //
+        // A call whose result is ALREADY in `toolResultsByID` needs no row: the
+        // `buildItems` above resolved it, so the item is final and no patch
+        // below can ever name it. That is the whole-file case, and the common
+        // one for a pane opening onto an existing transcript.
         for rowIdx in rawLines.indices {
-            for toolUseID in Self.toolUseIDs(in: rawLines[rowIdx]) {
+            for toolUseID in Self.toolUseIDs(in: rawLines[rowIdx])
+            where toolResultsByID[toolUseID] == nil {
                 toolCallRowByID[toolUseID] = RetainedRow(
                     line: rawText[rowIdx], stableID: stableIDs[rowIdx])
             }
@@ -130,6 +150,13 @@ public struct IncrementalTranscript: Sendable {
                 updated.append(idx)
             }
         }
+
+        // Each id in `newlyResolved` has had its one result folded in. Nothing
+        // can name it again, so stop carrying its JSON text. Done after the
+        // loop rather than inside it because sibling ids on the SAME assistant
+        // row hold separate entries pointing at that one line, and each still
+        // needs its own rebuild.
+        for id in newlyResolved { toolCallRowByID.removeValue(forKey: id) }
 
         return Change(appended: start..<items.count, updated: updated)
     }

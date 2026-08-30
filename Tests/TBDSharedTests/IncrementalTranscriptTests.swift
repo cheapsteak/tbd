@@ -65,6 +65,36 @@ struct IncrementalTranscriptTests {
         #expect(incremental.items == whole)
     }
 
+    /// The raw JSON of a tool-call row is held only so a late `tool_result` can
+    /// rebuild that item. Once the result has landed nothing can name the row
+    /// again, and a tool call's line — carrying the whole tool input — is
+    /// typically the largest in a transcript. Left unpruned the map grows with
+    /// every tool call the session ever made, for the life of the transcript.
+    @Test("a resolved tool call stops retaining its raw row")
+    func resolvedRowsAreNotRetained() throws {
+        let lines = try fixtureLines()
+        let resultIdx = try #require(lines.firstIndex { $0.contains("tool_result") })
+
+        var incremental = IncrementalTranscript()
+        incremental.ingest(lines: Array(lines[..<resultIdx]))
+        #expect(incremental.retainedToolCallRowCount > 0,
+                "a call still awaiting its result must keep the row that rebuilds it")
+
+        incremental.ingest(lines: Array(lines[resultIdx...]))
+        #expect(incremental.retainedToolCallRowCount == 0,
+                "every call the fixture resolves must release its row")
+    }
+
+    /// The other half: a pane opening onto an already-complete transcript reads
+    /// the calls and their results in one batch, so `buildItems` resolves them
+    /// on the spot and no row is ever worth keeping.
+    @Test("a whole-file ingest retains no tool-call rows at all")
+    func wholeFileIngestRetainsNoRows() throws {
+        var incremental = IncrementalTranscript()
+        incremental.ingest(lines: try fixtureLines())
+        #expect(incremental.retainedToolCallRowCount == 0)
+    }
+
     @Test("an empty ingest reports no change")
     func emptyIngestIsNoChange() throws {
         var incremental = IncrementalTranscript()

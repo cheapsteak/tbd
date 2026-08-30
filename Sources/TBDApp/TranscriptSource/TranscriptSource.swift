@@ -45,6 +45,19 @@ actor TranscriptSource {
         entries[sessionID]?.transcript.items ?? []
     }
 
+    /// How many sessions have a built transcript resident right now.
+    ///
+    /// Read-only, and here so the bound on this actor's retention is something
+    /// a test can assert rather than something a comment claims. Nothing in the
+    /// app reads it.
+    var trackedSessionCount: Int { entries.count }
+
+    /// Drops everything built for `sessionID`. The next `refresh` for that id
+    /// starts over from byte zero.
+    ///
+    /// `TranscriptPollScheduler.deregister` is the production caller, and the
+    /// only one: retention is scoped to registration, so no entry outlives the
+    /// pane that asked for it.
     func forget(sessionID: String) {
         entries.removeValue(forKey: sessionID)
     }

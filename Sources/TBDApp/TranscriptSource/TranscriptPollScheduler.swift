@@ -79,9 +79,31 @@ actor TranscriptPollScheduler {
         startPolling(sessionID: sessionID)
     }
 
-    func deregister(sessionID: String) {
+    /// Stops polling `sessionID` **and** drops what the source built for it.
+    ///
+    /// The two belong together. `TranscriptSource` keeps every `TranscriptItem`
+    /// it has parsed, plus `IncrementalTranscript`'s retained rows for
+    /// unresolved tool calls, and nothing else in the app removes an entry — so
+    /// without this the retained set is bounded only by "distinct Claude
+    /// sessions ever viewed", which grows for the life of the process. Every
+    /// production deregistration funnels here (`TranscriptPaneRegistration.apply`
+    /// on the flag-off / no-path branch, and the live pane's `.task` teardown),
+    /// which is what makes registration lifetime a real bound rather than an
+    /// asserted one.
+    ///
+    /// The cost is that a pane which deregisters and later re-registers
+    /// re-parses its file once from scratch, off the main actor. That is a
+    /// single bounded read, against a daemon-poll path that re-parses the whole
+    /// file every tick forever.
+    ///
+    /// This also covers session rollover: `/clear` and `/compact` mint a new
+    /// session id, the pane's `.task(id:)` key changes, and the outgoing task
+    /// deregisters the id it captured when it started — the OLD one. So the
+    /// orphaned session is forgotten here too, by the same gesture.
+    func deregister(sessionID: String) async {
         registrations[sessionID]?.task?.cancel()
         registrations.removeValue(forKey: sessionID)
+        await source.forget(sessionID: sessionID)
     }
 
     func setAppActive(_ active: Bool) {
