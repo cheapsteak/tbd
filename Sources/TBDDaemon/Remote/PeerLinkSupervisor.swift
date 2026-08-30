@@ -715,21 +715,37 @@ public actor PeerLinkSupervisor: PeerLinkSending {
             await publish(.up)
             await handler.handle(frame)
         case .ping:
-            // Liveness only; `lastActivity` was stamped by the caller.
+            // Liveness only; `lastActivity` was stamped by the caller — and
+            // stamped whatever this gate then decides, so a provider stuck
+            // before its `hello` still reads as a live stream to the watchdog
+            // and is killed by its handshake-stall check rather than by
+            // silence.
+            //
+            // Gated exactly like every other non-`hello` kind: a keepalive is
+            // one of the "other lines" the contract forbids ahead of the
+            // handshake, so it is not an exception to the rule.
+            guard state == .up else {
+                dropBeforeHandshake(frame)
+                return
+            }
             counters.framesReceived += 1
         default:
-            // "Neither side may write any other line before it" — a line ahead
-            // of the provider's `hello` is a protocol violation, dropped and
-            // counted rather than acted on.
             guard state == .up else {
-                counters.linesBeforeHandshake += 1
-                peerBridgeLogger.error(
-                    "messages \(self.config.name, privacy: .public) dropped a \(frame.kind.rawValue, privacy: .public) line that arrived before the provider's hello")
+                dropBeforeHandshake(frame)
                 return
             }
             counters.framesReceived += 1
             await handler.handle(frame)
         }
+    }
+
+    /// "Neither side may write any other line before it" — a line ahead of the
+    /// provider's `hello` is a protocol violation, dropped and counted rather
+    /// than acted on.
+    private func dropBeforeHandshake(_ frame: PeerBridgeFrame) {
+        counters.linesBeforeHandshake += 1
+        peerBridgeLogger.error(
+            "messages \(self.config.name, privacy: .public) dropped a \(frame.kind.rawValue, privacy: .public) line that arrived before the provider's hello")
     }
 
     /// Publishes a link-state transition, on change only.
@@ -815,7 +831,11 @@ public actor PeerLinkSupervisor: PeerLinkSending {
     /// provider that keeps pinging but never answers `hello` (an old shim, a
     /// protocol number this build does not speak) is not silent, so the first
     /// check never fires, and without the second the link would sit down
-    /// forever, never reconnecting and never escalating.
+    /// forever, never reconnecting and never escalating. Those pre-handshake
+    /// pings are dropped as protocol violations by `deliver`, but `lastActivity`
+    /// is stamped off the stream before that gate — so they keep the first check
+    /// quiet exactly as any other traffic would, and the second is what has to
+    /// catch them.
     private func killIfStalled(generation: Int) async {
         guard generation == self.generation, let process = currentProcess else { return }
         let silent = now().timeIntervalSince(lastActivity) > silenceLimit
