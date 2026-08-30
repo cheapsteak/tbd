@@ -66,6 +66,16 @@ def parse(line):
     return dict(PAIR.findall(body))
 
 
+def positive_int(raw):
+    # argparse happily accepts `--top -1`, and a negative slice silently DROPS
+    # the last ranking entry instead of erroring -- a quiet wrong answer from a
+    # tool whose whole job is to be trusted about rankings.
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return value
+
+
 def human_bytes(n):
     for unit in ("B", "KB", "MB", "GB"):
         if abs(n) < 1024 or unit == "GB":
@@ -76,17 +86,29 @@ def human_bytes(n):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--last", default="30m")
-    ap.add_argument("--top", type=int, default=12,
+    ap.add_argument("--top", type=positive_int, default=12,
                     help="how many message types to list in each ranking")
     args = ap.parse_args()
 
-    out = subprocess.run(
+    proc = subprocess.run(
         ["/usr/bin/log", "show", "--last", args.last, "--info", "--style", "compact",
          "--predicate", 'subsystem == "com.tbd.app" AND category == "rpcvolume"'],
-        capture_output=True, text=True).stdout
+        capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        # Without this, a rejected `--last` or a denied predicate produces empty
+        # stdout and the "probe is off" guidance below -- sending the reader to
+        # check a flag that was never the problem.
+        print(f"`log show` failed (exit {proc.returncode}):", file=sys.stderr)
+        print(proc.stderr.strip(), file=sys.stderr)
+        return 2
+    out = proc.stdout
+
+    def totals():
+        return {"n": 0, "bytes": 0, "decodems": 0.0, "maxms": 0.0}
 
     windows = []
-    types = defaultdict(lambda: {"n": 0, "bytes": 0, "decodems": 0.0, "maxms": 0.0})
+    types = defaultdict(totals)
+    rollup = totals()
 
     for ln in out.splitlines():
         kv = parse(ln)
@@ -96,7 +118,10 @@ def main():
             windows.append(kv)
             continue
         key = (kv.get("kind", "?"), kv.get("type", "?"))
-        t = types[key]
+        # The probe's own rollup is not a message type and must never win a
+        # ranking of message types. It is reported on its own below, where a
+        # large share means the traffic is spread thin rather than concentrated.
+        t = rollup if key == ("mixed", "(other)") else types[key]
         t["n"] += int(kv.get("n", 0))
         t["bytes"] += int(kv.get("bytes", 0))
         t["decodems"] += float(kv.get("decodems", 0.0))
@@ -158,7 +183,23 @@ def main():
           lambda t: f"{t['decodems'] / 1000:8.1f}s "
                     f"({100 * t['decodems'] / decode_ms:4.1f}%)" if decode_ms else "n/a")
 
+    if rollup["n"]:
+        byte_pct = 100 * rollup["bytes"] / total_bytes if total_bytes else 0.0
+        time_pct = 100 * rollup["decodems"] / decode_ms if decode_ms else 0.0
+        print(f"\nspread thin, outside both per-window rankings "
+              f"(the probe's `(other)` rollup):")
+        print(f"  {rollup['n']:,} messages, {human_bytes(rollup['bytes'])} "
+              f"({byte_pct:.1f}% of bytes), {rollup['decodems'] / 1000:.1f}s decode "
+              f"({time_pct:.1f}%)")
+        if byte_pct > 50 or time_pct > 50:
+            print("  -> most of the traffic is NOT concentrated in a few types.")
+            print("     Look at message rate and the daemon's broadcast policy,")
+            print("     not at any one payload's shape.")
+
     print()
+    if not types:
+        print("  -> only the probe's (other) rollup was logged; no type dominates.")
+        return 0
     by_bytes = sorted(types, key=lambda k: types[k]["bytes"], reverse=True)
     by_time = sorted(types, key=lambda k: types[k]["decodems"], reverse=True)
     if by_bytes[:3] != by_time[:3]:
@@ -171,9 +212,14 @@ def main():
     if share < 0.05:
         print(f"  -> decode share {share:.3f} is negligible. The `sample` frames were")
         print("     an artifact of short bursts; look elsewhere for the lag.")
-    elif share >= 0.5:
-        print(f"  -> decode share {share:.3f} is a standing multi-core load. The fix is")
-        print("     upstream of the decoder, in what the daemon chooses to send.")
+    elif share >= 1.0:
+        print(f"  -> decode share {share:.3f} is a standing multi-core load: more than")
+        print("     one core-second of decode per wall second. The fix is upstream of")
+        print("     the decoder, in what the daemon chooses to send.")
+    else:
+        print(f"  -> decode share {share:.3f} is a real but sub-core load. It competes")
+        print("     with the render path on a loaded box without being the whole story;")
+        print("     weigh it against what else is running before acting.")
     return 0
 
 
