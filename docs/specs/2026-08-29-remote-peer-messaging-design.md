@@ -112,8 +112,14 @@ Line kinds on the stream, in both directions unless noted:
 - `hello` — first line TBD writes, declaring the origin label and the protocol
   it will speak. The provider answers with its own `hello`.
 - `peer` — announces or updates one addressable session on the sender's side:
-  its handle, display name, status, and peer protocol. Idempotent and complete,
-  never a partial diff, following the `events` rule for `session`.
+  its handle, display name, status, peer protocol, and — from the provider —
+  the id of the session it announces. Idempotent and complete, never a partial
+  diff, following the `events` rule for `session`. The session id is the `id`
+  the Session object already carries, reused rather than reinvented, and it is
+  what TBD joins the announcement to its own worktree row for that session (see
+  Addressing and naming). It is **required provider → TBD**, because a peer TBD
+  cannot join is a peer it cannot name or place, and **not required** the other
+  way, where the handle is the provider's key and the name is TBD's to compose.
 - `peer-gone` — that handle is no longer addressable.
 - `message` — one frame for delivery, addressed by handle, and carrying an id
   the sender mints for it. The id is diagnostic only — see Failure semantics.
@@ -197,11 +203,34 @@ because the far host's tmux server is also called `main` and also has a pane
 terminal. A record with no `tmux` key lists correctly — measured.
 
 **Forward, a remote session seen locally: `<provider>:<worktree display name>`.**
+The display name is TBD's own, read off the worktree row TBD adopted that remote
+session into, and the `peer` line's session id is what finds the row: it is the
+provider's session id, which is what TBD stored as that row's
+`providerSessionID` when it adopted the session. So the join is an index probe
+on an identity both sides already hold, not a search, and nothing the provider
+asserts on the line composes the name. The same row supplies the shadow's `cwd`,
+which is the other half a shadow cannot be published without: the path the
+session runs at on the far host resolves to nothing here, and a surface
+filtering on the directory existing would drop the row.
+
 The contract makes this unique by construction — a session that resolves to a
 registered repository gets exactly one worktree row, and no session may take
 another's row by claiming its id — so the only collision is a display name the
 user reused across two remote worktrees. That collision is a refusal naming the
 `[ref]`, never a misdelivery, so it costs one round trip.
+
+**When the join fails, nothing is published.** Two lines fail it: one carrying no
+session id at all, and one whose session id names no row TBD adopted. Both leave
+TBD without either half of a site, and it may invent neither — a made-up display
+name is an identity peers would go on to address, and a made-up `cwd` is a
+directory that does not exist. So the handle is counted as unmirrored and
+surfaced (`tbd peer list` shows it, per Reclamation and detection) rather than
+swallowed, because a feature that silently does nothing is the failure this
+contract's users have been bitten by before. Nothing retries on a timer and
+nothing needs to: a `peer` line is complete and idempotent, one is written
+whenever anything about that session changes, and the whole roster is
+re-announced after the next `hello` — so a session TBD adopts later is published
+on the next line for it.
 
 **Reverse, a local session seen remotely: `<origin>:<display name> %<pane>`.**
 Here collisions are the norm rather than the exception: several Claude terminals
@@ -449,8 +478,13 @@ observable.
 
 A conforming provider **MUST**: close and unlink its listeners when the link
 drops; unlink every shadow it published when the stream ends; persist no frames
-across a link drop; namespace names by the declared origin; pass message content
+across a link drop; put the announced session's own id on every `peer` line it
+writes; namespace names by the declared origin; pass message content
 byte-verbatim; and never deliver a frame addressed to a handle it was not given.
+
+The session id is the one of those TBD can check cheaply and answer for itself,
+and the answer is the unmirrored count: a provider that omits it publishes
+nothing, visibly, rather than publishing something wrong.
 
 TBD cannot detect a provider that buffers frames and replays them, or that
 leaves stale shadows on a host TBD cannot sweep. The `peer-inventory` line is the
@@ -485,6 +519,12 @@ in `tbd peer list` and in the provider's diagnostics rather than showing nothing
   outside the table resolving to nothing.
 - **Scoping.** A local session in another repo is not mirrored; a non-TBD
   session is never mirrored.
+- **Siting.** The join is asserted on the key, not on the outcome: a `peer` line
+  announcing a handle and a name that are both wrong still sites, because the
+  session id is right. A line whose session id names no adopted row, and a line
+  carrying none at all, both go unmirrored and both are listed — and the second
+  never reaches the resolver, which is what tells a recognised absence apart
+  from an empty key handed downstream.
 - **Link loss** closes and unlinks listeners on both halves.
 
 ## Rejected alternatives

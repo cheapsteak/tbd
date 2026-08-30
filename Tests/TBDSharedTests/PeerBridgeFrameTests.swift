@@ -19,7 +19,7 @@ struct PeerBridgeFrameTests {
         .hello(origin: "acme-laptop", peerProtocol: 1),
         .peer(PeerBridgePeer(
             handle: "h-9f3a", name: "acme-cloud:useful-swallow",
-            status: "busy", peerProtocol: 1)),
+            status: "busy", peerProtocol: 1, sessionID: "useful-swallow")),
         .peerGone(handle: "h-9f3a"),
         .message(PeerBridgeMessage(
             id: "m-6d40", to: "h-9f3a", from: "h-1b2c",
@@ -54,7 +54,7 @@ struct PeerBridgeFrameTests {
     @Test func eachKindEncodesExactlyTheContractsFields() throws {
         let expected: [PeerBridgeFrame.Kind: Set<String>] = [
             .hello: ["kind", "origin", "protocol"],
-            .peer: ["kind", "handle", "name", "status", "protocol"],
+            .peer: ["kind", "handle", "name", "status", "protocol", "session"],
             .peerGone: ["kind", "handle"],
             .message: ["kind", "id", "to", "from", "content"],
             .peerInventory: ["kind", "handles"],
@@ -102,6 +102,64 @@ struct PeerBridgeFrameTests {
     @Test func peerInventoryIsTheOnlyProviderToTBDOnlyKind() {
         let oneWay = Self.everyKind.filter(\.isProviderToTBDOnly).map(\.kind)
         #expect(Set(oneWay) == [.peerInventory])
+    }
+
+    // MARK: - The session id on a `peer` line
+
+    /// The field is spelled `session` on the wire and carries the sender's own
+    /// session id verbatim — the same `id` the Session object `list` and
+    /// `events` return, not a value derived from it. Asserted against the raw
+    /// JSON rather than a round trip, because a round trip would pass just as
+    /// well if both halves agreed on the wrong key.
+    @Test func theSessionIdRidesUnderTheContractsOwnKeyAndVerbatim() throws {
+        let frame = PeerBridgeFrame.peer(PeerBridgePeer(
+            handle: "h-9f3a", name: "acme-cloud:useful-swallow", status: "busy",
+            peerProtocol: 1, sessionID: "useful-swallow"))
+        let data = try PeerBridgeFrameCodec.encode(frame)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["session"] as? String == "useful-swallow")
+    }
+
+    /// TBD → provider, where the field is not required: the key is left off
+    /// altogether rather than sent as a null. A provider publishes the name TBD
+    /// composed and the handle is its key, so there is nothing for it to say.
+    @Test func aPeerWithNoSessionIdOmitsTheKeyRatherThanSendingNull() throws {
+        let frame = PeerBridgeFrame.peer(PeerBridgePeer(
+            handle: "h-9f3a", name: "acme-laptop:fix-flaky-ci %388", status: "working",
+            peerProtocol: 1))
+        let data = try PeerBridgeFrameCodec.encode(frame)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(Set(object.keys) == ["kind", "handle", "name", "status", "protocol"])
+    }
+
+    /// A `peer` line with no `session` is a frame, not damage. The line is well
+    /// formed and one direction of this contract writes exactly it; whether a
+    /// peer with no session id can be *sited* is the receiver's judgement to
+    /// make and to surface (`ShadowPeerManager`), not the codec's to refuse.
+    @Test func aPeerLineWithNoSessionDecodesRatherThanBeingRejected() {
+        let line = #"{"kind":"peer","handle":"h-1","name":"acme-laptop:swallow %2","status":"idle","protocol":1}"#
+        #expect(PeerBridgeFrameCodec.decode(line: line, negotiatedProtocol: 1)
+            == .frame(.peer(PeerBridgePeer(
+                handle: "h-1", name: "acme-laptop:swallow %2", status: "idle",
+                peerProtocol: 1, sessionID: nil))))
+    }
+
+    /// And it round trips as the distinct value it is: a peer carrying a
+    /// session id and the same peer without one are not the same announcement,
+    /// so the field cannot be quietly dropped in either half of the coding.
+    @Test func aSessionIdIsPartOfThePeersIdentityAndSurvivesARoundTrip() throws {
+        let sited = PeerBridgeFrame.peer(PeerBridgePeer(
+            handle: "h-1", name: "swallow", status: "idle", peerProtocol: 1,
+            sessionID: "useful-swallow"))
+        let unsited = PeerBridgeFrame.peer(PeerBridgePeer(
+            handle: "h-1", name: "swallow", status: "idle", peerProtocol: 1))
+        #expect(sited != unsited)
+        for frame in [sited, unsited] {
+            let line = try PeerBridgeFrameCodec.encodeLine(frame)
+            #expect(PeerBridgeFrameCodec.decode(line: line, negotiatedProtocol: 1) == .frame(frame))
+        }
     }
 
     // MARK: - Size cap
@@ -227,6 +285,11 @@ struct PeerBridgeFrameTests {
             #"{"kind":"message","to":"h-1","from":"h-2","content":"no id"}"#,
             #"["kind","message"]"#,
             #"{"kind":42}"#,
+            // An optional field of the wrong type is malformed all the same:
+            // "absent" and "present and unreadable" are different facts, and
+            // reading the second as the first would silently turn a provider
+            // bug into an unsitable peer nobody diagnoses.
+            #"{"kind":"peer","handle":"h-1","name":"n","status":"idle","protocol":1,"session":42}"#,
             #"{"kind":"peer-gone","handle":"h-1"}"#,
         ]
         let outcomes = lines.map {
@@ -234,6 +297,7 @@ struct PeerBridgeFrameTests {
         }
         #expect(outcomes == [
             .frame(.ping),
+            .rejected(.malformed),
             .rejected(.malformed),
             .rejected(.malformed),
             .rejected(.malformed),

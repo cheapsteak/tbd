@@ -106,7 +106,7 @@ public struct ShadowPeerSite: Sendable, Equatable {
     }
 }
 
-/// Resolves the announcing side's `peer` line to the local worktree TBD adopted
+/// Resolves the provider's own session id to the local worktree TBD adopted
 /// that remote session into.
 ///
 /// A seam rather than a database call inside the manager, for two reasons. The
@@ -114,15 +114,19 @@ public struct ShadowPeerSite: Sendable, Equatable {
 /// and every handle-table and attribution test below then needs no database at
 /// all.
 ///
-/// **A `peer` line carries no session id** — only a handle, a name, a status
-/// and a protocol — so an implementation has nothing but the announced name to
-/// join on. That is a real limitation of the contract as written, not of this
-/// protocol; see this file's note on `composedName(for:)`.
+/// **The join key is the session id and nothing else on the `peer` line.** That
+/// id is the `id` the provider's Session object already carries, which is what
+/// TBD stored as the row's `providerSessionID` when it adopted the session, so
+/// an implementation is a `findRemote(provider:sessionID:)` probe rather than a
+/// search. The alternatives on the line are not identities: a handle means
+/// nothing outside one connection, and the name is the far side's assertion —
+/// naming a shadow after it would publish exactly the invented identity this
+/// design refuses (see `composedName(for:)`).
 public protocol ShadowPeerSiteResolving: Sendable {
     /// Nil when TBD has no worktree for this session. A remote session that
     /// resolves to no registered repository is never bridged, so nil means "do
     /// not publish a shadow" rather than "publish one with a guess".
-    func site(forAnnouncedPeer peer: PeerBridgePeer) async -> ShadowPeerSite?
+    func site(forProviderSessionID sessionID: String) async -> ShadowPeerSite?
 }
 
 // MARK: - What the manager can be asked about
@@ -167,8 +171,10 @@ public struct ShadowPeerSnapshot: Sendable, Equatable {
     /// Handles TBD minted for local sessions and announced on this link.
     public let localHandles: [String]
     /// Handles the far side announced that TBD could not site, and therefore
-    /// never mirrored. Surfaced rather than swallowed: a feature that silently
-    /// does nothing is the failure this contract's users have been bitten by.
+    /// never mirrored — a `peer` line with no session id on it, or one whose
+    /// session id names no worktree row TBD adopted, among them. Surfaced
+    /// rather than swallowed: a feature that silently does nothing is the
+    /// failure this contract's users have been bitten by.
     public let unmirroredHandles: [String]
     /// Handles the provider's last `peer-inventory` claimed but TBD never
     /// announced, and vice versa. TBD cannot verify the far half's hygiene, so
@@ -406,18 +412,23 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
             return
         }
 
-        guard let site = await siteResolver.site(forAnnouncedPeer: peer) else {
+        guard let site = await resolveSite(for: peer) else {
             unmirrored.insert(peer.handle)
             shadowPeerLogger.error("""
-                \(self.provider, privacy: .public) announced \(peer.name, privacy: .public) but \
-                TBD has no worktree for it; not mirroring it. A shadow needs a local directory \
-                that exists and a display name that is its whole identity, and neither may be \
-                invented
+                \(self.provider, privacy: .public) announced \(peer.name, privacy: .public) \
+                (session \(peer.sessionID ?? "<none on the line>", privacy: .public)) but TBD \
+                has no worktree row for it; not mirroring it. A shadow needs a local directory \
+                that exists and a display name that is its whole identity, both of which come \
+                from that row, and neither may be invented
                 """)
             return
         }
 
         let name = "\(provider):\(site.worktreeDisplayName)"
+        // `sessionID` here is the id of the *record the helper publishes* on
+        // this machine, minted locally and stable across its rewrites. It is
+        // not `peer.sessionID`, which names a session on the provider's host
+        // and is TBD's join key rather than anything a local record carries.
         let invocation = ShadowPeerHelperInvocation(
             handle: peer.handle, name: name, status: peer.status,
             peerProtocol: peer.peerProtocol, cwd: site.path,
@@ -473,8 +484,29 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     /// and a name that changed when some *other* session appeared would be
     /// worse than one that occasionally needs a ref.
     private func composedName(for peer: PeerBridgePeer) async -> String? {
-        guard let site = await siteResolver.site(forAnnouncedPeer: peer) else { return nil }
+        guard let site = await resolveSite(for: peer) else { return nil }
         return "\(provider):\(site.worktreeDisplayName)"
+    }
+
+    /// Where the announced session lands locally, or nil when it lands nowhere.
+    ///
+    /// **Two ways a peer fails to site, and both end here rather than in a
+    /// second path.** A `peer` line that carries no session id cannot be joined
+    /// to anything — the field is required in this direction for exactly this
+    /// reason — and one whose session id names no row TBD adopted has been
+    /// joined and found nothing. Either way TBD is missing both halves of a
+    /// site and may invent neither: a made-up display name is an identity peers
+    /// would go on to address, and a made-up `cwd` is a directory that does not
+    /// exist here. The caller counts the handle as unmirrored and publishes
+    /// nothing, so nothing addresses it.
+    ///
+    /// Nothing retries on a timer, and nothing needs to: a `peer` line is
+    /// idempotent and complete, one is written whenever anything about that
+    /// session changes, and the whole roster is re-announced after the next
+    /// `hello` — so a session TBD adopts later sites on the next line for it.
+    private func resolveSite(for peer: PeerBridgePeer) async -> ShadowPeerSite? {
+        guard let sessionID = peer.sessionID else { return nil }
+        return await siteResolver.site(forProviderSessionID: sessionID)
     }
 
     /// Deliver one frame from a remote session into the local session it names.

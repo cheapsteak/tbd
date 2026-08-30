@@ -154,11 +154,55 @@ private actor FakeShadowPeerSpawner: ShadowPeerHelperSpawning {
     var spawnCount: Int { invocations.count }
 }
 
+/// The join TBD does over its own worktree rows, reduced to a closure over the
+/// one thing the manager is allowed to join on: the provider's session id.
 private struct FakeSiteResolver: ShadowPeerSiteResolving {
-    let resolve: @Sendable (PeerBridgePeer) -> ShadowPeerSite?
+    let resolve: @Sendable (String) -> ShadowPeerSite?
 
-    func site(forAnnouncedPeer peer: PeerBridgePeer) async -> ShadowPeerSite? {
-        resolve(peer)
+    func site(forProviderSessionID sessionID: String) async -> ShadowPeerSite? {
+        resolve(sessionID)
+    }
+}
+
+/// Records every session id the manager asked about, so a test can assert what
+/// the join key actually was rather than infer it from the outcome.
+private final class SiteRequests: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ids: [String] = []
+
+    func record(_ sessionID: String) {
+        lock.lock()
+        ids.append(sessionID)
+        lock.unlock()
+    }
+
+    var asked: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return ids
+    }
+}
+
+/// A worktree display name a test can change between two `peer` lines, so a
+/// rename is modelled where it now happens — on TBD's own row — rather than on
+/// the name the far side asserts, which no longer composes anything.
+private final class MutableDisplayName: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: String
+
+    init(_ initial: String) { stored = initial }
+
+    var value: String {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+        set {
+            lock.lock()
+            stored = newValue
+            lock.unlock()
+        }
     }
 }
 
@@ -213,12 +257,18 @@ struct ShadowPeerManagerTests {
     private static let sessionsDirectory = URL(
         fileURLWithPath: "/tmp/tbd-test-shadow-sessions", isDirectory: true)
 
+    /// The provider's own id for the remote session every fixture below
+    /// announces — the `id` its Session object carries, and the id TBD stored
+    /// as `providerSessionID` when it adopted that session.
+    private static let remoteSessionID = "remote-session-1"
+
     private static func remotePeer(
-        handle: String = "remote-1", name: String = "fix-ci", status: String = "idle"
+        handle: String = "remote-1", name: String = "fix-ci", status: String = "idle",
+        sessionID: String? = remoteSessionID
     ) -> PeerBridgePeer {
         PeerBridgePeer(
             handle: handle, name: name, status: status,
-            peerProtocol: PeerBridgeFrameCodec.peerProtocol)
+            peerProtocol: PeerBridgeFrameCodec.peerProtocol, sessionID: sessionID)
     }
 
     private struct Harness {
@@ -229,7 +279,7 @@ struct ShadowPeerManagerTests {
     }
 
     private static func makeHarness(
-        site: @escaping @Sendable (PeerBridgePeer) -> ShadowPeerSite? = { _ in
+        site: @escaping @Sendable (String) -> ShadowPeerSite? = { _ in
             ShadowPeerSite(worktreeDisplayName: "fix-ci", path: "/tmp/tbd-test-worktree")
         }
     ) -> Harness {
@@ -497,32 +547,31 @@ struct ShadowPeerManagerTests {
     /// record directly: the helper is the single writer of its own record, and
     /// a second writer would tear a file every session on the machine reads.
     @Test func theHelperIsToldItsNewNameAndStatusRatherThanTheRecordBeingRewritten() async throws {
-        let harness = Self.makeHarness(site: { peer in
-            ShadowPeerSite(worktreeDisplayName: peer.name, path: "/tmp/tbd-test-worktree")
+        // The rename happens on TBD's own worktree row, which is the only
+        // place it can: the name is composed from the row the session id
+        // resolves to, so the far side renaming its session changes nothing
+        // here. The session id is stable across both lines, as a session id is.
+        let displayName = MutableDisplayName("fix-ci")
+        let adoptedSession = Self.remoteSessionID
+        let harness = Self.makeHarness(site: { sessionID in
+            sessionID == adoptedSession
+                ? ShadowPeerSite(
+                    worktreeDisplayName: displayName.value, path: "/tmp/tbd-test-worktree")
+                : nil
         })
-        await harness.manager.handle(.peer(Self.remotePeer(name: "fix-ci")))
+        await harness.manager.handle(.peer(Self.remotePeer()))
         let helper = try #require(await harness.spawner.helper(for: "remote-1"))
 
+        displayName.value = "fix-ci-renamed"
         await harness.manager.handle(
-            .peer(Self.remotePeer(name: "fix-ci-renamed", status: "working")))
+            .peer(Self.remotePeer(name: "whatever-the-far-side-now-calls-it", status: "working")))
 
+        // No session id on the frame the helper is handed: TBD → helper is the
+        // same direction as TBD → provider, and a helper publishes the name it
+        // is given under the handle it was spawned for.
         #expect(helper.controlFrames == [.peer(PeerBridgePeer(
             handle: "remote-1", name: "cloud:fix-ci-renamed", status: "working",
             peerProtocol: 1))])
-    }
-
-    /// The name a shadow is published under is `<provider>:<worktree display
-    /// name>` — TBD's own worktree name, never the one the far side asserted.
-    @Test func aShadowIsNamedForItsLocalWorktreeAndNotForWhatTheFarSideSaid() async {
-        let harness = Self.makeHarness(site: { _ in
-            ShadowPeerSite(worktreeDisplayName: "adopted-name", path: "/tmp/tbd-test-worktree")
-        })
-
-        await harness.manager.handle(
-            .peer(Self.remotePeer(name: "whatever-the-far-side-calls-it")))
-
-        let snapshot = await harness.manager.snapshot()
-        #expect(snapshot.shadows.map(\.name) == ["cloud:adopted-name"])
     }
 
     /// `peer-gone` takes down exactly that shadow and leaves the others alone.
@@ -597,6 +646,100 @@ struct ShadowPeerManagerTests {
         let snapshot = await harness.manager.snapshot()
         #expect(snapshot.shadows.isEmpty)
         #expect(snapshot.unmirroredHandles == ["remote-1"])
+    }
+
+    /// **The join is on the session id and on nothing else the line carries**,
+    /// and the name that comes back out of it is TBD's own worktree name rather
+    /// than anything the far side asserted. The announcement here names a
+    /// display name that is wrong on purpose, so a resolver quietly handed it
+    /// would site nothing and no shadow would appear. What the manager asked is
+    /// asserted as a whole list, because "it happened to work" and "it asked
+    /// the right question" are different facts.
+    @Test func aShadowIsSitedByItsSessionIdAndNamedForItsLocalWorktree() async {
+        let requests = SiteRequests()
+        let adoptedSession = Self.remoteSessionID
+        let harness = Self.makeHarness(site: { sessionID in
+            requests.record(sessionID)
+            return sessionID == adoptedSession
+                ? ShadowPeerSite(
+                    worktreeDisplayName: "adopted-name", path: "/tmp/tbd-test-worktree")
+                : nil
+        })
+
+        await harness.manager.handle(.peer(Self.remotePeer(
+            handle: "remote-1", name: "whatever-the-far-side-calls-it")))
+
+        #expect(requests.asked == [Self.remoteSessionID])
+        let snapshot = await harness.manager.snapshot()
+        #expect(snapshot.shadows.map(\.name) == ["cloud:adopted-name"])
+        #expect(snapshot.unmirroredHandles.isEmpty)
+    }
+
+    /// A session id TBD adopted no row for sites nothing. There is no fallback
+    /// to the name the far side asserted: publishing a shadow under a
+    /// provider-chosen name is the invented identity this design refuses, and a
+    /// remote path is a `cwd` that does not exist on this machine.
+    @Test func aPeerWhoseSessionIdNamesNoWorktreeIsNotMirroredAndIsSurfaced() async {
+        let adoptedSession = Self.remoteSessionID
+        let harness = Self.makeHarness(site: { sessionID in
+            sessionID == adoptedSession
+                ? ShadowPeerSite(worktreeDisplayName: "fix-ci", path: "/tmp/tbd-test-worktree")
+                : nil
+        })
+
+        await harness.manager.handle(
+            .peer(Self.remotePeer(sessionID: "a-session-tbd-never-adopted")))
+
+        #expect(await harness.spawner.spawnCount == 0)
+        let snapshot = await harness.manager.snapshot()
+        #expect(snapshot.shadows.isEmpty)
+        #expect(snapshot.unmirroredHandles == ["remote-1"])
+    }
+
+    /// A `peer` line with no session id at all lands in the same place, by the
+    /// same path rather than a second one: the field is required in this
+    /// direction precisely because there is nothing else to join on, so its
+    /// absence is "cannot be sited" and not "site it some other way". The
+    /// resolver is never asked, which is what proves the absence is recognised
+    /// rather than papered over with an empty or invented key.
+    @Test func aPeerWithNoSessionIdIsNotMirroredAndTheResolverIsNeverAsked() async {
+        let requests = SiteRequests()
+        let harness = Self.makeHarness(site: { sessionID in
+            requests.record(sessionID)
+            return ShadowPeerSite(worktreeDisplayName: "fix-ci", path: "/tmp/tbd-test-worktree")
+        })
+
+        await harness.manager.handle(.peer(Self.remotePeer(sessionID: nil)))
+
+        #expect(requests.asked.isEmpty)
+        #expect(await harness.spawner.spawnCount == 0)
+        let snapshot = await harness.manager.snapshot()
+        #expect(snapshot.shadows.isEmpty)
+        #expect(snapshot.unmirroredHandles == ["remote-1"])
+    }
+
+    /// An unsitable peer is not held against the session forever. A `peer` line
+    /// is idempotent and complete, and one is written whenever anything about
+    /// that session changes — so the announcement that arrives after TBD adopts
+    /// the session sites, publishes, and clears the handle from the unmirrored
+    /// list. Nothing retries on a timer, and nothing needs to.
+    @Test func aPeerSitesOnALaterLineOnceTBDHasAdoptedItsSession() async {
+        let adopted = MutableDisplayName("")
+        let adoptedSession = Self.remoteSessionID
+        let harness = Self.makeHarness(site: { sessionID in
+            guard sessionID == adoptedSession, !adopted.value.isEmpty else { return nil }
+            return ShadowPeerSite(
+                worktreeDisplayName: adopted.value, path: "/tmp/tbd-test-worktree")
+        })
+        await harness.manager.handle(.peer(Self.remotePeer()))
+        #expect(await harness.manager.snapshot().unmirroredHandles == ["remote-1"])
+
+        adopted.value = "adopted-late"
+        await harness.manager.handle(.peer(Self.remotePeer(status: "working")))
+
+        let snapshot = await harness.manager.snapshot()
+        #expect(snapshot.shadows.map(\.name) == ["cloud:adopted-late"])
+        #expect(snapshot.unmirroredHandles.isEmpty)
     }
 
     /// A helper that stops taking control frames is torn down rather than left

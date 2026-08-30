@@ -32,7 +32,8 @@ public enum PeerBridgeFrame: Equatable, Sendable, Codable {
     case hello(origin: String, peerProtocol: Int)
     /// Announces or updates one addressable session on the sender's side.
     /// Idempotent and **complete** — never a partial diff — which is why every
-    /// field on `PeerBridgePeer` is required.
+    /// field on `PeerBridgePeer` that the sender's direction defines is
+    /// required.
     case peer(PeerBridgePeer)
     /// That handle is no longer addressable.
     case peerGone(handle: String)
@@ -98,6 +99,8 @@ public enum PeerBridgeFrame: Equatable, Sendable, Codable {
         case name
         case status
         case id
+        /// `session` on the wire; `sessionID` in Swift.
+        case session
         case to
         case from
         case content
@@ -126,8 +129,16 @@ public enum PeerBridgeFrame: Equatable, Sendable, Codable {
             let name = try c.decode(String.self, forKey: .name)
             let status = try c.decode(String.self, forKey: .status)
             let peerProtocol = try c.decode(Int.self, forKey: .peerProtocol)
+            // Decoded permissively even though a provider MUST send it,
+            // because the same coding serves both directions and TBD's own
+            // `peer` lines carry no session id. A line that arrives without
+            // one is not malformed — it is a peer that cannot be sited, which
+            // is the receiver's judgement to make and to surface, not the
+            // codec's.
+            let sessionID = try c.decodeIfPresent(String.self, forKey: .session)
             self = .peer(PeerBridgePeer(
-                handle: handle, name: name, status: status, peerProtocol: peerProtocol))
+                handle: handle, name: name, status: status, peerProtocol: peerProtocol,
+                sessionID: sessionID))
         case .peerGone:
             let handle = try c.decode(String.self, forKey: .handle)
             self = .peerGone(handle: handle)
@@ -157,6 +168,7 @@ public enum PeerBridgeFrame: Equatable, Sendable, Codable {
             try c.encode(peer.name, forKey: .name)
             try c.encode(peer.status, forKey: .status)
             try c.encode(peer.peerProtocol, forKey: .peerProtocol)
+            try c.encodeIfPresent(peer.sessionID, forKey: .session)
         case .peerGone(let handle):
             try c.encode(handle, forKey: .handle)
         case .message(let message):
@@ -174,10 +186,12 @@ public enum PeerBridgeFrame: Equatable, Sendable, Codable {
 
 /// One addressable session on the sender's side, as announced by a `peer` line.
 ///
-/// Every field is required, and that is the contract rather than strictness for
-/// its own sake: a `peer` line is a complete, idempotent statement of one
-/// session's state, so a line missing one of them is not a smaller truth, it is
-/// a partial diff the receiver cannot apply.
+/// Every field the sender's direction defines is required, and that is the
+/// contract rather than strictness for its own sake: a `peer` line is a
+/// complete, idempotent statement of one session's state, so a line missing one
+/// of them is not a smaller truth, it is a partial diff the receiver cannot
+/// apply. `sessionID` is the one field only one direction defines, and its own
+/// documentation says which.
 public struct PeerBridgePeer: Sendable, Equatable {
     /// Opaque handle minted by the sender. **Never a socket path** — a wire
     /// that carried paths would let the far side name any socket in
@@ -196,12 +210,37 @@ public struct PeerBridgePeer: Sendable, Equatable {
     /// The peer protocol this session speaks, sourced from its own registry row
     /// rather than asserted.
     public let peerProtocol: Int
+    /// Which of the sender's own sessions this line announces: the `id` on the
+    /// Session object `list` and `events` already return for it, reused rather
+    /// than a second identity minted for this stream.
+    ///
+    /// **Required provider → TBD, and the whole of what makes a peer sitable.**
+    /// A handle addresses a session; this says *which* session, and TBD needs
+    /// that to join the announcement to the worktree row it adopted for it —
+    /// the row is what supplies the display name a shadow is published under
+    /// and a `cwd` that exists on this machine. Nothing else on the line can
+    /// stand in: a name the far side asserted is not the name the naming rule
+    /// specifies, and a remote path resolves to nothing here.
+    ///
+    /// Nil is therefore "this peer cannot be sited" rather than "site it some
+    /// other way": absent, or naming a session TBD adopted no row for, the
+    /// receiver surfaces it as unmirrored and publishes nothing. It is not
+    /// malformed — see the decoding note above.
+    ///
+    /// **Not required TBD → provider**, and defaulted to nil for exactly that
+    /// direction: a provider publishes the name TBD composed and needs no
+    /// session id to do it, and the handle is its stable key for the peer.
+    public let sessionID: String?
 
-    public init(handle: String, name: String, status: String, peerProtocol: Int) {
+    public init(
+        handle: String, name: String, status: String, peerProtocol: Int,
+        sessionID: String? = nil
+    ) {
         self.handle = handle
         self.name = name
         self.status = status
         self.peerProtocol = peerProtocol
+        self.sessionID = sessionID
     }
 }
 
