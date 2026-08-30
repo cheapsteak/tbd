@@ -91,13 +91,31 @@ struct PeerLinkSupervisorTests {
     /// the wait must **grow**. Measured in virtual seconds, which is what makes
     /// this exact rather than a tolerance window.
     ///
-    /// The two samples are chosen to be disjoint under jitter: the wait before
-    /// connection 2 is `2^0` seconds ±20% (0.8–1.2), the wait before connection
-    /// 4 is `2^2` ±20% (3.2–4.8). Add the per-connection overhead on the same
-    /// clock — the 50 ms drain grace, at most one 500 ms kill grace — and the
-    /// 250 ms advance granularity, and the first sample cannot exceed ~2.0 while
-    /// the second cannot fall below 3.25. `2.5` sits between them with margin on
-    /// both sides, and nothing in the arithmetic depends on real elapsed time.
+    /// **The two samples are compared to each other, never against an absolute
+    /// bound.** Each sample is the virtual time from one connection appearing
+    /// to the next, so each carries the same per-connection overhead: the 50 ms
+    /// drain grace, at most one 500 ms kill grace, and — the term that
+    /// dominates — every 0.25 s advance the driver spends while the previous
+    /// connection's watchdog and keepalive sleeps are still armed and the
+    /// child's EOF has not yet worked its way through to the supervisor. That
+    /// last term is paced by real time on a shared machine, so it is not
+    /// bounded by any constant in `PeerLinkSupervisor`: a bound derived from
+    /// the two graces alone comes to roughly half a second, and that is wrong
+    /// by a factor of four — a sample has been observed spending 3.25 virtual
+    /// seconds to reach connection 2, where that arithmetic predicts at most
+    /// 2.0. What *is* true of the term is that both windows draw it from the
+    /// same distribution, so it cancels in the difference — which is why the
+    /// assertion below subtracts.
+    ///
+    /// The backoff inside each sample is disjoint: the wait before connection 2
+    /// is `2^0` seconds ±20% (0.8–1.2), the wait before connection 4 is `2^2`
+    /// ±20% (3.2–4.8), each rounded up to the 0.25 s advance granularity, so
+    /// at least 3.25 against at most 1.25. The difference therefore contains at
+    /// least **2.0** virtual seconds of growth, and a `1.0` margin leaves a full
+    /// second — four advances — for the two windows' overheads to disagree.
+    /// Failing it means the difference collapsed toward the overhead noise
+    /// around zero: backoff went flat, which is the regression this test exists
+    /// to catch.
     ///
     /// `healthyResetUptime` is 3600 against a frozen date source, so the attempt
     /// counter cannot reset mid-test and turn the growth back into a flat line.
@@ -130,11 +148,13 @@ struct PeerLinkSupervisorTests {
         let second = try #require(toSecond)
         let fourth = try #require(toFourth)
         #expect(
-            second < 2.5,
-            "the first reconnect waits ~1 virtual second; spent \(second)s (third=\(String(describing: toThird)))")
-        #expect(
-            fourth > 2.5,
-            "the third reconnect waits ~4 virtual seconds; spent \(fourth)s (third=\(String(describing: toThird)))")
+            fourth - second > 1.0,
+            """
+            backoff must grow: the third reconnect waits ~4 virtual seconds where the \
+            first waits ~1, so the two samples must differ by at least a second once \
+            their shared per-connection overhead cancels; spent second=\(second)s \
+            fourth=\(fourth)s (third=\(String(describing: toThird)))
+            """)
     }
 
     // MARK: - Silence watchdog
