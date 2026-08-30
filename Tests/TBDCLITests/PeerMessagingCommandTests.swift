@@ -34,8 +34,8 @@ struct PeerMessagingCommandTests {
         let on = PeerMessaging.confirmation(value: .on)
         let off = PeerMessaging.confirmation(value: .off)
         #expect(on != off)
-        #expect(on.contains("messaging to on"), on)
-        #expect(off.contains("messaging to off"), off)
+        #expect(on.contains("messaging to on"), "\(on)")
+        #expect(off.contains("messaging to off"), "\(off)")
     }
 
     /// The restart caveat rides on both, because both are subject to it: the
