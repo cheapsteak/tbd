@@ -20,6 +20,20 @@ set nothing and could not silence it.  A ``-j``/``--jobs`` on the command line
 may lower it but not raise it — an agent that wants more parallelism is asking
 to overrule the machine owner, and should raise ``TBD_SWIFT_JOBS`` instead.
 
+Compile commands are also pointed at one shared precompiled-module cache
+under the user's real home, so every TBD worktree plans identically instead of
+each growing its own several-hundred-megabyte copy.  SwiftPM writes that path
+into every compile command in ``.build/debug.yaml``, so two entry points that
+disagree about it make each tree fully recompile on every transition between
+them — which is why the decision lives here, on the one path every governed
+build already takes, rather than in each caller.  The location is resolved from
+the passwd database and never from ``$HOME``: ``scripts/test.sh`` points ``HOME``
+at a scratch fence, and a ``$HOME``-derived cache would be minted empty inside
+it on every test run.  ``TBD_SWIFT_MODULE_CACHE_PATH`` moves it,
+``TBD_SWIFT_SHARED_MODULE_CACHE=0`` restores SwiftPM's per-worktree default, a
+caller that passes its own ``-module-cache-path`` is left alone, and ``CI`` is
+left alone too — runners are ephemeral, so a shared cache saves nothing there.
+
 Waiting is reported on stderr, never stdout, so a caller parsing SwiftPM's
 output sees nothing from this wrapper.  The holder writes ``pid``/``cwd``/
 ``command`` into the lock file after acquiring, and a waiter reads it back to
@@ -86,6 +100,7 @@ import fcntl
 import math
 import os
 from pathlib import Path
+import pwd
 import shutil
 import subprocess
 import sys
@@ -103,6 +118,11 @@ DEFAULT_HEARTBEAT_SECONDS = 60.0
 HOLDER_FIELDS = ("pid", "cwd", "command")
 MAX_REPORTED_COMMAND_CHARACTERS = 120
 COMPILE_SUBCOMMANDS = {"build", "run", "test"}
+# Where the shared precompiled-module cache lives, under the user's real home.
+SHARED_MODULE_CACHE_SUBPATH = "Library/Caches/tbd/swift-module-cache"
+# A caller that already spelled one of these has chosen; see
+# `_shares_the_module_cache`.
+MODULE_CACHE_OPTIONS = {"-module-cache-path", "-fmodules-cache-path"}
 SUPPORTED_SUBCOMMANDS = COMPILE_SUBCOMMANDS
 # Every status this wrapper produces itself, and what it means.  SwiftPM's own
 # status is deliberately absent and cannot be added: by then this process has
@@ -249,6 +269,101 @@ def _requested_jobs(arguments: list[str]) -> int | None:
     return None
 
 
+def _shared_module_cache_path() -> Path:
+    """Where precompiled modules go, spelled identically in every worktree.
+
+    Resolved from the passwd database, NEVER from ``$HOME`` and never through
+    ``Path.home()``, which reads ``$HOME`` first.  ``scripts/test.sh`` points
+    ``HOME`` and ``CFFIXED_USER_HOME`` at a scratch fence it deletes, so a
+    ``$HOME``-derived path would resolve inside that fence on every test run:
+    an empty cache minted per run, a full rebuild paid for it, and the local
+    caches this exists to retire regrown — all of it silent, looking like
+    nothing worse than slow tests.  `getpwuid` answers the real home whatever
+    the fence does, so the fence needs no cooperation from this wrapper and
+    this wrapper needs none from it.
+
+    Sharing depends on every worktree spelling the SAME path: the cached
+    artifacts embed the spelling, so a symlink per worktree would wedge every
+    worktree but the first.
+    """
+    explicit = os.environ.get("TBD_SWIFT_MODULE_CACHE_PATH")
+    if explicit:
+        return Path(explicit).expanduser()
+    return Path(pwd.getpwuid(os.getuid()).pw_dir) / SHARED_MODULE_CACHE_SUBPATH
+
+
+def _requests_a_module_cache(arguments: list[str]) -> bool:
+    """Whether the caller already named a module cache, in either spelling.
+
+    Covers the passthrough forms SwiftPM takes (``-Xswiftc
+    -module-cache-path <path>``, ``-Xcc -fmodules-cache-path=<path>``) by
+    looking for the flag itself wherever it appears in SwiftPM's own
+    arguments, with or without an ``=`` value attached.
+    """
+    return any(
+        argument.split("=", 1)[0] in MODULE_CACHE_OPTIONS for argument in arguments
+    )
+
+
+def _shares_the_module_cache(subcommand: str, swiftpm_arguments: list[str]) -> bool:
+    """Whether this invocation should be pointed at the shared cache.
+
+    Four ways to decline, each for its own reason:
+
+    * a subcommand that compiles nothing has no build plan to place;
+    * under ``CI`` the runners are ephemeral — one worktree per VM — so a
+      shared cache saves nothing, and ``.github/workflows/test.yml`` ends its
+      job with a build that does not come through here at all, so flagging
+      only the steps that do would make CI alternate against its own
+      ``actions/cache``d ``.build`` on every run;
+    * ``TBD_SWIFT_SHARED_MODULE_CACHE=0`` is the opt-out back to SwiftPM's
+      per-worktree default;
+    * a caller that passed its own path has chosen, and a second
+      differently-spelled copy would be a third plan variant — reintroducing
+      exactly the alternation that moving this decision here removes.
+    """
+    if subcommand not in COMPILE_SUBCOMMANDS:
+        return False
+    if os.environ.get("CI"):
+        return False
+    if os.environ.get("TBD_SWIFT_SHARED_MODULE_CACHE") == "0":
+        return False
+    return not _requests_a_module_cache(swiftpm_arguments)
+
+
+def _module_cache_arguments(subcommand: str, swiftpm_arguments: list[str]) -> list[str]:
+    """The flags to append, or nothing at all, creating the directory if used.
+
+    Both halves are needed: ``-Xswiftc -module-cache-path`` covers the Swift
+    frontend, and ``-Xcc -fmodules-cache-path=`` reaches the C-language
+    dependency shim targets (CNIOAtomics and friends) that the Swift flag
+    alone misses.
+
+    A directory that cannot be created costs a slower build, never a failed
+    one — SwiftPM's per-worktree default still works — so this says so once
+    and adds nothing, rather than failing a build over a cache.
+    """
+    if not _shares_the_module_cache(subcommand, swiftpm_arguments):
+        return []
+    path = _shared_module_cache_path()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        _report(
+            f"swift-safe: could not create the shared module cache at {path} "
+            f"({error}); building with SwiftPM's per-worktree cache instead"
+        )
+        return []
+    return [
+        "-Xswiftc",
+        "-module-cache-path",
+        "-Xswiftc",
+        str(path),
+        "-Xcc",
+        f"-fmodules-cache-path={path}",
+    ]
+
+
 def _run_swiftpm_arguments(arguments: list[str]) -> list[str]:
     """Return only `swift run` options before the executable and app args."""
     prefix: list[str] = []
@@ -277,24 +392,33 @@ def _bounded_arguments(subcommand: str, arguments: list[str]) -> list[str]:
         return result
 
     limit = _job_limit()
-    job_arguments = (
+    # `run` takes the program's own arguments after the executable name, and
+    # they are not SwiftPM's to read: both the job count and the module-cache
+    # flags are decided from the prefix alone, and inserted inside it.
+    swiftpm_arguments = (
         _run_swiftpm_arguments(arguments) if subcommand == "run" else arguments
     )
-    requested = _requested_jobs(job_arguments)
+    requested = _requested_jobs(swiftpm_arguments)
     if requested is None:
         _report_jobs_past_the_core_count(limit)
-        if subcommand == "run":
-            return [subcommand, "--jobs", str(limit), *arguments]
-        return [*result, "--jobs", str(limit)]
-    if requested <= 0:
-        raise SystemExit("SwiftPM --jobs must be positive")
-    if requested > limit:
-        raise SystemExit(
-            f"requested SwiftPM --jobs {requested} exceeds TBD_SWIFT_JOBS={limit}; "
-            "lower the command, or raise TBD_SWIFT_JOBS if you own this machine"
-        )
-    _report_jobs_past_the_core_count(requested)
-    return result
+        added = ["--jobs", str(limit)]
+    else:
+        if requested <= 0:
+            raise SystemExit("SwiftPM --jobs must be positive")
+        if requested > limit:
+            raise SystemExit(
+                f"requested SwiftPM --jobs {requested} exceeds TBD_SWIFT_JOBS={limit}; "
+                "lower the command, or raise TBD_SWIFT_JOBS if you own this machine"
+            )
+        _report_jobs_past_the_core_count(requested)
+        added = []
+
+    added += _module_cache_arguments(subcommand, swiftpm_arguments)
+    if not added:
+        return result
+    if subcommand == "run":
+        return [subcommand, *added, *arguments]
+    return [*result, *added]
 
 
 def _lock_path() -> Path:
