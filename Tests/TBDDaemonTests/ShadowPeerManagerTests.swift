@@ -207,6 +207,40 @@ private actor FakeLocalDelivery: LocalPeerDelivering {
     func path(at index: Int) -> String { delivered[index].path }
 }
 
+/// A `ShadowPeerArtifactRecording` that keeps the whitelist in memory.
+///
+/// The real one is a database table, and the reason it exists at all is that a
+/// shadow's record carries no marker of TBD's own — so the rows the manager
+/// writes here are the only thing `ShadowPeerReconciler` can later recognise a
+/// helper, a socket or a record by.
+private actor FakeArtifactRecorder: ShadowPeerArtifactRecording {
+    struct Entry: Equatable {
+        let provider: String
+        let handle: String
+        let name: String
+        let pid: pid_t
+        let sessionID: String
+        let socketPath: String
+        let recordPath: String
+    }
+
+    private(set) var recorded: [Entry] = []
+    private(set) var forgotten: [pid_t] = []
+
+    func recordPublished(
+        provider: String, handle: String, name: String, pid: pid_t,
+        sessionID: String, socketPath: String, recordPath: String
+    ) async {
+        recorded.append(Entry(
+            provider: provider, handle: handle, name: name, pid: pid,
+            sessionID: sessionID, socketPath: socketPath, recordPath: recordPath))
+    }
+
+    func forgetPublished(pid: pid_t) async {
+        forgotten.append(pid)
+    }
+}
+
 /// Deterministic handle minting, so a test can name the handle TBD minted
 /// instead of matching a random one.
 private final class HandleCounter: @unchecked Sendable {
@@ -261,6 +295,7 @@ struct ShadowPeerManagerTests {
         let link: FakePeerLink
         let spawner: FakeShadowPeerSpawner
         let delivery: FakeLocalDelivery
+        let recorder: FakeArtifactRecorder
     }
 
     private static func makeHarness(
@@ -272,6 +307,7 @@ struct ShadowPeerManagerTests {
         let spawner = FakeShadowPeerSpawner()
         let delivery = FakeLocalDelivery()
         let counter = HandleCounter()
+        let recorder = FakeArtifactRecorder()
         let manager = ShadowPeerManager(
             provider: "cloud",
             link: link,
@@ -282,8 +318,11 @@ struct ShadowPeerManagerTests {
             sessionsDirectory: sessionsDirectory,
             mintHandle: counter.mint,
             mintAgentMessageID: { "agent-msg" },
-            mintSessionID: { "session-1" })
-        return Harness(manager: manager, link: link, spawner: spawner, delivery: delivery)
+            mintSessionID: { "session-1" },
+            artifactRecorder: recorder)
+        return Harness(
+            manager: manager, link: link, spawner: spawner, delivery: delivery,
+            recorder: recorder)
     }
 
     /// One shadow published and one local session announced — the state every
@@ -295,6 +334,59 @@ struct ShadowPeerManagerTests {
         let localHandle = await harness.manager.handle(
             forLocalPeerAt: "/tmp/tbd-test-shadow-socks/4242.sock", name: "acme-laptop:review %7")
         return (harness, localHandle)
+    }
+
+    // MARK: - The reclaimer's whitelist
+
+    /// **The bookkeeping is the recognition.** A shadow's record carries no
+    /// field Claude Code does not define — one unknown key was measured to make
+    /// a record invisible to every listing while surviving on disk — so TBD
+    /// cannot mark its own records from the inside, and a path identifies
+    /// nothing in a directory every session on the machine binds into. If the
+    /// publish path does not write this row, the helper, its socket and its
+    /// record are unrecognisable to `ShadowPeerReconciler` forever.
+    @Test func publishingAShadowWritesItsThreeArtifactsToTheWhitelist() async {
+        let harness = Self.makeHarness()
+        await harness.manager.handle(.hello(origin: "acme-box", peerProtocol: 1))
+
+        await harness.manager.handle(.peer(Self.remotePeer()))
+
+        let recorded = await harness.recorder.recorded
+        #expect(recorded == [FakeArtifactRecorder.Entry(
+            provider: "cloud",
+            handle: "remote-1",
+            name: "cloud:fix-ci",
+            pid: 901,
+            sessionID: "session-1",
+            socketPath: Self.socketDirectory.appendingPathComponent("901.sock").path,
+            recordPath: Self.sessionsDirectory.appendingPathComponent("901.json").path)])
+    }
+
+    /// And the row is retired when the shadow is, so the sweep is not left
+    /// hunting artifacts that were cleaned up properly.
+    @Test func withdrawingAShadowRetiresItsWhitelistRow() async {
+        let harness = Self.makeHarness()
+        await harness.manager.handle(.hello(origin: "acme-box", peerProtocol: 1))
+        await harness.manager.handle(.peer(Self.remotePeer()))
+
+        await harness.manager.handle(.peerGone(handle: "remote-1"))
+
+        #expect(await harness.recorder.forgotten == [901])
+    }
+
+    /// A link that drops takes every shadow with it — and every row too. The
+    /// helpers are terminated here, so leaving the rows behind would make the
+    /// next sweep chase artifacts that are already gone.
+    @Test func aLinkGoingDownRetiresEveryWhitelistRow() async {
+        let harness = Self.makeHarness()
+        await harness.manager.handle(.hello(origin: "acme-box", peerProtocol: 1))
+        await harness.manager.handle(.peer(Self.remotePeer()))
+        await harness.manager.handle(.peer(Self.remotePeer(
+            handle: "remote-2", name: "other", sessionID: Self.remoteSessionID)))
+
+        await harness.manager.linkStateChanged(to: .down)
+
+        #expect(await harness.recorder.forgotten.sorted() == [901, 902])
     }
 
     // MARK: - The handle table is the security boundary

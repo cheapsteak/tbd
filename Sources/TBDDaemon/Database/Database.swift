@@ -30,6 +30,11 @@ public final class TBDDatabase: Sendable {
     public let watchDeskLeases: WatchDeskLeaseStore
     public let prBindings: PRBindingStore
     public let claudeCloudSessions: ClaudeCloudSessionStore
+    /// The shadow-peer whitelist `ShadowPeerReconciler` reclaims against
+    /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Reclamation
+    /// and detection"). Durable because a shadow's record carries no marker of
+    /// TBD's own, so a row that is lost is a shadow nothing can recognise.
+    public let shadowPeerArtifacts: ShadowPeerArtifactStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -72,6 +77,7 @@ public final class TBDDatabase: Sendable {
         self.watchDeskLeases = WatchDeskLeaseStore(writer: pool)
         self.prBindings = PRBindingStore(writer: pool)
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: pool)
+        self.shadowPeerArtifacts = ShadowPeerArtifactStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         // Both refusal gates before touching the database: rethrow a
@@ -119,6 +125,7 @@ public final class TBDDatabase: Sendable {
         self.watchDeskLeases = WatchDeskLeaseStore(writer: queue)
         self.prBindings = PRBindingStore(writer: queue)
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: queue)
+        self.shadowPeerArtifacts = ShadowPeerArtifactStore(writer: queue)
         // The same gates `init(path:)` runs. `migrationsForRegistration()`
         // cannot throw, so without this a resource bundle that failed to
         // resolve under `scripts/test.sh` would surface as scattered "no such

@@ -79,6 +79,19 @@ public final class Daemon: Sendable {
     /// it the same way they reach `rpcRouter.hibernationCoordinator`. `nil`
     /// in mock mode (never constructed).
     public nonisolated(unsafe) var orphanGC: OrphanGC?
+    /// The registry a live `ShadowPeerManager` registers itself with, so
+    /// `ShadowPeerReconciler` can tell a live shadow from an orphan. Owned here
+    /// because the two have opposite lifetimes: the reconciler runs for the
+    /// daemon's life, a manager comes and goes with its provider's peer link.
+    /// `nil` in mock mode.
+    public nonisolated(unsafe) var shadowPeerBridges: ShadowPeerBridgeRegistry?
+    /// The named reconciler for a shadow peer's helper process, socket and
+    /// record (`docs/specs/2026-08-29-remote-peer-messaging-design.md`,
+    /// "Reclamation and detection"). `nil` in mock mode.
+    public nonisolated(unsafe) var shadowPeerReconciler: ShadowPeerReconciler?
+    /// Its own tick — deliberately not folded into `gcTask`, whose hourly
+    /// cadence is far too slow for registry hygiene. `nil` in mock mode.
+    public nonisolated(unsafe) var shadowPeerReconcilerTask: Task<Void, Never>?
     /// Remote-backends actor (Task 7). Owned here so shutdown can reach it —
     /// the events supervisor's own supervision task retains the manager
     /// strongly, so without an explicit `shutdown()` call it (and its child
@@ -924,6 +937,26 @@ public final class Daemon: Sendable {
             self.pendingQuestionExpirySweep = questionSweep
             await questionSweep.start()
 
+            // 11a-shadow. Reclaim the durable artifacts of shadow peers — a
+            // helper process, the socket it bound, and the record it published
+            // into the registry every Claude Code session on this machine
+            // reads. Sweeps once now (which is what reclaims a previous
+            // daemon's leavings, including the recycled-pid ghosts Claude
+            // Code's own reaper provably will not collect) and then on its own
+            // tick.
+            //
+            // Not gated on `remotePeerMessagingEnabled`: this is the
+            // reclaimer's ledger rather than the feature, its whitelist is
+            // empty on any install that never published a shadow, and gating it
+            // would strand every artifact the moment somebody turned the
+            // feature off.
+            let shadowPeerBridges = ShadowPeerBridgeRegistry()
+            self.shadowPeerBridges = shadowPeerBridges
+            let shadowPeerReconciler = ShadowPeerReconciler(
+                artifacts: database.shadowPeerArtifacts, bridges: shadowPeerBridges)
+            self.shadowPeerReconciler = shadowPeerReconciler
+            self.shadowPeerReconcilerTask = Task { await shadowPeerReconciler.run() }
+
             // 11a-gc. Orphan maintenance: reap abandoned agent worktrees + scratchpads
             // and reconcile scratch terminals against their shared tmux server
             // (event-driven cleanup already runs via `lifecycle.onWorktreeRemoved`
@@ -1361,6 +1394,7 @@ public final class Daemon: Sendable {
         reaperTask?.cancel()
         hibernationSweepTask?.cancel()
         gcTask?.cancel()
+        shadowPeerReconcilerTask?.cancel()
 
         // Stop servers
         if let sock = socketServer {

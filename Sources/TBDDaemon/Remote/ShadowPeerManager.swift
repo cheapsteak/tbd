@@ -288,6 +288,18 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     private let mintAgentMessageID: @Sendable () -> String
     /// Mints the stable session id a shadow's record keeps across rewrites.
     private let mintSessionID: @Sendable () -> String
+    /// Where a published shadow's three artifacts are written down so they
+    /// survive a daemon restart.
+    ///
+    /// **The manager's own table is not enough, and that is not a nicety.** A
+    /// shadow's record carries no field Claude Code does not define (an unknown
+    /// key was measured to make a record invisible to every listing while
+    /// surviving on disk), so TBD cannot mark its own records from the inside
+    /// and cannot recognise one by its path either. Bookkeeping that died with
+    /// the daemon would leave every shadow of a crashed daemon unrecognisable —
+    /// a helper, a socket and a record that nothing on the machine can ever
+    /// claim. `ShadowPeerReconciler` reclaims against exactly these rows.
+    private let artifactRecorder: any ShadowPeerArtifactRecording
 
     private var shadows: [String: Shadow] = [:]
     private var localPeers: [String: LocalPeer] = [:]
@@ -328,7 +340,8 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         grantedMode: String = ShadowPeerAttribution.grantedMode,
         mintHandle: @escaping @Sendable () -> String = ShadowPeerManager.randomHandle,
         mintAgentMessageID: @escaping @Sendable () -> String = { UUID().uuidString },
-        mintSessionID: @escaping @Sendable () -> String = { UUID().uuidString }
+        mintSessionID: @escaping @Sendable () -> String = { UUID().uuidString },
+        artifactRecorder: any ShadowPeerArtifactRecording = UnrecordedShadowPeerArtifacts()
     ) {
         self.provider = provider
         self.link = link
@@ -341,6 +354,7 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         self.mintHandle = mintHandle
         self.mintAgentMessageID = mintAgentMessageID
         self.mintSessionID = mintSessionID
+        self.artifactRecorder = artifactRecorder
     }
 
     /// An opaque handle. **Random, and it must stay that way**: the contract
@@ -429,11 +443,12 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         // this machine, minted locally and stable across its rewrites. It is
         // not `peer.sessionID`, which names a session on the provider's host
         // and is TBD's join key rather than anything a local record carries.
+        let sessionID = mintSessionID()
         let invocation = ShadowPeerHelperInvocation(
             handle: peer.handle, name: name, status: peer.status,
             peerProtocol: peer.peerProtocol, cwd: site.path,
             socketDirectory: socketDirectory, sessionsDirectory: sessionsDirectory,
-            sessionID: mintSessionID())
+            sessionID: sessionID)
         let helper: any ShadowPeerHelperHandle
         do {
             helper = try await spawner.spawn(invocation)
@@ -446,6 +461,17 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
             return
         }
 
+        // Written down before the guard below can decide not to install this
+        // helper. The record and the socket exist from the instant the process
+        // starts, so bookkeeping that waited for a successful install would
+        // leave a window in which both artifacts are on disk and nothing can
+        // recognise them. The reconciler's publication grace is what keeps a
+        // row this fresh from being read as an orphan.
+        await artifactRecorder.recordPublished(
+            provider: provider, handle: peer.handle, name: name, pid: helper.pid,
+            sessionID: sessionID, socketPath: helper.socketPath,
+            recordPath: helper.recordPath)
+
         // Two races land here, and both end the same way: the process this
         // call just started is reclaimed rather than installed. A second `peer`
         // line for the same handle means somebody else already owns the table
@@ -455,6 +481,7 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         // would ever close.
         guard generation == linkGeneration, shadows[peer.handle] == nil else {
             await helper.terminate()
+            await artifactRecorder.forgetPublished(pid: helper.pid)
             return
         }
 
@@ -821,6 +848,10 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         shadow.reader?.cancel()
         try? await shadow.helper.send(.peerGone(handle: handle))
         await shadow.helper.terminate()
+        // The row goes only after the helper is confirmed gone: it names the
+        // artifacts, so retiring it first would drop the whitelist entry for
+        // anything the teardown failed to clean up.
+        await artifactRecorder.forgetPublished(pid: shadow.helper.pid)
         shadowPeerLogger.info("""
             unpublished shadow \(shadow.name, privacy: .public) \
             (\(handle, privacy: .public)) because \(reason, privacy: .public)
