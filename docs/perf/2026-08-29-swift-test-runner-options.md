@@ -111,10 +111,55 @@ Sampled with `top -l 1` while the above was in flight:
 - 30 directories under `~/tbd/worktrees/tbd`
 
 Forty per cent system time on a 12-core machine is about five cores burned in
-the kernel before any test runs. Top consumers during the sample included
-`fseventsd` (99% of a core), `XprotectService` (86%), Chrome (70%) and
-`WindowServer` (57%) — the per-worktree filesystem-event and scanning tax, not
-compilation.
+the kernel before any test runs. Sampled instantaneously during a build, out of
+1200% available: `kernel_task` **221%**, `fseventsd` **101%**, `WindowServer`
+38% — against 49% for all thirteen `swift-frontend` processes put together.
+
+`fseventsd` is not a subscriber-driven watch list — it journals every
+filesystem event on the volume unconditionally — so its core goes to write
+*traffic*, and there is no watcher of ours to switch off.
+
+A traced capture (`sudo fs_usage`, 20 s) put the event rate at **1,554,418
+operations — ~77,700 per second** — and that volume, not any watcher, is what
+fseventsd is journaling. Its own stacks confirm the shape: the hot thread,
+`com.apple.fseventsd.notify`, sits in a tight loop of `_platform_strncmp` under
+a mutex, i.e. path matching, for 8045 of 8045 samples.
+
+The producers are the fleet, and they are **not** this repo:
+
+- `bash` **41.3%** and `git` **20.6%** — together ~62%. git's operations are
+  ~400:1 concentrated on an unrelated project's checkout that shares this
+  machine; TBD's own worktree root accounts for six of 6,055 sampled git lines.
+  A live process listing found the generators to be another project's dev setup
+  scripts and a `.claude/hooks/` marker script on a 3-second loop.
+- `TBDDaemon` **12.0%**, most of it one bug: an unfiltered note list in the
+  app's 2-second poll re-reads every note row's file from disk, ~700 path
+  resolutions per cycle of which ~94% are for notes that cannot yield content.
+  Real, and worth fixing — and **~1.6% of machine-wide events**, so it will not
+  move fseventsd.
+- `swift-frontend` **6.0%** of all operations, though 36.8% of the
+  *write-shaped* ones. Builds are a minority of the event load; the earlier
+  assumption that build artifacts dominated was wrong.
+
+The honest summary is that ~62% of the machine's filesystem traffic is ~40
+concurrent agent sessions, their hooks and shells, and unrelated repositories'
+tooling — doing their job, on one laptop.
+
+Two things that sample rules **out**, worth stating because both are the
+intuitive culprit and neither is guilty. Spotlight indexing is **disabled** on
+every volume (`mdutil -s -a`), and `mdfind` for object files under the worktree
+root returns zero. And `lsof /dev/fsevents` lists nothing — but that instrument
+is a trap: only fseventsd itself opens that device, and clients connect over
+Mach/XPC. The real subscriber list is in the sample output as
+`com.apple.fseventsd.client.<pid>` thread names — 28 client threads, including
+`cfprefsd` twice, `node`, `Finder` and a `swiftpm-testing-helper`. Reading the
+absence of `lsof` output as "nothing is watching" is wrong, and was.
+
+One avoidable consumer did turn up: `tmutil isexcluded` reports the worktree
+root and the `.build` trees under it as `[Included]`, so 25 GB of purely
+ephemeral artifacts are queued for Time Machine. `backupd` was idle throughout
+the sampling, so it is not part of the slowness measured here, but excluding
+those trees is free and independent of everything else in this document.
 
 The comparison that settles it: CI ran this same tree green on a **3-core**
 `macos-26` runner (run `33232886152`, 2026-08-29):
@@ -210,6 +255,74 @@ That mapping matters: all 42 failures reported from the local run that prompted
 this were `Time limit was exceeded` or gate starvation, which is precisely the
 class this addresses, and none of them is the class it does not.
 
+### The knob is live on our build — positive control
+
+Before any A/B is worth reading, the variable has to be shown to *do* something.
+Measured against the 6.3.3-built bundle, `--skip-build`, `TBDSharedTests` only,
+arms interleaved so load drift hits both:
+
+- uncapped — 869 tests in 86 suites, reported **0.612 s**, then **0.300 s**
+- `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=1` — the same 869 tests,
+  reported **3.357 s**, then **0.909 s**
+
+Three to five times longer in both pairs, with the full 869 executed in every
+arm — the count is read from the summary line, because `--filter` exits green on
+zero matches and an exit status alone would not have caught a run of nothing.
+
+**Read the reported test-run duration, not shell wall time.** The same four arms
+took 154.4 / 77.5 / 22.9 / 23.5 s of wall, which tracks SwiftPM's manifest
+re-resolve and no-op build check rather than anything about tests. A comparison
+ranked on wall time here would have reported the *uncapped* arm as six times
+slower than the capped one, which is an artifact of running first.
+
+### Measured on the real suite: the cap works, and it is expensive
+
+Four interleaved arms over the whole package, `--skip-build`, on the 6.3.3
+build. Counts and failure kinds come from the per-arm xUnit file, not from the
+log. Width 24 is `NCORES * 2` — the bound upstream's own PR shipped and then
+commented out.
+
+- **uncapped** — 8,534 tests, **16** failures (**9** `Time limit was exceeded`),
+  500.9 s reported / 521.9 s wall
+- **width 24** — 8,534 tests, **4** failures (**0** time-limit), 1133.2 s /
+  1159.4 s
+- **uncapped** — 8,534 tests, **19** failures (**9** time-limit), 522.6 s /
+  549.0 s
+- **width 24** — 8,534 tests, **2** failures (**0** time-limit), 2143.0 s /
+  2173.2 s
+
+**The time-limit starvation class goes 9 to 0, in both capped arms.** That is
+the prediction §3's reading of the runner made, now measured rather than
+inferred. The suites that failed uncapped are the ones this repo already
+suspects: `AppearanceDebounceTests` and `SearchQueryDebouncerTests` — named in
+`Tests/CLAUDE.md` as the two migrated to `EventDrivenTestClock` *because* they
+reproduced starvation in a full-suite soak — plus `TerminalLockedAccessTests`,
+`TerminalTeardownReapTests` and `ThemeStoreTests`.
+
+**And it costs 3.1x the wall clock**: mean 535.5 s uncapped against 1666.3 s
+capped. That is not a tuning detail, it is the headline trade.
+
+**Why, and why 24 is the wrong number.** The gate admits *test cases*, and a
+**suspended test keeps its slot**. This suite is dominated by tests that wait —
+bounded polls, clock handshakes, tmux — so at width 24 waits that used to
+overlap now queue behind each other. `NCORES * 2` is sized for CPU-bound tests.
+A wait-bound suite wants a width high enough to bound scheduler pressure without
+serializing the waiting, which is somewhere far above 24 and was not measured
+here. **Do not adopt 24.**
+
+Two instrument bugs found while doing this, both of which produced confident
+wrong numbers before they were caught:
+
+- **SwiftPM writes two xUnit files.** `<name>.xml` holds the *XCTest* results —
+  22 tests, 0 failures — and `<name>-swift-testing.xml` holds the 8,534-test
+  Swift Testing run. Reading the first reports a green 22-test run for a suite
+  that failed. This is the same class of wrong answer `test.yml`'s comment
+  warns about for log scraping, reproduced *via* the structured file it
+  recommends instead.
+- Ranking arms on shell **wall** time rather than the reported run time credits
+  whichever arm did not pay SwiftPM's manifest re-resolve. See the positive
+  control above.
+
 ### What is still missing upstream
 
 [Issue #1086, "Expose parallelism"](https://github.com/swiftlang/swift-testing/issues/1086)
@@ -266,6 +379,23 @@ has to be told the number out of band.
 So the local/CI toolchain skew is unintentional: the 6.3.3 toolchain the
 workflow says local validation uses is on the disk and unused.
 
+**A standalone toolchain needs no Xcode update, and this tree builds under it.**
+Verified rather than assumed: a cold `swift-safe build --build-tests` driven
+through `TBD_SWIFT_BIN` at the 6.3.3 toolchain completed **exit 0 with zero
+errors** against the installed Xcode 26.3 macOS 26.2 SDK. The resulting
+`TBDPackageTests.xctest` links `@rpath/libTesting.dylib` — the toolchain's own
+Swift Testing library, which is the copy carrying the width knob — rather than
+Xcode's `Testing.framework`, which does not.
+
+The one real cost of the switch is that **`.build` is toolchain-specific**, so
+adopting 6.3.3 makes every worktree pay one cold build. On this machine that is
+not cheap: the cold build above took **2441 s (40.7 minutes)**, and §2B explains
+where that time goes — sampled mid-build, the 13 `swift-frontend` processes held
+**49% CPU combined out of 1200% available**, against `kernel_task` at 221% and
+`fseventsd` at 101%, with every frontend in state `R` (runnable, not blocked on
+I/O). The compiler was not short of work or memory; it was short of turns. Eight
+worktrees hold `.build` trees totalling **25 GB** against 24 GB of free disk.
+
 ## 6. Ranked recommendation
 
 Ranked by expected win per unit of cost and risk.
@@ -302,18 +432,18 @@ Cost: one cold rebuild per worktree, and a possibility that something compiles
 differently under 6.3 that CI has been absorbing all along — unlikely, since CI
 builds this tree on 6.3.3 every run. Modest, mostly hygiene.
 
-**4. Set `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH` once on 6.3.3.**
-Expected win, from the runner source rather than from measurement: it should
-retire the `Time limit was exceeded` and gate-starvation failure class — all 42
-failures reported from the run that prompted this — by keeping queue time out
-of every `.timeLimit` and every bounded wait. Expected non-win:
-wall time probably does not improve and may rise slightly (PR #1390: "does not
-generally impact execution time"), and reported per-test durations stay
-inflated. Cost: one environment variable, and it is `@_spi(Experimental)` with
-an uncapped upstream default, so it is a knob upstream has not committed to.
-Fits this repo's default-off-flag doctrine cleanly. **Also needs a spec** — it
-changes how the suite decides something, and picking the width is a theory
-call.
+**4. Set `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH` once on 6.3.3 — but
+not at 24, and not without picking the width first.** Measured, not inferred
+(§3): the cap takes `Time limit was exceeded` from 9 to 0 in both capped arms,
+and costs **3.1x the wall clock** at width 24. Both halves are real, and the
+second one disqualifies the obvious setting: a suite already too slow to run
+locally cannot pay 3x to lose a failure class. The knob is worth having, at a
+width nobody has measured yet — high enough to bound scheduler pressure, high
+enough not to serialize the waiting that dominates this suite. Cost: one
+environment variable, `@_spi(Experimental)`, with an uncapped upstream default,
+so it is a knob upstream has not committed to. Fits the default-off-flag
+doctrine cleanly. **Needs a spec** — it changes how the suite decides
+something, and choosing the width is a theory call, not a tuning sweep.
 
 **5. Mirror CI's two-pass split in the local default.** Already measured in
 this repo: p90 26.4 s → 14.6 s for +26 s of wall time. CI does it; local does
@@ -345,14 +475,15 @@ engineering one, and it belongs to the person running the fleet.
   drove it up should fall, and the right move then is to re-derive the triple
   downward, not to leave it where it is.
 
-**What would change the ranking:** an interleaved A/B of the width cap on the
-real suite, run on an idle machine — arms alternating uncapped and capped at
-some width, population held constant, reporting the executed test **count** per
-arm (a `--filter` matching nothing exits green), the count of
-`Time limit was exceeded` issues, and wall time. If capping does *not* reduce
-the time-limit failures, #4 is wrong and the reading of the runner source above
-is wrong with it. That measurement is worth taking on a quiet box; it was not
-worth taking on this one.
+**What the ranking is still waiting on.** The A/B this section originally asked
+for was run (§3), and it confirmed the mechanism while disqualifying the width.
+What remains unmeasured is the width itself: a sweep at, say, 64 / 128 / 256,
+interleaved against an uncapped control, looking for the smallest width that
+holds time-limit failures at zero without a wall-clock penalty. Until someone
+takes that, #4 names a knob rather than a setting. On a quiet machine it is a
+few hours; on this one the arms above already drifted by a factor of two
+between the two capped runs (1159 s then 2173 s), which is itself a reason not
+to tune here.
 
 ## 8. Sources
 
