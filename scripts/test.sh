@@ -39,10 +39,13 @@
 #      the error. See "READING A PERMISSION-DENIED FAILURE" below.
 #   3. DETECTION — on in CI (`$CI` set), off elsewhere; `--fingerprint` opts in
 #      locally and `--no-fingerprint` forces it off anywhere. The real `~/tbd`,
-#      `~/.claude`, `~/.codex` and tmux socket directory are fingerprinted
-#      before and after, and a changed fingerprint fails the run even when
-#      every test passed. This is now a backstop rather than the primary
-#      guard; see "WHY THE TRIPWIRE SUPERSEDES THE FINGERPRINT".
+#      `~/.claude`, `~/.codex`, the tmux socket directory and
+#      `~/Library/Preferences` are fingerprinted before and after, and a changed
+#      fingerprint fails the run even when every test passed. This is now a
+#      backstop rather than the primary guard for the first four; see "WHY THE
+#      TRIPWIRE SUPERSEDES THE FINGERPRINT". For the fifth it is the ONLY
+#      guard — no fence variable reaches `cfprefsd` — which is why the arm
+#      exists at all.
 #
 # READING A PERMISSION-DENIED FAILURE. If a test under this wrapper fails with
 # "You don't have permission to save the file …" or `EACCES`/`NSFileWriteNoPermissionError`
@@ -76,7 +79,12 @@
 #   - **`UserDefaults`.** `cfprefsd` resolves preference paths over XPC, so it
 #     ignores `CFFIXED_USER_HOME` entirely. The existing
 #     `AppState(userDefaults: UserDefaults(suiteName:))` discipline in
-#     `CLAUDE.md` stays load-bearing.
+#     `CLAUDE.md` stays load-bearing, and so does minting the suite through the
+#     `Tests/TestSupport` helper: `removePersistentDomain(forName:)` clears a
+#     domain's values without unlinking its file, and ~520,000 orphaned
+#     `~/Library/Preferences` plists (~2.1 GB) accumulated that way over months
+#     while every other layer here read green. Layer 3's Preferences arm is
+#     what makes that visible now; containment cannot.
 #   - **The Keychain.** It breaks rather than redirects under
 #     `CFFIXED_USER_HOME`: `SecItemAdd` returns `-60006` and
 #     `SecItemCopyMatching` returns `-25300`, and pre-seeding
@@ -939,7 +947,8 @@ fingerprint_after="$(scripts/tbd-home-fingerprint.sh)"
 if [ "$fingerprint_before" != "$fingerprint_after" ]; then
   echo >&2
   echo "=======================================================================" >&2
-  echo "  THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex OR /tmp/tmux-<uid>" >&2
+  echo "  THE TEST RUN WROTE INTO A REAL STORE: ~/tbd, ~/.claude, ~/.codex," >&2
+  echo "  /tmp/tmux-<uid> OR ~/Library/Preferences" >&2
   echo "=======================================================================" >&2
   echo >&2
   echo "CLAUDE.md: \"Tests must not touch ~/tbd\". Something resolved a real" >&2
@@ -966,8 +975,19 @@ if [ "$fingerprint_before" != "$fingerprint_after" ]; then
   echo "Something spawned tmux with an environment that dropped TMUX_TMPDIR:" >&2
   echo "look for a Process whose \`environment\` is built from scratch." >&2
   echo >&2
-  echo "Reaching here at all is now unusual: a hand-built \$HOME path normally" >&2
-  echo "dies at its call site on the mode-000 decoys in $fake_home." >&2
+  echo "If the entry is <preferences>, a test minted a UserDefaults suite and" >&2
+  echo "left its backing plist behind. The fix is to mint the suite through" >&2
+  echo "the Tests/TestSupport helper, which unlinks the file on teardown —" >&2
+  echo "removePersistentDomain(forName:) alone clears the domain's values and" >&2
+  echo "leaves a 42-byte empty plist there forever. Neither HOME nor" >&2
+  echo "CFFIXED_USER_HOME can contain this, so there is no fence to reach for:" >&2
+  echo "cfprefsd resolves preferences over XPC, in its own process, and never" >&2
+  echo "consults either. ~520,000 such files (~2.1 GB) accumulated in one" >&2
+  echo "real ~/Library/Preferences before this arm existed." >&2
+  echo >&2
+  echo "Reaching here at all is now unusual — except for <preferences>, which" >&2
+  echo "no decoy can cover: a hand-built \$HOME path normally dies at its call" >&2
+  echo "site on the mode-000 decoys in $fake_home." >&2
   echo "A leak that got past those wrote somewhere the decoys do not cover —" >&2
   echo "note the path above and consider whether it needs a third decoy." >&2
   echo >&2

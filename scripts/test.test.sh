@@ -95,10 +95,16 @@ rmfix()           { chmod -R u+rwx "$1" 2>/dev/null; rm -rf "$1"; }
 # swift. Echoes the fixture root.
 mkfix() {
   local d; d="$(mktmpd)"
+  # `Library/Preferences` is populated with an unrelated domain because that is
+  # what the real directory looks like: tens of thousands of plists nothing in
+  # this repo owns. An arm that reddened on those would be reporting the
+  # machine rather than the run.
   mkdir -p "$d/home/tbd/worktrees/slot" \
            "$d/home/.claude/projects/-acme-repo" \
            "$d/home/.codex/plugins/cache" \
+           "$d/home/Library/Preferences" \
            "$d/tmp" "$d/bin"
+  : > "$d/home/Library/Preferences/com.acme.unrelated.plist"
   : > "$d/home/tbd/state.db"
   mkdir -p "$d/home/tbd/worktrees/slot/existing-worktree"
   cat > "$d/bin/fake-swift" <<'STUB'
@@ -137,6 +143,16 @@ fake_swift_invocation="$(wc -l < "$FAKE_SWIFT_DUMP.count" | tr -d ' ')"
 if [ -n "${FAKE_SWIFT_DISARM:-}" ]; then chmod 755 "$HOME/$FAKE_SWIFT_DISARM"; fi
 # Write into the fixture's real home, as a leak that escaped the fence would.
 if [ -n "${FAKE_SWIFT_LEAK:-}" ]; then mkdir -p "$FAKE_SWIFT_LEAK"; fi
+# The same thing for a leak that is a FILE rather than a directory — a stray
+# `~/Library/Preferences/TBDTests.<label>.<uuid>.plist` is a file, and
+# `mkdir -p` would model it as a directory the Preferences arm counts anyway,
+# proving less than it looks. Space-separated absolute paths; parents created.
+if [ -n "${FAKE_SWIFT_LEAK_FILE:-}" ]; then
+  for leaked_file in $FAKE_SWIFT_LEAK_FILE; do
+    mkdir -p "$(dirname "$leaked_file")"
+    : > "$leaked_file"
+  done
+fi
 # Leave sockets where the run's tmux servers would leave them. tmux creates
 # `$TMUX_TMPDIR/tmux-<uid>` itself and never unlinks a socket on server exit,
 # so this is what the directory looks like when the suite finishes — dead
@@ -211,7 +227,7 @@ run_script() {
                  -u TBD_TEST_CODEX_HOME -u TBD_SWIFT_LOCK_PATH -u CFFIXED_USER_HOME \
                  -u TBD_SWIFT_JOBS -u TBD_SWIFT_LOCK_TIMEOUT_SECONDS \
                  -u TBD_SWIFT_HEARTBEAT_SECONDS -u TBD_SWIFT_ALLOW_ORPHAN \
-                 -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_RC \
+                 -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_LEAK_FILE -u FAKE_SWIFT_RC \
                  -u FAKE_SWIFT_TMUX_SOCKETS -u FAKE_SWIFT_TEST_COUNT \
                  -u TBD_REMOTE_VERIFY -u TBD_REMOTE_VERIFY_YIELD_SECONDS \
                  -u TBD_SWIFT_QUEUE_YIELD_SECONDS \
@@ -435,6 +451,14 @@ test_decoy_replaced_by_a_symlink_during_the_run_fails_the_run() {
 # 3. Fingerprint diffing, through the wrapper
 # ---------------------------------------------------------------------------
 
+# THE REPORT'S BANNER, COMPOSED RATHER THAN GREPPED FOR A FRAGMENT. It wraps
+# onto two lines because it names five roots, and a case that matched only the
+# first line would keep passing if the second were dropped — which is exactly
+# how a root can fall out of the report while every case stays green.
+LEAK_BANNER="$(printf '%s\n%s' \
+  "  THE TEST RUN WROTE INTO A REAL STORE: ~/tbd, ~/.claude, ~/.codex," \
+  "  /tmp/tmux-<uid> OR ~/Library/Preferences")"
+
 # Each arm leaks one entry into the fixture's real home — the shape a leak that
 # got past the fence would take — and must be named in the diff.
 _assert_leak_is_detected() {
@@ -443,7 +467,7 @@ _assert_leak_is_detected() {
   run_wrapper "$fix" --fingerprint
   RUN_ENV=()
   assert_nonzero "$label fails the run" "$RUN_RC"
-  assert_contains "$label is reported" "$RUN_OUT" "THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex OR /tmp/tmux-<uid>"
+  assert_contains "$label is reported" "$RUN_OUT" "$LEAK_BANNER"
   # `+  ` — the two spaces are the rendering: `sed 's/^>/  + /'` over a diff
   # line that already carries `> `. Pinned as-is so a reformat is visible.
   assert_contains "$label names the entry" "$RUN_OUT" "+  $expected"
@@ -471,6 +495,46 @@ test_fingerprint_detects_a_new_claude_projects_entry() {
 
 test_fingerprint_detects_a_new_codex_entry() {
   _assert_leak_is_detected "a new ~/.codex entry" ".codex/leaked" "~/.codex/leaked"
+}
+
+# THE FIFTH ROOT, AND THE ONLY ONE NO FENCE VARIABLE REACHES. `cfprefsd`
+# resolves `UserDefaults(suiteName:)` over XPC, in its own process, so the
+# backing plist lands in the REAL `~/Library/Preferences` however `HOME` and
+# `CFFIXED_USER_HOME` are pointed — which is why the leak ran for months with
+# every other layer green. A file rather than a directory, because that is what
+# a plist is; see `FAKE_SWIFT_LEAK_FILE` in the stub.
+test_fingerprint_detects_a_leaked_test_suite_plist() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(FAKE_SWIFT_LEAK_FILE="$fix/home/Library/Preferences/TBDTests.AppState.6F2C1A.plist")
+  run_wrapper "$fix" --fingerprint
+  RUN_ENV=()
+  assert_nonzero "a leaked test-suite plist fails the run" "$RUN_RC"
+  assert_contains "it is reported" "$RUN_OUT" "$LEAK_BANNER"
+  # A COUNT, NOT A NAME. The real directory holds hundreds of thousands of
+  # entries, so the arm emits one line and the diff moves it from 0 to 1.
+  assert_contains "the count before is named" "$RUN_OUT" "-  <preferences> TBDTests.* count=0"
+  assert_contains "the count after is named" "$RUN_OUT" "+  <preferences> TBDTests.* count=1"
+  assert_contains "and the fix is named" "$RUN_OUT" "mint the suite through"
+  assert_contains "with the reason no fence can do it instead" "$RUN_OUT" \
+    "cfprefsd resolves preferences over XPC"
+  chmod -R 755 "$fix/tmp" 2>/dev/null
+  rmfix "$fix"
+}
+
+# THE NEGATIVE HALF, AND IT IS WHAT KEEPS THE ARM USABLE. `com.apple.*` and
+# every other domain on the box are rewritten continuously while a run is in
+# flight; an arm that reddened on those would be reporting the machine rather
+# than the run, and would be switched off inside a week — the same argument the
+# `~/.claude` and tmux arms are shaped by.
+test_fingerprint_ignores_an_unrelated_preferences_plist() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(FAKE_SWIFT_LEAK_FILE="$fix/home/Library/Preferences/com.acme.someapp.plist")
+  run_wrapper "$fix" --fingerprint
+  RUN_ENV=()
+  assert_ok "a plist outside the suite prefix passes with detection on" "$RUN_RC"
+  assert_missing "and reports nothing" "$RUN_OUT" "THE TEST RUN WROTE INTO"
+  chmod -R 755 "$fix/tmp" 2>/dev/null
+  rmfix "$fix"
 }
 
 test_fingerprint_passes_on_an_unchanged_tree() {
@@ -520,13 +584,14 @@ test_fingerprint_comparison_is_load_bearing() {
 fingerprint_with_home() { HOME="$1" TMUX_TMPDIR="$1/tmux-tmpdir" bash "$2"; }
 
 # ARMS, NOT ROOTS — the two counts differ and the smaller one is the tempting
-# mistake. There are four roots (`~/tbd`, `~/.claude`, `~/.codex`, the tmux
-# socket dir) but SIX arms, because `~/.claude` and `~/.codex` are each read
-# twice: a `-maxdepth 1` pass over the store itself, then a second pass at a
-# nested directory the depth limit puts out of the first one's reach. An arm
-# with no assertion here can be deleted wholesale and this file stays green —
-# that is how the `~/.codex/plugins/cache` arm went untested — so the
-# enumeration IS the coverage. Count in arms, and add a line when you add one.
+# mistake. There are five roots (`~/tbd`, `~/.claude`, `~/.codex`, the tmux
+# socket dir, `~/Library/Preferences`) but SEVEN arms, because `~/.claude` and
+# `~/.codex` are each read twice: a `-maxdepth 1` pass over the store itself,
+# then a second pass at a nested directory the depth limit puts out of the
+# first one's reach. An arm with no assertion here can be deleted wholesale and
+# this file stays green — that is how the `~/.codex/plugins/cache` arm went
+# untested — so the enumeration IS the coverage. Count in arms, and add a line
+# when you add one.
 test_fingerprint_script_covers_every_arm() {
   local d; d="$(mktmpd)"
   local out; out="$(fingerprint_with_home "$d" "$FINGERPRINT")"
@@ -536,6 +601,7 @@ test_fingerprint_script_covers_every_arm() {
   assert_contains "absent ~/.codex is a marker" "$out" "~/.codex <absent>"
   assert_contains "absent ~/.codex/plugins/cache is a marker" "$out" "~/.codex/plugins/cache <absent>"
   assert_contains "absent socket dir is a marker" "$out" "<tmux-sockets> <absent>"
+  assert_contains "absent ~/Library/Preferences is a marker" "$out" "<preferences> <absent>"
   rmfix "$d"
 }
 
@@ -571,6 +637,32 @@ test_fingerprint_script_sees_a_claude_projects_entry() {
   assert_contains "projects entry present after" "$after" "~/.claude/projects/-acme-leaked"
   assert_contains "the depth-1 arm lists projects either way" "$mutant_after" "~/.claude/projects"
   assert_eq "without the projects arm the snapshots are identical" "$mutant_before" "$mutant_after"
+  rmfix "$fix"
+}
+
+# WHICH ARM CAUGHT IT. The end-to-end case above cannot say — any over-broad
+# arm would satisfy it — so the Preferences arm is deleted here and the two
+# snapshots must become identical. The unrelated-domain leg is in the same case
+# on purpose: "counts TBDTests.* " and "counts everything" are both arms that
+# pass the leak assertion, and only the prefix leg tells them apart.
+test_fingerprint_script_sees_a_new_test_suite_plist() {
+  local fix; fix="$(mkfix)"
+  # MUTATION: point the arm's existence test at a path that never exists, so it
+  # always takes the `<absent>` branch and its line stops varying.
+  local no_arm; no_arm="$(mutant_of "$FINGERPRINT" 's|-d "\$real_prefs"|-d "/no/such/path"|')"
+  local before mutant_before
+  before="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  mutant_before="$(fingerprint_with_home "$fix/home" "$no_arm")"
+  : > "$fix/home/Library/Preferences/com.acme.another.plist"
+  local unrelated; unrelated="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  : > "$fix/home/Library/Preferences/TBDTests.SomeSuite.0F1E2D.plist"
+  local after mutant_after
+  after="$(fingerprint_with_home "$fix/home" "$FINGERPRINT")"
+  mutant_after="$(fingerprint_with_home "$fix/home" "$no_arm")"
+  assert_contains "an empty prefix reads count=0" "$before" "<preferences> TBDTests.* count=0"
+  assert_eq "an unrelated domain does not move the fingerprint" "$before" "$unrelated"
+  assert_contains "a leaked suite plist reads count=1" "$after" "<preferences> TBDTests.* count=1"
+  assert_eq "without the arm the snapshots are identical" "$mutant_before" "$mutant_after"
   rmfix "$fix"
 }
 
@@ -903,8 +995,7 @@ test_fingerprint_detects_a_leaked_tmux_socket() {
   run_wrapper "$fix" --fingerprint
   RUN_ENV=()
   assert_nonzero "a leaked tmux socket fails the run" "$RUN_RC"
-  assert_contains "it is reported" "$RUN_OUT" \
-    "THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex OR /tmp/tmux-<uid>"
+  assert_contains "it is reported" "$RUN_OUT" "$LEAK_BANNER"
   assert_contains "the entry is named" "$RUN_OUT" "+  <tmux-sockets>/tbd-leaked-socket"
   assert_contains "and the fix is named" "$RUN_OUT" "the fix is TMUX_TMPDIR"
   rmfix "$fix"

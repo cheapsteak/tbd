@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 #
-# Prints a stable fingerprint of the REAL `~/tbd`, `~/.claude`, `~/.codex` and
-# tmux socket directory — deliberately `$HOME/...` and the CALLER's
-# `$TMUX_TMPDIR`, never `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME` /
+# Prints a stable fingerprint of the REAL `~/tbd`, `~/.claude`, `~/.codex`, the
+# tmux socket directory and `~/Library/Preferences` — deliberately `$HOME/...`
+# and the CALLER's `$TMUX_TMPDIR`, never `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME` /
 # `$TBD_TEST_CODEX_HOME` or the fenced socket dir, because the whole point is
 # to observe the directories a test run is supposed to leave alone even while
 # those overrides point somewhere else.
+#
+# The last of those five is the one no override could have redirected anyway:
+# `cfprefsd` resolves preference paths over XPC and ignores both home variables,
+# so the Preferences arm is the ONLY layer that can see a leaked
+# `UserDefaults(suiteName:)` plist at all. See that arm at the bottom.
 #
 # Bracket a test run with two calls and diff them: any added or removed entry
 # means something wrote into a real store the run should not have touched, which
@@ -212,4 +217,54 @@ if [ -d "$real_tmux" ]; then
     | LC_ALL=C sort
 else
   echo "<tmux-sockets> <absent>"
+fi
+
+# ~/Library/Preferences — the fifth root, and the only one the fence cannot
+# reach at all. `UserDefaults(suiteName: "X")` is backed by
+# `$HOME/Library/Preferences/X.plist` (never `ByHost/`, measured at the
+# CFPreferences level), and that `~` is the REAL user home whatever this run's
+# `HOME` and `CFFIXED_USER_HOME` say: `cfprefsd` resolves preference paths over
+# XPC, in its own process, so both variables are simply not in the lookup.
+# `Tests/CLAUDE.md` had said so all along and the leak shipped anyway.
+#
+# WHAT IT CATCHES. `removePersistentDomain(forName:)` clears a domain's VALUES
+# and never unlinks its file, so every suite a test mints leaves a 42-byte empty
+# bplist behind forever — ~520,000 of them, ~2.1 GB, accumulated in one real
+# `~/Library/Preferences` over months. Nothing reclaims them, which is the same
+# shape as the tmux sockets above and the same reason this arm is worth its
+# cost: a name that appears here is permanent litter.
+#
+# A COUNT, NOT A LISTING, and that is the one deliberate departure from every
+# other arm. The directory holds tens of thousands of entries on an ordinary
+# box and half a million on a box that has been leaking; printing them would
+# bury the diff and the report both. So this emits one line whose only variable
+# is the number of `TBDTests.` entries, and the before/after comparison sees a
+# leak as `count=0` becoming `count=1`.
+#
+# WHAT IT THEREFORE CANNOT SEE, stated plainly:
+#
+#   - WHICH suite leaked. The count says a leak happened, not who did it. Once
+#     it goes red, the suite is named by `Tests/TestSupport`'s helper naming
+#     convention — `TBDTests.<label>.<uuid>` — which is why the label is worth
+#     filling in honestly at the call site.
+#   - A suite minted with any OTHER prefix. The pattern is exact, so a
+#     hand-rolled `UserDefaults(suiteName: "whatever")` escapes this arm
+#     entirely. That is the trade for not reporting the machine: `com.apple.*`
+#     and every other domain churn continuously while a test run is in flight.
+#     The helper in `Tests/TestSupport` is therefore the only sanctioned way to
+#     mint a suite, and this arm covers TBD's own tests exactly to the extent
+#     that rule is followed.
+#   - Anything, quickly, on a box that already has a pile. `find` still has to
+#     readdir the whole directory to filter it; a bare `ls -f` on the leaking
+#     box above took over two minutes. On a runner the directory is small and
+#     the arm is free — which is one more reason detection stays CI-only.
+real_prefs="${HOME}/Library/Preferences"
+# The prefix `Tests/TestSupport` mints every suite under: `TBDTests.<label>.<uuid>`.
+test_suite_plist_glob='TBDTests.*'
+
+if [ -d "$real_prefs" ]; then
+  prefs_count="$(find "$real_prefs" -maxdepth 1 -name "$test_suite_plist_glob" -print 2>/dev/null | wc -l | tr -d ' ')"
+  echo "<preferences> $test_suite_plist_glob count=$prefs_count"
+else
+  echo "<preferences> <absent>"
 fi
