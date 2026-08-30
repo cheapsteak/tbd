@@ -125,25 +125,43 @@ fseventsd is journaling. Its own stacks confirm the shape: the hot thread,
 `com.apple.fseventsd.notify`, sits in a tight loop of `_platform_strncmp` under
 a mutex, i.e. path matching, for 8045 of 8045 samples.
 
-The producers are the fleet, and they are **not** this repo:
+The producers, and the attribution trap that sits under them:
 
-- `bash` **41.3%** and `git` **20.6%** — together ~62%. git's operations are
-  ~400:1 concentrated on an unrelated project's checkout that shares this
-  machine; TBD's own worktree root accounts for six of 6,055 sampled git lines.
-  A live process listing found the generators to be another project's dev setup
-  scripts and a `.claude/hooks/` marker script on a 3-second loop.
-- `TBDDaemon` **12.0%**, most of it one bug: an unfiltered note list in the
-  app's 2-second poll re-reads every note row's file from disk, ~700 path
-  resolutions per cycle of which ~94% are for notes that cannot yield content.
-  Real, and worth fixing — and **~1.6% of machine-wide events**, so it will not
-  move fseventsd.
+- `bash` **41.3%** and `git` **20.6%** — together ~62%.
+- `TBDDaemon` **12.0%**, most of it an unfiltered note list in the app's
+  2-second poll that re-reads every note row's file from disk: ~700 path
+  resolutions per cycle, ~94% of them for notes that cannot yield content.
+  Real, worth fixing, and **~1.6% of machine-wide events** — it will not move
+  fseventsd.
 - `swift-frontend` **6.0%** of all operations, though 36.8% of the
-  *write-shaped* ones. Builds are a minority of the event load; the earlier
-  assumption that build artifacts dominated was wrong.
+  *write-shaped* ones. Builds are a minority of the event load; an earlier
+  assumption here that build artifacts dominated was wrong.
 
-The honest summary is that ~62% of the machine's filesystem traffic is ~40
-concurrent agent sessions, their hooks and shells, and unrelated repositories'
-tooling — doing their job, on one laptop.
+**That 12.0% understates the daemon badly, and the reason generalizes.**
+`fs_usage` attributes an operation to the process performing it, so every `git`
+the daemon spawns is booked to `git`, never to `TBDDaemon`. Sampling process
+spawns for 90 seconds found **65 of 125 distinct `git` processes had the live
+daemon as their parent** — about 0.7 spawns per second, and 52% of all git on
+the machine.
+
+The code names this hazard itself. `BranchTrackingCache`'s doc comment says
+`pr.list` "invokes them once per worktree on every poll, so under a poll storm
+the daemon spawns dozens of concurrent subprocesses"; the cache exists to bound
+exactly that. With worktrees across several repositories, the per-worktree
+multiplier is large.
+
+**The trap worth recording is how this was nearly missed.** Grouping git's
+*paths* showed ~400:1 concentration on an unrelated repository's checkout and
+almost nothing under this repo's worktree root, which reads as "not us". It is
+not: TBD manages worktrees for several repositories, so the daemon's git
+commands legitimately target other repositories' paths. **Which paths a
+subprocess touches does not answer who spawned it** — that needs parent-PID
+attribution, and path grouping will confidently say the opposite.
+
+What is *not* established is how much of git's 20.6% those spawns represent;
+that needs per-invocation event counts, which this capture cannot give. The
+claim here is only that the daemon spawns half the git processes on the
+machine, which is enough to make the 12.0% a floor rather than a measurement.
 
 Two things that sample rules **out**, worth stating because both are the
 intuitive culprit and neither is guilty. Spotlight indexing is **disabled** on
