@@ -83,6 +83,20 @@ writes them may eventually read as stale even while it is answering — untested
 and the first thing to suspect if shadows go quiet after hours rather than
 immediately.
 
+### An unrecognised field VALUE is tolerated, unlike an unrecognised KEY — T1
+
+An unknown *key* makes a record invisible while leaving it on disk. An unknown
+*value* does not. A record with `status: "unknown"` — outside Claude Code's
+`idle`/`busy`/`waiting`/`shell` vocabulary — listed normally, and rendered
+identically to a record omitting `status` altogether: the status simply does not
+appear in the row. An `idle` control published alongside them rendered its
+status, which is what isolates the behavior to the value rather than to the
+publishing.
+
+So the strictness measured earlier is about the record's *shape*, not its
+contents. That is the difference between a stand-in that must mirror a key set
+exactly and one that may carry values the loader has never seen.
+
 ### There is a third per-peer artifact: a peer-token file — T1
 
 Alongside each record sits `<pid>.<sha256(messagingSocketPath)>.key`, mode 0600

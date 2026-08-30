@@ -211,11 +211,19 @@ some other session appears is worse than one that occasionally needs a ref. The
 pane is TBD's own documented join key, so a remote agent naming one names
 something `tbd terminal list` can resolve.
 
-**Origins must be namespaced.** A remote host is multi-tenant: two laptops
-bridging to it would otherwise publish colliding names for sessions on different
-machines belonging to different people. The provider **MUST** namespace reverse
-names by the origin declared in `hello`, and **MUST NOT** publish two shadows
-under one name.
+**Origins must be namespaced, and TBD does the namespacing.** A remote host is
+multi-tenant: two laptops bridging to it would otherwise publish colliding names
+for sessions on different machines belonging to different people, and a
+collision there is a misdelivery rather than a display glitch.
+
+TBD composes the whole name — origin, display name, and pane — and sends it on
+the `peer` line. The provider **MUST** publish that name verbatim, **MUST NOT**
+prefix or otherwise modify it, and **MUST NOT** publish two peers under one
+name. Putting the composition on TBD's side rather than the provider's is
+deliberate: the naming rules above are TBD's, a provider would have to
+reimplement them to construct the same string, and "use this string" is an
+obligation a third party can be checked against, where "construct a name
+correctly" is not.
 
 Refs are minted by Claude Code per record, so a daemon restart republishes
 shadows with fresh refs and peers that had settled into bare-name addressing hit
@@ -355,6 +363,12 @@ Required behaviors:
   is the backstop for unclean exits, not the mechanism.
 - **Helpers carry distinctive argv** so `ps` reads sanely and no pattern-kill
   takes out a sibling.
+- **An unrecognised `status` value is safe but invisible.** Measured: a record
+  with `status: "unknown"` lists, and renders exactly as one omitting `status`
+  does — the value is dropped from the row, not the row from the listing.
+  Against an `idle` control that rendered its status, that isolates the
+  behavior. So a shadow whose remote status has no local equivalent loses the
+  status display and nothing else.
 - **`cwd` names a directory that exists locally** — the adopted worktree. A
   remote path resolves to nothing here, and a surface that filters on the
   directory existing would drop the shadow.
