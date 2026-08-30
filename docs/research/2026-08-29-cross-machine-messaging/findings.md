@@ -83,6 +83,27 @@ writes them may eventually read as stale even while it is answering — untested
 and the first thing to suspect if shadows go quiet after hours rather than
 immediately.
 
+### A `from-mode="default"` frame is delivered to a bypass-mode session — T1
+
+The `<cross-session-message>` wrapper is composed by the sender, so anything
+standing in for a remote peer chooses the `from-mode` it claims. The worry is
+that claiming less than the receiver holds would get the message held for
+approval or refused, since inbound delivery is documented as turning on sender
+and receiver sharing a permission class.
+
+It does not. A frame stamped `from-mode="default"`, written into the socket of a
+session TBD had spawned with permissions bypassed, was delivered mid-turn with
+the full peer-trust preamble intact.
+
+So a stand-in can stamp the least-privileged class rather than echoing whatever
+the far side claimed, and pay nothing in deliverability. That matters because
+the alternative — forwarding the far side's own `from-mode` — would let a remote
+peer name its own permission class.
+
+Measured for `default` into a bypass receiver only. The reverse pairing, and the
+explicit `crossSessionInbound` policies (`accept` / `hold` / `refuse`), were not
+exercised.
+
 ### An unrecognised field VALUE is tolerated, unlike an unrecognised KEY — T1
 
 An unknown *key* makes a record invisible while leaving it on disk. An unknown
