@@ -48,6 +48,34 @@ The main chat session agent should not write code directly. Delegate all impleme
   concurrent default `-j12` builds can exhaust this development machine. The
   two wrappers are orthogonal — admission control and filesystem isolation —
   and compose rather than replace each other.
+- **When the local build queue is starving a test run, `scripts/test.sh` can get
+  the verdict from CI instead.** This *remote verification valve* is default-off;
+  arm it by exporting `TBD_REMOTE_VERIFY=1` in the shell your test runs start
+  from. Armed, a run that has queued for the machine-global build slot for
+  `TBD_REMOTE_VERIFY_YIELD_SECONDS` (default 300) **without ever acquiring it**
+  gives up its place, pushes the commit to an inert `preflight/` ref, and reports
+  the verdict CI returns. It bounds **queue** time, never run time, so a yield
+  discards nothing — a wait that never acquired the slot has compiled nothing —
+  and 300 is sized against GitHub's macOS concurrency rather than impatience.
+  Four things about it are easy to state wrongly and each is load-bearing:
+  - **It is an optimisation, never a gate.** A refused precondition (dirty tree,
+    no `gh`, no pushable ref) exits 78, names itself, and the run falls back to
+    the local queue. A refusal must never fail a run.
+  - **75 is not 76.** 76 means "yielded the queue, verify remotely" and is the
+    only status that routes. 75 means the wait timed out or was abandoned; it is
+    propagated untouched, it is **not** green, and it is not a request to verify
+    elsewhere. Conflating the two is a silent wrong answer.
+  - **Only `scripts/test.sh` opts in**, because its whole output is a verdict.
+    `scripts/restart.sh` and every other artifact build stay local permanently —
+    a binary has to land on this disk.
+  - **A remote run is always the whole suite**; the dispatch cannot carry
+    `--filter`. A green whole-suite verdict is sound for a narrowed caller, since
+    every subset of a passing suite passes. A red one is not — the failures may
+    lie outside what the caller selected — so a narrowed run that comes back red
+    is re-run locally and the local verdict is the one reported.
+
+  The knobs, the capacity model behind 300, and the soak evidence graduation
+  waits on: [`docs/specs/2026-08-16-remote-verification-valve-design.md`](docs/specs/2026-08-16-remote-verification-valve-design.md).
 - When adding a branching conditional that gates behavior (feature flags, toggles, mode switches), add a test for each branch. Verify the gated behavior is off when the flag is off, and that ungated behavior still works.
 
 ### Compile only what user-land cannot do well
@@ -191,6 +219,7 @@ Enforced mechanically by two SwiftLint custom rules in `.swiftlint.yml` (`no_tui
 - **Build**: `scripts/swift-safe build`
 - **Test**: `scripts/test.sh` (fences `~/tbd`, `~/.claude`, `~/.codex` and the tmux socket dir, then runs SwiftPM through `scripts/swift-safe`)
 - **Restart**: `scripts/restart.sh`
+- **Send a starving test run to CI instead of waiting**: `export TBD_REMOTE_VERIFY=1` (default off; needs a clean tree). See the remote verification valve under "Workflow" above.
 - **Install git hooks** (one-time setup after cloning): `scripts/install-hooks.sh`
 - **Diagnostics**: see [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md). Quick recipes:
   - Stream one feature area live: `log stream --level debug --predicate 'subsystem BEGINSWITH "com.tbd" AND category == "markdown"'`
