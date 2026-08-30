@@ -106,13 +106,38 @@ public func gateHoldingTask<Success: Sendable>(
     Task(executorPreference: GateExecutor.shared) { await operation() }
 }
 
+/// The handshake budget a bounded wait gets in a saturated pass.
+///
+/// One literal, two typed accessors, because the value is consumed as a
+/// `Duration` by the poll-loop helpers and as a `TimeInterval` by the
+/// `Date`-arithmetic ones. It lives here, next to ``TestGate/deadline``, for
+/// two reasons: it is the value that deadline must dominate — so a change to
+/// either that is not checked against the other is a bug, and adjacency is
+/// what makes that checkable — and it is reachable from both
+/// `Tests/TBDDaemonTests` and `Tests/TBDDaemonLiveTests`, which is what keeps
+/// `ciSafeDeadline`, `TmuxControlSupervisorTeardownTests.teardownWaitDeadline`
+/// and `ProviderEventsSupervisorTests.saturatedWaitDeadline` one constant
+/// rather than three that can drift apart unnoticed.
+///
+/// The derivation itself — why 90 s, and what re-derives it — stays with
+/// `ciSafeDeadline` in `Tests/TBDDaemonTests/ControlModeTestSupport.swift`,
+/// which is where the reasoning about population and contention lives.
+public enum TestDeadlines {
+    /// 90 s, as a `TimeInterval` for `Date`-based waits.
+    public static let saturatedPassSeconds: TimeInterval = 90
+
+    /// The same 90 s, as a `Duration` for poll-loop waits.
+    public static let saturatedPass: Duration = .seconds(saturatedPassSeconds)
+}
+
 /// How long a bounded gate wait tolerates before it reports itself.
 ///
 /// **Sized to dominate the longest legitimate hold, not to be snappy.** A gate
 /// is held for as long as the test's own observation takes, and the outer
 /// observations are themselves hang-catchers sized against a loaded runner:
 /// the `TmuxControlSupervisor` teardown gates are held across a `waitUntil`
-/// bounded by `ciSafeDeadline` (90 s). A gate deadline below that would go red
+/// bounded by that suite's own `teardownWaitDeadline` (90 s, the value
+/// `ciSafeDeadline` carries). A gate deadline below that would go red
 /// on a merely slow machine, and a spuriously red CI is worse than the bug
 /// this bound exists to report. 120 s clears 90 s with margin while staying a
 /// small fraction of the 30-minute step budget, so a wedge reports in minutes

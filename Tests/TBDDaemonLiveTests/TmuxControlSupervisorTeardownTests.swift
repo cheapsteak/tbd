@@ -8,7 +8,64 @@ import Testing
 /// R5-M1: a fatal-error teardown's blocking `stop()` (up to ~2 s of SIGTERM →
 /// SIGKILL escalation) must run OFF the supervisor actor — otherwise every
 /// supervisor call for every worktree stalls behind one wedged connection.
-@Suite("TmuxControlSupervisor teardown isolation")
+///
+/// ## Why this is tier 3
+///
+/// Every test here spawns a real child over a real pty — a stub standing in
+/// for `tmux -CC` — and then races a wall-clock deadline for a handshake that
+/// crosses three executors (the correlator's `onFatalError` → a fresh
+/// unstructured `Task` → the supervisor actor → `DispatchQueue.global`). That
+/// is the target's own admission criterion verbatim: "a spawned child racing a
+/// deadline" (`Package.swift`), the same one `ClaudeCloudSpawnerTimeoutTests`
+/// cites, and the sibling `TmuxControlConnectionTeardownTests` already sits
+/// here on it.
+///
+/// It was in the fast parallel pass instead, and that is where it went red. In
+/// the week to 2026-08-28 it took 4–5 of its 5 tests down in 3 of the 5 red
+/// runs on `main`, always on the FIRST handshake wait and never on anything
+/// downstream of it. The measurements say the deadline was reading contention,
+/// not the supervisor:
+///
+/// - Every failing test recorded exactly ONE issue. In
+///   `ensureConnectionWaitsForInFlightStop` the first 90 s wait timed out while
+///   the *later* 90 s wait — for a strictly longer chain: gate released →
+///   `stop()` returned → the parked `ensureConnection` resumed → a successor
+///   was created — passed, along with every assertion after it. The work was in
+///   flight, not absent.
+/// - The waiter could not be scheduled to observe its own expiry: the issue
+///   landed at 122.77 s of test time, well past when a 90 s deadline armed at
+///   the top of the test could have fired.
+/// - In that pass the median test's own reported span was 85.8 s (p90 112.1,
+///   max 132.8) and 47% of its 4359 tests spanned longer than the whole
+///   deadline — the same figures on the green run either side of it, so the
+///   colour of a run was luck.
+///
+/// Here the pass is `--no-parallel` on an otherwise idle machine, the
+/// handshakes settle in milliseconds, and the bound below goes back to being
+/// what it is meant to be: a hang-catcher that asserts nothing.
+/// ## Why an explicit `.timeLimit`, and why 7 minutes
+///
+/// Tier-3 suites pin their own rather than inheriting `.clockDriven`, whose
+/// value is sized for the fast parallel pass (`Tests/CLAUDE.md`). Not every
+/// wait here is bounded: the bare `await`s on the supervisor actor — the
+/// `command(server:)` probes taken while stops are held, and each closing
+/// `stopAll()` — are calls on the very actor whose wedging is the regression
+/// under test, so a real regression hangs the quiet-pass step to its
+/// 15-minute `timeout-minutes` with no test named.
+///
+/// The number is sized above this suite's worst-case chain, the way
+/// `ProviderEventsSupervisorTests` sizes its own. `stopAllDoesNotBlockActor`
+/// chains FOUR `teardownWaitDeadline` waits — 360 s — and the gate holds run
+/// concurrently on GCD threads rather than adding to that. A 4-minute limit
+/// would sit under the chain, and the failure that produced would be the worst
+/// kind: a generic time-limit expiry with no named diagnostic, reached on
+/// waits that were merely slow rather than wrong. 7 minutes clears 360 s with
+/// margin, stays well inside the quiet pass's 15-minute step budget, and still
+/// clears the 1.97 s this suite actually takes by two orders of magnitude.
+///
+/// If that chain ever needs to grow, shorten it rather than raising this
+/// again — the standing remedy in `Tests/CLAUDE.md`.
+@Suite("TmuxControlSupervisor teardown isolation", .timeLimit(.minutes(7)))
 struct TmuxControlSupervisorTeardownTests {
 
     /// Write an executable stub "tmux" that ignores its args and sleeps, so a
@@ -60,7 +117,7 @@ struct TmuxControlSupervisorTeardownTests {
         // teardown. (Reachable in production from any untolerated %error too.)
         await client.handle(.commandSucceeded(number: 1, fromClient: true, lines: []))
         #expect(await waitUntil(
-            { stopStarted.count == 1 }, timeout: ciSafeDeadline), "teardown never reached stop()")
+            { stopStarted.count == 1 }, timeout: teardownWaitDeadline), "teardown never reached stop()")
 
         // While the stop is STILL blocked, unrelated supervisor calls must
         // complete. Bounded by a generous CI-safe deadline: pre-fix, the
@@ -72,7 +129,7 @@ struct TmuxControlSupervisorTeardownTests {
             _ = await supervisor.command(server: "srv-unrelated")
             unrelatedDone.increment()
         }
-        let unrelatedCompleted = await waitUntil({ unrelatedDone.count == 1 }, timeout: ciSafeDeadline)
+        let unrelatedCompleted = await waitUntil({ unrelatedDone.count == 1 }, timeout: teardownWaitDeadline)
         #expect(unrelatedCompleted, "supervisor actor is blocked by a mid-stop teardown")
         // Pre-fix the actor stays wedged until the gate opens — unwedge so the
         // remaining assertions (and cleanup) can run instead of hanging.
@@ -127,7 +184,7 @@ struct TmuxControlSupervisorTeardownTests {
         // Fatal correlator violation → teardown; eviction runs, stop is held.
         await client.handle(.commandSucceeded(number: 1, fromClient: true, lines: []))
         #expect(await waitUntil(
-            { stopStarted.count == 1 }, timeout: ciSafeDeadline), "teardown never reached stop()")
+            { stopStarted.count == 1 }, timeout: teardownWaitDeadline), "teardown never reached stop()")
 
         // A re-attach's ensureConnection lands while the old tmux client
         // process is still dying. It must SUSPEND: `PaneFanout.route` keys by
@@ -148,7 +205,7 @@ struct TmuxControlSupervisorTeardownTests {
         // The held stop completes → the parked ensureConnection resumes and
         // creates exactly one successor.
         stopGate.signal()
-        #expect(await waitUntil({ ensured.count == 1 }, timeout: ciSafeDeadline),
+        #expect(await waitUntil({ ensured.count == 1 }, timeout: teardownWaitDeadline),
                 "ensureConnection must resume once the stop completed")
         #expect(stopFinished.count == 1)
         #expect(created.count == 2, "exactly one successor after the teardown finished")
@@ -186,7 +243,7 @@ struct TmuxControlSupervisorTeardownTests {
         // stopAll must route through the injectable stop seam (pre-fix it
         // called connection.stop() directly ON the actor).
         #expect(await waitUntil(
-            { stopStarted.count == 2 }, timeout: ciSafeDeadline), "stopAll never reached the stop seam")
+            { stopStarted.count == 2 }, timeout: teardownWaitDeadline), "stopAll never reached the stop seam")
 
         // While BOTH stops are still held open, an unrelated actor call must
         // complete promptly — pre-fix the actor is wedged inside the stops.
@@ -196,7 +253,7 @@ struct TmuxControlSupervisorTeardownTests {
             _ = await supervisor.command(server: "srv-third")
             unrelatedDone.increment()
         }
-        #expect(await waitUntil({ unrelatedDone.count == 1 }, timeout: ciSafeDeadline),
+        #expect(await waitUntil({ unrelatedDone.count == 1 }, timeout: teardownWaitDeadline),
                 "supervisor actor is blocked by a mid-stop stopAll")
 
         // Bookkeeping ran BEFORE the stops: both clients already evicted.
@@ -217,12 +274,12 @@ struct TmuxControlSupervisorTeardownTests {
 
         stopGate.signal()
         stopGate.signal()
-        #expect(await waitUntil({ stopAllDone.count == 1 }, timeout: ciSafeDeadline),
+        #expect(await waitUntil({ stopAllDone.count == 1 }, timeout: teardownWaitDeadline),
                 "stopAll must return once its stops complete")
         // The parked ensureConnection resumes and creates a fresh connection:
         // the supervisor stays usable after stopAll (the reconnect-after-
         // stopAll contract in TmuxControlCommandClientIntegrationTests).
-        #expect(await waitUntil({ ensured.count == 1 }, timeout: ciSafeDeadline),
+        #expect(await waitUntil({ ensured.count == 1 }, timeout: teardownWaitDeadline),
                 "parked ensureConnection must resume after stopAll finishes")
         #expect(await supervisor.command(server: "srv-a") != nil)
 
@@ -254,7 +311,7 @@ struct TmuxControlSupervisorTeardownTests {
         let client = try #require(await supervisor.command(server: "srv-pool"))
         await client.handle(.commandSucceeded(number: 1, fromClient: true, lines: []))
 
-        #expect(await waitUntil({ stopSeen.count >= 1 }, timeout: ciSafeDeadline),
+        #expect(await waitUntil({ stopSeen.count >= 1 }, timeout: teardownWaitDeadline),
                 "fatal teardown never reached stop()")
         let label = labelBox.get() ?? ""
         #expect(!label.contains("cooperative"),
@@ -285,11 +342,53 @@ struct TmuxControlSupervisorTeardownTests {
             })
 
         await supervisor.ensureConnection(serverName: "srv-natural")
-        #expect(await waitUntil({ stopSeen.count == 1 }, timeout: ciSafeDeadline),
+        #expect(await waitUntil({ stopSeen.count == 1 }, timeout: teardownWaitDeadline),
                 "natural stream end must stop() the connection to release its pty fd")
         // The map entry is gone too (drain owned it at stream end).
         #expect(await supervisor.command(server: "srv-natural") == nil)
     }
+}
+
+/// Hang guard for this suite's bounded waits on teardown progress.
+///
+/// Deliberately unchanged at the 90 s the suite carried in the fast pass. The
+/// point of the move is that the number is no longer load-bearing — in the
+/// serial quiet pass a healthy handshake returns in milliseconds — so keeping
+/// it makes this a pure re-tiering with no deadline re-derivation smuggled in.
+/// Every wait is positive and breaks on its first satisfying probe, so the
+/// value costs a passing run nothing and only a genuinely wedged one pays it.
+/// `ciSafeDeadline` itself lives in `Tests/TBDDaemonTests` and is not
+/// importable from this target, so the value comes from `TestSupport` — one
+/// literal for all three consumers, with the derivation still recorded at
+/// `ciSafeDeadline`.
+private let teardownWaitDeadline: Duration = TestDeadlines.saturatedPass
+
+/// Poll `condition` until it holds or `timeout` elapses. Returns its final
+/// value. File-local twin of `Tests/TBDDaemonTests`' `waitUntil`, which this
+/// target cannot import.
+///
+/// **Cancellation ends the wait; it does not shorten the sleep.** `Task.sleep`
+/// throws `CancellationError` the instant the task is cancelled — which the
+/// suite's own `.timeLimit` does — so swallowing it with `try?` would leave
+/// the loop spinning with nothing to suspend on, burning its whole remaining
+/// budget on a cooperative thread and then blaming the call site. That exact
+/// shape cost this repo a diagnosis once already (33.7M iterations in 30 s)
+/// and `Tests/CLAUDE.md` lists it as an anti-pattern to check for in any flake
+/// fix. Returning the condition's current value keeps the verdict honest: a
+/// cancelled wait reports what it last saw rather than a stale `false`.
+private func waitUntil(
+    _ condition: @Sendable () -> Bool, timeout: Duration
+) async -> Bool {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if condition() { return true }
+        do {
+            try await Task.sleep(for: .milliseconds(10))
+        } catch {
+            return condition()
+        }
+    }
+    return condition()
 }
 
 /// Lock-boxed single string for cross-thread capture in seams.

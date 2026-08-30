@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 
 @testable import TBDDaemonLib
@@ -104,7 +105,17 @@ import Testing
 /// `.serialized` before a longer timeout; that advice is about a suite starving
 /// *itself* (its own tests megaYielding against each other) and does not cover
 /// this case.
-let ciSafeDeadline: Duration = .seconds(90)
+///
+/// ## The value is shared; this is where its derivation lives
+///
+/// The number itself is `TestDeadlines.saturatedPass`
+/// (`Tests/TestSupport/BoundedGateSupport.swift`), because
+/// `Tests/TBDDaemonLiveTests` cannot import this symbol and two waits there
+/// need the same budget. Keeping one literal is what stops the three from
+/// drifting apart unnoticed; the reasoning above is what re-derives it, and it
+/// stays here. Re-derive it together with `TestGate.deadline`, which must
+/// dominate it, and with `waitForSuspension` / `.clockDriven`.
+let ciSafeDeadline: Duration = TestDeadlines.saturatedPass
 
 /// Thread-safe, synchronous recorder of fake-client stream writes in call
 /// order.
