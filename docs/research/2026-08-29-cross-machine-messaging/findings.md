@@ -132,8 +132,13 @@ refusal. **The token values are secrets and are not reproduced here.**
 It matters for two reasons. It is a **third durable artifact per peer**, so
 anything counting or reclaiming peer artifacts that knows only about records and
 sockets is incomplete. And a stand-in that publishes no token file delivers fine
-today — measured — but would stop silently if a future Claude Code began
-requiring one on the peer-send path.
+today — but the ratio is the finding: **83 of 84 records carried a key; the one
+that did not was a stand-in of our own making.** A keyless record is a population
+of one, authored by us, against 83 written by Claude Code itself. It works by the
+absence of a check rather than by a documented tolerance.
+
+The keys are mode 0600 where the records are 0644 — the token is treated as a
+secret, the record as public.
 
 ### Transport is one JSON line per message — T1
 
