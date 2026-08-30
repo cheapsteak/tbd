@@ -490,6 +490,87 @@ in their repository rather than nested, and the caller mints a fresh identity
 for each — so an agent inside the session has no ambient lane identity of its
 own.
 
+## 9. `messages` — addressing sessions by name across machines
+
+**What it is.** A new declared capability, and one new optional field on the
+Session object.
+
+```
+p messages
+```
+
+The verb is a **duplex** NDJSON stream — one per provider, held open
+indefinitely, lines from the caller on stdin and lines to the caller on stdout.
+It carries two things at once: announcements of which sessions each side can
+currently deliver to, and the message frames addressed to the handles those
+announcements minted. The line kinds are `hello`, `peer`, `peer-gone`,
+`message`, `peer-inventory`, and `ping`; the normative rules for each are under
+`messages` in the contract.
+
+The field is `peer_messaging` on the Session object:
+
+```json
+"peer_messaging": {"protocol": 1}
+```
+
+It says this session can be addressed by name, and which peer protocol it
+speaks. It is optional, no capability gates it, and an absent field means the
+session is never bridged.
+
+**Required?** No, on both halves. This is a capability-gated verb plus an
+optional response field — the same additive shape as `transcript` or `land` —
+so a provider that ignores it is unaffected in every other respect.
+
+**Not a v2 delta either.** Like the worktree identity keys in section 8,
+`messages` was added after v2 was published rather than as part of it. A
+capability string a caller does not recognize is never invoked, and an
+unrecognized response field is ignored, so both halves are readable at contract
+major 1 and 2 alike. Declaring `messages` does not oblige you to declare `[1,
+2]`, and declaring `[1, 2]` does not oblige you to implement `messages`.
+
+**What you gain.** A session on your box becomes addressable by name from the
+caller's machine, and the caller's sessions become addressable from yours —
+without a human relaying between them, and without a per-round-trip gesture.
+Today the only ways across are typing bytes into a pane with `send`, which
+carries no attribution and no reply path, or an out-of-band mailbox.
+
+**What it costs, and this is the part to read before declaring it.** The
+contract states six obligations for the provider's half, and three of them the
+caller cannot check:
+
+- Close and unlink your listeners when the link drops. An endpoint that stays
+  reachable while the link is down accepts every message, reports success, and
+  discards them — worse than not existing.
+- Unlink every peer you published on the caller's behalf when the stream ends,
+  however it ended.
+- Persist no frames across a link drop. No buffering, no replay when the link
+  returns.
+- Namespace names by the origin in the caller's `hello`, and never publish two
+  peers under one name. The host is multi-tenant; a collision is a
+  misdelivery.
+- Pass message content byte-verbatim.
+- Never deliver a frame to a handle you were not given. No name match, no
+  nearest match, no broadcast.
+
+The `peer-inventory` line is how the caller keeps the unverifiable half
+observable: you report the handles you currently publish, and the caller diffs
+that against what it asked for. A leak shows up as a divergence in the caller's
+diagnostics rather than as a mystery.
+
+**Source `peer_messaging`, do not assert it.** The contract requires that the
+field come from the remote session's own agent registry row. For a Claude Code
+session that row's existence is what encodes both a new-enough CLI and the
+absence of the messaging killswitches, and neither is inferable any other way. A
+session running a different agent, a plain shell, or a Claude Code whose
+messaging is inactive has no row — so omit the field, and the caller correctly
+never bridges it.
+
+**If you ignore it.** Nothing changes. Your sessions are reachable exactly as
+they are today, through `send` and `attach`, and simply are not addressable by
+name from another machine. Declaring `peer_messaging` without declaring
+`messages` is the one half-adoption to avoid: it describes sessions the caller
+has no channel to reach, so it buys nothing.
+
 ## What to do if you maintain a v1 provider
 
 In order, most value per unit of effort:
@@ -537,7 +618,14 @@ In order, most value per unit of effort:
    session in the caller's tree nested under the lane that spawned it. Never
    invent a value you were not given.
 
-8. **If you cannot terminate a running session at all, drop `stop`** — and in
+8. **If your sessions run Claude Code and you can read its registry, consider
+   `messages`** (section 9). The largest lift on this list, and the only item
+   whose obligations the caller cannot fully check — read the six of them before
+   declaring the capability. What it buys is sessions on your box and sessions
+   on the caller's machine addressing each other by name, with no human relaying
+   between them.
+
+9. **If you cannot terminate a running session at all, drop `stop`** — and in
    that case declare `contract_versions: [2]` only, since v1 requires it.
 
 Anything not on this list requires no action to remain conformant.

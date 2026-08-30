@@ -104,9 +104,12 @@ Line kinds on the stream, in both directions unless noted:
   never a partial diff, following the `events` rule for `session`.
 - `peer-gone` — that handle is no longer addressable.
 - `message` — one frame for delivery, addressed by handle.
-- `shadow-state` — periodic, provider to TBD only: the handles the provider
+- `peer-inventory` — periodic, provider to TBD only: the handles the provider
   currently publishes on its side. TBD diffs it against what it asked for and
   surfaces the difference. This is what makes the far half's hygiene observable.
+  It is named for what a provider sees rather than for TBD's internal term:
+  "shadow peer" is this design's vocabulary, and the contract a third party
+  implements should not have to learn it.
 - `ping` — keepalive, as on `events`.
 
 The stream is a registry-sync protocol, not only a message pipe: the `peer` and
@@ -115,10 +118,13 @@ The stream is a registry-sync protocol, not only a message pipe: the `peer` and
 **Ordering.** A `message` naming a handle the receiver has not been told about
 is dropped and logged. Senders announce before they address.
 
-**Silence limit.** Tighter than the `events` stream's 90 seconds. The cost of
-stale state on `events` is a stale badge; here it is a session sending into a
-void. Detection latency is what bounds the lie, so this number is the design's
-main honesty knob.
+**Silence limit: `ping` every 10 seconds, dead at 30.** The same 1:3 ratio the
+`events` stream uses, at a third of its magnitude. The cost of stale state on
+`events` is a stale badge; here it is a session sending into a void, so
+detection latency is what bounds how long a shadow peer can lie about being
+reachable. That makes this number the design's main honesty knob, and it is
+stated here rather than left to the implementer: a provider needs a figure it
+can conform to.
 
 No wake handling is specified, and none is needed: the silence watchdog compares
 wall-clock `Date`s and sleeps on a `ContinuousClock`, which counts time across
@@ -269,8 +275,9 @@ hop. This is stated so it is recognised as designed behavior rather than
 diagnosed later as a bug.
 
 **Frames are size-capped at 512 KB.** The daemon's pipe reader discards an
-un-newlined buffer past 1MB, silently, so the cap sits below the size at which
-loss becomes invisible. An oversized frame is dropped and counted rather than
+un-newlined buffer past 1MB — reporting the first such discard per reader and
+every one after that silently — so the cap sits below the size at which loss
+stops being reported. An oversized frame is dropped and counted rather than
 truncated. Stdin writes to the provider are
 non-blocking; a write that would block fails the frame rather than parking the
 caller.
@@ -391,7 +398,7 @@ across a link drop; namespace names by the declared origin; pass message content
 byte-verbatim; and never deliver a frame addressed to a handle it was not given.
 
 TBD cannot detect a provider that buffers frames and replays them, or that
-leaves stale shadows on a host TBD cannot sweep. The `shadow-state` line is the
+leaves stale shadows on a host TBD cannot sweep. The `peer-inventory` line is the
 mitigation: TBD diffs the provider's claimed inventory against what it asked
 for, logs the difference, and shows it in `tbd peer list`. A provider that
 declares `messages` and leaks is visible as a divergence rather than a mystery.
