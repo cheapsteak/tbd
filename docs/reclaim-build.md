@@ -138,6 +138,9 @@ governor.
   machine owner's consent — e.g. `8` on a 12-core laptop. A `-j`/`--jobs` on
   the command line may lower it but not raise it; raise this instead.
 - `TBD_SWIFT_LOCK_TIMEOUT_SECONDS` sets the wait timeout (default `1800`).
+- `TBD_SWIFT_SHARED_MODULE_CACHE=0` restores SwiftPM's per-worktree module
+  cache, and `TBD_SWIFT_MODULE_CACHE_PATH` moves the shared one. See
+  "Shared module cache" below.
 - `TBD_SWIFT_LOCK_PATH` overrides the shared lock path for isolated testing.
 - `TBD_SWIFT_ALLOW_ORPHAN=1` keeps a queued build waiting even after the
   process that requested it exits. A queued wrapper otherwise records its
@@ -158,44 +161,68 @@ unaffected.
 
 ## Shared module cache
 
-`scripts/restart.sh` passes every governed Swift build through a **shared
-clang/Swift module cache** at `$HOME/Library/Caches/tbd/swift-module-cache`:
+`scripts/swift-safe` points every governed compile — `build`, `test` and `run`
+alike — at one **shared clang/Swift module cache** at
+`<home>/Library/Caches/tbd/swift-module-cache`, so all three entry points, and
+every worktree, plan identically:
 
-```sh
-scripts/swift-safe build -Xswiftc -module-cache-path -Xswiftc "$SHARED" -Xcc -fmodules-cache-path="$SHARED"
+```
+-Xswiftc -module-cache-path -Xswiftc <cache> -Xcc -fmodules-cache-path=<cache>
 ```
 
-Without it, every worktree's `.build` accumulates its own ~640 MB
-`ModuleCache` with near-identical contents (precompiled clang modules for
-Foundation, AppKit, SwiftUI, the NIO C shims, …). With it there is **one
-~610–690 MB copy total, regardless of worktree count**, and the per-worktree
-`.build` carries no ModuleCache at all (measured: clean build's `.build`
-drops ~2.1 GB → ~1.4 GB; local `ModuleCache` 707 MB → 0 MB). The `-Xcc
--fmodules-cache-path=` piece is what reaches the C-language dependency shim
-targets (e.g. CNIOAtomics) that `-Xswiftc -module-cache-path` alone misses
-(~70 MB residual otherwise).
+Without it every worktree's `.build` accumulates its own 510–818 MB
+`ModuleCache` of near-identical precompiled clang modules (Foundation, AppKit,
+SwiftUI, the NIO C shims, …). The `-Xcc -fmodules-cache-path=` half is what
+reaches the C-language dependency shim targets (e.g. CNIOAtomics) that
+`-Xswiftc -module-cache-path` alone misses.
+
+The wrapper is the only place that decides this, and that is the point:
+SwiftPM bakes the cache path into every compile command in
+`.build/debug.yaml` at plan time, so **two entry points that disagree about
+the path make every transition between them a full recompile**, in both
+directions. Do not reintroduce the flags in `scripts/restart.sh` or anywhere
+else. Design and evidence:
+[`docs/specs/2026-08-30-shared-module-cache-design.md`](specs/2026-08-30-shared-module-cache-design.md).
 
 Notes:
 
+- **The path is resolved from the passwd database, never `$HOME`.**
+  `scripts/test.sh` deliberately points `HOME` and `CFFIXED_USER_HOME` at a
+  scratch fence it deletes; a `$HOME`-derived path would resolve inside that
+  fence on every test run, minting an empty cache each time so every run paid
+  a full rebuild — silently, looking like nothing worse than slow tests.
+  `pwd.getpwuid(os.getuid()).pw_dir` answers the real home whatever the fence
+  does, so the fence needs no cooperation and `scripts/test.sh` needs no
+  change. Writing into `~/Library/Caches` during a test run is intended: it is
+  a build artifact, not test state, and it is not one of the stores the
+  fence's fingerprint detector brackets.
 - **Concurrency-safe.** clang's module cache is designed for concurrent
-  writers; parallel builds from multiple worktrees against the shared cache
-  were tested with zero lock errors.
-- **Stickiness (expected, not a bug).** SwiftPM bakes the cache path into
-  `.build/debug.yaml` at plan time. A later build after a flagged one silently
-  keeps using the shared cache — and conversely, the first build
-  after a manifest re-plan only picks the shared cache up if it runs with the
-  flags (i.e. via `restart.sh`). Flag alternation does not trigger
-  recompilation; worst case is a ~14 s re-plan.
+  writers, and in practice the wrapper's exclusive lock means at most one
+  build writes to it at a time.
+- **Callers may still choose.** `TBD_SWIFT_MODULE_CACHE_PATH` moves the
+  cache; `TBD_SWIFT_SHARED_MODULE_CACHE=0` restores SwiftPM's per-worktree
+  default. A caller that passes its own `-module-cache-path` is left alone —
+  a second, differently-spelled copy would itself be a third plan variant.
+- **CI opts out.** When `CI` is set the wrapper adds nothing. Runners are
+  ephemeral (one worktree per VM), so a shared cache saves nothing there, and
+  `.github/workflows/test.yml` ends its job with a build that does not route
+  through the wrapper at all — flagging only the steps that do would make CI
+  alternate against its own `actions/cache`d `.build` on every run.
 - **Why not `Package.swift` `swiftSettings`?** Measured dead end:
   `.unsafeFlags(["-module-cache-path", …])` on every root target still left
   a 591 MB local ModuleCache — manifest settings don't apply to dependency
   targets (SwiftNIO, GRDB, SwiftTerm…), which are the bulk of it.
+- **Why not a symlink?** Cached artifacts embed the *spelled* path of the
+  worktree that created them and clang validates that spelling, so a shared
+  directory reached through per-worktree symlinks works for exactly one
+  worktree and wedges every other with `PCH was compiled with module cache
+  path '<A>/…' but the path is currently '<B>/…'`. Sharing by flag works
+  precisely because every worktree spells the identical path.
 - **Not swept by the reaper.** The shared cache sits outside every `.build`,
-  so Tier 1/2 above never touch it. It stays a constant single-copy size and
-  is safe to delete manually at any time — the next build regenerates it.
-- **CI is unchanged.** Runners are ephemeral (one worktree per VM), so a
-  shared cache buys nothing there, and the `actions/cache`d `.build` interacts
-  with plan-time stickiness in non-obvious ways. Deliberately not wired up.
+  so Tier 1/2 above never touch it. clang prunes it itself (a pass every
+  seven days evicting entries unused for thirty-one), which holds it at
+  roughly 1.5 GB, and it is safe to delete by hand at any time — the next
+  build regenerates what it needs.
 
 ## Future
 The ~4.6 GiB of compiled artifacts can only be de-duplicated across worktrees via SwiftPM compilation caching (LLVM CAS + prefix mapping) on the new Swift Build engine — currently an opt-in pitch. Track and pilot when it lands.

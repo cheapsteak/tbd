@@ -402,43 +402,43 @@ test_restart_sh_launches_reclaim_async_and_silent() {
   assert_eq "reclaim launch (line ${nohup_ln:-?}) precedes swift build (line ${build_ln:-?})" "before" "$order"
 }
 
-# Static check: restart.sh's swift build must route the clang/Swift module
-# cache to the shared per-user directory (single ~610 MB copy for ALL
-# worktrees instead of ~640 MB inside each .build) — both the Swift frontend
-# flag and the clang flag (which reaches C-shim dependency targets like
-# CNIOAtomics), and the cache dir must be created before the build runs.
-test_restart_sh_uses_shared_module_cache() {
+# Static check: the shared clang/Swift module cache must be selected in exactly
+# ONE place — scripts/swift-safe, the wrapper every governed compile goes
+# through — so that `build`, `test` and `run` plan identically. Two entry points
+# that disagree about the path make every transition between them a full
+# recompile, because SwiftPM bakes the path into .build/debug.yaml at plan time.
+# The invariant is therefore two-sided: the wrapper supplies both flags, and
+# restart.sh supplies neither.
+# See docs/specs/2026-08-30-shared-module-cache-design.md.
+test_the_shared_module_cache_is_selected_only_by_the_wrapper() {
   local restart="$HERE/restart.sh"
-  local body; body="$(cat "$restart")"
-  assert_contains "restart.sh points at the shared per-user module cache" "$body" 'Library/Caches/tbd/swift-module-cache'
-  # shellcheck disable=SC2016 # literal, unexpanded strings searched in restart.sh
-  assert_contains "restart.sh creates the shared cache dir" "$body" 'mkdir -p "$SHARED_MODULE_CACHE"'
-  assert_contains "flags include the Swift frontend module-cache-path" "$body" '-Xswiftc -module-cache-path'
-  assert_contains "flags include the clang modules cache path" "$body" '-Xcc -fmodules-cache-path='
+  local wrapper; wrapper="$(cat "$HERE/swift-safe")"
 
-  # The build itself runs through scripts/restart-build-lib.sh (which captures
-  # swift-safe's real exit status instead of piping it away), so the flags are
-  # asserted on the call restart.sh makes, and the admission wrapper on the lib
-  # that call lands in.
-  local build_line
-  # shellcheck disable=SC2016
-  build_line="$(grep -F 'run_governed_build "$REPO_ROOT"' "$restart")"
-  # shellcheck disable=SC2016
-  assert_contains "build line passes the module-cache flags" "$build_line" '"${MODULE_CACHE_FLAGS[@]}"'
+  assert_contains "the wrapper points at the shared per-user module cache" "$wrapper" 'Library/Caches/tbd/swift-module-cache'
+  assert_contains "the wrapper supplies the Swift frontend module-cache-path" "$wrapper" '"-module-cache-path"'
+  assert_contains "the wrapper supplies the clang modules cache path" "$wrapper" 'f"-fmodules-cache-path={path}"'
+  # The path must come from the passwd database: scripts/test.sh points HOME at
+  # a scratch fence it deletes, so a $HOME-derived cache would be minted empty
+  # inside the fence on every test run and every run would pay a full rebuild.
+  assert_contains "the wrapper resolves the path from the passwd database" "$wrapper" 'pwd.getpwuid(os.getuid()).pw_dir'
+  assert_missing "the wrapper never derives the cache from \$HOME" "$wrapper" 'os.environ["HOME"]'
+  # The wrapper creates it, so no build races a missing parent directory.
+  assert_contains "the wrapper creates the shared cache dir" "$wrapper" 'path.mkdir(parents=True, exist_ok=True)'
+
+  # restart.sh must not select it a second time, in any spelling.
+  local body; body="$(cat "$restart")"
+  local restart_flags
+  restart_flags="$(grep -nE '^[^#]*(-module-cache-path|-fmodules-cache-path|MODULE_CACHE_FLAGS)' "$restart" || true)"
+  assert_eq "restart.sh selects no module cache of its own" "" "$restart_flags"
+
+  # The build still runs through scripts/restart-build-lib.sh, which captures
+  # swift-safe's real exit status instead of piping it away, and that lib is
+  # where the admission wrapper is actually invoked.
+  # shellcheck disable=SC2016 # literal, unexpanded strings searched in restart.sh
+  assert_contains "restart.sh runs the governed build with no extra flags" "$body" 'run_governed_build "$REPO_ROOT" || exit $?'
   # shellcheck disable=SC2016
   assert_contains "the governed build still uses the admission wrapper" \
     "$(cat "$HERE/restart-build-lib.sh")" 'scripts/swift-safe build'
-
-  # mkdir must precede the build so the first flagged build never races a
-  # missing parent directory.
-  local mkdir_ln build_ln
-  # shellcheck disable=SC2016
-  mkdir_ln="$(grep -nF 'mkdir -p "$SHARED_MODULE_CACHE"' "$restart" | head -1 | cut -d: -f1)"
-  # shellcheck disable=SC2016
-  build_ln="$(grep -nF 'run_governed_build "$REPO_ROOT"' "$restart" | head -1 | cut -d: -f1)"
-  local order="unknown"
-  if [[ -n "$mkdir_ln" && -n "$build_ln" ]] && (( mkdir_ln < build_ln )); then order="before"; fi
-  assert_eq "shared cache mkdir (line ${mkdir_ln:-?}) precedes swift build (line ${build_ln:-?})" "before" "$order"
 }
 
 # --- install-reaping + gate helpers ------------------------------------------

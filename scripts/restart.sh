@@ -129,24 +129,13 @@ fi
 
 # MARK: - Build
 #
-# Shared clang/Swift module cache across ALL TBD worktrees. By default every
-# worktree's `.build` accumulates its own ~640 MB ModuleCache with near-
-# identical contents; pointing both the Swift frontend (-module-cache-path)
-# and clang (-fmodules-cache-path, reaches the C-shim dependency targets like
-# CNIOAtomics) at one $HOME-level directory keeps a single ~610 MB copy total,
-# concurrency-safe across parallel builds. Verified empirically (Swift 6.2.4):
-# local ModuleCache drops to ~0 MB with this flag combo.
-#
-# Stickiness note: SwiftPM bakes the cache path into .build/debug.yaml at plan
-# time, so a later build in this worktree silently keeps using
-# the shared cache until a manifest re-plan — expected, not a bug. See
-# docs/reclaim-build.md ("Shared module cache").
-SHARED_MODULE_CACHE="$HOME/Library/Caches/tbd/swift-module-cache"
-mkdir -p "$SHARED_MODULE_CACHE"
-MODULE_CACHE_FLAGS=(
-    -Xswiftc -module-cache-path -Xswiftc "$SHARED_MODULE_CACHE"
-    -Xcc -fmodules-cache-path="$SHARED_MODULE_CACHE"
-)
+# The shared clang/Swift module cache is NOT selected here. scripts/swift-safe
+# points every governed compile at it, so `build`, `test` and `run` all plan
+# identically. Passing the flags from here as well is how that agreement was
+# lost before: SwiftPM bakes the cache path into .build/debug.yaml at plan
+# time, so a tree that alternated between this script and the wrapper fully
+# recompiled on every transition, in both directions. See
+# docs/specs/2026-08-30-shared-module-cache-design.md.
 
 # Everything below this point ships what is in .build/debug — it assembles the
 # bundle, copies it over /Applications/TBD.app, and restarts the shared
@@ -167,7 +156,7 @@ source "$REPO_ROOT/scripts/restart-build-lib.sh"
 if [ "$skip_build" = false ]; then
     echo "Building..."
     t0=$SECONDS
-    run_governed_build "$REPO_ROOT" "${MODULE_CACHE_FLAGS[@]}" || exit $?
+    run_governed_build "$REPO_ROOT" || exit $?
     echo "  Build: $((SECONDS - t0))s"
 fi
 

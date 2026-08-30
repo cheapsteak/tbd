@@ -188,13 +188,21 @@ test_output_is_trimmed_to_three_lines() {
     rm -rf "$d"
 }
 
+# restart.sh passes no extra arguments today, but the lib's contract is that
+# whatever it is given reaches the wrapper unmangled — flags and their values
+# alike. (The module cache is deliberately NOT among them: scripts/swift-safe
+# decides that for every governed build. See
+# docs/specs/2026-08-30-shared-module-cache-design.md.)
 test_arguments_pass_through_to_swift_safe() {
     local d; d="$(mkfakeworktree 0)"
-    run_under_restart_shell "$d" -Xswiftc -module-cache-path -Xswiftc /tmp/cache >/dev/null 2>&1
+    run_under_restart_shell "$d" --product TBDApp -Xswiftc -DEXAMPLE >/dev/null 2>&1
     local args; args="$(cat "$d/args.txt")"
     assert_contains "the subcommand is build" "$args" "build"
-    assert_contains "module-cache flags reach swift-safe" "$args" "-module-cache-path"
-    assert_contains "flag values reach swift-safe" "$args" "/tmp/cache"
+    # The stub records one argument per line, so each is asserted on its own.
+    assert_contains "flags reach swift-safe" "$args" "-Xswiftc"
+    assert_contains "flag values reach swift-safe" "$args" "-DEXAMPLE"
+    assert_contains "options reach swift-safe" "$args" "--product"
+    assert_contains "option values reach swift-safe" "$args" "TBDApp"
     rm -rf "$d"
 }
 
@@ -222,9 +230,7 @@ test_restart_sh_routes_the_build_through_the_guard() {
     # shellcheck disable=SC2016 # literal, unexpanded strings searched in restart.sh
     assert_contains "restart.sh runs the governed build" "$body" 'run_governed_build "$REPO_ROOT"'
     # shellcheck disable=SC2016
-    assert_contains "restart.sh still passes the module-cache flags" "$body" 'run_governed_build "$REPO_ROOT" "${MODULE_CACHE_FLAGS[@]}"'
-    # shellcheck disable=SC2016
-    assert_contains "a non-zero build status exits restart.sh" "$body" 'run_governed_build "$REPO_ROOT" "${MODULE_CACHE_FLAGS[@]}" || exit $?'
+    assert_contains "a non-zero build status exits restart.sh" "$body" 'run_governed_build "$REPO_ROOT" || exit $?'
 }
 
 test_restart_sh_never_pipes_the_build_status_away() {
