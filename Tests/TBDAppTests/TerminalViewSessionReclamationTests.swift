@@ -33,6 +33,24 @@ import Testing
 /// `prepareSession` minted, because `panelID` alone does not identify a
 /// preparation — see `supersededCoordinatorReleaseSparesTheRebuiltViewSession`.
 /// The termination path deliberately is not: it reclaims everything tracked.
+///
+/// **Every test that touches a `Coordinator` is `@MainActor`.** `Coordinator`
+/// conforms to SwiftTerm's `TerminalViewDelegate`, which is `@MainActor` on
+/// the pinned fork, so the class inherits that isolation — its `init`,
+/// `tmuxBridge`, `tmuxServer`, `panelID` and `viewSessionReclaim` are all
+/// main-isolated and cannot be reached from a non-isolated test body. The
+/// releases those tests drive therefore run on the main thread, which is where
+/// SwiftUI drops coordinators in production anyway; `deinit` stays
+/// non-isolated and still reads its facts through `ViewSessionReclaim`, which
+/// is the property `publishedPreparationIsReadableOffTheMainThread` pins —
+/// that test constructs no `Coordinator`, so it stays off the main actor and
+/// does its read from a global queue.
+///
+/// The annotation costs one main-actor hop per `await`, not one per poll:
+/// every bounded wait here is a method on the `RecordingTmuxRunner` actor, so
+/// the polling loop runs on that actor's executor and the test body resumes
+/// exactly once. (`TerminalTeardownReapTests` batches its hops by hand for the
+/// opposite reason — its waits resume on the caller.)
 @Suite("tmux view sessions are reclaimed on every teardown path")
 struct TerminalViewSessionReclamationTests {
     private static let panelID = UUID(uuidString: "4C4F1A61-F385-46AB-861D-42A425DB427B")!
@@ -68,6 +86,7 @@ struct TerminalViewSessionReclamationTests {
     /// **The test that pins the bug.** Releasing the coordinator without ever
     /// calling `cleanup()` is exactly what SwiftUI does when it skips
     /// `dismantleNSView`, and before the fix nothing killed the session.
+    @MainActor
     @Test("releasing a panel coordinator without dismantle still kills its view session")
     func coordinatorReleaseWithoutDismantleKillsViewSession() async throws {
         let fixture = try TmuxBridgeFixture()
@@ -108,6 +127,7 @@ struct TerminalViewSessionReclamationTests {
     /// deciding whether to spawn a kill *before* the wait below starts, so no
     /// later invocation can appear — a second kill would already be recorded
     /// or already be impossible.
+    @MainActor
     @Test("a cleaned-up coordinator that is then released kills its session exactly once")
     func cleanedUpCoordinatorReleaseDoesNotKillTwice() async throws {
         let fixture = try TmuxBridgeFixture()
@@ -195,6 +215,7 @@ struct TerminalViewSessionReclamationTests {
     /// `dismantleNSView` — and before the fix its teardown removed and killed
     /// whatever `activeSessions` held for that `panelID`, which by then was the
     /// *new* coordinator's session. Symptom: the freshly woken terminal is dead.
+    @MainActor
     @Test("a superseded coordinator's release does not kill the rebuilt panel's view session")
     func supersededCoordinatorReleaseSparesTheRebuiltViewSession() async throws {
         let fixture = try TmuxBridgeFixture()
@@ -282,6 +303,7 @@ struct TerminalViewSessionReclamationTests {
     /// reachable shape: the field is assigned when SwiftUI makes the view,
     /// while the server the preparation actually ran against is the one the
     /// bridge recorded.
+    @MainActor
     @Test("a teardown kills on the session's own server, not the one its caller holds")
     func teardownKillsOnThePreparationsServerNotTheCallers() async throws {
         let fixture = try TmuxBridgeFixture()
