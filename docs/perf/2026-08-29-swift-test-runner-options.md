@@ -35,8 +35,7 @@ such wherever they appear: the local full-suite baseline (8,437 tests in 818
 suites, 771 s) and the failure breakdown of that run (42 failures, all
 `Time limit was exceeded` or gate starvation, none a real defect). They come
 from the run that prompted this investigation. Reproducing them would have cost
-the build slot for no new information; §7 says what measurement would have been
-worth that cost.
+the build slot for no new information.
 
 Deliberately **not** measured: an A/B of the parallelism cap on the real suite.
 Doing that honestly needs the machine-global build slot for a cold rebuild plus
@@ -61,6 +60,14 @@ For a build that is exactly the intent. For a test run it means **the
 machine-global build slot is held for the whole test execution, not just the
 compile.**
 
+The wrapper already knows this hazard by name — for a *different* subcommand.
+`scripts/swift-safe` prints a warning on `run` saying it "holds the
+machine-global build slot until the program exits, not just until it finishes
+compiling; every other TBD worktree waits meanwhile", and points at building
+the product and then executing the binary. `test` has exactly the same shape:
+SwiftPM stays alive for the whole run. It gets no such warning, and it is the
+subcommand that stays alive for tens of minutes.
+
 Observed live during this investigation:
 
 - The holder was a sibling worktree running SwiftPM's test command with
@@ -81,6 +88,17 @@ misbehaviour. The structure is what produces the queue.
 The arithmetic is unforgiving: with one slot and holders that run for tens of
 minutes, wait time grows linearly with the number of worktrees that want to
 test, and there are 30 of them.
+
+**This repo has already diagnosed this and shipped a valve for it.**
+`docs/specs/2026-08-16-remote-verification-valve-design.md` opens with the same
+observation, and its snapshots of live contention match today's: a `swift test`
+holder with two or three lanes queued behind it, six of seven queued lanes
+being pure verification whose only output is a pass/fail bit. The valve lets a
+lane that has queued past a threshold leave the local queue and get its verdict
+from CI instead. It is **off by default** — `TBD_REMOTE_VERIFY=1` arms it, with
+a 300-second yield bound. The peer run that died at exit 75 after 1800 seconds,
+having compiled nothing, would have yielded at 300 seconds and come back with a
+verdict.
 
 ### B. The machine is oversubscribed, and that is not a tooling problem
 
@@ -106,9 +124,9 @@ The comparison that settles it: CI ran this same tree green on a **3-core**
 - quiet pass (tier 3, serial) — 80 tests in 23 suites, **56.7 s**
 - **8,427 tests, 260.0 s of test execution**
 
-Against a reported 8,437 tests in 818 suites in **771 s** locally. A runner with a quarter
-of the cores is three times faster. Whatever is wrong, it is not that SwiftPM
-is the wrong tool for 8,400 tests.
+Against a reported 8,437 tests in 818 suites in **771 s** locally. A runner
+with a quarter of the cores is three times faster. Whatever is wrong, it is not
+that SwiftPM is the wrong tool for 8,400 tests.
 
 ### C. In-process scheduling — real, secondary, and now fixable
 
@@ -252,28 +270,43 @@ workflow says local validation uses is on the disk and unused.
 
 Ranked by expected win per unit of cost and risk.
 
-**1. Stop holding the machine-global build slot for the duration of a test
-run.** Highest expected win by a wide margin, and it touches no test code. The
+**1. Turn on the remote verification valve that is already built.**
+`TBD_REMOTE_VERIFY=1` in the environment `scripts/test.sh` runs under. Cost:
+one environment variable and a clean tree; no code, no spec, no soak — the
+design is committed and the mechanism shipped. Expected win: converts the worst
+case of cost A from "1800 seconds, exit 75, nothing tested" into "300 seconds,
+then a CI verdict". It does not make the local slot any less contended, so it
+treats the symptom rather than the cause — but it is the only item on this list
+that is free, and the run that prompted this document is exactly the run it was
+built for. Start here. Note that `TBD_REMOTE_VERIFY` appears nowhere outside
+its own design spec — not in the root `CLAUDE.md`, not in `Tests/CLAUDE.md`'s
+Quick Reference — so it is default-off *and* effectively undiscoverable; if the
+soak is going well, saying so in the Quick Reference is part of this item.
+
+**2. Stop holding the machine-global build slot for the duration of a test
+run.** Largest structural win, and it touches no test code. The
 lock is admission control for *compilation*; a test run holds it through
 *execution* because the wrapper `execv`s SwiftPM. Splitting `scripts/test.sh`
 into a locked build of the test bundle followed by an unlocked run against the
-already-built bundle would return the slot after the compile. Cost: test
+already-built bundle would return the slot after the compile — which is the
+same remedy the wrapper already recommends to `run`. Cost: test
 execution is not free either, so removing it from admission control needs a
 decision about what the lock is for. Risk: real — this is load-bearing shared
 infrastructure. **Needs a spec via `/tbd-brainstorming`, with a human answering
 the questions.** Do not implement from this document.
 
-**2. Route local runs through the 6.3.3 toolchain CI already pins.** Removes an
-unintentional local/CI skew, and is the precondition for #3. Mechanically it is
+**3. Route local runs through the 6.3.3 toolchain CI already pins.** Removes an
+unintentional local/CI skew, and is the precondition for #4. Mechanically it is
 `TBD_SWIFT_BIN`, or `TOOLCHAINS` set to the toolchain's bundle identifier.
 Cost: one cold rebuild per worktree, and a possibility that something compiles
 differently under 6.3 that CI has been absorbing all along — unlikely, since CI
 builds this tree on 6.3.3 every run. Modest, mostly hygiene.
 
-**3. Set `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH` once on 6.3.3.**
-Expected win: eliminates the `Time limit was exceeded` and gate-starvation
-failure class — 42 of 42 non-defect failures in the observed run — by keeping
-queue time out of every `.timeLimit` and every bounded wait. Expected non-win:
+**4. Set `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH` once on 6.3.3.**
+Expected win, from the runner source rather than from measurement: it should
+retire the `Time limit was exceeded` and gate-starvation failure class — all 42
+failures reported from the run that prompted this — by keeping queue time out
+of every `.timeLimit` and every bounded wait. Expected non-win:
 wall time probably does not improve and may rise slightly (PR #1390: "does not
 generally impact execution time"), and reported per-test durations stay
 inflated. Cost: one environment variable, and it is `@_spi(Experimental)` with
@@ -282,14 +315,14 @@ Fits this repo's default-off-flag doctrine cleanly. **Also needs a spec** — it
 changes how the suite decides something, and picking the width is a theory
 call.
 
-**4. Mirror CI's two-pass split in the local default.** Already measured in
+**5. Mirror CI's two-pass split in the local default.** Already measured in
 this repo: p90 26.4 s → 14.6 s for +26 s of wall time. CI does it; local does
 not. Cheap, understood, and it is the only in-process-population remedy that
 works on 6.2.4. Its cost is real though — +26 s of wall on a machine where the
 scarce resource is the build slot, and under today's wrapper the slot is held
-across both passes. Sequence it after #1, not before.
+across both passes. Sequence it after #2, not before.
 
-**5. Do nothing about the box, but say plainly that it is the box.** Thirty
+**6. Do nothing about the box, but say plainly that it is the box.** Thirty
 worktrees, load 140, 40% system time, 17% idle. If local test latency is the
 thing that matters, the highest-leverage change is fewer concurrent worktrees
 or a second machine — not a runner. That is a workflow decision, not an
@@ -308,7 +341,7 @@ engineering one, and it belongs to the person running the fleet.
   that the width cap is *not* per-suite `.serialized` reheated: it bounds the
   process-global in-flight count, which is the thing `.serialized` provably
   could not shrink.
-- **Do not raise `.clockDriven`'s limit again.** If #3 lands, the pressure that
+- **Do not raise `.clockDriven`'s limit again.** If #4 lands, the pressure that
   drove it up should fall, and the right move then is to re-derive the triple
   downward, not to leave it where it is.
 
@@ -317,7 +350,7 @@ real suite, run on an idle machine — arms alternating uncapped and capped at
 some width, population held constant, reporting the executed test **count** per
 arm (a `--filter` matching nothing exits green), the count of
 `Time limit was exceeded` issues, and wall time. If capping does *not* reduce
-the time-limit failures, #3 is wrong and the reading of the runner source above
+the time-limit failures, #4 is wrong and the reading of the runner source above
 is wrong with it. That measurement is worth taking on a quiet box; it was not
 worth taking on this one.
 
