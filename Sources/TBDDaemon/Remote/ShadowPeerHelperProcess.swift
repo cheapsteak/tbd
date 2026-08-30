@@ -129,6 +129,12 @@ public protocol ShadowPeerHelperHandle: Sendable {
     var lines: AsyncStream<String> { get }
     /// Write one control frame to the helper's stdin. Non-blocking: a write
     /// that would block fails the frame rather than parking the caller.
+    ///
+    /// **All-or-nothing at the stream level.** A frame that reaches the pipe
+    /// only in part cannot be un-written, and the bytes on it are the head of a
+    /// line the helper will never see terminated — so a short write retires the
+    /// stdin channel outright, and every later `send` fails with `stdinGone`
+    /// rather than appending a second frame onto a truncated line.
     func send(_ frame: PeerBridgeFrame) async throws
     /// Close stdin and make sure the process is gone before returning. Stdin
     /// EOF is the load-bearing signal — the kernel delivers it even to a
@@ -303,10 +309,12 @@ final class ShadowPeerHelperProcess: ShadowPeerHelperHandle, @unchecked Sendable
         self.recordPath = recordPath
         self.exitGrace = exitGrace
         self.clock = clock
-        // Non-blocking from here on. A control frame is a few hundred bytes
-        // against a 64 KB pipe buffer, so `EAGAIN` means the helper has stopped
+        // Non-blocking from here on: `EAGAIN` means the helper has stopped
         // draining — a frame to drop, never a reason to park the daemon's
-        // whole shadow-peer actor on a wedged child.
+        // whole shadow-peer actor on a wedged child. A message frame can carry
+        // a body far larger than the pipe buffer, so the write may also stop
+        // part-way through one; `send` treats that as fatal to the stream for
+        // the reason spelled out there.
         let fd = stdin.fileDescriptor  // the parameter, not Darwin's `stdin` global
         let flags = fcntl(fd, F_GETFL)
         if flags >= 0 { _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK) }
@@ -320,22 +328,39 @@ final class ShadowPeerHelperProcess: ShadowPeerHelperHandle, @unchecked Sendable
             }
             let data = Data(line.utf8)
             var offset = 0
-            try data.withUnsafeBytes { raw in
-                guard let base = raw.baseAddress else { return }
-                while offset < raw.count {
-                    let written = Darwin.write(
-                        self.stdinHandle.fileDescriptor, base.advanced(by: offset),
-                        raw.count - offset)
-                    if written > 0 {
-                        offset += written
-                        continue
+            do {
+                try data.withUnsafeBytes { raw in
+                    guard let base = raw.baseAddress else { return }
+                    while offset < raw.count {
+                        let written = Darwin.write(
+                            self.stdinHandle.fileDescriptor, base.advanced(by: offset),
+                            raw.count - offset)
+                        if written > 0 {
+                            offset += written
+                            continue
+                        }
+                        if written < 0 && errno == EINTR { continue }
+                        if written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            throw ShadowPeerHelperError.stdinWouldBlock(handle: self.handleName)
+                        }
+                        throw ShadowPeerHelperError.stdinGone(handle: self.handleName)
                     }
-                    if written < 0 && errno == EINTR { continue }
-                    if written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
-                        throw ShadowPeerHelperError.stdinWouldBlock(handle: self.handleName)
-                    }
-                    throw ShadowPeerHelperError.stdinGone(handle: self.handleName)
                 }
+            } catch {
+                // **A partly-written frame poisons the stream, so the pipe is
+                // dead rather than merely busy.** The fd is `O_NONBLOCK`, and a
+                // non-blocking pipe accepts a *prefix* of a large write when its
+                // buffer fills mid-frame — a message body may be up to
+                // `PeerBridgeFrameCodec.maxFrameBytes`, so this is reachable
+                // rather than theoretical. What is already on the pipe is then
+                // the head of an NDJSON line that will never get its newline,
+                // and a later `send` would append a whole frame directly onto
+                // it: the helper reads one merged line and every frame after it
+                // is misaligned. There is no way to take those bytes back, so
+                // `closed` latches here and every subsequent `send` fails fast
+                // with `stdinGone` instead of splicing onto a truncated line.
+                if offset > 0 { state.closed = true }
+                throw error
             }
         }
     }
