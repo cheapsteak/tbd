@@ -1,22 +1,49 @@
 #!/usr/bin/env python3
-"""Report the distribution of app-draw -> render-server-commit latency.
+"""Report the distribution of the app-side commit latency of terminal frames.
 
 WHAT THE METRIC IS
 ------------------
 `TerminalCommitLatencyProbe` (Sources/TBDApp/Terminal) stamps `t0` at the first
-terminal view's `viewWillDraw` in a display cycle, registers a `CATransaction`
-completion block on the transaction AppKit is building around that cycle, and
-stamps `t1` when CoreAnimation fires it. `commitms = t1 - t0` is the leg between
-"the app started painting its terminal content" and "the render server has
-committed that frame". `drawms` is the app-side paint span within it: `t0` to
-the last terminal draw returning.
+terminal view's `viewWillDraw` in a display cycle, marks the `CATransaction`
+AppKit is building around that cycle, registers a completion block on it, and
+stamps `t1` when CoreAnimation runs that block. `commitms = t1 - t0`.
 
-WHAT IT IS NOT
---------------
-It is NOT time-to-glass. Nothing after the render server's commit is covered:
-not WindowServer compositing the layer tree, not the display's scanout. Every
-number below is therefore a LOWER BOUND on what a user perceives. If you are
-tempted to quote a p99 here as "keystroke latency", don't.
+WHAT IT IS NOT -- AND THIS IS NOT A QUIBBLE
+-------------------------------------------
+`commitms` is APP-SIDE ONLY. It does not cross into the render server, and it
+is nowhere near time-to-glass.
+
+Measured with a real on-screen window and real committed layer changes, the
+completion block runs 12-99 MICROSECONDS after `CATransaction.commit()`
+returns, on the same runloop turn. Nothing round-trips to WindowServer in 20us.
+Apple's contract for `setCompletionBlock` says the block runs "as soon as all
+animations subsequent to this transaction group have completed", and with no
+animations "will be invoked immediately" -- the render server is not mentioned
+because it is not involved.
+
+So a small `commitms` licenses NO conclusion about the compositor. It says the
+app hands the frame over quickly, which is where the evidence already pointed.
+Do not read it as "the render server is fine". The render-server leg remains
+uninstrumented: no public API exposes it for a CoreGraphics-drawn NSView
+(CAMetalDrawable.addPresentedHandler would, but TBD does not use Metal).
+
+THE ANIMATION DISTORTION, AND WHY `sync` EXISTS
+-----------------------------------------------
+Because the block waits for ANIMATIONS rather than for a commit, any animation
+inside a marked transaction redefines `commitms`. Measured: a finite 0.6s
+animation deferred the block by 675ms -- a sample that reports an animation
+duration and lands in p90/p99 looking exactly like a compositor stall. An
+infinite animation meant the block never fired at all, and the cycle surfaces
+as a drop. TBD's terminal has both: SwiftTerm's caret blink repeats forever,
+and the overlay scroller fades over 0.25s -- during scrolling, which is the lag
+repro.
+
+`sync` separates them. `sync=1` means the completion block ran in the same
+runloop turn as the draw: no animation wait, the number means what it says.
+`sync=0` means it arrived later -- an animation wait, a commit spanning turns,
+or both, indistinguishable from inside the process. This script reports the two
+populations separately and never pools them. Read `sync=1` as the measurement
+and `sync=0` as a count of cycles you cannot use.
 
 WHY THIS LEG
 ------------
@@ -27,9 +54,12 @@ IO threads were idle, and tmux sat at 0.1-0.4% CPU. `sample` followed the trail
 to `CA::Transaction::commit` and lost it at the process boundary while
 WindowServer ran at 57-66% CPU. The live hypothesis is that TBD presents a deep
 SwiftUI-hosted layer tree where iTerm2 presents one flat layer, and that a
-loaded compositor degrades the expensive tree. This script measures the first
-half of that gap; the second half needs a WindowServer-side instrument we do
-not have.
+loaded compositor degrades the expensive tree.
+
+This script puts a per-frame number on `CA::Transaction::commit` itself -- the
+last thing `sample` could see. It stops there. Confirming or refuting the
+compositing hypothesis needs a WindowServer-side instrument that does not
+exist here.
 
 WHY THE SPLIT BY draws-per-cycle
 --------------------------------
@@ -44,14 +74,20 @@ WHY vis MATTERS
 `vis=0` means no view in that cycle was genuinely on screen (a non-empty
 `visibleRect` inside a visible, unoccluded window). Off-screen cycles are work
 the user never sees; they belong in a separate bucket, not in the headline
-percentiles.
+percentiles. Drop lines carry `vis` too, because drops cluster on animated
+frames rather than falling randomly -- knowing whether the lost ones were on
+screen is what makes the bias characterizable rather than merely flagged.
 
 DROPPED CYCLES
 --------------
 `CATransaction.setCompletionBlock` has no getter and replaces any incumbent
 block. When AppKit or SwiftUI sets its own block on a transaction after the
-probe set one, the probe's block never fires and that cycle is lost. The probe
-emits one `commitdrop draws=<n>` line per lost cycle -- one line each, not a
+probe set one, the probe's block never fires and that cycle is lost. An
+animation still running in the transaction produces the same observable, and
+the two causes cannot be told apart from inside the process -- so a high drop
+rate may mean "our block was replaced" OR "animations were running", not
+necessarily a biased sample. The probe emits one `commitdrop draws=<n> vis=<0|1>`
+line per lost cycle -- one line each, not a
 running total, so a windowed read of the log counts the drops in its own window
 instead of inheriting a process-lifetime counter. A high drop rate means the
 percentiles describe a biased sample, so it is reported alongside them.
@@ -92,11 +128,12 @@ from datetime import datetime
 # `log show` prefixes each line with e.g. "2026-08-29 10:11:12.345678-0400".
 TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+[+-]\d{4})")
 COMMIT_RE = re.compile(
-    r"\bcommit draws=(\d+) paints=(\d+) drawms=([\d.]+) commitms=([\d.]+) vis=([01])\b"
+    r"\bcommit draws=(\d+) paints=(\d+) drawms=([\d.]+) commitms=([\d.]+)"
+    r" vis=([01]) sync=([01])\b"
 )
 # One line per lost cycle, so drops are counted within the window being read
 # rather than inherited from a process-lifetime counter.
-DROP_RE = re.compile(r"\bcommitdrop draws=(\d+)\b")
+DROP_RE = re.compile(r"\bcommitdrop draws=(\d+) vis=([01])\b")
 
 # Load bands, as (label, upper bound exclusive). The last band is open-ended.
 LOAD_BANDS = [("load<2", 2.0), ("load 2-8", 8.0), ("load 8-32", 32.0), ("load>=32", None)]
@@ -112,6 +149,7 @@ class Sample:
     drawms: float
     commitms: float
     visible: bool
+    synchronous: bool
 
 
 def parse_epoch(line: str) -> float | None:
@@ -124,9 +162,10 @@ def parse_epoch(line: str) -> float | None:
         return None
 
 
-def parse(stream) -> tuple[list[Sample], int]:
+def parse(stream) -> tuple[list[Sample], int, int]:
     samples: list[Sample] = []
     drops = 0
+    drops_onscreen = 0
     for line in stream:
         commit = COMMIT_RE.search(line)
         if commit:
@@ -138,12 +177,16 @@ def parse(stream) -> tuple[list[Sample], int]:
                     drawms=float(commit.group(3)),
                     commitms=float(commit.group(4)),
                     visible=commit.group(5) == "1",
+                    synchronous=commit.group(6) == "1",
                 )
             )
             continue
-        if DROP_RE.search(line):
+        drop = DROP_RE.search(line)
+        if drop:
             drops += 1
-    return samples, drops
+            if drop.group(2) == "1":
+                drops_onscreen += 1
+    return samples, drops, drops_onscreen
 
 
 def load_series(path: str) -> list[tuple[float, float]]:
@@ -199,10 +242,11 @@ def report_group(label: str, samples: list[Sample]) -> None:
         print(f"  {label:<16} (no samples)")
         return
     commit = sorted(s.commitms for s in samples)
-    # A cycle with paints=0 was asked to draw and painted nothing, so its
-    # drawms is 0.000 for a reason that has nothing to do with paint speed.
-    # Folding those in would drag the paint figures toward zero.
-    draw = sorted(s.drawms for s in samples if s.paints > 0)
+    # `drawms` spans the first draw to the last paint, so it only describes
+    # paint cost when every draw in the cycle actually painted. Any shortfall
+    # (SwiftTerm's `draw` has early returns before its frame-presented hook)
+    # truncates the span for a reason unrelated to paint speed.
+    draw = sorted(s.drawms for s in samples if s.paints == s.draws)
     unpainted = len(samples) - len(draw)
     paint = (
         f"   (drawms p50={percentile(draw, 0.50):.2f} max={draw[-1]:.2f})"
@@ -210,7 +254,7 @@ def report_group(label: str, samples: list[Sample]) -> None:
         else "   (no painted cycles)"
     )
     if unpainted:
-        paint += f" [{unpainted} painted nothing]"
+        paint += f" [{unpainted} incompletely painted]"
     print(
         f"  {label:<16} n={len(commit):<7}"
         f" p50={percentile(commit, 0.50):8.2f}"
@@ -244,7 +288,7 @@ def main() -> int:
 
     stream = open(args.logfile, encoding="utf-8") if args.logfile else sys.stdin
     try:
-        samples, drops = parse(stream)
+        samples, drops, drops_onscreen = parse(stream)
     finally:
         if args.logfile:
             stream.close()
@@ -260,25 +304,41 @@ def main() -> int:
 
     offscreen = [s for s in samples if not s.visible]
     onscreen = samples if args.include_offscreen else [s for s in samples if s.visible]
+    # Never pool these two. See the docstring: a sync=0 sample may be reporting
+    # an animation's duration rather than a commit's cost.
+    deferred = [s for s in onscreen if not s.synchronous]
+    clean = [s for s in onscreen if s.synchronous]
 
     total = len(samples) + drops
     drop_pct = (100.0 * drops / total) if total else 0.0
 
-    print("app-draw -> render-server-commit latency, milliseconds")
-    print("NOT time-to-glass: WindowServer composite and scanout are not covered.")
+    print("app-side commit latency of terminal frames, milliseconds")
+    print("NOT time-to-glass, and NOT a render-server round trip: the CATransaction")
+    print("completion block runs on the same runloop turn, ~12-99us after commit.")
     print()
-    print(f"cycles reported: {len(samples)}   dropped (completion block lost): {drops}"
-          f" ({drop_pct:.1f}%)")
+    print(f"cycles reported: {len(samples)}   never completed: {drops}"
+          f" ({drop_pct:.1f}%, {drops_onscreen} of them on screen)")
     if drop_pct >= 20:
-        print("  WARNING: a fifth or more of cycles were dropped; this sample is biased.")
+        print("  WARNING: a fifth or more of cycles never completed. That is either our")
+        print("  completion block being replaced, or animations still running in those")
+        print("  transactions -- indistinguishable from here. Treat the rest as partial.")
     print(f"on screen: {len(samples) - len(offscreen)}   off screen: {len(offscreen)}")
+    print(f"of the on-screen cycles: {len(clean)} sync=1 (usable), "
+          f"{len(deferred)} sync=0 (animation wait or multi-turn commit)")
     print()
 
-    print("by draws-per-cycle" + ("" if args.include_offscreen else " (on-screen cycles only)"))
-    report_group("all", onscreen)
-    report_group("draws=1", [s for s in onscreen if s.draws == 1])
-    report_group("draws>1", [s for s in onscreen if s.draws > 1])
+    scope = "" if args.include_offscreen else ", on screen"
+    print(f"by draws-per-cycle (sync=1 only{scope}) -- THE measurement")
+    report_group("all", clean)
+    report_group("draws=1", [s for s in clean if s.draws == 1])
+    report_group("draws>1", [s for s in clean if s.draws > 1])
     print()
+
+    if deferred:
+        print("sync=0 cycles -- NOT comparable; commitms here may be an animation's")
+        print("duration rather than a commit's cost. Shown to be accounted for, not read.")
+        report_group("deferred", deferred)
+        print()
 
     if not args.include_offscreen and offscreen:
         print("off-screen cycles (work the user never sees)")
@@ -287,9 +347,9 @@ def main() -> int:
 
     if args.load_log:
         series = load_series(args.load_log)
-        print("by machine load (1-minute average, nearest sample within 30s)")
+        print("by machine load (1-minute average, nearest sample within 30s; sync=1 only)")
         banded: dict[str, list[Sample]] = {}
-        for sample in onscreen:
+        for sample in clean:
             banded.setdefault(band_for(load_at(series, sample.epoch)), []).append(sample)
         for label, _ in LOAD_BANDS:
             if label in banded:

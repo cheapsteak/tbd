@@ -1,4 +1,4 @@
-# Commit-latency diagnostic: app draw → render-server commit
+# Commit-latency diagnostic: the app-side commit of a terminal frame
 
 ## The gap this closes
 
@@ -30,21 +30,69 @@ hypothesis is **compositing**: TBD presents a deep SwiftUI-hosted layer tree
 with many panels where iTerm2 presents one flat layer, and under a loaded
 compositor an expensive tree degrades where a cheap one does not.
 
-Nothing has ever instrumented the leg between the app finishing a draw and the
-frame being committed. This diagnostic does.
+Nothing has ever instrumented what the app itself spends committing a terminal
+frame. This diagnostic does — and, as the next section explains, that turns out
+to be less than the work set out to measure. The design brief assumed
+`CATransaction`'s completion block signals the render server; measurement says
+otherwise, and the rest of this document is written to what was measured.
 
 ## What it measures, and what it does not
 
-`CATransaction.setCompletionBlock` fires after the **render server** has
-committed the transaction currently in flight. Stamping a timestamp when a
-terminal view begins drawing and again when that block fires yields exactly the
-missing leg.
+`commitms` is: first terminal `viewWillDraw` of a transaction → the
+`CATransaction` completion block for that transaction runs.
 
-**This is not time-to-glass.** Nothing after the render-server commit is
-covered: not `WindowServer` compositing the layer tree, not the display's
-scanout. Every figure the instrument produces is a **lower bound** on what a
-user perceives. Measuring the second half needs a WindowServer-side instrument
-we do not have and this design does not attempt.
+**That is app-side only. It does not cross into the render server, and it is
+nowhere near time-to-glass.** This correction matters enough to lead with,
+because the instrument was designed on the opposite premise. Measured on this
+machine with a real on-screen window and real committed layer changes, the
+completion block runs **12–99 microseconds after `CATransaction.commit()`
+returns**, on the same runloop turn. Nothing makes a round trip to
+`WindowServer` in 20µs. Apple's contract for `setCompletionBlock` says only
+that the block runs "as soon as all animations subsequent to this transaction
+group have completed", and that with no animations it "will be invoked
+immediately" — the render server is not mentioned, because it is not involved.
+
+What the instrument does cover is the app's own cost of assembling and
+committing the frame: `CA::Transaction::commit` on the main thread, the last
+thing `sample` could see before the trail left the process. That is a per-frame
+number nobody had, and it is worth having. It is not the leg this work set out
+to measure.
+
+**The render-server leg remains uninstrumented.** No public API exposes it for
+a CoreGraphics-drawn `NSView`. `CAMetalDrawable.addPresentedHandler` does, but
+TBD does not use SwiftTerm's Metal renderer; adopting it would be a much larger
+change and is not proposed here.
+
+The consequence for how results get read: **a small `commitms` licenses no
+conclusion about the compositor.** It says the app hands the frame over
+quickly, which is the direction the evidence already pointed. Anyone reading a
+capture must not conclude "attention moves past the render server" from an
+instrument that never observed the render server.
+
+### The animation distortion, and the `sync` bit
+
+The completion block waits for *animations*, not for a commit. Any animation
+added inside a transaction the probe marked therefore redefines `commitms` for
+that cycle. Measured here:
+
+- A finite 0.6s animation → the block fired **675ms** after commit. That sample
+  reports the animation's duration, lands straight in p90/p99, and looks
+  exactly like the compositor stall this instrument was built to look for.
+- An infinite animation → the block **never fired**, and the cycle surfaces as
+  a drop.
+
+TBD's terminal contains both shapes. SwiftTerm's caret blink is
+`repeatCount = .infinity` (`MacCaretView`), and the overlay scroller fades over
+0.25s — during scrolling, which is the lag repro itself. They are added on
+state changes rather than per frame, so the effect is episodic, not constant.
+
+`sync` is the discriminator. The probe schedules a marker for the end of the
+current runloop turn: `sync=1` means the completion block beat it — same turn,
+no animation wait, the number means what it says. `sync=0` means the block
+arrived later, so the sample folds in an animation wait, a commit spanning
+turns, or both, and the two cannot be separated from inside the process. The
+reader reports the two populations separately and never pools them; `sync=1` is
+the measurement, `sync=0` is a count of cycles that cannot be used.
 
 ## Design
 
@@ -104,16 +152,21 @@ accepted, and are the reason this cannot ship on: a block someone else set
 earlier in the cycle is discarded by us, and a block someone else sets later
 discards ours. The second case is why a cycle can go unreported.
 
-**A lost cycle is reported, promptly and exactly.** When a draw arrives in a
-different transaction while a cycle is still open, that cycle's completion
-block demonstrably never fired, so it is emitted as `commitdrop draws=<n>` —
+**A lost cycle is reported promptly.** When a draw arrives in a different
+transaction while a cycle is still open, that cycle's completion block has not
+run. Two causes produce that observable and they are indistinguishable from
+inside the process: somebody replaced our block on that transaction, or an
+animation in it is still running and CoreAnimation is still holding the block.
+The probe does not claim which. It emits `commitdrop draws=<n> vis=<0|1>` —
 one line per lost cycle, carrying the draws that went with it. One line rather
 than a running total, so a reader working over a `log show` window counts the
 drops inside its window instead of inheriting a process-lifetime counter. Each
 cycle also carries an id, so a completion block from an abandoned cycle
-arriving late cannot close the current one. The reader reports the drop rate
-and warns at 20% or above, because a high rate means the percentiles describe a
-biased sample. The one loss that goes uncounted is a final open cycle at the
+arriving late cannot close the current one. The line carries `vis` because
+drops cluster on animated frames rather than falling randomly, so a reader
+needs to know whether the lost cycles were on screen — that is what makes the
+bias characterizable rather than merely flagged. The reader warns at 20% or
+above. The one loss that goes uncounted is a final open cycle at the
 end of a session with no draw after it.
 
 **A draw that paints nothing is distinguishable.** SwiftTerm's `draw` has early
@@ -143,15 +196,17 @@ One `.info` line per instrumented display cycle, subsystem `com.tbd.app`,
 category `commitlatency`:
 
 ```
-commit draws=<n> paints=<n> drawms=<f> commitms=<f> vis=<0|1>
+commit draws=<n> paints=<n> drawms=<f> commitms=<f> vis=<0|1> sync=<0|1>
 ```
 
 - `draws` — terminal views that drew in this transaction
 - `paints` — how many of those reached the end of `draw`
 - `drawms` — first terminal view about to draw → last terminal draw returned
   (the app-side paint span)
-- `commitms` — first draw's start → render server committed
+- `commitms` — first draw's start → the transaction's completion block ran
 - `vis` — 1 if at least one of those views was genuinely on screen
+- `sync` — 1 if that block ran in the same runloop turn as the draw; only
+  `sync=1` samples are comparable
 
 `.info` rather than `.debug` because of how the two are retained.
 [`docs/diagnostics-strategy.md`](../diagnostics-strategy.md) assigns per-event
@@ -225,11 +280,12 @@ about latency.
 
 ## Lifetime
 
-Temporary. It exists to answer one question: how much of the residual lag lives
-between the app's draw and the render server's commit. Once that is answered —
-either the leg is fat, and the compositing hypothesis becomes a fix, or it is
-thin, and attention moves past the render server — the probe, its flag, its
-tests, and its reader come out. It is deliberately cheap to delete: one new
+Temporary. It answers a narrower question than the one that motivated it: how
+much per-frame time the app spends assembling and committing terminal frames.
+A fat `commitms` at `sync=1` would be a finding. A thin one closes off the
+app-side commit and says nothing about the compositor, which stays open and
+needs an instrument this design does not provide. Either way the probe, its
+flag, its tests, and its reader come out afterwards. It is deliberately cheap to delete: one new
 file, one `viewWillDraw()` override, one key on `AppState`, one script.
 
 ## Rejected alternatives

@@ -1,4 +1,5 @@
 import Foundation
+import QuartzCore
 import Testing
 @testable import TBDApp
 
@@ -31,6 +32,8 @@ struct TerminalCommitLatencyProbeTests {
         /// The mark on the transaction currently in flight, standing in for
         /// `CATransaction`'s per-transaction value store.
         private var mark: UInt64?
+        /// Turn-boundary markers, in registration order. Fired by `endTurn()`.
+        private var turnEndMarkers: [@MainActor () -> Void] = []
         private(set) var probe: TerminalCommitLatencyProbe!
 
         init() {
@@ -43,8 +46,25 @@ struct TerminalCommitLatencyProbeTests {
                         self.registered.append(onCommitted)
                     }
                 ),
+                afterCurrentTurn: { [unowned self] body in self.turnEndMarkers.append(body) },
                 emit: { [unowned self] line in self.lines.append(line) }
             )
+        }
+
+        /// Drain the runloop turn without the completion block having fired —
+        /// what CoreAnimation does when an animation in the transaction is
+        /// still running.
+        func endTurn() {
+            let markers = turnEndMarkers
+            turnEndMarkers.removeAll()
+            for marker in markers { marker() }
+        }
+
+        /// Fire only the OLDEST pending turn marker, leaving later ones armed:
+        /// an earlier turn's marker draining after a new cycle has begun.
+        func fireOldestTurnMarker() {
+            guard !turnEndMarkers.isEmpty else { return }
+            turnEndMarkers.removeFirst()()
         }
 
         /// End the transaction currently in flight without committing it —
@@ -124,7 +144,7 @@ struct TerminalCommitLatencyProbeTests {
         harness.draw(costMs: 2)
         #expect(harness.lines.isEmpty, "nothing is reported until the render server commits")
         harness.commit(afterMs: 8)
-        #expect(harness.lines == ["commit draws=1 paints=1 drawms=2.000 commitms=10.000 vis=1"])
+        #expect(harness.lines == ["commit draws=1 paints=1 drawms=2.000 commitms=10.000 vis=1 sync=1"])
     }
 
     @Test("several views drawing in one cycle produce ONE line, not one per view")
@@ -135,7 +155,7 @@ struct TerminalCommitLatencyProbeTests {
         harness.draw(costMs: 3)
         #expect(harness.registered.count == 1, "exactly one completion block per transaction")
         harness.commit(afterMs: 4)
-        #expect(harness.lines == ["commit draws=3 paints=3 drawms=6.000 commitms=10.000 vis=1"])
+        #expect(harness.lines == ["commit draws=3 paints=3 drawms=6.000 commitms=10.000 vis=1 sync=1"])
     }
 
     @Test("vis=0 only when every view in the cycle was off screen")
@@ -143,13 +163,13 @@ struct TerminalCommitLatencyProbeTests {
         let offscreen = Harness()
         offscreen.draw(costMs: 1, isOnScreen: false)
         offscreen.commit(afterMs: 1)
-        #expect(offscreen.lines.first?.hasSuffix("vis=0") == true)
+        #expect(offscreen.lines.first?.contains(" vis=0 ") == true)
 
         let mixed = Harness()
         mixed.draw(costMs: 1, isOnScreen: false)
         mixed.draw(costMs: 1, isOnScreen: true)
         mixed.commit(afterMs: 1)
-        #expect(mixed.lines.first?.hasSuffix("vis=1") == true)
+        #expect(mixed.lines.first?.contains(" vis=1 ") == true)
     }
 
     @Test("consecutive cycles are measured independently")
@@ -161,8 +181,8 @@ struct TerminalCommitLatencyProbeTests {
         harness.commit(afterMs: 20)
         #expect(harness.registered.count == 2)
         #expect(harness.lines == [
-            "commit draws=1 paints=1 drawms=1.000 commitms=5.000 vis=1",
-            "commit draws=1 paints=1 drawms=2.000 commitms=22.000 vis=1",
+            "commit draws=1 paints=1 drawms=1.000 commitms=5.000 vis=1 sync=1",
+            "commit draws=1 paints=1 drawms=2.000 commitms=22.000 vis=1 sync=1",
         ])
     }
 
@@ -176,26 +196,30 @@ struct TerminalCommitLatencyProbeTests {
         harness.now = 10
         harness.draw(costMs: 1)
         harness.commit(afterMs: 1)
-        #expect(harness.lines == ["commit draws=1 paints=1 drawms=1.000 commitms=2.000 vis=1"])
+        #expect(harness.lines == ["commit draws=1 paints=1 drawms=1.000 commitms=2.000 vis=1 sync=1"])
     }
 
-    @Test("a new transaction one frame later is a NEW cycle, not more draws on the old one")
-    func backToBackTransactionsDoNotMerge() {
+    /// Back-to-back committed cycles stay separate. This does NOT discriminate
+    /// the transaction mark from the elapsed-time boundary it replaced — the
+    /// first cycle is already closed by its commit, so both designs agree. The
+    /// tests that actually fail under the old design are
+    /// `lostCycleIsReportedPromptly`, `eachLostCycleIsItsOwnLine` and
+    /// `staleBlockIsInert`, which all leave a cycle open across a transaction
+    /// boundary.
+    @Test("back-to-back committed cycles are reported separately")
+    func backToBackCyclesStaySeparate() {
         let harness = Harness()
         harness.draw(costMs: 1)
         harness.commit(afterMs: 4)
 
-        // 16.67ms later — inside any plausible time window, and a different
-        // transaction. An elapsed-time boundary would fold this into the
-        // previous cycle; the transaction mark does not.
         harness.now += 0.01667
         harness.draw(costMs: 1)
         harness.commit(afterMs: 4)
 
         #expect(harness.registered.count == 2, "each transaction gets its own completion block")
         #expect(harness.lines == [
-            "commit draws=1 paints=1 drawms=1.000 commitms=5.000 vis=1",
-            "commit draws=1 paints=1 drawms=1.000 commitms=5.000 vis=1",
+            "commit draws=1 paints=1 drawms=1.000 commitms=5.000 vis=1 sync=1",
+            "commit draws=1 paints=1 drawms=1.000 commitms=5.000 vis=1 sync=1",
         ])
     }
 
@@ -209,12 +233,12 @@ struct TerminalCommitLatencyProbeTests {
         harness.beginNewTransaction()
 
         harness.draw(costMs: 1)
-        #expect(harness.lines == ["commitdrop draws=2"], "the lost cycle's draw count is reported")
+        #expect(harness.lines == ["commitdrop draws=2 vis=1"], "the lost cycle's draw count is reported")
 
         harness.commit(afterMs: 3)
         #expect(harness.lines == [
-            "commitdrop draws=2",
-            "commit draws=1 paints=1 drawms=1.000 commitms=4.000 vis=1",
+            "commitdrop draws=2 vis=1",
+            "commit draws=1 paints=1 drawms=1.000 commitms=4.000 vis=1 sync=1",
         ])
     }
 
@@ -226,7 +250,7 @@ struct TerminalCommitLatencyProbeTests {
             harness.beginNewTransaction()
         }
         harness.draw(costMs: 1)
-        #expect(harness.lines == ["commitdrop draws=1", "commitdrop draws=1", "commitdrop draws=1"])
+        #expect(harness.lines == ["commitdrop draws=1 vis=1", "commitdrop draws=1 vis=1", "commitdrop draws=1 vis=1"])
     }
 
     @Test("a late block from an abandoned cycle cannot close the current one")
@@ -242,7 +266,58 @@ struct TerminalCommitLatencyProbeTests {
         #expect(harness.lines.isEmpty, "the stale block must not report the new cycle")
 
         harness.commit(afterMs: 2)
-        #expect(harness.lines == ["commit draws=1 paints=1 drawms=1.000 commitms=3.000 vis=1"])
+        #expect(harness.lines == ["commit draws=1 paints=1 drawms=1.000 commitms=3.000 vis=1 sync=1"])
+    }
+
+    @Test("sync=0 when the completion block missed its runloop turn — the animation case")
+    func deferredCompletionIsMarkedUnsynchronized() {
+        let harness = Harness()
+        harness.draw(costMs: 1)
+        // CoreAnimation holds the block while an animation in the transaction
+        // runs, so the turn drains first.
+        harness.endTurn()
+        harness.commit(afterMs: 674)
+        #expect(harness.lines == ["commit draws=1 paints=1 drawms=1.000 commitms=675.000 vis=1 sync=0"])
+    }
+
+    @Test("a turn-end marker from an already-closed cycle cannot mark a later one")
+    func turnEndMarkerIsScopedToItsCycle() {
+        let harness = Harness()
+        harness.draw(costMs: 1)
+        harness.commit(afterMs: 1)
+        harness.draw(costMs: 1)
+        // The first cycle's marker drains now; it must not touch cycle two.
+        harness.fireOldestTurnMarker()
+        harness.commit(afterMs: 1)
+        #expect(harness.lines.allSatisfy { $0.hasSuffix("sync=1") })
+    }
+
+    // MARK: - The real CoreAnimation seam
+    //
+    // Every other test drives the injected fake, so without these the whole
+    // point of the mark/getter mechanism is unpinned: a typo in `markKey` or a
+    // change to the NSNumber cast would stay green.
+
+    @Test("the real transaction seam round-trips its mark")
+    func coreAnimationSeamRoundTrips() {
+        let seam = TerminalCommitLatencyProbe.TransactionSeam.coreAnimation
+        CATransaction.begin()
+        defer { CATransaction.commit() }
+        #expect(seam.mark() == nil, "a fresh transaction carries no mark")
+        seam.begin(4242) {}
+        #expect(seam.mark() == 4242)
+    }
+
+    @Test("the real transaction seam's mark does not survive its transaction")
+    func coreAnimationSeamMarkDiesWithTheTransaction() {
+        CATransaction.begin()
+        TerminalCommitLatencyProbe.TransactionSeam.coreAnimation.begin(7) {}
+        CATransaction.commit()
+        CATransaction.flush()
+        #expect(
+            TerminalCommitLatencyProbe.TransactionSeam.coreAnimation.mark() == nil,
+            "no mark is exactly how a new transaction is detected"
+        )
     }
 
     @Test("paints=0 distinguishes a draw that painted nothing from an instant paint")
@@ -250,6 +325,6 @@ struct TerminalCommitLatencyProbeTests {
         let harness = Harness()
         harness.drawWithoutPainting()
         harness.commit(afterMs: 7)
-        #expect(harness.lines == ["commit draws=1 paints=0 drawms=0.000 commitms=7.000 vis=1"])
+        #expect(harness.lines == ["commit draws=1 paints=0 drawms=0.000 commitms=7.000 vis=1 sync=1"])
     }
 }
