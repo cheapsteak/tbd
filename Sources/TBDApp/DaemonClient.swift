@@ -1671,12 +1671,17 @@ actor DaemonClient {
         )
     }
 
-    /// List notes, optionally filtered by worktree.
-    func listNotes(worktreeID: UUID? = nil) async throws -> [Note] {
+    /// List note METADATA, optionally filtered by worktree and/or an explicit
+    /// set of worktrees. Deliberately returns `NoteSummary`, not `Note`: the
+    /// daemon performs no filesystem work at all to answer this. Note content
+    /// is file-backed and the app reads it directly — same rule as
+    /// `TerminalHistoryEntry`.
+    func listNotes(worktreeID: UUID? = nil,
+                   worktreeIDs: [UUID]? = nil) async throws -> [NoteSummary] {
         return try await callAsync(
             method: RPCMethod.noteList,
-            params: NoteListParams(worktreeID: worktreeID),
-            resultType: [Note].self
+            params: NoteListParams(worktreeID: worktreeID, worktreeIDs: worktreeIDs),
+            resultType: [NoteSummary].self
         )
     }
 

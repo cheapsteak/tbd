@@ -202,7 +202,10 @@ final class AppState {
     /// so a pushed SessionStart can fence an older list response even in the
     /// brief interval before its activity delta arrives.
     @ObservationIgnored var terminalSessionOrderObservedAt: [UUID: Date] = [:]
-    var notes: [UUID: [Note]] = [:]
+    /// Polled note METADATA — never content. `note.list` touches no file (see
+    /// `NoteStore`); a pane that needs content reads it off disk with
+    /// `noteContent(noteID:worktreeID:)`.
+    var notes: [UUID: [NoteSummary]] = [:]
     var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
     /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the
@@ -1482,12 +1485,35 @@ final class AppState {
                 try await daemonClient.setPendingPrompt(
                     worktreeID: worktreeID, text: text, submit: submit)
             }
+    /// Where a note's content file lives. Injectable for the same reason
+    /// `NoteStore` takes `notesDir` — so a test can round-trip a real file
+    /// without depending on the process-global `TBD_HOME`, which
+    /// concurrently-running suites mutate (see `Tests/CLAUDE.md`).
+    @ObservationIgnored lazy var noteContentPathResolver: @MainActor (UUID, UUID) -> String =
+        { worktreeID, noteID in
+            TBDConstants.noteContentPath(worktreeID: worktreeID, noteID: noteID)
+        }
+    /// How the legacy-column fallback fetches a note's text when its content
+    /// file is missing (`noteContent`). Injectable for the same reason as
+    /// `prBindingsFetcher` — `DaemonClient` is concrete, no protocol.
+    @ObservationIgnored lazy var noteLegacyContentFetcher: @MainActor (UUID) async throws -> String =
+        { [daemonClient] noteID in try await daemonClient.getNote(noteID: noteID).content }
+    /// How an emptying save is handed back to the daemon, which deletes the
+    /// content file and clears the legacy column together. Injectable so a
+    /// test can prove that ordinary (non-empty) saves never reach it.
+    @ObservationIgnored lazy var noteEmptier: @MainActor (UUID) async throws -> Note =
+        { [daemonClient] noteID in try await daemonClient.updateNote(noteID: noteID, content: "") }
     /// Asks the user to confirm closing a note tab whose note has content —
     /// closing a note tab hard-deletes the note row (`closeTab` →
     /// `deleteNote`). Injectable so tests can exercise both branches without
     /// a real modal NSAlert.
-    @ObservationIgnored lazy var noteCloseConfirmer: @MainActor (Note) -> Bool = { note in
-        let filePath = TBDConstants.noteContentPath(worktreeID: note.worktreeID, noteID: note.id)
+    ///
+    /// Takes the content-file path rather than deriving one: the alert
+    /// advertises where the text is kept, and `noteContentPathResolver` is the
+    /// single answer to that question — so the caller resolves it once and the
+    /// advertised path cannot disagree with the written one.
+    @ObservationIgnored lazy var noteCloseConfirmer: @MainActor (NoteSummary, String) -> Bool = { note, contentPath in
+        let filePath = contentPath
             .replacingOccurrences(of: NSHomeDirectory(), with: "~")
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -3067,7 +3093,15 @@ final class AppState {
             }
 
             // Fetch all notes, group client-side
-            let allNotes = try await daemonClient.listNotes()
+            // Ask only for the worktrees about to be rendered. The grouping
+            // below keys by worktree and then reads only `visibleWorktreeIDs`,
+            // so every other row is decoded and thrown away — payload and JSON
+            // decode spent for nothing, on a two-second poll. (PR #754's RPC
+            // volume probe measured decoding as a standing multi-core load in
+            // the app.) It saves no filesystem work: `note.list` does none.
+            let allNotes = try await daemonClient.listNotes(
+                worktreeIDs: Array(visibleWorktreeIDs)
+            )
             let notesByWorktree = Dictionary(grouping: allNotes, by: { $0.worktreeID })
             for wtID in visibleWorktreeIDs {
                 let fetched = notesByWorktree[wtID] ?? []
@@ -3177,7 +3211,7 @@ final class AppState {
 
     /// Reconcile note tabs — remove tabs whose note no longer exists,
     /// add tabs for notes not already represented.
-    func reconcileNoteTabs(worktreeID: UUID, notes: [Note]) {
+    func reconcileNoteTabs(worktreeID: UUID, notes: [NoteSummary]) {
         // Same identity capture as reconcileTabs — see the comment there.
         let previousActiveTabID = explicitActiveTabID(worktreeID: worktreeID)
         var currentTabs = tabs[worktreeID] ?? []

@@ -2,24 +2,31 @@ import SwiftUI
 import TBDShared
 
 /// A simple text editor pane for freeform notes.
+///
+/// Rendering and gesture wiring only. The load/save sequence — which is where
+/// this pane's data-loss risks live, because one pane hosts many notes in
+/// succession — belongs to `NotePaneModel`, where it can be tested.
 struct NotePaneView: View {
     let noteID: UUID
     let worktreeID: UUID
     @Environment(AppState.self) var appState
-    @State private var text: String = ""
-    @State private var loaded = false
-    @State private var saveTask: Task<Void, Never>?
+    @State private var model = NotePaneModel()
 
-    private var note: Note? {
+    /// Metadata only — `appState.notes` is polled from `note.list`, which
+    /// carries no content. Used here for the title; the editor's text is read
+    /// off disk once on appear (see `.task(id: noteID)` below).
+    private var note: NoteSummary? {
         appState.notes[worktreeID]?.first { $0.id == noteID }
     }
 
-    /// Where this note's content lives on disk (daemon-written; the file
-    /// exists only once the note has non-empty content, but the would-be
-    /// path is shown regardless — file-backed settings convention, see
-    /// `RepoHooksSettingsView`).
+    /// Where this note's content lives on disk. Written by THIS app now (the
+    /// daemon is out of the content path); the file exists only once the note
+    /// has non-empty content, but the would-be path is shown regardless —
+    /// file-backed settings convention, see `RepoHooksSettingsView`. Resolved
+    /// through `noteContentPathResolver` so the advertised path is by
+    /// construction the one that gets read and written.
     private var contentFilePath: String {
-        TBDConstants.noteContentPath(worktreeID: worktreeID, noteID: noteID)
+        appState.noteContentPathResolver(worktreeID, noteID)
     }
 
     var body: some View {
@@ -54,45 +61,27 @@ struct NotePaneView: View {
     }
 
     private var editor: some View {
-        TextEditor(text: $text)
+        TextEditor(text: $model.text)
             .font(.system(.body, design: .monospaced))
             .padding(12)
             .scrollContentBackground(.hidden)
-            .onChange(of: text) { _, newValue in
-                guard loaded else { return }
-                debounceSave(content: newValue)
-            }
-            .onChange(of: note?.content) { _, newContent in
-                // Load content when note data arrives from polling
-                guard !loaded, let newContent else { return }
-                text = newContent
-                loaded = true
+            .onChange(of: model.text) { _, newValue in
+                model.textEdited(newValue, appState: appState)
             }
             .task(id: noteID) {
-                if let note {
-                    text = note.content
-                    loaded = true
-                }
+                // Content is read off disk when the pane appears — one read
+                // per pane the user opens, instead of the daemon reading every
+                // note on the machine on every two-second poll.
+                //
+                // This fires on a note SWAP as well as on first appearance:
+                // the pane is reused, keeping its SwiftUI identity, so there is
+                // no `onDisappear` in between. `load` flushes the outgoing
+                // note's pending save before it reads — see `NotePaneModel`.
+                await model.load(
+                    noteID: noteID, worktreeID: worktreeID, appState: appState)
             }
             .onDisappear {
-                saveTask?.cancel()
-                saveTask = nil
-                // Flush an immediate save so content isn't lost on tab switch.
-                // If the note was deleted, updateNote gets "Note not found"
-                // which handleConnectionError already absorbs silently.
-                if loaded {
-                    Task { await appState.updateNote(noteID: noteID, worktreeID: worktreeID, content: text) }
-                }
+                model.paneDisappeared(appState: appState)
             }
-    }
-
-    private func debounceSave(content: String) {
-        saveTask?.cancel()
-        saveTask = Task {
-            // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-            try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled else { return }
-            await appState.updateNote(noteID: noteID, worktreeID: worktreeID, content: content)
-        }
     }
 }

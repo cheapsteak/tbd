@@ -51,9 +51,14 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Returns `[NoteSummary]`, never `[Note]`: listing must not read content
+    /// files (see `NoteStore`'s doc comment). Content comes from `note.get`.
     func handleNoteList(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(NoteListParams.self, from: paramsData)
-        let notes = try await db.notes.list(worktreeID: params.worktreeID)
+        let notes = try await db.notes.list(
+            worktreeID: params.worktreeID,
+            worktreeIDs: params.worktreeIDs
+        )
         return try RPCResponse(result: notes)
     }
 }

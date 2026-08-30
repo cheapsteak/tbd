@@ -182,7 +182,7 @@ struct ActiveTabResolutionTests {
 
             state.reconcileNoteTabs(
                 worktreeID: worktreeID,
-                notes: noteIDs.map { Note(id: $0, worktreeID: worktreeID, title: "n") }
+                notes: noteIDs.map { NoteSummary(id: $0, worktreeID: worktreeID, title: "n") }
             )
 
             #expect(state.activeTabIndices[worktreeID] == nil,
@@ -406,7 +406,7 @@ struct ActiveTabResolutionTests {
 
             state.reconcileNoteTabs(
                 worktreeID: worktreeID,
-                notes: [Note(id: note, worktreeID: worktreeID, title: "Notes")]
+                notes: [NoteSummary(id: note, worktreeID: worktreeID, title: "Notes")]
             )
 
             #expect(state.tabs[worktreeID]?.map(\.id) == [claude, setup, note])
@@ -426,7 +426,7 @@ struct ActiveTabResolutionTests {
 
             state.reconcileNoteTabs(
                 worktreeID: worktreeID,
-                notes: [Note(id: keptNote, worktreeID: worktreeID, title: "Kept")]
+                notes: [NoteSummary(id: keptNote, worktreeID: worktreeID, title: "Kept")]
             )
 
             #expect(state.tabs[worktreeID]?.map(\.id) == [claude, keptNote])

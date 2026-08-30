@@ -28,7 +28,7 @@ struct NoteTabOnCreateTests {
         #expect(notes.count == 1)
         let note = try #require(notes.first)
         #expect(note.title == "Notes")
-        #expect(note.content.isEmpty)
+        #expect(!note.hasLegacyContent)
 
         let terminals = try await db.terminals.list(worktreeID: wt.id)
         let order = try await db.worktrees.getTabOrder(worktreeID: wt.id)

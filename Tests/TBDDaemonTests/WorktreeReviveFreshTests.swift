@@ -356,8 +356,10 @@ struct WorktreeReviveFreshTests {
 
         let note = try #require(try await db.notes.list(worktreeID: created.id).first)
         #expect(note.title == "Notes")
+        // `list` is metadata-only; content comes from `get`.
+        let noteContent = try #require(try await db.notes.get(id: note.id)?.content)
         #expect(
-            note.content == """
+            noteContent == """
             # Revived conversation
 
             Forked from **stale-owl** on 2026-07-27.

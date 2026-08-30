@@ -355,7 +355,7 @@ struct WorktreeConversationCarryoverTests {
 
         let note = try #require(try await db.notes.list(worktreeID: worktree.id).first)
         #expect(note.title == "Notes")
-        #expect(note.content == notesSeed)
+        #expect(try await db.notes.get(id: note.id)?.content == notesSeed)
         let order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
         #expect(order.last == note.id)
     }
