@@ -491,6 +491,7 @@ import Testing
             "20260825024814_codex_transcript_boundary",
             "20260825060216_terminal_session_incarnation",
             "20260829210843_pending_terminal_incarnation",
+            "20260830003851_config_remote_peer_messaging",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)
