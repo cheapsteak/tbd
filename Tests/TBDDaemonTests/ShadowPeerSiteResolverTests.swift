@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 
 @testable import TBDDaemonLib
@@ -95,6 +96,29 @@ struct ShadowPeerSiteResolverTests {
             branch: "tbd/api-lane",
             provider: "other-cloud",
             sessionID: "sess-42")
+
+        #expect(await Self.resolver(fixture).site(forProviderSessionID: "sess-42") == nil)
+    }
+
+    /// A row with no repository — a scratch space — has no directory to
+    /// verify and no repo to read a `cwd` from. `createRemote` always asks for
+    /// a `repoID`, so nothing in the public store API can mint this row; it is
+    /// reached here the same way a legacy or corrupted row could reach it, by
+    /// clearing the column directly underneath an otherwise-normal remote row.
+    @Test func aRowWithNoRepositoryResolvesToNothing() async throws {
+        let fixture = try await Self.makeFixture()
+        let row = try await fixture.db.worktrees.createRemote(
+            repoID: fixture.repo.id,
+            name: "api-lane",
+            displayName: "api-lane",
+            branch: "tbd/api-lane",
+            provider: "acme-cloud",
+            sessionID: "sess-42")
+        try await fixture.db.writerForTests.write { conn in
+            try conn.execute(
+                sql: "UPDATE worktree SET repoID = NULL WHERE id = ?",
+                arguments: [row.id.uuidString])
+        }
 
         #expect(await Self.resolver(fixture).site(forProviderSessionID: "sess-42") == nil)
     }

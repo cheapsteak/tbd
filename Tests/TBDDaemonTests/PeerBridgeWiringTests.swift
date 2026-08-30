@@ -382,6 +382,19 @@ struct PeerBridgeWiringTests {
     private static var liveProcStart: String {
         ProcessStartTime.format(liveStartedAt) ?? "unrenderable"
     }
+
+    /// The fixture's own contract, pinned the same way `RosterWatcherTests`
+    /// pins it: `recordedProcStart` and `liveProcStart` are produced
+    /// independently — one typed out, one rendered by production code — and
+    /// every "session admitted" assertion in this file rides on the two
+    /// agreeing. Unpinned, a formatter regression back to local time (the real
+    /// bug `RosterWatcherTests`' fixture comment documents) would fail every
+    /// live-session test here by a confusing route — "not live", "no bridge
+    /// requested" — rather than by name.
+    @Test func theTwoSidesOfTheLivenessComparisonAgree() {
+        #expect(Self.liveProcStart == Self.recordedProcStart)
+    }
+
     private static let fixtureSocketPath = "/tmp/cc-socks/4242.sock"
     private static let fixtureSessionID = "4E12DD65-92B8-4D8E-9920-214C6553FC63"
 
