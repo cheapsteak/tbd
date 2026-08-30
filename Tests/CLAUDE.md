@@ -137,7 +137,7 @@ before trusting it: the home value has to be visible near the append, so a path
 built from a `home` that arrived as a parameter matches nothing. It narrows the
 shape rather than closing it.
 
-The wrapper's last layer, a before/after fingerprint of the four real
+The wrapper's last layer, a before/after fingerprint of the five real
 directories, is on when `$CI` is set and off otherwise; `--fingerprint` opts in
 locally and `--no-fingerprint` forces it off. The default follows the argument
 rather than contradicting it: a live daemon and sibling worktrees write to
@@ -151,7 +151,7 @@ Full rationale is in the wrapper's header.
 
 The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
 runs in the `lint` CI job: it drives the symlink and ownership refusals on the
-fake home, the post-run mode-000 recheck, the fingerprint's six arms (four
+fake home, the post-run mode-000 recheck, the fingerprint's seven arms (five
 roots, two of which are read twice), the tmux socket fence (its `sun_path`
 budget and its kill-server sweep) and the
 shared-lock pin against fixture directories with a stub `swift`, so it takes

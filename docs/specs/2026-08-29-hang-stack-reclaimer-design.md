@@ -144,9 +144,18 @@ of files between two sweeps.
 
 So `HangStackWriter.recordHangStart` trims the directory to the newest
 `HangStackRetention.maxFiles` after writing its new file. Count only — the age
-half is the sweep's job, and the writer should do one cheap thing. It runs on
-the watchdog's background utility queue, never the main thread, and in steady
-state enumerates a directory the sweep has already bounded to ~1000 entries.
+half is the sweep's job, and the writer should do one cheap thing. In steady
+state it enumerates a directory the sweep has already bounded to ~1000 entries.
+
+**The trim runs on a private serial queue of the writer's own**, dispatched
+asynchronously — never the main thread, and never the watchdog's queue either.
+`recordHangStart` is called from `HangWatchdog`'s single serial `.utility`
+queue, which also drives the 250 ms tick that fires the resamples and the
+recovery; a trim over a large backlog on that queue delays the recovery tick,
+and `totalStallMs` is computed from `mach_absolute_time()` when the delayed tick
+lands. The trim would then inflate the very stall measurement it is writing into
+the file. **A diagnostic must not corrupt its own measurement.** Serial, so two
+trims can never race over one directory.
 
 Writer and collector read the same constants from
 `HangStackRetention` in `TBDShared`, so the two bounds cannot drift apart.
@@ -169,6 +178,13 @@ The write-side cap answers to the **same** flag rather than a second app-side
 into `HangStackWriter`. The mirror starts OFF and stays OFF whenever the daemon
 is unreachable — the keep-biased direction, and the same answer an unset column
 gives.
+
+**Resolved means `gcEnabled && gcHangStacksEnabled`**, exactly the conjunction
+the daemon's phase reads, and the app resolves it through one named function
+(`HangStackWriter.retentionArmed(for:)`) so the two sides cannot drift. The
+master switch has to master both halves of one policy: mirroring the per-phase
+flag alone would mean turning GC off in Settings stops the sweep while the app
+keeps deleting.
 
 Enablement for the soak is `tbd gc hang-stacks on`, mirroring
 `tbd gc profile-dirs` and `tbd gc orphan-processes`. No app UI toggle before
@@ -195,9 +211,14 @@ when neither is readable). A file is selected for deletion when its age exceeds
 
 **Deletion.** Sizes are summed from the already-fetched
 `fileSizeKey` — no `du` subprocess, since these are single small files. Each
-delete is guarded by the same anchor check `ScratchpadCollector` uses: the path
-must resolve strictly under the base. A failed `removeItem` logs and moves on;
-the next sweep retries.
+delete re-establishes **every** property selection depends on, not just one:
+the name is re-matched against the whitelist, the path must resolve to an
+immediate child of the base (the anchor check `ScratchpadCollector` uses), and
+the entry must still be a readable regular file. `HangStackCandidate` is a
+public value type anyone can construct and `removeItem` is recursive on a
+directory, so a hand-built candidate naming a subdirectory must be refused
+rather than trusted. All three guards fail toward keeping. A failed `removeItem`
+logs and moves on; the next sweep retries.
 
 **Absent directory.** No-op. A machine where the app has never hung has no
 directory, and creating one to sweep it would be absurd.
@@ -219,14 +240,19 @@ injected `now`.
   non-dry sweep untouched; flag on, it is trimmed to the newest 1000 with
   everything past 14 days gone.
 - **Both branches of the write-side cap** — the writer leaves the directory
-  alone when its mirrored flag is off, and trims to `maxFiles` when on.
+  alone when its mirrored flag is off, and trims to `maxFiles` when on, with
+  master-off-and-phase-on among the off cases.
 - **Three flag states are distinguishable** — a pre-migration row reads NULL
   rather than `0`; an explicit `false` survives a change to the default
   constant; NULL follows it. (The `ConfigStore.toModel` default-parameter seam
   the sibling flags already use.)
 - **Grace protects the newest file**, including one still open for appending.
 - **Whitelist holds** — a non-matching file and a subdirectory in the base
-  survive a sweep that deletes everything else.
+  survive a sweep that deletes everything else, and a hand-built candidate
+  naming either is refused by `reap` itself rather than by selection.
+- **A symlinked base is still swept** — on both sides. The collector reaps
+  through it, the writer's cap trims through it, and the phase's plan line names
+  the directory the reap actually touches.
 - **Unreadable dates keep**, never delete.
 - **Aggregation** — a sweep that reclaims 2,000 files adds one plan line and
   zero `reap_records` rows.

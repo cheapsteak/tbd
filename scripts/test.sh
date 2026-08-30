@@ -39,8 +39,9 @@
 #      the error. See "READING A PERMISSION-DENIED FAILURE" below.
 #   3. DETECTION — on in CI (`$CI` set), off elsewhere; `--fingerprint` opts in
 #      locally and `--no-fingerprint` forces it off anywhere. The real `~/tbd`,
-#      `~/.claude`, `~/.codex` and tmux socket directory are fingerprinted
-#      before and after, and a changed fingerprint fails the run even when
+#      `~/.claude`, `~/.codex`, `~/Library/Logs/TBD/hang-stacks` and the tmux
+#      socket directory are fingerprinted before and after, and a changed
+#      fingerprint fails the run even when
 #      every test passed. This is now a backstop rather than the primary
 #      guard; see "WHY THE TRIPWIRE SUPERSEDES THE FINGERPRINT".
 #
@@ -938,9 +939,9 @@ fingerprint_after="$(scripts/tbd-home-fingerprint.sh)"
 
 if [ "$fingerprint_before" != "$fingerprint_after" ]; then
   echo >&2
-  echo "=======================================================================" >&2
-  echo "  THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex OR /tmp/tmux-<uid>" >&2
-  echo "=======================================================================" >&2
+  echo "===========================================================================================" >&2
+  echo "  THE TEST RUN WROTE INTO ~/tbd, ~/.claude, ~/.codex, ~/Library/Logs/TBD OR /tmp/tmux-<uid>" >&2
+  echo "===========================================================================================" >&2
   echo >&2
   echo "CLAUDE.md: \"Tests must not touch ~/tbd\". Something resolved a real" >&2
   echo "config path despite TBD_HOME=$sanctioned_home," >&2

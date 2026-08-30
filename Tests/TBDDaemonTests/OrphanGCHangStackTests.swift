@@ -250,7 +250,13 @@ struct OrphanGCHangStackTests: ~Copyable {
 
         let lines = result.planned.filter { $0.hasPrefix("REAP hang-stacks ") }
         #expect(lines.count == 1, "one aggregate line, never one per file")
-        #expect(lines.first == "REAP hang-stacks \(hangStackBase.path) files=1000 bytes=32000")
+        // The RESOLVED base, which is what the collector enumerates and reaps.
+        // `NSTemporaryDirectory()` hands back a `/var/folders/…` spelling whose
+        // `/var` ancestor is a symlink, so the injected base and the swept
+        // directory genuinely differ here — a plan line naming the injected
+        // spelling would be naming a directory the reap never touched.
+        let sweptPath = HangStackRetention.resolvedDirectory(hangStackBase).path
+        #expect(lines.first == "REAP hang-stacks \(sweptPath) files=1000 bytes=32000")
         // No `ReapRecord`: a hang stack is not restorable and belongs to no
         // repo, and one row per file would make `reap_records` the new
         // unbounded table.
@@ -408,6 +414,50 @@ struct HangStackCollectorTests: ~Copyable {
 
         #expect(result == (files: 0, bytes: 0))
         #expect(fm.fileExists(atPath: inside.path))
+    }
+
+    @Test("reap refuses a hand-built candidate whose name is not on the whitelist")
+    func reapRefusesNonWhitelistedNames() throws {
+        // Both shapes the directory legitimately holds and TBD does not own: a
+        // user's own file, and a subdirectory. `candidates()` never selects
+        // either, but `HangStackCandidate` is public, and `removeItem` on the
+        // directory would take its contents with it.
+        let notes = base.appendingPathComponent("notes.md")
+        try Data("keep me".utf8).write(to: notes)
+        let archive = base.appendingPathComponent("archive", isDirectory: true)
+        try fm.createDirectory(at: archive, withIntermediateDirectories: true)
+        let inside = archive.appendingPathComponent("sample.txt")
+        try Data("keep me too".utf8).write(to: inside)
+        let collector = HangStackCollector(base: base)
+
+        let result = collector.reap([
+            HangStackCandidate(url: notes, modifiedAt: clock, sizeBytes: 7),
+            HangStackCandidate(url: archive, modifiedAt: clock, sizeBytes: 0),
+        ])
+
+        #expect(result == (files: 0, bytes: 0))
+        #expect(fm.fileExists(atPath: notes.path))
+        #expect(fm.fileExists(atPath: inside.path), "removeItem on a directory is recursive")
+    }
+
+    @Test("reap refuses a hand-built candidate that names a directory, whitelist or not")
+    func reapRefusesDirectories() throws {
+        // Named exactly like a hang stack, so the whitelist and the anchor both
+        // pass and the regular-file check is the only thing standing between a
+        // hand-built candidate and a recursive delete.
+        let dirNamedLikeAFile = base.appendingPathComponent("hang-not-a-file.txt", isDirectory: true)
+        try fm.createDirectory(at: dirNamedLikeAFile, withIntermediateDirectories: true)
+        let inside = dirNamedLikeAFile.appendingPathComponent("sample.txt")
+        try Data("keep me".utf8).write(to: inside)
+        let collector = HangStackCollector(base: base)
+
+        let result = collector.reap([
+            HangStackCandidate(url: dirNamedLikeAFile, modifiedAt: clock, sizeBytes: 0),
+        ])
+
+        #expect(result == (files: 0, bytes: 0))
+        #expect(fm.fileExists(atPath: dirNamedLikeAFile.path))
+        #expect(fm.fileExists(atPath: inside.path), "removeItem on a directory is recursive")
     }
 
     @Test("reap refuses a candidate that does not resolve under the base")

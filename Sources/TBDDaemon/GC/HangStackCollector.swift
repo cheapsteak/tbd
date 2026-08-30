@@ -119,20 +119,41 @@ public struct HangStackCollector: Sendable {
     /// what was planned. A failed delete logs and moves on; the next sweep
     /// retries it.
     ///
-    /// Every delete is anchored first, the same discipline
-    /// `ScratchpadCollector.cleanUp` follows and for the same reason: the path
-    /// must resolve to an immediate child of `base`. `candidates()` only ever
-    /// produces anchored candidates, but `HangStackCandidate` is a public value
-    /// type anyone can construct, so the invariant is checked rather than
-    /// assumed this close to `removeItem`.
+    /// **Every property `candidates()` selects on is re-established here**, not
+    /// just the anchor: the name is re-matched against the whitelist and the
+    /// entry is re-confirmed to be a regular file, alongside the immediate-child
+    /// check. `HangStackCandidate` is a public value type anyone can construct,
+    /// and `removeItem` is recursive on a directory — so a hand-built candidate
+    /// naming `base/notes.md`, or `base/archive`, would otherwise walk straight
+    /// past a doc comment claiming the invariant held and delete a subtree that
+    /// was never TBD's. Checked rather than assumed, this close to the delete.
+    ///
+    /// All three guards fail in the keep-biased direction, including the
+    /// resource read: an entry whose values cannot be read is refused, because
+    /// absence of evidence is not evidence that it is a file.
     public func reap(_ candidates: [HangStackCandidate]) -> (files: Int, bytes: Int64) {
         var files = 0
         var bytes: Int64 = 0
         for candidate in candidates {
+            guard HangStackRetention.isHangStackFilename(candidate.url.lastPathComponent) else {
+                logger.warning("""
+                gc: refusing to remove \(candidate.url.path, privacy: .public) — name does not \
+                match the hang-stack whitelist
+                """)
+                continue
+            }
             guard HangStackRetention.isImmediateChild(candidate.url, of: base) else {
                 logger.warning("""
                 gc: refusing to remove \(candidate.url.path, privacy: .public) — not an \
                 immediate child of hang-stacks base \(self.base.path, privacy: .public)
+                """)
+                continue
+            }
+            guard let values = try? candidate.url.resourceValues(forKeys: [.isRegularFileKey]),
+                  values.isRegularFile == true else {
+                logger.warning("""
+                gc: refusing to remove \(candidate.url.path, privacy: .public) — not a readable \
+                regular file
                 """)
                 continue
             }

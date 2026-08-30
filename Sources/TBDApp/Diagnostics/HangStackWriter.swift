@@ -18,15 +18,36 @@ final class HangStackWriter: @unchecked Sendable {
     /// Handle to the current hang file for appending.
     private var currentFileHandle: FileHandle?
 
-    /// Whether the write-time retention cap is armed. Mirrors the daemon's
-    /// `Config.gcHangStacksEnabled`, pushed in by `AppState`.
+    /// Whether the write-time retention cap is armed. Mirrors the resolved
+    /// daemon gate (`retentionArmed(for:)`), pushed in by `AppState`.
     ///
     /// Starts `false` and stays `false` whenever the daemon is unreachable —
     /// the keep-biased direction, and the same answer the unset column gives.
-    private var retentionEnabled = false
+    ///
+    /// **Its own lock, deliberately.** `setRetentionEnabled` is called from the
+    /// `@MainActor` `AppState`, and `lock` below is held across file IO on the
+    /// watchdog queue — so sharing one lock would put a main-thread block
+    /// inside the component whose whole job is measuring main-thread stalls,
+    /// firing exactly during a hang. One bit needs no relationship to the file
+    /// handle, so it gets a lock nothing slow ever holds.
+    private let retentionArmedLock = OSAllocatedUnfairLock<Bool>(initialState: false)
 
-    /// Lock protecting the file handle, the URL, and `retentionEnabled`.
+    /// Lock protecting the file handle and the URL.
     private let lock = OSAllocatedUnfairLock<()>(initialState: ())
+
+    /// The queue the write-time trim runs on — its own, never the watchdog's.
+    ///
+    /// `recordHangStart` is called from `HangWatchdog`'s single serial
+    /// `.utility` queue, which also drives the 250 ms tick that fires
+    /// `recordResample` and the recovery. A synchronous trim over a large
+    /// backlog would therefore delay that tick — and `totalStallMs` is computed
+    /// from `mach_absolute_time()` when the delayed tick lands, so the trim
+    /// would inflate the very stall measurement it is writing into the file.
+    /// **A diagnostic must not corrupt its own measurement**, so the trim goes
+    /// somewhere the watchdog never waits on.
+    ///
+    /// Serial, so two trims can never race each other over one directory.
+    private let trimQueue = DispatchQueue(label: "com.tbd.app.hang-stack-trim", qos: .utility)
 
     init(baseDir: URL? = nil) {
         // The default comes from `HangStackRetention` rather than being derived
@@ -35,11 +56,34 @@ final class HangStackWriter: @unchecked Sendable {
         self.baseDir = baseDir ?? HangStackRetention.defaultBaseDirectory
     }
 
+    /// Whether the write-time cap should be armed for a daemon `Config`.
+    ///
+    /// **Both flags, and that is the whole point.** `gcEnabled` is the master
+    /// switch for the reclaimer, and the daemon's own phase reads
+    /// `gcHangStacksEnabled` on top of it (`OrphanGC.reclaimHangStacks`).
+    /// Mirroring only the per-phase flag here would let one policy have two
+    /// answers: turn GC off in Settings and the daemon sweep stops while the
+    /// app keeps deleting — a master switch that masters half its subject is
+    /// not a master switch.
+    static func retentionArmed(for config: Config) -> Bool {
+        config.gcEnabled && config.gcHangStacksEnabled
+    }
+
     /// Arm or disarm the write-time retention cap. Called by `AppState` with
-    /// the daemon's resolved `Config.gcHangStacksEnabled`, on launch and on
+    /// `retentionArmed(for:)` over the daemon's `Config`, on launch and on
     /// every config-change delta.
     func setRetentionEnabled(_ enabled: Bool) {
-        lock.withLock { retentionEnabled = enabled }
+        retentionArmedLock.withLock { $0 = enabled }
+    }
+
+    /// Test seam: blocks until every trim dispatched so far has finished.
+    ///
+    /// `trimQueue` is serial, so a `sync` barrier behind an already-dispatched
+    /// `async` is a total-order guarantee rather than a sleep — which is what
+    /// lets the retention tests assert on the directory without racing the
+    /// trim. Never call it from `trimQueue` itself.
+    func waitForPendingTrims() {
+        trimQueue.sync {}
     }
 
     deinit {
@@ -103,7 +147,9 @@ final class HangStackWriter: @unchecked Sendable {
                 }
             }
             guard let opened else { return nil }
-            trimToRetentionCap(keeping: opened)
+            // Asynchronous, and off this thread: see `trimQueue`. The caller is
+            // the watchdog's tick queue and must get back to sampling.
+            trimQueue.async { [weak self] in self?.trimToRetentionCap(keeping: opened) }
             return opened
         } catch {
             Self.logger.error("Failed to write hang stack: \(error.localizedDescription, privacy: .public)")
@@ -169,24 +215,24 @@ final class HangStackWriter: @unchecked Sendable {
     }
 
     /// Trims the hang-stacks directory to the newest `HangStackRetention.maxFiles`
-    /// files, after a new one has been written. No-op unless the mirrored
-    /// `Config.gcHangStacksEnabled` flag is armed.
+    /// files, after a new one has been written. No-op unless the mirrored gate
+    /// (`retentionArmed(for:)` — `gcEnabled && gcHangStacksEnabled`) is armed.
     ///
     /// **Count only** — the age half of the policy belongs to the daemon's
     /// hourly sweep, and the writer should do one cheap thing. This bound
     /// exists because the hourly sweep genuinely leaves a gap: a hang storm can
     /// write hundreds of files between two passes.
     ///
-    /// Runs on the watchdog's background utility queue, never the main thread,
-    /// and in steady state enumerates a directory the sweep has already bounded
-    /// to ~1000 entries. The whitelist is the same one the collector uses, so
-    /// nothing the writer did not produce is ever a candidate; the file just
-    /// written and the one currently open for resamples are both excluded
-    /// explicitly, even though a newest-first ranking already puts them far
-    /// inside the cap.
+    /// Runs on `trimQueue` — never the main thread, and never the watchdog's
+    /// tick queue either — and in steady state enumerates a directory the sweep
+    /// has already bounded to ~1000 entries. The whitelist is the same one the
+    /// collector uses, so nothing the writer did not produce is ever a
+    /// candidate; the file just written and the one currently open for
+    /// resamples are both excluded explicitly, even though a newest-first
+    /// ranking already puts them far inside the cap.
     private func trimToRetentionCap(keeping justWritten: URL) {
-        let (enabled, openFile) = lock.withLock { () in (retentionEnabled, currentHangFileURL) }
-        guard enabled else { return }
+        guard retentionArmedLock.withLock({ $0 }) else { return }
+        let openFile = lock.withLock { () in currentHangFileURL }
 
         let keys: [URLResourceKey] = [
             .contentModificationDateKey, .creationDateKey, .isRegularFileKey,

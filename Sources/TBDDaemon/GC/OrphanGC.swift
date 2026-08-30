@@ -55,9 +55,6 @@ public actor OrphanGC {
     /// entirely; the property itself being `nil` means "use the real lsof".
     private let liveCWDsProvider: (@Sendable () async -> [String]?)?
     private let scratchpadBase: URL
-    /// The hang-stacks directory this sweep bounds. Held alongside the
-    /// collector because the phase's single aggregate plan line names it.
-    private let hangStackBase: URL
     private let now: @Sendable () -> Date
 
     private let snapshot: ReapSnapshot
@@ -170,7 +167,6 @@ public actor OrphanGC {
         self.broadcast = broadcast
         self.liveCWDsProvider = liveCWDsProvider
         self.scratchpadBase = resolvedScratchpadBase
-        self.hangStackBase = resolvedHangStackBase
         self.now = resolvedNow
         self.snapshot = snap
         self.beforeInterruptedArchiveReap = beforeInterruptedArchiveReap
@@ -326,8 +322,15 @@ public actor OrphanGC {
         guard !selected.isEmpty else { return }
 
         let plannedBytes = selected.reduce(Int64(0)) { $0 + $1.sizeBytes }
-        planned.append(
-            "REAP hang-stacks \(hangStackBase.path) files=\(selected.count) bytes=\(plannedBytes)")
+        // The COLLECTOR's base, never the one that was injected: it resolves
+        // its base at construction, so with a symlinked base the two spell
+        // different directories — and a plan line that names a directory the
+        // reap does not touch is the exact mismatch `resolvedDirectory` exists
+        // to kill.
+        planned.append("""
+        REAP hang-stacks \(hangStackCollector.base.path) files=\(selected.count) \
+        bytes=\(plannedBytes)
+        """)
         // This phase's guard is `gcHangStacksEnabled || dryRun`, so every line
         // below runs only with the flag actually on.
         guard !dryRun else { return }
@@ -338,7 +341,7 @@ public actor OrphanGC {
         logger.info("""
         gc: reaped \(result.files, privacy: .public) hang-stack file(s) \
         (\(result.bytes, privacy: .public) bytes) from \
-        \(self.hangStackBase.path, privacy: .public)
+        \(self.hangStackCollector.base.path, privacy: .public)
         """)
     }
 

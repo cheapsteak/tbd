@@ -246,9 +246,15 @@ extension AppState {
     /// its own to keep in sync and nothing published here. A failed fetch
     /// leaves the cap at whatever it was, which on launch is OFF: the
     /// keep-biased direction, and the same answer the unset column gives.
+    ///
+    /// The value mirrored is `HangStackWriter.retentionArmed(for:)`, which
+    /// reads `gcHangStacksEnabled` **on top of** `gcEnabled` exactly as the
+    /// daemon's own phase does: the master switch has to master both halves of
+    /// one policy, or turning GC off in Settings would stop the sweep while the
+    /// app kept deleting.
     func loadHangStackRetentionConfig() async {
         guard let config = await fetchConfig() else { return }
-        HangStackWriter.shared.setRetentionEnabled(config.gcHangStacksEnabled)
+        HangStackWriter.shared.setRetentionEnabled(HangStackWriter.retentionArmed(for: config))
     }
 
     /// Persist supervision's fleet-wide authority switch (design 2026-07-26

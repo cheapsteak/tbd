@@ -38,8 +38,21 @@ struct HangStackWriterRetentionTests: ~Copyable {
         }
     }
 
+    /// Records one hang and settles the writer: the recovery marker, then the
+    /// trim barrier.
+    ///
+    /// The trim is dispatched ASYNCHRONOUSLY onto the writer's own serial queue
+    /// — it must never run on the watchdog's tick queue, where it would delay
+    /// the recovery tick and inflate the `totalStallMs` it is writing down — so
+    /// every assertion about the directory sits behind `waitForPendingTrims()`.
+    /// That is a barrier on a serial queue rather than a sleep: it returns
+    /// exactly when the dispatched trim has finished.
+    @discardableResult
     private func recordOneHang(_ writer: HangStackWriter) -> URL? {
-        writer.recordHangStart(stallMs: 500, snapshot: .empty, frames: [])
+        let url = writer.recordHangStart(stallMs: 500, snapshot: .empty, frames: [])
+        writer.recordHangRecovery(totalStallMs: 500)
+        writer.waitForPendingTrims()
+        return url
     }
 
     private func names() throws -> [String] {
@@ -54,7 +67,6 @@ struct HangStackWriterRetentionTests: ~Copyable {
         // the daemon is unreachable.
 
         let written = try #require(recordOneHang(writer))
-        writer.recordHangRecovery(totalStallMs: 500)
 
         #expect(fm.fileExists(atPath: written.path))
         #expect(try names().count == HangStackRetention.maxFiles + 1)
@@ -67,8 +79,7 @@ struct HangStackWriterRetentionTests: ~Copyable {
         writer.setRetentionEnabled(true)
         writer.setRetentionEnabled(false)
 
-        _ = recordOneHang(writer)
-        writer.recordHangRecovery(totalStallMs: 500)
+        recordOneHang(writer)
 
         #expect(try names().count == HangStackRetention.maxFiles + 1)
     }
@@ -80,7 +91,6 @@ struct HangStackWriterRetentionTests: ~Copyable {
         writer.setRetentionEnabled(true)
 
         let written = try #require(recordOneHang(writer))
-        writer.recordHangRecovery(totalStallMs: 500)
 
         let survivors = try names().sorted()
         #expect(survivors.count == HangStackRetention.maxFiles)
@@ -106,10 +116,80 @@ struct HangStackWriterRetentionTests: ~Copyable {
         let notes = baseDir.appendingPathComponent("notes.md")
         try Data("keep me".utf8).write(to: notes)
 
-        _ = recordOneHang(writer)
-        writer.recordHangRecovery(totalStallMs: 500)
+        recordOneHang(writer)
 
         #expect(fm.fileExists(atPath: ancient.path))
         #expect(fm.fileExists(atPath: notes.path))
+    }
+
+    // MARK: - Which flag arms it
+
+    @Test("the GC master switch masters the write-time cap too")
+    func gcEnabledOffDisarmsTheCap() throws {
+        try fillToCap()
+        let writer = HangStackWriter(baseDir: baseDir)
+        // The state a user reaches by soaking the phase flag on and then
+        // turning GC off in Settings. The daemon's own phase stops there, and
+        // the app's half must stop with it — reading `gcHangStacksEnabled`
+        // alone would leave the writer deleting after the master switch said
+        // no.
+        writer.setRetentionEnabled(HangStackWriter.retentionArmed(
+            for: Config(gcEnabled: false, gcHangStacksEnabled: true)))
+
+        recordOneHang(writer)
+
+        #expect(try names().count == HangStackRetention.maxFiles + 1)
+    }
+
+    @Test("both flags on is the only combination that arms the cap")
+    func bothFlagsOnArmsTheCap() throws {
+        try fillToCap()
+        let writer = HangStackWriter(baseDir: baseDir)
+        writer.setRetentionEnabled(HangStackWriter.retentionArmed(
+            for: Config(gcEnabled: true, gcHangStacksEnabled: true)))
+
+        recordOneHang(writer)
+
+        // Without this arm the case above would pass against a writer that
+        // never trims at all, for reasons having nothing to do with the flags.
+        #expect(try names().count == HangStackRetention.maxFiles)
+    }
+
+    @Test("resolution is the conjunction, in every combination")
+    func retentionArmedIsTheConjunction() {
+        #expect(!HangStackWriter.retentionArmed(
+            for: Config(gcEnabled: false, gcHangStacksEnabled: false)))
+        #expect(!HangStackWriter.retentionArmed(
+            for: Config(gcEnabled: false, gcHangStacksEnabled: true)))
+        #expect(!HangStackWriter.retentionArmed(
+            for: Config(gcEnabled: true, gcHangStacksEnabled: false)))
+        #expect(HangStackWriter.retentionArmed(
+            for: Config(gcEnabled: true, gcHangStacksEnabled: true)))
+    }
+
+    // MARK: - The base as it is spelled
+
+    @Test("a base spelled through a symlink is still trimmed")
+    func symlinkedBaseIsStillTrimmed() throws {
+        // The regression this pins, and the half of it that shipped untested:
+        // `FileManager.contentsOfDirectory(at:)` yields NOTHING for a URL that
+        // is itself a symlink to a directory, so a writer handed such a base
+        // enumerates an empty directory, never reaches the cap, and silently
+        // trims nothing — a failure indistinguishable from a healthy trim over
+        // a small directory. Every other case here builds its base under
+        // `NSTemporaryDirectory()`, where only the `/var` ancestor is a
+        // symlink and the leaf is real, so none of them can see it.
+        try fillToCap()
+        let link = sandbox.appendingPathComponent("link-to-base", isDirectory: true)
+        try fm.createSymbolicLink(at: link, withDestinationURL: baseDir)
+        let writer = HangStackWriter(baseDir: link)
+        writer.setRetentionEnabled(true)
+
+        let written = try #require(recordOneHang(writer))
+
+        // Counted through the REAL directory, so the assertion cannot be
+        // satisfied by the same symlink confusion it is testing for.
+        #expect(try names().count == HangStackRetention.maxFiles)
+        #expect(fm.fileExists(atPath: written.path))
     }
 }
