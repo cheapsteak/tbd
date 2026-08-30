@@ -94,6 +94,11 @@ Writing into `~/Library/Caches` during a test run is intended and safe: it is a 
 artifact, not test state, and it is not one of the stores the fence's fingerprint
 detector brackets (`~/tbd`, `~/.claude`, `~/.codex`, and the tmux socket directory).
 
+**An unusable cache directory is not a build failure.** If the directory cannot be
+created, the wrapper says so on stderr and adds no flags, leaving SwiftPM's per-worktree
+default in place. A build is the wrong thing to fail over a cache that exists only to be
+regenerated, and the fallback is the behavior every worktree had before this change.
+
 **Callers may still choose.** `TBD_SWIFT_MODULE_CACHE_PATH` overrides the location.
 `TBD_SWIFT_SHARED_MODULE_CACHE=0` disables sharing and restores SwiftPM's per-worktree
 default. If a caller passes its own `-module-cache-path`, the wrapper adds nothing —
