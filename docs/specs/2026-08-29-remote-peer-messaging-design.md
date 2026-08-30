@@ -70,12 +70,26 @@ recorded in `findings.md`. The record's real key set is wider than the sample
 that shaped this design — `nameSince` is on every record, `updatedAt` and
 `statusUpdatedAt` on nearly all — and **each peer carries a third durable
 artifact**, a `<pid>.<sha256(messagingSocketPath)>.key` token file, almost
-certainly the start token behind the recycled-pid refusal. A shadow peer
-publishes no token file and delivers fine without one, measured; the exposure is
-that a future Claude Code could begin requiring one, at which point every shadow
-would stop receiving silently. That is the sharpest version of the
-depend-on-internals risk this design carries, and the pinned shape test below is
-what would catch it.
+certainly the start token behind the recycled-pid refusal.
+
+A shadow peer publishes no token file and delivers fine without one — but that
+result should be read at its real strength, which is weaker than "measured".
+Across a live registry, **83 of 84 records had a paired key file; the single
+exception was a stand-in of our own construction.** So the keyless path is not a
+supported path we exercised, it is an unexercised one, and what it rests on is
+the absence of a check rather than a documented tolerance.
+
+The exposure is therefore not only that a future Claude Code might begin
+requiring a token. It is that if the recycled-pid refusal is keyed off this
+token, the keyless path works right up until the first pid collision — and a pid
+collision is precisely what the reconciler below exists to reclaim. **The two
+mitigations are not independent**, which is the reason to treat this as the
+sharpest depend-on-internals risk in the design rather than one hedged item among
+several. The pinned shape test is what would catch a change here.
+
+The key files are mode 0600 where the records are 0644, so whatever writes them
+treats the token as a secret and the record as public. Any future requirement to
+mint one has to preserve that asymmetry.
 
 Incidental, and the reason for the socket sweep below: `/tmp/cc-socks` held 92
 socket files against roughly 80 records. Nothing unlinks a dead one — the same
@@ -250,6 +264,20 @@ The origin label is the sanitized local host name. It only has to be stable and
 distinct between the machines bridging to one host, which is what the
 multi-tenancy rule below needs it for.
 
+**Addresses are names; a pid is an implementation detail of the local
+transport.** A socket path embeds the pid of the process holding it, and a pid
+does not survive the session it names — a respawned session keeps its peer name
+and gets a new pid, leaving the old socket on disk as a dead file. Anything that
+hands a pid across the boundary, or caches one, inherits that staleness.
+
+This is why no pid and no socket path ever appears on the wire, in either
+direction, and why the handle table resolves inbound frames rather than any
+address the far side supplies. The far side never learns an address it could
+hold past its lifetime, so it cannot hold a stale one. A handle is meaningful
+only to the side that minted it and only while that side still has it in the
+table; a handle for a session that has gone resolves to nothing rather than to
+whatever now occupies its pid.
+
 **Origins must be namespaced, and TBD does the namespacing.** A remote host is
 multi-tenant: two laptops bridging to it would otherwise publish colliding names
 for sessions on different machines belonging to different people, and a
@@ -339,8 +367,14 @@ un-newlined buffer past 1MB — reporting the first such discard per reader and
 every one after that silently — so the cap sits below the size at which loss
 stops being reported. An oversized frame is dropped and counted rather than
 truncated. Stdin writes to the provider are
-non-blocking; a write that would block fails the frame rather than parking the
-caller.
+non-blocking, and a frame larger than the pipe buffer is written by a bounded
+refill loop rather than a single call: a partial transfer is *guaranteed* above
+`PIPE_BUF`, so treating one as a desync would tear the link down on every large
+message. Nothing that would block parks the caller — the loop sleeps on the
+injected clock against a bounded budget, and a frame that never makes progress is
+dropped and counted with the link left up. A genuinely short write, where some
+bytes crossed and the rest cannot, stays fatal: NDJSON cannot retract half a
+line.
 
 Loss is unreported to the sender in every case above, because the channel has no
 reply path. Every drop is logged and counted, and the counts surface in
@@ -485,6 +519,12 @@ shared with every session on the machine, which is squarely what the rule
 covers. The flag is the only opt-in: there is no per-worktree toggle, because a
 second gate under a global one is the kind nobody tunes and everybody has to
 debug around.
+
+**Moving the flag: `tbd peer messaging on|off`**, which writes it over
+`config.setRemotePeerMessagingEnabled`. The gate is read where a provider's
+streams are armed rather than once at boot, so a change made after that takes
+effect at the next daemon restart — the command says so rather than leaving the
+user to wonder why nothing happened.
 
 Graduation after a soak in which no ghost record outlives its daemon.
 

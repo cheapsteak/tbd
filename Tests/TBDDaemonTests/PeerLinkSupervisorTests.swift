@@ -385,6 +385,198 @@ struct PeerLinkSupervisorTests {
         #expect(!stub.stdinLines().contains(where: { $0.contains("peer-inventory") }))
     }
 
+    /// **A frame bigger than the pipe buffer is the ordinary case, not a
+    /// pathology.** POSIX lets a non-blocking write of more than `PIPE_BUF`
+    /// transfer only part of the buffer, and Darwin's pipe holds at most 64 KB
+    /// — so one `write(2)` of a quarter-megabyte frame is *guaranteed* to come
+    /// back short. Reading that as a desync cost the provider half a JSON line,
+    /// SIGTERMed its child, and unpublished every shadow peer behind that link,
+    /// on every message this size and on every retry of it.
+    ///
+    /// Both halves of the assertion carry weight. The frame must arrive
+    /// **whole** — decoded and compared against what was sent, so a clip at any
+    /// chunk boundary fails rather than merely looking long enough — and the
+    /// link must still be **up**, with no `.down` transition and no reconnect
+    /// behind it.
+    @Test func aFrameLargerThanThePipeBufferCrossesWholeAndKeepsTheLinkUp() async throws {
+        // `cat` rather than a `read` loop: the body has to drain a 256 KB line
+        // as it arrives, and bash's `read` takes a pipe one byte per syscall.
+        let stub = try Stub("large-frame", body: """
+            printf '%s\\n' '{"kind":"hello","origin":"acme-remote","protocol":1}'
+            cat >> "$STDIN_LOG"
+            """)
+        defer { stub.remove() }
+        let clock = TestClock<Duration>()
+        let recorder = LinkRecorder()
+        let supervisor = PeerLinkSupervisor(
+            config: stub.config, contractVersion: 2, origin: "acme-laptop",
+            handler: recorder, healthyResetUptime: 3600, clock: clock,
+            now: TestDateSource().provider)
+        await supervisor.start()
+        _ = try await waitFor(
+            "the link to come up",
+            observed: { let seen = await supervisor.state; return "state=\(seen)" }) { await supervisor.state == .up }
+
+        // Four times the most a Darwin pipe ever buffers, and well under the
+        // codec's 512 KB cap: a size no single write could ever hand over.
+        let big = PeerBridgeFrame.message(PeerBridgeMessage(
+            id: "m-big", to: "h-far", from: "h-near",
+            content: String(repeating: "a", count: 256 * 1024)))
+        let encoded = try PeerBridgeFrameCodec.encodeLine(big)
+        #expect(
+            encoded.utf8.count > 64 * 1024,
+            "the frame must exceed any Darwin pipe buffer or this test proves nothing")
+
+        // In its own task because the send suspends between chunks on the
+        // injected clock, and the clock is driven from here.
+        let outcome = SendOutcome()
+        let sender = Task {
+            do {
+                try await supervisor.send(big)
+                await outcome.record(nil)
+            } catch {
+                await outcome.record(error)
+            }
+        }
+        _ = await advanceVirtualTime(
+            clock, until: "the large frame to finish crossing the pipe",
+            observed: {
+                let finished = await outcome.finished
+                return "finished=\(finished) bytes=\(stub.stdinByteCount()) of \(encoded.utf8.count)"
+            }
+        ) { await outcome.finished }
+        await sender.value
+        _ = try await waitFor(
+            "the whole line to reach the child's log",
+            observed: { "bytes=\(stub.stdinByteCount()) of \(encoded.utf8.count)" }
+        ) { stub.stdinLines().contains { $0.utf8.count >= encoded.utf8.count - 1 } }
+
+        // Captured before the stop, as `linkGoesUpOnHelloExchangeAndDownOnChildExit`
+        // explains: `stopDriven` advances the clock and can open a connection.
+        let failure = await outcome.failure
+        let transitions = await recorder.transitions
+        let dropped = await supervisor.counters.sendsDropped
+        let spawns = stub.spawnCount()
+        let landed = stub.stdinLines().first { $0.contains("m-big") }
+        await stopDriven(supervisor, clock)
+
+        #expect(
+            failure == nil,
+            "a frame the pipe can only take in chunks must still be delivered; got \(String(describing: failure))")
+        let line = try #require(
+            landed,
+            "the large frame never reached the child; the log holds \(stub.stdinByteCount()) bytes")
+        #expect(
+            PeerBridgeFrameCodec.decode(
+                line: line, negotiatedProtocol: PeerBridgeFrameCodec.peerProtocol) == .frame(big),
+            "the frame must arrive whole and byte-identical, not clipped at a chunk boundary")
+        #expect(dropped == 0)
+        #expect(
+            transitions == [.up],
+            "a short write is not a desync when the rest follows; the link must stay up, got \(transitions)")
+        #expect(spawns == 1, "nothing may have torn the connection down and reconnected")
+    }
+
+    /// A **genuine** would-block — the pipe full, with no room for even the
+    /// first byte — is the failure this channel is designed around, and it is
+    /// the opposite of a short write: the frame is dropped and counted, and the
+    /// link survives, because nothing of it ever reached the wire.
+    ///
+    /// The stub never reads its stdin, so the pipe fills and stays full. Every
+    /// fill frame is under Darwin's 512-byte `PIPE_BUF`, where POSIX makes a
+    /// write all-or-nothing — which is what makes "zero bytes across"
+    /// reproducible here instead of a race with the reader.
+    ///
+    /// `writeStallLimit` is injected at three retry intervals so the budget is
+    /// crossed in a couple of advances rather than two hundred
+    /// (`Tests/CLAUDE.md`, "Keep advance chains short"). The frozen date source
+    /// is what keeps the advances harmless: neither the keepalive nor the
+    /// silence watchdog compares against the clock those advances move.
+    @Test func aFullPipeDropsTheFrameAndLeavesTheLinkUp() async throws {
+        let stub = try Stub("full-pipe", body: """
+            printf '%s\\n' '{"kind":"hello","origin":"acme-remote","protocol":1}'
+            sleep 300 &
+            child=$!
+            trap 'kill "$child" 2>/dev/null; exit 143' TERM INT
+            wait "$child"
+            """)
+        defer { stub.remove() }
+        let clock = TestClock<Duration>()
+        let recorder = LinkRecorder()
+        let supervisor = PeerLinkSupervisor(
+            config: stub.config, contractVersion: 2, origin: "acme-laptop",
+            handler: recorder, healthyResetUptime: 3600, writeStallLimit: 0.015,
+            clock: clock, now: TestDateSource().provider)
+        await supervisor.start()
+        _ = try await waitFor(
+            "the link to come up",
+            observed: { let seen = await supervisor.state; return "state=\(seen)" }) { await supervisor.state == .up }
+        let pid = try #require(stub.pids().first)
+
+        @Sendable func fillFrame(_ index: Int) -> PeerBridgeFrame {
+            .peer(PeerBridgePeer(
+                handle: "h-\(index)", name: "acme-laptop:fill %\(index)",
+                status: "working", peerProtocol: PeerBridgeFrameCodec.peerProtocol))
+        }
+        // The premise, checked rather than assumed: POSIX only promises an
+        // all-or-nothing pipe write at or below PIPE_BUF, which is 512 bytes on
+        // Darwin. A fatter fill frame could come back short instead of refused,
+        // and this test would then be measuring the desync path.
+        let fillProbe = try PeerBridgeFrameCodec.encodeLine(fillFrame(0))
+        #expect(
+            fillProbe.utf8.count < 512,
+            "a fill frame over PIPE_BUF could come back short instead of refused")
+
+        let outcome = SendOutcome()
+        let filler = Task {
+            // Far more than a 16 KB pipe holds at ~100 bytes a frame; the loop
+            // is expected to end in a refusal long before it runs out.
+            for index in 0..<4_000 {
+                do {
+                    try await supervisor.send(fillFrame(index))
+                } catch {
+                    await outcome.record(error)
+                    return
+                }
+            }
+            await outcome.record(nil)
+        }
+        _ = await advanceVirtualTime(
+            clock, until: "a send to be refused by the full pipe",
+            observed: {
+                let sent = await supervisor.counters.framesSent
+                let finished = await outcome.finished
+                return "finished=\(finished) framesSent=\(sent)"
+            }
+        ) { await outcome.finished }
+        await filler.value
+
+        let failure = await outcome.failure
+        let transitions = await recorder.transitions
+        let state = await supervisor.state
+        let dropped = await supervisor.counters.sendsDropped
+        let spawns = stub.spawnCount()
+        let alive = kill(-pid, 0) == 0
+        await stopDriven(supervisor, clock)
+
+        let refusal = try #require(
+            failure as? PeerLinkSendFailure,
+            "the fill loop must end in a send failure, not by exhausting its range; got \(String(describing: failure))")
+        if case .wouldBlock(let bytes) = refusal {
+            #expect(bytes > 0)
+        } else {
+            Issue.record(
+                "a full pipe must refuse the frame whole rather than desync the stream; got \(refusal)")
+        }
+        #expect(dropped == 1, "exactly the refused frame is counted as loss")
+        #expect(state == .up, "a would-block costs one frame, never the link")
+        #expect(
+            transitions == [.up],
+            "nothing may publish the link down over a frame that never reached the wire; got \(transitions)")
+        #expect(spawns == 1, "the child must not have been torn down and replaced")
+        #expect(alive, "the child's process group must survive a refused frame")
+    }
+
     // MARK: - Teardown
 
     /// `stop()` is deterministic: when it returns the child tree is dead, the
@@ -446,6 +638,19 @@ private actor LinkRecorder: PeerLinkHandler {
     }
 }
 
+/// How one `send` finished, for a test that has to keep driving the clock while
+/// that send is still in flight — which is every send big enough to need more
+/// than one `write(2)`.
+private actor SendOutcome {
+    private(set) var finished = false
+    private(set) var failure: (any Error)?
+
+    func record(_ error: (any Error)?) {
+        failure = error
+        finished = true
+    }
+}
+
 /// A `messages`-speaking stub provider in a temp directory of its own.
 ///
 /// Two append-only logs make the child's behaviour observable from the test
@@ -485,6 +690,11 @@ private struct Stub {
     func pids() -> [Int32] { lines(of: pidLog).compactMap { Int32($0) } }
 
     func stdinLines() -> [String] { lines(of: stdinLog) }
+
+    /// Total bytes recorded off stdin. The observable for a frame that crosses
+    /// the pipe in several chunks, where a line count says nothing until the
+    /// last one lands.
+    func stdinByteCount() -> Int { (try? Data(contentsOf: stdinLog))?.count ?? 0 }
 
     func remove() { try? FileManager.default.removeItem(at: dir) }
 

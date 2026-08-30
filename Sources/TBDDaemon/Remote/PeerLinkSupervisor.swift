@@ -26,8 +26,10 @@ public enum PeerLinkState: Sendable, Equatable {
 /// tested against a stub, and so nothing downstream can reach the supervisor's
 /// lifecycle controls.
 public protocol PeerLinkSending: Sendable {
-    /// Non-blocking. Throws if the link is down or the write would block —
-    /// the frame is then dropped and counted, never queued.
+    /// Bounded, and never parked on a wedged child: a frame waits at most one
+    /// write budget for room in the far side's stdin, and is then dropped and
+    /// counted rather than queued. Throws if the link is down, if the frame
+    /// never got a byte across, or if it got partway and stalled.
     func send(_ frame: PeerBridgeFrame) async throws
 }
 
@@ -71,16 +73,26 @@ public enum PeerLinkSendFailure: LocalizedError, Equatable, Sendable {
     /// No live stream, or the `hello` handshake has not completed. Same failure
     /// a caller sees messaging a local session that has exited.
     case linkDown
-    /// The child's stdin pipe is full. Refused rather than parked: a wedged
+    /// The child's stdin pipe stayed full for this frame's whole write budget
+    /// without accepting a single byte. Refused rather than parked: a wedged
     /// provider would otherwise block whichever actor called `send`, which is
     /// the `waitUntilExit` starvation class this file avoids everywhere else.
+    ///
+    /// **Nothing reached the wire**, which is what makes this the survivable
+    /// failure: the stream is still in sync, so the frame is dropped and the
+    /// link stays up.
     case wouldBlock(bytes: Int)
     /// `write(2)` failed for a reason other than EAGAIN — EPIPE when the child
     /// is already gone, most often.
     case writeFailed(errno: Int32)
-    /// A short write: part of a frame reached the wire. NDJSON has no way to
-    /// retract half a line, so the link is torn down and reconnected rather
-    /// than continued — the next `hello` resyncs everything.
+    /// A short write: part of a frame reached the wire and the rest could not
+    /// follow inside the frame's write budget. NDJSON has no way to retract
+    /// half a line, so the link is torn down and reconnected rather than
+    /// continued — the next `hello` resyncs everything.
+    ///
+    /// An ordinary large frame does **not** come here: `write` refills the pipe
+    /// as it drains, so this means a provider that stopped reading in the
+    /// middle of one frame and stayed stopped.
     case truncated(wrote: Int, of: Int)
     /// A kind this side may not send. `peer-inventory` is provider-to-TBD only.
     case notOutbound(PeerBridgeFrame.Kind)
@@ -144,9 +156,12 @@ public struct PeerLinkCounters: Sendable, Equatable {
 /// Four things differ, all load-bearing:
 ///
 /// - **Duplex.** `events` is stdout-only. This also writes frames to the
-///   child's stdin, and those writes are non-blocking: a write that would block
-///   fails the frame rather than parking the caller. A wedged child whose stdin
-///   pipe has filled would otherwise starve whichever actor called `send`.
+///   child's stdin, on a non-blocking fd: a frame is handed over in as many
+///   `write(2)`s as the pipe has room for, waiting on the injected clock
+///   between them, and a frame that cannot finish inside a bounded budget
+///   fails rather than parking the caller. A wedged child whose stdin pipe has
+///   filled would otherwise starve whichever actor called `send`. See `write`
+///   for why the refill loop is mandatory rather than an optimisation.
 /// - **A tighter silence limit**, `PeerBridgeFrameCodec.silenceLimit` (30 s
 ///   against `events`' 90 s), with a matching `ping` cadence of
 ///   `PeerBridgeFrameCodec.keepaliveInterval`. Detection latency here bounds how
@@ -184,6 +199,24 @@ public actor PeerLinkSupervisor: PeerLinkSending {
     /// Incremented per `runOnce`, so a previous run's teardown can never nil out
     /// or kill the *current* run's process after a `stop()`/`start()` cycle.
     private var generation = 0
+    /// The `generation` whose stdin has a frame part-way across it, if any.
+    ///
+    /// `write` can suspend between chunks of one frame, and an actor is
+    /// re-entrant across every suspension — so without this, a `send` arriving
+    /// while a large frame waits for the pipe to drain would interleave its own
+    /// bytes into the middle of that frame and produce exactly the desynced
+    /// NDJSON the refill loop exists to prevent. The arriving frame is refused
+    /// as a would-block, never queued behind the one in flight: congestion has
+    /// one answer on this channel and it is clean failure. The window is only
+    /// ever open for a frame that actually stalled — a frame the pipe takes
+    /// whole never suspends, so nothing can observe this set.
+    ///
+    /// A *generation* rather than a flag because the hazard is per-connection:
+    /// a frame still in flight from a previous run wrote into a pipe that is
+    /// now closed, so it can no longer interleave with anything, and a plain
+    /// flag would have let its unfinished write refuse the next connection's
+    /// opening `hello`.
+    private var writeInFlightGeneration: Int?
     private var lastActivity = Date()
     private var lastOutboundAt = Date()
     /// When the current connection was opened — the start of the `hello`
@@ -202,6 +235,18 @@ public actor PeerLinkSupervisor: PeerLinkSending {
     let keepaliveInterval: TimeInterval
     let backoffCap: TimeInterval
     let healthyResetUptime: TimeInterval
+    /// How long one outbound frame may spend waiting for room in the child's
+    /// stdin before the link gives up on it. Bounded by construction — the
+    /// whole point of the non-blocking fd is that no provider can park a caller
+    /// indefinitely — and injected so a test crosses it in two or three
+    /// advances instead of two hundred (`Tests/CLAUDE.md`, "Keep advance chains
+    /// short").
+    ///
+    /// The default buys 200 refill waits, where a frame at the codec's 512 KB
+    /// cap needs about eight against a 64 KB pipe. It is generous on purpose:
+    /// the alternative to waiting is a torn-down link and every shadow peer for
+    /// this provider unpublished, which costs far more than a millisecond.
+    let writeStallLimit: TimeInterval
     private let clock: any Clock<Duration>
     /// The date seam. Separate from `clock` for the reason the root `CLAUDE.md`
     /// gives — `Duration` is behavior, `Date` is data — and it covers the two
@@ -217,6 +262,23 @@ public actor PeerLinkSupervisor: PeerLinkSending {
     private static let killGrace: Duration = .milliseconds(500)
     private static let drainGrace: Duration = .milliseconds(50)
 
+    /// The cadence `write` re-attempts a stalled frame on, and so the
+    /// granularity of `writeStallLimit`. Not injected: a test shortens the
+    /// budget rather than the step, which keeps one knob rather than two that
+    /// can disagree. At this step a frame at the codec's cap crosses a 64 KB
+    /// pipe in roughly 40 ms, which is the throughput ceiling this channel
+    /// trades for never spinning on a full pipe.
+    private static let writeRetryInterval: TimeInterval = 0.005
+
+    /// How many refill waits `writeStallLimit` buys. Zero is a meaningful
+    /// value — it is the single-shot write, useful to a test that wants the
+    /// stall outcome without driving a clock at all.
+    private var writeRetryLimit: Int {
+        let steps = (writeStallLimit / Self.writeRetryInterval).rounded(.up)
+        guard steps.isFinite, steps > 0 else { return 0 }
+        return Int(min(steps, 1_000_000))
+    }
+
     public init(config: RemoteProviderConfig,
                 contractVersion: Int,
                 origin: String,
@@ -226,6 +288,7 @@ public actor PeerLinkSupervisor: PeerLinkSending {
                 keepaliveInterval: TimeInterval = PeerBridgeFrameCodec.keepaliveInterval,
                 backoffCap: TimeInterval = 60,
                 healthyResetUptime: TimeInterval = 300,
+                writeStallLimit: TimeInterval = 1,
                 clock: any Clock<Duration> = ContinuousClock(),
                 now: @Sendable @escaping () -> Date = { Date() }) {
         self.config = config
@@ -237,6 +300,7 @@ public actor PeerLinkSupervisor: PeerLinkSending {
         self.keepaliveInterval = keepaliveInterval
         self.backoffCap = backoffCap
         self.healthyResetUptime = healthyResetUptime
+        self.writeStallLimit = writeStallLimit
         self.clock = clock
         self.now = now
         self.connectionOpenedAt = now()
@@ -358,7 +422,7 @@ public actor PeerLinkSupervisor: PeerLinkSending {
         // Resync is by `hello`. The first line on every connection — first and
         // every reconnect alike — declares this origin and the protocol it
         // speaks, and nothing this side sends is valid before it.
-        try? write(.hello(origin: origin, peerProtocol: peerProtocol), to: writeHandle)
+        try? await write(.hello(origin: origin, peerProtocol: peerProtocol), to: writeHandle)
 
         // Teardown is driven by process EXIT, not by pipe EOF: a provider that
         // leaves a grandchild holding the pipe's write end never delivers EOF,
@@ -416,8 +480,9 @@ public actor PeerLinkSupervisor: PeerLinkSending {
 
     // MARK: Outbound
 
-    /// Non-blocking. Throws — and counts a drop — rather than queueing, in every
-    /// failure. See `PeerLinkSendFailure`.
+    /// Bounded by `writeStallLimit` and never parked on a wedged child. Throws
+    /// — and counts a drop — rather than queueing, in every failure. See
+    /// `PeerLinkSendFailure`.
     public func send(_ frame: PeerBridgeFrame) async throws {
         guard !frame.isProviderToTBDOnly else {
             counters.sendsDropped += 1
@@ -433,7 +498,7 @@ public actor PeerLinkSupervisor: PeerLinkSending {
             throw PeerLinkSendFailure.linkDown
         }
         do {
-            try write(frame, to: handle)
+            try await write(frame, to: handle)
         } catch PeerLinkSendFailure.truncated(let wrote, let total) {
             // Half a line reached the wire and NDJSON cannot retract it. Drop
             // the connection so the next one opens with a fresh `hello`.
@@ -442,13 +507,46 @@ public actor PeerLinkSupervisor: PeerLinkSending {
         }
     }
 
-    /// One non-blocking `write(2)` of one encoded line. Synchronous and
-    /// actor-isolated: it never awaits, so no other work can interleave between
-    /// encoding a line and putting it on the wire.
+    /// Writes one encoded line to the child's stdin, refilling the pipe as it
+    /// drains until the whole frame is across.
+    ///
+    /// **The loop is mandatory, not a tuning choice.** The fd is `O_NONBLOCK`
+    /// so that no wedged provider can park a caller, and POSIX gives a
+    /// non-blocking pipe write of more than `PIPE_BUF` bytes leave to transfer
+    /// only *part* of the buffer and report how much. Darwin's `PIPE_BUF` is
+    /// 512 bytes and a pipe holds 16–64 KB, while the codec caps a frame at
+    /// `PeerBridgeFrameCodec.maxFrameBytes` — 512 KB. A single `write(2)` of a
+    /// large frame therefore does not merely *risk* a short write, it
+    /// guarantees one, and reading that as a desync tore the link down (and
+    /// unpublished every shadow peer for the provider) on every message bigger
+    /// than the pipe buffer.
+    ///
+    /// **Reconciling the cap with the pipe is not the alternative.** No cap
+    /// above `PIPE_BUF` makes one write atomic, and even at the cap the pipe's
+    /// free space is whatever the provider has not yet read, so "it fits" is
+    /// never a static property of a frame. A cap this channel could hand over
+    /// in one write would have to be 512 bytes, far below one message. So the
+    /// cap stays where the *reader's* buffer sets it and the writer loops.
+    ///
+    /// What each bound means:
+    ///
+    /// - **A frame that never got a byte across is a would-block.** The pipe
+    ///   was full for the whole budget; the frame is dropped and counted and
+    ///   the link stays up, because nothing reached the wire to resync from.
+    /// - **A frame that got partway and then stalled out is fatal**, as before:
+    ///   NDJSON cannot retract half a line. That path is now reached only by a
+    ///   provider that stops reading in the middle of one frame for the whole
+    ///   budget, rather than by every large frame.
+    /// - **The wait is on the injected clock**, never on a blocking write or a
+    ///   `poll` with a timeout: both park the executor thread, which is the
+    ///   starvation this file avoids everywhere. (A zero-timeout `poll` would
+    ///   add nothing over the `EAGAIN` the write already returns, and `POLLOUT`
+    ///   on a pipe promises only `PIPE_BUF` bytes of room anyway — so it could
+    ///   not tell us a frame will fit even if it were free.)
     ///
     /// Every throw counts a drop first, because loss on this channel is
     /// unreported to the sender and a count is the only trace it leaves.
-    private func write(_ frame: PeerBridgeFrame, to handle: FileHandle) throws {
+    private func write(_ frame: PeerBridgeFrame, to handle: FileHandle) async throws {
         let line: String
         do {
             line = try PeerBridgeFrameCodec.encodeLine(frame)
@@ -459,36 +557,85 @@ public actor PeerLinkSupervisor: PeerLinkSending {
             throw error
         }
         let bytes = [UInt8](line.utf8)
-        let fd = handle.fileDescriptor
-        var written = -1
-        var failure: Int32 = 0
-        while true {
-            let n = bytes.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
-            let err = errno
-            if n < 0 && err == EINTR { continue }
-            written = n
-            failure = err
-            break
+        // Captured so a stall that outlives this connection cannot keep writing
+        // into a handle `runOnce` has closed — whose fd NUMBER another part of
+        // the daemon may by then have been handed for something else entirely.
+        let myGeneration = generation
+        guard writeInFlightGeneration != myGeneration else {
+            counters.sendsDropped += 1
+            peerBridgeLogger.error(
+                "messages \(self.config.name, privacy: .public) dropped a \(bytes.count, privacy: .public)-byte \(frame.kind.rawValue, privacy: .public) frame; another frame is mid-transfer")
+            throw PeerLinkSendFailure.wouldBlock(bytes: bytes.count)
         }
-        if written == bytes.count {
+        writeInFlightGeneration = myGeneration
+        // Only if a newer connection has not since claimed it: that one is
+        // still mid-transfer and owns the marker.
+        defer { if writeInFlightGeneration == myGeneration { writeInFlightGeneration = nil } }
+        let fd = handle.fileDescriptor
+        let retryLimit = writeRetryLimit
+        var sent = 0
+        var stalls = 0
+        var connectionEnded = false
+        while sent < bytes.count {
+            let n = bytes.withUnsafeBufferPointer { buffer -> Int in
+                guard let base = buffer.baseAddress else { return 0 }
+                return Darwin.write(fd, base + sent, buffer.count - sent)
+            }
+            let failure = errno
+            if n > 0 {
+                sent += n
+                continue
+            }
+            if n < 0 && failure == EINTR { continue }
+            if n < 0 && failure != EAGAIN && failure != EWOULDBLOCK {
+                counters.sendsDropped += 1
+                peerBridgeLogger.error(
+                    "messages \(self.config.name, privacy: .public) stdin write failed errno=\(failure, privacy: .public) after \(sent, privacy: .public)/\(bytes.count, privacy: .public) bytes")
+                throw PeerLinkSendFailure.writeFailed(errno: failure)
+            }
+            // EAGAIN — or a zero-length transfer, which a pipe should never
+            // report but which is counted against the same budget so it can
+            // never spin. Either way there is no room right now.
+            guard stalls < retryLimit else { break }
+            stalls += 1
+            var cancelled = false
+            do {
+                try await clock.sleep(for: .seconds(Self.writeRetryInterval))
+            } catch {
+                // A cancelled caller stops waiting immediately, which is the
+                // right degradation: whatever is already on the wire decides
+                // below whether this was a clean drop or a desync.
+                cancelled = true
+            }
+            if cancelled { break }
+            guard generation == myGeneration, stdinHandle === handle else {
+                connectionEnded = true
+                break
+            }
+        }
+        if connectionEnded {
+            // The run this frame belonged to is over, so its half-written line
+            // died with the pipe. No teardown to ask for — `runOnce` has
+            // already published `.down` and the next `hello` resyncs.
+            counters.sendsDropped += 1
+            peerBridgeLogger.error(
+                "messages \(self.config.name, privacy: .public) lost a \(frame.kind.rawValue, privacy: .public) frame; the connection ended mid-transfer")
+            throw PeerLinkSendFailure.linkDown
+        }
+        if sent == bytes.count {
             counters.framesSent += 1
             lastOutboundAt = now()
             return
         }
         counters.sendsDropped += 1
-        if written < 0 {
-            if failure == EAGAIN || failure == EWOULDBLOCK {
-                peerBridgeLogger.error(
-                    "messages \(self.config.name, privacy: .public) stdin full; dropped a \(bytes.count, privacy: .public)-byte \(frame.kind.rawValue, privacy: .public) frame")
-                throw PeerLinkSendFailure.wouldBlock(bytes: bytes.count)
-            }
+        if sent == 0 {
             peerBridgeLogger.error(
-                "messages \(self.config.name, privacy: .public) stdin write failed errno=\(failure, privacy: .public)")
-            throw PeerLinkSendFailure.writeFailed(errno: failure)
+                "messages \(self.config.name, privacy: .public) stdin full for \(self.writeStallLimit, privacy: .public)s; dropped a \(bytes.count, privacy: .public)-byte \(frame.kind.rawValue, privacy: .public) frame")
+            throw PeerLinkSendFailure.wouldBlock(bytes: bytes.count)
         }
         peerBridgeLogger.error(
-            "messages \(self.config.name, privacy: .public) wrote \(written, privacy: .public)/\(bytes.count, privacy: .public) bytes; stream desynced")
-        throw PeerLinkSendFailure.truncated(wrote: written, of: bytes.count)
+            "messages \(self.config.name, privacy: .public) wrote \(sent, privacy: .public)/\(bytes.count, privacy: .public) bytes; stream desynced")
+        throw PeerLinkSendFailure.truncated(wrote: sent, of: bytes.count)
     }
 
     /// A short write left half a line on the wire. Publish the link down at once
@@ -581,7 +728,7 @@ public actor PeerLinkSupervisor: PeerLinkSending {
         // A failed keepalive is already counted and logged by `write`; there is
         // nothing further to do with it, and the watchdog covers a link that
         // stops carrying traffic in either direction.
-        try? write(.ping, to: handle)
+        try? await write(.ping, to: handle)
     }
 
     /// Polls roughly three times per silence window, as on the `events` stream —
