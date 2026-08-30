@@ -113,6 +113,29 @@ struct PeerHelperForwardingTests {
         #expect(message.content == body)
     }
 
+    /// A body whose wrapper never closes is **dropped**, not forwarded. The
+    /// shipped binary is the subject because the leak is a property of the
+    /// whole hop: `content` would otherwise carry the sender's own `from`,
+    /// `from-name` and `from-mode`, and the delivering side wraps `content` in
+    /// an attribution block of its own — so the local session would read an
+    /// inner one a remote sender wrote.
+    @Test func anUnterminatedWrapperIsDroppedRatherThanForwarded() async throws {
+        let helper = try SpawnedPeerHelper(name: "acme:malformed-wrapper-shadow")
+        defer { helper.tearDown() }
+
+        #expect(await helper.waitForPublication(), "the helper never published")
+
+        let unterminated = "<cross-session-message from=\"\(CapturedAgentFrame.senderAddress)\""
+            + " from-name=\"\(CapturedAgentFrame.senderName)\""
+            + " from-mode=\"\(CapturedAgentFrame.senderMode)\"\nthe body"
+        try helper.deliverToSocket(CapturedAgentFrame.payload(rawContent: unterminated))
+
+        #expect(
+            await helper.lineEmitted(during: 0.5) == nil,
+            "an unterminated wrapper must be dropped, not forwarded")
+        #expect(helper.isRunning, "dropping a frame must not take the helper down")
+    }
+
     /// `ListAgents` probes liveness by connecting and dropping. That probe is
     /// the whole reason the listener exists, so it must cost nothing: no frame,
     /// no drop count, and a helper still running afterwards.
@@ -164,9 +187,9 @@ struct CrossSessionWrapperStrippingTests {
     /// contain `>`, and a naive `firstIndex(of: ">")` splits inside it — leaving
     /// the tail of the sender's tag, socket path and all, in the body that is
     /// about to go on the wire.
-    @Test func doesNotSplitInsideAQuotedAngleBracket() {
+    @Test func doesNotSplitInsideAQuotedAngleBracket() throws {
         let content = "<cross-session-message from=\"uds:/tmp/cc-socks/a>b.sock\" from-name=\"x\" from-mode=\"bypass\">\nthe body\n</cross-session-message>"
-        let stripped = PeerHelper.strippedOfSenderAttribution(content)
+        let stripped = try #require(PeerHelper.strippedOfSenderAttribution(content))
         #expect(stripped == "the body")
         #expect(!stripped.contains(".sock"))
         #expect(!stripped.contains("/tmp/"))
@@ -179,12 +202,49 @@ struct CrossSessionWrapperStrippingTests {
         #expect(PeerHelper.strippedOfSenderAttribution(content) == content)
     }
 
-    /// An opening tag with no closing tag keeps whatever follows it: the
+    /// An opening tag with no *closing* tag keeps whatever follows it: the
     /// closing tag is removed only as the pair of an opening one, and the
-    /// interior is never searched.
+    /// interior is never searched. This is the well-formed-tag case — the
+    /// opening tag itself closes.
     @Test func anUnclosedWrapperKeepsItsRemainder() {
         let content = "<cross-session-message from=\"uds:/x\">\nbody with no close"
         #expect(PeerHelper.strippedOfSenderAttribution(content) == "body with no close")
+    }
+
+    /// **The attribution-leak discriminator, and the reason the strip is
+    /// failable.** These bodies all begin with the wrapper element but never
+    /// terminate its opening tag, so the sender's `from`, `from-name` and
+    /// `from-mode` cannot be lifted off. Returning them untouched — which is
+    /// what a single `nil` shared with "no wrapper" caused — forwards the
+    /// sender's raw socket path and self-claimed permission class as `content`,
+    /// and the delivering side wraps that again, so a local session reads an
+    /// inner attribution block a remote sender authored.
+    @Test(arguments: [
+        // No `>` anywhere.
+        "<cross-session-message from=\"uds:/tmp/cc-socks/46403.sock\" from-mode=\"bypass\"",
+        // Unbalanced quote, so every `>` in the rest of the body is "inside" an
+        // attribute value and none of them closes the tag.
+        "<cross-session-message from=\"uds:/tmp/cc-socks/46403.sock>\nthe body\n</cross-session-message>",
+        // The element name and nothing else.
+        "<cross-session-message",
+        // A whitespace-separated attribute list that simply stops.
+        "<cross-session-message from-name=\"Agentbox\"\nstill no close",
+    ])
+    func anUnterminatedOpeningTagIsRejected(_ content: String) {
+        #expect(PeerHelper.strippedOfSenderAttribution(content) == nil)
+    }
+
+    /// The three scan outcomes, named. `.absent` and `.unterminated` shared one
+    /// `nil` before, which is exactly how the leak above got in.
+    @Test func scanDistinguishesNoWrapperFromAnUnterminatedOne() {
+        #expect(PeerHelper.openTagEnd(in: "plain body") == .absent)
+        #expect(PeerHelper.openTagEnd(in: "<cross-session-messageboard>hi") == .absent)
+        #expect(PeerHelper.openTagEnd(in: "<cross-session-message from=\"x\"") == .unterminated)
+        let wrapped = CapturedAgentFrame.wrapped("hi")
+        guard case .end = PeerHelper.openTagEnd(in: wrapped) else {
+            Issue.record("a well-formed wrapper must scan to .end")
+            return
+        }
     }
 
     @Test func readsTheSenderAndTheBodyOutOfARealFrame() throws {

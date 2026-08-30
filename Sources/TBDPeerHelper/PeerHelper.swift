@@ -538,7 +538,21 @@ final class PeerHelper {
                 """)
             return
         }
-        let content = Self.strippedOfSenderAttribution(inbound.body)
+        // Same rule, one step further in: a body whose `<cross-session-message`
+        // wrapper never closes is one this build cannot take the sender's
+        // attribution out of, and forwarding it would put their socket path,
+        // self-chosen name and self-claimed permission class into `content` —
+        // which the receiving side then wraps in an attribution block of its
+        // own, so the local session reads an inner one the remote sender wrote.
+        guard let content = Self.strippedOfSenderAttribution(inbound.body) else {
+            droppedFrames += 1
+            logger.error("""
+                shadow peer helper \(self.options.handle, privacy: .public) dropped an inbound \
+                message whose cross-session-message tag never closes; forwarding it would put \
+                the sender's own attribution in the message content
+                """)
+            return
+        }
         let sender = inbound.sender
         if sender.isEmpty {
             logger.error("""
@@ -640,14 +654,33 @@ final class PeerHelper {
     /// The opening tag and its matching closing tag are removed **together**,
     /// leaving a bare body: that is the shape `ShadowPeerAttribution.stamp`'s
     /// wrap branch expects, and it reproduces the exact framing a real local
-    /// send composes. A body with no wrapper is returned untouched, and one
-    /// whose closing tag is missing keeps whatever it has after the opening
-    /// one. Nothing else is trimmed, re-indented or normalised, and the
-    /// interior is never searched — a body quoting a `</cross-session-message>`
-    /// of its own keeps it, because only a *trailing* one is paired with the
-    /// opening tag that was actually removed.
-    static func strippedOfSenderAttribution(_ body: String) -> String {
-        guard let end = openTagEnd(in: body) else { return body }
+    /// send composes. A body carrying **no wrapper at all** is returned
+    /// untouched, and one whose *closing* tag is missing keeps whatever it has
+    /// after the opening one. Nothing else is trimmed, re-indented or
+    /// normalised, and the interior is never searched — a body quoting a
+    /// `</cross-session-message>` of its own keeps it, because only a
+    /// *trailing* one is paired with the opening tag that was actually removed.
+    ///
+    /// **Nil for a body whose opening tag never closes**, which is a different
+    /// answer from "no wrapper" and must not be collapsed into it. Such a body
+    /// begins with `<cross-session-message` and carries the sender's `from`,
+    /// `from-name` and `from-mode` — the exact attribution this function
+    /// exists to remove — so returning it untouched would forward the sender's
+    /// socket path and self-claimed permission class as `content`, which
+    /// `ShadowPeerAttribution.stamp` then wraps *again*: the receiving session
+    /// reads an inner attribution block a remote sender wrote. The caller drops
+    /// and counts that frame, the same way it drops a payload
+    /// `readAgentFrame` cannot read a body out of.
+    static func strippedOfSenderAttribution(_ body: String) -> String? {
+        let end: String.Index
+        switch openTagEnd(in: body) {
+        case .absent:
+            return body
+        case .unterminated:
+            return nil
+        case .end(let index):
+            end = index
+        }
         var stripped = String(body[body.index(after: end)...])
         // The newline Claude Code's composer writes after the opening tag, and
         // the one before the closing tag. Removed only when present, and only
@@ -660,32 +693,51 @@ final class PeerHelper {
         return stripped
     }
 
-    /// The index of the `>` that closes a leading opening tag, or nil when the
-    /// content does not begin with one.
+    /// What a scan of a body's leading `<cross-session-message` opening tag
+    /// found.
+    ///
+    /// Three answers rather than an optional index, because two of them used to
+    /// share `nil` and the caller could not tell them apart: "there is no
+    /// wrapper here" is safe to pass through, while "there is a wrapper and it
+    /// never closes" means the sender's attribution is still in the body.
+    enum OpenTagScan: Equatable {
+        /// The content does not begin with this element at all — no wrapper,
+        /// nothing to strip.
+        case absent
+        /// The content begins with this element, but no unquoted `>` closes the
+        /// tag. Malformed: the attribution is present and unremovable.
+        case unterminated
+        /// The index of the `>` that closes the opening tag.
+        case end(String.Index)
+    }
+
+    /// Scan a body for the `>` that closes a leading opening tag.
     ///
     /// Quote-aware on purpose: an attribute value may legally contain `>`, and
     /// a naive `firstIndex(of: ">")` would split inside one and spill the tail
     /// of the sender's tag — socket path included — into the body this function
-    /// exists to clean.
-    static func openTagEnd(in content: String) -> String.Index? {
-        guard content.hasPrefix(Self.crossSessionOpenTagName) else { return nil }
+    /// exists to clean. An unbalanced quote therefore reads as `.unterminated`
+    /// rather than as a place to split.
+    static func openTagEnd(in content: String) -> OpenTagScan {
+        guard content.hasPrefix(Self.crossSessionOpenTagName) else { return .absent }
         var index = content.index(
             content.startIndex, offsetBy: Self.crossSessionOpenTagName.count)
-        // `<cross-session-messageX` is a different element, not this one.
-        guard index < content.endIndex else { return nil }
+        // The element name and nothing else: a tag with no `>` anywhere.
+        guard index < content.endIndex else { return .unterminated }
         let following = content[index]
-        guard following == ">" || following.isWhitespace else { return nil }
+        // `<cross-session-messageX` is a different element, not this one.
+        guard following == ">" || following.isWhitespace else { return .absent }
         var quoted = false
         while index < content.endIndex {
             let character = content[index]
             if character == "\"" {
                 quoted.toggle()
             } else if character == ">" && !quoted {
-                return index
+                return .end(index)
             }
             index = content.index(after: index)
         }
-        return nil
+        return .unterminated
     }
 
     /// Bind and listen on `path`.
