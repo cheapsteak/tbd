@@ -388,8 +388,9 @@ actor PeerBridge: PeerBridging {
                 }))
         }
 
-        for (repoID, registrationID) in registrationsByRepo
-        where !scope.contains(repoID) {
+        for (repoID, registrationID) in registrationsByRepo.sorted(by: {
+            $0.key.uuidString < $1.key.uuidString
+        }) where !scope.contains(repoID) {
             registrationsByRepo[repoID] = nil
             await roster.removeLink(id: registrationID, because: .stillOpen)
         }
