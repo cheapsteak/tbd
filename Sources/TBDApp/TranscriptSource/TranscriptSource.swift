@@ -55,12 +55,22 @@ actor TranscriptSource {
         }
 
         var entry = entries[sessionID]
-        // Reset conditions: a different file, a file that shrank, or a
-        // modification time that moved backwards. These are the /clear,
-        // /compact and session-rollover cases; none can be served by appending,
-        // because the earlier bytes are no longer the same bytes.
+        // Reset conditions: a different file, a file that shrank, a
+        // modification time that moved backwards, or a file rewritten to the
+        // SAME byte size with a newer mtime. These are the /clear, /compact and
+        // session-rollover cases; none can be served by appending, because the
+        // earlier bytes are no longer the same bytes.
+        //
+        // The same-size case is the subtle one. Without it the file is never
+        // re-read — the size guard below reports "no change" — and once it
+        // later grows, the next read resumes from an offset into content that
+        // no longer exists, splicing stale rows onto a suffix of the new
+        // transcript. Re-parsing costs a full pass only when the mtime moved
+        // while the size did not, which an ordinary append cannot do, so the
+        // common path is untouched.
         if let existing = entry,
-           existing.path != path || size < existing.lastSize || modified < existing.lastModified {
+           existing.path != path || size < existing.lastSize || modified < existing.lastModified
+            || (size == existing.lastSize && modified != existing.lastModified) {
             Self.log.debug("resetting session=\(sessionID, privacy: .public)")
             entry = nil
         }

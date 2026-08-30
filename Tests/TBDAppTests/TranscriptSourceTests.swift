@@ -97,6 +97,61 @@ struct TranscriptSourceTests {
         #expect(await source.refresh(sessionID: "s1", path: path)?.isEmpty ?? true)
     }
 
+    /// Same byte length as `lineA`, different uuid and different text — the
+    /// shape a rewrite-in-place produces (an edited or regenerated transcript
+    /// whose replacement happens to weigh the same).
+    private let lineASameSize = #"{"type":"user","uuid":"c","timestamp":"2026-08-26T10:00:00.000Z","message":{"role":"user","content":"world"}}"#
+
+    /// `write(to:atomically:)` can land on the same whole-second mtime as the
+    /// first write, which would make the two indistinguishable to the source
+    /// and let this test pass for the wrong reason. Stamp the future time
+    /// explicitly instead.
+    private func setModified(_ path: String, secondsFromNow: TimeInterval) throws {
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(secondsFromNow)],
+            ofItemAtPath: path)
+    }
+
+    private func promptTexts(_ items: [TranscriptItem]) -> [String] {
+        items.compactMap { item -> String? in
+            if case .userPrompt(_, let text, _) = item { return text }
+            return nil
+        }
+    }
+
+    @Test("a same-size rewrite with a newer mtime is re-read, not skipped")
+    func sameSizeReplacementResets() async throws {
+        #expect(lineASameSize.utf8.count == lineA.utf8.count,
+                "the fixture only exercises the bug if both lines weigh the same")
+        let path = try tempFile(lineA + "\n")
+        let source = TranscriptSource()
+        _ = await source.refresh(sessionID: "s1", path: path)
+        #expect(promptTexts(await source.items(sessionID: "s1")) == ["hello"])
+
+        try (lineASameSize + "\n").write(to: URL(fileURLWithPath: path), atomically: true, encoding: .utf8)
+        try setModified(path, secondsFromNow: 5)
+        _ = await source.refresh(sessionID: "s1", path: path)
+        #expect(promptTexts(await source.items(sessionID: "s1")) == ["world"],
+                "a same-size rewrite must be re-read from the beginning")
+    }
+
+    @Test("a same-size rewrite that later grows does not splice stale rows")
+    func sameSizeReplacementThenGrowth() async throws {
+        let path = try tempFile(lineA + "\n")
+        let source = TranscriptSource()
+        _ = await source.refresh(sessionID: "s1", path: path)
+
+        try (lineASameSize + "\n").write(to: URL(fileURLWithPath: path), atomically: true, encoding: .utf8)
+        try setModified(path, secondsFromNow: 5)
+        _ = await source.refresh(sessionID: "s1", path: path)
+
+        try append(lineB + "\n", to: path)
+        try setModified(path, secondsFromNow: 10)
+        _ = await source.refresh(sessionID: "s1", path: path)
+        #expect(promptTexts(await source.items(sessionID: "s1")) == ["world", "second"],
+                "the transcript must be the new file's content, with no row from the old one")
+    }
+
     @Test("forget drops retained state")
     func forgetDropsState() async throws {
         let path = try tempFile(lineA + "\n")
