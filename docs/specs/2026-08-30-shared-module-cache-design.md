@@ -2,12 +2,11 @@
 
 ## Summary
 
-Every TBD worktree keeps its own precompiled-module cache — around 580 MB each,
-roughly 7 GB across the twelve worktrees that currently hold a `.build`. A shared
-cache already exists to collapse those into one copy, but only `scripts/restart.sh`
-passes the flags that select it, so most builds never use it and the machine pays
-for both: about 7 GB of per-worktree caches *plus* 1.5 GB of shared cache, on a data
-volume with 19 GiB free.
+Every TBD worktree keeps its own precompiled-module cache — 510 to 818 MB each, around
+4.7 GB across the worktrees currently holding a `.build`. A shared cache already exists
+to collapse those into one copy, but only `scripts/restart.sh` passes the flags that
+select it, so most builds never use it and the machine pays for both: the per-worktree
+caches *plus* 1.5 GB of shared cache.
 
 Worse, the disagreement itself costs compile time. SwiftPM writes the cache path into
 every compile command in the build plan, so a tree that alternates between
@@ -16,7 +15,7 @@ every compile command in the build plan, so a tree that alternates between
 
 This moves the flags into `scripts/swift-safe`, the wrapper every governed build
 already goes through, so all three entry points plan identically. The disagreement
-disappears, the per-worktree caches stop being regenerated, and roughly 7 GB comes
+disappears, the per-worktree caches stop being regenerated, and roughly 4.7 GB comes
 back.
 
 ## Why the cache path forces a recompile
@@ -111,21 +110,55 @@ branches of this condition are tested.
 
 ## What it costs and what it returns
 
-Twelve worktrees hold a `.build` today; three already carry the shared path and keep
-their plan unchanged, so nine pay a one-time full recompile on their next build. Those
-nine rebuild against an already-warm shared cache, so they skip precompiled-module
-population. The rebuilds are serialized by the wrapper's machine-global lock and are
-spread across whenever each tree next builds, not taken at once.
+**Read every figure here as a snapshot of a moving fleet.** `scripts/reclaim-build.sh`
+reaps idle `.build` trees at 48 hours, so both the number of worktrees holding a cache
+and the total they occupy change hour to hour — the planned-tree count moved from twelve
+to eight inside a day while this was being written. The shape of the trade holds; the
+digits do not.
 
-In return the per-worktree caches stop being regenerated: about 7 GB of local caches
-collapse into the roughly 1.5 GB shared copy that already exists, taking the data
-volume from 19 GiB free to about 26 GiB.
+At the time of writing, nine worktrees hold a local `ModuleCache` totalling 4,765 MB,
+alongside a 1,481 MB shared cache, on a data volume with 27 GiB free at 94% capacity.
+Under this design the local caches stop being regenerated and the shared copy — which
+already exists — absorbs them, so roughly **4.7 GB** comes back. That figure will erode
+somewhat: the shared cache will take on contexts it does not see today, since it will
+serve test plans and every worktree rather than the two that currently reach it.
+
+Keep the scale honest. The `.build` trees those caches sit inside total 28 GB, about six
+times the module caches. **Precompiled modules are not where the disk went**, and this
+is a worthwhile tidy rather than a fix for disk pressure.
+
+**Migration is best measured in build-slot hours, not in recompile counts,** because the
+wrapper's machine-global lock is the scarcest resource on the machine — sampled over 31
+minutes it was held 51% of the time with someone queued behind it 27% of the time, and a
+single holder was observed occupying it for 43 consecutive minutes.
+
+Of the eight worktrees with a plan today, two already carry the shared path and keep it
+unchanged; six pay a one-time full recompile on their next build. A cold full build
+measured 2,441 s — about 41 minutes — so those six cost on the order of **four hours of
+exclusive build slot**, taken whenever each tree next builds rather than at once. Two
+things make that an upper bound: the rebuilds land against an already-warm shared cache
+and so skip precompiled-module population, and the 41-minute figure was measured on a
+heavily loaded machine.
+
+That cost is the honest argument against this design and for the rejected alternative
+below, which converges just as completely for about a third of the slot time.
 
 **This is a disk change, not a speed change.** It removes the alternation tax, but so
-would simply deleting the flags from `scripts/restart.sh`. The only speed it adds
-beyond that is warm precompiled system and dependency modules for a cold worktree's
-first build, which covers Foundation, AppKit, SwiftUI and the NIO shims but not TBD's
-own compilation. That effect has not been measured and should not be claimed.
+would simply deleting the flags from `scripts/restart.sh`. The only speed it adds beyond
+that is warm precompiled system and dependency modules for a cold worktree's first
+build, which covers Foundation, AppKit, SwiftUI and the NIO shims but not TBD's own
+compilation. That effect has not been measured and should not be claimed — and a
+sampled build gives reason to doubt it would show: the thirteen `swift-frontend`
+processes held 49% CPU out of 1200% available, against `kernel_task` at 221%, with every
+frontend runnable rather than blocked on I/O. That build was short of turns, not of
+memory or disk. Returning 4.7 GB adds no RAM and removes no contention.
+
+**A caution for anyone re-measuring.** Timings on this machine swing with fleet load by
+close to an order of magnitude — `git config --get` measured 334 ms under load and 38 ms
+an hour later. Every duration in this document is a loaded-machine number, which makes
+both the alternation tax and the migration cost smaller on an idle machine than stated.
+Interleave the arms rather than measuring them an hour apart; `Tests/CLAUDE.md` records a
+prior comparison invalidated by exactly this drift.
 
 ## Cache growth
 
@@ -181,11 +214,18 @@ lost.
 ## Rejected alternatives
 
 **Delete the flags from `scripts/restart.sh` instead.** Converges the entry points just
-as completely and costs three recompiles rather than nine, with no new mechanism. It was
-the right answer while the field evidence for the alternation cost was in doubt. It
-forfeits the roughly 7 GB, which on a volume at 96% capacity is the reason to prefer
-sharing, and it discards a warm 1.5 GB cache that would have to be rebuilt if sharing
-were adopted later.
+as completely, with no new mechanism, and inverts the migration: the two trees on the
+shared path revert instead of the six on the default path, costing roughly a third of
+the build-slot hours. It removes the alternation tax exactly as well — that tax argues
+for convergence, not for sharing, and this is the cheaper convergence.
+
+It forfeits the roughly 4.7 GB and discards a warm 1.5 GB cache that would have to be
+rebuilt if sharing were adopted later. The case for paying the extra slot time is that
+the saving is permanent and recurring, while the migration is paid once; the case
+against is that 4.7 GB is 17% of the 28 GB the `.build` trees occupy, so it does not by
+itself resolve disk pressure, and build-slot time is the resource in shortest supply.
+This is the live trade-off between the two designs, and it is close enough that it
+turned on a judgement call rather than on evidence.
 
 **Change nothing and correct the documentation.** Leaves the flags in `restart.sh` as a
 trap for the next reader and keeps paying 1.5 GB for a benefit no worktree receives.
