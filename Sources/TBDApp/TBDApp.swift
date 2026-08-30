@@ -180,6 +180,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var cachedIcon: NSImage = generateAppIcon(worktreeName: detectWorktreeName())
     private var relaunchSource: (any DispatchSourceRead)?
     private var heartbeatTimer: Timer?
+    /// The app's tmux bridge, handed over when the main scene first appears so
+    /// `applicationWillTerminate` can reclaim the view sessions it is tracking.
+    /// `AppState` owns it for the life of the process; this is a plain
+    /// reference because the delegate is torn down with the app anyway.
+    var tmuxBridge: TmuxBridge?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         lifecycleLogger.info("willFinishLaunching")
@@ -359,7 +364,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        lifecycleLogger.info("willTerminate")
+        // Reclaim this app's tmux view sessions before the process goes. Each
+        // one holds a worktree window linked into it, and tmux destroys a
+        // window only when its last session reference drops — so a view
+        // session that outlives the app keeps that window, its pane process
+        // and the whole tmux server alive. The call blocks (see
+        // `cleanupAllSessionsBlocking`): work handed to a detached task here
+        // would never run.
+        let reclaimed = tmuxBridge?.cleanupAllSessionsBlocking() ?? 0
+        lifecycleLogger.info("willTerminate reclaimedViewSessions=\(reclaimed, privacy: .public)")
     }
 
     // MARK: - Self-relaunch
@@ -483,6 +496,10 @@ struct TBDAppMain: App {
                 .onAppear {
                     lifecycleLogger.info("scene main onAppear")
                     JumpMenuController.shared.configure(appState: appState)
+                    // So `applicationWillTerminate` can reclaim the tmux view
+                    // sessions the bridge is tracking (the delegate has no
+                    // other route to `AppState`).
+                    appDelegate.tmuxBridge = appState.tmuxBridge
                     // Hand AppState a reference to the appearance settings so
                     // `mainAreaTerminalSize()` can compute pre-spawn tmux pane
                     // dimensions using the user's current font. Done in

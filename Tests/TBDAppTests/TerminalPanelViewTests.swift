@@ -16,6 +16,20 @@ struct TerminalPanelViewTests {
         ))
     }
 
+    @Test("unresolvable tmux executable names the remedy instead of diagnostics")
+    func tmuxExecutableUnavailableRendersLocateGuidance() {
+        let action = TerminalPanelRepresentable.Coordinator.preparationAction(
+            for: .failure(.tmuxExecutableUnavailable)
+        )
+
+        #expect(action == .showMessage(
+            "TBD couldn't find tmux — it is not in PATH and no fallback path is saved. Locate the tmux executable in Settings → Terminal, then reopen this terminal."
+        ))
+        #expect(action != .showMessage(
+            TerminalPreparationPresentation.commandFailedMessage
+        ))
+    }
+
     @Test("confirmed missing window requests automatic recovery")
     func confirmedMissingWindowRequestsRecovery() {
         let action = TerminalPanelRepresentable.Coordinator.preparationAction(
@@ -32,8 +46,10 @@ struct TerminalPanelViewTests {
             arguments: ["-u", "attach"]
         )
 
-        #expect(TerminalPanelRepresentable.Coordinator.preparationAction(for: .success(prepared)) ==
-            .startViewer(prepared))
+        let preparation = TmuxSessionPreparation(session: prepared, generation: 7)
+
+        #expect(TerminalPanelRepresentable.Coordinator.preparationAction(
+            for: .success(preparation)) == .startViewer(preparation))
     }
 
     @MainActor
