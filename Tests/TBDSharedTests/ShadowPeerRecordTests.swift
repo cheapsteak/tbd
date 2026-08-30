@@ -328,24 +328,32 @@ struct ProcessStartTimeTests {
     /// this pins the property a formatter-based rewrite would silently lose.
     @Test("the formatted value is ctime's 24-character shape")
     func formatIsCtimeShaped() throws {
-        let formatted = ProcessStartTime.format(Date(timeIntervalSince1970: 1_788_041_297))
+        let formatted = try #require(
+            ProcessStartTime.format(Date(timeIntervalSince1970: 1_788_041_297)))
         #expect(formatted.count == 24)
         #expect(formatted.range(
             of: #"^[A-Za-z]{3} [A-Za-z]{3} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}$"#,
             options: .regularExpression) != nil)
     }
 
+    /// The calendar is pinned to GMT rather than `Calendar.current`, because
+    /// the formatter renders in UTC: building "the 5th at noon" in the local
+    /// zone and then reading the day back out of a UTC rendering disagrees
+    /// wherever the offset exceeds 12 hours. `ProcessStartTimeFormatTests`
+    /// covers the padding byte-exactly over fixed epochs.
     @Test("a single-digit day of month is space-padded, not zero-padded")
     func singleDigitDayIsSpacePadded() throws {
-        var components = Calendar.current.dateComponents(
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        var components = calendar.dateComponents(
             [.year, .month, .day, .hour, .minute, .second], from: Date())
         components.day = 5
         components.hour = 12
         components.minute = 0
         components.second = 0
-        let fifth = try #require(Calendar.current.date(from: components))
+        let fifth = try #require(calendar.date(from: components))
 
-        let formatted = ProcessStartTime.format(fifth)
+        let formatted = try #require(ProcessStartTime.format(fifth))
         let day = String(formatted.dropFirst(8).prefix(2))
         #expect(day == " 5")
     }

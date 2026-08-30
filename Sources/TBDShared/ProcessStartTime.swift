@@ -2,7 +2,8 @@ import Darwin
 import Foundation
 
 /// The kernel's record of when a process started, and the exact string shape
-/// Claude Code writes into a peer registry record's `procStart`.
+/// Claude Code writes into a peer registry record's `procStart`: `ctime(3)`'s
+/// layout, rendered in UTC (see `format`).
 ///
 /// A shadow peer's record must describe a process that genuinely exists and
 /// genuinely owns the socket
@@ -40,21 +41,52 @@ public enum ProcessStartTime {
             TimeInterval(started.tv_sec) + TimeInterval(started.tv_usec) / 1_000_000)
     }
 
-    /// `procStart`'s exact shape: `ctime(3)`'s local-time rendering —
-    /// `"Sat Aug 29 22:07:57 2026"`, with the day of month space-padded to two
-    /// columns. Every record on a live registry carries this format, and it is
-    /// the same rendering `ps -o lstart=` produces, so the value TBD writes is
-    /// byte-identical to the one any other reader of that pid would compute.
+    /// `procStart`'s exact shape: `ctime(3)`'s layout — `"Sat Aug 29 22:07:57
+    /// 2026"`, with the day of month space-padded to two columns — rendered in
+    /// **UTC**, never in the local zone.
     ///
-    /// `ctime_r` is used rather than a `DateFormatter`: ICU has no space-padded
-    /// day-of-month specifier, so a formatter would silently drift from the
-    /// observed shape on days 1-9.
-    public static func format(_ date: Date) -> String {
-        var seconds = time_t(date.timeIntervalSince1970)
-        // ctime_r requires a buffer of at least 26 bytes.
+    /// UTC is not a preference; it is what the format has to be to compare
+    /// equal. Claude Code writes `procStart` in UTC, and every reader of a
+    /// registry record — `RosterWatcher.admit`, the ghost check, `tbd peer
+    /// list` — decides liveness by comparing that string against one computed
+    /// here, by **string equality**. Rendering in the local zone therefore made
+    /// every comparison fail everywhere `TZ` is not UTC: measured on a machine
+    /// at `-0400`, 12 of 12 live records disagreed by exactly the offset, so
+    /// nothing was ever admitted and every live session classified as a ghost.
+    /// The correct cross-check with `ps` is `TZ=UTC ps -o lstart=`; bare `ps`
+    /// prints local time and will not match.
+    ///
+    /// `gmtime_r` plus `asctime_r` is used rather than a `DateFormatter`: ICU
+    /// has no space-padded day-of-month specifier, so a formatter would
+    /// silently drift from the observed shape on days 1-9. `asctime_r` is
+    /// `ctime_r` without the zone conversion, so the layout is identical by
+    /// construction.
+    ///
+    /// Returns nil when the date cannot be rendered in this shape at all —
+    /// `gmtime_r` rejects an out-of-range epoch and `asctime_r` rejects a year
+    /// outside 1-9999. Nil rather than `""` because the contract this type
+    /// carries is "nil means we cannot describe it", and because two empty
+    /// strings compare *equal*: returning `""` would silently satisfy the very
+    /// recycled-pid check that string comparison exists to serve.
+    public static func format(_ date: Date) -> String? {
+        let interval = date.timeIntervalSince1970
+        // `time_t(_:)` traps on a non-finite or out-of-range value, and this is
+        // a public entry point, so an undescribable date returns nil instead.
+        // `TimeInterval(time_t.max)` would be the wrong bound — it rounds *up*
+        // past `time_t.max` and so admits a value that still traps. 9e18 sits
+        // comfortably inside the range and loses nothing real: `asctime_r`
+        // refuses every year outside 1-9999 regardless.
+        guard interval.isFinite, interval.magnitude < 9e18 else { return nil }
+        var seconds = time_t(interval)
+        var components = tm()
+        guard gmtime_r(&seconds, &components) != nil else { return nil }
+        // asctime_r requires a buffer of at least 26 bytes.
         var buffer = [CChar](repeating: 0, count: 32)
-        guard ctime_r(&seconds, &buffer) != nil else { return "" }
+        guard asctime_r(&components, &buffer) != nil else { return nil }
         let bytes = buffer.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+        // `asctime_r` terminates the value with a newline; the trim removes it.
+        // There is no leading whitespace to lose, so the interior space padding
+        // the day of month carries survives untouched.
         // swiftlint:disable:next optional_data_string_conversion
         return String(decoding: bytes, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
