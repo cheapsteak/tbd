@@ -22,7 +22,7 @@
 # and passed explicitly — never left for `swift-safe` to derive from an
 # environment this script has already rewritten.
 #
-# Three layers. The first two are always on; the third is CI-only.
+# Four layers. All but the third are always on; the third is CI-only.
 #
 #   1. CONTAINMENT — always on. `TBD_HOME`, `TBD_SOCKET_PATH`,
 #      `TBD_CLAUDE_HOST_HOME` and `TMUX_TMPDIR` point at a fresh scratch dir
@@ -43,9 +43,15 @@
 #      `~/Library/Preferences` are fingerprinted before and after, and a changed
 #      fingerprint fails the run even when every test passed. This is now a
 #      backstop rather than the primary guard for the first four; see "WHY THE
-#      TRIPWIRE SUPERSEDES THE FINGERPRINT". For the fifth it is the ONLY
-#      guard — no fence variable reaches `cfprefsd` — which is why the arm
-#      exists at all.
+#      TRIPWIRE SUPERSEDES THE FINGERPRINT". For the fifth it is the only thing
+#      that can SEE a leak — no fence variable reaches `cfprefsd` — and what it
+#      watches is layer 4 having done its job.
+#   4. RECLAMATION — always on, and the only layer that deletes anything. The
+#      preferences container `~/Library/Preferences/TBDTests.suites` is removed
+#      before the first snapshot and again once the run has exited. It is a
+#      sweep rather than a fence because a fence is impossible here: `cfprefsd`
+#      writes the file after the test process is gone. See "THE PREFERENCES
+#      CONTAINER, AND THE RECLAIMER THAT OWNS IT" below.
 #
 # READING A PERMISSION-DENIED FAILURE. If a test under this wrapper fails with
 # "You don't have permission to save the file …" or `EACCES`/`NSFileWriteNoPermissionError`
@@ -77,14 +83,19 @@
 # Two things it deliberately does NOT fence, so don't read it as total:
 #
 #   - **`UserDefaults`.** `cfprefsd` resolves preference paths over XPC, so it
-#     ignores `CFFIXED_USER_HOME` entirely. The existing
+#     ignores `CFFIXED_USER_HOME` entirely, and no arrangement of layers 1 and
+#     2 can change that. The existing
 #     `AppState(userDefaults: UserDefaults(suiteName:))` discipline in
 #     `CLAUDE.md` stays load-bearing, and so does minting the suite through the
-#     `Tests/TestSupport` helper: `removePersistentDomain(forName:)` clears a
-#     domain's values without unlinking its file, and ~520,000 orphaned
-#     `~/Library/Preferences` plists (~2.1 GB) accumulated that way over months
-#     while every other layer here read green. Layer 3's Preferences arm is
-#     what makes that visible now; containment cannot.
+#     `Tests/TestSupport` helper — but note what the helper buys and what it
+#     does not. `removePersistentDomain(forName:)` clears a domain's values and
+#     leaves its file; adding an unlink removes the file and `cfprefsd` writes
+#     it back when the process disconnects, measured across six teardown
+#     orderings. What the helper actually does is make the damage COLLECTABLE:
+#     every suite is named `TBDTests.suites/<label>.<uuid>`, so every file
+#     lands in one directory that layer 4 can remove wholesale after the
+#     process is gone. ~520,000 orphaned plists (~2.1 GB) accumulated over
+#     months before that existed, while every other layer here read green.
 #   - **The Keychain.** It breaks rather than redirects under
 #     `CFFIXED_USER_HOME`: `SecItemAdd` returns `-60006` and
 #     `SecItemCopyMatching` returns `-25300`, and pre-seeding
@@ -306,6 +317,106 @@ require_owned_dir_after_mkdir() {
   [ -d "$path" ] || fence_bail "$what is not a directory: $path"
   owner="$(stat -f '%u' "$path")"
   [ "$owner" = "$(id -u)" ] || fence_bail "$what is owned by uid $owner, not $(id -u): $path"
+}
+
+# THE PREFERENCES CONTAINER, AND THE RECLAIMER THAT OWNS IT.
+#
+# `Tests/TestSupport/UserDefaultsTestSupport.swift` names every test suite
+# `TBDTests.suites/<label>.<uuid>`. A `/` in a suite name makes `cfprefsd` write
+# into a SUBDIRECTORY of `~/Library/Preferences`, so every backing plist the
+# suite can produce lands in this one directory instead of scattering through a
+# parent nobody can safely walk.
+#
+# WHY A WRAPPER-LEVEL RECLAIM IS NEEDED AT ALL, given the helper already
+# unlinks each file at teardown: because the unlink is not the last word.
+# Measured, six orderings, ten trials each — remove/sync/unlink, unlink-first,
+# poll-until-flushed, `removeSuite(named:)`, per-key `removeObject`, and an
+# `atexit`-registered second unlink — every one of the 60 files was back after
+# the process exited. `cfprefsd` keeps the domain cached and flushes it when
+# its client DISCONNECTS, which is strictly after every `atexit` handler a
+# process can run. Nothing inside the test process can therefore be the last
+# writer; only something that runs after it has exited can, and that is this
+# wrapper.
+#
+# IT IS A NAMED RECONCILER, WHICH IS THE POINT. The container is a durable
+# resource created against the filesystem by a process that cannot clean up
+# after itself, so per CLAUDE.md ("Every durable external resource needs a
+# named reconciler") the answer must be a sweep rather than better rollback.
+#
+# THE SWEEP HAS TWO HALVES AT OPPOSITE ENDS OF A RUN, and neither is redundant:
+#
+#   `TestDefaults.reclaimContainerDirectory()` fires once per test PROCESS,
+#   from `makeSuiteName` before the first suite is minted. It was observed
+#   clearing a previous run's files. But it runs at the START, which is the
+#   wrong end for a bracketing guard: the before-snapshot would then hold the
+#   PREVIOUS run's post-exit flush and the after-snapshot THIS run's, two
+#   different populations that differ in general — the arm would redden on
+#   almost every run, and a guard that reddens spuriously gets switched off
+#   within a week.
+#
+#   The two calls below are the other half. They put the same zero on both
+#   sides of the comparison, and they are also what keeps the directory empty
+#   BETWEEN runs rather than one run's worth of files behind.
+#
+# So a run this wrapper never got to finish — killed by
+# `scripts/nightly-flake-stress.sh`'s deadline, or bailed out by the decoy
+# recheck above — still leaks nothing durable: the next test process's start-up
+# reclaim takes it. One run's worth of files is the standing bound, and that is
+# the only thing the in-process half is relied on for now.
+#
+# ONE PATH, NEVER A GLOB, NEVER AN ENUMERATION. `~/Library/Preferences` holds
+# tens of thousands of entries and is far too large to walk; the reclaim knows
+# exactly one path and touches nothing else in there. The `case` guard below is
+# what keeps that true if the path is ever computed differently: a target that
+# does not END in the container name is refused rather than removed.
+#
+# DUPLICATED FROM SWIFT, DELIBERATELY. The name lives in
+# `TestDefaults.containerName` and is repeated here and in
+# `scripts/tbd-home-fingerprint.sh`. Deriving it at runtime would mean reading
+# the Swift file (a repo-relative path the fingerprint script does not have,
+# since the harness runs mutated copies of it from a temp directory) or an
+# environment override (a guard a caller can silently disarm), and both are
+# worse than three copies pinned by
+# `scripts/test.test.sh`'s `test_the_container_name_matches_the_swift_helper`.
+PREFERENCES_CONTAINER_NAME="TBDTests.suites"
+
+# A REFUSAL AND A FAILURE ARE BOTH SURVIVABLE, SO THIS ALWAYS RETURNS 0. It is
+# a reclaimer, not a gate: the run's verdict belongs to the tests. What turns an
+# unreclaimed container into a red run is the fingerprint arm reading a non-zero
+# count afterwards, which is a better signal than an exit code because it says
+# how many files are sitting there.
+reclaim_preferences_container() {
+  local container="$1" phase="$2"
+  case "$container" in
+    */"$PREFERENCES_CONTAINER_NAME") ;;
+    *)
+      echo "test.sh: refusing to reclaim '$container' $phase — it does not end" >&2
+      echo "         in $PREFERENCES_CONTAINER_NAME, and this function removes" >&2
+      echo "         nothing else." >&2
+      return 0
+      ;;
+  esac
+  # A symlink is refused rather than followed. `rm -rf` would only unlink the
+  # link itself, so this is not the chmod hazard the fake-home guards exist for
+  # — it is a statement that we delete a directory we believe is ours, or we
+  # delete nothing and say so.
+  if [ -L "$container" ]; then
+    echo "test.sh: refusing to reclaim '$container' $phase — it is a SYMLINK." >&2
+    return 0
+  fi
+  [ -e "$container" ] || return 0
+  if [ ! -d "$container" ]; then
+    echo "test.sh: refusing to reclaim '$container' $phase — it exists but is" >&2
+    echo "         not a directory. The fingerprint's stray arm counts it." >&2
+    return 0
+  fi
+  # `if !` rather than a bare call, so a removal that fails under `set -e`
+  # reports itself instead of taking the whole run down with it.
+  if ! rm -rf "$container"; then
+    echo "test.sh: could not remove '$container' $phase; the fingerprint will" >&2
+    echo "         report whatever is left." >&2
+  fi
+  return 0
 }
 
 # THE SHARED ADMISSION LOCK. The branches mirror `_lock_path()` in
@@ -596,6 +707,27 @@ swift_lock_path="$(resolve_swift_lock_path)"
 # is still compared exactly as before.
 mkdir -p "$(dirname "$swift_lock_path")"
 : >> "$swift_lock_path"
+
+# THE CALLER'S REAL `$HOME`, for the same reason the fingerprint script reads
+# it: the fence below is an `env` prefix rather than an export, so this script's
+# own `$HOME` is still the developer's — and the developer's is where `cfprefsd`
+# writes, whatever the run is told. (`TestDefaults.realHomeDirectory` resolves
+# the same directory through `getpwuid` because it runs INSIDE the fence and
+# cannot trust `$HOME`. On any ordinary account the two agree; where they do
+# not, the in-process reclaim is the half that covers it.)
+preferences_container="$HOME/Library/Preferences/$PREFERENCES_CONTAINER_NAME"
+
+# RECLAIMED ON BOTH SIDES OF THE RUN, and the first call is not redundant.
+# `cfprefsd` may have flushed the PREVIOUS run's domains to disk after that run
+# had already exited, so without this the before-snapshot counts files this run
+# never created, the after-snapshot counts zero, and the comparison reddens on a
+# leak somebody else already fixed. Exactly the argument the lock file above is
+# created early for: put it on both sides of the diff.
+#
+# Wiping it while other runs hold live domains in it is safe and was measured:
+# `cfprefsd` serves a live domain from memory, so their reads and writes keep
+# working after the file underneath is gone.
+reclaim_preferences_container "$preferences_container" "before the run"
 
 fingerprint_before=""
 if [ "$fingerprint" -eq 1 ]; then
@@ -938,6 +1070,29 @@ for decoy in "${decoys[@]}"; do
   [ "$mode" = "0" ] || fence_bail "the $decoy decoy came back mode 0$mode, not 000 — the run disarmed the tripwire: $path"
 done
 
+# AFTER THE TEST PROCESS HAS EXITED — which is the only moment this can work.
+# `cfprefsd` flushes a cached domain when its client disconnects, so a reclaim
+# that ran any earlier would be overwritten by the flush that follows it. By
+# here the fenced suite is gone (including the valve's local re-run, which is
+# why this sits below that whole block).
+#
+# WHAT IS NOT MEASURED, AND WOULD SHOW UP AS A FLAKE: whether that flush has
+# always COMPLETED by the time this line runs. The disconnect happens when the
+# process dies; the write is cfprefsd's, in another process, and nothing here
+# waits for it. If it lands after this `rm -rf`, the container is recreated
+# behind us and `fingerprint_after` reports a leak that is really a race. No
+# disk is lost either way — the next run's start-up reclaim takes it — so the
+# symptom would be a red CI run with a container count of one or two and no
+# explanation. If that shows up, the fix is a bounded settle-and-retry around
+# this call, NOT a relaxed arm: the arm is right, the timing would be what is
+# wrong.
+#
+# UNCONDITIONAL, ABOVE THE DETECTION GATE. Reclaiming is not detection: the
+# files accumulate on a developer box exactly as they do on a runner, and that
+# box is where the half-million came from. `--no-fingerprint` turns off the
+# report, never the sweep.
+reclaim_preferences_container "$preferences_container" "after the run"
+
 if [ "$fingerprint" -eq 0 ]; then
   exit "$test_status"
 fi
@@ -975,15 +1130,33 @@ if [ "$fingerprint_before" != "$fingerprint_after" ]; then
   echo "Something spawned tmux with an environment that dropped TMUX_TMPDIR:" >&2
   echo "look for a Process whose \`environment\` is built from scratch." >&2
   echo >&2
-  echo "If the entry is <preferences>, a test minted a UserDefaults suite and" >&2
-  echo "left its backing plist behind. The fix is to mint the suite through" >&2
-  echo "the Tests/TestSupport helper, which unlinks the file on teardown —" >&2
-  echo "removePersistentDomain(forName:) alone clears the domain's values and" >&2
-  echo "leaves a 42-byte empty plist there forever. Neither HOME nor" >&2
-  echo "CFFIXED_USER_HOME can contain this, so there is no fence to reach for:" >&2
-  echo "cfprefsd resolves preferences over XPC, in its own process, and never" >&2
-  echo "consults either. ~520,000 such files (~2.1 GB) accumulated in one" >&2
-  echo "real ~/Library/Preferences before this arm existed." >&2
+  echo "If the entry is a <preferences> count, read which one it is." >&2
+  echo >&2
+  echo "  <preferences>/$PREFERENCES_CONTAINER_NAME — test suites were minted" >&2
+  echo "  correctly and this wrapper failed to reclaim them. Any refusal it" >&2
+  echo "  printed is above; the files are still there, safe to list, and each" >&2
+  echo "  is named for the suite that made it." >&2
+  echo >&2
+  echo "  <preferences> stray TBDTests.* — a suite was minted with a flat name" >&2
+  echo "  instead of through the helper, so its file landed outside the" >&2
+  echo "  container and nothing will ever reclaim it." >&2
+  echo >&2
+  echo "Either way the fix is to mint the suite through the Tests/TestSupport" >&2
+  echo "helper. Note that unlinking the file yourself is NOT sufficient and" >&2
+  echo "never was: removePersistentDomain(forName:) clears the domain's values" >&2
+  echo "and leaves a 42-byte empty plist, and an unlink after it is undone when" >&2
+  echo "cfprefsd flushes the cached domain on client disconnect — strictly" >&2
+  echo "after every atexit handler a process can run, measured across six" >&2
+  echo "teardown orderings, sixty out of sixty files back. What the helper does" >&2
+  echo "is put every file in one container this wrapper can delete once the" >&2
+  echo "process is gone. There is no fence to reach for either: cfprefsd" >&2
+  echo "resolves preferences over XPC and consults neither HOME nor" >&2
+  echo "CFFIXED_USER_HOME. ~520,000 such files (~2.1 GB) accumulated in one" >&2
+  echo "real ~/Library/Preferences before any of this existed." >&2
+  echo >&2
+  echo "On a developer box this can also be somebody else's run: ~40 worktrees" >&2
+  echo "share one ~/Library/Preferences, so a container file counted here may" >&2
+  echo "belong to a run still in flight. That is why detection is CI-only." >&2
   echo >&2
   echo "Reaching here at all is now unusual — except for <preferences>, which" >&2
   echo "no decoy can cover: a hand-built \$HOME path normally dies at its call" >&2
