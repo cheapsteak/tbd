@@ -121,6 +121,13 @@ into a headless VT (neither, at the cost of a process in the path).
 
 - `scripts/diag/tmux-vs-rawpty-idle.py` — the raw-pty/tmux comparison above.
 - `scripts/diag/tmux-server-contention.py` — interleaves a busy server against a
-  private one-pane server. Measured 34.1 ms against 36.5 ms p50, which is why
-  pane count per server, and therefore sharding servers more finely, is not a
-  lever here.
+  private one-pane server. Measured 34.1 ms against 36.5 ms p50.
+
+  **Read that pair with its method in mind.** This script forks a `tmux
+  send-keys` client per sample, so both arms carry a fork+exec — the very cost
+  the raw-versus-tmux script above avoids on purpose, and the reason these
+  numbers sit roughly 30× above the 1.1 ms p50 that method measures for quiet
+  tmux. The arms share the method, so a large gap between them would still have
+  shown; but the effective resolution is tens of milliseconds. The honest
+  reading is "pane count per server is not a *large* effect", not "pane count
+  is not an effect", and a few milliseconds could hide here undetected.

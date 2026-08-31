@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Why is a tmux-attached terminal laggy when a raw one on the same box is not?
 
-    tmux-vs-rawpty-idle.py [--reps 4] [--gaps 0.1,1,5,20]
+    tmux-vs-rawpty-idle.py --socket /tmp/tmux-$(id -u)/<name> [--reps 4] [--gaps 0.1,1,5,20]
 
 WHY THIS EXISTS
 
@@ -65,10 +65,26 @@ resources no sweep covers, so this script kills them on every exit path
 including Ctrl-C. Tokens go only to panes it created; no agent session is
 touched and no agent output is recorded.
 """
-import argparse, os, pty, select, signal, struct, subprocess, sys, termios, time, fcntl
+import argparse, os, pty, select, shutil, signal, struct, subprocess, sys, termios, time, fcntl
 
 SESSION = "tbd-idlecost"
-TMUX = "/opt/homebrew/bin/tmux"
+
+
+def resolve_tmux():
+    """Find the tmux binary: TMUX_BIN env var, then PATH, then the common
+    Homebrew-on-Apple-Silicon path as a last resort. A hardcoded absolute path
+    breaks on Intel Macs, MacPorts, and Linux, so this is the only place that
+    guesses -- everything else uses the result.
+    """
+    for candidate in (os.environ.get("TMUX_BIN"), shutil.which("tmux"),
+                       "/opt/homebrew/bin/tmux"):
+        if candidate and os.path.exists(candidate):
+            return candidate
+    print("no tmux binary found: set TMUX_BIN or install tmux on PATH", file=sys.stderr)
+    sys.exit(1)
+
+
+TMUX = resolve_tmux()
 
 
 def set_winsize(fd, rows=50, cols=200):
@@ -133,7 +149,13 @@ def pct(xs, p):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--socket", default="/tmp/tmux-501/tbd-4c853a38")
+    ap.add_argument("--socket", required=True,
+                    help="path to the live tmux server socket to test, e.g. "
+                         f"/tmp/tmux-{os.getuid()}/<name>. TBD names its "
+                         "per-repo socket from a worktree-derived hash, so "
+                         "there's no portable default -- list "
+                         f"/tmp/tmux-{os.getuid()}/ or check `tmux -L "
+                         "<name> list-sessions` to find the one you want.")
     ap.add_argument("--reps", type=int, default=4)
     ap.add_argument("--gaps", default="0.1,1,5,20")
     a = ap.parse_args()

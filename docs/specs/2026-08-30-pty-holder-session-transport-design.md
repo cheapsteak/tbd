@@ -733,9 +733,20 @@ of which is carried into this design:
 
 ## Rejected alternatives
 
-- **Keeping tmux and sharding servers more finely.** Measured: a busy server
-  against a private one-pane server differed by 34.1 vs 36.5 ms p50 under
-  load — pane count per server is not the lever; the wakeups are.
+- **Keeping tmux and sharding servers more finely.** Rejected on mechanism,
+  not on measurement: the cost of tmux is per-keystroke process wakeups, and
+  every server has those no matter how few panes it holds — so sharding
+  redistributes panes without removing a single wakeup. The supporting
+  measurement (a busy server against a private one-pane server, 34.1 vs
+  36.5 ms p50 under load) is **weaker than it looks and should not be leaned
+  on**: `tmux-server-contention.py` forks a `tmux send-keys` client per
+  sample, so both arms carry a fork+exec that dominates the reading — which is
+  why those numbers sit ~30× above the 1.1 ms p50 the fork-avoiding method
+  measures for quiet tmux. Both arms share the method, so a large difference
+  would still have surfaced; but at that resolution the run cannot rule out a
+  difference of a few milliseconds. It supports "pane count is not a large
+  effect", not "pane count is not an effect", and the argument above does not
+  need the stronger claim.
 - **The daemon holds the masters itself (no holder).** A daemon restart is
   precisely one of the windows persistence exists to cover, and on a
   development machine the daemon restarts constantly. The holder exists to
