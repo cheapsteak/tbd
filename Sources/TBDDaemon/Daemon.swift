@@ -196,6 +196,14 @@ public final class Daemon: Sendable {
     /// it the same way they reach `rpcRouter.hibernationCoordinator`. `nil`
     /// in mock mode (never constructed).
     public nonisolated(unsafe) var orphanGC: OrphanGC?
+    /// The daemon's single owner of every live `HolderReader` — one per
+    /// holder-backed session, re-adopted at startup (step 8e). Owned here
+    /// because a reader's lifetime is the daemon's: the holder and its job
+    /// outlive us, the reader must not. `nil` in mock mode.
+    ///
+    /// Internal rather than public because the holder types are: nothing
+    /// outside `TBDDaemonLib` has any business holding a pty master.
+    nonisolated(unsafe) var holderRegistry: HolderRegistry?
     /// The registry a live `ShadowPeerManager` registers itself with, so
     /// `ShadowPeerReconciler` can tell a live shadow from an orphan. Owned here
     /// because the two have opposite lifetimes: the reconciler runs for the
@@ -1069,6 +1077,26 @@ public final class Daemon: Sendable {
             mockMode: mockMode, database: database, git: git, lifecycle: lifecycle,
             actuationLog: actuationLog)
 
+        // 8e. Re-adopt holder-backed sessions. A `HolderReader` lives only in
+        // the memory of the daemon that made it, so after a restart every live
+        // holder session has nobody draining its pty master — and an undrained
+        // master does not merely cost a screen: a job cannot finish exiting
+        // while anything it wrote is still queued on its terminal, so those
+        // sessions pile up half-exited. This must therefore run before the
+        // listeners serve, both because `terminal.output` needs the readers and
+        // because the liveness debt starts accruing the moment the daemon is up.
+        //
+        // With `pty_holder_enabled` off there are no such rows and this is a
+        // single query — it cannot delay the socket bind for anyone who has not
+        // opted in.
+        if mockMode == nil {
+            let holderRegistry = HolderRegistry(
+                owner: HolderRegistry.installationOwner(),
+                listTerminals: { [database] in try await database.terminals.list() })
+            self.holderRegistry = holderRegistry
+            await holderRegistry.adoptAll()
+        }
+
         // 9. Start socket server
         let sock = SocketServer(router: rpcRouter)
         self.socketServer = sock
@@ -1527,6 +1555,13 @@ public final class Daemon: Sendable {
         if let resumeScheduler = limitResumeScheduler {
             await resumeScheduler.stop()
         }
+
+        // Stop every holder drain loop. The holders and their jobs are
+        // deliberately untouched — a session outliving its daemon is the point
+        // of the transport — but a reader that is merely dropped leaks its drain
+        // thread and the pty descriptor it owns, because after end of file that
+        // thread parks on its wake pipe rather than exiting.
+        await holderRegistry?.releaseAll()
 
         if let questionSweep = pendingQuestionExpirySweep {
             await questionSweep.stop()

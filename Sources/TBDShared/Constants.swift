@@ -66,6 +66,20 @@ public enum TBDConstants {
         configDir(environment: environment).appendingPathComponent("holders")
     }
 
+    /// File holding this installation's holder owner token: `~/tbd/holder-owner`.
+    /// Honors TBD_HOME.
+    ///
+    /// The token identifies the **installation**, not the process, which is why
+    /// it is persisted at all: a daemon that minted a fresh one on every boot
+    /// would find every holder it had spawned minutes earlier unrecognisable and
+    /// adopt none of them. A fixed name that is rewritten rather than
+    /// accumulated, exactly like `tbdd.pid` and `port` beside it.
+    public static func holderOwnerTokenPath(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
+        configDir(environment: environment).appendingPathComponent("holder-owner").path
+    }
+
     public static func databasePath(environment: [String: String]) -> String {
         configDir(environment: environment).appendingPathComponent("state.db").path
     }
