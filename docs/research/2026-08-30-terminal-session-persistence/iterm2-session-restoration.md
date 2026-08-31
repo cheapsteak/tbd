@@ -407,6 +407,57 @@ rediscovered by anyone building the same thing:
   "disclaim children" advanced setting
   (`sources/Tasks/iTermFileDescriptorMultiClient+MRR.m:245-250`).
 
+## Forcing a repaint after reattach: the size jiggle
+
+A reattached session inherits a live pty but no screen contents, so anything
+already drawn is gone unless the program redraws it. iTerm2's lever for that is
+a deliberate window-size perturbation, and it is worth reading closely because
+what it does *not* cover is as instructive as what it does.
+
+- **The mechanism.** `WinSizeController` (ObjC name `iTermWinSizeController`,
+  `sources/Tasks/WinSizeController.swift:17-18`) exposes `jiggle()` (`:116-124`)
+  and `forceJiggle()` (`:110-114`) over the private `reallyJiggle()`
+  (`:126-140`), which grows the last-known grid by one column, sets it, then
+  sets it straight back. Two size changes, so the child gets a SIGWINCH and
+  full-screen programs repaint.
+- **Same-size resizes are suppressed at two layers**, which is why the
+  perturbation is necessary at all rather than just re-asserting the size.
+  `WinSizeController.set(_:)` returns early when the request matches the current
+  grid, view size and scale factor (`WinSizeController.swift:171-177`), and
+  below it `iTermSetTerminalSize` only calls through to
+  `iTermForceSetTerminalSize` when the requested size differs from what
+  `ioctl(TIOCGWINSZ)` reports (`sources/Tasks/iTermTTYState.c:104-109`); the
+  sole `TIOCSWINSZ` lives at `:101`. A reattach re-inherits the same master fd
+  with its kernel-tracked winsize intact, so asking for the same geometry
+  issues no ioctl and delivers no SIGWINCH.
+- **The ordinary reattach path does not jiggle.** Restoring a saved window
+  arrangement goes through `-tryToAttachToServerWithProcessId:tty:`
+  (`sources/PTYSession.m:2657-2671`),
+  `-tryToAttachToMultiserverWithRestorationIdentifier:` (`:2673-2687`) and
+  `-tryToFinishAttachingToMultiserverWithPartialAttachment:`, none of which
+  reference `jiggle`, `forceJiggle`, or `_jiggleUponAttach`. Combined with the
+  same-size suppression above, a same-geometry reattach heals nothing.
+- **Orphan adoption does jiggle,** by arming a flag first.
+  `-showOrphanAnnouncement` (`sources/PTYSession.m:2540-2547`) calls `jiggle`
+  and sets `_jiggleUponAttach = YES`; that flag is read once, in
+  `-attachToServer:completion:` (`:2701-2702`), which calls `forceJiggle`. Its
+  only callers are the two orphan-adoption delegate methods in
+  `sources/iTermApplicationDelegate.m:3782` and `:3816`.
+- **Two unrelated triggers exist,** so "the jiggle is the orphan-adoption
+  mechanism" would overstate it: the Clear Buffer command jiggles when the
+  `jiggleTTYSizeOnClearBuffer` advanced setting is on, and it defaults off
+  (`sources/PTYSession.m:6767-6768`, `sources/iTermAdvancedSettingsModel.m:494`);
+  and a light/dark or background-color change jiggles as a workaround for
+  iTerm2 issue 9855 (`sources/PTYSession.m:14093-14150`). Neither has anything
+  to do with attachment.
+- **Do not confuse it with `-[PTYTextView mouseHandlerJiggle:]`**
+  (`sources/PTYTextView.m:8197`), which only scrolls a line up and down to
+  force a scrollbar redraw and never touches `WinSizeController`.
+
+The reading for TBD: the mechanism is proven and cheap, but iTerm2 wires it to
+the recovery path and not to the common one. Applying it at *every* reader
+handoff is a small, deliberate divergence rather than an invention.
+
 ## What iTerm2 does not get that tmux does
 
 Being fair to tmux here matters, because TBD ships a feature that depends on

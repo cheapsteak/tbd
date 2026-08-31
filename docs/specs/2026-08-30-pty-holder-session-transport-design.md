@@ -349,8 +349,11 @@ that never arrives.
 
 Its cost is **two** failure modes, not one, and the second is the easier to
 overlook. A missing ack does not mean the injection was not delivered — the
-app may have written it and had the ack lost or merely delayed, which App Nap
-has been measured doing to this app's work for ~90 s. So the fallback can
+app may have written it and had the ack lost or merely delayed, which macOS
+App Nap can cause by coalescing a backgrounded app's work for far longer than
+any deadline worth waiting on. The policy does not rest on the exact
+magnitude — only on the ack deadline being shorter than an app can plausibly
+stall, which any usable deadline is. So the fallback can
 deliver an injection **twice**, and for a queued prompt acting twice may be
 worse than a sheared keystroke. This is the at-least-once versus at-most-once
 fork, chosen knowingly in favour of at-least-once: a duplicated prompt is
@@ -431,9 +434,10 @@ it reads back to the daemon:
   SIGWINCH and nothing else. Same scoping as the daemon-restart case above,
   and for the same reason.
 - Pulls are bounded (timeout on an injected clock), and every consumer
-  declares a failure policy, because the app can legitimately go quiet (App
-  Nap has coalesced this app's work for ~90 s in the field, and app-wedged
-  correlates with exactly the moments supervision most wants a screen).
+  declares a failure policy, because the app can legitimately go quiet —
+  macOS App Nap coalesces a backgrounded app's work, and an app being wedged
+  or busy correlates with exactly the moments supervision most wants a
+  screen, so "quiet" is not the rare case it looks like.
   Safety-critical consumers fail closed: the hibernation input-veto check
   treats no-answer as unsafe and refuses to hibernate, never risking typed
   input. Best-effort consumers fall back to the daemon's frozen-at-attach
@@ -456,11 +460,16 @@ Rejected alternatives.
 Whenever the reader changes — attach, detach, app death, daemon re-adoption —
 the incoming reader briefly wiggles the tty size (grow one column, restore)
 to force a SIGWINCH, so full-screen programs repaint into the reader's
-emulator. This is iTerm2's `WinSizeController` "jiggle", wired here to every
-handoff edge rather than only orphan adoption (in iTerm2 the plain reattach
-path gets no jiggle, and its resize ioctl is guarded by only-if-changed, so
-the common same-geometry reattach heals nothing — a gap, not a choice; see
-the companion iTerm2 record). The jiggle heals screen *state*; it cannot
+emulator. This is iTerm2's `WinSizeController` jiggle, applied here at every
+handoff edge. iTerm2 reaches it from orphan adoption but **not** from its
+ordinary reattach path, and its size-setting is suppressed at two layers when
+the requested geometry already matches — so a same-geometry reattach there
+issues no ioctl, delivers no SIGWINCH, and heals nothing. Wiring it to every
+edge is therefore a deliberate divergence from a proven mechanism, not an
+invention. (The jiggle in iTerm2 also fires from two paths unrelated to
+attachment — a default-off Clear Buffer setting and a light/dark-change
+workaround — so it is not purely a recovery device. Citations for all of this
+in the companion iTerm2 record's "Forcing a repaint after reattach" section.) The jiggle heals screen *state*; it cannot
 recover missing history and does nothing for scrolled-away output, which is
 why it complements rather than replaces the daemon's emulator.
 
@@ -754,9 +763,10 @@ of which is carried into this design:
 - **`setsid()` in the supervisor is load-bearing**, and SIGHUP/SIGPIPE must
   be ignored, or a crash of the spawning process (or a `sendmsg` into a dead
   peer) takes the supervisor with it.
-- **The jiggle exists and works** — and iTerm2 wires it only to orphan
-  adoption, leaving its common reattach path unhealed behind an
-  only-if-changed resize guard. This design wires it to every reader
+- **The jiggle exists and works** — and iTerm2 reaches it from orphan
+  adoption but not from its ordinary reattach path, leaving that common path
+  unhealed behind two layers of same-size suppression. This design applies it
+  at every reader
   handoff.
 - **Content and process persist on different clocks** unless something keeps
   the detached picture current. iTerm2 saves screen contents only on losing

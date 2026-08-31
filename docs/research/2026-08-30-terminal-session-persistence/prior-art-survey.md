@@ -43,8 +43,20 @@ The design space turns out to have three occupied regions and one empty one.
   The per-keystroke cost of tmux is the server waking twice and running a full
   VT parse and grid diff — not a four-hop client relay.
 - **Own the pty in a supervisor, hand the *pty master* fd to the renderer** –
-  empty. This is the region TBD's question points at, and no shipping system
-  occupies it.
+  occupied, but only halfway. **iTerm2 ships exactly this mechanism** and has
+  for years: its session-restoration server owns the master and hands it to
+  the app, which does direct I/O (see the companion iTerm2 record for the
+  source read). So the transport is precedent, not invention, and should not
+  be described as unexplored.
+
+  What is genuinely unoccupied is the *combination*: a supervisor that owns
+  the master, a renderer that reads it directly, **and a always-present
+  daemon that drains the master whenever no renderer is attached**. iTerm2
+  cannot occupy that third corner structurally — it has no process alive
+  while the app is closed, so a detached session's output has nowhere to go
+  and its supervisor simply parks the fd. That gap is the region TBD's
+  question actually points at, and it is a smaller and better-supported claim
+  than "nobody does this".
 
 The mechanism that region needs is not novel, and every piece of it is in
 production somewhere:
