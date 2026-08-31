@@ -119,7 +119,7 @@ struct HolderAdoptionTests {
     /// updates again and a job that can no longer finish exiting, because
     /// nothing is draining its terminal.
     ///
-    /// The interleaving is **forced, not waited for.** `PublishBarrier` parks
+    /// The interleaving is **forced, not waited for.** `ReentryBarrier` parks
     /// the adoption at exactly the suspension point that matters, so the
     /// ordering is a property of the test rather than of the scheduler.
     @Test func aReleaseIsNotUndoneByTheAdoptionItRaced() async throws {
@@ -130,7 +130,7 @@ struct HolderAdoptionTests {
 
         let registry = makeRegistry(owner: fixture.owner, home: fixture.home)
         defer { releaseInBackground(registry) }
-        let barrier = PublishBarrier()
+        let barrier = ReentryBarrier()
         await registry.setPublishBarrier(barrier.hook())
         let terminal = holderTerminal(id: fixture.sessionID)
 
@@ -186,7 +186,7 @@ struct HolderAdoptionTests {
 
         let registry = makeRegistry(owner: fixture.owner, home: fixture.home)
         defer { releaseInBackground(registry) }
-        let barrier = PublishBarrier()
+        let barrier = ReentryBarrier()
         await registry.setPublishBarrier(barrier.hook())
         let terminal = holderTerminal(id: fixture.sessionID)
 
@@ -218,6 +218,99 @@ struct HolderAdoptionTests {
             await live.renderScreen().contains("GOT:AFTER")
         }
         let screen = await live.renderScreen()
+        #expect(sawAfter, "screen was: \(screen.debugDescription)")
+    }
+
+    /// The third member of the family, and the one a targeted guard would have
+    /// missed: a **fresh** adoption arriving while a published reader is being
+    /// stopped.
+    ///
+    /// `release` spends nearly all of its time suspended inside `reader.stop()`,
+    /// waiting for the drain thread to acknowledge its wake and close the pty
+    /// dup. If the slot is vacated before that suspension, an `adopt` landing in
+    /// the window reads "nobody is on this master", opens its own `handOverPTY`
+    /// round trip, and takes a second `dup` of a pty a live drain loop is still
+    /// reading. That is the byte theft this registry exists to prevent — each
+    /// `read` takes bytes the other will never see, and nothing reports it.
+    ///
+    /// **The interleaving is forced, not waited for**, in both directions:
+    ///
+    ///   - `ReentryBarrier` parks the release at exactly the stop step, so the
+    ///     window is open for as long as the test wants it.
+    ///   - `adoptionCallsEntered` pins the instant to assert at. An actor runs
+    ///     one job at a time, so observing that counter go to two proves the
+    ///     racing `adopt` has already run its entire synchronous prefix — up to
+    ///     and including whichever slot decision it made. Whether it opened a
+    ///     round trip is therefore decided, not pending, and reading
+    ///     `attachRoundTripsStarted` next is reading a settled fact rather than
+    ///     racing one.
+    @Test func aFreshAdoptionWaitsForAReaderThatIsStillDraining() async throws {
+        let fixture = try await HolderProcessFixture.start(
+            command: "while IFS= read -r line; do printf 'GOT:%s\\n' \"$line\"; done")
+        defer { fixture.tearDown() }
+        await fixture.client.close()
+
+        let registry = makeRegistry(owner: fixture.owner, home: fixture.home)
+        defer { releaseInBackground(registry) }
+        let terminal = holderTerminal(id: fixture.sessionID)
+
+        let first = try await registry.adopt(terminal: terminal)
+        let adopted = await registry.drainLoopsStarted
+        #expect(adopted == 1)
+
+        let barrier = ReentryBarrier()
+        await registry.setReleaseBarrier(barrier.hook())
+        // Hoisted: capturing `fixture` itself in a `Task` would send a
+        // non-Sendable class across an isolation boundary.
+        let sessionID = fixture.sessionID
+        let releasing = Task { await registry.release(terminalID: sessionID) }
+        let parked = await pollUntil("the release to reach its stop step") {
+            await barrier.hasParked
+        }
+        #expect(parked)
+        let stillDraining = await first.isDraining
+        #expect(
+            stillDraining,
+            "the released reader had already stopped, so the window this test forces never existed")
+
+        // The whole point: a fresh adoption, arriving with the outgoing reader
+        // still on the pty.
+        let racing = Task { try await registry.adopt(terminal: terminal) }
+        let entered = await pollUntil("the racing adoption to consult the slot") {
+            await registry.adoptionCallsEntered == 2
+        }
+        #expect(entered)
+
+        let roundTrips = await registry.attachRoundTripsStarted
+        #expect(
+            roundTrips == 1,
+            """
+            a fresh adoption opened a second handOverPTY round trip against a reader that was \
+            still draining: \(roundTrips) round trips for one session
+            """)
+        let overlapped = await first.isDraining
+        #expect(overlapped, "the release finished on its own, so nothing was raced")
+
+        await barrier.release()
+        let fresh = try await racing.value
+        await releasing.value
+
+        let peak = await registry.peakLiveDrainLoops
+        #expect(peak == 1, "\(peak) drain loops were live at once on one pty master")
+        let stopped = await first.isDraining
+        #expect(!stopped, "the released reader was still draining after its release returned")
+        let stored = await registry.reader(for: fixture.sessionID)
+        #expect(stored === fresh, "the registry did not keep the reader that waited its turn")
+        let loops = await registry.drainLoopsStarted
+        #expect(loops == 2, "the re-adoption did not start a drain loop of its own")
+
+        // And it is genuinely draining, not merely published: only a live loop
+        // can show output the job produced after the re-adoption.
+        try await fresh.write(Data("AFTER\n".utf8))
+        let sawAfter = await pollUntil("output the job produced after the re-adoption") {
+            await fresh.renderScreen().contains("GOT:AFTER")
+        }
+        let screen = await fresh.renderScreen()
         #expect(sawAfter, "screen was: \(screen.debugDescription)")
     }
 
@@ -495,29 +588,30 @@ private func releaseInBackground(_ registry: HolderRegistry) {
     Task.detached { await registry.releaseAll() }
 }
 
-/// Holds the **first** adoption that reaches its publish step, and waves through
-/// every one after it.
+/// Holds the **first** caller that reaches the seam it is installed on, and
+/// waves through every one after it.
 ///
-/// It exists so the release/adopt race is a property of the test rather than of
-/// the scheduler. That race is a continuation-ordering accident inside an actor:
-/// reproducing it by timing would pass by luck, stop reproducing the day the
-/// scheduler changed, and prove nothing on the day it went green. Installed on
-/// the registry with `setPublishBarrier`, this parks the adoption at exactly the
-/// suspension point in question, so the interleaving is forced.
+/// It exists so these races are properties of the tests rather than of the
+/// scheduler. Each of them is a continuation-ordering accident inside an actor:
+/// reproducing one by timing would pass by luck, stop reproducing the day the
+/// scheduler changed, and prove nothing on the day it went green. Installed with
+/// `setPublishBarrier` it parks an adoption between its attach and its publish;
+/// installed with `setReleaseBarrier` it parks a release with the outgoing
+/// reader still draining. Either way the interleaving is forced.
 ///
 /// Nothing here sleeps to *create* the interleaving. The polling is only how
 /// each side observes a state the other has definitely reached, and it is
 /// bounded through `pollUntil`, so a barrier nobody releases fails its test with
 /// a named diagnostic instead of hanging the suite.
-private actor PublishBarrier {
+private actor ReentryBarrier {
     private var parked = false
     private var released = false
 
-    /// Whether an adoption is being held. The test waits for this before doing
+    /// Whether a caller is being held. The test waits for this before doing
     /// whatever must interleave.
     var hasParked: Bool { parked }
 
-    /// Lets the parked adoption finish.
+    /// Lets the parked caller finish.
     func release() { released = true }
 
     private var isReleased: Bool { released }

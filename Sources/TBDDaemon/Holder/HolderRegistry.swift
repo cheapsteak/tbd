@@ -70,13 +70,28 @@ actor HolderRegistry {
 
     /// What the registry knows about one session.
     ///
-    /// `adopting` is the idempotence guard. It holds the *task*, not a flag, so
-    /// a second caller has something to await rather than a state to poll —
-    /// which is what makes "two concurrent adoptions produce one reader" a
-    /// property of the type instead of a timing accident.
+    /// **A slot is occupied for as long as a reader for that session exists —
+    /// from before the pty dup is asked for until after the drain thread has
+    /// actually gone.** That is the invariant, and every case here is one leg of
+    /// it. There is deliberately no state that means "empty, but a reader is
+    /// still draining": that state is what a fresh `adopt` would read as "nobody
+    /// is on this pty", and it is how two drain loops end up on one master.
+    ///
+    /// Each occupied case holds the *task* that will vacate it, not a flag, so a
+    /// caller who finds the slot busy has something to await rather than a state
+    /// to poll — which is what makes "two concurrent adoptions produce one
+    /// reader" a property of the type instead of a timing accident.
+    ///
+    ///   - `adopting` — an attach is in flight. A second `adopt` awaits it; a
+    ///     `release` supersedes it.
+    ///   - `adopted` — a reader is published and draining.
+    ///   - `releasing` — a reader is being stopped. Its descriptor may still be
+    ///     open and its thread still in `read`, so an `adopt` arriving here
+    ///     *waits* rather than opening a second hand-over against it.
     private enum Slot {
         case adopting(Task<Adoption, Swift.Error>)
         case adopted(HolderReader)
+        case releasing(Task<Void, Never>)
     }
 
     /// How long an adoption keeps retrying a holder that answers the busy
@@ -116,6 +131,38 @@ actor HolderRegistry {
     /// make the number say "loops that ever ran" when what every assertion here
     /// asks is "loops this registry is on the hook for".
     private(set) var drainLoopsStarted = 0
+    /// How many published drain loops are live right now.
+    ///
+    /// The decrement happens inside the releasing task, before anything awaiting
+    /// that task resumes, so an adoption queued behind a release can never see
+    /// its own publish overlap the reader it waited for.
+    private var liveDrainLoops = 0
+    /// The most drain loops that have ever been live at one time.
+    ///
+    /// Test-facing, and the direct instrument for "one reader per session,
+    /// ever": `drainLoopsStarted` counts adoptions over all time and so cannot
+    /// tell a registry that stopped one reader before starting the next from one
+    /// that ran both at once. A peak above one is the byte theft itself, seen
+    /// after the fact.
+    private(set) var peakLiveDrainLoops = 0
+    /// How many calls to `adopt` have got as far as consulting the slot.
+    ///
+    /// Test-facing, and the one instrument every interleaving reaches: it is
+    /// incremented before the slot decision, so watching it go up proves a
+    /// concurrent adoption has already run its whole synchronous prefix —
+    /// whichever branch that prefix took. Tests use it to pin the instant at
+    /// which the *other* counters are meaningful, without waiting on a wall
+    /// clock.
+    private(set) var adoptionCallsEntered = 0
+    /// How many hand-over round trips this registry has opened against a
+    /// holder — that is, how many times it has committed to taking a fresh
+    /// `dup` of a pty master.
+    ///
+    /// Test-facing. Counted at the moment the attach task is created, because
+    /// that is the commitment: everything after it is that task's own business,
+    /// and a second one opened while a reader is still draining is the failure
+    /// this registry exists to prevent, whether or not it is ever published.
+    private(set) var attachRoundTripsStarted = 0
 
     private let busyRetryBudget: Duration
     private let clock: any Clock<Duration>
@@ -129,6 +176,15 @@ actor HolderRegistry {
     /// changed. Nil in production, where the cost is one nil check per
     /// adoption.
     private var publishBarrier: (@Sendable () async -> Void)?
+
+    /// Awaited inside a release, immediately before the reader is stopped — the
+    /// exact window a concurrent `adopt` interleaves in, and the one in which
+    /// the released reader is still draining the pty.
+    ///
+    /// A seam for the same reason `publishBarrier` is one: the interleaving is a
+    /// continuation-ordering accident, and a test that reproduced it by timing
+    /// would pass by luck. Nil in production.
+    private var releaseBarrier: (@Sendable () async -> Void)?
 
     init(
         owner: HolderOwnerToken,
@@ -150,10 +206,19 @@ actor HolderRegistry {
         publishBarrier = barrier
     }
 
+    /// Installs the release barrier described above. Test-facing; production
+    /// never calls it.
+    func setReleaseBarrier(_ barrier: (@Sendable () async -> Void)?) {
+        releaseBarrier = barrier
+    }
+
     // MARK: - Reading
 
     /// The live reader for a session, or nil if none has been adopted.
+    ///
     /// A session still being adopted answers nil: there is no drain loop yet.
+    /// So does one being released — its reader may still be draining, but it is
+    /// on its way out and nothing new should be routed to it.
     func reader(for terminalID: UUID) -> HolderReader? {
         guard case .adopted(let reader) = slots[terminalID] else { return nil }
         return reader
@@ -171,22 +236,75 @@ actor HolderRegistry {
     ///
     /// Idempotent, and that is load-bearing rather than tidy — see the type's
     /// note on byte theft. A call for a session already adopted returns the same
-    /// reader; a call for one mid-adoption awaits that adoption's own task.
+    /// reader; a call for one mid-adoption awaits that adoption's own task; a
+    /// call for one mid-*release* waits for the outgoing reader to have actually
+    /// stopped before it opens a hand-over of its own.
+    ///
+    /// The loop is the shape the slot protocol demands. Every occupied state is
+    /// vacated by awaiting a task, and an actor's methods are not atomic across
+    /// suspension, so the slot is re-read after every await instead of being
+    /// remembered across one.
     @discardableResult
     func adopt(terminal: Terminal) async throws -> HolderReader {
         guard terminal.transport == .holder else {
             throw Error.notAHolderSession(terminalID: terminal.id)
         }
-        switch slots[terminal.id] {
-        case .adopted(let reader):
-            return reader
-        case .adopting(let task):
-            return try await task.value.reader
-        case nil:
-            break
-        }
-
         let terminalID = terminal.id
+        adoptionCallsEntered += 1
+
+        while true {
+            switch slots[terminalID] {
+            case .adopted(let reader):
+                return reader
+            case .adopting(let task):
+                return try await joinInFlightAdoption(task, for: terminalID)
+            case .releasing(let task):
+                // A reader for this pty is still draining. Waiting for its stop
+                // — rather than treating the release's suspension as an empty
+                // slot — is what keeps "one reader per session, ever" true
+                // across the whole of a release instead of only up to its first
+                // await. Clearing the slot here rather than leaving it to the
+                // releaser is what guarantees this loop makes progress.
+                await task.value
+                clearIfStillReleasing(task, for: terminalID)
+                continue
+            case nil:
+                return try await beginAdoption(of: terminalID)
+            }
+        }
+    }
+
+    /// Waits for an adoption another caller already has in flight, and hands
+    /// back its reader only if the registry is really standing behind it.
+    ///
+    /// The re-check is the point. The awaited task settles at the *attach*, one
+    /// suspension before the publish decision, so a `release` arriving in
+    /// between supersedes that adoption and stops its reader. Returning it
+    /// anyway would hand this caller a reader whose drain thread has exited and
+    /// whose pty dup is closed — a screen that never updates again, and writes
+    /// that fail.
+    private func joinInFlightAdoption(
+        _ task: Task<Adoption, Swift.Error>, for terminalID: UUID
+    ) async throws -> HolderReader {
+        let adoption = try await task.value
+        // Read and decide with no await in between, as everywhere else here.
+        switch slots[terminalID] {
+        case .adopted(let published) where published === adoption.reader:
+            return published
+        case .adopting(let current) where current == task:
+            // Not published yet, but still this adoption's slot: nothing has
+            // superseded it, and its reader is the one that will be published.
+            return adoption.reader
+        default:
+            throw Error.superseded(terminalID: terminalID)
+        }
+    }
+
+    /// The empty-slot path: opens a hand-over, publishes what it obtains.
+    ///
+    /// Reached only with the slot genuinely vacant — no reader adopted, none
+    /// being adopted, and none still draining its way out of a release.
+    private func beginAdoption(of terminalID: UUID) async throws -> HolderReader {
         let socketPath = try HolderRendezvous.socketPath(
             sessionID: terminalID, environment: environment)
         let expected = owner
@@ -200,6 +318,7 @@ actor HolderRegistry {
                 busyRetryBudget: budget,
                 clock: clock)
         }
+        attachRoundTripsStarted += 1
         slots[terminalID] = .adopting(task)
 
         let settled = await task.result
@@ -247,6 +366,8 @@ actor HolderRegistry {
         slots[terminalID] = .adopted(adoption.reader)
         statuses[terminalID] = adoption.description.status
         drainLoopsStarted += 1
+        liveDrainLoops += 1
+        peakLiveDrainLoops = max(peakLiveDrainLoops, liveDrainLoops)
         Self.logger.info(
             """
             adopted the holder for session \(terminalID.uuidString, privacy: .public): child \
@@ -426,21 +547,71 @@ actor HolderRegistry {
     /// The `stop()` is the point: a reader dropped without one leaks its drain
     /// thread and the pty descriptor it owns, because after end of file that
     /// thread parks on its wake pipe rather than exiting.
+    ///
+    /// **The slot is not vacated until the stop has happened.** It is handed to
+    /// a `releasing` task first, so that the suspension inside `stop()` — which
+    /// is where this call spends nearly all its time, with the outgoing reader
+    /// still on the pty — is a state a concurrent `adopt` can see and wait for,
+    /// rather than an absence it would read as "nobody is on this master".
     func release(terminalID: UUID) async {
-        guard let slot = slots.removeValue(forKey: terminalID) else { return }
-        switch slot {
+        switch slots[terminalID] {
+        case nil:
+            return
+        case .releasing(let task):
+            // Somebody is already stopping this reader; waiting for their stop
+            // *is* this method's whole contract, so there is nothing to add.
+            await task.value
+            clearIfStillReleasing(task, for: terminalID)
         case .adopted(let reader):
-            await reader.stop()
-        case .adopting(let task):
-            // The attach performs no cancellation checks, so this waits for it
-            // to finish rather than interrupting it — which is what we want: a
-            // reader that was started while we were releasing would otherwise
-            // be exactly the leak this method exists to prevent.
-            task.cancel()
-            if let adoption = try? await task.value {
-                await adoption.reader.stop()
-            }
+            let task = Task<Void, Never> { await self.stopPublished(reader) }
+            slots[terminalID] = .releasing(task)
+            await task.value
+            clearIfStillReleasing(task, for: terminalID)
+        case .adopting(let attach):
+            let task = Task<Void, Never> { await self.stopInFlight(attach) }
+            slots[terminalID] = .releasing(task)
+            await task.value
+            clearIfStillReleasing(task, for: terminalID)
         }
+    }
+
+    /// Stops a reader this registry published, and drops it from the live count
+    /// **before** anything awaiting the release resumes — which is what lets an
+    /// adoption queued behind a release publish without ever overlapping the
+    /// reader it waited for.
+    private func stopPublished(_ reader: HolderReader) async {
+        await releaseBarrier?()
+        await reader.stop()
+        liveDrainLoops -= 1
+    }
+
+    /// Stops whatever an in-flight adoption managed to obtain.
+    ///
+    /// Nothing is decremented: an adoption that never published was never
+    /// counted, and the adoption itself will find its slot taken and discard the
+    /// reader too. Both stops are harmless — `HolderReader.stop()` is
+    /// idempotent — and neither may be skipped, because which of them runs first
+    /// is exactly the ordering nobody here controls.
+    private func stopInFlight(_ attach: Task<Adoption, Swift.Error>) async {
+        // The attach performs no cancellation checks, so this waits for it to
+        // finish rather than interrupting it — which is what we want: a reader
+        // that was started while we were releasing would otherwise be exactly
+        // the leak this method exists to prevent.
+        attach.cancel()
+        if let adoption = try? await attach.value {
+            await adoption.reader.stop()
+        }
+    }
+
+    /// Vacates a slot, but only while it still holds the release that finished.
+    ///
+    /// Both the releaser and every adoption that waited on it call this, and
+    /// whichever arrives first wins; the losers find a slot that is no longer
+    /// theirs and leave it alone. Synchronous, like `slotStillHolds`, and for
+    /// the same reason.
+    private func clearIfStillReleasing(_ task: Task<Void, Never>, for terminalID: UUID) {
+        guard case .releasing(let current) = slots[terminalID], current == task else { return }
+        slots[terminalID] = nil
     }
 
     /// Releases every reader. The holders and their jobs are untouched — that
