@@ -162,6 +162,41 @@ struct HolderSpawner {
         self.clock = clock
     }
 
+    // MARK: - Finding the binary
+
+    /// The `TBDHolder` binary, as a **sibling of the running daemon**.
+    ///
+    /// Sibling, and nothing else: `TBDHolder` is a product of the same package
+    /// as `TBDDaemon`, so every layout that has one has the other beside it —
+    /// `.build/debug` when `scripts/restart.sh` launches the daemon, and any
+    /// install layout that stages the daemon at all. `PATH` is deliberately not
+    /// consulted: a holder is a supervisor for this daemon's own sessions, and
+    /// resolving it through the user's `PATH` would let an unrelated binary of
+    /// the same name own them.
+    ///
+    /// `nil` when no such file exists, which the registry reports by name
+    /// rather than treating as a spawn failure — the difference between "the
+    /// build is incomplete" and "the holder crashed" is worth keeping.
+    static func locateSiblingExecutable(
+        of daemonExecutable: URL? = Bundle.main.executableURL
+            ?? URL(fileURLWithPath: CommandLine.arguments.first ?? "")
+    ) -> URL? {
+        guard let daemonExecutable else { return nil }
+        let candidate = daemonExecutable
+            .resolvingSymlinksInPath()
+            .deletingLastPathComponent()
+            .appendingPathComponent("TBDHolder")
+        guard FileManager.default.isExecutableFile(atPath: candidate.path) else {
+            Self.logger.error(
+                """
+                no TBDHolder binary beside the running daemon at \
+                \(candidate.path, privacy: .public); the holder transport cannot spawn
+                """)
+            return nil
+        }
+        return candidate
+    }
+
     // MARK: - Spawn
 
     func spawn(

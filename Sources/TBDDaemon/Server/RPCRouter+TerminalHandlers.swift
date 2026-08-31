@@ -1563,6 +1563,15 @@ extension RPCRouter {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
 
+        // A holder-backed session has no tmux coordinate to capture — its
+        // `tmuxPaneID` is empty and the repo's server may never have been
+        // started — so the branch is taken BEFORE the worktree lookup that only
+        // exists to name that server. The daemon's own emulator, fed by the
+        // reader that drains this session's pty, is the screen.
+        if terminal.transport == .holder {
+            return try await holderTerminalOutput(terminal: terminal, params: params)
+        }
+
         guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
@@ -1577,6 +1586,36 @@ extension RPCRouter {
         let trimmed = outputLines.suffix(lines).joined(separator: "\n")
 
         return try RPCResponse(result: TerminalOutputResult(output: trimmed))
+    }
+
+    /// The holder half of `terminal.output`: render the daemon's own emulator
+    /// for a session whose pty master it is draining.
+    ///
+    /// A missing reader is reported rather than papered over. It means the
+    /// registry never adopted this session — the holder is gone, or startup
+    /// adoption found it unreachable — and an empty screen would read as "the
+    /// session is quiet", which is a different and much more comfortable claim
+    /// than the true one.
+    private func holderTerminalOutput(
+        terminal: Terminal,
+        params: TerminalOutputParams
+    ) async throws -> RPCResponse {
+        guard let holderRegistry else {
+            return RPCResponse(
+                error: "Holder transport is not wired in this daemon: \(terminal.id)")
+        }
+        guard let reader = await holderRegistry.reader(for: terminal.id) else {
+            return RPCResponse(
+                error: "No live holder reader for terminal \(terminal.id); "
+                    + "its session is gone or was never adopted")
+        }
+        let lines = params.lines ?? 50
+        // Rendered to the requested depth directly. The tmux path asks for a
+        // whole pane and trims afterwards because `capture-pane` has no such
+        // knob; the emulator does, and going through it means the scrollback
+        // above the viewport is available rather than discarded.
+        let output = await reader.renderScreenWithScrollback(maxLines: lines)
+        return try RPCResponse(result: TerminalOutputResult(output: output))
     }
 
     func handleTerminalConversation(_ paramsData: Data) async throws -> RPCResponse {

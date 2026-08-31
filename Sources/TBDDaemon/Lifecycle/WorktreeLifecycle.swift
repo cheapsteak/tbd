@@ -138,6 +138,19 @@ public struct WorktreeLifecycle: Sendable {
     /// coordinator — the same reason `conflictSweepCache` is one.
     var pendingPromptCoordinator: PendingPromptCoordinator?
 
+    /// The daemon's single owner of every live `HolderReader`, and the only
+    /// thing that can put a session on the holder transport. `nil` when the
+    /// daemon did not wire one (mock mode, tests that do not exercise the
+    /// transport), and the spawn gate then falls back to tmux even with
+    /// `pty_holder_enabled` on — the honest answer when there is nothing to
+    /// hold a pty master.
+    ///
+    /// An actor reference, so every value copy of this struct shares one
+    /// registry — the same reason `conflictSweepCache` is one, and here it is
+    /// load-bearing rather than tidy: two registries would each take their own
+    /// dup of a session's pty master and steal bytes from each other.
+    var holderRegistry: HolderRegistry?
+
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
