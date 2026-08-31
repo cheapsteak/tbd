@@ -233,10 +233,16 @@ distributed protocol.
   sidecar. The app feeds the preamble into SwiftTerm first, then goes live on
   the fd, then jiggles (see below). Reattach therefore paints the last-known
   screen instantly, as tmux does today. Ownership transfers on the app's
-  acknowledgement, not on the send: if the vend or the ack fails, the daemon
-  resumes reading and the session is simply still detached — the invariant is
-  "at most one reader", so the failure direction is always back to the
-  fallback reader.
+  acknowledgement, not on the send. A failed vend or a lost ack does **not**
+  license an unconditional resume, because a lost ack and a lost app are
+  indistinguishable on the wire and the app may already be live on its dup —
+  resuming there would be the double read this whole design exists to prevent.
+  So the daemon applies the same liveness gate as App death below: app
+  confirmed gone, resume reading and the session is detached again; app alive
+  or not yet determined, stay off the fd and await reconnect and re-claim. The
+  invariant is "at most one reader", so the failure direction is always toward
+  reading nothing until liveness says otherwise — accepting a recoverable
+  stall over an unrecoverable corruption.
 - **Detach.** The mirror image, carrying the same ordering discipline in the
   opposite direction: the app stops reading and closes its dup, and **only
   then** tells the daemon. The detach notice carries a **snapshot preamble of
@@ -535,8 +541,14 @@ flag with a soak and a stated graduation plan.
   continuously — the hardest code in the design gets adversarial testing for
   free. Graduation gates on field evidence: no double-reader incidents, the
   reconcilers holding (no growth in unclaimed holders or socket litter), and
-  latency flatness confirmed under load by the existing probes in
-  `scripts/diag/`.
+  latency flatness re-confirmed under load by re-running the keystroke-echo
+  measurement whose methodology the companion research record documents.
+  That harness is a **deliverable of this work, not an existing tool to lean
+  on**: `scripts/diag/` today holds only a commit-latency report and an
+  RPC-volume report, neither of which measures keystroke echo. A design
+  justified by a latency curve has to ship the committed probe that can
+  re-draw that curve on demand, or graduation is a judgement call rather than
+  a measurement.
 - **Graduation.** Flip `Config.ptyHolderDefault` to `true` — a one-line
   change that reaches everyone who never chose while preserving every
   explicit opt-out. Removing the tmux path entirely is separate, later work,
