@@ -124,9 +124,14 @@ bytes the other reader never sees).
   other has already unlinked and a session nobody can reach. Beside each
   socket sits a zero-byte lock file on the same UUID. A spawner takes an
   exclusive `flock` on it before unlinking or binding anything; the descriptor
-  carrying the lock is passed across exec to the holder (`FD_CLOEXEC`
-  cleared) and the daemon closes its own copy, so the holder alone holds it
-  for its whole life. A spawner that cannot take the lock has learned that a
+  carrying the lock is handed to the holder **through a `posix_spawn` `dup2`
+  file action**, and the daemon closes its own copy, so the holder alone holds
+  it for its whole life. The file action matters more than it looks, and the
+  obvious alternative is wrong: clearing `FD_CLOEXEC` on the *daemon's* own
+  descriptor exposes that lock to **every other concurrent spawn in the
+  daemon**, so an unrelated child inherits it and keeps that session's UUID
+  unreclaimable until that child happens to die. `dup2` clears the flag on the
+  child's copy alone. This was measured as a real flake, not reasoned about. A spawner that cannot take the lock has learned that a
   live holder owns that UUID **without connecting to it**, and backs off
   instead of clearing the path — which is what makes the stale-daemon hazard
   named under Reconciliation safe rather than merely detectable. The kernel
@@ -277,6 +282,24 @@ distributed protocol.
   and keeps painting through the entire daemon outage. Detached sessions have
   no reader: their writers block on the kernel tty buffer, which is
   backpressure, not loss, and drains when the daemon returns.
+
+  **A detached job also cannot finish exiting while its output sits unread**,
+  which is a stronger consequence than backpressure and was measured rather
+  than predicted. The job is its pty's session leader, and the kernel's process
+  teardown waits on the terminal's output queue before revoking it — so a job
+  that exits with anything unread stops in a half-exited state until somebody
+  drains. A few bytes of ordinary echo are enough. `waitpid` then correctly
+  reports nothing, so the holder observes no status and has none to send.
+
+  The consequence for the design is that **the daemon's drain is a liveness
+  requirement, not a convenience**. It is what lets detached jobs die at all,
+  not merely what keeps their screens current. Two things follow. Through a
+  daemon outage, detached sessions that finish accumulate half-exited rather
+  than exiting and waiting to be reported — they complete when the daemon
+  returns and drains, so this costs latency in the exit path rather than
+  correctness. And the reader may never treat draining as best-effort or
+  pause it while a session still has a live job: a reader that stops reading
+  is not merely falling behind, it is holding jobs open.
 - **Daemon startup (re-adoption).** The new daemon connects to every holder
   and adopts a master dup, but **reads nothing yet**. Every app-liveness
   question below is the identity-verified check described under App death,
