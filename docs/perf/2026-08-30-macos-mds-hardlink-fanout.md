@@ -10,6 +10,10 @@ of a CPU core, and shows up as the single largest producer of filesystem
 operations on the machine, **even though Spotlight indexing is switched off** and
 the Spotlight store has not been written in a year.
 
+If `fseventsd` is *also* pinned near a full core on the same machine, that is a
+**separate** problem with a separate fix — see "The other half" below. The two
+are easily conflated because they appear together and both look like Spotlight.
+
 **One-line cause:** a package manager configured to install by **hardlink** makes
 every one of its files carry a link count equal to the number of checkouts, and
 each inode-to-path resolution then fans out across every sibling link. With 69
@@ -327,17 +331,70 @@ wrong number:
 is the useful part — the two daemons scale on different quantities:
 
 - **`mds`** costs scale with **link count**, which this change addresses.
-- **`fseventsd`** costs scale with the **number of watched paths**, which this
-  change does not touch at all. Converting a file in place leaves its path,
-  its directory entry, and the total file count exactly as they were; only the
-  inode behind it differs.
+- **`fseventsd`** costs scale with **internal state accumulated over the
+  process's lifetime**, which this change does not touch at all. Converting a
+  file in place leaves its path, its directory entry, and the total file count
+  exactly as they were; only the inode behind it differs. See the `fseventsd`
+  section below for what does move it.
 
-The only thing observed to move `fseventsd` was removing checkouts outright: its
-resident set fell 5.5 GB to 4.8 GB when 14 worktrees were archived. Its resident
-set also fell to 2.20 GB across the conversion, which is **not explained** — the
-prediction was no effect, and a large one appeared. It may be that the mass
-replacement forced it to rebuild internal state. Recorded as an observation, not
-a mechanism.
+Archiving 14 worktrees moved its resident set a little, 5.5 GB to 4.8 GB, and it
+drifted down further to ~2.2 GB across the conversion — the mass replacement
+plausibly churned some internal state. Neither dented its CPU. What actually
+fixes it is restarting the process, covered next.
+
+## The other half: `fseventsd` accumulates, and can be recycled
+
+The hardlink fix above does nothing for `fseventsd`, which on the same machine
+sat at 87–116% of a core continuously with a 5.5 GB resident set. That is a
+separate problem with a separate cause, and it has a blunt but effective remedy.
+
+**Its cost is accumulated in-memory state, not persistent state.** Sampling it
+(unlike `mds`, it is not SIP-blocked from `sample`) shows on-CPU time
+concentrated in a single function doing `_platform_strncmp` under a mutex, while
+every other thread sits parked in `__psynch_cvwait`, `read`, or
+`mach_msg2_trap`. Critically, this happens with **almost no subscribers** — a
+capture during the worst of it found four client threads belonging to `node` and
+`Finder`. So the cost is not "many watchers × many events"; a linear scan over
+internal state fits the evidence far better, and it explains the otherwise
+baffling observation that its CPU stayed pinned across a 23× swing in event
+rate. A saturating linear scan looks the same at any input rate.
+
+**Restarting it collapses the cost.** After 24 days of uptime:
+
+- **before** — ~101% of a core, 2.23 GB resident
+- **after** — 0.1% of a core, ~6 MB resident, still flat eight minutes later
+
+That is roughly a 1000× reduction, and it moved the whole machine: free pages
+went from 3,816 (~15 MB) to 23,093, compressor pages halved from 1,489,155 to
+688,739, and load average fell from 50.7 to 13.0. Much of what presented as
+`kernel_task` burning CPU was memory-compressor thrashing driven by this.
+
+**How to restart it:**
+
+```sh
+sudo kill -9 "$(pgrep -x fseventsd)"     # launchd respawns it immediately
+```
+
+Two traps here, both of which produced wrong conclusions on the way to that
+one-liner:
+
+- **`launchctl kickstart -k system/com.apple.fseventsd` does not work** — it
+  fails with *"Operation not permitted while System Integrity Protection is
+  engaged"*. A plain signal to the pid does work, which is the opposite of what
+  SIP normally implies.
+- **It can take well over 30 seconds to die and respawn.** An initial attempt
+  waited 30s, saw an unchanged pid, and reported "the kill did not take, SIP
+  probably blocks it" — a false negative. The kill had in fact succeeded. When
+  testing this, wait minutes and re-check the pid before concluding anything.
+
+**What is not yet known** is how fast it re-accumulates. It reached 5.5 GB over
+24 days of uptime on a busy machine, so the growth is slow, but whether a
+restart is a one-off or something to schedule needs longer observation than was
+done here. Treat this as a working remedy with an unmeasured duty cycle rather
+than a solved problem. Note also that this is the *only* lever found for
+`fseventsd`: excluding paths from Spotlight does not affect it, since Time
+Machine, iCloud, and third-party sync clients all consume the same event stream
+regardless of Spotlight's configuration.
 
 ## Limits of this analysis
 
@@ -347,12 +404,11 @@ investigation turned out to be measurement artifacts:
 - **The client driving the ~118 lookups/sec was never identified.** SIP blocks
   `fs_usage -p` and `sample` against `mds`, so its callers are not observable.
   The amplification is established; the trigger is not.
-- **`fseventsd` is a separate, unexplained problem.** It sat pinned at ~99–101%
-  of a core throughout, independent of a 23× swing in event rate, with a hot loop
-  in `_platform_strncmp` under a mutex. Archiving 14 checkouts dropped its RSS
-  from 5.5 GB to 4.8 GB while leaving CPU unchanged — consistent with saturation
-  at a single-thread ceiling rather than load-proportional work. Nothing in this
-  document fixes it.
+- **`fseventsd`'s internal state is still not directly observable.** The
+  restart remedy above is established empirically — the cost vanishes when the
+  process is recycled — but the specific structure being scanned is inferred
+  from a `strncmp`-dominated profile and a near-total absence of subscribers,
+  not read out of the daemon. The re-accumulation rate is unmeasured.
 - **No public prior art was found** for the hardlink fan-out mechanism. The
   generic "large dependency trees make Spotlight expensive" pattern is well
   documented for `.venv` and `node_modules`, but the specific claim that *link
