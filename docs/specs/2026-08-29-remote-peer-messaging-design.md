@@ -185,8 +185,11 @@ The field is a declaration in the inventory, not a gate. What causes TBD to
 shadow one of a provider's sessions is the `peer` line that announces it on the
 `messages` stream: the `session` id on that line joining to a worktree row TBD
 has, and the `protocol` on that line matching the one the local sessions speak.
-Frames whose `msgV` differs from the negotiated protocol are dropped and
-logged.
+The two line kinds that declare a protocol — `hello` and `peer` — are dropped
+and logged when their number differs from the one this build speaks. A `message`
+declares none: it rides a link whose `hello` matched, addressed to a handle a
+matching `peer` line announced. Claude Code's own `msgV` is a frame internal
+that stays inside `content` and is never compared against this protocol.
 
 ## The local roster
 
@@ -597,8 +600,8 @@ in `tbd peer list` and in the provider's diagnostics rather than showing nothing
   Code's loader changes, which is the signal we want rather than shadows quietly
   vanishing.
 - **Frames.** Oversized frames dropped and counted; a `message` naming an
-  unannounced handle dropped; a frame whose `msgV` differs from the negotiated
-  protocol dropped; attribution rewritten on every inbound frame; a handle
+  unannounced handle dropped; a `hello` and a `peer` line whose `protocol`
+  differs from the one this build speaks dropped; attribution rewritten on every inbound frame; a handle
   outside the table resolving to nothing.
 - **Scoping.** A local session in another repo is not mirrored; a non-TBD
   session is never mirrored.
