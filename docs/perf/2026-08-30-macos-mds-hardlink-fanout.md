@@ -296,7 +296,9 @@ machine-wide `fs_usage` capture:**
 - **A reduction of roughly 4,560x.**
 
 **`mds` CPU, sampled six times over ten minutes afterwards** — 0.56%, 0.26%,
-0.09%, 0.07% of a core, against a 40.8–45.1% baseline. Its resident set also
+0.09%, 0.07%, 0.38%, 0.06% of a core, against a 40.8–45.1% baseline. Six
+samples rather than one because of the burstiness noted below; the spread
+(0.06–0.56%) matters more than any single figure. Its resident set also
 fell from 185 MB to 12 MB, and the process was never restarted (same pid
 throughout), so this is the same daemon doing far less work rather than a fresh
 one that has not warmed up.
