@@ -171,10 +171,22 @@ child: the kernel's fd refcount keeps the pty alive — the same mechanism
 Superset exploits on purpose for daemon upgrades. The policy is that it kills
 the session anyway, promptly and deliberately. The daemon watches its
 connection to each holder; when a holder dies while its child lives, the
-daemon kills the child by its recorded pid — verifying process identity
-(executable and start time) first, so pid reuse cannot misdirect the kill —
-closes its dups, and marks the session exited with a distinct reason
-(holder lost) rather than a generic exit.
+daemon kills the child's **process group** — the child is the session leader
+of the pty's own session, courtesy of `forkpty`, so the group is the natural
+closure of the job rather than one pid — verifying process identity
+(executable and start time) before signalling, then closes its dups and marks
+the session exited with a distinct reason (holder lost) rather than a generic
+exit.
+
+Two honest limits on that kill, neither new to this design. Identity
+verification narrows the pid-reuse window but does not close it: nothing makes
+"check identity" and "signal" atomic on Darwin, and the residual race is the
+same one every pid-based reclaimer in TBD already runs. And a descendant that
+deliberately leaves the group — `setsid`, a double fork, `nohup`, `disown` —
+is outside the closure and survives, exactly as it survives a tmux pane kill
+today. Reclaiming deliberate escapees is a standing fleet-wide problem that
+belongs to `AgentReaper`, not to the transport; this design neither worsens
+it nor claims to solve it.
 
 The alternative — carrying the session on the daemon's own dup, marked
 degraded — was rejected: it preserves in-flight work only until the next
@@ -202,16 +214,29 @@ have stopped") is an in-process state transition plus one acked fd-vend, not a
 distributed protocol.
 
 - **Attach.** The app requests a session over the existing RPC. The daemon
-  stops reading, renders its headless emulator's screen and retained
-  scrollback into an escape-sequence **snapshot preamble**, and sends the
-  preamble plus the master dup over the FD sidecar. The app feeds the
-  preamble into SwiftTerm first, then goes live on the fd, then jiggles (see
-  below). Reattach therefore paints the last-known screen instantly, as tmux
-  does today.
+  **quiesces** before it snapshots anything: it lets any in-flight `read()`
+  finish and feeds every byte it already holds into its emulator, so no byte
+  is stranded in a buffer the app will never see. Only then does it render its
+  headless emulator's screen and retained scrollback into an escape-sequence
+  **snapshot preamble** and send the preamble plus the master dup over the FD
+  sidecar. The app feeds the preamble into SwiftTerm first, then goes live on
+  the fd, then jiggles (see below). Reattach therefore paints the last-known
+  screen instantly, as tmux does today. Ownership transfers on the app's
+  acknowledgement, not on the send: if the vend or the ack fails, the daemon
+  resumes reading and the session is simply still detached — the invariant is
+  "at most one reader", so the failure direction is always back to the
+  fallback reader.
 - **Detach.** The mirror image, carrying the same ordering discipline in the
   opposite direction: the app stops reading and closes its dup, and **only
-  then** tells the daemon; the daemon resumes reading on receipt and jiggles
-  so a full-screen program repaints into the daemon's emulator. The
+  then** tells the daemon. The detach notice carries a **snapshot preamble of
+  the app's own**, produced by the same serializer attach uses in the other
+  direction; the daemon resets its emulator, replays that preamble, and only
+  then resumes reading. This is what makes the handback symmetric, and it is
+  load-bearing rather than tidy: the jiggle heals only programs that repaint
+  on SIGWINCH, so without the handback a detach from a plain shell would leave
+  the daemon's store frozen at the last attach until new output happened to
+  arrive. One snapshot per detach is not the streaming handback rejected below
+  — it is O(1) per reader change, not per byte. The
   close-before-notify order is what preserves the single-reader invariant — a
   notify-first detach would put the daemon on the fd while the app's last
   `read()` is still outstanding, which is the double-reader corruption in
@@ -316,16 +341,26 @@ every attach, so it cannot rot unnoticed the way failure-edge-only code does.
 ### Two stores, reconciled on demand
 
 While a viewer is attached the daemon reads nothing, so its emulator is
-frozen at the moment of attach. This design accepts that — the **two-store
-model** — rather than having the app stream a copy of everything it reads back
-to the daemon:
+frozen for the duration of that attach — and re-seeded from the app's
+handback snapshot on an orderly detach. This design accepts that — the
+**two-store model** — rather than having the app stream a copy of everything
+it reads back to the daemon:
 
 - The app's SwiftTerm is authoritative while attached; the daemon's emulator
   is authoritative while detached.
 - When the daemon needs an attached session's screen (supervision, `tbd
   terminal read`), it **pulls a snapshot from the app** over the existing
-  RPC; the app serializes its live terminal state on request. Machine reads
-  are therefore always current, from whichever store is live.
+  RPC; the app serializes its live terminal state on request. A machine read
+  therefore reaches whichever store is live, instead of a store that stopped
+  being updated at attach. That is a routing guarantee, not a freshness
+  guarantee: when the pull cannot be answered, the consumer's declared policy
+  below decides, and one of the two policies deliberately returns a stale
+  answer.
+- The handback is the orderly path only. An app that dies attached hands back
+  nothing, so the daemon reverts to an emulator frozen at that attach and
+  heals it with the jiggle alone — which repairs programs that repaint on
+  SIGWINCH and nothing else. Same scoping as the daemon-restart case above,
+  and for the same reason.
 - Pulls are bounded (timeout on an injected clock), and every consumer
   declares a failure policy, because the app can legitimately go quiet (App
   Nap has coalesced this app's work for ~90 s in the field, and app-wedged
@@ -411,11 +446,22 @@ the process table — the same argument as every other resource here.
   and servers to the **holder inventory**: enumerate holder sockets under the
   sessions directory, connect, and handshake (yielding holder pid, child pid,
   child status, and launch parameters). A session row with no live holder is
-  marked exited through the existing handling. A **rejected** connection is
+  marked exited through the existing handling — and specifically as **status
+  unknown**, never a fabricated `0`. This is the durable landing place for the
+  case the holder's Lifetime contract describes: a daemon that was down through
+  the holder's whole report timeout comes back to a vanished holder and an
+  unreported status, and the sweep must record the absence rather than invent
+  a value. A **rejected** connection is
   the opposite of a dead holder — the holder is alive and owned by another
   daemon (a stale daemon from a different checkout is a known hazard on a
-  development machine) — and must never feed the exited path. A live holder with no session
-  row is a half-finished deletion: the daemon kills the child and the holder.
+  development machine) — and must never feed the exited path. **A rejected
+  connection is terminal for this sweep in both directions**: not exited, and
+  not killed either. Killing requires positive proof of ownership — a
+  completed handshake — and a rejection is the absence of that proof, so a
+  holder that will not talk to us is left alone and logged, never reclaimed on
+  the theory that it has no row. Only a holder that handshakes and then turns
+  out to have no session row is a half-finished deletion, and that is the case
+  where the daemon kills the child and the holder.
   **Kill, not adopt** — iTerm2 adopts unclaimed survivors into new tabs
   because its live processes are the only copy of anything; TBD's transcripts
   persist independently, so adoption would buy a mystery-session UI and
@@ -445,11 +491,15 @@ This wholesale-replaces a load-bearing path, so it ships behind a default-off
 flag with a soak and a stated graduation plan.
 
 - **Flag.** `pty_holder_enabled`, a `config` column added by a `.sql`
-  migration with **no SQL `DEFAULT` clause**, so unset stays a third state;
-  the shipped default lives solely in `?? Config.ptyHolderDefault` (`false`)
-  in `ConfigRecord.toModel()`. Tests cover all three states: a pre-migration
-  row reads NULL rather than `0`, NULL follows the constant, and an explicit
-  `0` survives a change to the constant.
+  migration with **no SQL `DEFAULT` clause**, so unset stays a third state.
+  The shipped default is `false`, resolved the way every other nullable gate
+  in `ConfigStore.toModel(...)` resolves one: a `ptyHolderDefault: Bool =
+  Config.ptyHolderDefault` parameter on `toModel`, and `pty_holder_enabled ??
+  ptyHolderDefault` in the body. The injected parameter is not decoration —
+  it is what lets a test change the effective default and prove NULL follows
+  it while an explicit `0` does not. Tests cover all three states: a
+  pre-migration row reads NULL rather than `0`, NULL follows the injected
+  default, and an explicit `0` survives a change to it.
 - **Granularity: spawn time only.** A session records its transport (`tmux`
   or `holder`) in its database row at creation and keeps it for life; the app
   attaches by whichever transport the row names. Flipping the flag never
