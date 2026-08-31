@@ -98,6 +98,8 @@ actor HolderReader {
     ///   `ptyFD` rather than the POSIX word because SwiftLint's
     ///   `inclusive_language` rule refuses that word in a *declaration*; prose
     ///   throughout still says "pty master", which is what `forkpty` calls it.
+    /// - Parameter readFault: a test seam. Production passes nothing; see
+    ///   `HolderReadFault` for why the branch it reaches has no other way in.
     init(
         sessionID: UUID,
         ptyFD: Int32,
@@ -105,12 +107,13 @@ actor HolderReader {
         rows: Int,
         scrollbackLines: Int = HolderReader.scrollbackLines,
         stopTimeout: Duration = HolderReader.defaultStopTimeout,
+        readFault: HolderReadFault? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.sessionID = sessionID
         self.stopTimeout = stopTimeout
         self.clock = clock
-        let descriptor = PTYDescriptor(fd: ptyFD)
+        let descriptor = PTYDescriptor(fd: ptyFD, readFault: readFault)
         self.descriptor = descriptor
         // The emulator's replies go straight back down the same descriptor.
         // A device-status or cursor-position report that never reaches the
@@ -306,6 +309,30 @@ private final class DrainLoop: @unchecked Sendable {
     /// into spinning.
     private static let pollSliceMilliseconds: Int32 = 250
 
+    /// The first pause after a read failed with an unclassified errno, doubling
+    /// per consecutive failure up to the ceiling.
+    private static let readBackoffBaseMilliseconds: Int32 = 10
+    /// The slowest the loop will retry a failing descriptor. Four attempts a
+    /// second costs nothing and keeps the promise that the queue will be
+    /// emptied the moment the descriptor can be read again.
+    private static let readBackoffCeilingMilliseconds: Int32 = 250
+    /// The streak length at which a failure stops being plausibly transient and
+    /// earns a second, louder log line. It changes what is *said*, never what is
+    /// done: the loop keeps retrying past it.
+    private static let implausibleReadFailureStreak = 8
+
+    /// What one pass of `drainEverythingReadable` decided about the descriptor.
+    private enum DrainOutcome {
+        /// The descriptor was emptied and may yield again.
+        case readable
+        /// The descriptor will never yield anything again — end of file, or an
+        /// errno that no amount of waiting can change.
+        case exhausted
+        /// A read failed with an errno that is *not* classified as permanent.
+        /// The descriptor stays in the loop's care and is retried after a pause.
+        case retryable(errno: Int32)
+    }
+
     private let sessionID: UUID
     private let descriptor: PTYDescriptor
     private let emulator: HolderEmulator
@@ -343,14 +370,23 @@ private final class DrainLoop: @unchecked Sendable {
         var buffer = [UInt8](repeating: 0, count: Self.readBufferSize)
         var ptyCanYieldBytes = ptyFD >= 0
         var consecutivePollFailures = 0
+        var consecutiveReadFailures = 0
+        // While positive, the loop is pausing before it retries a descriptor
+        // whose last read failed. The pause is spent in `poll` on the wake pipe
+        // alone rather than in a sleep, so `stop()` is answered immediately and
+        // the pty is simply not looked at for that long.
+        var readBackoffMilliseconds: Int32 = 0
 
         while true {
+            let backingOff = readBackoffMilliseconds > 0
+            let watchingPTY = ptyCanYieldBytes && !backingOff
             var watched = [pollfd(fd: wakeReadFD, events: Int16(POLLIN), revents: 0)]
-            if ptyCanYieldBytes {
+            if watchingPTY {
                 watched.append(pollfd(fd: ptyFD, events: Int16(POLLIN), revents: 0))
             }
 
-            let ready = poll(&watched, nfds_t(watched.count), Self.pollSliceMilliseconds)
+            let slice = backingOff ? readBackoffMilliseconds : Self.pollSliceMilliseconds
+            let ready = poll(&watched, nfds_t(watched.count), slice)
             if ready < 0 {
                 if errno == EINTR { continue }
                 // **Never a reason to stop draining.** A poll that fails leaves
@@ -368,7 +404,11 @@ private final class DrainLoop: @unchecked Sendable {
                         """)
                 }
                 if ptyCanYieldBytes {
-                    ptyCanYieldBytes = drainEverythingReadable(into: &buffer)
+                    apply(
+                        drainEverythingReadable(into: &buffer),
+                        canYield: &ptyCanYieldBytes,
+                        failures: &consecutiveReadFailures,
+                        backoff: &readBackoffMilliseconds)
                 }
                 usleep(20_000)
                 continue
@@ -378,27 +418,116 @@ private final class DrainLoop: @unchecked Sendable {
             // Checked before the pty: a stop must win a tie, or a session
             // flooding its terminal could keep the loop fed forever.
             if watched[0].revents != 0 { return }
-            guard ready > 0, ptyCanYieldBytes, watched.count > 1, watched[1].revents != 0 else {
+
+            if backingOff {
+                // The pause is over — the descriptor was deliberately not in
+                // the poll set, so nothing here says whether it is readable.
+                // Ask it directly; that is what the pause was for.
+                readBackoffMilliseconds = 0
+                if ptyCanYieldBytes {
+                    apply(
+                        drainEverythingReadable(into: &buffer),
+                        canYield: &ptyCanYieldBytes,
+                        failures: &consecutiveReadFailures,
+                        backoff: &readBackoffMilliseconds)
+                }
                 continue
             }
-            ptyCanYieldBytes = drainEverythingReadable(into: &buffer)
+
+            guard ready > 0, watchingPTY, watched.count > 1, watched[1].revents != 0 else {
+                continue
+            }
+            apply(
+                drainEverythingReadable(into: &buffer),
+                canYield: &ptyCanYieldBytes,
+                failures: &consecutiveReadFailures,
+                backoff: &readBackoffMilliseconds)
         }
     }
 
+    /// Folds one drain pass into the loop's state.
+    ///
+    /// The `.retryable` arm is the whole point of the enum. Draining is a
+    /// liveness requirement — a job cannot finish exiting while its output sits
+    /// unread — so a failure the loop cannot *prove* is permanent must never
+    /// end the loop's interest in the descriptor. It backs off instead, and
+    /// keeps backing off at a floor of four attempts a second for as long as
+    /// the session lives.
+    private func apply(
+        _ outcome: DrainOutcome,
+        canYield: inout Bool,
+        failures: inout Int,
+        backoff: inout Int32
+    ) {
+        switch outcome {
+        case .readable:
+            failures = 0
+            backoff = 0
+        case .exhausted:
+            canYield = false
+            failures = 0
+            backoff = 0
+        case .retryable(let code):
+            failures += 1
+            backoff = Self.backoffMilliseconds(forAttempt: failures)
+            if failures == 1 {
+                Self.logger.error(
+                    """
+                    read failed on the pty for session \
+                    \(self.sessionID.uuidString, privacy: .public) \
+                    (errno \(code, privacy: .public)); retrying — this errno is not one the \
+                    drain loop treats as permanent
+                    """)
+            } else if failures == Self.implausibleReadFailureStreak {
+                // Copied out: an os_log interpolation is an escaping
+                // autoclosure and cannot capture an `inout` parameter.
+                let streak = failures
+                Self.logger.error(
+                    """
+                    read on the pty for session \(self.sessionID.uuidString, privacy: .public) \
+                    has failed \(streak, privacy: .public) times running \
+                    (errno \(code, privacy: .public)); still retrying at the floor cadence, so \
+                    the job stays drainable if the descriptor recovers
+                    """)
+            }
+        }
+    }
+
+    /// Doubling backoff, capped. Attempt 1 pauses 10 ms; by attempt 6 the pause
+    /// has reached the 250 ms floor cadence and stays there.
+    private static func backoffMilliseconds(forAttempt attempt: Int) -> Int32 {
+        let doublings = Int32(min(max(attempt - 1, 0), 16))
+        let scaled = readBackoffBaseMilliseconds << doublings
+        return min(scaled, readBackoffCeilingMilliseconds)
+    }
+
+    /// The errnos a read on a pty master can report that no amount of waiting
+    /// will change.
+    ///
+    /// Deliberately a short, explicit list rather than a catch-all. `EBADF`
+    /// means the number is not an open descriptor and `ENXIO` means the device
+    /// behind it is gone; neither can become readable again. Everything else —
+    /// `ENOMEM` under memory pressure being the obvious case — is retried,
+    /// because assuming an unclassified errno is permanent is exactly how a
+    /// drain loop abandons a live job and wedges it in `ttywait`.
+    private static func isPermanentReadFailure(_ code: Int32) -> Bool {
+        code == EBADF || code == ENXIO
+    }
+
     /// Reads until the descriptor would block, feeding everything to the
-    /// emulator. Returns whether the descriptor can still yield bytes.
+    /// emulator, and says what the caller should do with the descriptor next.
     ///
     /// The inner loop matters: one `poll` wake means *at least* one read is
     /// ready, and a loop that took one bufferful per wake would fall behind a
     /// job writing faster than the scheduler round-trips.
-    private func drainEverythingReadable(into buffer: inout [UInt8]) -> Bool {
+    private func drainEverythingReadable(into buffer: inout [UInt8]) -> DrainOutcome {
         while true {
             switch descriptor.read(into: &buffer) {
             case .bytes(let count):
                 // Never logged, at any level: these are session contents.
                 emulator.feed(buffer[0..<count])
             case .wouldBlock, .interrupted:
-                return true
+                return .readable
             case .childGone:
                 // `0` or `EIO` on a pty master means the last slave closed —
                 // the ordinary end of a session, not an error. The loop stays
@@ -408,26 +537,53 @@ private final class DrainLoop: @unchecked Sendable {
                     pty for session \(self.sessionID.uuidString, privacy: .public) reached end of \
                     file; the job's terminal has no slave left
                     """)
-                return false
+                return .exhausted
             case .failed(let code):
-                // Unrecoverable rather than transient: EAGAIN and EINTR are
-                // handled above, so what is left is a descriptor that will
-                // never yield anything again. Continuing to read it would spin.
+                // EAGAIN, EINTR and EIO are classified above, so what arrives
+                // here is an errno nobody has ruled on. Only the explicitly
+                // permanent ones end the drain; the rest are handed back for a
+                // paced retry, because a descriptor that fails once is not
+                // evidence of a job that has stopped producing output — and a
+                // job whose output goes unread cannot finish exiting.
+                guard Self.isPermanentReadFailure(code) else {
+                    return .retryable(errno: code)
+                }
                 Self.logger.error(
                     """
                     read failed on the pty for session \
                     \(self.sessionID.uuidString, privacy: .public) \
-                    (errno \(code, privacy: .public)); stopped draining it
+                    (errno \(code, privacy: .public)); that descriptor can never be read again, \
+                    so draining it stopped
                     """)
-                return false
+                return .exhausted
             case .closed:
-                return false
+                return .exhausted
             }
         }
     }
 }
 
 // MARK: - The descriptor
+
+/// A test seam that substitutes a synthetic errno for one `read` on the pty.
+///
+/// It exists because the branch it reaches cannot otherwise be entered. The
+/// drain loop's retry path fires on errnos like `ENOMEM` — a machine under
+/// genuine memory pressure — which a test cannot provoke on demand and must not
+/// try to. Production never constructs one: every real call site takes the
+/// defaulted `nil`, so the check costs an optional test per read and nothing
+/// else.
+struct HolderReadFault: Sendable {
+    /// Consulted immediately before each `read`. Return an errno to report in
+    /// place of issuing the syscall, or `nil` to let the real read happen. The
+    /// returned errno runs through the same classification as a real one, so a
+    /// fault can exercise any outcome the descriptor can produce.
+    let nextErrno: @Sendable () -> Int32?
+
+    init(nextErrno: @escaping @Sendable () -> Int32?) {
+        self.nextErrno = nextErrno
+    }
+}
 
 /// Owns the handed-over pty master and serializes every operation on it.
 ///
@@ -444,6 +600,9 @@ private final class PTYDescriptor: @unchecked Sendable {
         case interrupted
         /// End of file, or `EIO`: on a pty master, the last slave has closed.
         case childGone
+        /// An errno this type does not rule on. Whether it ends the drain is the
+        /// drain loop's decision, not the descriptor's — see
+        /// `DrainLoop.isPermanentReadFailure`.
         case failed(errno: Int32)
         case closed
     }
@@ -458,9 +617,11 @@ private final class PTYDescriptor: @unchecked Sendable {
 
     private let lock = NSLock()
     private var fd: Int32
+    private let readFault: HolderReadFault?
 
-    init(fd: Int32) {
+    init(fd: Int32, readFault: HolderReadFault? = nil) {
         self.fd = fd
+        self.readFault = readFault
         // Non-blocking from the outset, for both directions. Reads are
         // poll-guarded anyway; what this really buys is that no `write` — not
         // the actor's, and above all not a terminal reply issued from inside a
@@ -486,16 +647,24 @@ private final class PTYDescriptor: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard fd >= 0 else { return .closed }
+        // The injected errno takes the same classification path a real one
+        // does, so a fault cannot accidentally test a shape production never
+        // produces.
+        if let injected = readFault?.nextErrno() { return Self.classify(errno: injected) }
         let count = buffer.withUnsafeMutableBytes { raw -> Int in
             Darwin.read(fd, raw.baseAddress, raw.count)
         }
         if count > 0 { return .bytes(count) }
         if count == 0 { return .childGone }
-        switch errno {
+        return Self.classify(errno: errno)
+    }
+
+    private static func classify(errno code: Int32) -> ReadOutcome {
+        switch code {
         case EAGAIN: return .wouldBlock
         case EINTR: return .interrupted
         case EIO: return .childGone
-        default: return .failed(errno: errno)
+        default: return .failed(errno: code)
         }
     }
 

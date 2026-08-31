@@ -91,6 +91,113 @@ struct HolderReaderTests {
         #expect(sawBoth)
     }
 
+    // MARK: - Read failures
+
+    /// A read that fails with an errno nobody has classified must not end the
+    /// drain — the loop backs off and tries again, and picks the session up
+    /// where it left off.
+    ///
+    /// `ENOMEM` is the case this defends: a machine under memory pressure can
+    /// fail a `read` on a perfectly live pty, and a loop that took that as
+    /// final would stop draining a job that is still producing output — which
+    /// is the `ttywait` wedge this whole task exists to close, arrived at by a
+    /// different road.
+    ///
+    /// The marker written *after* the failures is what discriminates. A drain
+    /// that gave up would still have `ALPHA` nowhere and `BRAVO` nowhere, but a
+    /// drain that merely swallowed the error and read once more would show
+    /// `ALPHA` alone.
+    @Test func retriesATransientReadFailureAndKeepsDraining() async throws {
+        let fault = ScriptedReadFault(errno: ENOMEM, times: 3)
+        let fixture = try await HolderProcessFixture.start(
+            command: "printf 'ALPHA\\n'; sleep 0.6; printf 'BRAVO\\n'; sleep 30")
+        defer { fixture.tearDown() }
+
+        let client = fixture.client
+        let (_, ptyFD) = try await client.handOverPTY()
+        await client.close()
+        let reader = HolderReader(
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
+            readFault: fault.seam())
+        try await reader.start()
+        defer { stopInBackground(reader) }
+
+        let sawBoth = await pollUntil("both markers, across the injected read failures") {
+            let screen = await reader.renderScreen()
+            return screen.contains("ALPHA") && screen.contains("BRAVO")
+        }
+        let screen = await reader.renderScreen()
+        #expect(sawBoth, "screen was: \(screen.debugDescription)")
+        #expect(
+            fault.injectedCount == 3,
+            "the fault fired \(fault.injectedCount) times, so this proved nothing about retrying")
+    }
+
+    /// The bound on retrying is the *cadence*, not a count.
+    ///
+    /// A scheme that gave up after N attempts would put the descriptor back
+    /// where the old code left it — permanently unread, with the job unable to
+    /// finish exiting — just later. So a failure that keeps failing keeps being
+    /// retried, forever, at a floor of a few attempts a second. Both halves are
+    /// asserted: attempts continue well past any plausible give-up point, and
+    /// they are paced rather than spun.
+    @Test func keepsRetryingAnUnclassifiedReadFailureRatherThanGivingUp() async throws {
+        let fault = ScriptedReadFault(errno: ENOMEM, times: nil)
+        let fixture = try await HolderProcessFixture.start(
+            command: "printf 'ECHO\\n'; sleep 30")
+        defer { fixture.tearDown() }
+
+        let client = fixture.client
+        let (_, ptyFD) = try await client.handOverPTY()
+        await client.close()
+        let reader = HolderReader(
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
+            readFault: fault.seam())
+        try await reader.start()
+        defer { stopInBackground(reader) }
+
+        let keptTrying = await pollUntil("read attempts to continue past a give-up point") {
+            fault.injectedCount > 12
+        }
+        #expect(keptTrying, "the drain loop stopped retrying after \(fault.injectedCount) attempts")
+        // Paced, not spun. The backoff floor is four attempts a second; a loop
+        // retrying without one would be four orders of magnitude above this.
+        #expect(
+            fault.injectedCount < 400,
+            "the retry path is spinning: \(fault.injectedCount) attempts")
+    }
+
+    /// The other branch: an errno that genuinely cannot recover ends the drain
+    /// immediately, with no retries at all.
+    ///
+    /// `EBADF` means the number is not an open descriptor, so retrying it is
+    /// pure waste. The assertion is that exactly one read was ever attempted,
+    /// even though the job keeps writing for the whole window — which is what
+    /// separates "classified as permanent" from "retried and still failing".
+    @Test func stopsDrainingOnAPermanentReadFailure() async throws {
+        let fault = ScriptedReadFault(errno: EBADF, times: nil)
+        let fixture = try await HolderProcessFixture.start(
+            command: "while true; do printf 'TICK\\n'; sleep 0.05; done")
+        defer { fixture.tearDown() }
+
+        let client = fixture.client
+        let (_, ptyFD) = try await client.handOverPTY()
+        await client.close()
+        let reader = HolderReader(
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
+            readFault: fault.seam())
+        try await reader.start()
+        defer { stopInBackground(reader) }
+
+        let attempted = await pollUntil("the first read attempt") { fault.injectedCount >= 1 }
+        #expect(attempted)
+
+        try await Task.sleep(for: .milliseconds(600))
+        #expect(
+            fault.injectedCount == 1,
+            "a permanent errno was retried \(fault.injectedCount) times")
+    }
+
     // MARK: - The emulator
 
     @Test func drainsChildOutputIntoTheEmulator() async throws {
@@ -230,6 +337,45 @@ struct HolderReaderTests {
 }
 
 // MARK: - Support
+
+/// A programmable `read` failure for the drain loop.
+///
+/// The failures it stands in for — `ENOMEM` above all — cannot be provoked on a
+/// healthy machine, and a test that tried to would be measuring the machine
+/// rather than the loop. It counts what it injects, because "the fault fired"
+/// is the difference between a test that proves retrying happens and one that
+/// passes because nothing ever went wrong.
+///
+/// Consulted on the drain thread while the test reads its counter, so every
+/// field is under the lock.
+private final class ScriptedReadFault: @unchecked Sendable {
+    private let lock = NSLock()
+    private let code: Int32
+    /// How many reads to fail. `nil` means every read, forever.
+    private let budget: Int?
+    private var injected = 0
+
+    init(errno code: Int32, times: Int?) {
+        self.code = code
+        self.budget = times
+    }
+
+    var injectedCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return injected
+    }
+
+    func seam() -> HolderReadFault {
+        HolderReadFault { [self] in
+            lock.lock()
+            defer { lock.unlock() }
+            if let budget, injected >= budget { return nil }
+            injected += 1
+            return code
+        }
+    }
+}
 
 /// Waits for a job to finish exiting, and returns the status the holder
 /// collected for it.
