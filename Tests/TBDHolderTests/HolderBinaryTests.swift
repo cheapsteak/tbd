@@ -36,10 +36,11 @@ struct HolderBinaryTests {
         #expect(Self.locateExecutable() != nil, "TBDHolder was not built into the products directory")
     }
 
-    /// The placeholder must fail loudly. A spawner that reaches an
-    /// unimplemented holder has to see a nonzero exit, not a session whose pty
-    /// nobody owns.
-    @Test func placeholderExitsNonzeroWithADiagnostic() throws {
+    /// A bad invocation must fail loudly, and distinguishably. Exit 2 is "the
+    /// command line was wrong", separate from a holder that started and then
+    /// failed, so a spawner can tell a mistake of its own from a bad machine —
+    /// and either way it must never get back a session whose pty nobody owns.
+    @Test func aBadInvocationExitsTwoWithAUsageDiagnostic() throws {
         let executable = try #require(Self.locateExecutable())
         let process = Process()
         process.executableURL = executable
@@ -49,7 +50,9 @@ struct HolderBinaryTests {
         try process.run()
         let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        #expect(process.terminationStatus != 0)
-        #expect(String(decoding: stderrData, as: UTF8.self).contains("not implemented"))
+        #expect(process.terminationStatus == 2)
+        let diagnostic = String(decoding: stderrData, as: UTF8.self)
+        #expect(diagnostic.contains("--session is required"))
+        #expect(diagnostic.contains("--lock-fd"), "the usage line must name the descriptor flag")
     }
 }
