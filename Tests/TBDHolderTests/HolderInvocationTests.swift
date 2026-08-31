@@ -141,6 +141,46 @@ struct HolderInvocationTests {
         #expect(Holder.status(fromWaitpidStatus: SIGKILL) == .exitedStatusUnknown)
     }
 
+    // MARK: - Exit codes
+
+    /// A spawner reading a dead holder's exit code has exactly one decision to
+    /// make — could retrying help? — so the codes must split on that line and
+    /// nothing else. A single code for every startup failure answers it wrongly
+    /// half the time: it reads a rendezvous directory that momentarily could not
+    /// be created as a mistake in the spawner's own command line, and abandons a
+    /// session a second attempt would have started.
+    @Test func startupErrorsSeparateABadInvocationFromABadMachine() {
+        #expect(HolderExitCode.badInvocation != HolderExitCode.environmentFailure)
+
+        let badInvocations: [HolderStartupError] = [
+            .unknownArgument("stray"),
+            .missingValue("--socket"),
+            .missingArgument("session"),
+            .invalidSessionID("not-a-uuid"),
+            .invalidLaunchPayload,
+            .invalidLockDescriptorArgument("/tmp/holders/session.lock"),
+            .invalidLockDescriptor(1),
+            .socketPathTooLong(path: "/tmp/holders/session.sock", limit: 104),
+        ]
+        for error in badInvocations {
+            #expect(
+                error.exitCode == HolderExitCode.badInvocation,
+                "\(error) is the command line being wrong; retrying it changes nothing")
+        }
+
+        let badMachines: [HolderStartupError] = [
+            .socketDirectoryUnavailable(path: "/tmp/holders", errno: ENOTDIR),
+            .cannotBind(path: "/tmp/holders/session.sock", errno: EADDRINUSE),
+            .cannotListen(path: "/tmp/holders/session.sock", errno: EINVAL),
+            .forkFailed(errno: EAGAIN),
+        ]
+        for error in badMachines {
+            #expect(
+                error.exitCode == HolderExitCode.environmentFailure,
+                "\(error) is the machine refusing, and a later attempt can succeed")
+        }
+    }
+
     // MARK: - The clock seam
 
     /// A clock whose every `now` read advances by a fixed step, so elapsed time

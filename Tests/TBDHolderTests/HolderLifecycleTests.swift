@@ -412,4 +412,124 @@ struct HolderLifecycleTests {
         let final = try client.awaitTerminalStatus()
         #expect(final.status == .exitedStatusUnknown)
     }
+
+    // MARK: 11 — the client that arrives after the child is already gone
+
+    /// A job that publishes its own pid, waits to be released, and exits with
+    /// `code`.
+    ///
+    /// It writes nothing to its terminal, which is what makes these tests
+    /// possible at all: a job that had written would block in `ttywait` until
+    /// somebody drained the master, so it could never reach a reaped state
+    /// *before* a client connected. See `drainPTY`. Bounded so a job that
+    /// somehow escapes teardown reaps itself.
+    private static func jobThatExitsOnCue(home: String, code: Int32) -> HolderLaunchRequest {
+        let script = [
+            "echo $$ > '\(home)/job.pid'",
+            "i=0",
+            "while [ ! -e '\(home)/go' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done",
+            "exit \(code)",
+        ].joined(separator: "; ")
+        return HolderLaunchRequest(
+            executable: "/bin/sh",
+            arguments: ["-c", script],
+            workingDirectory: "/tmp",
+            environment: rcFreeEnvironment,
+            columns: 80,
+            rows: 24)
+    }
+
+    /// Brings up a holder, releases its job, and returns once the holder has
+    /// **reaped** it — with no client having ever connected.
+    ///
+    /// The pid disappearing is precisely "reaped": a zombie still answers
+    /// `kill(pid, 0)` until its parent collects it, so `!processIsAlive` cannot
+    /// become true until the holder's `waitpid` has run and the exit window is
+    /// armed. Everything after this point is the state a daemon finds when it
+    /// restarts and comes back for a job that finished while it was away.
+    private static func holderWithAnAlreadyExitedChild(
+        code: Int32
+    ) throws -> (fixture: HolderFixture, jobPID: Int32) {
+        let home = HolderFixture.scratchHome()
+        let fixture = try HolderFixture.start(launch: jobThatExitsOnCue(home: home, code: code), home: home)
+        fixture.waitForSocket()
+
+        var jobPID: Int32 = 0
+        waitUntil("the job to report its pid\n\(fixture.diagnostics())") {
+            guard let text = try? String(contentsOfFile: home + "/job.pid", encoding: .utf8) else { return false }
+            jobPID = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            return jobPID > 0
+        }
+        fixture.trackChild(jobPID)
+
+        FileManager.default.createFile(atPath: home + "/go", contents: nil)
+        waitUntil("the holder to reap its exited job") { !processIsAlive(jobPID) }
+        return (fixture, jobPID)
+    }
+
+    /// **The primary re-adoption path.** A daemon that was restarting when the
+    /// job finished comes back, connects, and asks for the pty.
+    ///
+    /// The holder used to greet such a client with an unsolicited `.described`
+    /// frame at accept time: it landed where this request's answer belonged, so
+    /// the hand-over came back with no descriptor, and the collection that
+    /// frame recorded then ended the serve loop before the request was ever
+    /// read. Every existing hand-over test connects while the child is alive,
+    /// which is why it shipped.
+    @Test func handsOverThePTYToAClientThatArrivesAfterTheChildExited() throws {
+        let (fixture, jobPID) = try Self.holderWithAnAlreadyExitedChild(code: 7)
+        defer { fixture.tearDown() }
+
+        let client = try fixture.connect()
+        defer { client.close() }
+        let (response, fds) = try client.requestWithFDs(.handOverPTY)
+        defer { fds.forEach { close($0) } }
+
+        guard case .handedOverPTY(let description) = response else {
+            Issue.record("expected .handedOverPTY, got \(response)\n\(fixture.diagnostics())")
+            return
+        }
+        #expect(fds.count == 1, "the master must still ride the hand-over after the child has gone")
+        #expect(description.status == .exited(code: 7))
+        #expect(description.childPID == jobPID)
+    }
+
+    /// The same client, asking the cheaper question. Two claims, and the first
+    /// is what the second rests on: the holder says **nothing** to a client
+    /// that has asked for nothing, and then answers what it is asked.
+    @Test func describesAnAlreadyExitedChildOnlyWhenAsked() throws {
+        let (fixture, jobPID) = try Self.holderWithAnAlreadyExitedChild(code: 3)
+        defer { fixture.tearDown() }
+
+        let client = try fixture.connect(receiveTimeout: 1.0)
+        defer { client.close() }
+        #expect(
+            try client.frameArrivingUnsolicited() == nil,
+            "the holder greeted a client that had asked for nothing")
+
+        guard case .described(let description) = try client.request(.describe) else {
+            Issue.record("expected .described\n\(fixture.diagnostics())")
+            return
+        }
+        #expect(description.status == .exited(code: 3))
+        #expect(description.childPID == jobPID)
+    }
+
+    /// `forget` must work on this path too, and it is the request the old
+    /// behaviour could never answer: the connection was already torn down.
+    @Test func forgetsForAClientThatArrivesAfterTheChildExited() throws {
+        let (fixture, _) = try Self.holderWithAnAlreadyExitedChild(code: 0)
+        defer { fixture.tearDown() }
+
+        let client = try fixture.connect()
+        #expect(try client.request(.forget) == .forgotten)
+        client.close()
+
+        waitUntil("the holder to unlink its socket and exit") {
+            !FileManager.default.fileExists(atPath: fixture.socketPath)
+                && !processIsAlive(fixture.holderPID)
+        }
+        #expect(!processIsAlive(fixture.holderPID))
+        #expect(!FileManager.default.fileExists(atPath: fixture.socketPath))
+    }
 }

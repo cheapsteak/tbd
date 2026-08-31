@@ -24,9 +24,11 @@ do {
     let arguments = try HolderArguments.parse(Array(CommandLine.arguments.dropFirst()))
     exit(try Holder(arguments: arguments).run())
 } catch let error as HolderStartupError {
-    // 2 is "the invocation was wrong", distinct from a holder that started and
-    // then failed, so a spawner can tell a bad command line from a bad machine.
-    fail(error.localizedDescription, code: 2)
+    // The code carries the one thing a spawner needs from a dead holder: could
+    // retrying help? 2 says no — the command line is wrong and will stay wrong.
+    // 3 says the machine refused, so a later attempt can succeed. See
+    // `HolderExitCode` for which failure sits on which side.
+    fail(error.localizedDescription, code: error.exitCode)
 } catch {
-    fail(error.localizedDescription, code: 1)
+    fail(error.localizedDescription, code: HolderExitCode.unexpected)
 }

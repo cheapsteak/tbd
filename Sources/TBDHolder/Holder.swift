@@ -22,8 +22,25 @@ final class Holder {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "holder")
 
     /// How long a holder whose child has exited keeps its socket bound waiting
-    /// for somebody to come and collect the status. Long enough for a daemon
-    /// that is restarting to reconnect, short enough that nothing lingers.
+    /// for somebody to come and collect the status.
+    ///
+    /// The trade-off it encodes, in both directions:
+    ///
+    ///   - **Long enough** that a daemon which was restarting when the job
+    ///     finished can come back, connect, and be told what happened. Ten
+    ///     seconds comfortably covers a daemon relaunch, which is the case this
+    ///     window exists for.
+    ///   - **Short enough** that nothing lingers. A holder past this point has
+    ///     no job, no reader and nothing left to say; every extra second is a
+    ///     process and a bound socket that some reconciler would otherwise have
+    ///     to reclaim.
+    ///
+    /// What is lost when it expires is bounded and honest: the holder unlinks
+    /// its rendezvous and goes, so whoever asks later learns the session is
+    /// gone but not how it ended — the status reads `exitedStatusUnknown`
+    /// rather than a fabricated code. An invented exit code would be
+    /// indistinguishable downstream from one the job really returned, which is
+    /// strictly worse than admitting the status was never collected.
     static let defaultExitReportTimeout: Duration = .seconds(10)
 
     private let arguments: HolderArguments
@@ -270,7 +287,13 @@ final class Holder {
         var clientFD: Int32 = -1
         var inbox = Data()
         var forgotten = false
-        var exitReported = false
+        /// The terminal status has actually **reached** a client — either
+        /// pushed at one that was already connected when the child exited, or
+        /// carried back as the answer to that client's own request. It is what
+        /// ends the holder's life, so it is set only after a successful send: a
+        /// send that failed collected nothing, and the window must stay open
+        /// for whoever connects next.
+        var exitCollected = false
         var window = ExitReportWindow(limit: exitReportTimeout, clock: clock)
 
         func describe() -> HolderChildDescription {
@@ -288,28 +311,41 @@ final class Holder {
             inbox = Data()
         }
 
-        /// Push the terminal status at whoever is connected. There is no
-        /// separate "exited" verb on the wire: the description already carries
-        /// the status, and an unsolicited `.described` frame is what a reader
-        /// blocked on the pty needs to see to stop waiting.
+        /// Push the terminal status at a client that was **already connected**
+        /// when the child exited. There is no separate "exited" verb on the
+        /// wire: the description already carries the status, and an unsolicited
+        /// `.described` frame is what a reader blocked on the pty needs to see
+        /// to stop waiting.
         ///
-        /// The `status != .alive` guard is load-bearing, not defensive. Without
-        /// it this fires on every accept and greets each client with an
-        /// unsolicited frame it did not ask for — which then answers the
-        /// client's FIRST request, so `handOverPTY` comes back as a plain
-        /// `.described` with no descriptor and the whole hand-over silently
-        /// stops working.
-        func reportExitIfPossible() {
-            guard status != .alive, clientFD >= 0, !exitReported else { return }
+        /// It is called from the reaping branch alone, and that restriction is
+        /// the whole contract: **the holder never speaks first to a client that
+        /// arrives after the child is gone.** Greeting one at accept time put a
+        /// frame nobody asked for where that client's first response belongs —
+        /// its `handOverPTY` came back as a bare `.described` with no
+        /// descriptor — and the collection that frame recorded then tore the
+        /// connection down before the request was ever read. That is exactly
+        /// the shape of a daemon reconnecting after a restart to collect a
+        /// finished job's status, so it silently broke the primary
+        /// re-adoption path. Such a client is served instead; see the request
+        /// loop below.
+        func pushExitToConnectedClient() {
+            guard status != .alive, clientFD >= 0, !exitCollected else { return }
             guard let frame = try? HolderFraming.frame(.described(describe())) else { return }
             do {
                 try FDChannel.sendData(frame, over: clientFD)
-                exitReported = true
+                exitCollected = true
             } catch {
                 Self.logger.error(
                     "could not report exit to the connected client: \(error.localizedDescription, privacy: .public)")
                 dropClient()
             }
+        }
+
+        /// Records that an answer we just sent carried the terminal status, so
+        /// the loop can wind the holder down. A response about a live child
+        /// collects nothing and leaves the holder serving.
+        func noteAnswerCarriedTheStatus() {
+            if status != .alive { exitCollected = true }
         }
 
         while true {
@@ -321,7 +357,7 @@ final class Holder {
                     window.arm()
                     Self.logger.info(
                         "child \(child.pid, privacy: .public) exited: \(String(describing: status), privacy: .public)")
-                    reportExitIfPossible()
+                    pushExitToConnectedClient()
                 } else if reaped < 0 && errno != EINTR {
                     // We can no longer observe the child at all. Say exactly
                     // that — a fabricated exit code would be indistinguishable
@@ -329,12 +365,17 @@ final class Holder {
                     status = .exitedStatusUnknown
                     window.arm()
                     Self.logger.error("waitpid failed (errno \(errno, privacy: .public))")
-                    reportExitIfPossible()
+                    pushExitToConnectedClient()
                 }
             }
 
             if forgotten { break }
-            if window.isArmed && (exitReported || window.isExpired) { break }
+            // Once the status has reached somebody the holder has nothing left
+            // to do, and the armed window bounds the wait for anyone at all.
+            // Both halves must read `exitCollected` as "a client has actually
+            // been answered": a flag set by an unsolicited greeting would break
+            // here before that client's own request was ever read.
+            if window.isArmed && (exitCollected || window.isExpired) { break }
 
             var watched = [pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)]
             if clientFD >= 0 {
@@ -360,15 +401,33 @@ final class Holder {
                     for request in requests {
                         switch request {
                         case .describe:
-                            if !send(.described(describe()), to: clientFD) { dropClient() }
+                            if send(.described(describe()), to: clientFD) {
+                                noteAnswerCarriedTheStatus()
+                            } else {
+                                dropClient()
+                            }
                         case .handOverPTY:
                             // A forgotten holder has no master left to hand
                             // over; it answers with the description instead of
                             // pretending the transfer happened.
+                            //
+                            // A holder whose child has **exited** still hands
+                            // the master over, deliberately. The holder never
+                            // read it, so everything the job wrote and nobody
+                            // collected is still queued there and dies with the
+                            // holder — and the description riding the same
+                            // frame carries the terminal status, so no reader
+                            // can mistake the child for alive. Answering
+                            // `.described` instead would be a coherent reply
+                            // too, but it would throw those bytes away.
                             let delivered = ptyFD >= 0
                                 ? handOver(ptyFD, description: describe(), to: clientFD)
                                 : send(.described(describe()), to: clientFD)
-                            if !delivered { dropClient() }
+                            if delivered {
+                                noteAnswerCarriedTheStatus()
+                            } else {
+                                dropClient()
+                            }
                         case .forget:
                             _ = send(.forgotten, to: clientFD)
                             if ptyFD >= 0 { close(ptyFD) }
@@ -394,8 +453,10 @@ final class Holder {
                         _ = send(.rejected(version: HolderProtocolVersion.busySentinel), to: incoming)
                         close(incoming)
                     } else {
+                        // Nothing is sent here, even when the child is already
+                        // gone. This client has asked nothing yet, and the next
+                        // frame down this socket belongs to its first request.
                         clientFD = incoming
-                        reportExitIfPossible()
                     }
                 }
             }
@@ -601,6 +662,28 @@ struct HolderArguments: Equatable {
     }
 }
 
+/// What a holder that died before it ever served anything exits with.
+///
+/// The split is the point. A spawner reading a holder's exit code has exactly
+/// one decision to make — could retrying ever help? — and a single code for
+/// every startup failure answers it wrongly half the time: it reads a full
+/// disk or a rendezvous directory that momentarily did not exist as a mistake
+/// in its own command line, and gives up on a session that a second attempt
+/// would have started.
+enum HolderExitCode {
+    /// The invocation was wrong: a missing or malformed flag, a lock
+    /// descriptor the spawner never placed, a socket path that cannot fit in
+    /// `sun_path`. The same command line will fail the same way forever, so
+    /// the spawner must fix its arguments or give up. Retrying is pointless.
+    static let badInvocation: Int32 = 2
+    /// The machine refused: no rendezvous directory, a socket that would not
+    /// bind or listen, a `forkpty` that failed. Nothing about the invocation
+    /// is wrong, so a later attempt on a healthier machine can succeed.
+    static let environmentFailure: Int32 = 3
+    /// Something that is neither — an error `run()` did not classify.
+    static let unexpected: Int32 = 1
+}
+
 enum HolderStartupError: LocalizedError, Equatable {
     case unknownArgument(String)
     case missingValue(String)
@@ -615,6 +698,27 @@ enum HolderStartupError: LocalizedError, Equatable {
     case cannotListen(path: String, errno: Int32)
     case forkFailed(errno: Int32)
     case oversizedFrame(bytes: Int, limit: Int)
+
+    /// The process exit code this failure ends the holder with.
+    ///
+    /// Switched exhaustively with no `default`, so a new case cannot be added
+    /// without deciding which side of the retry question it falls on.
+    var exitCode: Int32 {
+        switch self {
+        case .unknownArgument, .missingValue, .missingArgument, .invalidSessionID,
+             .invalidLaunchPayload, .invalidLockDescriptorArgument, .invalidLockDescriptor,
+             .socketPathTooLong:
+            return HolderExitCode.badInvocation
+        case .socketDirectoryUnavailable, .cannotBind, .cannotListen, .forkFailed:
+            return HolderExitCode.environmentFailure
+        case .oversizedFrame:
+            // A peer sent a length word larger than the holder will allocate
+            // for. That is neither a bad command line nor a sick machine — it
+            // is a client speaking badly, and the spawner learns nothing
+            // actionable from retrying or from editing its arguments.
+            return HolderExitCode.unexpected
+        }
+    }
 
     var errorDescription: String? {
         switch self {

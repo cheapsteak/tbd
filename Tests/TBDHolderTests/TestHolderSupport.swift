@@ -439,6 +439,22 @@ final class TestHolderClient {
         try FDChannel.sendData(HolderFraming.frame(request), over: fd)
     }
 
+    /// Waits out the connection's receive timeout and reports whatever the
+    /// holder said without being asked — `nil` for the silence a client that
+    /// has issued no request is owed.
+    ///
+    /// Silence and a closed connection stay distinct on purpose. A holder that
+    /// greeted this client and hung up would satisfy "nothing more arrives"
+    /// while being exactly the failure the probe exists to catch, so the EOF
+    /// throws rather than reading as quiet.
+    func frameArrivingUnsolicited() throws -> HolderResponse? {
+        do {
+            return try receive()
+        } catch FDChannelError.receiveFailed(let code) where code == EAGAIN {
+            return nil
+        }
+    }
+
     /// Reads the next framed response, along with any descriptors that rode
     /// with it.
     /// One `recvmsg` can carry several frames — the holder answers a request
