@@ -269,8 +269,11 @@ def _requested_jobs(arguments: list[str]) -> int | None:
     return None
 
 
-def _shared_module_cache_path() -> Path:
+def _shared_module_cache_path() -> Path | None:
     """Where precompiled modules go, spelled identically in every worktree.
+
+    ``None`` when the home directory cannot be resolved at all, which is not a
+    build failure — see the `KeyError` note below.
 
     Resolved from the passwd database, NEVER from ``$HOME`` and never through
     ``Path.home()``, which reads ``$HOME`` first.  ``scripts/test.sh`` points
@@ -289,7 +292,19 @@ def _shared_module_cache_path() -> Path:
     explicit = os.environ.get("TBD_SWIFT_MODULE_CACHE_PATH")
     if explicit:
         return Path(explicit).expanduser()
-    return Path(pwd.getpwuid(os.getuid()).pw_dir) / SHARED_MODULE_CACHE_SUBPATH
+    try:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:
+        # A uid with no passwd entry — minimal containers, sandboxes and
+        # arbitrary-UID environments all produce one. Unguarded this raises
+        # through `main` and aborts the invocation with a traceback, and since
+        # this wrapper is the sole mandatory gate for every SwiftPM command in
+        # the repo, that would break every build, test and run for such a uid
+        # with no way out short of already knowing to set the opt-out. The
+        # cache is an optimisation; losing it costs a slower build, so this
+        # degrades exactly as an uncreatable directory does.
+        return None
+    return Path(home) / SHARED_MODULE_CACHE_SUBPATH
 
 
 def _requests_a_module_cache(arguments: list[str]) -> bool:
@@ -346,6 +361,13 @@ def _module_cache_arguments(subcommand: str, swiftpm_arguments: list[str]) -> li
     if not _shares_the_module_cache(subcommand, swiftpm_arguments):
         return []
     path = _shared_module_cache_path()
+    if path is None:
+        _report(
+            "swift-safe: could not resolve this uid's home directory, so there "
+            "is nowhere to put a shared module cache; building with SwiftPM's "
+            "per-worktree cache instead"
+        )
+        return []
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError as error:
