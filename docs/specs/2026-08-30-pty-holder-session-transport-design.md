@@ -624,14 +624,13 @@ flag with a soak and a stated graduation plan.
   continuously — the hardest code in the design gets adversarial testing for
   free. Graduation gates on field evidence: no double-reader violations, the
   reconcilers holding (no growth in unclaimed holders or socket litter), and
-  latency flatness re-confirmed under load by re-running the keystroke-echo
-  measurement whose methodology the companion research record documents.
-  That harness is a **deliverable of this work, not an existing tool to lean
-  on**: `scripts/diag/` today holds only a commit-latency report and an
-  RPC-volume report, neither of which measures keystroke echo. A design
-  justified by a latency curve has to ship the committed probe that can
-  re-draw that curve on demand, or graduation is a judgement call rather than
-  a measurement.
+  latency flatness re-confirmed under load by re-running the probes that drew
+  the curve in the first place: `scripts/diag/tmux-vs-rawpty-idle.py` for the
+  raw-versus-tmux echo comparison and `scripts/diag/tmux-server-contention.py`
+  for the pane-count control. Both are committed alongside this design, for
+  the reason that a design justified by a latency curve has to ship the tool
+  that can re-draw it — otherwise graduation is a judgement call wearing a
+  measurement's clothes.
 
   **"No double-reader violations" is only evidence if something can see one.**
   A double read is silent by construction — each `read()` takes bytes the other
