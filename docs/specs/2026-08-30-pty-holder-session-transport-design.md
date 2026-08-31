@@ -632,6 +632,28 @@ flag with a soak and a stated graduation plan.
   that can re-draw it — otherwise graduation is a judgement call wearing a
   measurement's clothes.
 
+  **Flatness is the claim, so flatness is what the threshold has to test.** An
+  absolute latency bound alone would pass a transport that is merely fast on a
+  quiet machine, which is exactly what tmux already is — its p50 is 1.1 ms and
+  imperceptible. The graduation run is therefore a paired measurement, and all
+  four conditions must hold:
+
+  - **Workload:** the design point — at least 100 concurrent sessions at
+    sustained load on one machine, matched against an idle-machine run of the
+    same probe, interleaved so both arms see the same conditions.
+  - **Sample:** at least 2,000 keystrokes per arm, the size the original
+    measurements used.
+  - **Absolute bound:** p90 keystroke echo at load stays at or under **5 ms**,
+    the ceiling a raw pty was never observed to exceed at any load up to 117.
+  - **Flatness bound:** p90 at load is no more than **2×** p90 at idle. This is
+    the condition that actually discriminates, and it is the one tmux fails —
+    its p90 went 9.3 → 12.7 → 139 ms as load rose, a 15× spread, because a
+    tmux keystroke costs process wakeups whose latency is scheduling delay.
+
+  Any load-dependent growth beyond that flatness bound means the transport has
+  a wakeup in the echo path that the design says it does not, and graduation
+  does not proceed on the theory that the absolute number still looks small.
+
   **"No double-reader violations" is only evidence if something can see one.**
   A double read is silent by construction — each `read()` takes bytes the other
   reader never sees — so an absence of reports is not an absence of the fault,
