@@ -1,0 +1,298 @@
+import Darwin
+import Foundation
+import Testing
+@testable import TBDDaemonLib
+@testable import TBDShared
+
+/// The daemon as default reader, driven against real holders and real jobs.
+///
+/// The suite exists for one measured fact: **a job cannot finish exiting while
+/// anything it wrote is still queued on its terminal.** The job is the pty's
+/// session leader, and XNU's `proc_exit` calls `ttywait` before revoking the
+/// terminal, so a job that exits with a few bytes unread stops half-exited and
+/// the holder's `waitpid` correctly reports nothing. Draining is therefore a
+/// liveness requirement, and two tests here — `keepsDrainingPastOneBufferful`
+/// and `completesTheExitOfAJobThatWroteUnreadOutput` — are the regression tests
+/// for it.
+///
+/// An exit is observed as the job's pid **disappearing**, which happens only
+/// once the holder's `waitpid` has collected it. A wedged job is still there:
+/// it has run its last instruction, but it is stuck inside `proc_exit` and
+/// nothing has reaped it. That is exactly the distinction these tests need, and
+/// the reason a screenful of expected output is never enough on its own.
+@Suite(.serialized)
+struct HolderReaderTests {
+
+    // MARK: - The drain is what lets jobs die
+
+    /// The regression test for the measured wedge, and the reason this task
+    /// exists.
+    ///
+    /// The job writes far more than any kernel tty buffer can hold, so a reader
+    /// that stops reading — or never starts — leaves it blocked mid-write and
+    /// then blocked in `ttywait` forever. The assertion is not that the output
+    /// is pretty: it is that the job **exits**, which it can only do if
+    /// somebody drained every byte of it.
+    @Test func keepsDrainingPastOneBufferful() async throws {
+        let fixture = try await HolderProcessFixture.start(
+            command: "for i in $(seq 1 5000); do echo line-$i; done")
+        defer { fixture.tearDown() }
+
+        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
+        let (_, ptyFD) = try await adoptPTY(via: client)
+        await client.close()
+        let reader = HolderReader(
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+        try await reader.start()
+        defer { stopInBackground(reader) }
+
+        let status = await awaitJobExit(childPID: fixture.handle.childPID, reportedBy: client)
+        #expect(status == .exited(code: 0), "the job never finished exiting: \(String(describing: status))")
+
+        // And the emulator holds the tail — draining is not the same as
+        // discarding, and a reader that read the bytes without feeding them
+        // would satisfy the exit assertion alone.
+        let sawTail = await pollUntil("the last line on the emulator's screen") {
+            await reader.renderScreen().contains("line-5000")
+        }
+        #expect(sawTail)
+        let history = await reader.renderScreenWithScrollback(maxLines: 500)
+        #expect(history.contains("line-4900"), "the scrollback did not keep the recent history")
+    }
+
+    /// The `ttywait` case stated directly: a job that exits with output nobody
+    /// has read still completes its exit, because a reader is attached.
+    ///
+    /// The second write is what makes this discriminate. A drain that stopped
+    /// after its first read would have emptied the queue before the job wrote
+    /// `CHARLIE`, and the job would then die on a clean terminal no matter how
+    /// broken the loop was — so the job writes, pauses long enough for that
+    /// first read to happen, and writes again immediately before exiting.
+    @Test func completesTheExitOfAJobThatWroteUnreadOutput() async throws {
+        let fixture = try await HolderProcessFixture.start(
+            command: "printf 'BRAVO\\n'; sleep 0.4; printf 'CHARLIE\\n'")
+        defer { fixture.tearDown() }
+
+        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
+        let (_, ptyFD) = try await adoptPTY(via: client)
+        await client.close()
+        let reader = HolderReader(
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+        try await reader.start()
+        defer { stopInBackground(reader) }
+
+        let status = await awaitJobExit(childPID: fixture.handle.childPID, reportedBy: client)
+        #expect(status == .exited(code: 0), "the job never finished exiting: \(String(describing: status))")
+
+        let sawBoth = await pollUntil("both markers on the emulator's screen") {
+            let screen = await reader.renderScreen()
+            return screen.contains("BRAVO") && screen.contains("CHARLIE")
+        }
+        #expect(sawBoth)
+    }
+
+    // MARK: - The emulator
+
+    @Test func drainsChildOutputIntoTheEmulator() async throws {
+        let fixture = try await HolderProcessFixture.start(
+            command: "printf 'ALPHA\\n'; sleep 30")
+        defer { fixture.tearDown() }
+
+        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
+        let (_, ptyFD) = try await adoptPTY(via: client)
+        await client.close()
+        let reader = HolderReader(
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+        try await reader.start()
+        defer { stopInBackground(reader) }
+
+        let sawMarker = await pollUntil("the job's output on the emulator's screen") {
+            await reader.renderScreen().contains("ALPHA")
+        }
+        let screen = await reader.renderScreen()
+        #expect(sawMarker, "screen was: \(screen.debugDescription)")
+    }
+
+    /// Input written to the reader reaches the job.
+    ///
+    /// The assertion is on the job's *transformation* of the input rather than
+    /// on the input itself: a pty in canonical mode echoes what is written to
+    /// it, so a screen containing `MARKER` would prove only that the terminal
+    /// echoed, not that anything read it. `GOT:MARKER` can only have been
+    /// produced by the job.
+    @Test func writeReachesTheChild() async throws {
+        let fixture = try await HolderProcessFixture.start(
+            command: "while IFS= read -r line; do printf 'GOT:%s\\n' \"$line\"; done")
+        defer { fixture.tearDown() }
+
+        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
+        let (_, ptyFD) = try await adoptPTY(via: client)
+        await client.close()
+        let reader = HolderReader(
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+        try await reader.start()
+        defer { stopInBackground(reader) }
+
+        try await reader.write(Data("MARKER\n".utf8))
+
+        let sawResponse = await pollUntil("the job's answer to the written line") {
+            await reader.renderScreen().contains("GOT:MARKER")
+        }
+        let screen = await reader.renderScreen()
+        #expect(sawResponse, "screen was: \(screen.debugDescription)")
+    }
+
+    // MARK: - Stopping
+
+    /// `stop()` ends the drain and closes the descriptor without touching the
+    /// job. That is what makes a later hand-off to an attached viewer possible:
+    /// the daemon is the *default* reader, not the owner.
+    ///
+    /// The close is the delicate half. It happens on the drain thread, woken by
+    /// a self-pipe, precisely so no descriptor is ever closed under a blocked
+    /// `read` — and `isDraining` reads the thread's own flag, so this asserts
+    /// the thread really left rather than that the actor intended it to.
+    @Test func stopEndsTheDrainWithoutKillingTheChild() async throws {
+        let fixture = try await HolderProcessFixture.start(
+            command: "printf 'DELTA\\n'; sleep 30")
+        defer { fixture.tearDown() }
+
+        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
+        let (_, ptyFD) = try await adoptPTY(via: client)
+        let reader = HolderReader(
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+        try await reader.start()
+        defer { stopInBackground(reader) }
+
+        let sawMarker = await pollUntil("the job's output before stopping") {
+            await reader.renderScreen().contains("DELTA")
+        }
+        #expect(sawMarker)
+
+        await reader.stop()
+        let stillDraining = await reader.isDraining
+        #expect(stillDraining == false, "the drain thread outlived stop()")
+
+        // The job is untouched: the holder still owns its own copy of the pty
+        // master, so closing the reader's dup destroys nothing.
+        let description = try await client.describe()
+        #expect(description.status == .alive)
+        #expect(description.childPID == fixture.handle.childPID)
+        #expect(holderProcessIsAlive(fixture.handle.holderPID))
+
+        // Idempotent, and still not fatal to anything.
+        await reader.stop()
+        #expect(holderProcessIsAlive(fixture.handle.childPID))
+    }
+
+    /// The other branch of `stop()`: a reader that was never started still owns
+    /// a `dup` the holder handed over, and stopping it must release that
+    /// descriptor. There is no drain thread to hand the close to, so the actor
+    /// does it — the one case where that is safe, because nothing can be
+    /// mid-read on a descriptor no thread has ever touched.
+    ///
+    /// The proof is the far end of a pipe reaching end of file, which happens
+    /// only when the last writer is gone. Two details of that are load-bearing
+    /// and were both learned the hard way:
+    ///
+    ///   - The ends are made close-on-exec **immediately**. Every test target
+    ///     compiles into one process and its suites run concurrently, so a
+    ///     neighbouring test that spawns a long-lived child would otherwise
+    ///     hand it an inherited copy of the write end, and the pipe would never
+    ///     report EOF however correctly the reader behaved. That is not a
+    ///     hypothetical: it reddened this test on its third run.
+    ///   - The assertion is not `F_GETFD` on the descriptor number. The kernel
+    ///     hands out the lowest free number, so a just-closed one is a *likely*
+    ///     pick for the next `open` on any of those concurrent threads — an
+    ///     assertion about the number would fail exactly when the code was
+    ///     right.
+    @Test func stoppingAReaderThatNeverStartedReleasesThePTY() async throws {
+        var ends: [Int32] = [-1, -1]
+        try #require(pipe(&ends) == 0, "could not create a pipe")
+        for end in ends { _ = fcntl(end, F_SETFD, FD_CLOEXEC) }
+        let readEnd = ends[0]
+        defer { Darwin.close(readEnd) }
+        // Non-blocking, so a reader that failed to release the write end fails
+        // the assertion instead of parking the suite in `read`.
+        _ = fcntl(readEnd, F_SETFL, fcntl(readEnd, F_GETFL) | O_NONBLOCK)
+
+        let reader = HolderReader(
+            sessionID: UUID(), ptyFD: ends[1], columns: 80, rows: 24)
+        let neverDrained = await reader.isDraining
+        #expect(neverDrained == false)
+
+        await reader.stop()
+
+        var scratch: UInt8 = 0
+        let outcome = Darwin.read(readEnd, &scratch, 1)
+        #expect(outcome == 0, "the reader kept the descriptor open (read returned \(outcome))")
+    }
+}
+
+// MARK: - Support
+
+/// Waits for a job to finish exiting, and returns the status the holder
+/// collected for it.
+///
+/// The wait itself is on the **pid disappearing**, not on a status. That is
+/// what discriminates: a job wedged in `ttywait` has run its last instruction
+/// and still answers `kill(pid, 0)` exactly like a healthy one, because it is
+/// stuck inside `proc_exit` and has not been reaped. The pid only goes away
+/// once the holder's `waitpid` has collected it, which cannot happen until the
+/// exit completes — which cannot happen until somebody drained the terminal.
+///
+/// Nothing stays connected to the holder while this waits, deliberately. The
+/// holder *pushes* a status at a client that happens to be connected when its
+/// job exits, and then winds itself down; a poller that raced that push would
+/// sometimes collect the status and sometimes find the holder already gone.
+/// With no client attached the holder arms its exit-report window instead and
+/// waits to be asked, which is the same path a restarted daemon takes.
+private func awaitJobExit(
+    childPID: Int32,
+    reportedBy client: HolderClient,
+    timeout: TimeInterval = 25.0
+) async -> HolderChildStatus? {
+    let reaped = await pollUntil("the job to finish exiting", timeout: timeout) {
+        !holderProcessIsAlive(childPID)
+    }
+    guard reaped else { return nil }
+    return try? await client.describe().status
+}
+
+/// Takes the pty master from a freshly spawned holder, retrying a refusal.
+///
+/// The holder serves **one client at a time**, and it learns that the previous
+/// one has gone only when its poll loop next reads EOF on that socket. The
+/// spawner closes its handshake connection and returns immediately, so a
+/// hand-over issued in the next microsecond can legitimately be answered with
+/// the busy sentinel — the slot is free, the holder has not noticed yet. It is
+/// a race the wire cannot avoid and the caller must absorb, so every consumer
+/// of a just-spawned holder needs this retry; here it is bounded, and a
+/// refusal that outlives the budget is rethrown rather than swallowed.
+private func adoptPTY(
+    via client: HolderClient,
+    timeout: TimeInterval = 5.0
+) async throws -> (HolderChildDescription, Int32) {
+    let deadline = Date().addingTimeInterval(timeout)
+    while true {
+        do {
+            return try await client.handOverPTY()
+        } catch HolderClient.Error.rejected(let version) {
+            guard Date() < deadline else { throw HolderClient.Error.rejected(version: version) }
+            // The holder drops a rejected connection, so the next attempt has
+            // to start a new one.
+            await client.close()
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+    }
+}
+
+/// Stops a reader from a `defer`, which cannot `await`.
+///
+/// Every test needs this on every exit path — a reader left running leaks a
+/// thread and a pty descriptor for the rest of the suite — and a detached task
+/// is the only way to reach an actor method from a non-async context. The stop
+/// is idempotent, so a test that already stopped its reader loses nothing.
+private func stopInBackground(_ reader: HolderReader) {
+    Task.detached { await reader.stop() }
+}
