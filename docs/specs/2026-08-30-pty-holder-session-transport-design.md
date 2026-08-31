@@ -479,6 +479,20 @@ the process table — the same argument as every other resource here.
   the theory that it has no row. Only a holder that handshakes and then turns
   out to have no session row is a half-finished deletion, and that is the case
   where the daemon kills the child and the holder.
+
+  **Row-lessness is only meaningful once creation can no longer be in flight.**
+  Reconcile runs on demand from RPC handlers, not only at startup, so it can
+  land in the window between a holder becoming connectable and its session row
+  committing — and killing there would destroy a session that was merely being
+  born. Two things close that window, and both are required. Creation **commits
+  the session row before the holder becomes discoverable**: the row is written
+  in a creating state first, and only then is the holder spawned, so a
+  discoverable holder always has a row unless something failed. And the sweep
+  is **keep-biased for young holders** — a holder whose socket is newer than a
+  grace window is left alone regardless of row state, the same guard `OrphanGC`
+  already applies to the same race shape. Ordering alone would be enough if
+  nothing ever crashed between the two steps; the grace window is what makes
+  the guarantee hold when something does.
   **Kill, not adopt** — iTerm2 adopts unclaimed survivors into new tabs
   because its live processes are the only copy of anything; TBD's transcripts
   persist independently, so adoption would buy a mystery-session UI and
@@ -510,7 +524,7 @@ flag with a soak and a stated graduation plan.
 - **Flag.** `pty_holder_enabled`, a `config` column added by a `.sql`
   migration with **no SQL `DEFAULT` clause**, so unset stays a third state.
   The shipped default is `false`, resolved the way every other nullable gate
-  in `ConfigStore.toModel(...)` resolves one: a `ptyHolderDefault: Bool =
+  in `ConfigRecord.toModel(...)` resolves one: a `ptyHolderDefault: Bool =
   Config.ptyHolderDefault` parameter on `toModel`, and `pty_holder_enabled ??
   ptyHolderDefault` in the body. The injected parameter is not decoration —
   it is what lets a test change the effective default and prove NULL follows
@@ -533,13 +547,20 @@ flag with a soak and a stated graduation plan.
   spawns to holders; on → off leaves every running holder session on its
   holder and routes new spawns back to tmux.
 - **Coexistence cost, stated honestly.** Both paths live until graduation:
-  two attach paths in the app, two reconciliation ground truths, and a
-  doubled test surface. Each gated branch gets tests for flag-on and
-  flag-off behavior.
+  two reconciliation ground truths, a doubled test surface, and — counted
+  accurately — a **third** attach path in the app, not a second. The app
+  already carries two: the older one forks a `tmux attach` client per viewer
+  and lets SwiftTerm read that client's pty, and the control-mode one feeds
+  SwiftTerm bytes the daemon relays over the FD sidecar. The holder path joins
+  them. That the count is three is an argument for graduating and deleting
+  promptly, not against the design — and the control-mode path's fd-in,
+  `feed(byteArray:)`-out shape is the closest existing seam to what the holder
+  transport needs, so the third path is cheaper than the second was. Each
+  gated branch gets tests for flag-on and flag-off behavior.
 - **Soak.** Enable on a development machine running a real fleet at real
   load. Ordinary development restarts exercise the re-adoption path
   continuously — the hardest code in the design gets adversarial testing for
-  free. Graduation gates on field evidence: no double-reader incidents, the
+  free. Graduation gates on field evidence: no double-reader violations, the
   reconcilers holding (no growth in unclaimed holders or socket litter), and
   latency flatness re-confirmed under load by re-running the keystroke-echo
   measurement whose methodology the companion research record documents.
@@ -549,6 +570,19 @@ flag with a soak and a stated graduation plan.
   justified by a latency curve has to ship the committed probe that can
   re-draw that curve on demand, or graduation is a judgement call rather than
   a measurement.
+
+  **"No double-reader violations" is only evidence if something can see one.**
+  A double read is silent by construction — each `read()` takes bytes the other
+  reader never sees — so an absence of reports is not an absence of the fault,
+  and gating the design's central safety property on unaided observation would
+  be the weakest step in the argument. Two positive detectors carry that bar
+  instead. An always-on **reader-count assertion**: the daemon holds explicit
+  per-session reader state, and every transition into reading asserts the count
+  was zero, incrementing a violation counter and logging loudly rather than
+  trusting the arbitration to be correct. And a soak-time **continuity
+  canary**: a known sequence written periodically to a session, whose reader
+  checks it arrives unbroken — a gap is byte theft, positively observed rather
+  than inferred. Graduation reads those two numbers.
 - **Graduation.** Flip `Config.ptyHolderDefault` to `true` — a one-line
   change that reaches everyone who never chose while preserving every
   explicit opt-out. Removing the tmux path entirely is separate, later work,
