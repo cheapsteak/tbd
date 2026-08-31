@@ -24,9 +24,11 @@ The justification is **scaling headroom, not current latency**. At quiet load
 tmux costs 1.1 ms p50 per keystroke and is imperceptible; this design does not
 claim to fix any latency a user feels today. What the measurements show is that
 a raw pty is *flat* under load (never exceeded 5 ms at any load including 117)
-while tmux degrades superlinearly (p90 of 9.3 → 12.7 → 139 ms as load rises),
-because a tmux keystroke costs two extra process wakeups whose latency is
-scheduling delay. tmux is therefore the component that breaks first as the
+while tmux degrades superlinearly (p90 of 9.3 → 12.7 → 139 ms as load rises —
+the 139 ms bucket is n=4 and directional only, so read it as a direction, not a
+figure; the 9.3 → 12.7 growth is the solid part and is already the whole point,
+since flat means flat), because a tmux keystroke costs two extra process
+wakeups whose latency is scheduling delay. tmux is therefore the component that breaks first as the
 fleet grows. The design point is roughly twice the present fleet: **~150
 concurrent sessions at sustained load ≥ 100** on one machine.
 
@@ -638,17 +640,29 @@ flag with a soak and a stated graduation plan.
   imperceptible. The graduation run is therefore a paired measurement, and all
   four conditions must hold:
 
-  - **Workload:** the design point — at least 100 concurrent sessions at
-    sustained load on one machine, matched against an idle-machine run of the
-    same probe, interleaved so both arms see the same conditions.
-  - **Sample:** at least 2,000 keystrokes per arm, the size the original
-    measurements used.
+  - **Workload:** the design point as stated above — **~150 concurrent sessions
+    at sustained load ≥ 100** on one machine, matched against an idle-machine
+    run of the same probe, interleaved so both arms see the same conditions.
+    Session count and load are two different numbers and both have to be met;
+    validating at 100 sessions would clear a materially lower bar than the
+    design targets.
+  - **Sample:** at least 2,000 keystrokes per arm. This is a bar chosen for
+    graduation, **not** a repeat of the original method: the load-based latency
+    runs behind the headline numbers were small, and their highest-load bucket
+    was explicitly n=4 and directional only. That is precisely why graduation
+    needs a larger sample than the measurements that motivated it — a p90 is
+    the statistic under test, and a p90 from a handful of samples is not one.
   - **Absolute bound:** p90 keystroke echo at load stays at or under **5 ms**,
     the ceiling a raw pty was never observed to exceed at any load up to 117.
-  - **Flatness bound:** p90 at load is no more than **2×** p90 at idle. This is
-    the condition that actually discriminates, and it is the one tmux fails —
-    its p90 went 9.3 → 12.7 → 139 ms as load rose, a 15× spread, because a
-    tmux keystroke costs process wakeups whose latency is scheduling delay.
+  - **Flatness bound:** p90 at load is no more than **2×** p90 at idle. The
+    multiplier is set where it is because it has to sit clear of ordinary
+    scheduling jitter on a loaded machine while still failing anything with a
+    per-keystroke wakeup in the path — and tmux fails it by more than an order
+    of magnitude, so the exact value is not load-bearing. Its p90 went
+    9.3 → 12.7 → 139 ms as load rose; the 139 ms bucket is n=4 and directional
+    only, but even discarding it entirely the 9.3 → 12.7 growth already
+    exceeds nothing-should-grow, and the mechanism is not in doubt: a tmux
+    keystroke costs process wakeups whose latency is scheduling delay.
 
   Any load-dependent growth beyond that flatness bound means the transport has
   a wakeup in the echo path that the design says it does not, and graduation
