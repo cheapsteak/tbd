@@ -1,0 +1,484 @@
+# Migrating terminal sessions off tmux onto per-session pty holders
+
+**Status:** Approved design. Not yet implemented.
+
+**Companion evidence:** the measurement and research records under
+[`docs/research/2026-08-30-terminal-session-persistence/`](../research/2026-08-30-terminal-session-persistence/)
+— field measurements of the tmux path, a full source read of iTerm2's session
+restoration, and a prior-art survey of every shipping system found in this
+space. This spec restates the decision-critical numbers so it stands alone, and
+defers to those records for methodology and file:line citations.
+
+## Summary
+
+TBD today keeps agent sessions alive across daemon and app restarts by running
+them under tmux. This design replaces tmux with a **per-session holder
+process**: a minimal supervisor that `forkpty()`s the job, holds the pty
+master, and hands the master over `SCM_RIGHTS` to whoever should be reading —
+the app while a viewer is attached, the daemon otherwise. The attached path
+becomes a raw pty read in the app with no other process involved, which is the
+arrangement iTerm2 has shipped for years; the daemon's always-on presence
+covers the detached-output window iTerm2 structurally cannot.
+
+The justification is **scaling headroom, not current latency**. At quiet load
+tmux costs 1.1 ms p50 per keystroke and is imperceptible; this design does not
+claim to fix any latency a user feels today. What the measurements show is that
+a raw pty is *flat* under load (never exceeded 5 ms at any load including 117)
+while tmux degrades superlinearly (p90 of 9.3 → 12.7 → 139 ms as load rises),
+because a tmux keystroke costs two extra process wakeups whose latency is
+scheduling delay. tmux is therefore the component that breaks first as the
+fleet grows. The design point is roughly twice the present fleet: **~150
+concurrent sessions at sustained load ≥ 100** on one machine.
+
+## The measured basis
+
+Three findings from the companion records shape everything below.
+
+- **The cost of tmux is process wakeups, and they track load.** A raw pty's
+  echo happens in the kernel line discipline inside `write()`, with no process
+  wakeup at all, which is why it is indifferent to load. A tmux keystroke is
+  two server wakeups (read the key, read the echo) plus the reader's own; the
+  server's actual work is ~40 µs, and the rest is waiting to be scheduled.
+  The tmux *client* is not in the steady-state path — it hands its stdin to
+  the server over `SCM_RIGHTS` at attach — so there is no client relay to
+  delete; the only saving available is the server wakeups and the redundant
+  VT parse.
+- **TBD's live path is already the good arrangement, minus tmux.** The app
+  spawns a `tmux attach` client per viewer and SwiftTerm reads that client's
+  pty natively; the control-mode fanout is gated off by default. There is no
+  intermediary left to remove first.
+- **Holding a pty master elsewhere is proven, and draining is the hard half.**
+  Passing a master over `SCM_RIGHTS` to another process which then does direct
+  I/O works on Darwin, and the shell sees no SIGHUP when the passing process
+  dies. But a supervisor that merely parks the fd wedges its child once the
+  kernel tty buffer fills — observed directly — so exactly one process must be
+  reading at all times that output flows, and the transfer of that role needs
+  an acknowledged edge.
+
+Additionally, tmux imposes a throughput cost this design removes: every byte a
+program prints is parsed twice — once by the tmux server into its grid, then
+re-rendered as a fresh escape stream that SwiftTerm parses again — with tmux's
+output flow control in between. On the new attached path the bytes are read
+once and parsed once, by the app. For the dominant workload (a full-screen
+agent TUI repainting continuously) this is a straight bandwidth win in addition
+to the latency-flatness win.
+
+## Design overview
+
+Three roles, three processes:
+
+- **The holder** — one tiny process per session. It `forkpty()`s the job, owns
+  the pty master for the session's whole life, and **never reads it**. It
+  survives daemon restarts, app restarts, and crashes of both. It is the only
+  component whose death kills the session, so it is kept small enough to
+  essentially never change.
+- **The daemon** — the arbiter of who reads, and the **default reader**. While
+  no viewer is attached it drains the master into a headless terminal
+  emulator, so unattended agents never stall and reattachment has a screen to
+  show. Because the holder owns the master, the daemon is freely restartable:
+  a daemon restart no longer touches any live terminal.
+- **The app (viewer)** — while attached, reads and writes the master directly
+  through a dup received over the existing FD sidecar. Keystroke echo is
+  kernel → app: 0.1 ms, flat under load, identical in mechanism to iTerm2's
+  attached path.
+
+The single-reader invariant, in one sentence: **the daemon reads exactly the
+sessions that no live, connected app has claimed — and when it cannot yet
+know, it errs toward reading nothing**, because not-reading costs recoverable
+backpressure while double-reading is silent corruption (each `read()` steals
+bytes the other reader never sees).
+
+## The holder
+
+### Contract
+
+- **Spawn.** The daemon spawns the holder with fork + `setsid()` + exec.
+  `setsid` detaches it from any process group that could signal it (the
+  iTerm2 lesson: without it, a Ctrl-C aimed at the parent kills the
+  supervisor and strands every session). The holder then `forkpty()`s the
+  job, making it both the master's owner and the child's parent; it reaps the
+  child via SIGCHLD. When the daemon exits, the holder orphans to launchd and
+  carries on. SIGHUP and SIGPIPE are ignored.
+- **Lifetime.** The holder exits when its child exits — but only after
+  reporting the child's exit status to the daemon, or timing out trying
+  (bounded, injected clock). Exit status is data the session lifecycle wants,
+  and the holder is the only process guaranteed to observe it. On the way out
+  it unlinks its socket.
+- **Rendezvous and identity.** One Unix socket per holder, at a
+  `TBDConstants`-derived path under the TBD home directory (honoring
+  `TBD_HOME`), named by the session UUID. Session identity is the UUID TBD
+  already persists — stronger than iTerm2's *(socket number, child pid)*
+  pairing. Socket paths observe `sun_path`-length discipline: the sessions
+  directory stays shallow, and the length is checked before every `bind` and
+  `connect`. The socket is bound with owner-only permissions. One client at a
+  time, enforced holder-side: a second connection is accepted and immediately
+  rejected with a sentinel protocol version.
+- **Protocol.** Minimal and versioned from day one. Verbs: report the child
+  (pid, tty name, launch parameters, alive/exited status) and hand over a
+  master dup; report exit status; forget the child (close the master and stop
+  reporting, so a killed session cannot be resurrected — iTerm2's preemptive
+  wait). The version field is load-bearing: long-lived sessions keep running
+  old holder binaries, so the daemon must interoperate with every holder
+  version that has ever shipped. This is the standing argument for keeping
+  the holder near-featureless forever.
+- **Environment and launch parameters.** The session's environment (including
+  `envOverrides`) is applied at spawn by the daemon and passed through the
+  holder to the child, replacing today's tmux `-e` delivery. The holder
+  retains the launch request and replays it on demand, so a re-adopting
+  daemon can reconstruct what is running without trusting the database.
+- **Binary.** A new small SPM executable target. No copying the binary out of
+  the build tree: a running holder's executable image survives rebuilds and
+  build-directory reclamation (iTerm2 copies its server binary only because
+  its auto-updater deletes the bundle out from under running servers, a
+  hazard TBD does not have). The consequence — old sessions run old holders —
+  is handled by the protocol versioning above.
+
+### Why per-session
+
+The holder is the process whose crash kills its sessions' ptys, so blast
+radius dominates the granularity choice. A per-session holder's bug costs one
+session; its lifecycle is self-reclaiming in the common case (exit on child
+exit); its socket needs no child multiplexing; and upgrading the holder
+binary — the hardest problem in this space, which Superset solves with a
+successor-spawn fd-inheritance dance — is sidestepped entirely, because new
+sessions simply get the new binary while old ones keep the old. At the design
+point this is ~150 processes, which is trivial on macOS.
+
+## Reader arbitration
+
+Each session has exactly one reader at any moment: the app, the daemon, or —
+transiently and safely — nobody. All transitions are arbitrated by the daemon,
+which is also the fallback reader, so the acknowledged edge ("you read now, I
+have stopped") is an in-process state transition plus one acked fd-vend, not a
+distributed protocol.
+
+- **Attach.** The app requests a session over the existing RPC. The daemon
+  stops reading, renders its headless emulator's screen and retained
+  scrollback into an escape-sequence **snapshot preamble**, and sends the
+  preamble plus the master dup over the FD sidecar. The app feeds the
+  preamble into SwiftTerm first, then goes live on the fd, then jiggles (see
+  below). Reattach therefore paints the last-known screen instantly, as tmux
+  does today.
+- **Detach.** The app tells the daemon and closes its dup; the daemon resumes
+  reading and jiggles so a full-screen program repaints into the daemon's
+  emulator.
+- **App death.** The daemon observes the sidecar disconnect and reverts every
+  session that app held to daemon-read, with a jiggle. No cooperation from
+  the dead process is needed.
+- **Daemon death.** Attached sessions are untouched — the app keeps its fds
+  and keeps painting through the entire daemon outage. Detached sessions have
+  no reader: their writers block on the kernel tty buffer, which is
+  backpressure, not loss, and drains when the daemon returns.
+- **Daemon startup (re-adoption).** The new daemon connects to every holder
+  and adopts a master dup, but **reads nothing yet**. If no app process is
+  alive, it becomes reader of everything immediately. If an app process is
+  alive, it waits for that app's sidecar handshake, which carries the list of
+  sessions the app holds fds for; claimed sessions stay app-owned and
+  everything else begins draining. The wait is bounded by a grace window on
+  an injected clock; on expiry the daemon re-checks app liveness — app gone,
+  drain everything; app alive but silent, stay off the fds and log loudly.
+  A claim arriving after draining began is handled as an ordinary attach.
+  The database records attach state as an observability hint only; it is
+  never the arbiter, because a persisted row cannot answer a liveness
+  question.
+
+This arbitration was checked against the restart script's actual sequencing
+(daemon bounces first, then the app): during a full development restart,
+attached sessions keep painting through the daemon swap and go dark only for
+the app's own bounce; detached sessions get a few seconds of harmless
+backpressure. The daemon-only restart path — a live app throughout — is the
+scenario the claim handshake exists for, and ordinary development restarts
+exercise it continuously.
+
+### Input is not arbitrated
+
+Reading the master is exclusive; writing is not. The daemon keeps its master
+dup for the session's whole life and injects input (`tbd terminal send`,
+queued prompts, supervision nudges) by writing to it directly, whether or not
+a viewer is attached. This retires a real bug class: today a daemon keystroke
+is addressed to a tmux pane coordinate resolved at send time and can hit the
+wrong session after pane reuse; a write to an fd bound to the session at
+spawn cannot miss.
+
+Resize follows the reader: whichever process currently reads the master owns
+`TIOCSWINSZ` — the app drives it from the view while attached, the daemon
+holds the last-known size while detached.
+
+## Detached output and the headless emulator
+
+While no viewer is attached, the daemon drains each session's master into a
+headless instance of SwiftTerm's core `Terminal` — the same parser the viewer
+uses, so the detached picture and the attached picture can never disagree on
+interpretation, and every escape-sequence fix benefits both. This repo's own
+history is the argument against a purpose-built minimal parser: the
+`ANSIEscape` component missed `CSI <>=`, `ESC 7/8`, and charset switching,
+and a `hasPrefix` broke title parsing — the escape-sequence long tail is
+precisely what bites.
+
+The emulator keeps a bounded in-memory scrollback (on the order of 10k lines;
+a plain constant, not a flag) and is **not persisted to disk**. A daemon
+restart starts it empty; the jiggle on re-adoption makes full-screen programs
+repaint into the fresh emulator, and the durable record of an agent's work is
+its transcript, which persists on disk independently of any terminal.
+
+### Two stores, reconciled on demand
+
+While a viewer is attached the daemon reads nothing, so its emulator is
+frozen at the moment of attach. This design accepts that — the **two-store
+model** — rather than having the app stream a copy of everything it reads back
+to the daemon:
+
+- The app's SwiftTerm is authoritative while attached; the daemon's emulator
+  is authoritative while detached.
+- When the daemon needs an attached session's screen (supervision, `tbd
+  terminal read`), it **pulls a snapshot from the app** over the existing
+  RPC; the app serializes its live terminal state on request. Machine reads
+  are therefore always current, from whichever store is live.
+- Terminal scrollback history has a hole across each attached period (minus
+  whatever the kernel buffer held at the edges). This is the accepted cost,
+  and it is cheap here specifically: the artifact users actually mine history
+  from is the transcript, and the dominant workload is a full-screen TUI that
+  manages its own display anyway.
+
+The alternative — the app forwarding every chunk it reads to the daemon so
+one unbroken history exists — was rejected because it re-imposes roughly the
+tmux parse-everything CPU bill on the loaded machine this design targets
+(relocated off the paint path, but standing), to buy a property (gapless
+terminal scrollback) that transcripts already provide where it matters. See
+Rejected alternatives.
+
+### The jiggle
+
+Whenever the reader changes — attach, detach, app death, daemon re-adoption —
+the incoming reader briefly wiggles the tty size (grow one column, restore)
+to force a SIGWINCH, so full-screen programs repaint into the reader's
+emulator. This is iTerm2's `WinSizeController` "jiggle", wired here to every
+handoff edge rather than only orphan adoption (in iTerm2 the plain reattach
+path gets no jiggle, and its resize ioctl is guarded by only-if-changed, so
+the common same-geometry reattach heals nothing — a gap, not a choice; see
+the companion iTerm2 record). The jiggle heals screen *state*; it cannot
+recover missing history and does nothing for scrolled-away output, which is
+why it complements rather than replaces the daemon's emulator.
+
+## Feature parity
+
+Everything TBD does through tmux today, and its replacement:
+
+- **Session persistence across app and daemon restarts** — the holder; strictly
+  better than today, since attached sessions now also survive daemon restarts
+  without interruption.
+- **Reattach shows the last screen** — snapshot preamble from the daemon's
+  emulator, plus jiggle.
+- **Input injection** (`tbd terminal send`, queued prompts) — daemon writes to
+  its master dup.
+- **Machine reads** (`tbd terminal read`, the interactive-login driver, the
+  hibernation pending-input rail, the embedded supervision babysitter) — the
+  daemon renders its own emulator when it is the reader and pulls a snapshot
+  from the app when a viewer is attached. This replaces `capture-pane` with a
+  first-party interface, which the no-TUI-scraping rule already pushes
+  toward; the three sanctioned scrapers migrate onto it as part of this work.
+- **Hibernation and revive** — hibernate instructs the holder to terminate its
+  child (the holder reports status and exits); revive spawns a fresh holder.
+  The input-veto and queued-prompt flags keep their semantics, now gating
+  daemon writes to the master instead of tmux `send-keys`.
+- **Scrollback** — bounded emulator history while detached, SwiftTerm's own
+  history while attached, transcripts as the durable record. tmux's 50k-line
+  retention is not matched and deliberately so.
+
+### Out of scope, structurally
+
+- **External attach from another terminal emulator** is not carried forward.
+  It existed only as a diagnostic and is being unshipped independently of
+  this design.
+- **Remote or ssh attach** cannot exist in this design: the interface is a
+  file descriptor, and a file descriptor cannot cross a machine boundary.
+  Every system in the survey that dropped a mux server also dropped this, on
+  purpose. If remote viewing is ever wanted it is a separate streaming
+  feature, not a holder feature. Sessions on remote hosts keep whatever
+  transport they have today; this migration is local-machine only.
+- **Survival of reboot or GUI logout** — not provided, exactly as today.
+
+## Reconciliation
+
+Per the named-reconciler doctrine, the new durable resources are the holder
+processes, their socket files, and (transitively) the agent processes under
+them. Orphans can arise because holder creation is non-transactional against
+the process table — the same argument as every other resource here.
+
+- **`WorktreeLifecycle+Reconcile`** swaps its ground truth from tmux windows
+  and servers to the **holder inventory**: enumerate holder sockets under the
+  sessions directory, connect, and handshake (yielding holder pid, child pid,
+  child status, and launch parameters). A session row with no live holder is
+  marked exited through the existing handling. A live holder with no session
+  row is a half-finished deletion: the daemon kills the child and the holder.
+  **Kill, not adopt** — iTerm2 adopts unclaimed survivors into new tabs
+  because its live processes are the only copy of anything; TBD's transcripts
+  persist independently, so adoption would buy a mystery-session UI and
+  little else, and it cuts against the database-is-intent model the other
+  reconcilers already follow.
+- **`OrphanGC`** (hourly, gated on `gcEnabled` as today) gains two sweeps:
+  unlink socket files with no listening process behind them, and re-run the
+  holder-versus-database check between startup reconciles. The socket sweep
+  is mandatory, not hygienic: a SIGKILLed holder cannot unlink its own
+  socket, and the tmux precedent on this machine was ~7,100 dead socket
+  files, because tmux unlinks lazily on rebind and nothing ever rebound.
+- **`AgentReaper`** keeps its current role unchanged: a child whose holder
+  died is re-parented to launchd and lands in the reaper's existing
+  by-session-identity sweep.
+
+## Rollout
+
+This wholesale-replaces a load-bearing path, so it ships behind a default-off
+flag with a soak and a stated graduation plan.
+
+- **Flag.** `pty_holder_enabled`, a `config` column added by a `.sql`
+  migration with **no SQL `DEFAULT` clause**, so unset stays a third state;
+  the shipped default lives solely in `?? Config.ptyHolderDefault` (`false`)
+  in `ConfigRecord.toModel()`. Tests cover all three states: a pre-migration
+  row reads NULL rather than `0`, NULL follows the constant, and an explicit
+  `0` survives a change to the constant.
+- **Granularity: spawn time only.** A session records its transport (`tmux`
+  or `holder`) in its database row at creation and keeps it for life; the app
+  attaches by whichever transport the row names. Flipping the flag never
+  migrates a running session — the fleet converges as sessions naturally end
+  and respawn. Live migration (extracting a pty from a running tmux server)
+  is rejected; see below.
+
+  The flag therefore gates **spawning, not servicing**: the flag is consulted
+  only when a session is created, and both transports' machinery (attach
+  paths, the daemon's arbitration and drain, each reconciler's ground-truth
+  sweep) runs whenever any session row of that transport exists, regardless
+  of the flag's current value. Toggling in either direction strands nothing:
+  off → on leaves every running tmux session on tmux and routes only new
+  spawns to holders; on → off leaves every running holder session on its
+  holder and routes new spawns back to tmux.
+- **Coexistence cost, stated honestly.** Both paths live until graduation:
+  two attach paths in the app, two reconciliation ground truths, and a
+  doubled test surface. Each gated branch gets tests for flag-on and
+  flag-off behavior.
+- **Soak.** Enable on a development machine running a real fleet at real
+  load. Ordinary development restarts exercise the re-adoption path
+  continuously — the hardest code in the design gets adversarial testing for
+  free. Graduation gates on field evidence: no double-reader incidents, the
+  reconcilers holding (no growth in unclaimed holders or socket litter), and
+  latency flatness confirmed under load by the existing probes in
+  `scripts/diag/`.
+- **Graduation.** Flip `Config.ptyHolderDefault` to `true` — a one-line
+  change that reaches everyone who never chose while preserving every
+  explicit opt-out. Removing the tmux path entirely is separate, later work,
+  undertaken once no `tmux`-transport session rows remain in the wild.
+
+New delays introduced by this design — the re-adoption grace window, the
+holder's exit-report timeout, any handoff ack timeout — take an injected
+clock (`clock: any Clock<Duration> = ContinuousClock()`), per the repo rule.
+
+## Relationship to the build-isolation work
+
+Issue #720 (isolating development builds from the production daemon, tmux
+server, and database) interacts with this design in both directions: it
+reduces how often the production daemon restarts, shrinking one window the
+holder covers, while the holder makes daemon restarts nearly free for live
+sessions, shrinking the pain that motivates it. The two are deliberately
+**independent, with no ordering dependency**: whichever lands first makes the
+other somewhat less urgent, nothing in either design assumes the other, and
+re-scoping #720 is that issue's own decision, not this spec's.
+
+## Learnings from iTerm2
+
+iTerm2 is the shipping precedent for the core of this design, and its source
+is a catalogue of paid-for lessons. **Implementers and reviewers of this work
+should read the companion record
+[`iterm2-session-restoration.md`](../research/2026-08-30-terminal-session-persistence/iterm2-session-restoration.md)
+and consult the iTerm2 source before re-deriving any of the following**, each
+of which is carried into this design:
+
+- **The fd rides on a one-byte `sendmsg`.** `sendmsg` with an `SCM_RIGHTS`
+  control block has been observed failing with `EMSGSIZE` at payload sizes
+  the man page permits, and an empty payload fails too; iTerm2 caps the
+  fd-carrying message at exactly one byte and sends the rest with a plain
+  `write()` — and never re-sends the fd on a short write, or the recipient
+  materializes duplicate descriptors. TBD's existing FD sidecar already
+  navigates fd-number recycling; the holder protocol adopts the one-byte
+  convention as well.
+- **Reads on the fd channel must be serialized by construction** — exactly
+  one method may read after the handshake, or interleaved partial reads
+  corrupt the stream.
+- **Creation races are settled by an advisory lock file** held for the
+  server's whole life; connecting to a busy server is settled separately by
+  accept-then-reject with a sentinel version.
+- **SIGHUP is not enough on user-initiated close.** A supervised child can
+  ignore SIGHUP, leaving the supervisor alive to be adopted later; closing a
+  session must make the holder forget the child (close the master, stop
+  reporting) and then kill, which is why the protocol carries a forget verb.
+- **`sun_path` shapes the feature.** Check the socket path length before
+  every bind and connect; keep the rendezvous directory shallow.
+- **`setsid()` in the supervisor is load-bearing**, and SIGHUP/SIGPIPE must
+  be ignored, or a crash of the spawning process (or a `sendmsg` into a dead
+  peer) takes the supervisor with it.
+- **The jiggle exists and works** — and iTerm2 wires it only to orphan
+  adoption, leaving its common reattach path unhealed behind an
+  only-if-changed resize guard. This design wires it to every reader
+  handoff.
+- **Content and process persist on different clocks** unless something keeps
+  the detached picture current. iTerm2 saves screen contents only on losing
+  focus and at clean quit, so a crash restores a screen as stale as the last
+  click away, with no banner admitting it. The daemon's always-on drain is
+  this design's answer; the residual skew (the attached-period scrollback
+  hole) is accepted and documented above.
+
+## Rejected alternatives
+
+- **Keeping tmux and sharding servers more finely.** Measured: a busy server
+  against a private one-pane server differed by 34.1 vs 36.5 ms p50 under
+  load — pane count per server is not the lever; the wakeups are.
+- **The daemon holds the masters itself (no holder).** A daemon restart is
+  precisely one of the windows persistence exists to cover, and on a
+  development machine the daemon restarts constantly. The holder exists to
+  make the daemon boring to restart.
+- **Per-repo or global holders.** A global holder is a single crash away from
+  SIGHUPing the entire fleet and is the one process that can never be
+  restarted for an upgrade (the successor-spawn fd-inheritance dance is the
+  known workaround, and it is surgery). Per-repo shrinks but keeps both
+  problems and adds child-table multiplexing to the protocol. Per-session
+  makes blast radius one session and upgrade a non-event.
+- **The holder drains its own pty (headless emulator in the holder).** Every
+  minimal-supervisor precedent (shpool, zmx, the Zed proposal) puts the
+  emulator in the persistent process — but each of those has no other
+  persistent process. TBD has an always-on daemon, so putting the emulator
+  there keeps the holder near-featureless and makes the crashiest, most
+  frequently updated code freely restartable and upgradable. The residual
+  window — daemon and app both dead — blocks writers without losing data and
+  is bounded by daemon supervision.
+- **The app streams attached-period output to the daemon for one unbroken
+  history.** Rejected as a standing per-byte tax (roughly tmux's parse bill,
+  relocated) on exactly the loaded machine this design targets, purchasing
+  gapless terminal scrollback that transcripts already provide where it
+  matters. The two-store model with pull-on-demand keeps machine reads
+  current at zero steady-state cost.
+- **State handback at detach** (the app serializes its full terminal state to
+  the daemon when it detaches). Its worst case sits on the worst edge: an
+  app crash is a detach with no handback, leaving both a permanent history
+  gap and a stale emulator resuming mid-stream, and it requires a full
+  SwiftTerm state export/import surface exercised only at failure time.
+- **A purpose-built minimal VT parser.** The `ANSIEscape` scar tissue is the
+  refutation: the escape-sequence long tail is where the bugs live, and a
+  second interpretation of the stream can disagree with the viewer's.
+  Likewise **a third-party headless VT** (e.g. libghostty-vt): well-tested,
+  but a new dependency and a second interpretation; SwiftTerm headless gives
+  one parser for both pictures.
+- **Persisting the daemon's emulator to disk.** Buys a cold-restorable
+  picture across daemon crashes at the cost of a write cadence, a file
+  format, and a new durable resource needing a reclaimer — for a screen the
+  jiggle heals and a history the transcript already holds.
+- **Live-migrating running sessions between transports at flag flip.**
+  Extracting a live pty from a tmux server is ptrace-grade surgery with no
+  payoff; sessions converge to the new transport as they naturally recycle.
+- **Adopting unclaimed holders into the UI** (iTerm2's orphan adoption).
+  TBD's database records intent and its transcripts survive independently; a
+  row-less holder is a half-finished deletion, not a treasure, and adoption
+  UI is real complexity.
+- **Predictive local echo (the mosh approach) instead of removing tmux.**
+  Prediction speculates only about the echo of the user's own printable
+  keystrokes; it does nothing for program output, scrolling, or a
+  full-screen TUI repainting — which is most of what a fleet of streaming
+  agents shows. It is a complement to a fast path, not a substitute.
