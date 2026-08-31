@@ -668,6 +668,20 @@ flag with a soak and a stated graduation plan.
   a wakeup in the echo path that the design says it does not, and graduation
   does not proceed on the theory that the absolute number still looks small.
 
+  **The run must exercise a real holder-backed session, not the raw-pty arm
+  standing in for one.** The existing probes measure a raw pty and tmux; the
+  raw arm is *expected* to be the holder's attached echo path exactly, because
+  by construction there is no process between the app and the master once a
+  viewer is attached — the holder never reads, and the daemon has stepped off.
+  But that is the design's central claim, and a graduation gate that assumes it
+  is measuring nothing. So the load arm runs against sessions actually spawned
+  on the holder transport with a viewer attached, and the raw-pty arm stays as
+  the reference the holder path is expected to match: if the two diverge, the
+  gap is a process in the path that should not be there, and finding it is the
+  entire value of the measurement. The detached path is a separate question the
+  flatness bound does not speak to at all — nobody is typing into a detached
+  session — and the reconciler and drain evidence cover it instead.
+
   **"No double-reader violations" is only evidence if something can see one.**
   A double read is silent by construction — each `read()` takes bytes the other
   reader never sees — so an absence of reports is not an absence of the fault,
