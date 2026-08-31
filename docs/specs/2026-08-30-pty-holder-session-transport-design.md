@@ -305,15 +305,46 @@ backpressure. The daemon-only restart path — a live app throughout — is the
 scenario the claim handshake exists for, and ordinary development restarts
 exercise it continuously.
 
-### Input is not arbitrated
+### Input is not arbitrated, but it is serialized
 
 Reading the master is exclusive; writing is not. The daemon keeps its master
 dup for the session's whole life and injects input (`tbd terminal send`,
-queued prompts, supervision nudges) by writing to it directly, whether or not
-a viewer is attached. This retires a real bug class: today a daemon keystroke
-is addressed to a tmux pane coordinate resolved at send time and can hit the
-wrong session after pane reuse; a write to an fd bound to the session at
-spawn cannot miss.
+queued prompts, supervision nudges) by writing to it. This retires a real bug
+class: today a daemon keystroke is addressed to a tmux pane coordinate
+resolved at send time and can hit the wrong session after pane reuse; a write
+to an fd bound to the session at spawn cannot miss.
+
+It also introduces one, which the design must answer rather than inherit.
+Today every injection funnels through the single tmux server process, so
+tmux serializes daemon input against user keystrokes for free. Here the app
+and the daemon hold separate fds to the same master, and a `write()` to a tty
+is not atomic — so a daemon injection landing mid-keystroke can shear. The
+sharp case is bracketed paste: user bytes arriving between `ESC[200~` and
+`ESC[201~` are swallowed into the pasted text, and a torn marker leaves the
+TUI's paste state desynchronized. Rare, and recoverable by retyping, but it
+is a regression against today and it is not acceptable to leave implicit.
+
+Three rules close it, in increasing order of how often they apply.
+
+- **Every injection is one message.** The daemon completes partial writes in
+  a loop while holding that session's write lock, so a payload is never
+  interleaved with another *daemon* write. A bracketed paste is one message
+  including both markers — the framing is never split across a decision.
+- **While a viewer is attached, the daemon injects through the app**, over
+  the sidecar frames that already carry input for the control-mode path. The
+  app is then the session's only writer as well as its only reader, and the
+  concurrency simply does not exist. This is the mirror of how reads already
+  work: pull from whichever store is live rather than reaching past it.
+- **The app is not allowed to become a single point of failure for
+  injection.** If it does not acknowledge within a bounded deadline on an
+  injected clock, the daemon writes directly and accepts the shear risk.
+
+That last fallback is deliberately fail-*open*, where the read side's
+safety rail fails closed, and the asymmetry is the point: an unanswered read
+can be resolved by refusing to act on a stale screen, but an unanswered
+injection that is simply dropped leaves an agent waiting forever for a prompt
+that never arrives. A rare sheared keystroke is the smaller harm than a
+queued prompt that silently never lands.
 
 Resize follows the reader: whichever process currently reads the master owns
 `TIOCSWINSZ` — the app drives it from the view while attached, the daemon
