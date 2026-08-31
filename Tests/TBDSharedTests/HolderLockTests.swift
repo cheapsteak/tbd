@@ -110,11 +110,41 @@ struct HolderLockTests {
         // process, but the ordering costs nothing and the failure would be
         // baffling.
         try #require(lock.fileDescriptor > 2)
-        posix_spawn_file_actions_adddup2(&actions, lock.fileDescriptor, 9)
-        posix_spawn_file_actions_adddup2(&actions, toChild[0], 0)
-        posix_spawn_file_actions_adddup2(&actions, fromChild[1], 1)
+        // `dup2(fd, fd)` is a no-op that succeeds WITHOUT clearing FD_CLOEXEC,
+        // so if the lock already sits on the target number the descriptor is
+        // closed at exec, `echo K >&9` fails, and the child dies before it can
+        // report — read() then returns EOF and this test fails for a reason
+        // that has nothing to do with locking. Whether the lock lands on 9
+        // depends on how many descriptors sibling tests hold open at the time,
+        // which is why this only reddens when the suite runs together.
+        // `dup` hands back the lowest free number, which cannot be the one
+        // still occupied by the original.
+        var lockSource = lock.fileDescriptor
+        var duplicated: Int32 = -1
+        if lockSource == 9 {
+            duplicated = dup(lockSource)
+            try #require(duplicated >= 0, "could not move the lock off the target descriptor")
+            lockSource = duplicated
+        }
+        defer { if duplicated >= 0 { close(duplicated) } }
+        // File actions run IN ORDER, and the ordering here is load-bearing.
+        //
+        // The closes come first: pipe fds are handed out by number, and under a
+        // parallel suite either unwanted end can land on 9. Closing after the
+        // lock's dup2 would then destroy the descriptor we just placed there —
+        // `echo K >&9` fails, a non-interactive shell exits on a redirection
+        // error, and the parent sees EOF instead of the ready byte. That is a
+        // fd-numbering coincidence, so it reddens only when siblings run
+        // alongside and hold enough descriptors open.
+        //
+        // The stdio dup2s come next, before the lock's, so that if a pipe end
+        // occupies 9 it has already been copied to its final home by the time
+        // the lock overwrites it.
         posix_spawn_file_actions_addclose(&actions, toChild[1])
         posix_spawn_file_actions_addclose(&actions, fromChild[0])
+        posix_spawn_file_actions_adddup2(&actions, toChild[0], 0)
+        posix_spawn_file_actions_adddup2(&actions, fromChild[1], 1)
+        posix_spawn_file_actions_adddup2(&actions, lockSource, 9)
 
         var pid: pid_t = 0
         let arguments = ["sh", "-c", script]
