@@ -590,10 +590,19 @@ extension WorktreeLifecycle {
                 // have been created. `windowExists` can therefore only ever
                 // answer "gone" for them, and both outcomes below — the park
                 // and the delete — would then destroy a live session on the
-                // very daemon restart the transport exists to survive. Their
-                // ground truth is the holder inventory, which is a separate
-                // sweep. This loop is about tmux, and has to say so before it
-                // reaches either arm of the fork.
+                // very daemon restart the transport exists to survive. This
+                // loop is about tmux, and has to say so before it reaches
+                // either arm of the fork.
+                //
+                // **Nothing reconciles holder rows yet.** Their ground truth
+                // is the holder inventory, and the sweep that would consult it
+                // is Milestone B's work — see `HolderSpawner`'s doc comment and
+                // the spec's Reconciliation section. So this guard is not
+                // "handled elsewhere"; it is "not handled at all, and wrongly
+                // destroying them is worse than leaving them alone". That gap
+                // is what keeps `pty_holder_enabled` off outside a development
+                // machine, and it should stay visible here until a real sweep
+                // closes it.
                 guard terminal.transport == .tmux else { continue }
 
                 var windowAlive = false
