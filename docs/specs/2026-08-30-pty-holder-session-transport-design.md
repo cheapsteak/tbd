@@ -504,12 +504,24 @@ the process table — the same argument as every other resource here.
   daemon (a stale daemon from a different checkout is a known hazard on a
   development machine) — and must never feed the exited path. **A rejected
   connection is terminal for this sweep in both directions**: not exited, and
-  not killed either. Killing requires positive proof of ownership — a
-  completed handshake — and a rejection is the absence of that proof, so a
-  holder that will not talk to us is left alone and logged, never reclaimed on
-  the theory that it has no row. Only a holder that handshakes and then turns
-  out to have no session row is a half-finished deletion, and that is the case
-  where the daemon kills the child and the holder.
+  not killed either — a holder that will not talk to us is left alone and
+  logged, never reclaimed on the theory that it has no row.
+
+  **A completed handshake is proof of liveness, not of ownership**, and only
+  ownership licenses a kill. Two installations can share a holders directory —
+  the default `TBD_HOME` is shared by every checkout on a machine — so
+  "reachable and absent from *my* database" is exactly the shape a foreign but
+  perfectly healthy session presents. The holder therefore carries an **owner
+  token**, given at spawn and returned by every handshake: a UUID minted once
+  per installation and persisted in the `config` row. It identifies the
+  installation rather than the process, so it survives daemon restarts — a
+  token that did not would strand a daemon from reclaiming the holders it
+  spawned a moment earlier, which is the common case, not the exotic one. The
+  sweep kills only a holder whose token matches its own; a mismatch is left
+  alone and logged, exactly like a rejection. Only a holder that handshakes,
+  proves the same owner, and still has no session row is a half-finished
+  deletion, and that is the case where the daemon kills the child and the
+  holder.
 
   **Row-lessness is only meaningful once creation can no longer be in flight.**
   Reconcile runs on demand from RPC handlers, not only at startup, so it can
