@@ -332,6 +332,10 @@ public enum RPCMethod {
     /// explains.
     public static let configSetRemotePeerMessagingEnabled =
         "config.setRemotePeerMessagingEnabled"
+    /// The pty-holder transport gate (`pty_holder_enabled`) — the feature's only
+    /// opt-in. Reading needs no method of its own: `config.get` already carries
+    /// the resolved value.
+    public static let configSetPtyHolderEnabled = "config.setPtyHolderEnabled"
     /// Everything TBD knows about the peer-messaging bridge, for `tbd peer list`.
     /// Read-only and unaddressed: it takes no params and never actuates.
     public static let peerStatus = "peer.status"
@@ -1605,6 +1609,17 @@ public struct ConfigSetRemoteBackendsParams: Codable, Sendable {
 /// state, so an operator who turns the feature off stays off when the shipped
 /// default graduates.
 public struct ConfigSetPeerMessagingEnabledParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setPtyHolderEnabled` — the pty-holder transport gate
+/// (default OFF during soak), which decides whether a *new* session is spawned
+/// onto a holder rather than into a tmux window. Writing either value is the
+/// explicit gesture that lifts the column out of its NULL "never chose" state,
+/// so an operator who turns the feature off stays off when the shipped default
+/// graduates.
+public struct ConfigSetPtyHolderEnabledParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

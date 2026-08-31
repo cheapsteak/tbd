@@ -87,6 +87,12 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// default, so `nil` here means "never chose" rather than "off". Resolve it
     /// through `Config.remotePeerMessagingDefault`, never through `?? false`.
     var remote_peer_messaging_enabled: Bool?
+    /// The pty-holder transport gate. **Genuinely tri-state**, same shape as
+    /// `remote_peer_messaging_enabled`: the
+    /// `20260831055718_config_pty_holder` migration carries no SQL default, so
+    /// `nil` here means "never chose" rather than "off". Resolve it through
+    /// `Config.ptyHolderDefault`, never through `?? false`.
+    var pty_holder_enabled: Bool?
     /// JSON-encoded `[String: String]` remote create-param defaults (machine
     /// scope), keyed by the provider's own field names. Nil/absent means no
     /// opinion at this level — every field falls through to its
@@ -116,6 +122,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter remotePeerMessagingDefault: same shape once more, for
     ///   `remote_peer_messaging_enabled` — the remote peer messaging bridge's
     ///   soak gate.
+    /// - Parameter ptyHolderDefault: same shape once more, for
+    ///   `pty_holder_enabled` — the pty-holder transport's soak gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -123,7 +131,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         gcProfileDirsDefault: Bool = Config.gcProfileDirsEnabledDefault,
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
         gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault,
-        remotePeerMessagingDefault: Bool = Config.remotePeerMessagingDefault
+        remotePeerMessagingDefault: Bool = Config.remotePeerMessagingDefault,
+        ptyHolderDefault: Bool = Config.ptyHolderDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -181,6 +190,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // And once more, for the remote peer messaging bridge's gate —
             // NOT `?? false`.
             remotePeerMessagingEnabled: remote_peer_messaging_enabled ?? remotePeerMessagingDefault,
+            // And once more, for the pty-holder transport's gate — NOT `?? false`.
+            ptyHolderEnabled: pty_holder_enabled ?? ptyHolderDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults)
         )
     }
@@ -576,6 +587,21 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET remote_peer_messaging_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the pty-holder transport gate (default OFF, soaking). It gates
+    /// which transport a session is *spawned* onto; a session records its
+    /// transport at creation and keeps it for life, so flipping this never
+    /// migrates a running session. The column is written on every call, because
+    /// writing either value is the explicit gesture that lifts it out of NULL
+    /// forever after.
+    public func setPtyHolderEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET pty_holder_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }
