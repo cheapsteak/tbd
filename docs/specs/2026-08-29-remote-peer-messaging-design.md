@@ -179,11 +179,14 @@ source it from the remote session's own registry row rather than assert it. That
 row's existence already encodes both a new-enough CLI and the absence of the
 messaging killswitches, which cannot be inferred any other way. A session
 running a different agent, a shell, or a Claude Code with messaging inactive
-simply has no row, so the field is absent and the session is never shadowed.
+simply has no row, so the field is absent.
 
-TBD shadows a session only when `protocol` matches the protocol the local
-sessions speak. Frames whose `msgV` differs from the negotiated protocol are
-dropped and logged.
+The field is a declaration in the inventory, not a gate. What causes TBD to
+shadow one of a provider's sessions is the `peer` line that announces it on the
+`messages` stream: the `session` id on that line joining to a worktree row TBD
+has, and the `protocol` on that line matching the one the local sessions speak.
+Frames whose `msgV` differs from the negotiated protocol are dropped and
+logged.
 
 ## The local roster
 
