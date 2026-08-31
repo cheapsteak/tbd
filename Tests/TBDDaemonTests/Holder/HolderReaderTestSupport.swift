@@ -30,6 +30,11 @@ final class HolderProcessFixture {
     let sessionID: UUID
     let owner: HolderOwnerToken
     let handle: HolderHandle
+    /// The connection the spawner's handshake ran on, handed straight over.
+    /// Reconnecting instead would race the holder's notice that the handshake
+    /// connection had gone, and be answered with the busy sentinel for a slot
+    /// that is already free.
+    let client: HolderClient
     private var torndown = false
     private var reaped = false
 
@@ -84,19 +89,31 @@ final class HolderProcessFixture {
         let executable = try #require(
             locateExecutable(), "TBDHolder must be built beside the test bundle")
         let spawner = HolderSpawner(executableURL: executable)
-        let handle = try await spawner.spawn(
+        let spawned = try await spawner.spawn(
             sessionID: session,
             launch: launch(command: command),
             owner: token,
             environment: environment(home: home))
-        return HolderProcessFixture(home: home, sessionID: session, owner: token, handle: handle)
+        return HolderProcessFixture(
+            home: home,
+            sessionID: session,
+            owner: token,
+            handle: spawned.handle,
+            client: spawned.client)
     }
 
-    private init(home: String, sessionID: UUID, owner: HolderOwnerToken, handle: HolderHandle) {
+    private init(
+        home: String,
+        sessionID: UUID,
+        owner: HolderOwnerToken,
+        handle: HolderHandle,
+        client: HolderClient
+    ) {
         self.home = home
         self.sessionID = sessionID
         self.owner = owner
         self.handle = handle
+        self.client = client
     }
 
     /// Kills the holder AND the job, in that order, then removes the scratch

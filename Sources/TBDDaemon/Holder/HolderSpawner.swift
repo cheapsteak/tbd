@@ -15,6 +15,28 @@ struct HolderHandle: Sendable, Equatable {
     var socketPath: String
 }
 
+/// A spawned holder, together with **the connection its handshake ran on**.
+///
+/// The connection is returned rather than closed because the holder serves one
+/// client at a time and learns the previous one has gone only when its `poll`
+/// loop next reads EOF on that socket. A spawner that closed its handshake
+/// connection and returned would leave every caller to reconnect into that
+/// window, where the holder legitimately answers the busy sentinel for a slot
+/// that is already free. Handing the live connection on removes the reconnect,
+/// so the window cannot be entered: the caller attaches over the connection the
+/// handshake already proved good, and pays one fewer connect per session.
+///
+/// **Ownership is the client's, and it is released by letting go.** `client` is
+/// an actor whose `deinit` closes the socket, so a caller that never uses it
+/// frees the holder's client slot by dropping the result; a caller that wants
+/// the slot free sooner calls `close()`, and the client reconnects on its next
+/// verb like any other. Nothing is returned on a failed spawn — every
+/// connection the spawner opened on the way to one is closed before it throws.
+struct HolderSpawnResult: Sendable {
+    var handle: HolderHandle
+    var client: HolderClient
+}
+
 /// Spawns one holder process per session and waits for it to become reachable.
 ///
 /// The ordering in `spawn` is the contract rather than a preference, and each
@@ -33,7 +55,10 @@ struct HolderHandle: Sendable, Equatable {
 ///   6. The daemon drops its own copy of the lock, so the holder alone holds it
 ///      and the kernel drops it when the holder dies.
 ///   7. The socket is polled for reachability on the injected clock, then
-///      handshaken.
+///      handshaken — and the connection that answered is **returned, not
+///      closed**, because a caller made to reconnect would race the holder's
+///      notice that the handshake connection went away. See
+///      `HolderSpawnResult`.
 ///   8. A holder that never answers is judged by whether its socket exists,
 ///      never by the handshake alone: no socket means it never bound and so
 ///      never forked, which is the only state where killing it can orphan
@@ -144,7 +169,7 @@ struct HolderSpawner {
         launch: HolderLaunchRequest,
         owner: HolderOwnerToken,
         environment: [String: String]
-    ) async throws -> HolderHandle {
+    ) async throws -> HolderSpawnResult {
         let socketPath = try HolderRendezvous.socketPath(sessionID: sessionID, environment: environment)
         let lockPath = try HolderRendezvous.lockPath(sessionID: sessionID, environment: environment)
         let holdersDir = TBDConstants.holdersDir(environment: environment)
@@ -205,9 +230,9 @@ struct HolderSpawner {
         lock.release()
         lockReleased = true
 
-        let description: HolderChildDescription
+        let attached: (description: HolderChildDescription, client: HolderClient)
         do {
-            description = try await awaitBinding(socketPath: socketPath)
+            attached = try await awaitBinding(socketPath: socketPath)
         } catch {
             throw resolveUnreachableHolder(
                 holderPID: holderPID,
@@ -217,14 +242,17 @@ struct HolderSpawner {
                 cause: error)
         }
 
+        let description = attached.description
         Self.logger.info(
             """
             spawned holder pid \(holderPID, privacy: .public) for session \
             \(sessionID.uuidString, privacy: .public): child \
             \(description.childPID, privacy: .public) on \(description.ttyName, privacy: .public)
             """)
-        return HolderHandle(
-            holderPID: holderPID, childPID: description.childPID, socketPath: socketPath)
+        return HolderSpawnResult(
+            handle: HolderHandle(
+                holderPID: holderPID, childPID: description.childPID, socketPath: socketPath),
+            client: attached.client)
     }
 
     // MARK: - A holder that was spawned but never answered
@@ -434,21 +462,31 @@ struct HolderSpawner {
     // MARK: - Waiting for the rendezvous
 
     /// Polls until the socket answers a handshake, bounded on the **injected**
-    /// clock.
+    /// clock, and returns the connection that answered.
+    ///
+    /// **The winning connection is kept open**, which is what makes the spawn
+    /// hand-off raceless — see `HolderSpawnResult`. Every connection that did
+    /// *not* answer is closed here, on both the retry and the rejection paths,
+    /// so a failed spawn leaves nothing attached to the holder's one client
+    /// slot.
     ///
     /// Elapsed time is accumulated from the poll interval rather than measured
     /// against a deadline because `any Clock<Duration>` pins `Duration` but not
     /// `Instant`: instant arithmetic does not typecheck through the
     /// existential, and a limit expressed as "how much waiting has been spent"
     /// is what a fake clock can drive.
-    private func awaitBinding(socketPath: String) async throws -> HolderChildDescription {
+    private func awaitBinding(
+        socketPath: String
+    ) async throws -> (description: HolderChildDescription, client: HolderClient) {
         var waited: Duration = .zero
         while true {
             let client = HolderClient(socketPath: socketPath, receiveTimeout: handshakeTimeout)
             do {
                 let description = try await client.describe()
-                await client.close()
-                return description
+                // The handshake budget is a startup deadline, not a session
+                // one, and this connection is about to become a session's.
+                await client.adoptReceiveTimeout(HolderClient.defaultReceiveTimeout)
+                return (description, client)
             } catch HolderClient.Error.rejected(let version) {
                 await client.close()
                 throw Error.rejected(version: version)

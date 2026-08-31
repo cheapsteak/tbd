@@ -38,8 +38,8 @@ struct HolderReaderTests {
             command: "for i in $(seq 1 5000); do echo line-$i; done")
         defer { fixture.tearDown() }
 
-        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
-        let (_, ptyFD) = try await adoptPTY(via: client)
+        let client = fixture.client
+        let (_, ptyFD) = try await client.handOverPTY()
         await client.close()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
@@ -73,8 +73,8 @@ struct HolderReaderTests {
             command: "printf 'BRAVO\\n'; sleep 0.4; printf 'CHARLIE\\n'")
         defer { fixture.tearDown() }
 
-        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
-        let (_, ptyFD) = try await adoptPTY(via: client)
+        let client = fixture.client
+        let (_, ptyFD) = try await client.handOverPTY()
         await client.close()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
@@ -98,8 +98,8 @@ struct HolderReaderTests {
             command: "printf 'ALPHA\\n'; sleep 30")
         defer { fixture.tearDown() }
 
-        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
-        let (_, ptyFD) = try await adoptPTY(via: client)
+        let client = fixture.client
+        let (_, ptyFD) = try await client.handOverPTY()
         await client.close()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
@@ -125,8 +125,8 @@ struct HolderReaderTests {
             command: "while IFS= read -r line; do printf 'GOT:%s\\n' \"$line\"; done")
         defer { fixture.tearDown() }
 
-        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
-        let (_, ptyFD) = try await adoptPTY(via: client)
+        let client = fixture.client
+        let (_, ptyFD) = try await client.handOverPTY()
         await client.close()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
@@ -157,8 +157,8 @@ struct HolderReaderTests {
             command: "printf 'DELTA\\n'; sleep 30")
         defer { fixture.tearDown() }
 
-        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
-        let (_, ptyFD) = try await adoptPTY(via: client)
+        let client = fixture.client
+        let (_, ptyFD) = try await client.handOverPTY()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
         try await reader.start()
@@ -257,34 +257,6 @@ private func awaitJobExit(
     }
     guard reaped else { return nil }
     return try? await client.describe().status
-}
-
-/// Takes the pty master from a freshly spawned holder, retrying a refusal.
-///
-/// The holder serves **one client at a time**, and it learns that the previous
-/// one has gone only when its poll loop next reads EOF on that socket. The
-/// spawner closes its handshake connection and returns immediately, so a
-/// hand-over issued in the next microsecond can legitimately be answered with
-/// the busy sentinel — the slot is free, the holder has not noticed yet. It is
-/// a race the wire cannot avoid and the caller must absorb, so every consumer
-/// of a just-spawned holder needs this retry; here it is bounded, and a
-/// refusal that outlives the budget is rethrown rather than swallowed.
-private func adoptPTY(
-    via client: HolderClient,
-    timeout: TimeInterval = 5.0
-) async throws -> (HolderChildDescription, Int32) {
-    let deadline = Date().addingTimeInterval(timeout)
-    while true {
-        do {
-            return try await client.handOverPTY()
-        } catch HolderClient.Error.rejected(let version) {
-            guard Date() < deadline else { throw HolderClient.Error.rejected(version: version) }
-            // The holder drops a rejected connection, so the next attempt has
-            // to start a new one.
-            await client.close()
-            try? await Task.sleep(for: .milliseconds(25))
-        }
-    }
 }
 
 /// Stops a reader from a `defer`, which cannot `await`.
