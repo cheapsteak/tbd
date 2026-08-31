@@ -17,7 +17,8 @@ links, one lookup becomes 66 path resolutions.
 
 **One-line fix:** on APFS, install by **clone** (copy-on-write) instead of
 hardlink. You get the same disk sharing with a link count of 1, and the fan-out
-disappears.
+disappears. Measured on the machine described below, this cut `mds`'s filesystem
+operations by ~4,560x and its CPU from ~45% of a core to under 1%.
 
 ---
 
@@ -277,6 +278,64 @@ symptom-level fallback if you cannot change link mode. It needs no renaming and
 breaks no tooling. Note there is an open report of
 [exclusions being disregarded on macOS 26](https://developer.apple.com/forums/thread/814978),
 so verify it actually reduced the numbers rather than assuming.
+
+## Before and after
+
+The intervention: 51 virtualenvs converted from hardlinks to clones (~2.3
+million files, zero failures, every one verified to still start its interpreter
+and resolve imports), taking the link count on a representative file from 69 to
+1. Nothing else changed — no worktrees were deleted for this measurement, and
+Spotlight was already disabled throughout.
+
+**The primary result, measured as `mds`'s own filesystem operations in a
+machine-wide `fs_usage` capture:**
+
+- **Before, at `nlink=69`** — 868,769 operations in 30s = **28,959/sec**, which
+  was 50% of all filesystem activity on the machine.
+- **After, at `nlink=1`** — 127 operations in 20s = **6.3/sec**.
+- **A reduction of roughly 4,560x.**
+
+**`mds` CPU, sampled six times over ten minutes afterwards** — 0.56%, 0.26%,
+0.09%, 0.07% of a core, against a 40.8–45.1% baseline. Its resident set also
+fell from 185 MB to 12 MB, and the process was never restarted (same pid
+throughout), so this is the same daemon doing far less work rather than a fresh
+one that has not warmed up.
+
+Three measurement traps are worth recording, because each one nearly produced a
+wrong number:
+
+- **`mds` load is bursty, so a single CPU sample proves little.** Cumulative CPU
+  over ten hours averaged 5.9% of a core while individual samples read 40–45%.
+  A before/after pair taken at two arbitrary moments could show almost any
+  ratio. The operations-per-second figure is the trustworthy one because it
+  measures the *multiplier* directly; the CPU distribution is reported as six
+  samples for the same reason.
+- **A measurement can create its own contamination.** An initial "after" reading
+  was taken by a script that created its output file *before* sampling, while a
+  queued conversion sweep was waiting for exactly that file to appear. The sweep
+  started two seconds into the sample window and ran through it, producing a
+  meaningless 42.6% that briefly looked like "the fix did nothing". Sequence
+  such things on the *process* exiting, not on a file appearing.
+- **Verify the daemon did not simply die.** A CPU reading of ~0 is equally
+  consistent with success and with a crashed process. Check the pid is unchanged
+  and the service still responds.
+
+**What did not change: `fseventsd`.** It stayed at 96.5% of a core against a
+98.9% baseline. This is expected rather than disappointing, and the distinction
+is the useful part — the two daemons scale on different quantities:
+
+- **`mds`** costs scale with **link count**, which this change addresses.
+- **`fseventsd`** costs scale with the **number of watched paths**, which this
+  change does not touch at all. Converting a file in place leaves its path,
+  its directory entry, and the total file count exactly as they were; only the
+  inode behind it differs.
+
+The only thing observed to move `fseventsd` was removing checkouts outright: its
+resident set fell 5.5 GB to 4.8 GB when 14 worktrees were archived. Its resident
+set also fell to 2.20 GB across the conversion, which is **not explained** — the
+prediction was no effect, and a large one appeared. It may be that the mass
+replacement forced it to rebuild internal state. Recorded as an observation, not
+a mechanism.
 
 ## Limits of this analysis
 
