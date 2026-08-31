@@ -94,10 +94,19 @@ Writing into `~/Library/Caches` during a test run is intended and safe: it is a 
 artifact, not test state, and it is not one of the stores the fence's fingerprint
 detector brackets (`~/tbd`, `~/.claude`, `~/.codex`, and the tmux socket directory).
 
-**An unusable cache directory is not a build failure.** If the directory cannot be
-created, the wrapper says so on stderr and adds no flags, leaving SwiftPM's per-worktree
-default in place. A build is the wrong thing to fail over a cache that exists only to be
-regenerated, and the fallback is the behavior every worktree had before this change.
+**An unavailable cache is not a build failure.** Two things can go wrong, and both
+degrade the same way: the wrapper says so on stderr, adds no flags, and leaves SwiftPM's
+per-worktree default in place. A build is the wrong thing to fail over a cache that
+exists only to be regenerated, and the fallback is the behavior every worktree had before
+this change.
+
+The first is a directory that cannot be created. The second is a home directory that
+cannot be resolved at all: `getpwuid` raises for a uid with no passwd entry, which
+minimal containers, sandboxes and arbitrary-UID environments all produce. Because this
+wrapper is the sole mandatory gate for every SwiftPM command in the repo, letting that
+raise would break every build, test and run for such a uid — and the only escape would be
+knowing to set the opt-out beforehand. `TBD_SWIFT_MODULE_CACHE_PATH` is read *before* the
+passwd lookup, so it stays a working escape hatch for exactly that environment.
 
 **Callers may still choose.** `TBD_SWIFT_MODULE_CACHE_PATH` overrides the location.
 `TBD_SWIFT_SHARED_MODULE_CACHE=0` disables sharing and restores SwiftPM's per-worktree
