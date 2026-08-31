@@ -829,6 +829,33 @@ class SharedModuleCacheTests(RunnerFixture):
         self.assertEqual(result.stdout.strip(), "build --jobs 2")
         self.assertIn("shared module cache", result.stderr)
 
+    def test_a_uid_with_no_passwd_entry_falls_back_rather_than_crashing(self):
+        """The same promise, one step earlier: home resolution can fail too.
+
+        `pwd.getpwuid` raises `KeyError` for a uid with no passwd entry —
+        minimal containers, sandboxes and arbitrary-UID environments all make
+        one. This wrapper is the sole mandatory gate for every SwiftPM command
+        in the repo, so an unhandled raise here would abort every build, test
+        and run for such a uid, with no way out short of already knowing to set
+        the opt-out. Degrade like an uncreatable directory instead.
+        """
+        with self.in_process_environment():
+            with mock.patch.object(
+                swift_safe.pwd, "getpwuid", side_effect=KeyError("uid not found")
+            ):
+                self.assertIsNone(swift_safe._shared_module_cache_path())
+                self.assertEqual(swift_safe._module_cache_arguments("build", []), [])
+
+    def test_an_explicit_path_still_works_without_a_passwd_entry(self):
+        """The override is read before the passwd lookup, so it remains the
+        escape hatch for exactly the environment that has no home to find."""
+        target = Path(self.temp.name) / "explicit"
+        with self.in_process_environment(TBD_SWIFT_MODULE_CACHE_PATH=str(target)):
+            with mock.patch.object(
+                swift_safe.pwd, "getpwuid", side_effect=KeyError("uid not found")
+            ):
+                self.assertEqual(swift_safe._shared_module_cache_path(), target)
+
 
 class WaitReportingTests(unittest.TestCase):
     """Drive `_acquire` against a real contended flock with a fake clock."""
