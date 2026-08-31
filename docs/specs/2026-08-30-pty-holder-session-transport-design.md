@@ -337,14 +337,33 @@ Three rules close it, in increasing order of how often they apply.
   work: pull from whichever store is live rather than reaching past it.
 - **The app is not allowed to become a single point of failure for
   injection.** If it does not acknowledge within a bounded deadline on an
-  injected clock, the daemon writes directly and accepts the shear risk.
+  injected clock, the daemon writes directly.
 
 That last fallback is deliberately fail-*open*, where the read side's
 safety rail fails closed, and the asymmetry is the point: an unanswered read
 can be resolved by refusing to act on a stale screen, but an unanswered
 injection that is simply dropped leaves an agent waiting forever for a prompt
-that never arrives. A rare sheared keystroke is the smaller harm than a
-queued prompt that silently never lands.
+that never arrives.
+
+Its cost is **two** failure modes, not one, and the second is the easier to
+overlook. A missing ack does not mean the injection was not delivered — the
+app may have written it and had the ack lost or merely delayed, which App Nap
+has been measured doing to this app's work for ~90 s. So the fallback can
+deliver an injection **twice**, and for a queued prompt acting twice may be
+worse than a sheared keystroke. This is the at-least-once versus at-most-once
+fork, chosen knowingly in favour of at-least-once: a duplicated prompt is
+visible and recoverable, while a silently dropped one strands an agent
+indefinitely with nothing to see. **Do not "fix" the duplicate by acking
+before writing** — that trades a visible duplicate for exactly the invisible
+loss this design rejected, and it will look like a cleanup.
+
+Rule 2 also makes a real deferral policy possible, where the daemon could
+never have one. Once the app is the sole writer it is the only process that
+sees both streams, so the serialization point is a single in-process queue —
+and that queue knows its own bracketed-paste state exactly. A daemon-originated
+frame is therefore held while a user paste is open and never lands between its
+markers, which is the strongest form of the guarantee rule 1 approximates.
+That belongs to the attach work, not here.
 
 Resize follows the reader: whichever process currently reads the master owns
 `TIOCSWINSZ` — the app drives it from the view while attached, the daemon
