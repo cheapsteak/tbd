@@ -120,6 +120,138 @@ struct HolderClientTests {
         #expect(survivor == Data("not really a socket".utf8))
     }
 
+    /// The other half of the lock's contract, and the branch the held-lock test
+    /// above never reaches: a socket with **no** lock file beside it.
+    ///
+    /// Absence of a lock is not evidence of absence of a holder — `flock` lives
+    /// on the open file description, so a holder whose lock file was swept out
+    /// from under it keeps the lock while the path is free for anyone to
+    /// recreate. A spawner that read "no lock file" as "no holder" would unlink
+    /// a live session's rendezvous. The probe is what stops it.
+    @Test func refusesToClearASocketAnAliveHolderStillAnswers() async throws {
+        let fixture = try await SpawnedHolderFixture.start(command: "sleep 30")
+        defer { fixture.tearDown() }
+        let environment = SpawnedHolderFixture.environment(home: fixture.home)
+        let lockPath = try HolderRendezvous.lockPath(
+            sessionID: fixture.sessionID, environment: environment)
+
+        // Sweep the lock file. The live holder keeps its lock; the path is now
+        // free, so the next spawner takes a *different* one and learns nothing
+        // from having got it.
+        try FileManager.default.removeItem(atPath: lockPath)
+
+        let spawner = try SpawnedHolderFixture.makeSpawner()
+        var thrown: Swift.Error?
+        do {
+            _ = try await spawner.spawn(
+                sessionID: fixture.sessionID,
+                launch: SpawnedHolderFixture.launch(command: "sleep 30", home: fixture.home),
+                owner: fixture.owner,
+                environment: environment)
+        } catch {
+            thrown = error
+        }
+
+        guard case .lockHeldByLiveHolder? = thrown as? HolderSpawner.Error else {
+            Issue.record("expected .lockHeldByLiveHolder, got \(String(describing: thrown))")
+            return
+        }
+        #expect(FileManager.default.fileExists(atPath: fixture.handle.socketPath))
+        #expect(processIsAlive(fixture.handle.holderPID))
+
+        // The assertion that matters: the session the probe protected is still
+        // usable, not merely still on disk.
+        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
+        let description = try await client.describe()
+        await client.close()
+        #expect(description.childPID == fixture.handle.childPID)
+        #expect(description.status == .alive)
+    }
+
+    /// The branch that *does* license clearing: a bound path whose server is
+    /// gone answers `ECONNREFUSED`, and nothing is left to protect.
+    ///
+    /// The holder that gets launched here never binds, so the spawn fails — and
+    /// that is what makes the assertion direct. A real holder unlinks the path
+    /// itself before binding, which would leave "the socket is gone" true no
+    /// matter what the spawner decided.
+    @Test func clearsASocketWhoseListenerIsGone() async throws {
+        let home = SpawnedHolderFixture.scratchHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let environment = SpawnedHolderFixture.environment(home: home)
+        try FileManager.default.createDirectory(
+            atPath: TBDConstants.holdersDir(environment: environment).path,
+            withIntermediateDirectories: true)
+
+        let session = UUID()
+        let socketPath = try HolderRendezvous.socketPath(sessionID: session, environment: environment)
+        // Bind, listen, close: the socket file survives its server, which is
+        // exactly what a SIGKILLed holder leaves behind.
+        Darwin.close(try bindUnixListener(at: socketPath, backlog: 4))
+        try #require(FileManager.default.fileExists(atPath: socketPath))
+
+        let spawner = HolderSpawner(
+            executableURL: try SpawnedHolderFixture.writeNeverBindingHolder(into: home),
+            bindTimeout: .milliseconds(200),
+            bindPollInterval: .milliseconds(20),
+            handshakeTimeout: .milliseconds(50))
+        var thrown: Swift.Error?
+        do {
+            _ = try await spawner.spawn(
+                sessionID: session,
+                launch: SpawnedHolderFixture.launch(command: "sleep 30", home: home),
+                owner: HolderOwnerToken(rawValue: "acme-installation"),
+                environment: environment)
+        } catch {
+            thrown = error
+        }
+
+        guard case .holderDidNotBind? = thrown as? HolderSpawner.Error else {
+            Issue.record("expected .holderDidNotBind, got \(String(describing: thrown))")
+            return
+        }
+        #expect(!FileManager.default.fileExists(atPath: socketPath))
+    }
+
+    /// Every other errno must NOT license clearing: an unreadable socket is not
+    /// a dead one.
+    ///
+    /// A regular file at the rendezvous path answers `connect` with `ENOTSOCK`,
+    /// which is neither of the two answers that mean "nothing is listening". A
+    /// spawner that treated any failed connect as permission to unlink would
+    /// destroy whatever that path really is.
+    @Test func refusesToClearAPathThatIsNotASocket() async throws {
+        let home = SpawnedHolderFixture.scratchHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let environment = SpawnedHolderFixture.environment(home: home)
+        try FileManager.default.createDirectory(
+            atPath: TBDConstants.holdersDir(environment: environment).path,
+            withIntermediateDirectories: true)
+
+        let session = UUID()
+        let socketPath = try HolderRendezvous.socketPath(sessionID: session, environment: environment)
+        let contents = Data("not really a socket".utf8)
+        try contents.write(to: URL(fileURLWithPath: socketPath))
+
+        let spawner = try SpawnedHolderFixture.makeSpawner()
+        var thrown: Swift.Error?
+        do {
+            _ = try await spawner.spawn(
+                sessionID: session,
+                launch: SpawnedHolderFixture.launch(command: "sleep 30", home: home),
+                owner: HolderOwnerToken(rawValue: "acme-installation"),
+                environment: environment)
+        } catch {
+            thrown = error
+        }
+
+        guard case .lockHeldByLiveHolder? = thrown as? HolderSpawner.Error else {
+            Issue.record("expected .lockHeldByLiveHolder, got \(String(describing: thrown))")
+            return
+        }
+        #expect((try? Data(contentsOf: URL(fileURLWithPath: socketPath))) == contents)
+    }
+
     // MARK: - Forget
 
     @Test func forgetStopsReporting() async throws {
@@ -204,6 +336,114 @@ struct HolderClientTests {
         }
     }
 
+    /// A holder that never created its socket is killed, and that is the *only*
+    /// state in which killing is licensed.
+    ///
+    /// `Holder.run()` binds and listens before it `forkpty`s and only ever
+    /// `accept`s from inside `serve()`, after the fork — so an absent socket is
+    /// proof no job exists to orphan. Leaving such a holder alive would be the
+    /// real hazard: it holds the creation lock, and this session UUID could
+    /// then never be spawned or reclaimed again.
+    ///
+    /// The fake holder stays alive on purpose. A stand-in that exited by itself
+    /// would leave the same "process is gone" observation whether the spawner
+    /// killed it or not.
+    @Test func killsAHolderThatNeverCreatedItsSocket() async throws {
+        let home = SpawnedHolderFixture.scratchHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let environment = SpawnedHolderFixture.environment(home: home)
+
+        let spawner = HolderSpawner(
+            executableURL: try SpawnedHolderFixture.writeNeverBindingHolder(into: home),
+            bindTimeout: .milliseconds(200),
+            bindPollInterval: .milliseconds(20),
+            handshakeTimeout: .milliseconds(50))
+        var thrown: Swift.Error?
+        do {
+            _ = try await spawner.spawn(
+                sessionID: UUID(),
+                launch: SpawnedHolderFixture.launch(command: "sleep 30", home: home),
+                owner: HolderOwnerToken(rawValue: "acme-installation"),
+                environment: environment)
+        } catch {
+            thrown = error
+        }
+
+        guard case .holderDidNotBind(let holderPID, _, _)? = thrown as? HolderSpawner.Error else {
+            Issue.record("expected .holderDidNotBind, got \(String(describing: thrown))")
+            return
+        }
+        // Reaped as well as killed, so nothing is signallable: the holder is
+        // the spawner's own child, and an unreaped corpse answers `kill(pid, 0)`
+        // exactly like a live process.
+        defer { reapIfAlive(holderPID) }
+        #expect(holderPID > 0)
+        #expect(!processIsAlive(holderPID))
+    }
+
+    /// A holder that DID create its socket must survive the failed spawn.
+    ///
+    /// Binding happens before `forkpty`, so a holder that got this far may
+    /// already be supervising a job — and the loaded machine that made it miss
+    /// the budget is exactly when that is most likely. Milestone A has no
+    /// holder reconciler, so a blind kill here orphans that job permanently and
+    /// erases the only evidence of it. The spawn still fails; what it must
+    /// carry is enough to find what it left behind.
+    ///
+    /// The state is built the way it really occurs rather than by racing a real
+    /// holder into wedging: a listener that accepts and never answers, and a
+    /// stand-in process that stays alive. The unheld lock file is what steers
+    /// `spawn` past the probe-and-unlink branch so the listener is still there
+    /// when the holder is launched.
+    @Test func leavesAHolderThatBoundButNeverAnsweredAlive() async throws {
+        let home = SpawnedHolderFixture.scratchHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let environment = SpawnedHolderFixture.environment(home: home)
+        try FileManager.default.createDirectory(
+            atPath: TBDConstants.holdersDir(environment: environment).path,
+            withIntermediateDirectories: true)
+
+        let session = UUID()
+        let socketPath = try HolderRendezvous.socketPath(sessionID: session, environment: environment)
+        let lockPath = try HolderRendezvous.lockPath(sessionID: session, environment: environment)
+        try HolderLock.acquire(path: lockPath).release()
+
+        // Bound and listening, never accepting: connects succeed from the
+        // backlog and no request is ever answered.
+        let listener = try bindUnixListener(at: socketPath, backlog: 64)
+        defer {
+            Darwin.close(listener)
+            unlink(socketPath)
+        }
+
+        let spawner = HolderSpawner(
+            executableURL: try SpawnedHolderFixture.writeNeverBindingHolder(into: home),
+            bindTimeout: .milliseconds(200),
+            bindPollInterval: .milliseconds(20),
+            handshakeTimeout: .milliseconds(50))
+        var thrown: Swift.Error?
+        do {
+            _ = try await spawner.spawn(
+                sessionID: session,
+                launch: SpawnedHolderFixture.launch(command: "sleep 30", home: home),
+                owner: HolderOwnerToken(rawValue: "acme-installation"),
+                environment: environment)
+        } catch {
+            thrown = error
+        }
+
+        guard case .holderBoundButUnresponsive(let holderPID, let reportedSocket, _)?
+            = thrown as? HolderSpawner.Error else {
+            Issue.record("expected .holderBoundButUnresponsive, got \(String(describing: thrown))")
+            return
+        }
+        // This test owns the process now — nothing in the daemon reaps it.
+        defer { reapIfAlive(holderPID) }
+        #expect(holderPID > 0)
+        #expect(reportedSocket == socketPath)
+        #expect(processIsAlive(holderPID), "the spawner killed a holder that may have owned a job")
+    }
+
     // MARK: - The pending-message queue
 
     /// One `recvmsg` routinely carries a response and the holder's unsolicited
@@ -218,21 +458,17 @@ struct HolderClientTests {
     ///
     /// The peer here is a stub rather than a real holder precisely so the
     /// coalescing is *arranged* instead of raced: it writes both frames in a
-    /// single `write` and then answers nothing else ever. With the queue the
-    /// second read is served from memory; without it, it waits for a reply that
-    /// will never come and dies on the receive timeout.
-    @Test func queuesAResponseAndAnExitPushDeliveredInOneRead() async throws {
+    /// single `write` and then answers nothing else ever. The push is nobody's
+    /// answer — it is retired and surfaced as `lastPushedDescription` — but a
+    /// client that decoded only the first frame and discarded the rest of the
+    /// read would have lost the exit entirely.
+    @Test func keepsAnExitPushCoalescedWithAnAnswerInsteadOfLosingIt() async throws {
         let home = SpawnedHolderFixture.scratchHome()
         defer { try? FileManager.default.removeItem(atPath: home) }
         try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
         let socketPath = home + "/stub.sock"
 
-        let alive = HolderChildDescription(
-            childPID: 4242,
-            ttyName: "/dev/ttys004",
-            status: .alive,
-            launch: SpawnedHolderFixture.launch(command: "sleep 30", home: home),
-            owner: HolderOwnerToken(rawValue: "acme-installation"))
+        let alive = SpawnedHolderFixture.description(childPID: 4242, home: home)
         var exited = alive
         exited.status = .exited(code: 7)
 
@@ -240,18 +476,78 @@ struct HolderClientTests {
         coalesced += try HolderFraming.frame(HolderResponse.described(alive))
         coalesced += try HolderFraming.frame(HolderResponse.described(exited))
 
-        let peer = try CoalescingStubPeer(socketPath: socketPath, singleWrite: coalesced)
+        let peer = try ScriptedStubPeer(
+            socketPath: socketPath,
+            answers: [ScriptedStubPeer.Answer(payload: coalesced)])
         defer { peer.tearDown() }
 
         let client = HolderClient(socketPath: socketPath, receiveTimeout: .seconds(2))
         let first = try await client.describe()
         #expect(first.status == .alive)
+        #expect(first.childPID == 4242)
 
-        // The discriminating half. The stub has stopped writing, so this can
-        // only be answered from the queue.
-        let second = try await client.describe()
-        #expect(second.status == .exited(code: 7))
-        #expect(second.childPID == 4242)
+        // The discriminating half: the second frame arrived in the same read
+        // and the stub has stopped writing, so anything known about the exit
+        // now can only have come from that read.
+        await client.close()
+        let pushed = await client.lastPushedDescription
+        #expect(pushed?.status == .exited(code: 7))
+        #expect(pushed?.childPID == 4242)
+    }
+
+    /// The coalesced push must not become the **next** verb's answer.
+    ///
+    /// Mixing verbs across the push is what makes this visible: two `describe`s
+    /// cannot, because `describe` accepts either frame shape and a stale
+    /// `.described` therefore looks exactly like a correct reply. A hand-over
+    /// followed by a `forget` cannot hide it — a queue served first-in-first-out
+    /// answers the `forget` with the hand-over's trailing exit push, so the call
+    /// throws `unexpectedResponse` for a verb the holder performed correctly,
+    /// the real `.forgotten` is left on the wire for whatever asks next, and the
+    /// connection never resynchronises.
+    @Test func doesNotAnswerForgetWithTheHandOversCoalescedExitPush() async throws {
+        let home = SpawnedHolderFixture.scratchHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+        let socketPath = home + "/stub.sock"
+
+        let alive = SpawnedHolderFixture.description(childPID: 4242, home: home)
+        var exited = alive
+        exited.status = .exited(code: 7)
+
+        // Stands in for the pty master. Any descriptor will do: what is under
+        // test is which frame the client attributes to which request, not what
+        // the transferred fd points at.
+        let carried = open("/dev/null", O_RDWR)
+        try #require(carried >= 0, "could not open a descriptor to hand over")
+        defer { Darwin.close(carried) }
+
+        let peer = try ScriptedStubPeer(
+            socketPath: socketPath,
+            answers: [
+                // The hand-over's answer, with the exit push written straight
+                // after it so both land in one read.
+                ScriptedStubPeer.Answer(
+                    descriptor: carried,
+                    payload: try HolderFraming.frame(HolderResponse.handedOverPTY(alive)),
+                    trailer: try HolderFraming.frame(HolderResponse.described(exited))),
+                ScriptedStubPeer.Answer(payload: try HolderFraming.frame(HolderResponse.forgotten)),
+            ])
+        defer { peer.tearDown() }
+
+        let client = HolderClient(socketPath: socketPath, receiveTimeout: .seconds(2))
+        let (description, ptyFD) = try await client.handOverPTY()
+        defer { Darwin.close(ptyFD) }
+        #expect(description.status == .alive)
+        #expect(ptyFD >= 0)
+
+        // The assertion: `forget` is answered by the holder's `.forgotten`, not
+        // by the exit push the hand-over left behind.
+        try await client.forget()
+
+        // And the push is not simply thrown away to achieve that.
+        let pushed = await client.lastPushedDescription
+        #expect(pushed?.status == .exited(code: 7))
         await client.close()
     }
 }
@@ -307,6 +603,61 @@ private func processIsAlive(_ pid: Int32) -> Bool {
     pid > 0 && kill(pid, 0) == 0
 }
 
+/// Kills and reaps a spawned holder a test is finished with.
+///
+/// Safe to call on one the spawner already reaped: `waitpid` simply reports
+/// there is no such child. A test that leaves a holder running leaks a `sleep`
+/// with it, because holder death is not child death.
+private func reapIfAlive(_ pid: Int32) {
+    guard pid > 0 else { return }
+    kill(pid, SIGKILL)
+    var ignored: Int32 = 0
+    _ = waitpid(pid, &ignored, 0)
+}
+
+/// Binds and listens on a Unix socket at `socketPath`, returning the listening
+/// descriptor. Nothing accepts on it: a connect lands in the backlog and is
+/// never answered, which is what a holder that reached `bind` and then wedged
+/// looks like from the outside.
+private func bindUnixListener(
+    at socketPath: String,
+    backlog: Int32,
+    sourceLocation: SourceLocation = #_sourceLocation
+) throws -> Int32 {
+    let listenFD = socket(AF_UNIX, SOCK_STREAM, 0)
+    try #require(listenFD >= 0, "could not create a listening socket", sourceLocation: sourceLocation)
+
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    let sunPathSize = MemoryLayout.size(ofValue: address.sun_path)
+    socketPath.withCString { source in
+        withUnsafeMutablePointer(to: &address.sun_path) { destination in
+            destination.withMemoryRebound(to: CChar.self, capacity: sunPathSize) { chars in
+                _ = strlcpy(chars, source, sunPathSize)
+            }
+        }
+    }
+    unlink(socketPath)
+    let bound = withUnsafePointer(to: &address) { addressPtr in
+        addressPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+            Darwin.bind(listenFD, generic, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    guard bound == 0, listen(listenFD, backlog) == 0 else {
+        let saved = errno
+        Darwin.close(listenFD)
+        Issue.record(
+            "could not listen at \(socketPath) (errno \(saved))", sourceLocation: sourceLocation)
+        throw HolderTestSetupFailure()
+    }
+    return listenFD
+}
+
+/// Thrown when a test's own scaffolding could not be built. Never an assertion
+/// about the code under test — the `Issue` was already recorded where it was
+/// discovered.
+private struct HolderTestSetupFailure: Swift.Error {}
+
 /// Takes whatever is queued on a handed-over pty master, without blocking.
 ///
 /// **A test that holds the master must drain it, or the job cannot finish
@@ -358,6 +709,32 @@ private final class SpawnedHolderFixture {
             environment: ["PATH": "/usr/bin:/bin", "TERM": "xterm-256color"],
             columns: 80,
             rows: 24)
+    }
+
+    /// A description shaped like one a holder would send, for tests that drive
+    /// the client against a stub instead of a real holder.
+    static func description(childPID: Int32, home: String) -> HolderChildDescription {
+        HolderChildDescription(
+            childPID: childPID,
+            ttyName: "/dev/ttys004",
+            status: .alive,
+            launch: launch(command: "sleep 30", home: home),
+            owner: HolderOwnerToken(rawValue: "acme-installation"))
+    }
+
+    /// An executable that stands in for a holder which never reaches `bind`.
+    ///
+    /// It ignores the arguments the spawner passes — a real holder's flags mean
+    /// nothing to it — and stays alive until something kills it, so "the
+    /// process is gone" can only be the spawner's doing. `exec` rather than a
+    /// plain command so the pid the spawner holds is the pid that sleeps.
+    static func writeNeverBindingHolder(into home: String) throws -> URL {
+        try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+        let url = URL(fileURLWithPath: home + "/never-binding-holder")
+        try "#!/bin/sh\nexec sleep 30\n".write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
     }
 
     static func locateExecutable() -> URL? {
@@ -453,43 +830,35 @@ private final class SpawnedHolderFixture {
     }
 }
 
-/// A stub peer that writes a prepared byte string in exactly one `write` on its
-/// first read, and then answers nothing ever again.
+/// A stub peer that answers each request the client sends from a fixed script,
+/// and then answers nothing ever again.
 ///
-/// Deliberately not a holder: the property under test is what the *client* does
-/// when two frames land in one read, and racing a real holder into coalescing
-/// them would make the test load-dependent — which is precisely the failure
-/// mode being closed.
-private final class CoalescingStubPeer: @unchecked Sendable {
+/// Deliberately not a holder: what is under test is which frame the *client*
+/// attributes to which request when two of them land in one read, and racing a
+/// real holder into coalescing them would make the test load-dependent — which
+/// is precisely the failure mode being closed.
+private final class ScriptedStubPeer: @unchecked Sendable {
+    /// One scripted reply, sent when a request arrives.
+    ///
+    /// `trailer` is written immediately after `payload` and with no request in
+    /// between, so the two arrive in the client's single read — the arranged
+    /// version of the holder answering and then reporting an exit microseconds
+    /// later.
+    struct Answer {
+        var descriptor: Int32 = -1
+        var payload: Data
+        var trailer: Data = Data()
+    }
+
     private let listenFD: Int32
     private let socketPath: String
     private let lock = NSLock()
     private var connectionFD: Int32 = -1
     private var stopped = false
 
-    init(socketPath: String, singleWrite: Data) throws {
+    init(socketPath: String, answers: [Answer]) throws {
         self.socketPath = socketPath
-        listenFD = socket(AF_UNIX, SOCK_STREAM, 0)
-        try #require(listenFD >= 0, "could not create the stub peer's socket")
-
-        var address = sockaddr_un()
-        address.sun_family = sa_family_t(AF_UNIX)
-        let sunPathSize = MemoryLayout.size(ofValue: address.sun_path)
-        socketPath.withCString { source in
-            withUnsafeMutablePointer(to: &address.sun_path) { destination in
-                destination.withMemoryRebound(to: CChar.self, capacity: sunPathSize) { chars in
-                    _ = strlcpy(chars, source, sunPathSize)
-                }
-            }
-        }
-        unlink(socketPath)
-        let bound = withUnsafePointer(to: &address) { addressPtr in
-            addressPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
-                Darwin.bind(listenFD, generic, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        try #require(bound == 0, "could not bind the stub peer at \(socketPath) (errno \(errno))")
-        try #require(listen(listenFD, 4) == 0, "could not listen on the stub peer's socket")
+        listenFD = try bindUnixListener(at: socketPath, backlog: 4)
 
         let listener = listenFD
         let thread = Thread { [weak self] in
@@ -500,11 +869,19 @@ private final class CoalescingStubPeer: @unchecked Sendable {
             }
             self.adopt(incoming)
             var scratch = [UInt8](repeating: 0, count: 256)
-            // Wait for the client's first request, so the two frames are a
-            // reply rather than an unsolicited greeting.
-            _ = read(incoming, &scratch, scratch.count)
-            _ = singleWrite.withUnsafeBytes { raw in
-                Darwin.write(incoming, raw.baseAddress, raw.count)
+            for answer in answers {
+                // Wait for the request this answers, so every frame written is
+                // a reply rather than an unsolicited greeting.
+                guard read(incoming, &scratch, scratch.count) > 0 else { break }
+                if answer.descriptor >= 0 {
+                    try? FDChannel.sendFDMinimal(
+                        answer.descriptor, over: incoming, payload: answer.payload)
+                } else {
+                    try? FDChannel.sendData(answer.payload, over: incoming)
+                }
+                if !answer.trailer.isEmpty {
+                    try? FDChannel.sendData(answer.trailer, over: incoming)
+                }
             }
             // Park with the connection open. Closing here would let the client
             // reach EOF, which is the very thing the queue is meant to make

@@ -34,6 +34,10 @@ struct HolderHandle: Sendable, Equatable {
 ///      and the kernel drops it when the holder dies.
 ///   7. The socket is polled for reachability on the injected clock, then
 ///      handshaken.
+///   8. A holder that never answers is judged by whether its socket exists,
+///      never by the handshake alone: no socket means it never bound and so
+///      never forked, which is the only state where killing it can orphan
+///      nothing. See `resolveUnreachableHolder`.
 ///
 /// **Who reclaims a holder is not answered here.** The holder is spawned as a
 /// direct child of the daemon, so a daemon that outlives it must reap its exit
@@ -58,15 +62,28 @@ struct HolderSpawner {
     /// the spawn rather than wedge the caller.
     static let defaultBindTimeout: Duration = .seconds(10)
     static let defaultBindPollInterval: Duration = .milliseconds(20)
+    /// How long one handshake attempt against a socket that already exists may
+    /// wait. Separate from `bindTimeout`, which bounds the whole wait: a
+    /// connect that succeeds and then goes quiet must not spend the entire
+    /// startup budget on a single attempt.
+    static let defaultHandshakeTimeout: Duration = .seconds(2)
 
     enum Error: LocalizedError, Equatable {
         /// Another live holder owns this session UUID. Nothing was created and,
         /// crucially, nothing was cleared.
         case lockHeldByLiveHolder(sessionID: UUID, lockPath: String)
-        /// The holder never became reachable within the budget. Carries
-        /// whatever it wrote to stderr, which is the only channel for anything
-        /// that went wrong before the socket existed.
-        case holderDidNotBind(socketPath: String, diagnostics: String)
+        /// The holder never created its socket within the budget, and was
+        /// therefore killed. Carries whatever it wrote to stderr, which is the
+        /// only channel for anything that went wrong before the socket existed.
+        case holderDidNotBind(holderPID: Int32, socketPath: String, diagnostics: String)
+        /// The holder created its socket but never answered the handshake.
+        ///
+        /// **It is deliberately left running.** Binding happens before
+        /// `forkpty`, so a holder that got this far may already be supervising
+        /// a live job — one recorded in no database, which nothing would ever
+        /// find again if the holder were killed here. The pid and the socket
+        /// path are carried so a human, or a later reconciler, can.
+        case holderBoundButUnresponsive(holderPID: Int32, socketPath: String, diagnostics: String)
         /// The holder answered the handshake with the busy sentinel.
         case rejected(version: Int)
         case rendezvousDirectoryUnavailable(path: String, detail: String)
@@ -78,9 +95,14 @@ struct HolderSpawner {
             case .lockHeldByLiveHolder(let sessionID, let lockPath):
                 return "a live holder already owns session \(sessionID.uuidString) "
                     + "(creation lock at \(lockPath)); refusing to clear its socket"
-            case .holderDidNotBind(let socketPath, let diagnostics):
-                return "the holder never bound \(socketPath) within the budget. "
+            case .holderDidNotBind(let holderPID, let socketPath, let diagnostics):
+                return "the holder never created \(socketPath) within the budget, so pid "
+                    + "\(holderPID) was killed before it could fork a job. "
                     + "Holder output: \(diagnostics)"
+            case .holderBoundButUnresponsive(let holderPID, let socketPath, let diagnostics):
+                return "the holder bound \(socketPath) but never answered the handshake. "
+                    + "Pid \(holderPID) was left running because it may already own a live "
+                    + "job; kill it by hand once you have checked. Holder output: \(diagnostics)"
             case .rejected(let version):
                 return "the freshly spawned holder rejected the handshake "
                     + "(protocol version \(version))"
@@ -98,17 +120,20 @@ struct HolderSpawner {
     let executableURL: URL
     let bindTimeout: Duration
     let bindPollInterval: Duration
+    let handshakeTimeout: Duration
     private let clock: any Clock<Duration>
 
     init(
         executableURL: URL,
         bindTimeout: Duration = HolderSpawner.defaultBindTimeout,
         bindPollInterval: Duration = HolderSpawner.defaultBindPollInterval,
+        handshakeTimeout: Duration = HolderSpawner.defaultHandshakeTimeout,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.executableURL = executableURL
         self.bindTimeout = bindTimeout
         self.bindPollInterval = bindPollInterval
+        self.handshakeTimeout = handshakeTimeout
         self.clock = clock
     }
 
@@ -182,24 +207,14 @@ struct HolderSpawner {
 
         let description: HolderChildDescription
         do {
-            description = try await awaitBinding(socketPath: socketPath, stderrPath: stderrPath)
+            description = try await awaitBinding(socketPath: socketPath)
         } catch {
-            // A holder that never answered must not be left running: it holds
-            // the creation lock, and while it does this session UUID cannot be
-            // respawned or reclaimed by anything. Killing it is safe precisely
-            // here — the holder binds *before* it `forkpty`s, so one that never
-            // bound has no job to orphan — and reaping keeps a corpse from
-            // accumulating in the daemon's process table.
-            Self.logger.error(
-                """
-                holder pid \(holderPID, privacy: .public) for session \
-                \(sessionID.uuidString, privacy: .public) never answered; killing it: \
-                \(error.localizedDescription, privacy: .public)
-                """)
-            kill(holderPID, SIGKILL)
-            var ignored: Int32 = 0
-            _ = waitpid(holderPID, &ignored, 0)
-            throw error
+            throw resolveUnreachableHolder(
+                holderPID: holderPID,
+                sessionID: sessionID,
+                socketPath: socketPath,
+                stderrPath: stderrPath,
+                cause: error)
         }
 
         Self.logger.info(
@@ -210,6 +225,78 @@ struct HolderSpawner {
             """)
         return HolderHandle(
             holderPID: holderPID, childPID: description.childPID, socketPath: socketPath)
+    }
+
+    // MARK: - A holder that was spawned but never answered
+
+    /// Decides what to do with a spawned holder that never completed a
+    /// handshake, and returns the error the spawn fails with.
+    ///
+    /// **The kill is gated on evidence that no job can exist, not on the
+    /// handshake having failed.** `Holder.run()` binds and listens *before* it
+    /// `forkpty`s, and it only ever `accept`s from inside `serve()`, which runs
+    /// after the fork. So a socket that was never created is proof the holder
+    /// never reached bind and therefore never forked a job: nothing can be
+    /// orphaned by killing it, and leaving it alive would strand the creation
+    /// lock it holds. That, and only that, licenses SIGKILL.
+    ///
+    /// A socket that *does* exist says the opposite — the holder got at least
+    /// as far as bind, and the very case the generous budget exists for (a
+    /// loaded machine, a cold `execve`) is the case where it has since forked a
+    /// job that is recorded in no database. Milestone A has no holder
+    /// reconciler, so killing the holder there would orphan that job
+    /// permanently and destroy the only evidence of it. It is left running and
+    /// named instead: the spawn still fails, this session UUID stays locked
+    /// until somebody deals with the pid, and that is a visible, recoverable
+    /// state rather than a silent leak.
+    ///
+    /// The residual window is the microseconds between the holder's bind and
+    /// its fork, and the check is read at the moment of the decision — a holder
+    /// that creates its socket after this stat has already missed the whole
+    /// budget.
+    private func resolveUnreachableHolder(
+        holderPID: Int32,
+        sessionID: UUID,
+        socketPath: String,
+        stderrPath: String,
+        cause: Swift.Error
+    ) -> Swift.Error {
+        let socketExists = FileManager.default.fileExists(atPath: socketPath)
+        let diagnostics = (try? String(contentsOfFile: stderrPath, encoding: .utf8))
+            .flatMap { $0.isEmpty ? nil : $0 } ?? "<no holder output>"
+
+        guard !socketExists else {
+            Self.logger.error(
+                """
+                holder pid \(holderPID, privacy: .public) for session \
+                \(sessionID.uuidString, privacy: .public) bound \(socketPath, privacy: .public) but \
+                never answered; leaving it alive because it may already own a job: \
+                \(cause.localizedDescription, privacy: .public)
+                """)
+            // A busy holder answered — with the sentinel, but it answered — so
+            // that failure keeps its own name rather than being reported as
+            // silence.
+            if let spawnerError = cause as? Error, case .rejected = spawnerError {
+                return spawnerError
+            }
+            return Error.holderBoundButUnresponsive(
+                holderPID: holderPID, socketPath: socketPath, diagnostics: diagnostics)
+        }
+
+        Self.logger.error(
+            """
+            holder pid \(holderPID, privacy: .public) for session \
+            \(sessionID.uuidString, privacy: .public) never created \
+            \(socketPath, privacy: .public), so it never forked a job; killing it: \
+            \(cause.localizedDescription, privacy: .public)
+            """)
+        kill(holderPID, SIGKILL)
+        // Reaped because the holder is the daemon's own child: without this the
+        // corpse accumulates in its process table.
+        var ignored: Int32 = 0
+        _ = waitpid(holderPID, &ignored, 0)
+        return Error.holderDidNotBind(
+            holderPID: holderPID, socketPath: socketPath, diagnostics: diagnostics)
     }
 
     // MARK: - Probing an existing socket
@@ -354,13 +441,10 @@ struct HolderSpawner {
     /// `Instant`: instant arithmetic does not typecheck through the
     /// existential, and a limit expressed as "how much waiting has been spent"
     /// is what a fake clock can drive.
-    private func awaitBinding(
-        socketPath: String,
-        stderrPath: String
-    ) async throws -> HolderChildDescription {
+    private func awaitBinding(socketPath: String) async throws -> HolderChildDescription {
         var waited: Duration = .zero
         while true {
-            let client = HolderClient(socketPath: socketPath, receiveTimeout: .seconds(2))
+            let client = HolderClient(socketPath: socketPath, receiveTimeout: handshakeTimeout)
             do {
                 let description = try await client.describe()
                 await client.close()
@@ -377,8 +461,20 @@ struct HolderSpawner {
             waited += bindPollInterval
         }
 
-        let diagnostics = (try? String(contentsOfFile: stderrPath, encoding: .utf8))
-            .flatMap { $0.isEmpty ? nil : $0 } ?? "<no holder output>"
-        throw Error.holderDidNotBind(socketPath: socketPath, diagnostics: diagnostics)
+        throw BindBudgetExhausted(budget: bindTimeout)
+    }
+
+    /// The budget ran out with no answer. Never escapes `spawn`: what a caller
+    /// sees is whichever error `resolveUnreachableHolder` chooses once it knows
+    /// whether the holder ever created its socket — the two outcomes differ in
+    /// whether a job can exist, which this type deliberately cannot know. It
+    /// still carries a real description, because it is logged as the cause of
+    /// whichever of those two the spawn fails with.
+    private struct BindBudgetExhausted: LocalizedError {
+        let budget: Duration
+
+        var errorDescription: String? {
+            "no answer within the \(budget) bind budget"
+        }
     }
 }
