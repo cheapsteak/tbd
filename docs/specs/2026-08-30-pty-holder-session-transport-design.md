@@ -297,9 +297,19 @@ distributed protocol.
   daemon outage, detached sessions that finish accumulate half-exited rather
   than exiting and waiting to be reported — they complete when the daemon
   returns and drains, so this costs latency in the exit path rather than
-  correctness. And the reader may never treat draining as best-effort or
-  pause it while a session still has a live job: a reader that stops reading
-  is not merely falling behind, it is holding jobs open.
+  correctness. And **whichever process currently holds the fd must drain it
+  unconditionally** — no lazy reads, no draining only when someone asks for a
+  screen, no pausing while a session still has a live job. A reader that stops
+  reading is not merely falling behind; it is holding jobs open.
+
+  That constrains the reader, not the arbitration. The windows where nobody
+  reads — the attach liveness gate, the alive-but-silent arm, a daemon outage
+  — are deliberate and stay exactly as specified above: erring toward *no*
+  reader is still correct, because a double reader corrupts silently while an
+  absent one only delays. What changes is the price of those windows. They do
+  not merely stall output; a job that finishes inside one cannot complete its
+  exit until somebody drains. That is an argument for keeping such windows
+  short and loud, not for reading during them.
 - **Daemon startup (re-adoption).** The new daemon connects to every holder
   and adopts a master dup, but **reads nothing yet**. Every app-liveness
   question below is the identity-verified check described under App death,
@@ -317,10 +327,16 @@ distributed protocol.
 The alive-but-silent arm is an acknowledged limitation: while an app process
 exists but never (re)connects, no detached session drains — a fleet-wide
 stall of unattended work, visible as the notification above plus writers
-blocked on full tty buffers. The alternative — draining sessions a database
-hint says were detached — trades a visible, recoverable stall for a chance of
-silent corruption, and is rejected; backpressure loses nothing, and the stall
-ends the moment the app reconnects or its process dies.
+blocked on full tty buffers **and jobs that finish during the stall unable to
+complete their exit** (see the drain-liveness note under Daemon death). The
+alternative — draining sessions a database hint says were detached — trades a
+visible, recoverable stall for a chance of silent corruption, and is
+rejected. The stall is still the right trade, but it is a larger one than
+"writers wait": nothing is lost or corrupted, and everything resumes the
+moment the app reconnects or its process dies, yet a session whose agent
+finished mid-stall stays half-exited until then rather than being merely
+quiet. That sharpens the case for the notification being loud, and for the
+grace window being bounded rather than open-ended.
 
 This arbitration was checked against the restart script's actual sequencing
 (daemon bounces first, then the app): during a full development restart,
