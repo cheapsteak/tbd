@@ -69,9 +69,9 @@ Three roles, three processes:
 
 - **The holder** — one tiny process per session. It `forkpty()`s the job, owns
   the pty master for the session's whole life, and **never reads it**. It
-  survives daemon restarts, app restarts, and crashes of both. It is the only
-  component whose death kills the session, so it is kept small enough to
-  essentially never change.
+  survives daemon restarts, app restarts, and crashes of both. Holder death
+  is session death — by policy as well as by mechanism, see "Holder death"
+  below — so it is kept small enough to essentially never change.
 - **The daemon** — the arbiter of who reads, and the **default reader**. While
   no viewer is attached it drains the master into a headless terminal
   emulator, so unattended agents never stall and reattachment has a screen to
@@ -102,8 +102,10 @@ bytes the other reader never sees).
 - **Lifetime.** The holder exits when its child exits — but only after
   reporting the child's exit status to the daemon, or timing out trying
   (bounded, injected clock). Exit status is data the session lifecycle wants,
-  and the holder is the only process guaranteed to observe it. On the way out
-  it unlinks its socket.
+  and the holder is the only process guaranteed to observe it. If the report
+  never lands (daemon down through the whole timeout), the session record's
+  status becomes exited, status unknown — implementations must not fabricate
+  one. On the way out the holder unlinks its socket.
 - **Rendezvous and identity.** One Unix socket per holder, at a
   `TBDConstants`-derived path under the TBD home directory (honoring
   `TBD_HOME`), named by the session UUID. Session identity is the UUID TBD
@@ -142,7 +144,39 @@ exit); its socket needs no child multiplexing; and upgrading the holder
 binary — the hardest problem in this space, which Superset solves with a
 successor-spawn fd-inheritance dance — is sidestepped entirely, because new
 sessions simply get the new binary while old ones keep the old. At the design
-point this is ~150 processes, which is trivial on macOS.
+point this is ~150 processes, which is trivial on macOS. The daemon's fd
+budget is likewise a non-issue: it already raises `RLIMIT_NOFILE` at startup
+(`raiseFileDescriptorLimit` in `Sources/TBDDaemon/Daemon.swift`) far beyond
+150 master dups plus 150 holder sockets.
+
+### Holder death
+
+The daemon holds a master dup, so a holder crash does not by itself kill the
+child: the kernel's fd refcount keeps the pty alive — the same mechanism
+Superset exploits on purpose for daemon upgrades. The policy is that it kills
+the session anyway, promptly and deliberately. The daemon watches its
+connection to each holder; when a holder dies while its child lives, the
+daemon kills the child by its recorded pid — verifying process identity
+(executable and start time) first, so pid reuse cannot misdirect the kill —
+closes its dups, and marks the session exited with a distinct reason
+(holder lost) rather than a generic exit.
+
+The alternative — carrying the session on the daemon's own dup, marked
+degraded — was rejected: it preserves in-flight work only until the next
+daemon restart kills the session anyway, at the price of a permanent extra
+session state and an ownership story with an exception in it. Holder crashes
+are expected to be vanishingly rare precisely because the holder is small and
+frozen; predictability is worth more than softening a rare event.
+
+Recovery follows the transcript. For a Claude session the conversation up to
+the last persisted turn survives on disk regardless, and a respawn with
+`claude --resume <session-id>` continues it (any revive affordance must pass
+`--fork-session`; a bare `--resume` reuses the session UUID). The in-flight
+turn and unsubmitted composer input are lost — the same ladder as any process
+death today, and no worse than a tmux server crash is now, with blast radius
+one session rather than a repo's worth. Because the daemon knows why the
+session died, the distinct exit reason enables a natural follow-on, out of
+scope for this design: a UI affordance that revives the session in place.
 
 ## Reader arbitration
 
@@ -162,9 +196,15 @@ distributed protocol.
 - **Detach.** The app tells the daemon and closes its dup; the daemon resumes
   reading and jiggles so a full-screen program repaints into the daemon's
   emulator.
-- **App death.** The daemon observes the sidecar disconnect and reverts every
-  session that app held to daemon-read, with a jiggle. No cooperation from
-  the dead process is needed.
+- **App death.** A sidecar disconnect alone is not death: the sidecar has a
+  designed reconnect path, so a socket-level drop can leave the app alive,
+  holding its dups, still reading — and seizing then is exactly the
+  double-reader corruption this design exists to avoid. On disconnect the
+  daemon first checks whether the app process is alive. Gone: every session
+  it held reverts to daemon-read, with a jiggle, no cooperation from the dead
+  process needed. Alive: the daemon stays off the fds and treats the drop
+  like the startup grace window — await reconnect and re-claim, seize only on
+  confirmed process death.
 - **Daemon death.** Attached sessions are untouched — the app keeps its fds
   and keeps painting through the entire daemon outage. Detached sessions have
   no reader: their writers block on the kernel tty buffer, which is
@@ -176,11 +216,19 @@ distributed protocol.
   sessions the app holds fds for; claimed sessions stay app-owned and
   everything else begins draining. The wait is bounded by a grace window on
   an injected clock; on expiry the daemon re-checks app liveness — app gone,
-  drain everything; app alive but silent, stay off the fds and log loudly.
-  A claim arriving after draining began is handled as an ordinary attach.
-  The database records attach state as an observability hint only; it is
-  never the arbiter, because a persisted row cannot answer a liveness
-  question.
+  drain everything; app alive but silent, stay off the fds, log loudly, and
+  raise a user-visible notification. A claim arriving after draining began is
+  handled as an ordinary attach. The database records attach state as an
+  observability hint only; it is never the arbiter, because a persisted row
+  cannot answer a liveness question.
+
+The alive-but-silent arm is an acknowledged limitation: while an app process
+exists but never (re)connects, no detached session drains — a fleet-wide
+stall of unattended work, visible as the notification above plus writers
+blocked on full tty buffers. The alternative — draining sessions a database
+hint says were detached — trades a visible, recoverable stall for a chance of
+silent corruption, and is rejected; backpressure loses nothing, and the stall
+ends the moment the app reconnects or its process dies.
 
 This arbitration was checked against the restart script's actual sequencing
 (daemon bounces first, then the app): during a full development restart,
@@ -216,10 +264,29 @@ and a `hasPrefix` broke title parsing — the escape-sequence long tail is
 precisely what bites.
 
 The emulator keeps a bounded in-memory scrollback (on the order of 10k lines;
-a plain constant, not a flag) and is **not persisted to disk**. A daemon
-restart starts it empty; the jiggle on re-adoption makes full-screen programs
-repaint into the fresh emulator, and the durable record of an agent's work is
-its transcript, which persists on disk independently of any terminal.
+a plain constant, not a flag) and is **not persisted to disk**. The constant
+is a memory decision as much as a history one: at the design point there are
+~150 emulators resident, and a naive per-cell buffer representation across
+150 sessions can reach into gigabytes, so the limit must be sized against
+SwiftTerm's measured per-line cost at implementation time — and the limit, or
+the representation, gives way first if field memory pressure says so.
+
+A daemon restart starts the emulator empty; the jiggle on re-adoption makes
+full-screen programs repaint into the fresh emulator, and the durable record
+of an agent's work is its transcript, which persists on disk independently of
+any terminal. That heal is scoped honestly: it works for programs that
+repaint on SIGWINCH. A plain shell prompt, or output that has scrolled away,
+repaints nothing — so after a daemon restart such a *detached* session reads,
+and later seeds its viewer, as a blank screen until new output arrives, and a
+shell has no transcript to fall back on. tmux preserves screen and history
+across daemon restarts unconditionally; this design deliberately does not,
+trading that for a daemon that is free to restart under live sessions at all.
+
+Rendering terminal state as bytes is a named deliverable of this design, not
+an assumed primitive: both the attach-time snapshot preamble and the app's
+pull snapshot need a grid-to-escape-stream serializer (screen plus retained
+scrollback, emitted as a stream a fresh emulator ingests). It is exercised on
+every attach, so it cannot rot unnoticed the way failure-edge-only code does.
 
 ### Two stores, reconciled on demand
 
@@ -234,6 +301,14 @@ to the daemon:
   terminal read`), it **pulls a snapshot from the app** over the existing
   RPC; the app serializes its live terminal state on request. Machine reads
   are therefore always current, from whichever store is live.
+- Pulls are bounded (timeout on an injected clock), and every consumer
+  declares a failure policy, because the app can legitimately go quiet (App
+  Nap has coalesced this app's work for ~90 s in the field, and app-wedged
+  correlates with exactly the moments supervision most wants a screen).
+  Safety-critical consumers fail closed: the hibernation input-veto check
+  treats no-answer as unsafe and refuses to hibernate, never risking typed
+  input. Best-effort consumers fall back to the daemon's frozen-at-attach
+  emulator, labeled stale, rather than blocking on an unresponsive app.
 - Terminal scrollback history has a hole across each attached period (minus
   whatever the kernel buffer held at the edges). This is the accepted cost,
   and it is cheap here specifically: the artifact users actually mine history
@@ -268,7 +343,9 @@ Everything TBD does through tmux today, and its replacement:
   better than today, since attached sessions now also survive daemon restarts
   without interruption.
 - **Reattach shows the last screen** — snapshot preamble from the daemon's
-  emulator, plus jiggle.
+  emulator, plus jiggle; scoped by the emulator's lifetime — after a daemon
+  restart, a detached session that does not repaint on SIGWINCH (a plain
+  shell, scrolled-away output) seeds blank until new output arrives.
 - **Input injection** (`tbd terminal send`, queued prompts) — daemon writes to
   its master dup.
 - **Machine reads** (`tbd terminal read`, the interactive-login driver, the
@@ -309,7 +386,10 @@ the process table — the same argument as every other resource here.
   and servers to the **holder inventory**: enumerate holder sockets under the
   sessions directory, connect, and handshake (yielding holder pid, child pid,
   child status, and launch parameters). A session row with no live holder is
-  marked exited through the existing handling. A live holder with no session
+  marked exited through the existing handling. A **rejected** connection is
+  the opposite of a dead holder — the holder is alive and owned by another
+  daemon (a stale daemon from a different checkout is a known hazard on a
+  development machine) — and must never feed the exited path. A live holder with no session
   row is a half-finished deletion: the daemon kills the child and the holder.
   **Kill, not adopt** — iTerm2 adopts unclaimed survivors into new tabs
   because its live processes are the only copy of anything; TBD's transcripts
@@ -322,9 +402,14 @@ the process table — the same argument as every other resource here.
   is mandatory, not hygienic: a SIGKILLed holder cannot unlink its own
   socket, and the tmux precedent on this machine was ~7,100 dead socket
   files, because tmux unlinks lazily on rebind and nothing ever rebound.
-- **`AgentReaper`** keeps its current role unchanged: a child whose holder
-  died is re-parented to launchd and lands in the reaper's existing
-  by-session-identity sweep.
+- **`AgentReaper`** gains a holder-transport leg. Its existing sweep
+  enumerates children of tmux server pids and structurally cannot see a
+  child re-parented to launchd, so for holder-transport sessions it sweeps by
+  each session's **recorded child pid** (captured at spawn and refreshed at
+  adoption), verifying process identity (executable and start time) before
+  killing, and reaps children whose session row is exited or absent. This is
+  the backstop for holder deaths the daemon was down for; the prompt path is
+  the daemon's own holder-connection watch ("Holder death" above).
 
 ## Rollout
 
