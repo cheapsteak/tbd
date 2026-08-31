@@ -125,7 +125,7 @@ struct HolderInvocationTests {
         var buffer = Data()
         var length = UInt32(HolderFraming.maximumFrameSize + 1).littleEndian
         buffer.append(Data(bytes: &length, count: MemoryLayout<UInt32>.size))
-        #expect(throws: HolderStartupError.self) {
+        #expect(throws: HolderFramingError.self) {
             _ = try HolderFraming.drainRequests(from: &buffer)
         }
     }

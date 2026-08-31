@@ -117,12 +117,24 @@ struct HolderLockTests {
         // that has nothing to do with locking. Whether the lock lands on 9
         // depends on how many descriptors sibling tests hold open at the time,
         // which is why this only reddens when the suite runs together.
-        // `dup` hands back the lowest free number, which cannot be the one
-        // still occupied by the original.
+        //
+        // `F_DUPFD_CLOEXEC` hands back the lowest free number at or above its
+        // argument, which is past the target, and keeps the duplicate
+        // close-on-exec — a plain `dup` would clear FD_CLOEXEC and expose this
+        // lock to every other concurrent `posix_spawn` in the process.
+        //
+        // **The duplicate must be closed before the reacquire below, not by a
+        // trailing `defer`.** `flock` lives on the open file description, and a
+        // `dup` shares one: while this descriptor is open, the parent still
+        // holds the child's lock, so the reacquire throws `.alreadyHeld`
+        // against a claim userspace never dropped. That is a measured flake,
+        // and its trigger is that `lock.fileDescriptor` happened to land on 9 —
+        // which depends on how many descriptors sibling suites hold open, so it
+        // fires only when the suite runs alongside others.
         var lockSource = lock.fileDescriptor
         var duplicated: Int32 = -1
         if lockSource == 9 {
-            duplicated = dup(lockSource)
+            duplicated = fcntl(lockSource, F_DUPFD_CLOEXEC, 10)
             try #require(duplicated >= 0, "could not move the lock off the target descriptor")
             lockSource = duplicated
         }
@@ -178,9 +190,15 @@ struct HolderLockTests {
             marker == Data("K\n".utf8),
             "the lock descriptor did not survive exec, so the child never held the lock")
 
-        // From here the child is the sole holder.
+        // From here the child is the sole holder — which means dropping EVERY
+        // descriptor this process has on that open file description, not just
+        // the one `release()` knows about.
         lock.release()
         parentStillHoldsLock = false
+        if duplicated >= 0 {
+            close(duplicated)
+            duplicated = -1
+        }
         close(toChild[1])
 
         var status: Int32 = 0
