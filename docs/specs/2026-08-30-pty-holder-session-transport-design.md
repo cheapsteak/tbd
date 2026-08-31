@@ -115,6 +115,21 @@ bytes the other reader never sees).
   `connect`. The socket is bound with owner-only permissions. One client at a
   time, enforced holder-side: a second connection is accepted and immediately
   rejected with a sentinel protocol version.
+- **Creation is serialized by an advisory lock.** A socket file alone cannot
+  distinguish a live holder from the corpse of a SIGKILLed one, and `bind`
+  refuses a path that already exists — so "unlink the stale socket, then bind"
+  is a race two spawners can both win, leaving one holder bound to a path the
+  other has already unlinked and a session nobody can reach. Beside each
+  socket sits a zero-byte lock file on the same UUID. A spawner takes an
+  exclusive `flock` on it before unlinking or binding anything; the descriptor
+  carrying the lock is passed across exec to the holder (`FD_CLOEXEC`
+  cleared) and the daemon closes its own copy, so the holder alone holds it
+  for its whole life. A spawner that cannot take the lock has learned that a
+  live holder owns that UUID **without connecting to it**, and backs off
+  instead of clearing the path — which is what makes the stale-daemon hazard
+  named under Reconciliation safe rather than merely detectable. The kernel
+  drops the lock when the holder dies, so nothing can leak but an empty file,
+  swept with the socket by `OrphanGC`.
 - **Protocol.** Minimal and versioned from day one. Verbs: report the child
   (pid, tty name, launch parameters, alive/exited status) and hand over a
   master dup; report exit status; forget the child (close the master and stop
@@ -193,14 +208,23 @@ distributed protocol.
   preamble into SwiftTerm first, then goes live on the fd, then jiggles (see
   below). Reattach therefore paints the last-known screen instantly, as tmux
   does today.
-- **Detach.** The app tells the daemon and closes its dup; the daemon resumes
-  reading and jiggles so a full-screen program repaints into the daemon's
-  emulator.
+- **Detach.** The mirror image, carrying the same ordering discipline in the
+  opposite direction: the app stops reading and closes its dup, and **only
+  then** tells the daemon; the daemon resumes reading on receipt and jiggles
+  so a full-screen program repaints into the daemon's emulator. The
+  close-before-notify order is what preserves the single-reader invariant — a
+  notify-first detach would put the daemon on the fd while the app's last
+  `read()` is still outstanding, which is the double-reader corruption in
+  miniature. An app that dies mid-detach needs no special handling: the fd
+  closes with the process and the app-death path below covers it.
 - **App death.** A sidecar disconnect alone is not death: the sidecar has a
   designed reconnect path, so a socket-level drop can leave the app alive,
   holding its dups, still reading — and seizing then is exactly the
   double-reader corruption this design exists to avoid. On disconnect the
-  daemon first checks whether the app process is alive. Gone: every session
+  daemon first checks whether the app process is alive, using the same
+  identity-verified check the holder-death kill uses — recorded pid plus
+  executable and start time — so a reused pid cannot make a dead app look
+  alive and stall the fleet. Gone: every session
   it held reverts to daemon-read, with a jiggle, no cooperation from the dead
   process needed. Alive: the daemon stays off the fds and treats the drop
   like the startup grace window — await reconnect and re-claim, seize only on
@@ -210,9 +234,10 @@ distributed protocol.
   no reader: their writers block on the kernel tty buffer, which is
   backpressure, not loss, and drains when the daemon returns.
 - **Daemon startup (re-adoption).** The new daemon connects to every holder
-  and adopts a master dup, but **reads nothing yet**. If no app process is
-  alive, it becomes reader of everything immediately. If an app process is
-  alive, it waits for that app's sidecar handshake, which carries the list of
+  and adopts a master dup, but **reads nothing yet**. Every app-liveness
+  question below is the identity-verified check described under App death,
+  never a bare `kill(pid, 0)`. If no app process is alive, it becomes reader
+  of everything immediately. If an app process is alive, it waits for that app's sidecar handshake, which carries the list of
   sessions the app holds fds for; claimed sessions stay app-owned and
   everything else begins draining. The wait is bounded by a grace window on
   an injected clock; on expiry the daemon re-checks app liveness — app gone,
@@ -378,8 +403,8 @@ Everything TBD does through tmux today, and its replacement:
 ## Reconciliation
 
 Per the named-reconciler doctrine, the new durable resources are the holder
-processes, their socket files, and (transitively) the agent processes under
-them. Orphans can arise because holder creation is non-transactional against
+processes, their socket and lock files, and (transitively) the agent processes
+under them. Orphans can arise because holder creation is non-transactional against
 the process table — the same argument as every other resource here.
 
 - **`WorktreeLifecycle+Reconcile`** swaps its ground truth from tmux windows
@@ -397,11 +422,14 @@ the process table — the same argument as every other resource here.
   little else, and it cuts against the database-is-intent model the other
   reconcilers already follow.
 - **`OrphanGC`** (hourly, gated on `gcEnabled` as today) gains two sweeps:
-  unlink socket files with no listening process behind them, and re-run the
-  holder-versus-database check between startup reconciles. The socket sweep
-  is mandatory, not hygienic: a SIGKILLed holder cannot unlink its own
-  socket, and the tmux precedent on this machine was ~7,100 dead socket
-  files, because tmux unlinks lazily on rebind and nothing ever rebound.
+  unlink socket files (and their sibling lock files) with no listening
+  process behind them, and re-run the holder-versus-database check between
+  startup reconciles. The socket sweep is mandatory, not hygienic: a
+  SIGKILLed holder cannot unlink its own socket, and the tmux precedent on
+  this machine was ~7,100 dead socket files, because tmux unlinks lazily on
+  rebind and nothing ever rebound. The lock file leaks only as an empty
+  file — the kernel released its lock when the holder died — so it is swept
+  for tidiness on the same pass rather than needing its own reclaimer.
 - **`AgentReaper`** gains a holder-transport leg. Its existing sweep
   enumerates children of tmux server pids and structurally cannot see a
   child re-parented to launchd, so for holder-transport sessions it sweeps by
@@ -489,8 +517,10 @@ of which is carried into this design:
   one method may read after the handshake, or interleaved partial reads
   corrupt the stream.
 - **Creation races are settled by an advisory lock file** held for the
-  server's whole life; connecting to a busy server is settled separately by
-  accept-then-reject with a sentinel version.
+  server's whole life — adopted verbatim, and specified under "Creation is
+  serialized by an advisory lock" above. Connecting to a *busy* server is a
+  separate problem with a separate answer: accept-then-reject with a sentinel
+  version.
 - **SIGHUP is not enough on user-initiated close.** A supervised child can
   ignore SIGHUP, leaving the supervisor alive to be adopted later; closing a
   session must make the holder forget the child (close the master, stop
