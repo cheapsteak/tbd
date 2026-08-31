@@ -585,6 +585,17 @@ extension WorktreeLifecycle {
             // is expected, and the row is already exactly what this pass would
             // produce.
             for terminal in terminals where !terminal.isParked {
+                // Holder-backed sessions carry no tmux coordinate: their
+                // `tmuxWindowID` is "" and the repo's tmux server may never
+                // have been created. `windowExists` can therefore only ever
+                // answer "gone" for them, and both outcomes below — the park
+                // and the delete — would then destroy a live session on the
+                // very daemon restart the transport exists to survive. Their
+                // ground truth is the holder inventory, which is a separate
+                // sweep. This loop is about tmux, and has to say so before it
+                // reaches either arm of the fork.
+                guard terminal.transport == .tmux else { continue }
+
                 var windowAlive = false
                 if serverAlive {
                     windowAlive = await tmux.windowExists(
