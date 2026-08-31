@@ -130,6 +130,17 @@ bytes the other reader never sees).
   named under Reconciliation safe rather than merely detectable. The kernel
   drops the lock when the holder dies, so nothing can leak but an empty file,
   swept with the socket by `OrphanGC`.
+
+  Two rules keep that safe against holder versions. **A socket with no
+  sibling lock is unowned-but-unproven, never unowned**: the spawner must
+  handshake the existing socket before clearing it, and a rejected or
+  timed-out handshake means leave it alone. Absence of a lock is not evidence
+  of absence of a holder. And **the rendezvous layout is frozen at v1** —
+  socket name, lock name, lock semantics — deliberately outside the
+  protocol's version negotiation, because it has to be interpretable *before*
+  a connection exists, which is exactly when no version has been exchanged.
+  A future holder needing a different rendezvous gets a different directory,
+  not a different convention in the same one.
 - **Protocol.** Minimal and versioned from day one. Verbs: report the child
   (pid, tty name, launch parameters, alive/exited status) and hand over a
   master dup; report exit status; forget the child (close the master and stop
