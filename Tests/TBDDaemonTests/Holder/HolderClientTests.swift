@@ -550,6 +550,80 @@ struct HolderClientTests {
         #expect(pushed?.status == .exited(code: 7))
         await client.close()
     }
+
+    /// The same misattribution, from a push that never reached the queue.
+    ///
+    /// The coalesced case above is only half the hazard, and the easier half: a
+    /// push that shared a read with the answer it trailed is already decoded,
+    /// so draining the queue at send time is enough to retire it. The holder
+    /// does not owe anyone that coincidence. It reaps its child on its own
+    /// schedule, so the push can be written a moment *after* the client read
+    /// its answer — and then it is sitting unread in the socket's receive
+    /// buffer, where the queue cannot see it and where it is indistinguishable,
+    /// on the next read, from that request's answer. Only a barrier that reaches
+    /// the socket catches it.
+    ///
+    /// The ordering is arranged rather than raced, and in both directions,
+    /// because a test that merely *hoped* the writes landed in separate reads
+    /// would be the coalesced test again on a good day: the peer holds the push
+    /// until `handOverPTY` has returned, and the test holds `forget` until the
+    /// push has been written. Nothing reads that socket between those two
+    /// points — `HolderClient` reads only from inside a verb — so the push is
+    /// provably buffered and undecoded when the barrier runs.
+    @Test func drainsAnExitPushStillBufferedInTheSocketBeforeTheNextRequest() async throws {
+        let home = SpawnedHolderFixture.scratchHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+        let socketPath = home + "/stub.sock"
+
+        let alive = SpawnedHolderFixture.description(childPID: 4242, home: home)
+        var exited = alive
+        exited.status = .exited(code: 7)
+
+        // Stands in for the pty master, as in the coalesced case: what is under
+        // test is frame attribution, not what the descriptor points at.
+        let carried = open("/dev/null", O_RDWR)
+        try #require(carried >= 0, "could not open a descriptor to hand over")
+        defer { Darwin.close(carried) }
+
+        let gate = ScriptedStubPeer.TrailerGate()
+        let peer = try ScriptedStubPeer(
+            socketPath: socketPath,
+            answers: [
+                ScriptedStubPeer.Answer(
+                    descriptor: carried,
+                    payload: try HolderFraming.frame(HolderResponse.handedOverPTY(alive)),
+                    trailer: try HolderFraming.frame(HolderResponse.described(exited)),
+                    trailerGate: gate),
+                ScriptedStubPeer.Answer(payload: try HolderFraming.frame(HolderResponse.forgotten)),
+            ])
+        defer { peer.tearDown() }
+
+        let client = HolderClient(socketPath: socketPath, receiveTimeout: .seconds(2))
+        let (description, ptyFD) = try await client.handOverPTY()
+        defer { Darwin.close(ptyFD) }
+        #expect(description.status == .alive)
+        #expect(ptyFD >= 0)
+
+        // Nothing has been pushed yet, and that is what separates this test from
+        // the coalesced one: the exit has not been written, so it cannot be in
+        // the queue, and everything observed after this point came off the wire.
+        let beforeTheGate = await client.lastPushedDescription
+        #expect(beforeTheGate == nil, "the stub pushed the exit before the test released it")
+
+        gate.release()
+        try #require(gate.waitUntilWritten(), "the stub peer never wrote its trailing push")
+
+        // The push is now in the kernel's receive buffer, unread. `forget`'s
+        // barrier has to poll the socket to find it; a barrier that only drained
+        // the decoded queue would take this frame as the answer to `forget`.
+        try await client.forget()
+
+        let pushed = await client.lastPushedDescription
+        #expect(pushed?.status == .exited(code: 7))
+        #expect(pushed?.childPID == 4242)
+        await client.close()
+    }
 }
 
 // MARK: - Support
@@ -844,10 +918,59 @@ private final class ScriptedStubPeer: @unchecked Sendable {
     /// between, so the two arrive in the client's single read — the arranged
     /// version of the holder answering and then reporting an exit microseconds
     /// later.
+    ///
+    /// A `trailerGate` inverts that: the peer holds the trailer back until the
+    /// test says the client has finished reading `payload`, so the two frames
+    /// arrive in *different* reads. See `TrailerGate`.
     struct Answer {
         var descriptor: Int32 = -1
         var payload: Data
         var trailer: Data = Data()
+        var trailerGate: TrailerGate?
+    }
+
+    /// A rendezvous between the test and the stub peer's thread, for the case
+    /// where the trailing push must be written **after** the client has already
+    /// read the answer it follows.
+    ///
+    /// Both directions are needed, and a sleep would give neither. `release()`
+    /// tells the peer the client is done reading, so the push cannot be
+    /// coalesced into that read; `waitUntilWritten` tells the test the push has
+    /// reached the socket, so the next verb is guaranteed to find it buffered
+    /// rather than still in flight. Every wait is bounded, and the peer's also
+    /// gives up when the stub is torn down, so a test that fails before
+    /// releasing cannot strand the thread.
+    final class TrailerGate: Sendable {
+        private let released = DispatchSemaphore(value: 0)
+        private let written = DispatchSemaphore(value: 0)
+
+        /// Lets the peer write the trailer.
+        func release() { released.signal() }
+
+        /// Blocks the peer until `release()`, until the stub is torn down, or
+        /// until the budget runs out. Returns whether the trailer may be written.
+        fileprivate func waitForRelease(timeout: TimeInterval, stopped: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if released.wait(timeout: .now() + 0.02) == .success { return true }
+                if stopped() { return false }
+            }
+            return false
+        }
+
+        fileprivate func markWritten() { written.signal() }
+
+        /// Blocks the test until the trailer has been written, or fails.
+        func waitUntilWritten(
+            timeout: TimeInterval = 10.0,
+            sourceLocation: SourceLocation = #_sourceLocation
+        ) -> Bool {
+            if written.wait(timeout: .now() + timeout) == .success { return true }
+            Issue.record(
+                "timed out after \(timeout)s waiting for the stub peer to write its trailing push",
+                sourceLocation: sourceLocation)
+            return false
+        }
     }
 
     private let listenFD: Int32
@@ -880,7 +1003,14 @@ private final class ScriptedStubPeer: @unchecked Sendable {
                     try? FDChannel.sendData(answer.payload, over: incoming)
                 }
                 if !answer.trailer.isEmpty {
-                    try? FDChannel.sendData(answer.trailer, over: incoming)
+                    if let gate = answer.trailerGate {
+                        guard gate.waitForRelease(timeout: 10.0, stopped: { self.isStopped })
+                        else { break }
+                        try? FDChannel.sendData(answer.trailer, over: incoming)
+                        gate.markWritten()
+                    } else {
+                        try? FDChannel.sendData(answer.trailer, over: incoming)
+                    }
                 }
             }
             // Park with the connection open. Closing here would let the client
