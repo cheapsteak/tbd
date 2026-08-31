@@ -87,17 +87,24 @@ Three roles, three processes:
 The single-reader invariant, in one sentence: **the daemon reads exactly the
 sessions that no live, connected app has claimed — and when it cannot yet
 know, it errs toward reading nothing**, because not-reading costs recoverable
-backpressure while double-reading is silent corruption (each `read()` steals
+delay — stalled output, and jobs that finish meanwhile unable to complete
+their exit — while double-reading is silent corruption (each `read()` steals
 bytes the other reader never sees).
 
 ## The holder
 
 ### Contract
 
-- **Spawn.** The daemon spawns the holder with fork + `setsid()` + exec.
-  `setsid` detaches it from any process group that could signal it (the
+- **Spawn.** The daemon spawns the holder with `posix_spawn`, and the holder
+  calls `setsid()` itself as its first act. `posix_spawn` rather than
+  fork+exec because the lock descriptor rides a `dup2` **file action** (see
+  the creation lock below), which has no equivalent in a hand-rolled
+  fork+exec — and because a daemon that forks is a daemon whose child
+  inherits whatever locks its other threads happened to hold. `setsid`
+  detaches the holder from any process group that could signal it (the
   iTerm2 lesson: without it, a Ctrl-C aimed at the parent kills the
-  supervisor and strands every session). The holder then `forkpty()`s the
+  supervisor and strands every session); the holder does it rather than the
+  spawner so the guarantee holds however it was launched. The holder then `forkpty()`s the
   job, making it both the master's owner and the child's parent; it reaps the
   child via SIGCHLD. When the daemon exits, the holder orphans to launchd and
   carries on. SIGHUP and SIGPIPE are ignored.
@@ -226,7 +233,10 @@ scope for this design: a UI affordance that revives the session in place.
 ## Reader arbitration
 
 Each session has exactly one reader at any moment: the app, the daemon, or —
-transiently and safely — nobody. All transitions are arbitrated by the daemon,
+transiently — nobody. "Transiently" is doing real work in that sentence: a
+no-reader window is safe in the sense that nothing is lost or corrupted, but
+it is not free, because a job that finishes inside one cannot complete its
+exit until draining resumes (see Daemon death). All transitions are arbitrated by the daemon,
 which is also the fallback reader, so the acknowledged edge ("you read now, I
 have stopped") is an in-process state transition plus one acked fd-vend, not a
 distributed protocol.
