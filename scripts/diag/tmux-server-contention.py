@@ -73,7 +73,7 @@ RECLAMATION. Both scratch sessions are durable external resources no sweep
 covers, so this script owns their whole life and kills them on every exit path,
 including Ctrl-C.
 """
-import argparse, os, shutil, subprocess, sys, time
+import argparse, os, shlex, shutil, subprocess, sys, time
 
 SCRATCH = os.environ.get("TMPDIR", "/tmp").rstrip("/")
 STAMPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_rtt_stamp.py")
@@ -123,7 +123,11 @@ def arm_up(sock, tag):
                    capture_output=True)
     tmux(sock, "new-session", "-d", "-s", SESSION, "-c", "/tmp", "cat")
     pane = tmux(sock, "list-panes", "-t", f"={SESSION}", "-F", "#{pane_id}")
-    tmux(sock, "pipe-pane", "-o", "-t", pane, f"/usr/bin/python3 {STAMPER} {cap}")
+    # sys.executable, not a hardcoded /usr/bin/python3: if the interpreter is
+    # not at that exact path, pipe-pane fails silently, the capture stays
+    # empty, and the run reports NaN percentiles with nothing pointing at the
+    # cause -- a measurement that lies rather than one that errors.
+    tmux(sock, "pipe-pane", "-o", "-t", pane, f"{shlex.quote(sys.executable)} {shlex.quote(STAMPER)} {shlex.quote(cap)}")
     return pane, cap
 
 

@@ -587,14 +587,20 @@ flag with a soak and a stated graduation plan.
 
 - **Flag.** `pty_holder_enabled`, a `config` column added by a `.sql`
   migration with **no SQL `DEFAULT` clause**, so unset stays a third state.
-  The shipped default is `false`, resolved the way every other nullable gate
-  in `ConfigRecord.toModel(...)` resolves one: a `ptyHolderDefault: Bool =
-  Config.ptyHolderDefault` parameter on `toModel`, and `pty_holder_enabled ??
-  ptyHolderDefault` in the body. The injected parameter is not decoration —
-  it is what lets a test change the effective default and prove NULL follows
-  it while an explicit `0` does not. Tests cover all three states: a
-  pre-migration row reads NULL rather than `0`, NULL follows the injected
-  default, and an explicit `0` survives a change to it.
+  The shipped default is `false`, resolved in `ConfigRecord.toModel(...)` the
+  way the **graduation-ready** gates there resolve theirs: a
+  `ptyHolderDefault: Bool = Config.ptyHolderDefault` parameter on `toModel`,
+  and `pty_holder_enabled ?? ptyHolderDefault` in the body. That is a minority
+  of the gates in that file, not all of them — roughly seven follow it, while
+  a dozen older ones still hardcode `?? false` or `?? true`. Those older gates
+  are the ones CLAUDE.md describes as not retrofittable, because their columns
+  shipped with a SQL `DEFAULT` that backfilled every existing row and destroyed
+  the distinction between "chose off" and "never chose". The convention here is
+  the one to copy precisely because the file is not uniform. The injected
+  parameter is not decoration — it is what lets a test change the effective
+  default and prove NULL follows it while an explicit `0` does not. Tests cover
+  all three states: a pre-migration row reads NULL rather than `0`, NULL
+  follows the injected default, and an explicit `0` survives a change to it.
 - **Granularity: spawn time only.** A session records its transport (`tmux`
   or `holder`) in its database row at creation and keeps it for life; the app
   attaches by whichever transport the row names. Flipping the flag never
