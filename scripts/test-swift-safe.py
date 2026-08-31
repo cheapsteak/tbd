@@ -216,6 +216,27 @@ class RunnerFixture(unittest.TestCase):
         """Run with the module cache left at its shipped (shared) default."""
         return self._run(self.sharing_env(**extra_env), arguments)
 
+    @contextlib.contextmanager
+    def in_process_environment(self, **overrides):
+        """`sharing_env`'s twin for helpers called in-process, not as a subprocess.
+
+        `_shares_the_module_cache` reads `os.environ` directly, so calling it
+        from a test inherits the *real* environment — and this harness runs
+        inside GitHub Actions, where `CI=true` is exported.  Left alone, every
+        in-process assertion silently evaluates the no-flags branch: the
+        `assertFalse` legs then pass for entirely the wrong reason, and only an
+        `assertTrue` control leg reveals it.  One did, in CI, after the
+        subprocess half had already been sanitised here — which is the whole
+        argument for routing both halves through a named helper rather than
+        remembering the environment at each call site.
+        """
+        env = dict(os.environ)
+        env.pop("CI", None)
+        env.pop("TBD_SWIFT_SHARED_MODULE_CACHE", None)
+        env.update(overrides)
+        with mock.patch.dict(os.environ, env, clear=True):
+            yield
+
 
 class SwiftSafeTests(RunnerFixture):
     def test_compile_commands_default_to_two_jobs(self):
@@ -697,8 +718,20 @@ class SharedModuleCacheTests(RunnerFixture):
 
     def test_a_non_compiling_subcommand_is_never_flagged(self):
         """`package resolve` plans nothing, so it has no cache to place."""
-        self.assertFalse(swift_safe._shares_the_module_cache("package", []))
-        self.assertTrue(swift_safe._shares_the_module_cache("build", []))
+        with self.in_process_environment():
+            self.assertFalse(swift_safe._shares_the_module_cache("package", []))
+            self.assertTrue(swift_safe._shares_the_module_cache("build", []))
+
+    def test_the_in_process_control_leg_survives_a_ci_runner(self):
+        """The regression that reached CI: `CI=true` disarmed the control leg.
+
+        Pins the helper rather than the predicate.  Without the environment
+        scrubbing, this is exactly the assertion that failed on a runner while
+        passing on every developer machine.
+        """
+        with mock.patch.dict(os.environ, {"CI": "true"}):
+            with self.in_process_environment():
+                self.assertTrue(swift_safe._shares_the_module_cache("build", []))
 
     # ---- continuous integration -------------------------------------------
 
