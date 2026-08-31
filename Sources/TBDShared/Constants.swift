@@ -55,6 +55,17 @@ public enum TBDConstants {
     /// the app (SCM_RIGHTS). Sibling of `socketPath`.
     public static var vendSocketPath: String { vendSocketPath(environment: ProcessInfo.processInfo.environment) }
 
+    /// Directory holding one socket and one lock file per live pty holder:
+    /// `~/tbd/holders`. Honors TBD_HOME.
+    ///
+    /// Deliberately shallow and directly under the config dir: every holder
+    /// socket path must fit Darwin's ~104-byte `sun_path`, and nesting is the
+    /// thing that breaks that budget first. `HolderRendezvous` composes the
+    /// per-session names inside it and enforces the budget.
+    public static func holdersDir(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        configDir(environment: environment).appendingPathComponent("holders")
+    }
+
     public static func databasePath(environment: [String: String]) -> String {
         configDir(environment: environment).appendingPathComponent("state.db").path
     }
