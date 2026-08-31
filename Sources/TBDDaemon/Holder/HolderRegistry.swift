@@ -39,6 +39,11 @@ actor HolderRegistry {
         /// It is left strictly alone: reachable-but-absent-from-my-database is
         /// exactly what another checkout's healthy session looks like.
         case foreignOwner(terminalID: UUID, holderOwner: String)
+        /// A concurrent `release` (or a later adoption) took the slot while this
+        /// adoption was still in flight, so its result was discarded rather than
+        /// published. Everything it obtained — the reader, and with it the pty
+        /// dup — was released before this was thrown.
+        case superseded(terminalID: UUID)
 
         var errorDescription: String? {
             switch self {
@@ -47,6 +52,9 @@ actor HolderRegistry {
             case .foreignOwner(let terminalID, let holderOwner):
                 return "the holder for terminal \(terminalID.uuidString) belongs to installation "
                     + "\(holderOwner); leaving it alone"
+            case .superseded(let terminalID):
+                return "the adoption of terminal \(terminalID.uuidString) was superseded while it "
+                    + "was in flight; its reader was stopped rather than published"
             }
         }
     }
@@ -95,16 +103,32 @@ actor HolderRegistry {
     /// an unreachable holder is recorded as `exitedStatusUnknown` — never as a
     /// fabricated code, which downstream could not tell from a real one.
     private var statuses: [UUID: HolderChildStatus] = [:]
-    /// How many drain loops this registry has ever started.
+    /// How many drain loops this registry has ever taken ownership of — that
+    /// is, how many adoptions it has published.
     ///
     /// Test-facing, and the honest instrument for the invariant above: object
     /// identity alone cannot tell a registry that reused a reader from one that
     /// built a second and threw it away, and only the count sees the second
     /// drain loop that would have been stealing bytes.
+    ///
+    /// A superseded adoption is deliberately **not** counted. Its loop did
+    /// start, and was stopped again before this call returned; counting it would
+    /// make the number say "loops that ever ran" when what every assertion here
+    /// asks is "loops this registry is on the hook for".
     private(set) var drainLoopsStarted = 0
 
     private let busyRetryBudget: Duration
     private let clock: any Clock<Duration>
+
+    /// Awaited inside `adopt` between the attach settling and the slot being
+    /// published — the exact window a concurrent `release` interleaves in.
+    ///
+    /// A seam rather than a sleep: the interleaving this guards against is a
+    /// continuation-ordering accident, and a test that reproduced it by timing
+    /// would pass by luck and stop reproducing it the day the scheduler
+    /// changed. Nil in production, where the cost is one nil check per
+    /// adoption.
+    private var publishBarrier: (@Sendable () async -> Void)?
 
     init(
         owner: HolderOwnerToken,
@@ -118,6 +142,12 @@ actor HolderRegistry {
         self.listTerminals = listTerminals
         self.busyRetryBudget = busyRetryBudget
         self.clock = clock
+    }
+
+    /// Installs the publish barrier described above. Test-facing; production
+    /// never calls it.
+    func setPublishBarrier(_ barrier: (@Sendable () async -> Void)?) {
+        publishBarrier = barrier
     }
 
     // MARK: - Reading
@@ -172,15 +202,47 @@ actor HolderRegistry {
         }
         slots[terminalID] = .adopting(task)
 
+        let settled = await task.result
+        // The one suspension a test can steer. In production `publishBarrier` is
+        // nil and this is a nil check.
+        await publishBarrier?()
+
         let adoption: Adoption
         do {
-            adoption = try await task.value
+            adoption = try settled.get()
         } catch {
             // Nothing was started, so nothing is owed a `stop()`. Clearing the
             // slot is what lets a later pass retry a holder that was merely
-            // slow to answer.
-            slots[terminalID] = nil
+            // slow to answer — but only while the slot is still this call's to
+            // clear. Past a supersession it belongs to whoever took it, and
+            // clearing it would discard a live adoption's task and let the next
+            // caller open a *second* attach on the same pty.
+            if slotStillHolds(task, for: terminalID) {
+                slots[terminalID] = nil
+            }
             throw error
+        }
+        // The publish decision and the publish itself, with no `await` between
+        // them. An actor's methods are not atomic across suspension: while this
+        // call was parked awaiting the attach, a `release` could have cleared
+        // the slot and stopped this very reader, or a later `adopt` could have put
+        // its own task there. Writing unconditionally would then either
+        // resurrect a stopped reader or orphan a live one — two drain loops on
+        // one pty master, which is the byte theft this type exists to prevent.
+        guard slotStillHolds(task, for: terminalID) else {
+            // Superseded. Whatever took the slot is the current truth, so
+            // nothing from this adoption is published — not the reader, and not
+            // the description's status either, which would otherwise overwrite
+            // a fresher observation with a staler one. The reader is a resource,
+            // so it is released: `stop()` is what closes the pty dup and joins
+            // the drain thread, and a reader dropped without one leaks both.
+            await adoption.reader.stop()
+            Self.logger.info(
+                """
+                discarded a superseded adoption of session \
+                \(terminalID.uuidString, privacy: .public); its reader was stopped
+                """)
+            throw Error.superseded(terminalID: terminalID)
         }
         slots[terminalID] = .adopted(adoption.reader)
         statuses[terminalID] = adoption.description.status
@@ -192,6 +254,20 @@ actor HolderRegistry {
             \(String(describing: adoption.description.status), privacy: .public)
             """)
         return adoption.reader
+    }
+
+    /// Whether `terminalID`'s slot still holds the in-flight task that `adopt`
+    /// started, rather than a later adoption's task, a published reader, or
+    /// nothing at all.
+    ///
+    /// Synchronous on purpose, and every caller must use its answer with no
+    /// `await` in between: the answer is only true of the instant it was read,
+    /// and an actor's methods are not atomic across suspension.
+    private func slotStillHolds(
+        _ task: Task<Adoption, Swift.Error>, for terminalID: UUID
+    ) -> Bool {
+        guard case .adopting(let current) = slots[terminalID] else { return false }
+        return current == task
     }
 
     /// Adopts every holder-backed row, once, at startup.
@@ -384,47 +460,45 @@ extension HolderRegistry {
     /// It must identify the **installation**, not the process: a token minted
     /// per daemon would make every holder that daemon spawned look foreign to
     /// its own successor, and re-adoption — the entire point of the transport —
-    /// would never adopt anything. So it is persisted beside the other
-    /// installation-scoped files under `TBD_HOME` (`tbdd.pid`, `port`), and like
-    /// them it is a fixed name that is rewritten rather than accumulated: no
-    /// sweep is owed one.
+    /// would never adopt anything. So it lives in the singleton `config` row,
+    /// with the rest of the daemon's structured installation-scoped settings.
     ///
-    /// Minting is `O_EXCL`, so two daemons racing on a fresh `TBD_HOME` agree on
-    /// whichever won rather than each keeping its own.
+    /// **The mint is a conditional UPDATE, not a read-then-write.** Two daemons
+    /// starting at once on one `TBD_HOME` must agree on one token, so the
+    /// decision is SQLite's: the second writer's UPDATE matches no row and the
+    /// read-back in the same transaction hands it the token the first one
+    /// wrote. That is the same guarantee the file-backed store got from an
+    /// `O_EXCL` open, which is what this replaced.
     static func installationOwner(
+        config: ConfigStore,
         environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> HolderOwnerToken {
-        let path = TBDConstants.holderOwnerTokenPath(environment: environment)
-        if let existing = readOwnerToken(at: path) { return existing }
-
-        let minted = UUID().uuidString.lowercased()
-        try? FileManager.default.createDirectory(
-            at: TBDConstants.configDir(environment: environment),
-            withIntermediateDirectories: true)
-        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
-        if fd >= 0 {
-            var bytes = Array(minted.utf8)
-            _ = Darwin.write(fd, &bytes, bytes.count)
-            Darwin.close(fd)
-            return HolderOwnerToken(rawValue: minted)
+    ) async -> HolderOwnerToken {
+        do {
+            let stored = try await config.ensureHolderOwnerToken(
+                minting: UUID().uuidString.lowercased())
+            return HolderOwnerToken(rawValue: stored)
+        } catch {
+            // The database is unwritable. A path-derived token is the least-bad
+            // answer — it is at least stable for as long as the outage lasts,
+            // where an ephemeral one would disown this daemon's own holders on
+            // its very next boot.
+            //
+            // What it costs, plainly: a daemon that cannot persist its token is
+            // running on an identity nothing else agrees to. Holders it spawns
+            // during the outage are stamped with the path-derived token, so the
+            // moment the database becomes writable again a real token is minted
+            // and every one of those holders reads as `foreignOwner` — left
+            // running, adopted by nobody, and reclaimed by nothing until the
+            // holder reconciler lands.
+            Self.logger.error(
+                """
+                could not mint or read the holder owner token from the config row \
+                (\(error.localizedDescription, privacy: .public)); falling back to a \
+                path-derived token, under which holders spawned now will read as foreign \
+                once the database is writable again
+                """)
+            return HolderOwnerToken(
+                rawValue: "tbd-home:\(TBDConstants.configDir(environment: environment).path)")
         }
-        // Lost the race, or could not write at all. A token read back is the
-        // right answer; a store we cannot write to gets a value derived from the
-        // store's own path, which is at least stable across restarts — an
-        // ephemeral one would quietly disown every holder on the next boot.
-        if let existing = readOwnerToken(at: path) { return existing }
-        Self.logger.error(
-            """
-            could not persist the holder owner token at \(path, privacy: .public) \
-            (errno \(errno, privacy: .public)); falling back to a path-derived token
-            """)
-        return HolderOwnerToken(
-            rawValue: "tbd-home:\(TBDConstants.configDir(environment: environment).path)")
-    }
-
-    private static func readOwnerToken(at path: String) -> HolderOwnerToken? {
-        guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
-        let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : HolderOwnerToken(rawValue: trimmed)
     }
 }

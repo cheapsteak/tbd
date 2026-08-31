@@ -1091,7 +1091,7 @@ public final class Daemon: Sendable {
         // opted in.
         if mockMode == nil {
             let holderRegistry = HolderRegistry(
-                owner: HolderRegistry.installationOwner(),
+                owner: await HolderRegistry.installationOwner(config: database.config),
                 listTerminals: { [database] in try await database.terminals.list() })
             self.holderRegistry = holderRegistry
             await holderRegistry.adoptAll()

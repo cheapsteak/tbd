@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import GRDB
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -102,6 +103,122 @@ struct HolderAdoptionTests {
 
         let loops = await registry.drainLoopsStarted
         #expect(loops == 1, "the registry started \(loops) drain loops on one pty")
+    }
+
+    // MARK: - A release that races the adoption it is releasing
+
+    /// A `release` that runs while an adoption is between its attach and its
+    /// publish must not be undone by that adoption.
+    ///
+    /// The registry is an actor, and an actor's methods are **not** atomic
+    /// across `await`. `release` clears the slot and then suspends inside
+    /// `reader.stop()`; the adoption it just cancelled can resume in that window
+    /// and — before this fix — wrote its result into the slot regardless. The
+    /// registry was then holding a reader whose drain thread had already exited
+    /// and whose pty descriptor was closed: a session with a screen that never
+    /// updates again and a job that can no longer finish exiting, because
+    /// nothing is draining its terminal.
+    ///
+    /// The interleaving is **forced, not waited for.** `PublishBarrier` parks
+    /// the adoption at exactly the suspension point that matters, so the
+    /// ordering is a property of the test rather than of the scheduler.
+    @Test func aReleaseIsNotUndoneByTheAdoptionItRaced() async throws {
+        let fixture = try await HolderProcessFixture.start(
+            command: "while IFS= read -r line; do printf 'GOT:%s\\n' \"$line\"; done")
+        defer { fixture.tearDown() }
+        await fixture.client.close()
+
+        let registry = makeRegistry(owner: fixture.owner, home: fixture.home)
+        defer { releaseInBackground(registry) }
+        let barrier = PublishBarrier()
+        await registry.setPublishBarrier(barrier.hook())
+        let terminal = holderTerminal(id: fixture.sessionID)
+
+        let racing = Task { try await registry.adopt(terminal: terminal) }
+        let parked = await pollUntil("the adoption to reach its publish step") {
+            await barrier.hasParked
+        }
+        #expect(parked)
+
+        // Runs to completion — slot cleared, reader stopped — while the
+        // adoption sits parked between its attach and its publish.
+        await registry.release(terminalID: fixture.sessionID)
+        await barrier.release()
+
+        await #expect(throws: HolderRegistry.Error.superseded(terminalID: fixture.sessionID)) {
+            try await racing.value
+        }
+        let stored = await registry.reader(for: fixture.sessionID)
+        #expect(stored == nil, "the registry kept a reader the release had already stopped")
+        let loopsAfterTheRace = await registry.drainLoopsStarted
+        #expect(loopsAfterTheRace == 0, "a superseded adoption was published as a live reader")
+
+        // And the session is still adoptable, which is the whole point: the
+        // discarded reader neither survived in the slot nor left a drain loop
+        // behind to take bytes from this one. Asserting on output the job
+        // produced *after* this adoption is what distinguishes a reader that is
+        // really draining from one that merely exists.
+        let reader = try await registry.adopt(terminal: terminal)
+        try await reader.write(Data("AFTER\n".utf8))
+        let sawAfter = await pollUntil("output the job produced after the re-adoption") {
+            await reader.renderScreen().contains("GOT:AFTER")
+        }
+        let screen = await reader.renderScreen()
+        #expect(sawAfter, "screen was: \(screen.debugDescription)")
+        let loops = await registry.drainLoopsStarted
+        #expect(loops == 1, "the registry started \(loops) drain loops on one pty")
+    }
+
+    /// The other half of the same race: a *later* adoption takes the slot while
+    /// an earlier one is parked, and the earlier one must not clobber it.
+    ///
+    /// This is the escalation, and it is worse than the case above. Before the
+    /// fix the parked adoption overwrote the slot with its own stopped reader,
+    /// which both resurrected a dead reader **and** orphaned the live one — a
+    /// reader nothing owns any more, still draining the pty master, still owed a
+    /// `stop()` nobody will ever call. Two drain loops on one master is silent
+    /// byte theft: each `read` takes bytes the other will never see.
+    @Test func aLaterAdoptionIsNotClobberedByTheOneItSuperseded() async throws {
+        let fixture = try await HolderProcessFixture.start(
+            command: "while IFS= read -r line; do printf 'GOT:%s\\n' \"$line\"; done")
+        defer { fixture.tearDown() }
+        await fixture.client.close()
+
+        let registry = makeRegistry(owner: fixture.owner, home: fixture.home)
+        defer { releaseInBackground(registry) }
+        let barrier = PublishBarrier()
+        await registry.setPublishBarrier(barrier.hook())
+        let terminal = holderTerminal(id: fixture.sessionID)
+
+        let superseded = Task { try await registry.adopt(terminal: terminal) }
+        let parked = await pollUntil("the first adoption to reach its publish step") {
+            await barrier.hasParked
+        }
+        #expect(parked)
+
+        // The slot is freed and then claimed by a second adoption, which runs
+        // to completion — the barrier holds only the first arrival.
+        await registry.release(terminalID: fixture.sessionID)
+        let live = try await registry.adopt(terminal: terminal)
+        await barrier.release()
+
+        await #expect(throws: HolderRegistry.Error.superseded(terminalID: fixture.sessionID)) {
+            try await superseded.value
+        }
+        let stored = await registry.reader(for: fixture.sessionID)
+        #expect(
+            stored === live,
+            "the superseded adoption overwrote the live one, orphaning its drain loop")
+        let loops = await registry.drainLoopsStarted
+        #expect(loops == 1, "the registry published \(loops) readers for one pty")
+
+        // Still the session's only reader, and still genuinely draining.
+        try await live.write(Data("AFTER\n".utf8))
+        let sawAfter = await pollUntil("output the surviving reader drained after the race") {
+            await live.renderScreen().contains("GOT:AFTER")
+        }
+        let screen = await live.renderScreen()
+        #expect(sawAfter, "screen was: \(screen.debugDescription)")
     }
 
     // MARK: - Somebody else's session
@@ -256,25 +373,94 @@ struct HolderAdoptionTests {
     /// own successor, and `adoptAll` would walk away from every live session it
     /// was written to rescue — while still passing a test that only checked two
     /// different installations disagree.
-    @Test func theInstallationOwnerTokenSurvivesARestart() throws {
-        let home = HolderProcessFixture.scratchHome()
-        defer { try? FileManager.default.removeItem(atPath: home) }
-        let elsewhere = HolderProcessFixture.scratchHome()
-        defer { try? FileManager.default.removeItem(atPath: elsewhere) }
+    ///
+    /// A second `TBDDatabase` is a second installation, which is what makes the
+    /// last assertion mean anything: the token has to be per-`TBD_HOME`, not a
+    /// constant every checkout on the machine would share.
+    @Test func theInstallationOwnerTokenSurvivesARestart() async throws {
+        let database = try TBDDatabase(inMemory: true)
+        let elsewhere = try TBDDatabase(inMemory: true)
 
-        let minted = HolderRegistry.installationOwner(
-            environment: HolderProcessFixture.environment(home: home))
+        let minted = await HolderRegistry.installationOwner(config: database.config)
         #expect(!minted.rawValue.isEmpty)
+        #expect(!minted.rawValue.hasPrefix("tbd-home:"), "the mint fell back instead of persisting")
 
-        let reread = HolderRegistry.installationOwner(
-            environment: HolderProcessFixture.environment(home: home))
+        // The restart: a second daemon, reading the row the first one wrote.
+        let reread = await HolderRegistry.installationOwner(config: database.config)
         #expect(
             reread == minted,
             "the token was re-minted, so a restarted daemon would disown its own holders")
 
-        let other = HolderRegistry.installationOwner(
-            environment: HolderProcessFixture.environment(home: elsewhere))
+        let other = await HolderRegistry.installationOwner(config: elsewhere.config)
         #expect(other != minted, "two installations share one token")
+    }
+
+    /// The column is genuinely NULL until somebody mints, and the mint is what
+    /// fills it.
+    ///
+    /// If the migration ever grows a `DEFAULT` clause this goes red, which is
+    /// its only job — and the failure it prevents is not a lost preference but a
+    /// shared identity: every checkout on the machine would carry the same
+    /// literal token and claim every other checkout's holder sessions.
+    @Test func theOwnerTokenColumnIsNullUntilItIsMinted() async throws {
+        let database = try TBDDatabase(inMemory: true)
+
+        let before = try await database.config.get().holderOwnerToken
+        #expect(
+            before == nil,
+            """
+            config.holder_owner_token must be NULL until a daemon mints one — read back \
+            \(String(describing: before)). A non-nil value here means \
+            20260831200151_config_holder_owner_token grew a DEFAULT clause; remove it.
+            """)
+
+        let minted = await HolderRegistry.installationOwner(config: database.config)
+        let after = try await database.config.get().holderOwnerToken
+        #expect(after == minted.rawValue, "the minted token did not reach the config row")
+    }
+
+    /// Two daemons starting at once mint one token between them.
+    ///
+    /// This is the property the file-backed store got from `O_EXCL` and the
+    /// `config` row gets from a conditional UPDATE: whoever loses the race reads
+    /// back the winner's value instead of keeping its own. Two tokens here would
+    /// mean two daemons that each disown the other's holders — and, because a
+    /// foreign holder is deliberately left strictly alone, sessions neither of
+    /// them ever drains.
+    @Test func concurrentMintsAgreeOnOneToken() async throws {
+        let database = try TBDDatabase(inMemory: true)
+
+        async let first = HolderRegistry.installationOwner(config: database.config)
+        async let second = HolderRegistry.installationOwner(config: database.config)
+        async let third = HolderRegistry.installationOwner(config: database.config)
+        let tokens = await [first, second, third].map(\.rawValue)
+
+        #expect(
+            Set(tokens).count == 1,
+            "concurrent mints produced \(Set(tokens).count) tokens: \(tokens)")
+        let stored = try await database.config.get().holderOwnerToken
+        #expect(stored == tokens[0], "the row holds a token nobody was handed")
+    }
+
+    /// A daemon whose database cannot be written still starts, and says what
+    /// that costs.
+    ///
+    /// The fallback is path-derived rather than random on purpose: it is stable
+    /// for as long as the outage lasts, where an ephemeral token would disown
+    /// this daemon's own holders on its very next boot. What it still costs is
+    /// real, and is the reason the log line exists — holders stamped with it
+    /// read as foreign the moment a real token is minted.
+    @Test func anUnwritableStoreFallsBackToAStableToken() async throws {
+        // A database with no `config` table at all: every write against it
+        // throws, which is the shape of an unwritable store.
+        let store = ConfigStore(writer: try DatabaseQueue())
+        let home = HolderProcessFixture.scratchHome()
+        let environment = HolderProcessFixture.environment(home: home)
+
+        let first = await HolderRegistry.installationOwner(config: store, environment: environment)
+        #expect(!first.rawValue.isEmpty, "a daemon that cannot persist a token must still start")
+        let second = await HolderRegistry.installationOwner(config: store, environment: environment)
+        #expect(first == second, "the fallback token changed between two calls in one outage")
     }
 
     // MARK: - Support
@@ -307,4 +493,46 @@ struct HolderAdoptionTests {
 /// idempotent.
 private func releaseInBackground(_ registry: HolderRegistry) {
     Task.detached { await registry.releaseAll() }
+}
+
+/// Holds the **first** adoption that reaches its publish step, and waves through
+/// every one after it.
+///
+/// It exists so the release/adopt race is a property of the test rather than of
+/// the scheduler. That race is a continuation-ordering accident inside an actor:
+/// reproducing it by timing would pass by luck, stop reproducing the day the
+/// scheduler changed, and prove nothing on the day it went green. Installed on
+/// the registry with `setPublishBarrier`, this parks the adoption at exactly the
+/// suspension point in question, so the interleaving is forced.
+///
+/// Nothing here sleeps to *create* the interleaving. The polling is only how
+/// each side observes a state the other has definitely reached, and it is
+/// bounded through `pollUntil`, so a barrier nobody releases fails its test with
+/// a named diagnostic instead of hanging the suite.
+private actor PublishBarrier {
+    private var parked = false
+    private var released = false
+
+    /// Whether an adoption is being held. The test waits for this before doing
+    /// whatever must interleave.
+    var hasParked: Bool { parked }
+
+    /// Lets the parked adoption finish.
+    func release() { released = true }
+
+    private var isReleased: Bool { released }
+
+    /// True for the first caller only; every later one is waved through.
+    private func claimPark() -> Bool {
+        guard !parked else { return false }
+        parked = true
+        return true
+    }
+
+    nonisolated func hook() -> @Sendable () async -> Void {
+        { [self] in
+            guard await claimPark() else { return }
+            await pollUntil("the test to release the parked adoption") { await self.isReleased }
+        }
+    }
 }

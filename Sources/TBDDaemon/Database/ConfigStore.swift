@@ -93,6 +93,13 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.ptyHolderDefault`, never through `?? false`.
     var pty_holder_enabled: Bool?
+    /// This installation's holder owner token, minted once by the first daemon
+    /// that needs one and read forever after. **Not a flag**: NULL means "not
+    /// yet minted", and the mint is the conditional UPDATE in
+    /// `ensureHolderOwnerToken` rather than a resolved default — there is no
+    /// value the shipped code could default this to that would not make every
+    /// checkout on a machine claim every other checkout's holders.
+    var holder_owner_token: String?
     /// JSON-encoded `[String: String]` remote create-param defaults (machine
     /// scope), keyed by the provider's own field names. Nil/absent means no
     /// opinion at this level — every field falls through to its
@@ -192,8 +199,25 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             remotePeerMessagingEnabled: remote_peer_messaging_enabled ?? remotePeerMessagingDefault,
             // And once more, for the pty-holder transport's gate — NOT `?? false`.
             ptyHolderEnabled: pty_holder_enabled ?? ptyHolderDefault,
-            remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults)
+            remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
+            // Passed straight through, NULL included: "not yet minted" is a
+            // real state and has no default to resolve to.
+            holderOwnerToken: holder_owner_token
         )
+    }
+}
+
+/// Failures the singleton `config` row can produce that GRDB has no error for.
+public enum ConfigStoreError: LocalizedError, Equatable {
+    /// The conditional mint ran and the row still holds no usable token — the
+    /// singleton row is missing, or something wrote an empty value over it.
+    case holderOwnerTokenUnavailable
+
+    public var errorDescription: String? {
+        switch self {
+        case .holderOwnerTokenUnavailable:
+            return "the config row holds no holder owner token and one could not be minted"
+        }
     }
 }
 
@@ -604,6 +628,46 @@ public struct ConfigStore: Sendable {
                 sql: "UPDATE config SET pty_holder_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
+        }
+    }
+
+    /// Return this installation's holder owner token, minting `candidate` only
+    /// if none has been minted yet.
+    ///
+    /// **The conditional write is the whole point.** Two daemons starting at
+    /// once on one `TBD_HOME` must agree on one token or each would disown the
+    /// other's holders, so the decision is made by SQLite rather than by the
+    /// caller: `WHERE holder_owner_token IS NULL` means the second writer's
+    /// UPDATE matches no row, and the read-back inside the same transaction
+    /// returns whichever token actually landed. This is the SQL equivalent of
+    /// the `O_EXCL` open the file-backed store used before the token moved into
+    /// the `config` row.
+    ///
+    /// The empty string is treated as unminted: a hand-edited row or a
+    /// half-written value must not become an identity every holder is compared
+    /// against.
+    ///
+    /// - Returns: the token now stored, which may not be `candidate`.
+    /// - Throws: if the row cannot be written or read — including the case
+    ///   where no singleton row exists at all, which no migrated database has.
+    public func ensureHolderOwnerToken(minting candidate: String) async throws -> String {
+        try await writer.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE config SET holder_owner_token = ?
+                     WHERE id = ? AND (holder_owner_token IS NULL OR holder_owner_token = '')
+                    """,
+                arguments: [candidate, Self.singletonID]
+            )
+            let stored = try String.fetchOne(
+                db,
+                sql: "SELECT holder_owner_token FROM config WHERE id = ?",
+                arguments: [Self.singletonID]
+            )
+            guard let stored, !stored.isEmpty else {
+                throw ConfigStoreError.holderOwnerTokenUnavailable
+            }
+            return stored
         }
     }
 

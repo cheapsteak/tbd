@@ -1484,6 +1484,16 @@ public struct Config: Codable, Sendable, Equatable {
     /// without interpreting them; see `Repo.remoteCreateDefaults` for why the
     /// map is keyed generically rather than given a column per concept.
     public var remoteCreateDefaults: [String: String]
+    /// This installation's holder owner token, or nil if none has been minted.
+    ///
+    /// **Identity, not a preference**, which is why it is the one field here
+    /// with no shipped default: nil genuinely means "not yet minted", and any
+    /// literal the code could fall back to would be shared by every checkout on
+    /// the machine — making each of them claim all the others' holder sessions.
+    /// It is minted by `ConfigStore.ensureHolderOwnerToken(minting:)`, whose
+    /// conditional UPDATE is what keeps two daemons starting at once from
+    /// minting two.
+    public var holderOwnerToken: String?
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1572,7 +1582,8 @@ public struct Config: Codable, Sendable, Equatable {
                 gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
                 remotePeerMessagingEnabled: Bool = Config.remotePeerMessagingDefault,
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
-                remoteCreateDefaults: [String: String] = [:]) {
+                remoteCreateDefaults: [String: String] = [:],
+                holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1607,6 +1618,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.remotePeerMessagingEnabled = remotePeerMessagingEnabled
         self.ptyHolderEnabled = ptyHolderEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
+        self.holderOwnerToken = holderOwnerToken
     }
 
     public init(from decoder: Decoder) throws {
@@ -1699,6 +1711,10 @@ public struct Config: Codable, Sendable, Equatable {
         // field falls through to its provider-declared `default`.
         remoteCreateDefaults = try c.decodeIfPresent(
             [String: String].self, forKey: .remoteCreateDefaults) ?? [:]
+        // Absent means the sender knew nothing about the token — the same state
+        // as an unminted column. Unlike every flag above there is no shipped
+        // default to fall through to; see the property's note.
+        holderOwnerToken = try c.decodeIfPresent(String.self, forKey: .holderOwnerToken)
     }
 }
 
