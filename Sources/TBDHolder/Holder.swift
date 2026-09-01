@@ -697,7 +697,6 @@ enum HolderStartupError: LocalizedError, Equatable {
     case cannotBind(path: String, errno: Int32)
     case cannotListen(path: String, errno: Int32)
     case forkFailed(errno: Int32)
-    case oversizedFrame(bytes: Int, limit: Int)
 
     /// The process exit code this failure ends the holder with.
     ///
@@ -711,12 +710,6 @@ enum HolderStartupError: LocalizedError, Equatable {
             return HolderExitCode.badInvocation
         case .socketDirectoryUnavailable, .cannotBind, .cannotListen, .forkFailed:
             return HolderExitCode.environmentFailure
-        case .oversizedFrame:
-            // A peer sent a length word larger than the holder will allocate
-            // for. That is neither a bad command line nor a sick machine — it
-            // is a client speaking badly, and the spawner learns nothing
-            // actionable from retrying or from editing its arguments.
-            return HolderExitCode.unexpected
         }
     }
 
@@ -751,8 +744,6 @@ enum HolderStartupError: LocalizedError, Equatable {
                 + "\(String(cString: strerror(errno))) (errno \(errno))"
         case .forkFailed(let errno):
             return "forkpty failed: \(String(cString: strerror(errno))) (errno \(errno))"
-        case .oversizedFrame(let bytes, let limit):
-            return "holder frame claims \(bytes) bytes, over the \(limit)-byte limit"
         }
     }
 }
@@ -786,55 +777,5 @@ struct ExitReportWindow {
     mutating func charging(_ work: () -> Void) {
         let slice = clock.measure(work)
         if isArmed { elapsed += slice }
-    }
-}
-
-// MARK: - Wire framing
-
-/// `[UInt32 little-endian byte count][JSON]`, both directions.
-///
-/// It lives in the holder rather than in `TBDShared` for now because the
-/// holder is the only thing that speaks it; the daemon-side client hoists it
-/// when it lands.
-enum HolderFraming {
-    /// Refuses anything larger than this rather than trusting a length word
-    /// from the wire — a peer that desyncs would otherwise make the holder
-    /// allocate gigabytes on its behalf.
-    static let maximumFrameSize = 1 << 20
-
-    static func frame(_ response: HolderResponse) throws -> Data { try encode(response) }
-    static func frame(_ request: HolderRequest) throws -> Data { try encode(request) }
-
-    private static func encode<Message: Encodable>(_ message: Message) throws -> Data {
-        let payload = try JSONEncoder().encode(message)
-        var length = UInt32(payload.count).littleEndian
-        var framed = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
-        framed.append(payload)
-        return framed
-    }
-
-    /// Pulls every complete frame out of `buffer`, leaving any partial tail
-    /// behind for the next read.
-    static func drain<Message: Decodable>(_ type: Message.Type, from buffer: inout Data) throws -> [Message] {
-        var messages: [Message] = []
-        while true {
-            guard buffer.count >= MemoryLayout<UInt32>.size else { return messages }
-            let header = buffer.prefix(MemoryLayout<UInt32>.size)
-            let length = Int(header.withUnsafeBytes { raw in
-                UInt32(littleEndian: raw.loadUnaligned(as: UInt32.self))
-            })
-            guard length <= maximumFrameSize else {
-                throw HolderStartupError.oversizedFrame(bytes: length, limit: maximumFrameSize)
-            }
-            let total = MemoryLayout<UInt32>.size + length
-            guard buffer.count >= total else { return messages }
-            let payload = buffer.dropFirst(MemoryLayout<UInt32>.size).prefix(length)
-            messages.append(try JSONDecoder().decode(Message.self, from: Data(payload)))
-            buffer = Data(buffer.dropFirst(total))
-        }
-    }
-
-    static func drainRequests(from buffer: inout Data) throws -> [HolderRequest] {
-        try drain(HolderRequest.self, from: &buffer)
     }
 }
