@@ -100,6 +100,14 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.gcHolderRendezvousEnabledDefault`, never through
     /// `?? false`.
     var gc_holder_rendezvous_enabled: Bool?
+    /// Gate for the GC phase that kills a row-less pty holder this installation
+    /// owns. **Genuinely tri-state**, same shape as
+    /// `gc_holder_rendezvous_enabled`: the
+    /// `20260901161500_config_gc_rowless_holders` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.gcRowlessHoldersEnabledDefault`, never through
+    /// `?? false`.
+    var gc_rowless_holders_enabled: Bool?
     /// This installation's holder owner token, minted once by the first daemon
     /// that needs one and read forever after. **Not a flag**: NULL means "not
     /// yet minted", and the mint is the conditional UPDATE in
@@ -141,6 +149,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter gcHolderRendezvousDefault: and once more, for
     ///   `gc_holder_rendezvous_enabled` — the holder rendezvous sweep's soak
     ///   gate.
+    /// - Parameter gcRowlessHoldersDefault: and once more, for
+    ///   `gc_rowless_holders_enabled` — the row-less holder sweep's soak gate,
+    ///   which is a separate opt-in because it kills processes rather than
+    ///   unlinking files.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -150,7 +162,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault,
         remotePeerMessagingDefault: Bool = Config.remotePeerMessagingDefault,
         ptyHolderDefault: Bool = Config.ptyHolderDefault,
-        gcHolderRendezvousDefault: Bool = Config.gcHolderRendezvousEnabledDefault
+        gcHolderRendezvousDefault: Bool = Config.gcHolderRendezvousEnabledDefault,
+        gcRowlessHoldersDefault: Bool = Config.gcRowlessHoldersEnabledDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -213,6 +226,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // And the last of them, for the holder rendezvous sweep's gate —
             // NOT `?? false`.
             gcHolderRendezvousEnabled: gc_holder_rendezvous_enabled ?? gcHolderRendezvousDefault,
+            // And its process-killing sibling, resolved the same way and from
+            // its own column — NOT `?? false`, and NOT the rendezvous flag.
+            gcRowlessHoldersEnabled: gc_rowless_holders_enabled ?? gcRowlessHoldersDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
             // Passed straight through, NULL included: "not yet minted" is a
             // real state and has no default to resolve to.
@@ -653,6 +669,21 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_holder_rendezvous_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the row-less holder sweep gate (default OFF, soaking) — read on
+    /// top of the GC master switch, so both must be on for the phase to run.
+    /// Separate from `setGCHolderRendezvousEnabled` on purpose: that gate
+    /// unlinks files, this one kills processes. The column is written on every
+    /// call, because writing either value is the explicit gesture that lifts it
+    /// out of NULL forever after.
+    public func setGCRowlessHoldersEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET gc_rowless_holders_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

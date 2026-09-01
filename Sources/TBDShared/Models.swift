@@ -1469,6 +1469,24 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcHolderRendezvousEnabled: Bool
+    /// Gate for the orphan-GC phase that **kills** a pty holder this
+    /// installation owns which no session row claims — the holder-versus-
+    /// database half of
+    /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+    /// "Reconciliation". Read on top of `gcEnabled`: both must be on.
+    ///
+    /// **Deliberately not `gcHolderRendezvousEnabled`.** That flag unlinks
+    /// files; this one signals processes. They are independent opt-ins because
+    /// somebody enabling file cleanup must not silently acquire a process
+    /// killer, and because what this phase misjudges cannot be restored.
+    ///
+    /// **Resolved, not stored**, like `gcHolderRendezvousEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `gc_rowless_holders_enabled ?? Config.gcRowlessHoldersEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var gcRowlessHoldersEnabled: Bool
     /// The single opt-in for remote peer messaging
     /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
     /// rollout"): publishing a shadow peer for each remote session and carrying
@@ -1579,6 +1597,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// this constant, with no forcing `UPDATE` migration and every explicit
     /// opt-out left alone.
     public static let gcHolderRendezvousEnabledDefault = false
+    /// The shipped default for `gcRowlessHoldersEnabled`, and the single place
+    /// it lives. The row-less holder sweep ships off; graduation — after a soak
+    /// in which it never kills a holder that turned out to be somebody's live
+    /// session — is a change to this constant, with no forcing `UPDATE`
+    /// migration and every explicit opt-out left alone.
+    public static let gcRowlessHoldersEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1614,6 +1638,7 @@ public struct Config: Codable, Sendable, Equatable {
                 remotePeerMessagingEnabled: Bool = Config.remotePeerMessagingDefault,
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
                 gcHolderRendezvousEnabled: Bool = Config.gcHolderRendezvousEnabledDefault,
+                gcRowlessHoldersEnabled: Bool = Config.gcRowlessHoldersEnabledDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1650,6 +1675,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.remotePeerMessagingEnabled = remotePeerMessagingEnabled
         self.ptyHolderEnabled = ptyHolderEnabled
         self.gcHolderRendezvousEnabled = gcHolderRendezvousEnabled
+        self.gcRowlessHoldersEnabled = gcRowlessHoldersEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -1745,6 +1771,12 @@ public struct Config: Codable, Sendable, Equatable {
         gcHolderRendezvousEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcHolderRendezvousEnabled)
             ?? Config.gcHolderRendezvousEnabledDefault
+        // Same reading for the row-less holder sweep's gate: absent means the
+        // sender knew nothing about the flag, which is the NULL column's
+        // situation — follow the shipped default, never a hardcoded `false`.
+        gcRowlessHoldersEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .gcRowlessHoldersEnabled)
+            ?? Config.gcRowlessHoldersEnabledDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.
