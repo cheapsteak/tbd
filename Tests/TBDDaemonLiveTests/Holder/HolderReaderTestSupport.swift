@@ -25,6 +25,11 @@ import Testing
 /// It deliberately duplicates the fixture in `HolderClientTests` rather than
 /// sharing it: that file belongs to a separate change still under review, and a
 /// shared extraction is worth doing once both have landed.
+///
+/// Every suite that uses this fixture is **tier 3** and belongs in
+/// `TBDDaemonLiveTests`, because each one spawns a real `TBDHolder` process
+/// (`docs/specs/2026-07-24-test-hardening-design.md` §3). `HolderClientTests`
+/// carries the measurement that made the placement non-negotiable.
 final class HolderProcessFixture {
     let home: String
     let sessionID: UUID

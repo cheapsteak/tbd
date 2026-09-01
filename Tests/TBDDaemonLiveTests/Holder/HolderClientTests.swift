@@ -9,6 +9,20 @@ import Testing
 /// The daemon-side half of the holder rendezvous, driven against real holder
 /// processes spawned through the real `HolderSpawner`.
 ///
+/// **Tier 3** (`docs/specs/2026-07-24-test-hardening-design.md` §3: "spawned
+/// processes … serial, on a quiet machine"), which is why it lives in
+/// `TBDDaemonLiveTests` rather than beside the daemon's parallel suites. It
+/// started in the parallel target and had to move: `spawnsAHolderAndDescribes`
+/// `ItsChild` failed three CI runs running and passed the fourth at 82.1 s, in
+/// a pass whose p50 *reported* test duration was 51 s and p90 100 s — Swift
+/// Testing runs every non-serialized test of a target in one process with no
+/// concurrency cap, so a holder spawned while 4,354 tests are in flight takes
+/// two orders of magnitude longer to become reachable than the same spawn on a
+/// quiet machine (measured: 67.9 s inside the full pass, sub-second alone).
+/// The bind budget is 500 polls, and 500 polls landed in the same band. Red and
+/// green were the same run separated by a coin flip; only leaving the herd
+/// fixes that, and raising the budget only moves the coin.
+///
 /// Four rules shape the suite, each one a bug it would otherwise ship:
 ///
 ///   1. **Every wait is a bounded poll.** A holder that wedges must fail a test
