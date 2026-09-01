@@ -9,6 +9,20 @@ import Testing
 /// The daemon-side half of the holder rendezvous, driven against real holder
 /// processes spawned through the real `HolderSpawner`.
 ///
+/// **Tier 3** (`docs/specs/2026-07-24-test-hardening-design.md` §3: "spawned
+/// processes … serial, on a quiet machine"), which is why it lives in
+/// `TBDDaemonLiveTests` rather than beside the daemon's parallel suites. It
+/// started in the parallel target and had to move: `spawnsAHolderAndDescribes`
+/// `ItsChild` failed three CI runs running and passed the fourth at 82.1 s, in
+/// a pass whose p50 *reported* test duration was 51 s and p90 100 s — Swift
+/// Testing runs every non-serialized test of a target in one process with no
+/// concurrency cap, so a holder spawned while 4,354 tests are in flight takes
+/// two orders of magnitude longer to become reachable than the same spawn on a
+/// quiet machine (measured: 67.9 s inside the full pass, sub-second alone).
+/// The bind budget is 500 polls, and 500 polls landed in the same band. Red and
+/// green were the same run separated by a coin flip; only leaving the herd
+/// fixes that, and raising the budget only moves the coin.
+///
 /// Four rules shape the suite, each one a bug it would otherwise ship:
 ///
 ///   1. **Every wait is a bounded poll.** A holder that wedges must fail a test
@@ -406,7 +420,8 @@ struct HolderClientTests {
             thrown = error
         }
 
-        guard case .holderDidNotBind(let holderPID, _, _)? = thrown as? HolderSpawner.Error else {
+        guard case .holderDidNotBind(let holderPID, _, let diagnostics)?
+            = thrown as? HolderSpawner.Error else {
             Issue.record("expected .holderDidNotBind, got \(String(describing: thrown))")
             return
         }
@@ -416,6 +431,25 @@ struct HolderClientTests {
         defer { reapIfAlive(holderPID) }
         #expect(holderPID > 0)
         #expect(!processIsAlive(holderPID))
+
+        // The failure has to say which of the several indistinguishable things
+        // happened, because "<no holder output>" was true of all of them. This
+        // stand-in is alive and silent, so the report must say exactly that —
+        // and must say the log file EXISTS and is empty, which is what
+        // separates a holder that wrote nothing from a redirect that never
+        // applied.
+        #expect(
+            diagnostics.contains("holder=alive"),
+            "the report must distinguish a live holder from a dead one: \(diagnostics)")
+        #expect(
+            diagnostics.contains("file exists") && diagnostics.contains("empty"),
+            "an empty stderr file must not read as a missing one: \(diagnostics)")
+        #expect(
+            diagnostics.contains("socket absent"),
+            "the report must say whether the socket was ever created: \(diagnostics)")
+        #expect(
+            diagnostics.contains("polls over"),
+            "the report must say what the budget bought in real time: \(diagnostics)")
     }
 
     /// A holder that DID create its socket must survive the failed spawn.

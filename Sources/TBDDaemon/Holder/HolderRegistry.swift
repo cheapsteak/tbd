@@ -44,6 +44,16 @@ actor HolderRegistry {
         /// published. Everything it obtained — the reader, and with it the pty
         /// dup — was released before this was thrown.
         case superseded(terminalID: UUID)
+        /// No `TBDHolder` binary could be located, so no session can be
+        /// spawned onto this transport. Named rather than swallowed: the
+        /// caller's fallback is to spawn onto tmux, and a silent fallback
+        /// would make a flag that appears on look off.
+        case holderExecutableUnavailable
+        /// Something is already registered for this session. A spawn is for a
+        /// session that does not exist yet, so this can only mean the caller
+        /// minted a terminal ID that is already live — never a race to be
+        /// waited out.
+        case sessionAlreadyRegistered(terminalID: UUID)
 
         var errorDescription: String? {
             switch self {
@@ -55,6 +65,11 @@ actor HolderRegistry {
             case .superseded(let terminalID):
                 return "the adoption of terminal \(terminalID.uuidString) was superseded while it "
                     + "was in flight; its reader was stopped rather than published"
+            case .holderExecutableUnavailable:
+                return "no TBDHolder binary was found beside the running daemon, so no session "
+                    + "can be spawned onto the holder transport"
+            case .sessionAlreadyRegistered(let terminalID):
+                return "session \(terminalID.uuidString) already has a live holder reader"
             }
         }
     }
@@ -105,10 +120,36 @@ actor HolderRegistry {
     /// This installation's token, compared against every holder's before it is
     /// adopted.
     let owner: HolderOwnerToken
-    /// The environment the rendezvous paths are derived from. Explicit rather
-    /// than ambient so tests never reach the developer's real `~/tbd`.
-    private let environment: [String: String]
+    /// The environment the rendezvous paths are derived from, the holder
+    /// processes run under, and the jobs they fork inherit. Explicit rather
+    /// than ambient so tests never reach the developer's real `~/tbd` — or the
+    /// developer's real login shell. In production it *is* the daemon's own
+    /// environment, which is also what a tmux pane inherits from the server the
+    /// daemon started, so the two transports launch a job into the same place.
+    ///
+    /// Immutable and `Sendable`, so a caller composing a `HolderLaunchRequest`
+    /// can read it without hopping onto the actor.
+    nonisolated let environment: [String: String]
     private let listTerminals: @Sendable () async throws -> [Terminal]
+    /// How a holder is started. `nil` when no `TBDHolder` binary could be
+    /// located, which makes `spawn` refuse by name instead of the registry
+    /// pretending it could have spawned one. Adoption does not need it: an
+    /// already-running holder is reached through its socket.
+    private let spawner: HolderSpawner?
+    /// Whether this registry can start a holder at all — that is, whether
+    /// `spawn` can do anything but throw `.holderExecutableUnavailable`.
+    ///
+    /// **The registry's existence is not the answer to that question, and the
+    /// spawn gate must ask this instead.** A daemon whose `TBDHolder` binary is
+    /// missing still builds a registry, because adoption needs no executable:
+    /// a holder that is already running is reached through its socket, and a
+    /// user whose sessions are live must not lose them because an upgrade moved
+    /// the binary. So "registry present" and "can spawn" are genuinely
+    /// different facts, and only the second one may gate a create.
+    ///
+    /// `nonisolated` and immutable so the gate can read it without hopping onto
+    /// the actor — `spawner` is a `let`, so this is decided once, in `init`.
+    nonisolated let canSpawn: Bool
 
     private var slots: [UUID: Slot] = [:]
     /// The last status a holder reported for a session, and the only home it
@@ -190,12 +231,15 @@ actor HolderRegistry {
         owner: HolderOwnerToken,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         listTerminals: @escaping @Sendable () async throws -> [Terminal],
+        spawner: HolderSpawner? = nil,
         busyRetryBudget: Duration = HolderRegistry.defaultBusyRetryBudget,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.owner = owner
         self.environment = environment
         self.listTerminals = listTerminals
+        self.spawner = spawner
+        self.canSpawn = spawner != nil
         self.busyRetryBudget = busyRetryBudget
         self.clock = clock
     }
@@ -227,6 +271,79 @@ actor HolderRegistry {
     /// The last status a holder reported for a session, if one ever has.
     func lastKnownStatus(for terminalID: UUID) -> HolderChildStatus? {
         statuses[terminalID]
+    }
+
+    // MARK: - Spawning
+
+    /// Starts a holder for a brand-new session and begins draining it.
+    ///
+    /// **The spawner's own handshake connection is what takes the pty**, rather
+    /// than a fresh one. A holder serves one client at a time and learns the
+    /// previous one has gone only when its poll loop next reads end of file, so
+    /// a caller that closed the handshake connection and reconnected would race
+    /// that notice and be answered with the busy sentinel for a slot that is
+    /// already free. `HolderSpawner` hands the live connection back precisely so
+    /// that window cannot be entered; dropping it and reconnecting would put it
+    /// straight back.
+    ///
+    /// The returned handle is what the caller persists. Nothing here writes a
+    /// row: a holder that was spawned and then failed to be recorded is the
+    /// caller's to `abandon`, because only the caller knows whether the record
+    /// landed.
+    func spawn(terminalID: UUID, launch: HolderLaunchRequest) async throws -> HolderHandle {
+        guard let spawner else { throw Error.holderExecutableUnavailable }
+        guard slots[terminalID] == nil else {
+            throw Error.sessionAlreadyRegistered(terminalID: terminalID)
+        }
+
+        let spawned = try await spawner.spawn(
+            sessionID: terminalID, launch: launch, owner: owner, environment: environment)
+
+        let adoption: Adoption
+        do {
+            adoption = try await Self.take(
+                terminalID: terminalID, over: spawned.client, expecting: owner)
+        } catch {
+            // The holder is up and supervising a job that no row will ever
+            // name, so leaving it would orphan both. Best-effort, and the
+            // standing guarantee is still a reconciler (Milestone B).
+            await Self.dispose(handle: spawned.handle)
+            throw error
+        }
+
+        slots[terminalID] = .adopted(adoption.reader)
+        statuses[terminalID] = adoption.description.status
+        drainLoopsStarted += 1
+        Self.logger.info(
+            """
+            spawned and adopted a holder for session \(terminalID.uuidString, privacy: .public): \
+            holder \(spawned.handle.holderPID, privacy: .public), child \
+            \(spawned.handle.childPID, privacy: .public)
+            """)
+        return spawned.handle
+    }
+
+    /// Undoes a `spawn` whose session could not be recorded: stops the reader,
+    /// tells the holder to let go, and kills the job.
+    ///
+    /// Best-effort by nature — every step talks to something that may already
+    /// be gone — and creation-time cleanup only. The standing guarantee for a
+    /// holder nobody owns is the reconciler Milestone B adds.
+    func abandon(terminalID: UUID, handle: HolderHandle) async {
+        await release(terminalID: terminalID)
+        statuses[terminalID] = nil
+        await Self.dispose(handle: handle)
+    }
+
+    /// `forget` then kill: the holder closes the pty master and winds down, and
+    /// the job it was supervising is killed by pid. Both are named because
+    /// holder death is deliberately **not** child death — a holder killed on
+    /// its own leaves its job reparented to pid 1 with nobody to reclaim it.
+    private static func dispose(handle: HolderHandle) async {
+        let client = HolderClient(socketPath: handle.socketPath)
+        try? await client.forget()
+        await client.close()
+        if handle.childPID > 0 { kill(handle.childPID, SIGKILL) }
     }
 
     // MARK: - Adoption
@@ -498,15 +615,32 @@ actor HolderRegistry {
         }
     }
 
-    /// One connect-and-take. Every exit path closes the connection: the holder
-    /// serves one client at a time, so a connection kept past the hand-over
-    /// would refuse every later verb — a `forget` on the deletion path above all.
+    /// One connect-and-take, over a connection opened for the purpose.
     private static func attemptAttach(
         terminalID: UUID,
         socketPath: String,
         expecting owner: HolderOwnerToken
     ) async throws -> Adoption {
-        let client = HolderClient(socketPath: socketPath)
+        try await take(
+            terminalID: terminalID,
+            over: HolderClient(socketPath: socketPath),
+            expecting: owner)
+    }
+
+    /// The hand-over itself, over a connection the caller supplies.
+    ///
+    /// Split from `attemptAttach` so a freshly spawned session can take its pty
+    /// over the connection the spawner's handshake already ran on — see
+    /// `spawn(terminalID:launch:)` — instead of reconnecting into the holder's
+    /// busy window. The connection is closed on every exit path either way: the
+    /// holder serves one client at a time, so a connection kept past the
+    /// hand-over would refuse every later verb, a `forget` on the deletion path
+    /// above all.
+    private static func take(
+        terminalID: UUID,
+        over client: HolderClient,
+        expecting owner: HolderOwnerToken
+    ) async throws -> Adoption {
         let description: HolderChildDescription
         let ptyFD: Int32
         do {

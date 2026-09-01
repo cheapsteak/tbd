@@ -250,12 +250,6 @@ let package = Package(
                 "TBDDaemonLib",
                 "TBDShared",
                 "TestSupport",
-                // Load-bearing for the same reason `TBDPeerHelperTests` depends
-                // on `TBDPeerHelper` below: `Holder/HolderClientTests` spawns
-                // the real `TBDHolder` binary through the real `HolderSpawner`,
-                // so the product has to be built and sit in the same products
-                // directory as the test bundle. Nothing here imports it.
-                "TBDHolder",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),
             ]
@@ -275,6 +269,13 @@ let package = Package(
                 // TmuxBridge (app side) drives a real tmux server in
                 // TmuxBridgeViewSessionLiveTests, which makes it tier 3.
                 "TBDApp",
+                // Load-bearing for the same reason `TBDPeerHelperTests` depends
+                // on `TBDPeerHelper` below: the suites under `Holder/` spawn the
+                // real `TBDHolder` binary through the real `HolderSpawner`, so
+                // the product has to be built and sit in the same products
+                // directory as the test bundle. Nothing here imports it.
+                "TBDHolder",
+                .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),
             ]
         ),

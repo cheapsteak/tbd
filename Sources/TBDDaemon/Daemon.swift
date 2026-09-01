@@ -808,6 +808,26 @@ public final class Daemon: Sendable {
             }
         )
 
+        // The holder registry, constructed HERE rather than at step 8e where it
+        // is first used, because `lifecycle` is copied by value into the RPC
+        // router below and both need to reach the same actor: the spawn path
+        // registers a session's reader, and `terminal.output` renders it.
+        // Startup adoption still happens at 8e — construction is cheap and
+        // opens nothing.
+        //
+        // `nil` in mock mode, like every other rail. With no registry the spawn
+        // gate falls back to tmux even with the flag on, which is the only
+        // honest answer when there is nothing to hold a pty.
+        let holderRegistry: HolderRegistry? = mockMode == nil
+            ? HolderRegistry(
+                owner: await HolderRegistry.installationOwner(config: database.config),
+                listTerminals: { [database] in try await database.terminals.list() },
+                spawner: HolderSpawner.locateSiblingExecutable().map {
+                    HolderSpawner(executableURL: $0)
+                })
+            : nil
+        self.holderRegistry = holderRegistry
+
         var lifecycle = WorktreeLifecycle(
             db: database, git: git, tmux: tmux, hooks: hooks,
             subscriptions: subs,
@@ -815,6 +835,7 @@ public final class Daemon: Sendable {
             pendingQuestions: pendingQuestions
         )
         lifecycle.controlMode = controlModeBridge
+        lifecycle.holderRegistry = holderRegistry
 
         // Queued prompt on worktree creation (design 2026-08-10). Constructed
         // here — before `lifecycle` is copied by value into the RPC router
@@ -941,6 +962,11 @@ public final class Daemon: Sendable {
             await rpcRouter.attachPendingPromptCoordinator(pendingPrompts)
         }
         rpcRouter.controlMode = controlModeBridge
+        // `terminal.output` renders a holder-backed session from the same
+        // reader the spawn path registered, so the router and the lifecycle
+        // must hold ONE registry — two would each drain their own dup of the
+        // pty master and quietly steal bytes from each other.
+        rpcRouter.holderRegistry = holderRegistry
         // The wake path recreates a terminal's tmux server/window when the
         // window is gone (e.g. post-reboot); give the recreated server the
         // same gated control-mode connection as every other ensureServer
@@ -1089,11 +1115,7 @@ public final class Daemon: Sendable {
         // With `pty_holder_enabled` off there are no such rows and this is a
         // single query — it cannot delay the socket bind for anyone who has not
         // opted in.
-        if mockMode == nil {
-            let holderRegistry = HolderRegistry(
-                owner: await HolderRegistry.installationOwner(config: database.config),
-                listTerminals: { [database] in try await database.terminals.list() })
-            self.holderRegistry = holderRegistry
+        if let holderRegistry {
             await holderRegistry.adoptAll()
         }
 
