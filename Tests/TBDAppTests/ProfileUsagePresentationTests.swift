@@ -1095,42 +1095,59 @@ struct CadenceRelativeStalenessTests {
         #expect(ProfileUsagePresentation.staleAge(forKind: .oauthToken) == 900)
     }
 
-    @Test func tokenProfileFetchedFourMinutesAgoIsNotStale() {
+    /// Every age below is chosen to sit BETWEEN the two thresholds, or to
+    /// bracket one of them — never below both, where the same verdict would
+    /// come back whatever `staleAge(forKind:)` returned and the assertion
+    /// would prove nothing. Each is also mid-minute (6.5, 14.5, 16.5) rather
+    /// than on a bucket edge, so sub-second `Date` wobble cannot shift the
+    /// "Nm" string `ageText` renders.
+    private func aging(_ secondsAgo: TimeInterval,
+                       from now: Date) -> ProfileUsageSnapshot {
+        snapshot(buckets: [bucket(kind: "session", percent: 12)],
+                 fetchedAt: now.addingTimeInterval(-secondsAgo))
+    }
+
+    /// 390s is past the 300s signed-in threshold and well short of the 900s
+    /// token one, so the two kinds must disagree here. A `staleAge(forKind:)`
+    /// that ignored its argument — returning a constant 300 or a constant 900
+    /// — fails one leg or the other.
+    @Test func atSixMinutesOnlyTheSignedInProfileIsStale() {
         let now = Date()
-        let fresh = snapshot(buckets: [bucket(kind: "session", percent: 12)],
-                             fetchedAt: now.addingTimeInterval(-240))
-        #expect(ProfileUsagePresentation.stalenessNote(for: fresh, kind: .oauthToken,
+        let sixMinutesOld = aging(390, from: now)
+        #expect(ProfileUsagePresentation.stalenessNote(for: sixMinutesOld, kind: .oauth,
+                                                       now: now) == "updated 6m ago")
+        #expect(ProfileUsagePresentation.stalenessNote(for: sixMinutesOld, kind: .oauthToken,
                                                        now: now) == nil)
     }
 
-    /// The off-branch: the same age on a signed-in profile IS stale, so the
-    /// threshold is genuinely per-kind rather than uniformly relaxed.
-    @Test func oauthProfileFetchedFourMinutesAgoIsStale() {
+    /// Brackets the token threshold in (870s, 990s]: fresh at 14.5 minutes,
+    /// stale at 16.5. That interval excludes 300, so the token window is
+    /// provably its own value and not the shared one — and it is finite, so a
+    /// token profile whose probe genuinely stopped landing is still called out.
+    @Test func theTokenThresholdSitsWellAboveTheSignedInOne() {
         let now = Date()
-        let aging = snapshot(buckets: [bucket(kind: "session", percent: 12)],
-                             fetchedAt: now.addingTimeInterval(-240))
-        #expect(ProfileUsagePresentation.stalenessNote(for: aging, kind: .oauth,
-                                                       now: now) == "updated 4m ago")
-    }
-
-    @Test func tokenProfileEventuallyGoesStale() {
-        let now = Date()
-        let old = snapshot(buckets: [bucket(kind: "session", percent: 12)],
-                           fetchedAt: now.addingTimeInterval(-960))
-        #expect(ProfileUsagePresentation.stalenessNote(for: old, kind: .oauthToken,
+        #expect(ProfileUsagePresentation.stalenessNote(for: aging(870, from: now),
+                                                       kind: .oauthToken, now: now) == nil)
+        #expect(ProfileUsagePresentation.stalenessNote(for: aging(990, from: now),
+                                                       kind: .oauthToken,
                                                        now: now) == "updated 16m ago")
+        // The signed-in profile crossed long before either of those.
+        #expect(ProfileUsagePresentation.stalenessNote(for: aging(870, from: now),
+                                                       kind: .oauth,
+                                                       now: now) == "updated 14m ago")
     }
 
+    /// The same disagreement has to survive the hop through `secondaryLine`,
+    /// which is what the Settings rows and account menus actually call.
     @Test func secondaryLineThreadsKindThroughToTheThreshold() {
         let now = Date()
-        let fourMinutesOld = snapshot(buckets: [bucket(kind: "session", percent: 12)],
-                                      fetchedAt: now.addingTimeInterval(-240))
-        #expect(ProfileUsagePresentation.secondaryLine(for: fourMinutesOld, kind: .oauthToken,
+        let sixMinutesOld = aging(390, from: now)
+        #expect(ProfileUsagePresentation.secondaryLine(for: sixMinutesOld, kind: .oauthToken,
                                                        timeZone: utc, now: now)
                 == "5h 12% used")
-        #expect(ProfileUsagePresentation.secondaryLine(for: fourMinutesOld, kind: .oauth,
+        #expect(ProfileUsagePresentation.secondaryLine(for: sixMinutesOld, kind: .oauth,
                                                        timeZone: utc, now: now)
-                == "5h 12% used · updated 4m ago")
+                == "5h 12% used · updated 6m ago")
     }
 
     /// A rejected setup-token is repaired by pasting a new one, never by
