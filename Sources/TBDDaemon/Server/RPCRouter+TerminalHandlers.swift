@@ -1008,42 +1008,24 @@ extension RPCRouter {
     /// kills the job it forked. Returns a description of what was left running,
     /// or nil when the whole teardown was attempted.
     ///
-    /// `HolderRegistry.abandon` is best-effort by nature — every step talks to
-    /// something that may already be gone — so it reports nothing, and the only
-    /// failures nameable here are the ones that stop it being *attempted*: no
-    /// registry wired into this daemon, an unrepresentable rendezvous path, or
-    /// a row that never recorded the child pid. Each one leaks a live process,
-    /// and until the Milestone B holder reconciler lands nothing else will ever
-    /// find it, so each is reported rather than swallowed.
-    private func disposeHolder(for terminal: Terminal) async -> String? {
+    /// `HolderRegistry.abandon(terminal:)` is best-effort by nature — every
+    /// step talks to something that may already be gone — so the only failures
+    /// nameable are the ones that stop it being *attempted*: no registry wired
+    /// into this daemon, an unrepresentable rendezvous path, or a row that never
+    /// recorded the child pid. Each one leaks a live process, and until the
+    /// Milestone B holder reconciler lands nothing else will ever find it, so
+    /// each is reported rather than swallowed.
+    ///
+    /// Not `private`: `closeScratchTerminals` tears down rows the same way and
+    /// must reclaim the same holders. The teardown itself lives on the registry
+    /// so the lifecycle's own paths (archive, forget) share one implementation
+    /// rather than three near-copies.
+    func disposeHolder(for terminal: Terminal) async -> String? {
         guard let holderRegistry else {
             return "terminal \(terminal.id) runs on the holder transport but this daemon has "
                 + "no holder registry, so its holder and job were left running"
         }
-        let socketPath: String
-        do {
-            socketPath = try HolderRendezvous.socketPath(
-                sessionID: terminal.id, environment: holderRegistry.environment)
-        } catch {
-            return "\(error)"
-        }
-        // `holderPID` is not needed to reclaim anything: `abandon` reaches the
-        // holder over its socket and kills the job by CHILD pid, so a row whose
-        // holder pid was never recorded is still fully reclaimable. `childPID`
-        // is the one that matters, and 0 is the sentinel `dispose` refuses to
-        // signal — deliberately, since `kill(0, …)` would signal the daemon's
-        // own process group.
-        await holderRegistry.abandon(
-            terminalID: terminal.id,
-            handle: HolderHandle(
-                holderPID: terminal.holderPID ?? 0,
-                childPID: terminal.childPID ?? 0,
-                socketPath: socketPath))
-        guard terminal.childPID != nil else {
-            return "terminal \(terminal.id) recorded no child pid, so its holder was told to "
-                + "let go but the job it forked was not killed"
-        }
-        return nil
+        return await holderRegistry.abandon(terminal: terminal)
     }
 
     /// Closed-terminal capture metadata for a worktree, newest first. Content

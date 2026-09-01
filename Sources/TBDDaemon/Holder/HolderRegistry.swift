@@ -335,6 +335,55 @@ actor HolderRegistry {
         await Self.dispose(handle: handle)
     }
 
+    /// Tears down the holder behind a row that is about to lose its DB record,
+    /// deriving the rendezvous from this registry's own environment. Returns a
+    /// description of what was left running, or nil when the whole teardown was
+    /// attempted.
+    ///
+    /// **Every teardown path that deletes terminal rows must call this for a
+    /// holder row, and the `killWindow` beside it is not an adequate
+    /// substitute.** A holder row's `tmuxWindowID` is the empty string by
+    /// construction, so that kill is not merely a no-op for this transport — it
+    /// IS the leak: it addresses a coordinate naming nothing while the holder
+    /// process, the job it forked, and the socket and lock files at its
+    /// rendezvous all outlive the row. The row was the only record of those
+    /// pids, so the moment before it is deleted is the last moment anything can
+    /// reclaim them; until Milestone B's holder reconciler lands, no sweep will
+    /// ever find them again.
+    ///
+    /// `abandon` is best-effort by nature — every step talks to something that
+    /// may already be gone — so it reports nothing, and the only failures
+    /// nameable here are the ones that stop it being *attempted*: an
+    /// unrepresentable rendezvous path, or a row that never recorded the child
+    /// pid. Each one leaks a live process, so each is reported rather than
+    /// swallowed.
+    func abandon(terminal: Terminal) async -> String? {
+        let socketPath: String
+        do {
+            socketPath = try HolderRendezvous.socketPath(
+                sessionID: terminal.id, environment: environment)
+        } catch {
+            return "\(error)"
+        }
+        // `holderPID` is not needed to reclaim anything: `abandon` reaches the
+        // holder over its socket and kills the job by CHILD pid, so a row whose
+        // holder pid was never recorded is still fully reclaimable. `childPID`
+        // is the one that matters, and 0 is the sentinel `dispose` refuses to
+        // signal — deliberately, since `kill(0, …)` would signal the daemon's
+        // own process group.
+        await abandon(
+            terminalID: terminal.id,
+            handle: HolderHandle(
+                holderPID: terminal.holderPID ?? 0,
+                childPID: terminal.childPID ?? 0,
+                socketPath: socketPath))
+        guard terminal.childPID != nil else {
+            return "terminal \(terminal.id) recorded no child pid, so its holder was told to "
+                + "let go but the job it forked was not killed"
+        }
+        return nil
+    }
+
     /// `forget` then kill: the holder closes the pty master and winds down, and
     /// the job it was supervising is killed by pid. Both are named because
     /// holder death is deliberately **not** child death — a holder killed on

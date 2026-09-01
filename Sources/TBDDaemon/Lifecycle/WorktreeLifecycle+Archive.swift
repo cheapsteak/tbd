@@ -127,7 +127,19 @@ extension WorktreeLifecycle {
         // kill-window's SIGHUP. The archived worktree row and its history rows
         // survive, so the captured output stays readable later.
         for terminal in terminals {
-            await captureThenKillWindow(terminal: terminal, server: worktree.tmuxServer)
+            // A holder row takes the holder teardown instead. Its rows are
+            // deleted below just as a tmux row's are, so refusing here would
+            // leak rather than protect, and `captureThenKillWindow` would
+            // capture, kill and reap against empty coordinates while the holder
+            // and its job outlive the only record of their pids.
+            if terminal.transport == .holder {
+                if let failure = await disposeHolder(for: terminal) {
+                    archiveLogger.warning(
+                        "archive left a holder running: \(failure, privacy: .public)")
+                }
+            } else {
+                await captureThenKillWindow(terminal: terminal, server: worktree.tmuxServer)
+            }
         }
 
         // Delete terminals from db

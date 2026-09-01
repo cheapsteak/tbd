@@ -170,5 +170,108 @@ struct ScratchDeleteRPCTests {
         let del = await router.handle(try RPCRequest(method: RPCMethod.scratchDelete, params: ScratchDeleteParams(worktreeID: wt.id)))
         #expect(!del.success)
     }
+
+    // MARK: - The holder transport
+
+    /// `closeScratchTerminals` kills tmux windows and then deletes the rows.
+    /// A holder row's `tmuxWindowID` is the empty string by construction, so
+    /// that kill addressed nothing while the holder, the job it forked and its
+    /// rendezvous files outlived the row that was the only record of their
+    /// pids — and no sweep covers them until Milestone B's holder reconciler.
+    /// It is the same branch, for the same reason, as `handleTerminalDelete`:
+    /// the row goes away either way, so refusing would cause the leak rather
+    /// than prevent it.
+    ///
+    /// The observable is `adoptAll`'s recorded status, which nothing but
+    /// `abandon` clears. A row that merely vanished leaves it set.
+    ///
+    /// This gate's siblings — worktree archive and forget — live in
+    /// `HolderTmuxAssumptionGateTests`, which needs no `TBD_HOME`.
+    @Test func scratchDeleteDisposesHolderInsteadOfKillingAWindow() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        // Reports every window dead, which is what a real server answers for
+        // the empty window id, and records every argv it is handed.
+        let tmux = TmuxManager(
+            dryRun: true, dryRunRecorder: { recorded.append($0) },
+            dryRunWindowIsDead: { _ in true })
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            tmux: tmux, startTime: Date(), actuationLog: makeTestActuationLog())
+        let created = await router.handle(try RPCRequest(
+            method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "holder-scratch")))
+        let wt = try created.decodeResult(Worktree.self)
+        // `scratch.create` auto-spawns a primary agent terminal; clear it so
+        // this test controls its own fixture.
+        try await db.terminals.deleteForWorktree(worktreeID: wt.id)
+
+        // `childPID: 0` deliberately: it is the one value the registry's
+        // disposal refuses to signal, and any other value a fixture could name
+        // is a pid this shared box may really be running.
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder, holderPID: 9101, childPID: 0)
+        let registry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: ["TBD_HOME": "/tmp/tbd-sd-\(UUID().uuidString.prefix(8))"],
+            listTerminals: { [terminal] })
+        // Nothing answers at the derived rendezvous, so the startup sweep
+        // records the session as ended with an unknown status. That recorded
+        // status is what separates "the row went away" from "the holder was
+        // disposed of".
+        await registry.adoptAll()
+        let armed = await registry.lastKnownStatus(for: terminal.id)
+        #expect(armed == .exitedStatusUnknown, "the fixture never armed the observable")
+        router.holderRegistry = registry
+
+        let del = await router.handle(try RPCRequest(
+            method: RPCMethod.scratchDelete, params: ScratchDeleteParams(worktreeID: wt.id)))
+
+        #expect(del.success, "error: \(del.error ?? "nil")")
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+        let disposed = await registry.lastKnownStatus(for: terminal.id)
+        #expect(disposed == nil,
+                "scratch.delete removed the row without disposing of its holder, so the holder, its child and its rendezvous files are now owned by nothing")
+        #expect(recorded.snapshot().contains { $0.contains("kill-window") } == false,
+                "scratch.delete reached tmux kill-window for a holder row: \(recorded.snapshot())")
+    }
+
+    /// The other leg. An inverted transport comparison would leave a real tmux
+    /// window running while its row was deleted.
+    @Test func scratchDeleteStillKillsAnIdenticalTmuxWindow() async throws {
+        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = TmuxManager(
+            dryRun: true, dryRunRecorder: { recorded.append($0) },
+            dryRunWindowIsDead: { _ in true })
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            tmux: tmux, startTime: Date(), actuationLog: makeTestActuationLog())
+        let created = await router.handle(try RPCRequest(
+            method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "tmux-scratch")))
+        let wt = try created.decodeResult(Worktree.self)
+        try await db.terminals.deleteForWorktree(worktreeID: wt.id)
+        _ = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@7", tmuxPaneID: "%7", kind: .claude)
+        // Wired in and listing nothing, so an inverted comparison reaches a
+        // registry that has never heard of this row rather than a nil that
+        // would make the branch unreachable either way.
+        router.holderRegistry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: ["TBD_HOME": "/tmp/tbd-sd-\(UUID().uuidString.prefix(8))"],
+            listTerminals: { [] })
+
+        let del = await router.handle(try RPCRequest(
+            method: RPCMethod.scratchDelete, params: ScratchDeleteParams(worktreeID: wt.id)))
+
+        #expect(del.success, "error: \(del.error ?? "nil")")
+        let argv = recorded.snapshot()
+        #expect(argv.contains { $0.contains("kill-window") && $0.contains("@7") },
+                "the tmux leg must still kill its own window: \(argv)")
+    }
 }
 }

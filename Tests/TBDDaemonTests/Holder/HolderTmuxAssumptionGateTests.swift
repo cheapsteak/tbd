@@ -7,7 +7,10 @@ import Testing
 /// Every argv the dry-run `TmuxManager` was handed. "Nothing was recorded" is
 /// the assertion that a guard sat ahead of the whole tmux mechanic, not merely
 /// ahead of the DB write at the end of it.
-private final class RecordedTmuxArgs: @unchecked Sendable {
+/// Not `private`: the same teardown gate is asserted in `ScratchDeleteRPCTests`
+/// and `DeskSessionManagerTests`, whose fixtures need `TBD_HOME` and so cannot
+/// live in this suite. One recorder rather than three copies.
+final class RecordedTmuxArgs: @unchecked Sendable {
     private let lock = NSLock()
     private var calls: [[String]] = []
 
@@ -634,6 +637,129 @@ struct HolderTmuxAssumptionGateTests {
             params: TerminalDeleteParams(terminalID: terminal.id)))
 
         #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        let argv = recorded.snapshot()
+        #expect(argv.contains { $0.contains("kill-window") && $0.contains("@7") },
+                "the tmux leg must still kill its own window: \(argv)")
+    }
+
+    // MARK: - Gate 8: the other teardowns that delete a row
+
+    /// `terminal.delete` was never the only path that deletes a terminal row.
+    /// Worktree archive, forget, `scratch.delete`/`scratch.archive` and the
+    /// Watch Desk close all kill windows and then delete the rows, and every
+    /// one of them leaked a holder for the same reason: `tmuxWindowID` is the
+    /// empty string, so the kill addresses nothing while the holder, the job it
+    /// forked and its rendezvous files outlive the row that was the only record
+    /// of their pids. Nothing reclaims them until Milestone B's reconciler.
+    ///
+    /// The observable is the one the delete gate established: `adoptAll`
+    /// records a status for a session nothing answers for, and `abandon` is the
+    /// only thing that clears it. A row that simply vanished leaves it set.
+    private func armedRegistry(
+        listing terminals: [Terminal], for terminalID: UUID
+    ) async throws -> HolderRegistry {
+        let registry = holderRegistry(listing: terminals)
+        await registry.adoptAll()
+        let armed = await registry.lastKnownStatus(for: terminalID)
+        #expect(armed == .exitedStatusUnknown, "the fixture never armed the observable")
+        return registry
+    }
+
+    private func lifecycle(
+        _ db: TBDDatabase, tmux: TmuxManager, registry: HolderRegistry?
+    ) -> WorktreeLifecycle {
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.holderRegistry = registry
+        return lifecycle
+    }
+
+    @Test("archiving a worktree disposes its holder instead of killing a window")
+    func archiveDisposesHolder() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // `childPID: 0` for the same reason as the delete gate: it is the one
+        // value the registry's disposal refuses to signal, and every other
+        // value a fixture could name is a pid this shared box may be running.
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, childPID: 0)
+        let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
+
+        _ = try await lifecycle(db, tmux: tmux, registry: registry)
+            .beginArchiveWorktree(worktreeID: wt.id)
+
+        #expect(try await db.terminals.get(id: terminal.id) == nil,
+                "archive is supposed to delete the row; the gate is about what goes with it")
+        let disposed = await registry.lastKnownStatus(for: terminal.id)
+        #expect(disposed == nil,
+                "archive deleted the row without disposing of its holder, so the holder, its child and its rendezvous files are now owned by nothing")
+        #expect(recorded.snapshot().isEmpty,
+                "archive reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    @Test("archiving a worktree still captures and kills an identical tmux row")
+    func archiveStillKillsTmuxWindow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+        // Wired in and listing nothing, so an inverted transport comparison
+        // reaches a registry that has never heard of this row rather than a nil
+        // that would make the branch unreachable either way.
+        let registry = holderRegistry(listing: [])
+
+        _ = try await lifecycle(db, tmux: tmux, registry: registry)
+            .beginArchiveWorktree(worktreeID: wt.id)
+
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        let argv = recorded.snapshot()
+        #expect(argv.contains { $0.contains("kill-window") && $0.contains("@7") },
+                "the tmux leg must still kill its own window: \(argv)")
+    }
+
+    @Test("forgetting a worktree disposes its holder instead of killing a window")
+    func forgetDisposesHolder() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, childPID: 0)
+        let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
+
+        try await lifecycle(db, tmux: tmux, registry: registry)
+            .forgetWorktree(worktreeID: wt.id)
+
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        let disposed = await registry.lastKnownStatus(for: terminal.id)
+        #expect(disposed == nil,
+                "forget deleted the row without disposing of its holder, so the holder, its child and its rendezvous files are now owned by nothing")
+        #expect(recorded.snapshot().isEmpty,
+                "forget reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    @Test("forgetting a worktree still kills an identical tmux row's window")
+    func forgetStillKillsTmuxWindow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+        let registry = holderRegistry(listing: [])
+
+        try await lifecycle(db, tmux: tmux, registry: registry)
+            .forgetWorktree(worktreeID: wt.id)
+
         #expect(try await db.terminals.get(id: terminal.id) == nil)
         let argv = recorded.snapshot()
         #expect(argv.contains { $0.contains("kill-window") && $0.contains("@7") },
