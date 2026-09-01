@@ -188,6 +188,25 @@ extension RPCRouter {
                 // token bytes.
                 return RPCResponse(error: "Failed to store secret in keychain")
             }
+
+            // Probe once, now that the secret is actually on disk. A freshly
+            // pasted token then shows bars immediately, and a bad paste
+            // surfaces as a rejected-token row here rather than at the user's
+            // first spawn — which is the whole reason the probe happens at
+            // creation at all.
+            //
+            // Deliberately fire-and-forget: the probe is a network round trip,
+            // and the profile is validly created whether or not it succeeds, so
+            // it must neither delay this response nor be able to fail it. The
+            // poller broadcasts its own delta once the snapshot lands.
+            //
+            // Creation ONLY. Each probe is a real billed request, so nothing
+            // else calls this — not rename, and not `updateToken` rotation.
+            if let poller = oauthUsagePoller {
+                let createdProfileID = profileRow.id
+                Task { await poller.noteProfileCreated(profileID: createdProfileID) }
+            }
+
             subscriptions.broadcast(delta: .modelProfilesChanged)
             return try RPCResponse(result: ModelProfileAddResult(profile: profileRow, warning: nil))
         }

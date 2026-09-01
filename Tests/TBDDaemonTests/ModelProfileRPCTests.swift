@@ -30,6 +30,22 @@ final class StubClaudeUsageFetcher: ClaudeUsageFetcher, @unchecked Sendable {
     }
 }
 
+/// Records every credential a poller sweep hands it, so a test can assert both
+/// that a probe fired and what it carried. Returns an empty successful reading:
+/// nothing here is testing the parse, only the wiring.
+final class CountingProfileUsageFetcher: ProfileUsageFetching, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _credentials: [ProfileUsageCredential] = []
+
+    var credentials: [ProfileUsageCredential] { lock.withLock { _credentials } }
+    var callCount: Int { lock.withLock { _credentials.count } }
+
+    func fetchUsage(credential: ProfileUsageCredential) async -> ProfileUsageFetchStatus {
+        lock.withLock { _credentials.append(credential) }
+        return .ok([], organizationID: nil)
+    }
+}
+
 /// Keychain seam that samples the database from *inside* the delete handler's
 /// cleanup block, recording whether the `model_profiles` row still existed at
 /// that moment.
@@ -560,6 +576,113 @@ struct ModelProfileRPCTests {
         let result = try listResp.decodeResult(ModelProfileListResult.self)
         let entry = result.profiles.first { $0.profile.id == profile.id }
         #expect(entry?.tokenTail == nil)
+    }
+
+    /// A poller wired the way `Daemon.swift` wires the real one — profiles read
+    /// from this router's database, the secret read back through the same
+    /// `ModelProfileKeychain` the add handler wrote it to — with both fetchers
+    /// replaced by counters. Never `start()`ed: these tests exercise the
+    /// targeted creation probe, not the cadence loop.
+    private func makeCountingPoller(
+        db: TBDDatabase,
+        fetcher: CountingProfileUsageFetcher,
+        tokenFetcher: CountingProfileUsageFetcher
+    ) -> OAuthProfileUsagePoller {
+        OAuthProfileUsagePoller(
+            profilesProvider: { try await db.modelProfiles.list() },
+            loginIdentity: { _ in nil },
+            configDirPath: { id in "/tmp/profiles/\(id.uuidString)/claude" },
+            fetcher: fetcher,
+            tokenFetcher: tokenFetcher,
+            profileSecret: { id in try? ModelProfileKeychain.load(id: id.uuidString) },
+            broadcast: {},
+            sleeper: { _ in }
+        )
+    }
+
+    /// The creation probe is deliberately fire-and-forget — it must not delay
+    /// the add response — so it lands after the RPC returns. Bounded, so a
+    /// wiring regression fails fast instead of hanging the suite; the same
+    /// window is reused for the negative cases, where the positive test above
+    /// is the evidence that the window is long enough to have caught a probe.
+    private func waitForProbes(_ fetcher: CountingProfileUsageFetcher,
+                               toReach target: Int,
+                               within seconds: Double = 3) async {
+        let deadline = Date().addingTimeInterval(seconds)
+        while fetcher.callCount < target, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    /// A bad paste must be caught at creation — the row shows a rejected token
+    /// straight away — rather than at the user's first spawn.
+    @Test("add: creating a token profile probes usage exactly once")
+    func addTokenProfileProbesOnce() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+        let oauthFetcher = CountingProfileUsageFetcher()
+        let tokenFetcher = CountingProfileUsageFetcher()
+        router.oauthUsagePoller = makeCountingPoller(
+            db: db, fetcher: oauthFetcher, tokenFetcher: tokenFetcher)
+
+        let token = freshToken()
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: token)
+        #expect(resp.success)
+
+        await waitForProbes(tokenFetcher, toReach: 1)
+        #expect(tokenFetcher.callCount == 1)
+        // Not just "a probe happened": it carried the secret the add had only
+        // just stored, which is the whole chain — handler to keychain to poller.
+        #expect(tokenFetcher.credentials == [.token(token)])
+        // Dispatch is by kind, so the signed-in fetcher is never consulted.
+        #expect(oauthFetcher.callCount == 0)
+    }
+
+    /// Off-branch: creating a signed-in profile spends no billed request. Its
+    /// usage endpoint is free and the cadence sweep already serves it.
+    @Test("add: creating a signed-in profile probes nothing")
+    func addOAuthProfileProbesNothing() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+        let oauthFetcher = CountingProfileUsageFetcher()
+        let tokenFetcher = CountingProfileUsageFetcher()
+        router.oauthUsagePoller = makeCountingPoller(
+            db: db, fetcher: oauthFetcher, tokenFetcher: tokenFetcher)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(name: "SignedIn", token: nil)))
+        #expect(resp.success)
+
+        await waitForProbes(tokenFetcher, toReach: 1, within: 0.5)
+        #expect(tokenFetcher.callCount == 0)
+        #expect(oauthFetcher.callCount == 0)
+    }
+
+    /// Off-branch: rotation is not creation. Each probe is a real billed
+    /// request, and the spec asks for one per creation only — the next session
+    /// turn refreshes a rotated profile.
+    @Test("updateToken: rotating a token spends no additional probe")
+    func updateTokenProbesNothing() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+        let oauthFetcher = CountingProfileUsageFetcher()
+        let tokenFetcher = CountingProfileUsageFetcher()
+        router.oauthUsagePoller = makeCountingPoller(
+            db: db, fetcher: oauthFetcher, tokenFetcher: tokenFetcher)
+
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: freshToken())
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+        await waitForProbes(tokenFetcher, toReach: 1)
+        #expect(tokenFetcher.callCount == 1, "the creation probe is the baseline this test measures against")
+
+        let rotate = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileUpdateToken,
+            params: ModelProfileUpdateTokenParams(id: profile.id, token: freshToken())))
+        #expect(rotate.success)
+
+        await waitForProbes(tokenFetcher, toReach: 2, within: 0.5)
+        #expect(tokenFetcher.callCount == 1)
     }
 
     @Test("fetchUsage: rejected for token profiles (the setup token 403s there)")
