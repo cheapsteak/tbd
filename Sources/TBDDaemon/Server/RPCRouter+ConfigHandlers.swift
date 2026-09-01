@@ -210,6 +210,20 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the holder rendezvous sweep gate — the default-off soak switch
+    /// for unlinking the socket, lock and log a dead holder left behind, read
+    /// on top of the GC master switch. Like that master switch, flipping it off
+    /// does not cancel an in-progress sweep: `OrphanGC.sweep` re-reads the flag
+    /// on its next pass.
+    func handleConfigSetGCHolderRendezvousEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetGCHolderRendezvousEnabledParams.self, from: paramsData)
+        try await db.config.setGCHolderRendezvousEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the orphaned-process collector gate — the default-off soak
     /// switch for reclaiming processes that outlived the worktree they were
     /// rooted in, read on top of the GC master switch.

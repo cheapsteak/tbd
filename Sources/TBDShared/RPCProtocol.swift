@@ -289,6 +289,7 @@ public enum RPCMethod {
     public static let configSetGCEnabled = "config.setGCEnabled"
     public static let configSetGCProfileDirsEnabled = "config.setGCProfileDirsEnabled"
     public static let configSetGCOrphanProcessesEnabled = "config.setGCOrphanProcessesEnabled"
+    public static let configSetGCHolderRendezvousEnabled = "config.setGCHolderRendezvousEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -2934,6 +2935,15 @@ public struct ConfigSetGCEnabledParams: Codable, Sendable {
 /// collector, which reclaims orphaned `~/tbd/profiles/<uuid>/` directories
 /// (default OFF during soak, on top of the GC master switch).
 public struct ConfigSetGCProfileDirsEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setGCHolderRendezvousEnabled` — the gate for the sweep
+/// that unlinks holder rendezvous files (socket, lock, log) whose holder is
+/// gone (default OFF during soak, on top of the GC master switch). Design:
+/// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
+public struct ConfigSetGCHolderRendezvousEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
