@@ -123,7 +123,25 @@ struct ModelProfileRow: View {
                 }
                 menuButton
             }
-            if let caption = endpointCaption {
+            if tokenRejected {
+                // The stored setup token was rejected (401/403 on the usage
+                // probe). Rotation is the only repair — a /login here would be
+                // shadowed by the token — so the caption carries the fix
+                // inline, mirroring the "Open login session" affordance's
+                // shape. Deliberately outside the `endpointCaption` gate: a
+                // profile whose secret file has gone missing has no masked
+                // tail to render, and that is exactly when the user most needs
+                // the button.
+                HStack(spacing: 8) {
+                    Text("Token rejected")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Button("Replace token…") { showEditClaudeDirect = true }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                        .help("Paste a fresh claude setup-token value for this profile")
+                }
+            } else if let caption = endpointCaption {
                 if needsLogin {
                     HStack(spacing: 8) {
                         Text(caption)
@@ -186,6 +204,13 @@ struct ModelProfileRow: View {
         ProfileLoginPresentation.needsLogin(kind: profile.kind, loginIdentity: entry.loginIdentity)
     }
 
+    /// True only for a token profile whose stored token the API rejected.
+    /// `needsLogin` is false for that kind by construction, so the two caption
+    /// treatments are mutually exclusive rather than racing each other.
+    private var tokenRejected: Bool {
+        ProfileLoginPresentation.tokenRejected(for: entry)
+    }
+
     /// Per-account usage summary shown under the identity/endpoint caption,
     /// reusing `ProfileUsagePresentation.secondaryLine` over the daemon poller's
     /// `usageSnapshot` — the SAME source and honest-state handling the account
@@ -193,7 +218,12 @@ struct ModelProfileRow: View {
     /// explicit note rather than a silent blank. `nil` (no line) only when there
     /// is genuinely no snapshot (Bedrock/proxy profiles, or not yet polled).
     private var usageLine: String? {
-        ProfileUsagePresentation.secondaryLine(for: entry.usageSnapshot)
+        // The rejected-token caption above already states the condition AND
+        // carries the repair; repeating "token rejected" underneath it would
+        // print the same sentence twice.
+        guard !tokenRejected else { return nil }
+        return ProfileUsagePresentation.secondaryLine(for: entry.usageSnapshot,
+                                                      kind: profile.kind)
     }
 
     @ViewBuilder
@@ -376,11 +406,70 @@ func normalizedFallbackModels(_ rows: [String]) -> [String]? {
     return cleaned.isEmpty ? nil : Array(cleaned)
 }
 
-private enum AddPreset: String, CaseIterable, Identifiable {
+/// Top-level shape picker in the Add sheet. Internal (not private) so the
+/// pure decision layer below is reachable from tests.
+enum AddPreset: String, CaseIterable, Identifiable {
     case claudeDirect = "Claude"
     case proxy        = "Proxy"
     case bedrock      = "Bedrock"
     var id: String { rawValue }
+}
+
+/// How a Claude-direct profile authenticates. A visible sub-picker inside the
+/// Claude segment, deliberately NOT inferred from whether the token field is
+/// non-empty: an inferred mode is undiscoverable, and it makes the resulting
+/// profile's kind awkward to reason about when editing.
+enum ClaudeAuthMode: String, CaseIterable, Identifiable {
+    case signIn = "Sign in"
+    case token  = "Paste a token"
+    var id: String { rawValue }
+}
+
+/// Pure decision layer for `AddModelProfileSheet`, extracted from the view the
+/// same way `ProfileLoginPresentation` was — a SwiftUI `View`'s private state
+/// cannot be exercised, and every one of these rules has an off-branch that is
+/// wrong in a way no compiler catches.
+enum AddModelProfilePresentation {
+
+    /// The kind to send on `modelProfile.add`, or nil to let the daemon infer
+    /// it from the other fields (today's behavior for sign-in and proxy).
+    ///
+    /// Only the token mode names a kind, and it must: `claudeDirect` carrying a
+    /// token is the legacy path that stores nothing and warns, so "store this
+    /// and authenticate with it" has to be said outright rather than inferred
+    /// from a non-empty field.
+    static func addKind(preset: AddPreset,
+                        authMode: ClaudeAuthMode) -> ModelProfileAddKind? {
+        preset == .claudeDirect && authMode == .token ? .claudeToken : nil
+    }
+
+    /// The token to send. nil for a sign-in profile — the daemon must not be
+    /// handed a credential the user did not mean to store — and the typed
+    /// value for the proxy and token paths alike.
+    static func tokenToSend(preset: AddPreset,
+                            authMode: ClaudeAuthMode,
+                            token: String) -> String? {
+        if preset == .claudeDirect && authMode == .signIn { return nil }
+        return token
+    }
+
+    /// Whether the Claude segment has everything it needs. Sign-in needs only
+    /// the name the caller already checked; token mode cannot save an empty
+    /// credential, which the daemon rejects and which would leave a profile
+    /// that is dead on arrival.
+    static func canSaveClaude(authMode: ClaudeAuthMode, token: String) -> Bool {
+        authMode == .signIn
+            || !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Whether the post-save sheet swaps to the "Profile Created → Open login
+    /// session" step. False for the token path: the profile is usable the
+    /// moment the sheet closes, and that skipped step is the entire friction
+    /// this credential kind removes.
+    static func showsLoginFollowUp(preset: AddPreset,
+                                   authMode: ClaudeAuthMode) -> Bool {
+        preset == .claudeDirect && authMode == .signIn
+    }
 }
 
 private enum ProbeStatus: Equatable {
@@ -524,6 +613,8 @@ struct AddModelProfileSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var preset: AddPreset = .claudeDirect
+    /// Only meaningful while `preset == .claudeDirect`.
+    @State private var claudeAuthMode: ClaudeAuthMode = .signIn
     @State private var name = ""
     @State private var token = ""
     @State private var baseURL = ""
@@ -626,12 +717,35 @@ struct AddModelProfileSheet: View {
 
                 switch preset {
                 case .claudeDirect:
-                    (Text("After creating this profile, open a session with it and run ")
-                        + Text("/login").font(.system(.caption, design: .monospaced))
-                        + Text(" once. TBD keeps each profile's login isolated in its own config directory."))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    // One account type, two ways to authenticate it — rather
+                    // than presenting the same product twice at top level.
+                    LabeledField("Authentication") {
+                        Picker("", selection: $claudeAuthMode) {
+                            ForEach(ClaudeAuthMode.allCases) { mode in
+                                Text(mode.rawValue).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                    }
+                    switch claudeAuthMode {
+                    case .signIn:
+                        (Text("After creating this profile, open a session with it and run ")
+                            + Text("/login").font(.system(.caption, design: .monospaced))
+                            + Text(" once. TBD keeps each profile's login isolated in its own config directory."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    case .token:
+                        LabeledField(
+                            "Token",
+                            caption: "Run claude setup-token and paste the sk-ant-oat01-… value here. The profile is usable the moment this sheet closes — no login session needed."
+                        ) {
+                            SecureField("", text: $token)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
                     LabeledField(
                         "Model (optional)",
                         caption: "Leave blank to use Claude Code's default model."
@@ -776,7 +890,8 @@ struct AddModelProfileSheet: View {
         if duplicate { return false }
         switch preset {
         case .claudeDirect:
-            return true
+            return AddModelProfilePresentation.canSaveClaude(authMode: claudeAuthMode,
+                                                             token: token)
         case .proxy:
             return !token.isEmpty &&
                    !baseURL.trimmingCharacters(in: .whitespaces).isEmpty
@@ -794,6 +909,7 @@ struct AddModelProfileSheet: View {
         let trimmedRegion = awsRegion.trimmingCharacters(in: .whitespaces)
         let trimmedAwsProfile = awsProfile.trimmingCharacters(in: .whitespaces)
         let preset = self.preset  // capture for the Task
+        let authMode = self.claudeAuthMode
         isSaving = true
         errorMessage = nil
         Task {
@@ -841,7 +957,11 @@ struct AddModelProfileSheet: View {
             let priorAlert = await MainActor.run { appState.alertMessage }
             let warning = await appState.addModelProfile(
                 name: trimmedName,
-                token: preset == .claudeDirect ? nil : tokenValue,
+                kind: AddModelProfilePresentation.addKind(preset: preset,
+                                                          authMode: authMode),
+                token: AddModelProfilePresentation.tokenToSend(preset: preset,
+                                                              authMode: authMode,
+                                                              token: tokenValue),
                 baseURL: preset == .proxy ? trimmedBase : nil,
                 // Bedrock returns early above, so only proxy/claudeDirect reach here —
                 // both carry an optional model.
@@ -865,12 +985,16 @@ struct AddModelProfileSheet: View {
                     errorMessage = warning
                     return
                 }
-                if preset == .claudeDirect,
+                if AddModelProfilePresentation.showsLoginFollowUp(preset: preset,
+                                                                  authMode: authMode),
                    let created = appState.modelProfiles.first(where: {
                        $0.profile.kind == .oauth && $0.profile.name == trimmedName
                    }) {
                     // New oauth profile: swap the sheet to the follow-up step
                     // offering a one-click login session instead of closing.
+                    // A token profile dismisses immediately instead — gated on
+                    // the mode the user chose, so a name collision with an
+                    // existing oauth profile cannot resurrect the follow-up.
                     createdOAuthProfile = created
                     return
                 }
@@ -1219,6 +1343,10 @@ struct EditClaudeDirectSheet: View {
     @State private var name: String
     @State private var model: String
     @State private var fallbackModels: [String]
+    /// Only shown for `.oauthToken` profiles. Blank means "keep the stored
+    /// token" — never "clear it"; there is deliberately no way to leave a token
+    /// profile with no credential from this sheet.
+    @State private var replacementToken = ""
     @State private var isSaving = false
     @State private var errorMessage: String?
 
@@ -1243,6 +1371,21 @@ struct EditClaudeDirectSheet: View {
                     TextField("", text: $model, prompt: Text("e.g. opus"))
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: .infinity)
+                }
+                if profile.kind == .oauthToken {
+                    // Setup tokens expire and can be revoked, and this is the
+                    // only recovery path for a profile whose token aged out —
+                    // deleting and recreating would throw away its isolated
+                    // config dir along with the credential.
+                    LabeledField(
+                        "Replace token",
+                        caption: "Run claude setup-token again and paste the new sk-ant-oat01-… value."
+                    ) {
+                        SecureField("", text: $replacementToken,
+                                    prompt: Text("Leave blank to keep the current token"))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: .infinity)
+                    }
                 }
                 FallbackModelsEditor(models: $fallbackModels)
             }
@@ -1277,6 +1420,7 @@ struct EditClaudeDirectSheet: View {
     private func save() {
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
         let trimmedModel = model.trimmingCharacters(in: .whitespaces)
+        let newToken = replacementToken.trimmingCharacters(in: .whitespacesAndNewlines)
         isSaving = true
         errorMessage = nil
         Task {
@@ -1292,6 +1436,25 @@ struct EditClaudeDirectSheet: View {
                         isSaving = false
                         errorMessage = msg
                         appState.alertMessage = priorAlert
+                    }
+                    return
+                }
+            }
+
+            // Rotate the stored token before the endpoint update, so a
+            // rejected token leaves the sheet open on the field that caused it
+            // rather than after an unrelated save has already succeeded. Blank
+            // skips the call entirely — the stored token is left alone.
+            if profile.kind == .oauthToken, !newToken.isEmpty {
+                let priorTokenAlert = await MainActor.run { appState.alertMessage }
+                let replaced = await appState.updateModelProfileToken(id: profile.id,
+                                                                     token: newToken)
+                if !replaced {
+                    await MainActor.run {
+                        isSaving = false
+                        // The daemon's message, never the token bytes.
+                        errorMessage = appState.alertMessage ?? "Failed to replace token"
+                        appState.alertMessage = priorTokenAlert
                     }
                     return
                 }
