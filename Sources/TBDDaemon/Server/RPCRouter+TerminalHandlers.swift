@@ -3278,6 +3278,27 @@ extension RPCRouter {
 
         for terminal in allTerminals {
             guard let server = serverByWorktree[terminal.worktreeID] else { continue }
+            // Not a refusal: this is the one mechanic in the holder family the
+            // transport can answer, so it is asked rather than skipped. A
+            // holder row's `tmuxWindowID` is the empty string, so `resizeWindow`
+            // addressed nothing and the failure was swallowed by `try?` — the
+            // session stayed at the size it was spawned with while the app's
+            // main area moved out from under it, and the daemon's own emulator
+            // (the surface `terminal.output` renders) kept the old grid too.
+            // `HolderReader.resize` is the authority for both halves: it
+            // reshapes the emulator so rendering matches, and sets the pty's
+            // window size so the child gets `SIGWINCH` and can lay itself out.
+            //
+            // A row whose reader is missing is skipped silently, unlike
+            // `terminal.output`, which reports it. There a caller asked about
+            // one named session and an empty screen would be a false claim;
+            // this is a fan-out over every terminal on a resize-debounce tick,
+            // and a session nothing has adopted has no grid to reshape.
+            if terminal.transport == .holder {
+                await holderRegistry?.reader(for: terminal.id)?
+                    .resize(columns: params.cols, rows: params.rows)
+                continue
+            }
             try? await tmux.resizeWindow(
                 server: server,
                 windowID: terminal.tmuxWindowID,

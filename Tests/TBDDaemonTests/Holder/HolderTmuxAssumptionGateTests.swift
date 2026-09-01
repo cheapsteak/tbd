@@ -643,6 +643,74 @@ struct HolderTmuxAssumptionGateTests {
                 "the tmux leg must still kill its own window: \(argv)")
     }
 
+    // MARK: - Gate 10: the one mechanic that is routed rather than refused
+
+    /// `app.setMainAreaSize` fans a new terminal size out over every terminal
+    /// on an active worktree. For a holder row it called
+    /// `resizeWindow(windowID: "")`, whose failure `try?` swallowed — so the
+    /// session kept the size it was spawned with while the app's main area
+    /// moved out from under it, and the daemon's emulator (what
+    /// `terminal.output` renders) kept the old grid too.
+    ///
+    /// This gate is the one that does NOT refuse. The holder transport can
+    /// answer this question: `HolderReader.resize` reshapes the emulator and
+    /// sets the pty's window size, which is both halves of what the tmux call
+    /// was for. Refusing a mechanic the transport can serve would remove a
+    /// working feature rather than close a hole.
+    ///
+    /// What these two tests pin is the branch: a holder row no longer reaches
+    /// tmux, and a tmux row still does. That the reader is then actually
+    /// resized needs a real `TBDHolder` to observe and belongs in
+    /// `TBDDaemonLiveTests` — here `reader(for:)` answers nil, which is also
+    /// the un-adopted case the branch must survive without throwing.
+    @Test("setMainAreaSize does not reach tmux for a holder row")
+    func setMainAreaSizeSkipsTmuxForHolderRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+
+        let router = router(db, tmux: tmux)
+        router.holderRegistry = holderRegistry(listing: [terminal])
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.setMainAreaSize,
+            params: SetMainAreaSizeParams(cols: 120, rows: 40)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(recorded.snapshot().contains { $0.contains("resize-window") } == false,
+                "setMainAreaSize resized a tmux window for a holder row: \(recorded.snapshot())")
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+    }
+
+    @Test("setMainAreaSize still resizes an identical tmux row's window")
+    func setMainAreaSizeStillResizesTmuxRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = try await seedClaudeTerminal(db, worktreeID: wt.id, transport: .tmux)
+
+        let router = router(db, tmux: tmux)
+        // Wired in and listing nothing, so an inverted transport comparison
+        // reaches a registry that has never heard of this row rather than a nil
+        // that would make the branch unreachable either way.
+        router.holderRegistry = holderRegistry(listing: [])
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.setMainAreaSize,
+            params: SetMainAreaSizeParams(cols: 120, rows: 40)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        let argv = recorded.snapshot()
+        #expect(argv.contains { $0.contains("resize-window") && $0.contains("@7") },
+                "the tmux leg must still resize its own window: \(argv)")
+    }
+
     // MARK: - Gate 9: the two verbs that refused for the wrong reason
 
     /// `terminal.send` and `terminal.attachCommand` both consult the pane
