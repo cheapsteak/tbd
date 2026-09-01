@@ -613,6 +613,12 @@ struct WorktreeProfilePickerView: View {
         case .oauth:
             // Selectable OAuth never reaches this path; only logged-out rows.
             return ("Not logged in — run /login", false)
+        case .oauthToken:
+            // A token profile authenticates by its stored setup-token, so it
+            // is always selectable and never "not logged in". No subtitle:
+            // the usage note above is the only thing worth saying, and a
+            // skeleton here would imply a login that will never happen.
+            return (nil, false)
         case .apiKey, .bedrock:
             // Static descriptor from ModelProfile — never a loading state.
             if let detail = entry.profile.detailCaption {

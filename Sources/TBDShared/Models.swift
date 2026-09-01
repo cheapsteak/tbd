@@ -926,6 +926,10 @@ public extension Terminal {
 
 public enum CredentialKind: String, Codable, Sendable {
     case oauth
+    /// Isolated config dir like `.oauth`, but authenticated by a stored
+    /// `claude setup-token` injected as `CLAUDE_CODE_OAUTH_TOKEN` rather than
+    /// by an interactive `/login` into the dir.
+    case oauthToken
     case apiKey
     case bedrock
 }
@@ -987,7 +991,11 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
         name = try c.decode(String.self, forKey: .name)
-        kind = try c.decode(CredentialKind.self, forKey: .kind)
+        // An unknown kind degrades to `.oauth` rather than throwing: the
+        // profile list decodes as ONE array, so a throw on a single unknown
+        // row would lose EVERY profile, not just that row.
+        let rawKind = try c.decode(String.self, forKey: .kind)
+        kind = CredentialKind(rawValue: rawKind) ?? .oauth
         baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL)
         model = try c.decodeIfPresent(String.self, forKey: .model)
         awsRegion = try c.decodeIfPresent(String.self, forKey: .awsRegion)
@@ -1142,15 +1150,27 @@ public struct ProfileUsageSnapshot: Codable, Sendable, Equatable {
     /// Machine-readable classification of the last fetch outcome. Optional for
     /// decode-compat with older daemons; defaults to `.unknown` when absent.
     public var statusKind: ProfileUsageStatusKind
+    /// Organization id from the last successful fetch's
+    /// `anthropic-organization-id` response header. nil when the endpoint sent
+    /// none, or the snapshot predates this field. Captured for account
+    /// correlation; nothing renders it yet.
+    ///
+    /// Last initializer parameter and `decodeIfPresent` on the way in, so this
+    /// stays decode-compatible in BOTH directions: stored JSON written before
+    /// the field existed decodes with nil, and an older app tolerates the new
+    /// key (unknown keys are ignored by `KeyedDecodingContainer`).
+    public var organizationID: String?
 
     public init(buckets: [ClaudeUsageLimitBucket], fetchedAt: Date? = nil,
                 lastAttemptAt: Date, status: String,
-                statusKind: ProfileUsageStatusKind = .unknown) {
+                statusKind: ProfileUsageStatusKind = .unknown,
+                organizationID: String? = nil) {
         self.buckets = buckets
         self.fetchedAt = fetchedAt
         self.lastAttemptAt = lastAttemptAt
         self.status = status
         self.statusKind = statusKind
+        self.organizationID = organizationID
     }
 
     public init(from decoder: Decoder) throws {
@@ -1164,6 +1184,8 @@ public struct ProfileUsageSnapshot: Codable, Sendable, Equatable {
         self.statusKind = try container.decodeIfPresent(
             ProfileUsageStatusKind.self, forKey: .statusKind)
             ?? (self.status == "ok" ? .ok : .unknown)
+        self.organizationID = try container.decodeIfPresent(
+            String.self, forKey: .organizationID)
     }
 
     public var isOK: Bool { status == "ok" }
@@ -2280,9 +2302,10 @@ extension ModelProfile {
     /// Short capsule label for the kind badge.
     public var kindLabel: String {
         switch kind {
-        case .oauth:   return "OAuth"
-        case .apiKey:  return baseURL != nil ? "Proxy" : "API key"
-        case .bedrock: return "Bedrock"
+        case .oauth:      return "OAuth"
+        case .oauthToken: return "Token"
+        case .apiKey:     return baseURL != nil ? "Proxy" : "API key"
+        case .bedrock:    return "Bedrock"
         }
     }
 
@@ -2298,6 +2321,16 @@ extension ModelProfile {
             if let baseURL { parts.append("via \(baseURL)") }
             if let model, !model.isEmpty { parts.append(model) }
             return parts.joined(separator: " · ")
+        case .oauthToken:
+            // Structurally an oauth profile, but authenticated by a stored
+            // setup-token — so it must NOT carry the `.oauth` branch's
+            // "Run /login once" hint. With no endpoint or pinned model there
+            // is nothing to say here; the app's ProfileLoginPresentation
+            // supplies the masked-token caption instead.
+            var parts: [String] = []
+            if let baseURL { parts.append("via \(baseURL)") }
+            if let model, !model.isEmpty { parts.append(model) }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
         case .apiKey:
             guard let baseURL else {
                 // Direct api-key profile: nothing to show unless a model is pinned.
