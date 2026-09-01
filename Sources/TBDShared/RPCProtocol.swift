@@ -2957,6 +2957,10 @@ public struct ConfigSetGCHolderRendezvousEnabledParams: Codable, Sendable {
 /// unlinking files. Design:
 /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
 public struct ConfigSetGCRowlessHoldersEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setReapHolderChildrenEnabled` — the gate on the
 /// `AgentReaper` leg that kills the surviving job of a dead pty holder (default
 /// OFF during soak). This is how the soak is turned on: the leg signals

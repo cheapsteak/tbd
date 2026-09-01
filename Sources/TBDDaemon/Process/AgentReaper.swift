@@ -318,10 +318,18 @@ public struct AgentReaper: Sendable {
     /// leader (`setsid` then `forkpty` in the holder), so `signal` widens to
     /// `kill(-pid, …)` — which is the point: the thing being reclaimed is an
     /// orphaned job *and its descendants*. A job that ignores SIGHUP while
-    /// holding `/dev/null` on its stdio survives a pid-exact kill; that was
-    /// measured, and it is why teardown moved to a group kill in `c12c0386`.
-    /// Reaping pid-exact here would leave behind exactly what this leg exists
-    /// to collect.
+    /// holding `/dev/null` on its stdio outlives a teardown that only hangs it
+    /// up; that was measured, and it is why teardown moved to a group kill in
+    /// `c12c0386`. A pid-exact SIGKILL does end the pid it names — what it
+    /// leaves behind is that job's descendants, which is exactly what this leg
+    /// exists to collect.
+    ///
+    /// Both halves are held down live rather than only in the scripted suite:
+    /// `AgentReaperHolderLegLiveTests` spawns a session leader whose SIGTERM
+    /// disposition is *ignore* with a descendant in its group, proves it
+    /// survives a real SIGTERM through this same signaller, and then asserts
+    /// that the sweep reclaims both — and that every gate below re-runs between
+    /// the SIGTERM and the SIGKILL.
     ///
     /// The pid-reuse worry that argues for the pid-exact door is real but is
     /// answered elsewhere and only narrowed, never closed, by that door: if a

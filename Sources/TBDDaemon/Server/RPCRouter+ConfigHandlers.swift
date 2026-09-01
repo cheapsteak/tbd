@@ -235,6 +235,11 @@ extension RPCRouter {
         let params = try decoder.decode(
             ConfigSetGCRowlessHoldersEnabledParams.self, from: paramsData)
         try await db.config.setGCRowlessHoldersEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the `AgentReaper` holder leg's gate — the default-off soak
     /// switch for killing the surviving job of a dead pty holder.
     ///

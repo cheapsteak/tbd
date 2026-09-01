@@ -699,6 +699,11 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_rowless_holders_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
     /// Persist the `AgentReaper` holder leg's gate (default OFF, soaking) — the
     /// sweep that kills the surviving job of a dead holder. The column is
     /// written on every call, because writing either value is the explicit
