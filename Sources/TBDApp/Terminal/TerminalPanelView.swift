@@ -23,6 +23,15 @@ enum TerminalPreparationPresentation {
         "TBD couldn't attach to this terminal. The terminal was left unchanged. Check diagnostics for details or close the tab."
     static let tmuxExecutableUnavailableMessage =
         "TBD couldn't find tmux — it is not in PATH and no fallback path is saved. Locate the tmux executable in Settings → Terminal, then reopen this terminal."
+    /// Shown for a session carried by the pty-holder transport, which the app
+    /// cannot render yet.
+    ///
+    /// Deliberately offers no remedy: there is no gesture that makes this pane
+    /// draw, so any call to action would be a lie. It says the session is fine
+    /// because it is — the daemon refuses every tmux mechanic for a holder row
+    /// before touching state, so nothing was parked, killed or lost.
+    static let holderTransportMessage =
+        "This session runs on the pty-holder transport, which TBD can't display yet. The session is unaffected and keeps running."
 }
 
 enum TerminalRecoveryPresentation {
@@ -491,6 +500,67 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             appState?.registerTerminalCloseContext(context, for: terminalID)
         }
 
+        /// The notice to render *instead of* preparing a tmux view session, or
+        /// `nil` when this transport is carried by tmux and prepares as usual.
+        ///
+        /// Consulted before `prepareSession`, so a holder-backed session never
+        /// reaches the tmux failure classifier at all. That ordering is the
+        /// point. A holder row's `tmuxWindowID` is the empty string by
+        /// construction, so tmux preparation can only ever fail for it — and
+        /// *how* it fails is decided by something unrelated to the session:
+        ///
+        /// - The repo has some other tmux-backed session alive, so its (per-repo)
+        ///   tmux server is running. The window-inventory probe succeeds and
+        ///   omits the expected id, which classifies as `.windowMissing` — the
+        ///   app then fires automatic recovery, the daemon refuses
+        ///   `terminal.recreateWindow` for a holder row, and the user gets an
+        ///   orange banner with a Retry button that can only reproduce the
+        ///   refusal.
+        /// - Every session in the repo is holder-backed, so there is no tmux
+        ///   server. The probe itself fails, which is deliberately treated as
+        ///   ambiguous and classifies as `.commandFailed` — no recovery, but
+        ///   diagnostics copy about an attach that was never possible.
+        ///
+        /// Both are the wrong story, and neither is a property of the session,
+        /// which is running normally throughout. Branching on the transport the
+        /// app already receives in `Terminal` removes the whole question.
+        nonisolated static func transportPreparationNotice(
+            for transport: TerminalTransport
+        ) -> String? {
+            guard transport == .holder else { return nil }
+            return TerminalPreparationPresentation.holderTransportMessage
+        }
+
+        /// This panel's transport, or `.tmux` when AppState has not loaded the
+        /// terminal. The fallback is the pre-existing behavior: an unresolvable
+        /// panel must keep taking the tmux path rather than be suppressed.
+        @MainActor
+        func panelTransport() -> TerminalTransport {
+            appState?.terminals.values
+                .lazy
+                .flatMap { $0 }
+                .first(where: { $0.id == panelID })?
+                .transport ?? .tmux
+        }
+
+        @MainActor
+        func transportPreparationNoticeForPanel() -> String? {
+            Self.transportPreparationNotice(for: panelTransport())
+        }
+
+        /// Renders the transport notice and reports whether it took over.
+        /// `true` means the caller must not prepare or attach anything.
+        @MainActor
+        private func handleUnsupportedTransport(into terminalView: TerminalView) -> Bool {
+            guard let notice = transportPreparationNoticeForPanel() else { return false }
+            let worktreeID = worktreeIDForDiagnostics()?.uuidString ?? "unknown"
+            logger.info(
+                "terminal preparation skipped terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) category=unsupportedTransport transport=\(self.panelTransport().rawValue, privacy: .public)"
+            )
+            feedPreparationMessage(notice, into: terminalView)
+            return true
+        }
+
         nonisolated static func preparationAction(
             for result: Result<TmuxSessionPreparation, TmuxPreparationFailure>
         ) -> TerminalPreparationAction {
@@ -700,6 +770,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // already ran; only deinit would remove the monitors, nothing
             // would terminate the process).
             guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else { return }
+            // A session this app cannot carry through tmux is settled here,
+            // before any tmux subprocess runs and before any classification —
+            // see `transportPreparationNotice(for:)`.
+            if handleUnsupportedTransport(into: terminalView) { return }
             // `prepareSession` is non-isolated and awaits tmux subprocesses
             // off the main actor — Swift releases main while we suspend here,
             // so SwiftUI's render loop is no longer blocked while tmux runs.
@@ -1041,6 +1115,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             windowID: String,
             panelID: UUID
         ) async {
+            // Same gate as the grouped-sessions path: a holder-backed session
+            // has no pane for control mode to attach to either, and falling
+            // through to the fallback would only reach the tmux classifier by a
+            // longer route.
+            if handleUnsupportedTransport(into: terminalView) { return }
             // Reader-registry key: one reader per PANE (worktree/pane), not per
             // attach — a re-attach replaces the pane's reader. Distinct from
             // the sidecar's per-request demux key, which also carries the

@@ -1430,11 +1430,14 @@ extension RPCRouter {
         // holder branch is (see `handleTerminalOutput`): everything downstream
         // exists only to name a tmux server and window this row does not have.
         //
-        // This handler is reached automatically, not only by the Retry button:
-        // the app is transport-blind, so a holder tab whose repo happens to
-        // have a tmux server running for any other reason classifies as
-        // `.windowMissing` and fires automatic recovery. Both downstream
-        // branches would then act on `tmuxWindowID == ""`, which
+        // The current app no longer calls this for a holder row — it settles
+        // such a panel on the transport before tmux preparation runs (see
+        // `transportPreparationNotice` in `TerminalPanelView`), so neither its
+        // automatic nor its manual path reaches here. That gate spares the user
+        // a doomed round trip; it does not retire this guard, which is the only
+        // thing standing between a holder row and the CLI, an older app build,
+        // or any future caller. Both downstream branches would then act on
+        // `tmuxWindowID == ""`, which
         // `TmuxManager.windowExists` can only ever answer "gone" for — parking
         // a resumable row whose holder and child are still running, or standing
         // up a tmux window under a row that still reads `transport == .holder`.
