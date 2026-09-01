@@ -572,11 +572,44 @@ The session id is the one of those TBD can check cheaply and answer for itself,
 and the answer is the unmirrored count: a provider that omits it publishes
 nothing, visibly, rather than publishing something wrong.
 
+**A name is claimed once, and the first claim holds.** Two peers under one name
+is a misdelivery rather than a display glitch, so a provider asked to publish a
+name it already publishes leaves the incumbent as it is, does not publish the
+second, and omits the refused handle from `peer-inventory`. The incumbent wins
+because it may already be carrying traffic: a name that changes which session it
+resolves to breaks a path that was working, where a refused newcomer is merely
+unreachable and says so in the inventory diff. That omission is the whole
+report, because nothing on this stream is acknowledged and a refusal has no
+other channel.
+
+The window that makes this more than a formality is a reconnect. TBD kills a
+stalled link at the silence limit and dials again within a second, while the far
+side runs its own timer from its own last activity — losing the transport and
+noticing it are different events, so the previous connection's remote half can
+still be publishing when the next one opens. Both connections carry names TBD
+composed from the same origin, which does not change across a reconnect, so what
+they publish collides exactly. Nothing in the protocol coordinates them: there
+is no takeover frame and no generation number. The exclusion therefore has to
+hold at the host rather than inside one process, and a per-process duplicate
+check is the natural implementation and the one that fails here — the process
+that would refuse the duplicate is not the process that published the
+original.
+
 TBD cannot detect a provider that buffers frames and replays them, or that
 leaves stale shadows on a host TBD cannot sweep. The `peer-inventory` line is the
 mitigation: TBD diffs the provider's claimed inventory against what it asked
 for, logs the difference, and shows it in `tbd peer list`. A provider that
 declares `messages` and leaks is visible as a divergence rather than a mystery.
+
+**That inventory is emitted at least every 30 seconds** — the stream's own
+silence limit, so a divergence is never more than one silence window old and any
+connection that lives long enough for a leak to matter carries at least one. It
+is a SHOULD where the keepalive is a MUST because the two absences cost
+different things: silence past the limit means the link may be lying about
+reachability and kills the connection, while a late inventory delays the
+detection of a leak by exactly how late it is. TBD reads only the inventories
+that arrive. A missing one is not a claim that the provider publishes nothing,
+and never terminates the stream.
 
 **A stale shim is silent, and that silence is answered rather than accepted.** An
 old shim never declares `messages`, so TBD never invokes it — the safety half is
@@ -635,6 +668,14 @@ in `tbd peer list` and in the provider's diagnostics rather than showing nothing
   investigation's original proposal. It survives the tunnel's life by opting out
   of the only collector that exists, and leaves permanent ghosts after a reboot
   or an uninstall — the cases where TBD is not running to collect.
+- **Letting the newest publisher take a colliding name.** Reads as
+  self-healing — the freshest announcement is the most current statement — and
+  is wrong in the case that actually produces the collision. The two publishers
+  are usually the same provider's remote half either side of a reconnect, so
+  displacing the incumbent hands the name to a half whose link may itself be
+  about to be killed, and does it by silently repointing a name that other
+  sessions are already addressing. A misdelivery is the failure this rule
+  exists to prevent, and it is worth an unreachable session to avoid.
 - **A marker field inside the record.** Measured to make the record invisible.
 - **A bounded in-memory buffer across reconnects.** Would ride out a wifi blip,
   but it is store-and-forward with a smaller number on it, and the number gets
