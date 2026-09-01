@@ -160,6 +160,26 @@ let package = Package(
             ],
             path: "Sources/TBDPeerHelper"
         ),
+        // One process per holder-transport session
+        // (docs/specs/2026-08-30-pty-holder-session-transport-design.md). It
+        // `forkpty()`s the job, owns the pty master for the session's life, and
+        // hands a `dup` of it to whoever asks over SCM_RIGHTS — so the session
+        // outlives the daemon that started it.
+        //
+        // A separate executable rather than a thread in the daemon for the
+        // whole point of the design: the pty master must survive a daemon
+        // restart, and a descriptor cannot outlive the process that holds it.
+        //
+        // Deliberately NOT linked against TBDDaemonLib. It needs the rendezvous
+        // paths, the creation lock and the wire protocol, all of which live in
+        // TBDShared, and nothing else.
+        .executableTarget(
+            name: "TBDHolder",
+            dependencies: [
+                "TBDShared",
+            ],
+            path: "Sources/TBDHolder"
+        ),
         .systemLibrary(
             name: "CComrakFFI",
             path: "Sources/CComrakFFI"
@@ -281,6 +301,19 @@ let package = Package(
             name: "TBDPeerHelperTests",
             dependencies: [
                 "TBDPeerHelper",
+                "TBDShared",
+            ]
+        ),
+        // The holder's own suite. Like `TBDPeerHelperTests` above, its
+        // dependency on the EXECUTABLE target is load-bearing rather than
+        // cosmetic: the tests spawn the real `TBDHolder` binary, so the product
+        // has to be built and sit in the same products directory as the test
+        // bundle. `@testable import` reaching the holder's internals is the
+        // lesser half.
+        .testTarget(
+            name: "TBDHolderTests",
+            dependencies: [
+                "TBDHolder",
                 "TBDShared",
             ]
         ),
