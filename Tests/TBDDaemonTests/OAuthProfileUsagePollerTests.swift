@@ -1074,4 +1074,361 @@ private func makeTokenPoller(
         #expect(snapshot?.organizationID == "org_first")
         #expect(snapshot?.buckets == okBuckets)
     }
+
+    /// The spec commits to the backoff being **cleared** by a credential
+    /// change, not waived for one call — "a fresh credential restarts the
+    /// exponential schedule instead of inheriting a dead one's exponent".
+    ///
+    /// That distinction is invisible after a single pre-rotation failure:
+    /// both readings put the next window at the 30s base. It only shows up
+    /// from the second rung on, which is why this test fails twice before
+    /// rotating. With the schedule cleared, the rotation probe's own failure
+    /// re-arms rung 1 (30s). With it merely waived, the same failure is the
+    /// third in a row and arms rung 3 (120s) — so the probe asserted below
+    /// would be held for another minute and a half.
+    @Test func credentialChangeRestartsTheBackoffScheduleRatherThanWaivingIt() async {
+        let profile = tokenProfile(named: "Acme (token)")
+        let fetcher = ScriptedProfileUsageFetcher(
+            default: .needsLogin("token rejected (HTTP 401)"))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-DEAD"],
+            fetcher: fetcher, clock: clock)
+
+        // Failure 1 arms rung 1: 30s. (`jitter` is injected as 0 by
+        // `makeTokenPoller`, so every window below is exact, not ranged.)
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        // +31s: past rung 1. Failure 2 arms rung 2: 60s, expiring at +91s.
+        clock.advance(31)
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 2)
+
+        // +62s: still deep inside rung 2, so activity is held. This is what
+        // proves the schedule really did advance past its base before the
+        // rotation — without it a cleared-and-never-re-armed backoff would
+        // pass the rest of this test.
+        clock.advance(31)
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 2)
+
+        // Rotation at +62s. Nothing has ever succeeded, so there is no
+        // `fetchedAt` and the freshness floor is not in play — the backoff is
+        // the only gate this probe can be released by. Its own failure re-arms
+        // the schedule from wherever the poller is carrying it.
+        await poller.noteCredentialChanged(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 3)
+
+        // +82s — 20s after the rotation probe, inside the fresh schedule's
+        // first rung either way.
+        clock.advance(20)
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 3)
+
+        // +97s — 35s after the rotation probe. A CLEARED schedule is on rung 1
+        // (30s, expired at +92s) and admits this. A WAIVED one would be on
+        // rung 3 (120s, expiring at +182s) and would not.
+        clock.advance(15)
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 4)
+    }
+}
+
+// MARK: - Token profiles: the per-turn cost of the activity gate
+
+/// Poller whose profile-table reads are counted, over a MUTABLE profile list —
+/// so a test can both measure what a completed turn costs and make a profile
+/// appear after the gate's cache was warmed.
+private func makeCountingTokenPoller(
+    profiles: LockedBox<[ModelProfile]>,
+    tokens: [UUID: String],
+    fetcher: ScriptedProfileUsageFetcher,
+    clock: MutableClock,
+    loggedIn: Set<UUID>,
+    providerCalls: LockedBox<Int>
+) -> OAuthProfileUsagePoller {
+    OAuthProfileUsagePoller(
+        profilesProvider: {
+            providerCalls.mutate { $0 += 1 }
+            return profiles.value
+        },
+        loginIdentity: { id in loggedIn.contains(id) ? "someone@example.com" : nil },
+        configDirPath: { id in "/profiles/\(id.uuidString.lowercased())/claude" },
+        fetcher: fetcher,
+        tokenFetcher: fetcher,
+        profileSecret: { tokens[$0] },
+        broadcast: {},
+        sleeper: { _ in },
+        now: { clock.now },
+        jitter: { _ in 0 }
+    )
+}
+
+@Suite struct OAuthProfileUsageIdleGateCostTests {
+
+    /// EVERY completed turn on every session in the fleet reaches
+    /// `noteSessionBecameIdle`, and in most installs none of them can act.
+    /// Once the profile table has been read once, a turn on a profile that is
+    /// not a token profile must cost no read at all.
+    @Test func idleTransitionOnANonTokenProfileReadsNoProfileTableOnceWarm() async {
+        let signedIn = oauthProfile(named: "Acme")
+        let token = tokenProfile(named: "Acme (token)")
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets, organizationID: nil))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let calls = LockedBox<Int>(0)
+        let poller = makeCountingTokenPoller(
+            profiles: LockedBox([signedIn, token]),
+            tokens: [token.id: "sk-ant-oat01-A"],
+            fetcher: fetcher, clock: clock, loggedIn: [signedIn.id],
+            providerCalls: calls)
+
+        // One cadence sweep warms the gate's cache.
+        await poller.sweepForTest()
+        let warm = calls.value
+
+        await poller.noteSessionBecameIdle(profileID: signedIn.id)
+        #expect(calls.value == warm)
+        #expect(fetcher.tokenProbeCount == 0)
+
+        // A terminal with no profile at all never reaches here, but an id the
+        // table does not know must be just as cheap.
+        await poller.noteSessionBecameIdle(profileID: UUID())
+        #expect(calls.value == warm)
+
+        // The gate is a shortcut, not a wall: a token profile still gets
+        // through and probes.
+        await poller.noteSessionBecameIdle(profileID: token.id)
+        #expect(calls.value > warm)
+        #expect(fetcher.tokenProbeCount == 1)
+    }
+
+    /// The staleness direction that would silently lose probes: a token
+    /// profile created AFTER the cache was warmed. It is covered because the
+    /// creation probe reads the table, and every read refreshes the cache —
+    /// remove that refresh and the profile is invisible to the activity gate
+    /// for good.
+    @Test func aTokenProfileCreatedAfterTheCacheWasWarmedIsStillProbed() async {
+        let signedIn = oauthProfile(named: "Acme")
+        let token = tokenProfile(named: "Acme (token)")
+        let profiles = LockedBox<[ModelProfile]>([signedIn])
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets, organizationID: nil))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeCountingTokenPoller(
+            profiles: profiles, tokens: [token.id: "sk-ant-oat01-A"],
+            fetcher: fetcher, clock: clock, loggedIn: [signedIn.id],
+            providerCalls: LockedBox<Int>(0))
+
+        // Warm with a table that holds no token profile at all.
+        await poller.sweepForTest()
+        #expect(fetcher.tokenProbeCount == 0)
+
+        // Creation: the row lands, and the creation probe follows it.
+        profiles.mutate { $0.append(token) }
+        await poller.noteCredentialChanged(profileID: token.id)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        // The activity path now recognises it.
+        clock.advance(301)
+        await poller.noteSessionBecameIdle(profileID: token.id)
+        #expect(fetcher.tokenProbeCount == 2)
+    }
+}
+
+// MARK: - Token profiles: concurrent probes
+
+/// Deterministic rendezvous for the concurrency tests: a fetcher parks in
+/// `arrive()` until the gate opens, so a probe can be held "in flight" while a
+/// second caller races it. No sleeps and no polling — every wait resumes off an
+/// explicit signal.
+///
+/// The gate also opens ITSELF once `autoOpenAt` probes have arrived. That is
+/// what keeps a regression from turning into a hung test run: if the in-flight
+/// guard is removed, the duplicate probe arrives, the gate releases both, every
+/// task completes, and the assertion on the probe COUNT fails promptly.
+private actor ProbeGate {
+    private let autoOpenAt: Int
+    private var arrivals = 0
+    private var opened = false
+    private var parked: [CheckedContinuation<Void, Never>] = []
+    private var watchers: [(threshold: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    init(autoOpenAt: Int) { self.autoOpenAt = autoOpenAt }
+
+    /// Called from inside a fetch: records the arrival, wakes any
+    /// `waitForArrivals`, then parks until the gate opens.
+    func arrive() async {
+        arrivals += 1
+        let reached = arrivals
+        let ready = watchers.filter { $0.threshold <= reached }
+        watchers.removeAll { $0.threshold <= reached }
+        for watcher in ready { watcher.continuation.resume() }
+        if reached >= autoOpenAt { open() }
+        if opened { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            parked.append(continuation)
+        }
+    }
+
+    /// Releases every parked fetch, and every later one immediately.
+    func open() {
+        opened = true
+        let waiting = parked
+        parked = []
+        for continuation in waiting { continuation.resume() }
+    }
+
+    /// Resumes once `threshold` fetches have reached `arrive()`.
+    func waitForArrivals(_ threshold: Int) async {
+        if arrivals >= threshold { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            watchers.append((threshold: threshold, continuation: continuation))
+        }
+    }
+}
+
+/// Fetcher that counts every entry and then parks on a `ProbeGate`. The count
+/// is bumped BEFORE parking, so it measures requests issued rather than
+/// requests completed — which is what a billed probe costs.
+private final class GatedProfileUsageFetcher: ProfileUsageFetching, @unchecked Sendable {
+    private let gate: ProbeGate
+    private let status: ProfileUsageFetchStatus
+    private let queue = DispatchQueue(label: "GatedProfileUsageFetcher")
+    private var _probeCount = 0
+
+    var probeCount: Int { queue.sync { _probeCount } }
+
+    init(gate: ProbeGate, status: ProfileUsageFetchStatus) {
+        self.gate = gate
+        self.status = status
+    }
+
+    func fetchUsage(credential: ProfileUsageCredential) async -> ProfileUsageFetchStatus {
+        queue.sync { _probeCount += 1 }
+        await gate.arrive()
+        return status
+    }
+}
+
+private func makeGatedTokenPoller(
+    profiles: [ModelProfile],
+    tokens: [UUID: String],
+    fetcher: GatedProfileUsageFetcher,
+    clock: MutableClock
+) -> OAuthProfileUsagePoller {
+    OAuthProfileUsagePoller(
+        profilesProvider: { profiles },
+        loginIdentity: { _ in nil },
+        configDirPath: { id in "/profiles/\(id.uuidString.lowercased())/claude" },
+        fetcher: fetcher,
+        tokenFetcher: fetcher,
+        profileSecret: { tokens[$0] },
+        broadcast: {},
+        sleeper: { _ in },
+        now: { clock.now },
+        jitter: { _ in 0 }
+    )
+}
+
+/// The poller is an actor, and every other test in this file drives it
+/// sequentially — which is precisely how the double-billing window survived
+/// review. These drive two callers that genuinely overlap.
+@Suite struct OAuthProfileUsageConcurrentProbeTests {
+
+    /// A rotation probe and an activity probe for the SAME profile, overlapping.
+    ///
+    /// `sweep` suspends at `profilesProvider()` and admits the second caller
+    /// there, with `snapshots` and `backoff` both still unwritten — so neither
+    /// the freshness floor nor the backoff window can hold it. Only the
+    /// in-flight reservation can, and for a token profile the cost of it not
+    /// doing so is a second BILLED inference request.
+    @Test func concurrentProbesOfOneTokenProfileIssueOneBilledRequest() async {
+        let profile = tokenProfile(named: "Acme (token)")
+        let gate = ProbeGate(autoOpenAt: 2)
+        let fetcher = GatedProfileUsageFetcher(
+            gate: gate, status: .ok(okBuckets, organizationID: "org_acme"))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeGatedTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-A"],
+            fetcher: fetcher, clock: clock)
+
+        let rotation = Task { await poller.noteCredentialChanged(profileID: profile.id) }
+        // The rotation probe is now parked inside the fetcher: its reservation
+        // is held and nothing has been recorded yet. This is the window.
+        await gate.waitForArrivals(1)
+
+        let activity = Task { await poller.noteSessionBecameIdle(profileID: profile.id) }
+        await activity.value
+
+        #expect(fetcher.probeCount == 1)
+
+        await gate.open()
+        await rotation.value
+
+        #expect(fetcher.probeCount == 1)
+        #expect(await poller.snapshot(for: profile.id)?.buckets == okBuckets)
+    }
+
+    /// The guard is per profile, not a global lock. A fix that serialized ALL
+    /// fetches would pass the test above and quietly turn a full sweep into a
+    /// queue — so this pins that two DIFFERENT profiles still probe at once.
+    @Test func concurrentProbesOfTwoTokenProfilesBothFire() async {
+        let first = tokenProfile(named: "Acme (token)")
+        let second = tokenProfile(named: "Globex (token)")
+        let gate = ProbeGate(autoOpenAt: 2)
+        let fetcher = GatedProfileUsageFetcher(
+            gate: gate, status: .ok(okBuckets, organizationID: nil))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeGatedTokenPoller(
+            profiles: [first, second],
+            tokens: [first.id: "sk-ant-oat01-A", second.id: "sk-ant-oat01-B"],
+            fetcher: fetcher, clock: clock)
+
+        let firstProbe = Task { await poller.noteSessionBecameIdle(profileID: first.id) }
+        await gate.waitForArrivals(1)
+
+        // Reaches the fetcher while `first` is still parked there, which is
+        // what opens the gate for both.
+        let secondProbe = Task { await poller.noteSessionBecameIdle(profileID: second.id) }
+        await secondProbe.value
+        // Belt and braces: if a global lock had dropped `second`, the gate
+        // never reached its threshold and `first` would still be parked.
+        // Opening explicitly keeps that a failed assertion rather than a hang.
+        await gate.open()
+        await firstProbe.value
+
+        #expect(fetcher.probeCount == 2)
+        #expect(await poller.snapshot(for: first.id)?.buckets == okBuckets)
+        #expect(await poller.snapshot(for: second.id)?.buckets == okBuckets)
+    }
+
+    /// Once the winner's snapshot has been recorded, the ordinary gates take
+    /// over again: the reservation is released only AFTER `record` commits, so
+    /// the next caller meets a `fetchedAt` and is held by the 300s floor
+    /// rather than racing for the reservation.
+    @Test func reservationIsReleasedSoTheFloorTakesOverAfterwards() async {
+        let profile = tokenProfile(named: "Acme (token)")
+        // Opens on first arrival: nothing parks, so these calls are ordinary
+        // sequential ones and the assertion is about the state left behind.
+        let gate = ProbeGate(autoOpenAt: 1)
+        let fetcher = GatedProfileUsageFetcher(
+            gate: gate, status: .ok(okBuckets, organizationID: nil))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeGatedTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-A"],
+            fetcher: fetcher, clock: clock)
+
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.probeCount == 1)
+
+        // Inside the floor: held by freshness, not by a leaked reservation.
+        clock.advance(10)
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.probeCount == 1)
+
+        // Past the floor: a leaked reservation would keep this at 1 forever.
+        clock.advance(300)
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.probeCount == 2)
+    }
 }

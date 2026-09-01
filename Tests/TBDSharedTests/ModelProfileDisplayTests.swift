@@ -99,6 +99,37 @@ struct ModelProfileDisplayTests {
         #expect(p.detailCaption == "?")
     }
 
+    @Test("kindLabel: oauthToken → Token")
+    func kindLabelOAuthToken() {
+        let p = ModelProfile(name: "x", kind: .oauthToken)
+        #expect(p.kindLabel == "Token")
+    }
+
+    /// "Run /login once" is the affordance a token profile exists to remove:
+    /// the credential was pasted, so there is no login to run. Asserted
+    /// against the `.oauth` case's real output rather than as a bare
+    /// `!contains`, so folding the two kinds into one branch — the obvious
+    /// regression — fails here rather than shipping a caption that instructs
+    /// the user to do something the feature made unnecessary.
+    @Test("detailCaption: oauthToken carries no /login hint, unlike oauth")
+    func detailOAuthTokenHasNoLoginHint() {
+        let token = ModelProfile(name: "x", kind: .oauthToken)
+        let signedIn = ModelProfile(name: "x", kind: .oauth)
+        #expect(signedIn.detailCaption == "Run /login once")
+        #expect(token.detailCaption == nil)
+        #expect(token.detailCaption != signedIn.detailCaption)
+    }
+
+    @Test("detailCaption: oauthToken with baseURL and model → no login hint")
+    func detailOAuthTokenWithBaseURLAndModel() {
+        let token = ModelProfile(name: "x", kind: .oauthToken,
+                                 baseURL: "http://h:1", model: "opus")
+        let signedIn = ModelProfile(name: "x", kind: .oauth,
+                                    baseURL: "http://h:1", model: "opus")
+        #expect(token.detailCaption == "via http://h:1 · opus")
+        #expect(signedIn.detailCaption == "Run /login once · via http://h:1 · opus")
+    }
+
     @Test("tabDisplayName returns name verbatim")
     func tabDisplayName() {
         let p = ModelProfile(name: "Bedrock prod", kind: .bedrock,

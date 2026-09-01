@@ -569,16 +569,44 @@ public final class TerminalActivityTransitionNotifier: @unchecked Sendable {
 public struct TerminalStore: Sendable {
     let writer: any DatabaseWriter
 
-    /// `working -> idle` transitions observed by EITHER activity writer.
-    ///
-    /// The edge is detected inside the store rather than at the call sites
-    /// because there are two writers that commit it — `setActivityState` and
-    /// `applyActivityObservation` — and a caller-side check would have to be
-    /// duplicated, kept in sync, and would still miss any future writer.
+    /// `working -> idle` transitions reported by an OBSERVER of the session.
     ///
     /// Its one consumer today is the token-profile usage probe, which is a
     /// billed request and therefore fires on completed turns instead of a
     /// timer (`docs/specs/2026-09-01-token-based-claude-profiles-design.md`).
+    /// That consumer defines what the edge means: *a turn finished, so this
+    /// profile's utilization moved*. It is not "the `activity_state` column
+    /// changed value".
+    ///
+    /// **Two writers fire it**, and they are the two that carry an outside
+    /// observation of what the agent did: `applyActivityObservation` (the path
+    /// every Claude and Codex hook takes) and `setActivityState`. The edge is
+    /// detected inside the store rather than at their call sites because a
+    /// caller-side check would have to be written twice, kept in sync, and
+    /// would still miss the next call site.
+    ///
+    /// **Four other writers set `activityState = .idle` and deliberately do
+    /// not fire it**, because none of them observed a turn finishing:
+    ///
+    /// - `applySessionStart`'s Codex branch — a session *starting* is the
+    ///   opposite of a turn completing, and it is also how a resumed session
+    ///   arrives. The non-ordered path's `unknown -> idle` case is excluded
+    ///   for the same reason.
+    /// - `beginHibernatedShellRespawn`, `finalizeHibernatedShellRespawn`,
+    ///   `persistHibernatedState` — a park writes `.idle` with
+    ///   `FactSource.database`: TBD's own bookkeeping that it stopped the
+    ///   session, not evidence from the session that it stopped working. Most
+    ///   parks are of sessions that were already idle, and the sweep that
+    ///   issues them is a background timer — wiring a billed probe to it would
+    ///   put token profiles back on exactly the blind cadence the design
+    ///   removed.
+    ///
+    /// The one case that genuinely loses information is a session parked
+    /// **mid-turn**: utilization moved and no probe fires. It is accepted.
+    /// Those numbers are not lost, only late — the next turn on that profile
+    /// probes, the profile row renders its staleness note meanwhile, and the
+    /// profile's `⋯` menu offers a manual refresh. Paying a billed request per
+    /// park to shave that latency is the wrong trade.
     public let activityTransitions = TerminalActivityTransitionNotifier()
 
     init(writer: any DatabaseWriter) {

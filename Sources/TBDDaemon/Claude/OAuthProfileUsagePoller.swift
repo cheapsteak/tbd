@@ -28,6 +28,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "oauthUsagePo
 ///   are still swept by a *targeted* sweep, and still keep their snapshots
 ///   across full sweeps.
 /// - Per-profile calls within one sweep are staggered slightly.
+/// - At most one fetch per profile is ever in flight. Sweeps overlap freely
+///   (the actor is reentrant across every `await` one takes), and a second
+///   sweep that reaches a profile another is already fetching is dropped
+///   rather than issuing a duplicate request — which for a token profile
+///   would be a duplicate BILLED one. Different profiles still fetch
+///   concurrently; the reservation is per profile, not a global lock.
 /// - A failing profile records a status ("stale since X; fetch failed: …")
 ///   without poisoning the rest of the sweep; previously fetched buckets are
 ///   retained so the picker can show stale-but-real numbers.
@@ -115,6 +121,34 @@ public actor OAuthProfileUsagePoller {
         var nextEligibleAt: Date?
     }
     private var backoff: [UUID: BackoffState] = [:]
+
+    /// Profiles with a fetch currently in flight.
+    ///
+    /// `sweep` suspends twice before it issues a request — at
+    /// `profilesProvider()` and at the inter-profile stagger — and the actor
+    /// admits another sweep at both, with neither having written `snapshots`
+    /// or `backoff` yet. Without this set, two callers can compute the same
+    /// target and both fetch; for a `.oauthToken` profile that is two BILLED
+    /// inference requests where the design commits to one. Membership is
+    /// released only after `record` commits, so the next caller is held by
+    /// the freshness floor rather than racing again.
+    private var inFlight: Set<UUID> = []
+
+    /// Ids of the `.oauthToken` profiles seen by the most recent read of the
+    /// profile table, or nil when no read has happened yet.
+    ///
+    /// Purely a cheap negative gate for `noteSessionBecameIdle`, which every
+    /// completed turn in the fleet reaches. nil means "unknown", never
+    /// "empty": before the first read the slow path decides, so a daemon that
+    /// has not swept yet cannot silently drop probes.
+    ///
+    /// It cannot go stale in the direction that loses a probe. A profile's
+    /// `kind` is immutable — `ModelProfileStore` exposes no writer for it — so
+    /// a row cannot become a token profile after creation, and creation itself
+    /// calls `noteCredentialChanged`, whose sweep reads the table. A stale
+    /// entry in the other direction (a deleted profile) merely costs the full
+    /// lookup that then finds nothing.
+    private var tokenProfileIDs: Set<UUID>?
 
     // MARK: - Init
 
@@ -264,7 +298,15 @@ public actor OAuthProfileUsagePoller {
     /// collapses into one billed request. Per-profile backoff still applies on
     /// top of that, so a rejected or rate-limited token is not hammered by
     /// activity either.
+    ///
+    /// EVERY completed turn on every session in the fleet arrives here, and in
+    /// an install with no token profiles at all none of them can act. So the
+    /// kind guard is preceded by a cached one that costs no query: the profile
+    /// table is read only once it is already known that this profile might be
+    /// a token profile. See `tokenProfileIDs` for why that cache cannot go
+    /// stale in the direction that would lose a probe.
     public func noteSessionBecameIdle(profileID: UUID) async {
+        if let known = tokenProfileIDs, !known.contains(profileID) { return }
         let profiles: [ModelProfile]
         do {
             profiles = try await profilesProvider()
@@ -272,9 +314,17 @@ public actor OAuthProfileUsagePoller {
             logger.warning("profile list failed; skipping activity probe: \(error.localizedDescription, privacy: .public)")
             return
         }
+        rememberTokenProfiles(in: profiles)
         guard let profile = profiles.first(where: { $0.id == profileID }),
               profile.kind == .oauthToken else { return }
         await sweep(only: profileID, skipFresherThan: Self.tokenProfileFloor)
+    }
+
+    /// Refresh the `noteSessionBecameIdle` negative gate. Called from every
+    /// path that has just read the profile table, so the cache tracks it
+    /// without a query of its own.
+    private func rememberTokenProfiles(in profiles: [ModelProfile]) {
+        tokenProfileIDs = Set(profiles.filter { $0.kind == .oauthToken }.map(\.id))
     }
 
     /// Probe once because this profile's credential just changed — it was
@@ -363,6 +413,7 @@ public actor OAuthProfileUsagePoller {
             logger.warning("profile list failed; skipping usage sweep: \(error.localizedDescription, privacy: .public)")
             return
         }
+        rememberTokenProfiles(in: allProfiles)
 
         // Deliberately `.oauth` only. Token profiles are NOT swept on cadence:
         // their probe is a real billed API request, so they refresh on session
@@ -416,6 +467,30 @@ public actor OAuthProfileUsagePoller {
             }
             if Task.isCancelled { break }
             guard let usageCredential = credential(for: profile) else { continue }
+            // Reserve the profile, or yield to the sweep that already holds
+            // it. The check and the reservation are one statement so no
+            // suspension can separate them.
+            //
+            // The loser is DROPPED, not made to await the winner's result.
+            // The winner records and broadcasts, so a dropped caller's reader
+            // sees the fresh snapshot moments later anyway; awaiting would add
+            // continuation bookkeeping that has to stay correct under
+            // cancellation to buy a fresher return value for one RPC. Being
+            // skipped is what the backoff and freshness gates already do.
+            //
+            // One residual, accepted: a credential change that lands while a
+            // probe of the OLD credential is in flight is dropped, so the new
+            // token is not verified until the next turn end or a manual
+            // refresh. The window is the length of a single HTTP request, and
+            // the alternative — exempting that path — is the double bill this
+            // guard exists to prevent.
+            guard inFlight.insert(profile.id).inserted else {
+                logger.debug("usage probe already in flight for profile \(profile.id, privacy: .public); dropping duplicate")
+                continue
+            }
+            // Released at the end of THIS iteration, after `record` commits,
+            // and on every exit from it — including a cancelled fetch.
+            defer { inFlight.remove(profile.id) }
             didFetch = true
             // Dispatch by kind: a signed-in profile's usage comes from the
             // OAuth usage endpoint, a token profile's from probe response

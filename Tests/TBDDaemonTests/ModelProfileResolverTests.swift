@@ -226,6 +226,58 @@ struct ModelProfileResolverTests {
         #expect(result?.secret == nil)
     }
 
+    @Test("oauthToken profile with a stored secret resolves carrying the token")
+    func oauthTokenProfile_secretPresent_carriesTheToken() async throws {
+        let (db, box, resolver) = try makeHarness()
+        let token = try await db.modelProfiles.create(name: "Acme (token)", kind: .oauthToken)
+        try await db.config.setDefaultProfileID(token.id)
+        box.map[token.id.uuidString] = "sk-ant-oat01-EXAMPLE"
+
+        let result = try await resolver.resolve(repoID: nil)
+        #expect(result?.profileID == token.id)
+        #expect(result?.kind == .oauthToken)
+        // Unlike `.oauth`, this kind DOES carry a TBD-stored secret: the spawn
+        // path turns it into `CLAUDE_CODE_OAUTH_TOKEN`.
+        #expect(result?.secret == "sk-ant-oat01-EXAMPLE")
+    }
+
+    /// The deliberate asymmetry with `.apiKey`, which returns nil here. A token
+    /// profile still owns an isolated config dir, so a missing secret yields an
+    /// unauthenticated pane that asks for a login — visible and recoverable.
+    /// Falling through the precedence chain instead would silently run the
+    /// session under whatever profile came next, i.e. a DIFFERENT account.
+    @Test("oauthToken profile with no stored secret still resolves, with secret == nil")
+    func oauthTokenProfile_secretMissing_resolvesAnyway() async throws {
+        let (db, _, resolver) = try makeHarness()
+        let token = try await db.modelProfiles.create(name: "Acme (token)", kind: .oauthToken)
+        try await db.config.setDefaultProfileID(token.id)
+        let fallback = try await db.modelProfiles.create(name: "Other", kind: .oauth)
+        // No keychain entry for the token profile.
+
+        let result = try await resolver.resolve(repoID: nil)
+        #expect(result != nil)
+        #expect(result?.profileID == token.id)
+        #expect(result?.kind == .oauthToken)
+        #expect(result?.secret == nil)
+        // Stated positively, because "did not return nil" alone would not
+        // catch a fall-through that happened to land somewhere plausible.
+        #expect(result?.profileID != fallback.id)
+    }
+
+    /// An empty string is a stored-but-useless secret and must behave as a
+    /// missing one — the same test `.apiKey` applies, with the opposite verdict.
+    @Test("oauthToken profile with an empty stored secret resolves with secret == nil")
+    func oauthTokenProfile_secretEmpty_resolvesWithNilSecret() async throws {
+        let (db, box, resolver) = try makeHarness()
+        let token = try await db.modelProfiles.create(name: "Acme (token)", kind: .oauthToken)
+        box.map[token.id.uuidString] = ""
+
+        let result = try await resolver.loadByID(token.id)
+        #expect(result != nil)
+        #expect(result?.kind == .oauthToken)
+        #expect(result?.secret == nil)
+    }
+
     @Test("resolver carries fallbackModels through the global default")
     func resolve_globalDefault_carriesFallbackModels() async throws {
         let (db, box, resolver) = try makeHarness()
