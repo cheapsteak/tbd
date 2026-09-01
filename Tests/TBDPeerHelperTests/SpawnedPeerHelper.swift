@@ -166,14 +166,40 @@ final class SpawnedPeerHelper: @unchecked Sendable {
     }
 
     /// Kill whatever is left and remove the scratch root. Idempotent.
+    ///
+    /// **The wait is bounded, like every other wait in this fixture**, and this
+    /// is the one place that used not to be. `Process.waitUntilExit()` blocks
+    /// the calling thread until Foundation *observes* the exit, and it has no
+    /// deadline of its own — a SIGKILL it never observes parks the caller
+    /// forever. `tearDown()` runs from a `defer` inside an async test, so the
+    /// thread it parks is one of Swift Testing's cooperative-pool threads, and
+    /// the whole test process cannot finish while a test is still running on
+    /// one. Measured on a full-suite run: the process sat at 0.0% CPU for 24
+    /// minutes holding the machine-global build lock, with two of these frames
+    /// (`aLineNamingAnotherHandleIsIgnored`, and
+    /// `aLivenessProbeForwardsNothingAndLeavesTheHelperRunning`) the only test
+    /// threads left alive. Polling releases the thread between checks and caps
+    /// the damage at `waitLimit`.
+    ///
+    /// Giving up is deliberately silent here. `tearDown` is a `defer` on every
+    /// exit path including the failing ones, so a diagnostic raised from it
+    /// would attach itself to whatever the test was already reporting; a test
+    /// that cares whether the helper exited asserts on `waitForExit()`, which
+    /// is what that method is for.
     func tearDown() {
         closeStdin()
         if process.isRunning {
             kill(pid, SIGKILL)
-            process.waitUntilExit()
+            let deadline = Date().addingTimeInterval(Self.waitLimit)
+            while process.isRunning, Date() < deadline {
+                usleep(useconds_t(Self.pollIntervalMicroseconds))
+            }
         }
         try? FileManager.default.removeItem(at: root)
     }
+
+    /// `pollInterval` for the synchronous waits, which cannot `await`.
+    private static let pollIntervalMicroseconds = 20_000
 
     // MARK: - Driving it
 

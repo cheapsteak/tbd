@@ -36,12 +36,10 @@ struct HolderClientTests {
         #expect(processIsAlive(fixture.handle.childPID))
         #expect(processIsAlive(fixture.handle.holderPID))
 
-        // The spawner closes its handshake connection, so the holder's single
-        // client slot is free for a fresh one — which is what every later
-        // daemon-side consumer relies on.
-        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
-        let description = try await client.describe()
-        await client.close()
+        // The spawner hands its handshake connection on, so the holder is
+        // already attached and answering before the caller asks anything —
+        // which is what every later daemon-side consumer relies on.
+        let description = try await fixture.client.describe()
         #expect(description.childPID == fixture.handle.childPID)
         #expect(description.status == .alive)
         #expect(description.ttyName.hasPrefix("/dev/"))
@@ -54,10 +52,13 @@ struct HolderClientTests {
         let fixture = try await SpawnedHolderFixture.start(command: "printf HOLDER-OK; sleep 30")
         defer { fixture.tearDown() }
 
-        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
-        let (description, ptyFD) = try await client.handOverPTY()
+        // Straight onto the spawner's own connection, with no reconnect in
+        // between. This used to dial the socket again and fail about one run in
+        // five with the busy sentinel, because the holder had not yet read EOF
+        // on the connection the spawner closed a moment earlier.
+        let (description, ptyFD) = try await fixture.client.handOverPTY()
         defer { Darwin.close(ptyFD) }
-        await client.close()
+        await fixture.client.close()
         #expect(description.childPID == fixture.handle.childPID)
         #expect(ptyFD >= 0)
 
@@ -67,6 +68,45 @@ struct HolderClientTests {
             return String(decoding: seen, as: UTF8.self).contains("HOLDER-OK")
         }
         #expect(sawMarker, "read \(seen.count) bytes: \(String(decoding: seen, as: UTF8.self).debugDescription)")
+    }
+
+    /// Handing the handshake connection on must not soften the busy sentinel.
+    ///
+    /// The sentinel is the only thing standing between one pty master and two
+    /// readers, and "two readers" is silent byte theft rather than an error
+    /// anyone would notice. So the fix for the spawn race is checked against
+    /// its opposite: while the spawner's connection is genuinely attached, a
+    /// second client is refused — and once that connection is let go, the slot
+    /// really does become free, which is what makes the refusal a statement
+    /// about occupancy rather than a permanent lockout.
+    @Test func refusesASecondClientWhileTheSpawnersConnectionIsHeld() async throws {
+        let fixture = try await SpawnedHolderFixture.start(command: "sleep 30")
+        defer { fixture.tearDown() }
+
+        // Not merely constructed: a round trip proves the spawner's connection
+        // is the live one occupying the holder's single slot.
+        let held = try await fixture.client.describe()
+        #expect(held.status == .alive)
+
+        let second = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
+        await #expect(throws: HolderClient.Error.rejected(version: HolderProtocolVersion.busySentinel)) {
+            _ = try await second.describe()
+        }
+        await second.close()
+
+        // The other half: the refusal tracks occupancy. Polled rather than
+        // asserted once, because the holder learns the slot is free only when
+        // its poll loop next reads EOF — the very latency that made a
+        // reconnecting caller flaky, here waited out on purpose.
+        await fixture.client.close()
+        let socketPath = fixture.handle.socketPath
+        let reattached = await pollUntil("the holder to free its client slot") {
+            let probe = HolderClient(socketPath: socketPath, receiveTimeout: .seconds(5))
+            let answered = (try? await probe.describe()) != nil
+            await probe.close()
+            return answered
+        }
+        #expect(reattached, "the holder never freed its client slot")
     }
 
     // MARK: - The creation lock
@@ -161,9 +201,7 @@ struct HolderClientTests {
 
         // The assertion that matters: the session the probe protected is still
         // usable, not merely still on disk.
-        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
-        let description = try await client.describe()
-        await client.close()
+        let description = try await fixture.client.describe()
         #expect(description.childPID == fixture.handle.childPID)
         #expect(description.status == .alive)
     }
@@ -259,9 +297,8 @@ struct HolderClientTests {
         defer { fixture.tearDown() }
         let childPID = fixture.handle.childPID
 
-        let client = HolderClient(socketPath: fixture.handle.socketPath, receiveTimeout: .seconds(5))
-        try await client.forget()
-        await client.close()
+        try await fixture.client.forget()
+        await fixture.client.close()
 
         // A forgotten holder has nothing left to say, so it drops its pty and
         // exits, unlinking the socket on the way out.
@@ -624,6 +661,68 @@ struct HolderClientTests {
         #expect(pushed?.childPID == 4242)
         await client.close()
     }
+
+    /// A pushed exit must be observable **without** anybody calling `close()`.
+    ///
+    /// This is the shape a real holder produces: it pushes the terminal status
+    /// at its connected client and then winds itself down, so the push and the
+    /// EOF behind it are both waiting when the next verb runs. The barrier
+    /// decodes the push, the read after it fails on the EOF, and the verb
+    /// rightly throws — but the exit it just decoded is a fact about the child,
+    /// not about the connection, and it has to survive the throw. A poller that
+    /// calls `describe()` and reads `lastPushedDescription` is the whole reason:
+    /// it never closes, so a status only retired at `close()` reaches it never.
+    ///
+    /// `close()` is deliberately not called before the assertion — calling it
+    /// would retire the queue by the other path and turn the test green with
+    /// the fix reverted.
+    @Test func surfacesAPushedExitWithoutWaitingForClose() async throws {
+        let home = SpawnedHolderFixture.scratchHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        try FileManager.default.createDirectory(atPath: home, withIntermediateDirectories: true)
+        let socketPath = home + "/stub.sock"
+
+        let alive = SpawnedHolderFixture.description(childPID: 4242, home: home)
+        var exited = alive
+        exited.status = .exited(code: 7)
+
+        // Gated so the push lands in its own read rather than coalesced with
+        // the answer, and the peer then hangs up — the holder's own sequence.
+        let gate = ScriptedStubPeer.TrailerGate()
+        let peer = try ScriptedStubPeer(
+            socketPath: socketPath,
+            answers: [
+                ScriptedStubPeer.Answer(
+                    payload: try HolderFraming.frame(HolderResponse.described(alive)),
+                    trailer: try HolderFraming.frame(HolderResponse.described(exited)),
+                    trailerGate: gate),
+            ],
+            closesAfterScript: true)
+        defer { peer.tearDown() }
+
+        let client = HolderClient(socketPath: socketPath, receiveTimeout: .seconds(2))
+        let first = try await client.describe()
+        #expect(first.status == .alive)
+        let beforeTheGate = await client.lastPushedDescription
+        #expect(beforeTheGate == nil, "the stub pushed the exit before the test released it")
+
+        gate.release()
+        try #require(gate.waitUntilWritten(), "the stub peer never wrote its trailing push")
+        // Waiting for the hang-up, not just the write, is what makes the
+        // interleaving deterministic: both the push and the EOF are queued
+        // before the next verb runs, so the barrier is guaranteed to decode one
+        // and then fail on the other.
+        try #require(peer.waitUntilClosed(), "the stub peer never closed the connection")
+
+        await #expect(throws: HolderClient.Error.peerClosed) {
+            _ = try await client.describe()
+        }
+
+        let pushed = await client.lastPushedDescription
+        #expect(pushed?.status == .exited(code: 7))
+        #expect(pushed?.childPID == 4242)
+        await client.close()
+    }
 }
 
 // MARK: - Support
@@ -757,6 +856,11 @@ private final class SpawnedHolderFixture {
     let sessionID: UUID
     let owner: HolderOwnerToken
     let handle: HolderHandle
+    /// The connection the spawner's handshake ran on, handed straight over.
+    /// Tests use this rather than dialling the socket again: a fresh connect
+    /// would race the holder's notice that the handshake connection had gone,
+    /// which is the race this fixture exists to stop reintroducing.
+    let client: HolderClient
     private var torndown = false
 
     private final class BundleMarker {}
@@ -840,20 +944,31 @@ private final class SpawnedHolderFixture {
         let home = scratchHome()
         let token = HolderOwnerToken(rawValue: owner)
         let spawner = try makeSpawner()
-        let handle = try await spawner.spawn(
+        let spawned = try await spawner.spawn(
             sessionID: session,
             launch: launch(command: command, home: home),
             owner: token,
             environment: environment(home: home))
         return SpawnedHolderFixture(
-            home: home, sessionID: session, owner: token, handle: handle)
+            home: home,
+            sessionID: session,
+            owner: token,
+            handle: spawned.handle,
+            client: spawned.client)
     }
 
-    private init(home: String, sessionID: UUID, owner: HolderOwnerToken, handle: HolderHandle) {
+    private init(
+        home: String,
+        sessionID: UUID,
+        owner: HolderOwnerToken,
+        handle: HolderHandle,
+        client: HolderClient
+    ) {
         self.home = home
         self.sessionID = sessionID
         self.owner = owner
         self.handle = handle
+        self.client = client
     }
 
     private var reaped = false
@@ -978,8 +1093,16 @@ private final class ScriptedStubPeer: @unchecked Sendable {
     private let lock = NSLock()
     private var connectionFD: Int32 = -1
     private var stopped = false
+    /// Signalled once the peer has hung up, for `closesAfterScript`.
+    private let closedConnection = DispatchSemaphore(value: 0)
 
-    init(socketPath: String, answers: [Answer]) throws {
+    /// `closesAfterScript` makes the peer hang up when its script runs out
+    /// instead of parking with the connection open. Parking is the default
+    /// because an EOF the client did not expect can mask a missing queue as a
+    /// pass; a test about what happens *at* the EOF needs the opposite, and
+    /// waits for `waitUntilClosed()` so the hang-up is ordered rather than
+    /// raced.
+    init(socketPath: String, answers: [Answer], closesAfterScript: Bool = false) throws {
         self.socketPath = socketPath
         listenFD = try bindUnixListener(at: socketPath, backlog: 4)
 
@@ -1015,7 +1138,12 @@ private final class ScriptedStubPeer: @unchecked Sendable {
             }
             // Park with the connection open. Closing here would let the client
             // reach EOF, which is the very thing the queue is meant to make
-            // unnecessary — an EOF would mask a missing queue as a pass.
+            // unnecessary — an EOF would mask a missing queue as a pass. A test
+            // whose subject IS the EOF opts out with `closesAfterScript`.
+            if closesAfterScript {
+                self.hangUp()
+                self.closedConnection.signal()
+            }
             while !self.isStopped { usleep(20_000) }
         }
         thread.name = "holder-stub-peer"
@@ -1034,13 +1162,34 @@ private final class ScriptedStubPeer: @unchecked Sendable {
         return stopped
     }
 
-    func tearDown() {
+    /// Closes the accepted connection, once. Safe to race `tearDown`: whichever
+    /// runs first takes the descriptor and leaves -1 behind.
+    private func hangUp() {
         lock.lock()
-        stopped = true
         let connection = connectionFD
         connectionFD = -1
         lock.unlock()
         if connection >= 0 { Darwin.close(connection) }
+    }
+
+    /// Blocks the test until a `closesAfterScript` peer has hung up.
+    @discardableResult
+    func waitUntilClosed(
+        timeout: TimeInterval = 10.0,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) -> Bool {
+        if closedConnection.wait(timeout: .now() + timeout) == .success { return true }
+        Issue.record(
+            "timed out after \(timeout)s waiting for the stub peer to close the connection",
+            sourceLocation: sourceLocation)
+        return false
+    }
+
+    func tearDown() {
+        lock.lock()
+        stopped = true
+        lock.unlock()
+        hangUp()
         Darwin.close(listenFD)
         unlink(socketPath)
     }

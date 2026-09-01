@@ -113,6 +113,16 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
+                // The daemon is the default reader for a holder-backed session:
+                // it drains that session's pty master into a headless SwiftTerm
+                // `Terminal` so an unattended job never wedges behind a full tty
+                // queue (Sources/TBDDaemon/Holder/HolderReader.swift).
+                //
+                // This pulls an AppKit-importing target into the daemon binary.
+                // SwiftTerm ships one target with no core/views split, so there
+                // is no headless-only product to depend on instead; the daemon
+                // simply never touches the view types.
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
             ],
             path: "Sources/TBDDaemon",
             exclude: ["main.swift"],

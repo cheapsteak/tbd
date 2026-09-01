@@ -64,7 +64,11 @@ actor HolderClient {
     }
 
     let socketPath: String
-    private let receiveTimeout: Duration
+    /// Mutable because a connection can outlive the budget it was made under:
+    /// `HolderSpawner` handshakes on a short handshake timeout and then hands
+    /// the same connection on as a session's long-lived one. See
+    /// `adoptReceiveTimeout`.
+    private var receiveTimeout: Duration
     private var fd: Int32 = -1
     /// Bytes read but not yet parsed into a whole frame.
     private var inbox = Data()
@@ -98,6 +102,21 @@ actor HolderClient {
     /// Deliberately survives `close()`: it is an observation about the child,
     /// not connection state.
     private(set) var lastPushedDescription: HolderChildDescription?
+    /// The busy sentinel this connection was refused with, if it has arrived.
+    ///
+    /// **`.rejected` is the other frame the holder writes without being asked**,
+    /// and unlike an exit push it is not noise: the holder writes it the moment
+    /// it accepts a connection it cannot serve, and then hangs up. So it
+    /// routinely lands *before* the first request is even written, where the
+    /// barrier finds it — and a barrier that discarded it left the following
+    /// write to fail with `EPIPE`, reporting a perfectly ordinary busy holder
+    /// as `transportFailed("Broken pipe")`. Which of the two a caller saw was
+    /// decided by microseconds.
+    ///
+    /// Kept, so the verb that was about to go out fails with the refusal the
+    /// holder actually gave. Cleared by `close()`: it is a fact about one
+    /// connection, and the next one gets its own answer.
+    private var refusal: Int?
 
     init(socketPath: String, receiveTimeout: Duration = HolderClient.defaultReceiveTimeout) {
         self.socketPath = socketPath
@@ -181,6 +200,21 @@ actor HolderClient {
         }
     }
 
+    /// Re-times an already-open connection, and every later one.
+    ///
+    /// Exists because `HolderSpawner` connects under a deliberately short
+    /// handshake budget — a holder that connects and then goes quiet must not
+    /// spend the whole startup budget on one attempt — and then hands that same
+    /// connection to the daemon to keep for the session's life. Leaving the
+    /// handshake budget on it would silently apply a startup-shaped deadline to
+    /// every later verb.
+    func adoptReceiveTimeout(_ timeout: Duration) {
+        receiveTimeout = timeout
+        guard fd >= 0 else { return }
+        var value = Self.timeval(from: timeout)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &value, socklen_t(MemoryLayout<timeval>.size))
+    }
+
     /// Drops the connection. Idempotent; the client reconnects on the next
     /// verb, which is what makes a `HolderClient` reusable across a holder's
     /// life without pinning its single client slot between requests.
@@ -192,6 +226,10 @@ actor HolderClient {
         // it is retired the same way a send retires it: the status it may carry
         // is remembered, and its descriptors are closed rather than leaked.
         retireQueuedFrames()
+        // A refusal belongs to the connection that was refused, not to the
+        // client. Carrying one across a reconnect would fail the next verb with
+        // an answer a holder gave about a socket that no longer exists.
+        refusal = nil
     }
 
     // MARK: - Transport
@@ -237,14 +275,46 @@ actor HolderClient {
         fd = socketFD
     }
 
+    /// **A refusal outranks whatever else went wrong on the way to noticing
+    /// it**, which is why every failure path here consults it first.
+    ///
+    /// A holder refuses and hangs up in one breath, so the refusal is always
+    /// chased by an EOF and, if the write lost the race, an `EPIPE`. Those are
+    /// the same event seen from further away: reporting `peerClosed` or
+    /// `transportFailed("Broken pipe")` would name the symptom and lose the
+    /// reason, and which of the three a caller saw was decided by microseconds.
+    /// Reporting `.rejected` in all of them is what makes "somebody else is
+    /// already attached" a fact a caller can act on rather than a coin toss.
     private func send(_ request: HolderRequest) throws {
         guard fd >= 0 else { throw Error.notConnected }
-        try raiseBarrier()
+        do {
+            try raiseBarrier()
+        } catch {
+            throw refusalError() ?? error
+        }
+        if let refused = refusalError() { throw refused }
         do {
             try FDChannel.sendData(HolderFraming.frame(request), over: fd)
         } catch {
-            throw Error.transportFailed(error.localizedDescription)
+            // The refusal can still be sitting unread in the receive buffer
+            // when the write fails. The barrier's own throw says nothing this
+            // does not already know — the refusal, if there was one, is
+            // recorded on its way out.
+            try? raiseBarrier()
+            throw refusalError() ?? Error.transportFailed(error.localizedDescription)
         }
+    }
+
+    /// Consumes a recorded refusal, dropping the connection it belongs to.
+    ///
+    /// Dropping is what makes the client reusable: the holder closes every
+    /// connection it refuses, so the socket is already dead, and a caller that
+    /// backs off and retries reconnects on its next verb rather than writing
+    /// into a corpse.
+    private func refusalError() -> Error? {
+        guard let version = refusal else { return nil }
+        close()
+        return .rejected(version: version)
     }
 
     /// Separates everything the holder has already said from the answer to the
@@ -267,6 +337,17 @@ actor HolderClient {
     /// misattributed to the one after it — a desync that never heals.
     private func raiseBarrier() throws {
         guard fd >= 0 else { return }
+        // Retired on the way out **however the barrier ends**, because the
+        // commonest shape of a pushed exit is a push immediately followed by
+        // the holder's own shutdown: the first read decodes the push, the next
+        // one is the EOF behind it, and a barrier that only retired on the
+        // success path threw that EOF with the exit still sitting undelivered
+        // in the queue. `lastPushedDescription` then stayed nil until somebody
+        // called `close()`, so a poller doing `describe()` and reading the
+        // pushed status never saw how the child ended. Everything queued when
+        // the barrier ran arrived before this request existed and is nobody's
+        // answer, which is exactly as true when the read after it fails.
+        defer { retireQueuedFrames() }
         while hasBufferedInput() {
             try readMoreFrames()
         }
@@ -277,7 +358,6 @@ actor HolderClient {
         while !inbox.isEmpty {
             try readMoreFrames()
         }
-        retireQueuedFrames()
     }
 
     /// Whether the socket has something to deliver right now.
@@ -312,7 +392,14 @@ actor HolderClient {
                     child \(description.childPID, privacy: .public): \
                     \(String(describing: description.status), privacy: .public)
                     """)
-            case .forgotten, .rejected:
+            case .rejected(let version):
+                refusal = version
+                Self.logger.debug(
+                    """
+                    the holder at \(self.socketPath, privacy: .public) refused this connection \
+                    before it was asked anything (protocol version \(version, privacy: .public))
+                    """)
+            case .forgotten:
                 Self.logger.debug(
                     """
                     discarding an unsolicited \(String(describing: response), privacy: .public) frame \
