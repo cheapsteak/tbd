@@ -100,10 +100,12 @@ Note that an older *daemon* reading a `"oauthToken"` row already degrades it to
 crashing — the profile stops authenticating rather than misbehaving.
 
 Adding the case makes the compiler surface every exhaustive switch over
-`CredentialKind`. There are three such files today — `TBDShared/Models.swift`,
-`TBDApp/Settings/ModelProfilesSettingsView.swift`, and
-`TBDDaemon/Claude/ClaudeProfileConfigDirManager.swift` — so the blast radius is
-small and fully enumerated by the build rather than by grep.
+`CredentialKind`. There are four such sites today, in three files —
+`TBDShared/Models.swift` (`kindLabel`, `detailCaption`),
+`TBDApp/Sidebar/WorktreeProfilePickerView.swift` (`profileSubtitle`), and
+`TBDDaemon/Claude/ClaudeProfileConfigDirManager.swift` (`resolveConfigDir`) —
+so the blast radius is small and fully enumerated by the build rather than by
+grep.
 
 ## Spawn
 
