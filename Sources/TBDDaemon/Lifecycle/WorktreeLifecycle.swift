@@ -151,6 +151,21 @@ public struct WorktreeLifecycle: Sendable {
     /// dup of a session's pty master and steal bytes from each other.
     var holderRegistry: HolderRegistry?
 
+    /// How the create path builds the scheduler that recaptures a resumed
+    /// session's ID. `nil` in production, which builds the ordinary
+    /// `SessionRecaptureScheduler(db:tmux:)`.
+    ///
+    /// A seam because the branch it feeds — recapture is scheduled for a tmux
+    /// primary and not for a holder one — is otherwise unobservable from
+    /// outside. A real scheduler's only trace is a database write five wall
+    /// seconds later, made only if a tmux pane answers with a live Claude
+    /// process; "it was never scheduled" and "it was scheduled and found
+    /// nothing" look identical from the row. Injecting the scheduler makes the
+    /// decision itself the observable, on virtual time.
+    var sessionRecaptureFactory: (
+        @Sendable (TBDDatabase, TmuxManager) -> SessionRecaptureScheduler
+    )?
+
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"

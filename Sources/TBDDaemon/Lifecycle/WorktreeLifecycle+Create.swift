@@ -1345,12 +1345,19 @@ extension WorktreeLifecycle {
         // running session, because the transport is a property of a live pty
         // that already exists, not of a preference.
         //
-        // A missing registry means no `TBDHolder` binary or mock mode, and
-        // falls back to tmux rather than failing the create — a worktree that
-        // will not open is a worse answer than one that opens on the old
-        // transport.
+        // Both halves of "can this create put a session on a holder" are asked
+        // here, and they are different questions. Mock mode has no registry at
+        // all; a daemon whose `TBDHolder` binary is missing has one that cannot
+        // spawn — it is still built, because adoption reaches an already-running
+        // holder through its socket and must keep working across an upgrade that
+        // moved the binary. Gating on the registry's mere presence would take
+        // the holder path with nothing able to start a holder, and the
+        // `holderExecutableUnavailable` that `spawn` then throws has nothing
+        // catching it: the whole worktree create would fail. Either way the
+        // fallback is tmux, because a worktree that will not open is a worse
+        // answer than one that opens on the old transport.
         let holderRegistry = self.holderRegistry
-        let useHolderTransport = config.ptyHolderEnabled && holderRegistry != nil
+        let useHolderTransport = config.ptyHolderEnabled && holderRegistry?.canSpawn == true
 
         // The tmux server is ensured LAZILY on the holder path, and eagerly —
         // in exactly the place it always was — on the tmux path.
@@ -1633,7 +1640,9 @@ extension WorktreeLifecycle {
         // holder session — `paneID` is empty there by construction. Scheduling
         // it anyway would poll a coordinate that can never resolve.
         if carryover != nil, primaryTransport == .tmux {
-            SessionRecaptureScheduler(db: db, tmux: tmux).schedule(
+            let recapture = sessionRecaptureFactory?(db, tmux)
+                ?? SessionRecaptureScheduler(db: db, tmux: tmux)
+            recapture.schedule(
                 terminalID: plannedTerminalID1,
                 paneID: window1.paneID,
                 server: tmuxServer,

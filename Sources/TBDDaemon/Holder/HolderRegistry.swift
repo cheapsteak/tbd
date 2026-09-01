@@ -136,6 +136,20 @@ actor HolderRegistry {
     /// pretending it could have spawned one. Adoption does not need it: an
     /// already-running holder is reached through its socket.
     private let spawner: HolderSpawner?
+    /// Whether this registry can start a holder at all — that is, whether
+    /// `spawn` can do anything but throw `.holderExecutableUnavailable`.
+    ///
+    /// **The registry's existence is not the answer to that question, and the
+    /// spawn gate must ask this instead.** A daemon whose `TBDHolder` binary is
+    /// missing still builds a registry, because adoption needs no executable:
+    /// a holder that is already running is reached through its socket, and a
+    /// user whose sessions are live must not lose them because an upgrade moved
+    /// the binary. So "registry present" and "can spawn" are genuinely
+    /// different facts, and only the second one may gate a create.
+    ///
+    /// `nonisolated` and immutable so the gate can read it without hopping onto
+    /// the actor — `spawner` is a `let`, so this is decided once, in `init`.
+    nonisolated let canSpawn: Bool
 
     private var slots: [UUID: Slot] = [:]
     /// The last status a holder reported for a session, and the only home it
@@ -225,6 +239,7 @@ actor HolderRegistry {
         self.environment = environment
         self.listTerminals = listTerminals
         self.spawner = spawner
+        self.canSpawn = spawner != nil
         self.busyRetryBudget = busyRetryBudget
         self.clock = clock
     }
