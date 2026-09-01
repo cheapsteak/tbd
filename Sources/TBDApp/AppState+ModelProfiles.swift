@@ -602,6 +602,39 @@ extension AppState {
         }
     }
 
+    /// Refresh ONE profile's usage snapshot on an explicit user gesture (the
+    /// profile row's `⋯ ▸ Refresh usage`) and report what happened.
+    ///
+    /// Targeted rather than a full sweep, and that is the whole point. A sweep
+    /// that names no profile visits only the daemon's *cadence* set — logged-in
+    /// `.oauth` profiles — so a `.oauthToken` profile, deliberately kept off
+    /// that cadence because its usage probe is a real billed request, is
+    /// reachable from no other gesture in the app. Naming the id puts it on the
+    /// daemon's targeted path, which covers every *supported* profile.
+    ///
+    /// The five-minute floor between token probes stays the daemon's to enforce
+    /// (`OAuthProfileUsagePoller.freshnessWindow` raises any caller's requested
+    /// window to `tokenProfileFloor` for that kind): this asks, it does not
+    /// insist, and a click inside the floor comes back `.alreadyCurrent`.
+    ///
+    /// Failures are returned rather than raised as an alert — a usage refresh
+    /// is not worth a modal — and the row renders them inline.
+    func refreshUsageSnapshot(profileID: UUID) async -> ProfileUsageRefreshOutcome {
+        let before = modelProfiles.first { $0.profile.id == profileID }?.usageSnapshot
+        do {
+            let result = try await daemonClient.refreshProfileUsage(id: profileID)
+            let merged = Self.mergingUsageSnapshots(into: modelProfiles, entries: result.snapshots)
+            if merged != modelProfiles {
+                modelProfiles = merged
+            }
+            let after = merged.first { $0.profile.id == profileID }?.usageSnapshot
+            return ProfileUsageRefreshOutcome.classify(before: before, after: after)
+        } catch {
+            logger.warning("Targeted usage refresh failed for \(profileID, privacy: .public): \(error, privacy: .public)")
+            return .failed(error.localizedDescription)
+        }
+    }
+
     /// Merge freshly swept snapshots into the current profile list, preserving
     /// every other field. Profiles without a returned snapshot keep whatever
     /// snapshot they had (the sweep only reports eligible logged-in OAuth
@@ -675,5 +708,48 @@ extension AppState {
             logger.error("Failed to set nightwatch mode: \(error, privacy: .public)")
             showAlert("Failed to set nightwatch mode: \(error.localizedDescription)", isError: true)
         }
+    }
+}
+
+/// What a user-initiated, single-profile usage refresh actually did.
+///
+/// The distinction that earns this type is `refreshed` vs `alreadyCurrent`.
+/// The daemon floors token profiles at `OAuthProfileUsagePoller.tokenProfileFloor`
+/// (five minutes) because their probe is billed, so a click inside that window
+/// legitimately changes nothing on screen. Without a name for that case the row
+/// looks identical after the click and reads as broken — which is the failure
+/// mode the manual-refresh affordance exists to avoid, not to create.
+enum ProfileUsageRefreshOutcome: Equatable {
+    /// A fetch ran and succeeded: the snapshot carries newer numbers.
+    case refreshed
+    /// A fetch ran and failed. The row's own status line carries the reason
+    /// (rate limited, token rejected, network) — this only says an attempt
+    /// was made.
+    case probeFailed
+    /// No fetch was attempted: the freshness floor or a backoff window held.
+    /// What is on screen is what there is — which is not the same claim as
+    /// "up to date", since a backoff window can hold a probe over data the
+    /// row's own status line is already calling stale.
+    case alreadyCurrent
+    /// The sweep returned no snapshot for this profile at all. Unreachable
+    /// while the menu item is gated on a profile the daemon can fetch for, but
+    /// it is a real shape of the reply and must not be reported as success.
+    case noData
+    /// The RPC itself never landed.
+    case failed(String)
+
+    /// Classify by comparing the profile's snapshot before and after the sweep.
+    ///
+    /// `fetchedAt` moves only on a successful fetch and `lastAttemptAt` moves
+    /// on every attempt, so the pair separates all three of "new numbers",
+    /// "tried and failed", and "never tried" — which a bucket comparison could
+    /// not: a successful probe returning identical percentages is still a
+    /// refresh, and a failed one that retains its old buckets is not.
+    static func classify(before: ProfileUsageSnapshot?,
+                         after: ProfileUsageSnapshot?) -> ProfileUsageRefreshOutcome {
+        guard let after else { return .noData }
+        if let fetchedAt = after.fetchedAt, fetchedAt != before?.fetchedAt { return .refreshed }
+        guard let before, after.lastAttemptAt == before.lastAttemptAt else { return .probeFailed }
+        return .alreadyCurrent
     }
 }

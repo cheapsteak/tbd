@@ -159,10 +159,12 @@ struct WorktreeProfilePickerView: View {
                     let isTheDefault = appState.primaryAgentPreference == .claude
                         && entry.profile.id == appState.defaultProfileID
                     Group {
-                        if entry.profile.kind == .oauth && isSelectable {
-                            // Selectable Claude account: always render the
-                            // model rail — model selection must not depend on
-                            // usage data being available. The subtitle is the
+                        if Self.rendersClaudeRow(kind: entry.profile.kind,
+                                                 isSelectable: isSelectable) {
+                            // Selectable Claude account — signed in or
+                            // token-authenticated: always render the model
+                            // rail — model selection must not depend on usage
+                            // data being available. The subtitle is the
                             // two-bar meter when a snapshot has buckets, else
                             // the same text/skeleton line as the plain rows.
                             ClaudeProfileRow(
@@ -577,23 +579,72 @@ struct WorktreeProfilePickerView: View {
         )
     }
 
-    /// Whether a profile row should render the two-bar usage meter (instead of
-    /// a text subtitle): an OAuth profile whose snapshot carries at least one of
-    /// the session / weekly buckets the meter draws. Every other case (logged-in
-    /// awaiting first poll, logged out, apiKey/bedrock) keeps its text subtitle.
-    private func showsUsageBars(for entry: ModelProfileWithUsage) -> Bool {
-        guard entry.profile.kind == .oauth, ProfileUsagePresentation.isSelectable(entry) else { return false }
+    /// Which of the two row shapes a profile gets in this menu.
+    ///
+    /// `ClaudeProfileRow` — the model rail plus an optional usage meter — is
+    /// for a selectable Claude *account*, and a Claude account is one that is
+    /// signed in OR authenticated by a stored `claude setup-token`. Both draw
+    /// their numbers from the same `ProfileUsageSnapshot` and both accept a
+    /// per-spawn model override, so gating on `.oauth` alone dropped token
+    /// profiles onto the plain row, where a healthy snapshot rendered as the
+    /// text line "5h 61% · 7d 38%" where a signed-in account got a meter.
+    ///
+    /// `.apiKey` / `.bedrock` keep the plain row: no usage snapshot exists for
+    /// them, and there is no account to meter. An unselectable row (a signed-
+    /// out `.oauth` profile) keeps it too — it is dimmed and disabled, and a
+    /// model rail on a row that cannot be picked would be inert chrome.
+    nonisolated static func rendersClaudeRow(kind: CredentialKind,
+                                             isSelectable: Bool) -> Bool {
+        guard isSelectable else { return false }
+        switch kind {
+        case .oauth, .oauthToken: return true
+        case .apiKey, .bedrock: return false
+        }
+    }
+
+    /// Whether a profile row should render the usage meter (instead of a text
+    /// subtitle): a Claude-account row whose snapshot carries at least one of
+    /// the session / weekly buckets the meter draws. Every other case
+    /// (logged-in awaiting first poll, logged out, apiKey/bedrock) keeps its
+    /// text subtitle.
+    ///
+    /// A token profile contributes exactly two of those buckets and never a
+    /// `weekly_scoped` one — the probe's response headers carry no per-model
+    /// breakdown — which needs no special handling: `UsageBarsView` draws each
+    /// row from an optional lookup and then loops over the scoped buckets, so
+    /// an empty scoped set contributes no rows rather than an empty slot.
+    nonisolated static func showsUsageBars(for entry: ModelProfileWithUsage) -> Bool {
+        guard rendersClaudeRow(kind: entry.profile.kind,
+                               isSelectable: ProfileUsagePresentation.isSelectable(entry))
+        else { return false }
         return ProfileUsagePresentation.sessionBucket(entry.usageSnapshot) != nil
             || ProfileUsagePresentation.weeklyAllBucket(entry.usageSnapshot) != nil
+    }
+
+    /// Whether a Claude row with no meter shows the shimmering placeholder.
+    ///
+    /// Reserved for `.oauth`, as it was before token profiles reached this row
+    /// at all: a signed-in profile with no snapshot is genuinely awaiting its
+    /// first cadence poll, which lands within ~90 seconds. A token profile is
+    /// deliberately off that cadence — it probes after a session goes idle —
+    /// so a skeleton there would promise numbers that may not arrive until
+    /// some session finishes a turn, or at all if nobody spawns on it.
+    nonisolated static func claudeRowShowsSkeleton(kind: CredentialKind,
+                                                   usageNote: String?,
+                                                   snapshot: ProfileUsageSnapshot?) -> Bool {
+        kind == .oauth && usageNote == nil && snapshot == nil
     }
 
     /// Subtitle for a selectable Claude row: the two-bar meter when the
     /// snapshot has buckets, otherwise the same text/skeleton precedence as
     /// `profileSubtitle` (usage note → first-poll skeleton → reserved blank).
     private func claudeRowSubtitle(for entry: ModelProfileWithUsage) -> ClaudeProfileRow.Subtitle {
-        if showsUsageBars(for: entry) { return .bars }
+        if Self.showsUsageBars(for: entry) { return .bars }
         let line = ProfileUsagePresentation.menuLine(for: entry)
-        return .text(line.secondary, showsSkeleton: line.secondary == nil && entry.usageSnapshot == nil)
+        return .text(line.secondary,
+                     showsSkeleton: Self.claudeRowShowsSkeleton(kind: entry.profile.kind,
+                                                                usageNote: line.secondary,
+                                                                snapshot: entry.usageSnapshot))
     }
 
     /// Resolve the fixed-height subtitle for a non-Claude-row profile
@@ -615,9 +666,11 @@ struct WorktreeProfilePickerView: View {
             return ("Not logged in — run /login", false)
         case .oauthToken:
             // A token profile authenticates by its stored setup-token, so it
-            // is always selectable and never "not logged in". No subtitle:
-            // the usage note above is the only thing worth saying, and a
-            // skeleton here would imply a login that will never happen.
+            // is always selectable and normally renders as a `ClaudeProfileRow`
+            // instead of reaching here at all. Kept as the honest fallback if
+            // it ever does: no subtitle, because the usage note above is the
+            // only thing worth saying and a skeleton here would imply a login
+            // that will never happen.
             return (nil, false)
         case .apiKey, .bedrock:
             // Static descriptor from ModelProfile — never a loading state.

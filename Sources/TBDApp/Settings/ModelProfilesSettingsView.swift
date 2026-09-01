@@ -100,6 +100,9 @@ struct ModelProfileRow: View {
     @State private var showEditEndpoint = false
     @State private var showEditBedrock = false
     @State private var showEditClaudeDirect = false
+    /// In-flight and last-outcome state for the `⋯ ▸ Refresh usage` item.
+    @State private var isRefreshingUsage = false
+    @State private var usageRefreshOutcome: ProfileUsageRefreshOutcome?
 
     private var profile: ModelProfile { entry.profile }
 
@@ -108,6 +111,11 @@ struct ModelProfileRow: View {
             HStack(spacing: 10) {
                 nameView
                 kindBadge
+                // The same in-flight signal the add/edit sheets use, so a
+                // refresh that takes a moment doesn't read as a dead click.
+                if isRefreshingUsage {
+                    ProgressView().controlSize(.small)
+                }
                 Spacer()
                 // Exactly one Edit button per row, partitioned by profile shape:
                 // bedrock → proxy (non-bedrock with a baseURL) → Claude-direct (the rest).
@@ -171,6 +179,19 @@ struct ModelProfileRow: View {
                 Text(usageLine)
                     .font(.caption)
                     .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+            }
+            if let usageRefreshOutcome {
+                // What the last manual refresh did. Load-bearing for the
+                // floored case: the daemon legitimately declines a token
+                // profile's probe inside its five-minute window, leaving the
+                // bars byte-identical, and an unexplained no-op reads as a
+                // broken button.
+                Text(ProfileUsageRefreshPresentation.note(for: usageRefreshOutcome))
+                    .font(.caption)
+                    .foregroundStyle(
+                        ProfileUsageRefreshPresentation.noteIsWarning(for: usageRefreshOutcome)
+                            ? Color.orange
+                            : Color.secondary)
             }
         }
         .contentShape(Rectangle())
@@ -278,6 +299,14 @@ struct ModelProfileRow: View {
                 }
                 .disabled(appState.selectedWorktree == nil)
             }
+            if ProfileUsageRefreshPresentation.showsRefreshItem(kind: profile.kind,
+                                                                loginIdentity: entry.loginIdentity) {
+                Button("Refresh usage") {
+                    Task { await refreshUsage() }
+                }
+                .disabled(isRefreshingUsage)
+                .help(ProfileUsageRefreshPresentation.refreshHelp(kind: profile.kind))
+            }
             Divider()
             Button("Delete…", role: .destructive) {
                 showDeleteConfirm = true
@@ -287,6 +316,22 @@ struct ModelProfileRow: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+    }
+
+    /// Ask the daemon for fresh usage for THIS profile and leave the outcome
+    /// on the row.
+    ///
+    /// Named — `refreshUsageSnapshot(profileID:)`, not the account picker's
+    /// `refreshUsageSnapshots()` — because an unnamed sweep only visits the
+    /// daemon's 90-second cadence set, which excludes token profiles by
+    /// design. Without the id this menu item would spin and do nothing for the
+    /// one kind that has no other way back to fresh numbers.
+    private func refreshUsage() async {
+        isRefreshingUsage = true
+        usageRefreshOutcome = nil
+        let outcome = await appState.refreshUsageSnapshot(profileID: profile.id)
+        isRefreshingUsage = false
+        usageRefreshOutcome = outcome
     }
 
     private var inUseCount: Int {
@@ -301,6 +346,84 @@ struct ModelProfileRow: View {
             return "\(n) running terminal(s) are using this profile. They'll keep running on it until closed. Delete anyway?"
         }
         return "This will remove the profile from TBD. Are you sure?"
+    }
+}
+
+// MARK: - Manual usage refresh
+
+/// Pure decision layer for the profile row's `⋯ ▸ Refresh usage` item,
+/// extracted from the view the same way `AddModelProfilePresentation` was: a
+/// SwiftUI `View`'s private state cannot be exercised, and each rule here has
+/// an off-branch that is wrong in a way no compiler catches.
+enum ProfileUsageRefreshPresentation {
+
+    /// Whether the row's `⋯` menu offers "Refresh usage" at all.
+    ///
+    /// Only where the gesture can actually do something — the app-side mirror
+    /// of the daemon poller's own `isSupported`. A menu item that silently
+    /// no-ops is worse than one that is absent, and for `.apiKey` / `.bedrock`
+    /// there is no usage endpoint to read, while a signed-out `.oauth` profile
+    /// has no credential to read one with; either would spin and report
+    /// nothing.
+    ///
+    /// `.oauthToken` is the case this item exists for. Token profiles are
+    /// deliberately excluded from the 90-second cadence sweep because their
+    /// probe is a billed request, and the only other trigger is a
+    /// `working → idle` transition on a session using the profile. Close that
+    /// session and, without this item, the bars are frozen for good.
+    static func showsRefreshItem(kind: CredentialKind, loginIdentity: String?) -> Bool {
+        switch kind {
+        case .oauthToken:
+            return true
+        case .oauth:
+            return ProfileLoginPresentation.normalizedIdentity(loginIdentity) != nil
+        case .apiKey, .bedrock:
+            return false
+        }
+    }
+
+    /// Tooltip for the item. A token profile's refresh is a real, billed API
+    /// request floored at five minutes — `OAuthProfileUsagePoller.tokenProfileFloor`,
+    /// which lives daemon-side and is not linkable from the app — so it says
+    /// so outright rather than letting the user discover the cost by clicking.
+    /// A signed-in profile's refresh is a free read of the usage endpoint.
+    static func refreshHelp(kind: CredentialKind) -> String {
+        kind == .oauthToken
+            ? "Check this profile's usage now — a small billed request, at most once every 5 minutes"
+            : "Fetch this profile's usage from Anthropic now"
+    }
+
+    /// The one-line note the row shows once a refresh returns.
+    ///
+    /// Every outcome gets a sentence, including the two that leave the bars
+    /// unchanged: a refresh whose visible result is nothing at all is exactly
+    /// what a broken button looks like.
+    static func note(for outcome: ProfileUsageRefreshOutcome) -> String {
+        switch outcome {
+        case .refreshed:
+            return "Usage refreshed."
+        case .probeFailed:
+            return "Refresh attempted — the fetch failed."
+        case .alreadyCurrent:
+            return "No new request — this profile was checked too recently."
+        case .noData:
+            return "No usage data available for this profile."
+        case .failed(let message):
+            return "Refresh failed — \(message)"
+        }
+    }
+
+    /// Whether that note reads as a problem (orange) rather than an ordinary
+    /// observation (secondary). `alreadyCurrent` is deliberately NOT a warning:
+    /// declining to spend a billed probe inside the floor is the feature
+    /// working, not a fault.
+    static func noteIsWarning(for outcome: ProfileUsageRefreshOutcome) -> Bool {
+        switch outcome {
+        case .refreshed, .alreadyCurrent:
+            return false
+        case .probeFailed, .noData, .failed:
+            return true
+        }
     }
 }
 
