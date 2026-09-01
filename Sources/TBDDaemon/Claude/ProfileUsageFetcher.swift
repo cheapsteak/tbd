@@ -114,7 +114,15 @@ public struct SecurityCLIOAuthTokenReader: ClaudeOAuthTokenReading {
 // MARK: - Per-profile usage fetch
 
 public enum ProfileUsageFetchStatus: Equatable, Sendable {
-    case ok([ClaudeUsageLimitBucket])
+    /// Buckets from a successful fetch, plus the `anthropic-organization-id`
+    /// response header when one was sent.
+    ///
+    /// Both fetchers read that header opportunistically: the token probe is
+    /// known to return it, and whether `/api/oauth/usage` does is unverified,
+    /// so nil is a normal outcome rather than a failure. It is an account
+    /// identifier, not a credential — safe to log at `.public`, but it must
+    /// never be composed into a string that also carries token bytes.
+    case ok([ClaudeUsageLimitBucket], organizationID: String?)
     /// No stored credential for this profile (not logged in), or the
     /// credential could not be read. The reason is human-readable and MUST
     /// NOT contain token bytes.
@@ -166,11 +174,27 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
     }
 }
 
+/// Where a fetcher gets its bearer credential.
+///
+/// `.configDir` resolves a `/login` credential out of an isolated
+/// `CLAUDE_CONFIG_DIR`; `.token` is a stored `claude setup-token` used
+/// directly. The enum exists so `OAuthProfileUsagePoller` can dispatch on
+/// profile kind without knowing how either fetcher obtains its credential.
+///
+/// `Equatable` is deliberate and `CustomStringConvertible` is deliberately
+/// absent: a `.token` value carries secret bytes, so it must never be
+/// interpolated into a log line or an error string.
+public enum ProfileUsageCredential: Equatable, Sendable {
+    case configDir(String)
+    case token(String)
+}
+
 public protocol ProfileUsageFetching: Sendable {
-    /// Fetch the usage buckets for the OAuth account logged into the given
-    /// isolated `CLAUDE_CONFIG_DIR`. Never throws — failures come back as
-    /// non-ok statuses so a poller sweep can record them per profile.
-    func fetchUsage(configDirPath: String) async -> ProfileUsageFetchStatus
+    /// Fetch the usage buckets for the account the given credential
+    /// authenticates. Never throws — failures come back as non-ok statuses so
+    /// a poller sweep can record them per profile. A fetcher that cannot serve
+    /// a credential shape returns `.noCredentials` rather than trapping.
+    func fetchUsage(credential: ProfileUsageCredential) async -> ProfileUsageFetchStatus
 }
 
 /// Live fetcher: resolve the profile's OAuth access token, then GET
@@ -203,7 +227,15 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
         self.now = now ?? { Date() }
     }
 
-    public func fetchUsage(configDirPath: String) async -> ProfileUsageFetchStatus {
+    public func fetchUsage(credential: ProfileUsageCredential) async -> ProfileUsageFetchStatus {
+        // This fetcher serves `/login`-authenticated profiles only. A setup
+        // token 403s on `/api/oauth/usage` (it lacks the `user:profile`
+        // scope), so there is nothing sensible to do with `.token` here —
+        // `TokenProfileUsageFetcher` serves those.
+        guard case .configDir(let configDirPath) = credential else {
+            return .noCredentials("config-dir fetcher cannot serve a token credential")
+        }
+
         // 1. Read the full credential blob.
         let blob: Data?
         do {
@@ -321,7 +353,15 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
         switch http.statusCode {
         case 200:
             do {
-                return .ok(try ClaudeUsagePayloadParser.parseBuckets(from: data))
+                let buckets = try ClaudeUsagePayloadParser.parseBuckets(from: data)
+                // Opportunistic: whether this endpoint sends the header is
+                // unverified, so nil is a normal outcome. An empty string
+                // becomes nil — "" would read as "this account's id is the
+                // empty string" rather than "absent".
+                let organizationID = http
+                    .value(forHTTPHeaderField: "anthropic-organization-id")
+                    .flatMap { $0.isEmpty ? nil : $0 }
+                return .ok(buckets, organizationID: organizationID)
             } catch {
                 return .decodeError("\(error)")
             }
