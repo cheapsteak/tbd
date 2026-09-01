@@ -87,17 +87,24 @@ Three roles, three processes:
 The single-reader invariant, in one sentence: **the daemon reads exactly the
 sessions that no live, connected app has claimed — and when it cannot yet
 know, it errs toward reading nothing**, because not-reading costs recoverable
-backpressure while double-reading is silent corruption (each `read()` steals
+delay — stalled output, and jobs that finish meanwhile unable to complete
+their exit — while double-reading is silent corruption (each `read()` steals
 bytes the other reader never sees).
 
 ## The holder
 
 ### Contract
 
-- **Spawn.** The daemon spawns the holder with fork + `setsid()` + exec.
-  `setsid` detaches it from any process group that could signal it (the
+- **Spawn.** The daemon spawns the holder with `posix_spawn`, and the holder
+  calls `setsid()` itself as its first act. `posix_spawn` rather than
+  fork+exec because the lock descriptor rides a `dup2` **file action** (see
+  the creation lock below), which has no equivalent in a hand-rolled
+  fork+exec — and because a daemon that forks is a daemon whose child
+  inherits whatever locks its other threads happened to hold. `setsid`
+  detaches the holder from any process group that could signal it (the
   iTerm2 lesson: without it, a Ctrl-C aimed at the parent kills the
-  supervisor and strands every session). The holder then `forkpty()`s the
+  supervisor and strands every session); the holder does it rather than the
+  spawner so the guarantee holds however it was launched. The holder then `forkpty()`s the
   job, making it both the master's owner and the child's parent; it reaps the
   child via SIGCHLD. When the daemon exits, the holder orphans to launchd and
   carries on. SIGHUP and SIGPIPE are ignored.
@@ -124,9 +131,14 @@ bytes the other reader never sees).
   other has already unlinked and a session nobody can reach. Beside each
   socket sits a zero-byte lock file on the same UUID. A spawner takes an
   exclusive `flock` on it before unlinking or binding anything; the descriptor
-  carrying the lock is passed across exec to the holder (`FD_CLOEXEC`
-  cleared) and the daemon closes its own copy, so the holder alone holds it
-  for its whole life. A spawner that cannot take the lock has learned that a
+  carrying the lock is handed to the holder **through a `posix_spawn` `dup2`
+  file action**, and the daemon closes its own copy, so the holder alone holds
+  it for its whole life. The file action matters more than it looks, and the
+  obvious alternative is wrong: clearing `FD_CLOEXEC` on the *daemon's* own
+  descriptor exposes that lock to **every other concurrent spawn in the
+  daemon**, so an unrelated child inherits it and keeps that session's UUID
+  unreclaimable until that child happens to die. `dup2` clears the flag on the
+  child's copy alone. This was measured as a real flake, not reasoned about. A spawner that cannot take the lock has learned that a
   live holder owns that UUID **without connecting to it**, and backs off
   instead of clearing the path — which is what makes the stale-daemon hazard
   named under Reconciliation safe rather than merely detectable. The kernel
@@ -221,7 +233,10 @@ scope for this design: a UI affordance that revives the session in place.
 ## Reader arbitration
 
 Each session has exactly one reader at any moment: the app, the daemon, or —
-transiently and safely — nobody. All transitions are arbitrated by the daemon,
+transiently — nobody. "Transiently" is doing real work in that sentence: a
+no-reader window is safe in the sense that nothing is lost or corrupted, but
+it is not free, because a job that finishes inside one cannot complete its
+exit until draining resumes (see Daemon death). All transitions are arbitrated by the daemon,
 which is also the fallback reader, so the acknowledged edge ("you read now, I
 have stopped") is an in-process state transition plus one acked fd-vend, not a
 distributed protocol.
@@ -277,6 +292,34 @@ distributed protocol.
   and keeps painting through the entire daemon outage. Detached sessions have
   no reader: their writers block on the kernel tty buffer, which is
   backpressure, not loss, and drains when the daemon returns.
+
+  **A detached job also cannot finish exiting while its output sits unread**,
+  which is a stronger consequence than backpressure and was measured rather
+  than predicted. The job is its pty's session leader, and the kernel's process
+  teardown waits on the terminal's output queue before revoking it — so a job
+  that exits with anything unread stops in a half-exited state until somebody
+  drains. A few bytes of ordinary echo are enough. `waitpid` then correctly
+  reports nothing, so the holder observes no status and has none to send.
+
+  The consequence for the design is that **the daemon's drain is a liveness
+  requirement, not a convenience**. It is what lets detached jobs die at all,
+  not merely what keeps their screens current. Two things follow. Through a
+  daemon outage, detached sessions that finish accumulate half-exited rather
+  than exiting and waiting to be reported — they complete when the daemon
+  returns and drains, so this costs latency in the exit path rather than
+  correctness. And **whichever process currently holds the fd must drain it
+  unconditionally** — no lazy reads, no draining only when someone asks for a
+  screen, no pausing while a session still has a live job. A reader that stops
+  reading is not merely falling behind; it is holding jobs open.
+
+  That constrains the reader, not the arbitration. The windows where nobody
+  reads — the attach liveness gate, the alive-but-silent arm, a daemon outage
+  — are deliberate and stay exactly as specified above: erring toward *no*
+  reader is still correct, because a double reader corrupts silently while an
+  absent one only delays. What changes is the price of those windows. They do
+  not merely stall output; a job that finishes inside one cannot complete its
+  exit until somebody drains. That is an argument for keeping such windows
+  short and loud, not for reading during them.
 - **Daemon startup (re-adoption).** The new daemon connects to every holder
   and adopts a master dup, but **reads nothing yet**. Every app-liveness
   question below is the identity-verified check described under App death,
@@ -294,10 +337,16 @@ distributed protocol.
 The alive-but-silent arm is an acknowledged limitation: while an app process
 exists but never (re)connects, no detached session drains — a fleet-wide
 stall of unattended work, visible as the notification above plus writers
-blocked on full tty buffers. The alternative — draining sessions a database
-hint says were detached — trades a visible, recoverable stall for a chance of
-silent corruption, and is rejected; backpressure loses nothing, and the stall
-ends the moment the app reconnects or its process dies.
+blocked on full tty buffers **and jobs that finish during the stall unable to
+complete their exit** (see the drain-liveness note under Daemon death). The
+alternative — draining sessions a database hint says were detached — trades a
+visible, recoverable stall for a chance of silent corruption, and is
+rejected. The stall is still the right trade, but it is a larger one than
+"writers wait": nothing is lost or corrupted, and everything resumes the
+moment the app reconnects or its process dies, yet a session whose agent
+finished mid-stall stays half-exited until then rather than being merely
+quiet. That sharpens the case for the notification being loud, and for the
+grace window being bounded rather than open-ended.
 
 This arbitration was checked against the restart script's actual sequencing
 (daemon bounces first, then the app): during a full development restart,
