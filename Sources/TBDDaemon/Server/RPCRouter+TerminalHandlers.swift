@@ -836,25 +836,21 @@ extension RPCRouter {
         // does). Refuse to kill an in-flight turn or a raised permission hand,
         // matching `isManuallyHibernatable`'s rails.
         //
-        // Qualified on the window actually being ALIVE. `activityState` is
+        // Qualified on the session actually being ALIVE. `activityState` is
         // hook-fed and carries no timestamp, so a session that died mid-turn
         // (crash, OOM, killed pane) stays `.working` forever. An unqualified
         // rail would then refuse forever on exactly the wedged terminal a
         // caller most needs to close — turning the safety rail into a trap for
-        // this command's primary cleanup use case. A dead-window row cannot be
+        // this command's primary cleanup use case. A dead session cannot be
         // mid-turn, so it stays closeable without --force.
+        //
+        // The qualifier is asked of the row's OWN transport — see
+        // `sessionIsRunningForActivityRails`. Asking tmux for every row is how
+        // this rail silently stopped applying to holder-backed sessions.
         if params.respectActivityRails == true,
            terminal.activityState == .working || terminal.activityState == .waitingForUser {
-            // Resolved inside the rails branch, not in the condition list, so
-            // the lookup keeps its short-circuit (only reached when the rails
-            // are on and the row looks busy) while a DB failure still confirms
-            // the request row before it propagates.
-            let railWorktree = try await actuating(actuationID) {
-                try await db.worktrees.getLocal(id: terminal.worktreeID)
-            }
-            if let railWorktree,
-               await tmux.windowExists(
-                server: railWorktree.tmuxServer, windowID: terminal.tmuxWindowID) {
+            if try await sessionIsRunningForActivityRails(
+                terminal: terminal, actuationID: actuationID) {
                 let what = terminal.activityState == .working
                     ? "mid-turn"
                     : "waiting on a permission prompt"
@@ -946,6 +942,65 @@ extension RPCRouter {
             alreadyGone: false,
             claudeSessionID: terminal.claudeSessionID
         ))
+    }
+
+    /// Is this session still running, as far as its own transport can say?
+    ///
+    /// Only `terminal.delete`'s activity rails ask, and only to decide whether
+    /// a `.working` / `.waitingForUser` row is worth refusing to close. It is
+    /// deliberately an *escape hatch* rather than a liveness guarantee: the
+    /// rail is on by default for the CLI, and a wrong "yes" costs a `--force`
+    /// while a wrong "no" kills an in-flight turn.
+    ///
+    /// **The tmux question and the holder question are different questions,
+    /// and asking the tmux one for every row is the defect this replaces.** A
+    /// holder row's `tmuxWindowID` is the empty string by construction and
+    /// `TmuxManager.windowExists` swallows its errors, so tmux answered "that
+    /// window is gone" for every holder-backed session — the one answer that
+    /// switches the rail off. A busy holder session was closeable without
+    /// `--force`, and nothing said so.
+    ///
+    /// The holder leg reads the registry's recorded status, and reads it as
+    /// **"running unless something recorded that it ended"** — the two ended
+    /// statuses answer no, and everything else answers yes. That polarity is
+    /// the whole content of the leg, because the states carrying no status at
+    /// all are live sessions, not dead ones: `adoptAll` deliberately records
+    /// nothing for a holder owned by another installation, or for one that
+    /// answered the busy sentinel because somebody else holds its client slot.
+    /// Reading those two as dead would put the rail right back where it was.
+    ///
+    /// It is the *last known* status, not a fresh probe, and that is the one
+    /// place the two legs are not equivalent: a child that exits while the
+    /// daemon is up leaves `.alive` behind until the next adoption, because
+    /// Milestone A publishes no holder-death fact for this rail to read (the
+    /// drain loop keeps polling a pty that will yield no more bytes rather
+    /// than ending). Until Milestone B's holder-death watch lands, such a row
+    /// needs `--force` — a nuisance the message names, and the opposite of the
+    /// live session it used to close silently.
+    private func sessionIsRunningForActivityRails(
+        terminal: Terminal, actuationID: String
+    ) async throws -> Bool {
+        if terminal.transport == .holder {
+            // No worktree lookup on this leg: it exists only to name a tmux
+            // server, and this row has none. A daemon with no registry wired
+            // has adopted nothing and can spawn nothing, so it has no holder
+            // sessions to protect and no fact to protect them with.
+            guard let holderRegistry else { return false }
+            switch await holderRegistry.lastKnownStatus(for: terminal.id) {
+            case .exited, .exitedStatusUnknown: return false
+            case .alive, nil: return true
+            }
+        }
+        // Resolved inside the rails branch, not in the condition list, so the
+        // lookup keeps its short-circuit (only reached when the rails are on
+        // and the row looks busy) while a DB failure still confirms the request
+        // row before it propagates.
+        let railWorktree = try await actuating(actuationID) {
+            try await db.worktrees.getLocal(id: terminal.worktreeID)
+        }
+        guard let railWorktree else { return false }
+        return await tmux.windowExists(
+            server: railWorktree.tmuxServer, windowID: terminal.tmuxWindowID)
     }
 
     /// Tears down the holder behind a row that is about to be deleted: stops
