@@ -1,0 +1,12 @@
+-- This installation's holder owner token.
+--
+-- It identifies the INSTALLATION, not the process: a token minted per daemon
+-- would make every holder that daemon spawned look foreign to its own
+-- successor, and re-adoption -- the entire point of the pty-holder transport --
+-- would never adopt anything.
+--
+-- No DEFAULT clause, deliberately, and for a different reason than the feature
+-- flags: NULL here means "not yet minted", which is the state the conditional
+-- mint tests for. A DEFAULT would hand every install the same literal token and
+-- make every checkout on a machine claim every other checkout's holders.
+ALTER TABLE config ADD COLUMN holder_owner_token TEXT;
