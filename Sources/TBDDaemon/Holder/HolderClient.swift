@@ -215,6 +215,29 @@ actor HolderClient {
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &value, socklen_t(MemoryLayout<timeval>.size))
     }
 
+    /// The pid at the other end of this connection, or `nil` when there is no
+    /// connection or the kernel would not say.
+    ///
+    /// `LOCAL_PEERPID` is a property of the **socket**, not of the path, so it
+    /// can only be read while the connection is open — and it is the only way a
+    /// reconciler can learn a holder's pid without a session row to read it
+    /// from, since the handshake deliberately does not carry one (the holder is
+    /// kept small enough to essentially never change, and this needs no protocol
+    /// version).
+    ///
+    /// Read it *after* a verb has been answered, so the pid belongs to a peer
+    /// that has provably spoken the protocol rather than to whatever happened to
+    /// own the path at connect time.
+    func peerPID() -> Int32? {
+        guard fd >= 0 else { return nil }
+        var pid: pid_t = 0
+        var size = socklen_t(MemoryLayout<pid_t>.size)
+        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &size) == 0, pid > 0 else {
+            return nil
+        }
+        return pid
+    }
+
     /// Drops the connection. Idempotent; the client reconnects on the next
     /// verb, which is what makes a `HolderClient` reusable across a holder's
     /// life without pinning its single client slot between requests.
