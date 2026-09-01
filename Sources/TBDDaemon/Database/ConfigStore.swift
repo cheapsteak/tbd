@@ -87,6 +87,34 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// default, so `nil` here means "never chose" rather than "off". Resolve it
     /// through `Config.remotePeerMessagingDefault`, never through `?? false`.
     var remote_peer_messaging_enabled: Bool?
+    /// The pty-holder transport gate. **Genuinely tri-state**, same shape as
+    /// `remote_peer_messaging_enabled`: the
+    /// `20260831055718_config_pty_holder` migration carries no SQL default, so
+    /// `nil` here means "never chose" rather than "off". Resolve it through
+    /// `Config.ptyHolderDefault`, never through `?? false`.
+    var pty_holder_enabled: Bool?
+    /// Gate for the GC phase that unlinks holder rendezvous files whose holder
+    /// is gone. **Genuinely tri-state**, same shape as `pty_holder_enabled`:
+    /// the `20260901135111_config_gc_holder_rendezvous` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.gcHolderRendezvousEnabledDefault`, never through
+    /// `?? false`.
+    var gc_holder_rendezvous_enabled: Bool?
+    /// Gate for the GC phase that kills a row-less pty holder this installation
+    /// owns. **Genuinely tri-state**, same shape as
+    /// `gc_holder_rendezvous_enabled`: the
+    /// `20260901161500_config_gc_rowless_holders` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.gcRowlessHoldersEnabledDefault`, never through
+    /// `?? false`.
+    var gc_rowless_holders_enabled: Bool?
+    /// This installation's holder owner token, minted once by the first daemon
+    /// that needs one and read forever after. **Not a flag**: NULL means "not
+    /// yet minted", and the mint is the conditional UPDATE in
+    /// `ensureHolderOwnerToken` rather than a resolved default — there is no
+    /// value the shipped code could default this to that would not make every
+    /// checkout on a machine claim every other checkout's holders.
+    var holder_owner_token: String?
     /// JSON-encoded `[String: String]` remote create-param defaults (machine
     /// scope), keyed by the provider's own field names. Nil/absent means no
     /// opinion at this level — every field falls through to its
@@ -116,6 +144,15 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter remotePeerMessagingDefault: same shape once more, for
     ///   `remote_peer_messaging_enabled` — the remote peer messaging bridge's
     ///   soak gate.
+    /// - Parameter ptyHolderDefault: same shape once more, for
+    ///   `pty_holder_enabled` — the pty-holder transport's soak gate.
+    /// - Parameter gcHolderRendezvousDefault: and once more, for
+    ///   `gc_holder_rendezvous_enabled` — the holder rendezvous sweep's soak
+    ///   gate.
+    /// - Parameter gcRowlessHoldersDefault: and once more, for
+    ///   `gc_rowless_holders_enabled` — the row-less holder sweep's soak gate,
+    ///   which is a separate opt-in because it kills processes rather than
+    ///   unlinking files.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -123,7 +160,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         gcProfileDirsDefault: Bool = Config.gcProfileDirsEnabledDefault,
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
         gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault,
-        remotePeerMessagingDefault: Bool = Config.remotePeerMessagingDefault
+        remotePeerMessagingDefault: Bool = Config.remotePeerMessagingDefault,
+        ptyHolderDefault: Bool = Config.ptyHolderDefault,
+        gcHolderRendezvousDefault: Bool = Config.gcHolderRendezvousEnabledDefault,
+        gcRowlessHoldersDefault: Bool = Config.gcRowlessHoldersEnabledDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -181,8 +221,33 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // And once more, for the remote peer messaging bridge's gate —
             // NOT `?? false`.
             remotePeerMessagingEnabled: remote_peer_messaging_enabled ?? remotePeerMessagingDefault,
-            remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults)
+            // And once more, for the pty-holder transport's gate — NOT `?? false`.
+            ptyHolderEnabled: pty_holder_enabled ?? ptyHolderDefault,
+            // And the last of them, for the holder rendezvous sweep's gate —
+            // NOT `?? false`.
+            gcHolderRendezvousEnabled: gc_holder_rendezvous_enabled ?? gcHolderRendezvousDefault,
+            // And its process-killing sibling, resolved the same way and from
+            // its own column — NOT `?? false`, and NOT the rendezvous flag.
+            gcRowlessHoldersEnabled: gc_rowless_holders_enabled ?? gcRowlessHoldersDefault,
+            remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
+            // Passed straight through, NULL included: "not yet minted" is a
+            // real state and has no default to resolve to.
+            holderOwnerToken: holder_owner_token
         )
+    }
+}
+
+/// Failures the singleton `config` row can produce that GRDB has no error for.
+public enum ConfigStoreError: LocalizedError, Equatable {
+    /// The conditional mint ran and the row still holds no usable token — the
+    /// singleton row is missing, or something wrote an empty value over it.
+    case holderOwnerTokenUnavailable
+
+    public var errorDescription: String? {
+        switch self {
+        case .holderOwnerTokenUnavailable:
+            return "the config row holds no holder owner token and one could not be minted"
+        }
     }
 }
 
@@ -578,6 +643,89 @@ public struct ConfigStore: Sendable {
                 sql: "UPDATE config SET remote_peer_messaging_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
+        }
+    }
+
+    /// Persist the pty-holder transport gate (default OFF, soaking). It gates
+    /// which transport a session is *spawned* onto; a session records its
+    /// transport at creation and keeps it for life, so flipping this never
+    /// migrates a running session. The column is written on every call, because
+    /// writing either value is the explicit gesture that lifts it out of NULL
+    /// forever after.
+    public func setPtyHolderEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET pty_holder_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the holder rendezvous sweep gate (default OFF, soaking) — read
+    /// on top of the GC master switch, so both must be on for the phase to run.
+    /// The column is written on every call, because writing either value is the
+    /// explicit gesture that lifts it out of NULL forever after.
+    public func setGCHolderRendezvousEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET gc_holder_rendezvous_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the row-less holder sweep gate (default OFF, soaking) — read on
+    /// top of the GC master switch, so both must be on for the phase to run.
+    /// Separate from `setGCHolderRendezvousEnabled` on purpose: that gate
+    /// unlinks files, this one kills processes. The column is written on every
+    /// call, because writing either value is the explicit gesture that lifts it
+    /// out of NULL forever after.
+    public func setGCRowlessHoldersEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET gc_rowless_holders_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Return this installation's holder owner token, minting `candidate` only
+    /// if none has been minted yet.
+    ///
+    /// **The conditional write is the whole point.** Two daemons starting at
+    /// once on one `TBD_HOME` must agree on one token or each would disown the
+    /// other's holders, so the decision is made by SQLite rather than by the
+    /// caller: `WHERE holder_owner_token IS NULL` means the second writer's
+    /// UPDATE matches no row, and the read-back inside the same transaction
+    /// returns whichever token actually landed. This is the SQL equivalent of
+    /// the `O_EXCL` open the file-backed store used before the token moved into
+    /// the `config` row.
+    ///
+    /// The empty string is treated as unminted: a hand-edited row or a
+    /// half-written value must not become an identity every holder is compared
+    /// against.
+    ///
+    /// - Returns: the token now stored, which may not be `candidate`.
+    /// - Throws: if the row cannot be written or read — including the case
+    ///   where no singleton row exists at all, which no migrated database has.
+    public func ensureHolderOwnerToken(minting candidate: String) async throws -> String {
+        try await writer.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE config SET holder_owner_token = ?
+                     WHERE id = ? AND (holder_owner_token IS NULL OR holder_owner_token = '')
+                    """,
+                arguments: [candidate, Self.singletonID]
+            )
+            let stored = try String.fetchOne(
+                db,
+                sql: "SELECT holder_owner_token FROM config WHERE id = ?",
+                arguments: [Self.singletonID]
+            )
+            guard let stored, !stored.isEmpty else {
+                throw ConfigStoreError.holderOwnerTokenUnavailable
+            }
+            return stored
         }
     }
 

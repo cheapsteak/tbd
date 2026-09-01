@@ -54,6 +54,15 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// wait carried no structured reason.
     var awaitingInputReason: String?
     var awaitingInputObservedAt: Date?
+    /// `TerminalTransport` raw value. NULL on every row written before
+    /// `20260831055719_terminal_transport`, which is what `.tmux` means; an
+    /// unrecognized value from a newer daemon degrades the same way rather than
+    /// failing the decode.
+    var transport: String?
+    /// PID of the `TBDHolder` process, for holder-transport rows only.
+    var holder_pid: Int32?
+    /// PID of the job the holder `forkpty()`d, for holder-transport rows only.
+    var child_pid: Int32?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -84,6 +93,9 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.activityStateOrderObservedAt = terminal.activityStateOrderObservedAt
         self.awaitingInputReason = FactColumnJSON.encode(terminal.awaitingInputReason)
         self.awaitingInputObservedAt = terminal.awaitingInputObservedAt
+        self.transport = terminal.transport.rawValue
+        self.holder_pid = terminal.holderPID
+        self.child_pid = terminal.childPID
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -128,7 +140,12 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             activityStateObservedAt: activityStateObservedAt,
             activityStateOrderObservedAt: activityStateOrderObservedAt,
             awaitingInputReason: FactColumnJSON.decode(AwaitingInputReason.self, from: awaitingInputReason),
-            awaitingInputObservedAt: awaitingInputObservedAt
+            awaitingInputObservedAt: awaitingInputObservedAt,
+            // NULL (a row older than the column) and an unrecognized value from
+            // a newer daemon both degrade to tmux rather than throwing.
+            transport: transport.flatMap(TerminalTransport.init(rawValue:)) ?? .tmux,
+            holderPID: holder_pid,
+            childPID: child_pid
         )
     }
 }
@@ -640,6 +657,11 @@ public struct TerminalStore: Sendable {
     /// never held a lease is still a desk. The lease store keeps maintaining
     /// the column afterwards — this is the same mechanism, given a starting
     /// value, not a second one.
+    ///
+    /// `transport` is likewise stamped here and never changed afterwards — the
+    /// `pty_holder_enabled` gate is read at spawn time, so a session created on
+    /// one transport keeps it for life. It defaults to `.tmux` so every existing
+    /// call site keeps creating tmux-backed sessions untouched.
     public func create(
         id: UUID = UUID(),
         worktreeID: UUID,
@@ -649,7 +671,10 @@ public struct TerminalStore: Sendable {
         claudeSessionID: String? = nil,
         profileID: UUID? = nil,
         kind: TerminalKind? = nil,
-        watchDeskRole: WatchDeskRole? = nil
+        watchDeskRole: WatchDeskRole? = nil,
+        transport: TerminalTransport = .tmux,
+        holderPID: Int32? = nil,
+        childPID: Int32? = nil
     ) async throws -> Terminal {
         let terminal = Terminal(
             id: id,
@@ -660,7 +685,10 @@ public struct TerminalStore: Sendable {
             claudeSessionID: claudeSessionID,
             profileID: profileID,
             kind: kind,
-            watchDeskRole: watchDeskRole
+            watchDeskRole: watchDeskRole,
+            transport: transport,
+            holderPID: holderPID,
+            childPID: childPID
         )
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in

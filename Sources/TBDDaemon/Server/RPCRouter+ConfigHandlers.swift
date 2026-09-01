@@ -210,6 +210,36 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the holder rendezvous sweep gate — the default-off soak switch
+    /// for unlinking the socket, lock and log a dead holder left behind, read
+    /// on top of the GC master switch. Like that master switch, flipping it off
+    /// does not cancel an in-progress sweep: `OrphanGC.sweep` re-reads the flag
+    /// on its next pass.
+    func handleConfigSetGCHolderRendezvousEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetGCHolderRendezvousEnabledParams.self, from: paramsData)
+        try await db.config.setGCHolderRendezvousEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the row-less holder sweep gate — the default-off soak switch for
+    /// killing a pty holder this installation owns which no session row claims,
+    /// read on top of the GC master switch. Deliberately a different verb from
+    /// the rendezvous gate above: enabling file cleanup must never enable a
+    /// process killer. Like the master switch, flipping it off does not cancel
+    /// an in-progress sweep: `OrphanGC.sweep` re-reads the flag on its next
+    /// pass.
+    func handleConfigSetGCRowlessHoldersEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetGCRowlessHoldersEnabledParams.self, from: paramsData)
+        try await db.config.setGCRowlessHoldersEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the orphaned-process collector gate — the default-off soak
     /// switch for reclaiming processes that outlived the worktree they were
     /// rooted in, read on top of the GC master switch.
@@ -315,6 +345,29 @@ extension RPCRouter {
         let params = try decoder.decode(
             ConfigSetPeerMessagingEnabledParams.self, from: paramsData)
         try await db.config.setRemotePeerMessagingEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the pty-holder transport gate — the default-off soak switch for
+    /// spawning sessions onto a holder process rather than into a tmux window.
+    /// This is how the soak is turned on: the flag is the feature's only opt-in,
+    /// and leaving it reachable only by hand-editing `~/tbd/state.db` would put
+    /// the sole way to enable it behind a database the project's own rules say
+    /// not to go into.
+    ///
+    /// **It applies to sessions created after the call, and to no others.** A
+    /// session records its transport at creation and keeps it for life, so
+    /// flipping this on never moves a running tmux session onto a holder, and
+    /// flipping it off never takes a live holder session away.
+    ///
+    /// The column is written on every call, because writing either value is the
+    /// explicit gesture that lifts it out of NULL forever after.
+    func handleConfigSetPtyHolderEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetPtyHolderEnabledParams.self, from: paramsData)
+        try await db.config.setPtyHolderEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

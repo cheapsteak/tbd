@@ -614,6 +614,22 @@ public enum WatchDeskRole: String, Codable, Sendable, Equatable {
     }
 }
 
+/// Which mechanism carries a terminal's session.
+///
+/// Recorded at creation and never changed for the life of the session: the
+/// `pty_holder_enabled` flag gates *spawning*, not servicing, so flipping it
+/// never migrates a running session. Both transports therefore coexist for as
+/// long as any pre-flip session is alive.
+public enum TerminalTransport: String, Codable, Sendable, Equatable {
+    /// The session lives in a tmux window; `tmuxWindowID`/`tmuxPaneID` address it.
+    case tmux
+    /// The session's pty master is owned by a `TBDHolder` process.
+    /// `tmuxWindowID`/`tmuxPaneID` are NOT NULL from the v1 schema and cannot be
+    /// relaxed, so such a row carries empty strings there and must be
+    /// discriminated by this value alone — never by those columns.
+    case holder
+}
+
 public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var worktreeID: UUID
@@ -698,6 +714,16 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var awaitingInputReason: AwaitingInputReason?
     /// When `awaitingInputReason` was observed.
     public var awaitingInputObservedAt: Date?
+    /// Which mechanism carries this session. Stamped at creation and never
+    /// changed. Rows and JSON written before the column existed decode as
+    /// `.tmux`, which is what they are.
+    public var transport: TerminalTransport
+    /// PID of the `TBDHolder` process owning the pty master, for
+    /// `transport == .holder` rows. Nil for tmux rows, and nil on a holder row
+    /// only while the holder is being established.
+    public var holderPID: Int32?
+    /// PID of the job the holder `forkpty()`d. Nil for tmux rows.
+    public var childPID: Int32?
 
     /// `activityState` as a fact — value, source, observed-at — or nil.
     ///
@@ -758,7 +784,10 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 activityStateObservedAt: Date? = nil,
                 activityStateOrderObservedAt: Date? = nil,
                 awaitingInputReason: AwaitingInputReason? = nil,
-                awaitingInputObservedAt: Date? = nil) {
+                awaitingInputObservedAt: Date? = nil,
+                transport: TerminalTransport = .tmux,
+                holderPID: Int32? = nil,
+                childPID: Int32? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -789,6 +818,9 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.activityStateOrderObservedAt = activityStateOrderObservedAt
         self.awaitingInputReason = awaitingInputReason
         self.awaitingInputObservedAt = awaitingInputObservedAt
+        self.transport = transport
+        self.holderPID = holderPID
+        self.childPID = childPID
     }
 
     enum CodingKeys: String, CodingKey {
@@ -800,6 +832,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt, watchDeskRole
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
+        case transport, holderPID, childPID
     }
 
     public init(from decoder: Decoder) throws {
@@ -842,6 +875,17 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
             Date.self, forKey: .activityStateOrderObservedAt)
         awaitingInputReason = try c.decodeIfPresent(AwaitingInputReason.self, forKey: .awaitingInputReason)
         awaitingInputObservedAt = try c.decodeIfPresent(Date.self, forKey: .awaitingInputObservedAt)
+        // Decoded as a raw string rather than as the enum so an unrecognized
+        // transport from a newer daemon degrades to tmux instead of failing the
+        // whole payload — the same rule `TerminalStore` applies to the column.
+        // Absent means the sender predates the holder transport, which is
+        // exactly what `.tmux` says. THIS LINE IS LOAD-BEARING: `init(from:)` is
+        // hand-written, so a defaulted property compiles without it and then
+        // silently reports `.tmux` for every holder row that crosses the wire.
+        transport = try c.decodeIfPresent(String.self, forKey: .transport)
+            .flatMap(TerminalTransport.init(rawValue:)) ?? .tmux
+        holderPID = try c.decodeIfPresent(Int32.self, forKey: .holderPID)
+        childPID = try c.decodeIfPresent(Int32.self, forKey: .childPID)
     }
 }
 
@@ -913,6 +957,16 @@ public extension Terminal {
     /// explicitly. Still refuses to hibernate an in-flight turn or a raised
     /// permission hand.
     var isManuallyHibernatable: Bool {
+        // Parking is a tmux mechanic end to end: it `respawn-window`s the pane
+        // to a bare shell and wake respawns `claude --resume` back into that
+        // same pane. A holder row has no pane — its `tmuxWindowID`/`tmuxPaneID`
+        // are empty strings by construction — so every step would address the
+        // empty coordinate, which tmux answers for by reporting the window
+        // gone. The row would flip to parked while the holder and its child
+        // kept running, unreclaimed. Until parking learns the holder transport,
+        // refuse: an ineligible session is recoverable, a row that lies about a
+        // live process is not.
+        guard transport != .holder else { return false }
         guard isClaudeResumable else { return false }
         guard hibernatedAt == nil, suspendedAt == nil else { return false }
         switch activityState {
@@ -1432,6 +1486,39 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcOrphanProcessesEnabled: Bool
+    /// Gate for the orphan-GC phase that unlinks holder rendezvous files whose
+    /// holder is gone — the socket, and its sibling lock and log
+    /// (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+    /// "Reconciliation"). Read on top of `gcEnabled`: both must be on for the
+    /// phase to run. It ships OFF because it is a brand-new background sweep
+    /// that unlinks files, and the holder transport it reclaims after is itself
+    /// still soaking behind `ptyHolderEnabled`.
+    ///
+    /// **Resolved, not stored**, like `gcProfileDirsEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `gc_holder_rendezvous_enabled ?? Config.gcHolderRendezvousEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var gcHolderRendezvousEnabled: Bool
+    /// Gate for the orphan-GC phase that **kills** a pty holder this
+    /// installation owns which no session row claims — the holder-versus-
+    /// database half of
+    /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+    /// "Reconciliation". Read on top of `gcEnabled`: both must be on.
+    ///
+    /// **Deliberately not `gcHolderRendezvousEnabled`.** That flag unlinks
+    /// files; this one signals processes. They are independent opt-ins because
+    /// somebody enabling file cleanup must not silently acquire a process
+    /// killer, and because what this phase misjudges cannot be restored.
+    ///
+    /// **Resolved, not stored**, like `gcHolderRendezvousEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `gc_rowless_holders_enabled ?? Config.gcRowlessHoldersEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var gcRowlessHoldersEnabled: Bool
     /// The single opt-in for remote peer messaging
     /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
     /// rollout"): publishing a shadow peer for each remote session and carrying
@@ -1450,12 +1537,38 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var remotePeerMessagingEnabled: Bool
+    /// Whether new sessions spawn onto the per-session pty-holder transport
+    /// instead of tmux. It ships OFF: the holder owns a pty and a child process
+    /// that outlive the daemon, and until the holder reconcilers land nothing
+    /// reclaims one orphaned by a daemon crash.
+    ///
+    /// The gate covers *spawning* only. A session records its transport at
+    /// creation and keeps it for life, so flipping this never migrates a running
+    /// session and both transports coexist while any pre-flip session is alive.
+    ///
+    /// **Resolved, not stored**, like `remotePeerMessagingEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `pty_holder_enabled ?? Config.ptyHolderDefault`. NULL means "never chose"
+    /// and follows the shipped default wherever it goes; `0`/`1` is an explicit
+    /// gesture and is honored forever.
+    public var ptyHolderEnabled: Bool
     /// Machine-wide remote create-param defaults, keyed by the **provider's
     /// own** `create_params` field names — the fall-through level beneath
     /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
     /// without interpreting them; see `Repo.remoteCreateDefaults` for why the
     /// map is keyed generically rather than given a column per concept.
     public var remoteCreateDefaults: [String: String]
+    /// This installation's holder owner token, or nil if none has been minted.
+    ///
+    /// **Identity, not a preference**, which is why it is the one field here
+    /// with no shipped default: nil genuinely means "not yet minted", and any
+    /// literal the code could fall back to would be shared by every checkout on
+    /// the machine — making each of them claim all the others' holder sessions.
+    /// It is minted by `ConfigStore.ensureHolderOwnerToken(minting:)`, whose
+    /// conditional UPDATE is what keeps two daemons starting at once from
+    /// minting two.
+    public var holderOwnerToken: String?
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -1504,6 +1617,24 @@ public struct Config: Codable, Sendable, Equatable {
     /// constant, with no forcing `UPDATE` migration and every explicit opt-out
     /// left alone.
     public static let remotePeerMessagingDefault = false
+    /// The shipped default for `ptyHolderEnabled`, and the single place it
+    /// lives. The holder transport ships off; graduation — after a soak in which
+    /// no holder or child process outlives the session that owns it — is a
+    /// change to this constant, with no forcing `UPDATE` migration and every
+    /// explicit opt-out left alone.
+    public static let ptyHolderDefault = false
+    /// The shipped default for `gcHolderRendezvousEnabled`, and the single place
+    /// it lives. The rendezvous sweep ships off; graduation — after a soak in
+    /// which it never unlinks a socket a live holder was using — is a change to
+    /// this constant, with no forcing `UPDATE` migration and every explicit
+    /// opt-out left alone.
+    public static let gcHolderRendezvousEnabledDefault = false
+    /// The shipped default for `gcRowlessHoldersEnabled`, and the single place
+    /// it lives. The row-less holder sweep ships off; graduation — after a soak
+    /// in which it never kills a holder that turned out to be somebody's live
+    /// session — is a change to this constant, with no forcing `UPDATE`
+    /// migration and every explicit opt-out left alone.
+    public static let gcRowlessHoldersEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1537,7 +1668,11 @@ public struct Config: Codable, Sendable, Equatable {
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
                 gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
                 remotePeerMessagingEnabled: Bool = Config.remotePeerMessagingDefault,
-                remoteCreateDefaults: [String: String] = [:]) {
+                ptyHolderEnabled: Bool = Config.ptyHolderDefault,
+                gcHolderRendezvousEnabled: Bool = Config.gcHolderRendezvousEnabledDefault,
+                gcRowlessHoldersEnabled: Bool = Config.gcRowlessHoldersEnabledDefault,
+                remoteCreateDefaults: [String: String] = [:],
+                holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -1570,7 +1705,11 @@ public struct Config: Codable, Sendable, Equatable {
         self.claudeCloudEnabled = claudeCloudEnabled
         self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
         self.remotePeerMessagingEnabled = remotePeerMessagingEnabled
+        self.ptyHolderEnabled = ptyHolderEnabled
+        self.gcHolderRendezvousEnabled = gcHolderRendezvousEnabled
+        self.gcRowlessHoldersEnabled = gcRowlessHoldersEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
+        self.holderOwnerToken = holderOwnerToken
     }
 
     public init(from decoder: Decoder) throws {
@@ -1653,11 +1792,32 @@ public struct Config: Codable, Sendable, Equatable {
         // default rather than hardcoding `false`.
         remotePeerMessagingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .remotePeerMessagingEnabled) ?? Config.remotePeerMessagingDefault
+        // And once more: absent means the sender knew nothing about the flag,
+        // which is the NULL column's situation — follow the shipped default
+        // rather than hardcoding `false`.
+        ptyHolderEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .ptyHolderEnabled) ?? Config.ptyHolderDefault
+        // And the last of them: absent means the sender knew nothing about the
+        // flag, which is the NULL column's situation — follow the shipped
+        // default rather than hardcoding `false`.
+        gcHolderRendezvousEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .gcHolderRendezvousEnabled)
+            ?? Config.gcHolderRendezvousEnabledDefault
+        // Same reading for the row-less holder sweep's gate: absent means the
+        // sender knew nothing about the flag, which is the NULL column's
+        // situation — follow the shipped default, never a hardcoded `false`.
+        gcRowlessHoldersEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .gcRowlessHoldersEnabled)
+            ?? Config.gcRowlessHoldersEnabledDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.
         remoteCreateDefaults = try c.decodeIfPresent(
             [String: String].self, forKey: .remoteCreateDefaults) ?? [:]
+        // Absent means the sender knew nothing about the token — the same state
+        // as an unminted column. Unlike every flag above there is no shipped
+        // default to fall through to; see the property's note.
+        holderOwnerToken = try c.decodeIfPresent(String.self, forKey: .holderOwnerToken)
     }
 }
 

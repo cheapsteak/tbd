@@ -101,7 +101,20 @@ extension RPCRouter {
     private func closeScratchTerminals(_ wt: Worktree) async throws {
         let terminals = try await db.terminals.list(worktreeID: wt.id)
         for t in terminals {
-            try? await tmux.killWindow(server: wt.tmuxServer, windowID: t.tmuxWindowID)
+            // The rows go away below either way, so a holder row must be
+            // reclaimed here rather than refused: `tmuxWindowID` is the empty
+            // string by construction, so the kill in the else-branch addresses
+            // nothing while the holder, its job and its rendezvous files outlive
+            // the row that was their only record. Same branch, same reason, as
+            // `handleTerminalDelete`.
+            if t.transport == .holder {
+                if let failure = await disposeHolder(for: t) {
+                    scratchLogger.warning(
+                        "scratch teardown left a holder running: \(failure, privacy: .public)")
+                }
+            } else {
+                try? await tmux.killWindow(server: wt.tmuxServer, windowID: t.tmuxWindowID)
+            }
         }
         try await db.terminals.deleteForWorktree(worktreeID: wt.id)
         try await db.tabs.deleteForWorktree(worktreeID: wt.id)

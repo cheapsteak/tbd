@@ -493,6 +493,11 @@ import Testing
             "20260829210843_pending_terminal_incarnation",
             "20260830003851_config_remote_peer_messaging",
             "20260830022625_shadow_peer_artifacts",
+            "20260831055718_config_pty_holder",
+            "20260831055719_terminal_transport",
+            "20260831200151_config_holder_owner_token",
+            "20260901135111_config_gc_holder_rendezvous",
+            "20260901161500_config_gc_rowless_holders",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)

@@ -138,6 +138,34 @@ public struct WorktreeLifecycle: Sendable {
     /// coordinator — the same reason `conflictSweepCache` is one.
     var pendingPromptCoordinator: PendingPromptCoordinator?
 
+    /// The daemon's single owner of every live `HolderReader`, and the only
+    /// thing that can put a session on the holder transport. `nil` when the
+    /// daemon did not wire one (mock mode, tests that do not exercise the
+    /// transport), and the spawn gate then falls back to tmux even with
+    /// `pty_holder_enabled` on — the honest answer when there is nothing to
+    /// hold a pty master.
+    ///
+    /// An actor reference, so every value copy of this struct shares one
+    /// registry — the same reason `conflictSweepCache` is one, and here it is
+    /// load-bearing rather than tidy: two registries would each take their own
+    /// dup of a session's pty master and steal bytes from each other.
+    var holderRegistry: HolderRegistry?
+
+    /// How the create path builds the scheduler that recaptures a resumed
+    /// session's ID. `nil` in production, which builds the ordinary
+    /// `SessionRecaptureScheduler(db:tmux:)`.
+    ///
+    /// A seam because the branch it feeds — recapture is scheduled for a tmux
+    /// primary and not for a holder one — is otherwise unobservable from
+    /// outside. A real scheduler's only trace is a database write five wall
+    /// seconds later, made only if a tmux pane answers with a live Claude
+    /// process; "it was never scheduled" and "it was scheduled and found
+    /// nothing" look identical from the row. Injecting the scheduler makes the
+    /// decision itself the observable, on virtual time.
+    var sessionRecaptureFactory: (
+        @Sendable (TBDDatabase, TmuxManager) -> SessionRecaptureScheduler
+    )?
+
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -256,5 +284,27 @@ public struct WorktreeLifecycle: Sendable {
             windowID: terminal.tmuxWindowID,
             paneID: terminal.tmuxPaneID
         )
+    }
+
+    /// The holder-transport counterpart of `killWindowAndReap`, for the
+    /// teardown paths that delete a terminal's row: stop the daemon's reader,
+    /// tell the holder to let go of the pty master, and kill the job it forked.
+    /// Returns a description of what was left running, or nil.
+    ///
+    /// It is a *replacement* for the tmux teardown beside it, not an addition.
+    /// A holder row's `tmuxWindowID` and `tmuxPaneID` are the empty string by
+    /// construction, so `captureThenKillWindow` captures nothing, kills nothing,
+    /// and reaps nothing for such a row — which makes it the leak rather than a
+    /// harmless no-op, since the row about to be deleted is the only record of
+    /// the holder and child pids and no sweep covers them until Milestone B's
+    /// holder reconciler lands. Nothing is captured for Closed Terminals
+    /// either: a holder's screen lives in the daemon's own emulator, not in a
+    /// tmux pane, so there was never a capture to preserve.
+    func disposeHolder(for terminal: Terminal) async -> String? {
+        guard let holderRegistry else {
+            return "terminal \(terminal.id) runs on the holder transport but this daemon has "
+                + "no holder registry, so its holder and job were left running"
+        }
+        return await holderRegistry.abandon(terminal: terminal)
     }
 }

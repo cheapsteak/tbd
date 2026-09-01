@@ -514,8 +514,10 @@ The field is `peer_messaging` on the Session object:
 ```
 
 It says this session can be addressed by name, and which peer protocol it
-speaks. It is optional, no capability gates it, and an absent field means the
-session is never bridged.
+speaks. It is optional and no capability gates it. It is a declaration in your
+inventory rather than a switch: what actually bridges a session is the `peer`
+line announcing it on the `messages` stream, so populating the field turns
+nothing on and omitting it turns nothing off.
 
 **Required?** No, on both halves. This is a capability-gated verb plus an
 optional response field — the same additive shape as `transcript` or `land` —
@@ -562,8 +564,8 @@ field come from the remote session's own agent registry row. For a Claude Code
 session that row's existence is what encodes both a new-enough CLI and the
 absence of the messaging killswitches, and neither is inferable any other way. A
 session running a different agent, a plain shell, or a Claude Code whose
-messaging is inactive has no row — so omit the field, and the caller correctly
-never bridges it.
+messaging is inactive has no row — so omit the field, and let the sessions you
+do announce on the stream be the ones with a row behind them.
 
 **If you ignore it.** Nothing changes. Your sessions are reachable exactly as
 they are today, through `send` and `attach`, and simply are not addressable by

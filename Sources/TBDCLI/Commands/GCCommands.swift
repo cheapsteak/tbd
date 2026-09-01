@@ -8,7 +8,7 @@ struct GCCommand: ParsableCommand {
         abstract: "Orphan GC: list reaps, restore a reaped agent worktree, trigger a sweep",
         subcommands: [
             GCList.self, GCRestore.self, GCSweep.self, GCProfileDirs.self,
-            GCOrphanProcesses.self,
+            GCOrphanProcesses.self, GCHolders.self, GCRowlessHolders.self,
         ]
     )
 }
@@ -54,6 +54,55 @@ struct GCOrphanProcesses: AsyncParsableCommand {
             method: RPCMethod.configSetGCOrphanProcessesEnabled,
             params: ConfigSetGCOrphanProcessesEnabledParams(enabled: enabled))
         print("Orphan-process GC \(enabled ? "enabled" : "disabled").")
+    }
+}
+
+/// The soak switch for the holder rendezvous sweep. It unlinks the socket a
+/// SIGKILLed pty holder could not unlink, plus that holder's sibling lock and
+/// log — files nothing else reclaims, so they accumulate one triple per session
+/// forever. It ships off and is opted into by hand, like every other GC phase
+/// whose classifier is new.
+struct GCHolders: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "holders",
+        abstract: "Enable or disable unlinking rendezvous files of dead pty holders (default off)")
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetGCHolderRendezvousEnabled,
+            params: ConfigSetGCHolderRendezvousEnabledParams(enabled: enabled))
+        print("Holder rendezvous GC \(enabled ? "enabled" : "disabled").")
+    }
+}
+
+/// The soak switch for the row-less holder sweep. It **kills** a pty holder
+/// this installation owns which no session row claims — the child first, then
+/// the holder — and is therefore a separate opt-in from `tbd gc holders`, which
+/// only unlinks files. A holder that will not talk to us, one another
+/// installation owns, and one younger than the GC grace window are all left
+/// running, whatever this is set to.
+struct GCRowlessHolders: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rowless-holders",
+        abstract: "Enable or disable killing pty holders no session row claims (default off)")
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetGCRowlessHoldersEnabled,
+            params: ConfigSetGCRowlessHoldersEnabledParams(enabled: enabled))
+        print("Row-less holder GC \(enabled ? "enabled" : "disabled").")
     }
 }
 

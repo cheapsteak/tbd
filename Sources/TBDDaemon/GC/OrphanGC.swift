@@ -62,6 +62,8 @@ public actor OrphanGC {
     private let scratchpadCollector: ScratchpadCollector
     private let deletionQueueCollector: DeletionQueueCollector
     private let profileDirCollector: ProfileDirCollector
+    private let holderRendezvousCollector: HolderRendezvousCollector
+    private let rowlessHolderCollector: RowlessHolderCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
     /// keychain, which `scripts/test.sh` cannot fence.
@@ -108,7 +110,8 @@ public actor OrphanGC {
         now: (@Sendable () -> Date)? = nil,
         profileDirBase: URL? = nil,
         credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
-        signaller: any ProcessSignaller = ProductionProcessSignaller()
+        signaller: any ProcessSignaller = ProductionProcessSignaller(),
+        holdersBase: URL? = nil
     ) {
         var wrapped: (@Sendable () async -> [String]?)?
         if let lsofProvider {
@@ -118,7 +121,7 @@ public actor OrphanGC {
             db: db, git: git, broadcast: broadcast, liveCWDsProvider: wrapped,
             scratchpadBase: scratchpadBase, now: now,
             profileDirBase: profileDirBase, credentialsKeychain: credentialsKeychain,
-            signaller: signaller
+            signaller: signaller, holdersBase: holdersBase
         )
     }
 
@@ -143,7 +146,11 @@ public actor OrphanGC {
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
         orphanProcessGraceAttempts: Int = 30,
         orphanProcessPollInterval: Duration = .milliseconds(100),
-        clock: any Clock<Duration> = ContinuousClock()
+        clock: any Clock<Duration> = ContinuousClock(),
+        holdersBase: URL? = nil,
+        holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
+        rowlessHolderHandshake: (@Sendable (String) async -> RowlessHolderHandshake)? = nil,
+        rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil
     ) {
         let resolvedNow = now ?? Date.init
         let resolvedScratchpadBase = scratchpadBase ?? TBDConstants.claudeScratchpadBase
@@ -169,6 +176,16 @@ public actor OrphanGC {
         self.deletionQueueCollector = DeletionQueueCollector(git: git, now: resolvedNow)
         self.profileDirCollector = ProfileDirCollector(
             base: resolvedProfileDirBase, now: resolvedNow)
+        let resolvedHoldersBase = holdersBase ?? TBDConstants.holdersDir()
+        self.holderRendezvousCollector = HolderRendezvousCollector(
+            base: resolvedHoldersBase,
+            now: resolvedNow,
+            isListening: holderListenerProbe ?? HolderRendezvousCollector.probeForListener)
+        self.rowlessHolderCollector = RowlessHolderCollector(
+            base: resolvedHoldersBase,
+            now: resolvedNow,
+            handshake: rowlessHolderHandshake,
+            reclaimer: rowlessHolderReclaimer)
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -260,6 +277,19 @@ public actor OrphanGC {
         await reclaimOrphanProcesses(
             config: config, repos: repos, live: live,
             dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
+        // Before the rendezvous file sweep, deliberately. A holder this phase
+        // kills leaves a socket behind that nothing else will ever unlink, and
+        // running the file sweep next means one pass reclaims both the process
+        // and its residue — for an installation that has opted into both, which
+        // is the only way either runs.
+        await reclaimRowlessHolders(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
+        await reclaimHolderRendezvous(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
         // Snapshot retention never runs in dryRun; the outer guard already
@@ -661,6 +691,165 @@ public actor OrphanGC {
                     """)
                 }
                 await insertReapRecord(record)
+                reaped += 1
+            }
+        }
+    }
+
+    // MARK: - Holder rendezvous files
+
+    /// Unlinks the socket, lock and log a dead pty holder left in
+    /// `~/tbd/holders` — the named reconciler for that resource class
+    /// (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+    /// "Reconciliation").
+    ///
+    /// Gated by `gcHolderRendezvousEnabled` on top of `gcEnabled`, both because
+    /// every new background sweep that unlinks files soaks behind its own
+    /// switch and because the transport it reclaims after is itself still
+    /// behind `ptyHolderEnabled` — a machine that has never spawned a holder
+    /// has nothing here for this phase to be right or wrong about.
+    ///
+    /// `dryRun` bypasses the flag exactly as `sweep` lets it bypass `gcEnabled`:
+    /// planning is read-only, and someone deciding whether to enable a
+    /// default-off flag needs to see what enabling it would reclaim before
+    /// flipping it. A NON-dry run still requires the flag.
+    ///
+    /// This phase deliberately reads no rows. It reclaims files whose *process*
+    /// is gone, which the socket and the lock answer directly; the
+    /// holder-versus-database check the design also describes is a separate
+    /// leg, and folding it in here would make a filesystem sweep depend on
+    /// intent it does not need.
+    private func reclaimHolderRendezvous(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        guard config.gcHolderRendezvousEnabled || dryRun else { return }
+        for candidate in holderRendezvousCollector.candidates() {
+            switch await holderRendezvousCollector.decide(
+                candidate, graceSeconds: config.gcGraceSeconds
+            ) {
+            case .keep(let reason):
+                planned.append("KEEP \(reason) \(candidate.socketPath)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) \(candidate.socketPath, privacy: .public)
+                """)
+            case .reap:
+                planned.append("REAP holder-rendezvous \(candidate.socketPath)")
+                // This arm's guard is `gcHolderRendezvousEnabled || dryRun`, so
+                // every line below runs only with the flag actually on.
+                guard !dryRun else { continue }
+                let removed = holderRendezvousCollector.reap(candidate)
+                if removed.isEmpty {
+                    planned.append("KEEP unlink-failed \(candidate.socketPath)")
+                    continue
+                }
+                // Counted once per session, not once per file: the triple is
+                // one holder's residue, and `reaped` is what the sweep reports
+                // as things reclaimed. No `ReapRecord` is written — these files
+                // are unlinked, not quarantined, and there is nothing a
+                // `tbd gc restore` could put back.
+                reaped += 1
+            }
+        }
+    }
+
+    // MARK: - Row-less holders
+
+    /// Kills a pty holder this installation owns which no session row claims —
+    /// the holder-versus-database half of
+    /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+    /// "Reconciliation". The child first, then the holder.
+    ///
+    /// Gated by `gcRowlessHoldersEnabled` on top of `gcEnabled`, and **not** by
+    /// `gcHolderRendezvousEnabled`: that flag unlinks files, this one signals
+    /// processes, and enabling the first must never enable the second.
+    ///
+    /// `dryRun` bypasses the flag exactly as `sweep` lets it bypass `gcEnabled`:
+    /// planning is read-only, and somebody deciding whether to enable a
+    /// default-off process killer needs to see what enabling it would kill. A
+    /// NON-dry run still requires the flag.
+    ///
+    /// Two reads bound what this may do, and both fail toward keeping:
+    ///
+    ///   - **The owner token is read, never minted.** `HolderRegistry` mints on
+    ///     the spawn path; a sweep that minted one would hand itself an identity
+    ///     no holder on disk was ever stamped with. A NULL token means this
+    ///     installation has never spawned a holder, so nothing out there can be
+    ///     ours and every candidate is kept.
+    ///   - **The session rows are read here**, not handed down from `sweep`,
+    ///     and a failed read skips the phase entirely rather than proceeding on
+    ///     an empty list — which would read as "nothing is claimed" and license
+    ///     killing the whole fleet.
+    ///
+    /// The row is then **re-read immediately before the kill**, the same
+    /// pre-reap re-read `reapOrphanProfileDirs` keeps. The gates above run
+    /// against one snapshot, and the handshake round trip in between is the
+    /// window a session's row can commit in.
+    private func reclaimRowlessHolders(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        guard config.gcRowlessHoldersEnabled || dryRun else { return }
+        let candidates = rowlessHolderCollector.candidates()
+        guard !candidates.isEmpty else { return }
+
+        guard let terminals = try? await db.terminals.list() else {
+            logger.error("gc: session rows unreadable this sweep — skipping the row-less holder phase")
+            planned.append("KEEP rows-unreadable rowless-holder phase")
+            return
+        }
+        let claimed = Set(terminals.map(\.id))
+        let owner = config.holderOwnerToken.map(HolderOwnerToken.init(rawValue:))
+
+        for candidate in candidates {
+            switch await rowlessHolderCollector.decide(
+                candidate, graceSeconds: config.gcGraceSeconds,
+                owner: owner, claimedSessionIDs: claimed
+            ) {
+            case .keep(let reason):
+                planned.append("KEEP \(reason) \(candidate.socketPath)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) \(candidate.socketPath, privacy: .public)
+                """)
+            case .kill(let childPID, let holderPID):
+                planned.append("REAP rowless-holder \(candidate.socketPath)")
+                // This arm's guard is `gcRowlessHoldersEnabled || dryRun`, so
+                // every line below runs only with the flag actually on.
+                guard !dryRun else { continue }
+                // The late gate. A row that committed during the handshake makes
+                // this holder somebody's live session after all.
+                //
+                // Spelled `do`/`catch` rather than `try?` deliberately: `try?`
+                // on a throwing call that already returns an optional flattens
+                // "the read failed" into "there is no row", which is the one
+                // direction this gate must never fail in.
+                do {
+                    if try await db.terminals.get(id: candidate.sessionID) != nil {
+                        planned.append("KEEP raced-row \(candidate.socketPath)")
+                        logger.info("""
+                        gc: row-less holder \(candidate.socketPath, privacy: .public) acquired a \
+                        session row during the handshake — left alone
+                        """)
+                        continue
+                    }
+                } catch {
+                    planned.append("KEEP row-reread-failed \(candidate.socketPath)")
+                    logger.error("""
+                    gc: could not re-read the session row for \
+                    \(candidate.socketPath, privacy: .public) \
+                    (\(error.localizedDescription, privacy: .public)) — left alone
+                    """)
+                    continue
+                }
+                guard await rowlessHolderCollector.reclaim(
+                    candidate, childPID: childPID, holderPID: holderPID)
+                else {
+                    planned.append("KEEP reclaim-refused \(candidate.socketPath)")
+                    continue
+                }
+                // Counted once per holder. No `ReapRecord` is written: the
+                // record type is directory-shaped and keyed by the worktree a
+                // reap removed, and a row-less holder has neither — no row means
+                // no worktree to name. There is nothing a `tbd gc restore` could
+                // put back either; a killed process is not restorable.
                 reaped += 1
             }
         }

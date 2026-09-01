@@ -18,6 +18,10 @@ public enum HibernationGate {
     public enum Decision: Equatable, Sendable {
         case eligible
         case featureDisabled
+        /// The session's pty is owned by a `TBDHolder`, not a tmux pane, so the
+        /// respawn-window park mechanic has no coordinate to act on. Refused
+        /// outright rather than parked against an empty window id.
+        case holderTransport
         case notClaudeResumable
         case alreadyHibernated
         case suspended
@@ -77,6 +81,13 @@ public enum HibernationGate {
     /// reports `.alreadyHibernated`, not `.running`). Kept identical to the cascade
     /// that used to be inlined in `decide` so existing behavior is preserved.
     static func blockingRail(terminal: Terminal) -> Decision? {
+        // First, and ahead of `isClaudeResumable`: a holder-backed session is
+        // refused for a reason that has nothing to do with the Claude rails,
+        // and naming it precisely is what keeps a future reader from "fixing"
+        // the resumable check. Mirrors the same guard on
+        // `Terminal.isManuallyHibernatable`, which this cascade deliberately
+        // re-implements rather than calls (it needs per-rail reasons).
+        guard terminal.transport != .holder else { return .holderTransport }
         guard terminal.isClaudeResumable else { return .notClaudeResumable }
         guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
         guard terminal.suspendedAt == nil else { return .suspended }

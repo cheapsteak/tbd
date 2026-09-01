@@ -66,6 +66,11 @@ public enum WakeResult: Equatable, Sendable {
     /// default-profile fallback; the row stays parked and resumable. Carries
     /// the missing profile id for the message.
     case profileMissing(profileID: UUID)
+    /// The row runs on the pty-holder transport. Every branch below this point
+    /// — the unparked pane classification as much as the respawn — addresses a
+    /// tmux pane the row does not have, so wake refuses before reaching any of
+    /// them and leaves the row exactly as it found it.
+    case holderTransport
 }
 
 /// Owns session PARKING — the single unified "park a Claude session" feature
@@ -269,6 +274,7 @@ public actor HibernationCoordinator {
 
     /// The reason a manual hibernate was refused, for the RPC error string.
     private func manualBlockReason(_ terminal: Terminal) -> String {
+        if terminal.transport == .holder { return Self.holderTransportRefusal }
         if !terminal.isClaudeResumable { return "Not a resumable Claude session" }
         if terminal.suspendedAt != nil { return "Terminal is suspended" }
         switch terminal.activityState {
@@ -339,8 +345,15 @@ public actor HibernationCoordinator {
     /// keep-warm, which merge-park honors but manual bypasses — plus the
     /// pending-input veto, whose wording matches the backup TUI scrape's so a
     /// reader cannot tell which of the two rails fired and does not need to.
+    /// The one refusal text every park/wake path uses for a holder-backed row,
+    /// so the CLI, the app and the actuation record all name the same reason.
+    static let holderTransportRefusal =
+        "Session runs on the pty-holder transport, which has no tmux window to "
+        + "park or wake. Parking is not supported for it yet."
+
     private static func mergeBlockReason(_ decision: HibernationGate.Decision) -> String {
         switch decision {
+        case .holderTransport: return holderTransportRefusal
         case .notClaudeResumable: return "Not a resumable Claude session"
         case .alreadyHibernated: return "Terminal is already hibernated"
         case .suspended: return "Terminal is suspended"
@@ -822,6 +835,14 @@ public actor HibernationCoordinator {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
         }
+        // Ahead of the parked check, and therefore ahead of BOTH downstream
+        // paths: `classifyUnparkedWake` probes the pane, and the parked branch
+        // respawns into it. A holder row's pane id is the empty string, which
+        // tmux answers for by reporting the pane gone — so the unparked path
+        // would report a live session as `.sessionGone` and the parked path
+        // would respawn a second `claude --resume` for a session whose original
+        // process is still alive on the holder's pty. Refuse, mutating nothing.
+        guard terminal.transport != .holder else { return .holderTransport }
         // Wake ANY parked row, not just `hibernatedAt`-marked ones: legacy rows
         // and the reconcile / recreate-window paths may carry only `suspendedAt`.
         // `clearHibernated` nils both columns, so this fully un-parks either.
@@ -1360,8 +1381,9 @@ public actor HibernationCoordinator {
                 logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input")
                 pendingKillSince[terminal.id] = nil
 
-            case .featureDisabled, .notClaudeResumable, .alreadyHibernated,
-                 .suspended, .keepWarm, .running, .waitingForUser:
+            case .featureDisabled, .holderTransport, .notClaudeResumable,
+                 .alreadyHibernated, .suspended, .keepWarm, .running,
+                 .waitingForUser:
                 // Not at rest (or ineligible): the idle clock and any armed
                 // debounce reset so a later settle starts a fresh full window.
                 idleSince[terminal.id] = nil
