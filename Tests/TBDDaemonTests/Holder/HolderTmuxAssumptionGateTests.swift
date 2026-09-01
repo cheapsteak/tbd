@@ -639,4 +639,121 @@ struct HolderTmuxAssumptionGateTests {
         #expect(argv.contains { $0.contains("kill-window") && $0.contains("@7") },
                 "the tmux leg must still kill its own window: \(argv)")
     }
+
+    // MARK: - Gate 7: the auto-resume rail, which types without a user gesture
+
+    /// Arms one pending resume row for `terminal` and returns it, with the
+    /// governing toggle on — production only ever actuates a row that came
+    /// from `scheduler.schedule()`, which always inserts first, and the
+    /// actuator re-reads both facts on every eligibility pass.
+    private func armedResume(
+        _ db: TBDDatabase, terminal: Terminal
+    ) async throws -> ScheduledResume {
+        try await db.config.setAutoResumeOnLimitReset(true)
+        let row = ScheduledResume(
+            terminalID: terminal.id, worktreeID: terminal.worktreeID,
+            claudeSessionID: terminal.claudeSessionID,
+            resetsAt: Date().addingTimeInterval(-120),
+            fireAt: Date().addingTimeInterval(-60),
+            limitType: "session", rawMessage: "limit",
+            createdAt: Date().addingTimeInterval(-3600))
+        _ = try await db.scheduledResumes.insertPending(row)
+        return row
+    }
+
+    /// An actuator whose every side effect is observable: no real sleeping, no
+    /// transcript on disk, and a tmux double that records the keys it is asked
+    /// to type.
+    private func resumeActuator(
+        _ db: TBDDatabase, tmux: FakeResumeTmux
+    ) -> LimitResumeActuator {
+        LimitResumeActuator(
+            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            readTranscript: { _ in nil },
+            transcriptModifiedAt: { _ in nil },
+            waiter: { _ in }, actuationLog: makeTestActuationLog())
+    }
+
+    /// The reproduction, on the answer a real tmux gives.
+    ///
+    /// `windowExists(windowID: "")` is `false`, so the rail cancelled the
+    /// user's armed auto-resume as `.terminalGone` — a silent cancel that
+    /// records "the terminal is gone" for a session that is perfectly alive,
+    /// and leaves nobody told. The refusal is now named, and `.failed` so the
+    /// daemon's notification says so once.
+    @Test("auto-resume refuses a holder row by name instead of cancelling it as gone")
+    func autoResumeRefusesHolderRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+        let resume = try await armedResume(db, terminal: terminal)
+
+        let tmux = FakeResumeTmux()
+        tmux.windowAlive = false   // what a real server answers for ""
+        let outcome = await resumeActuator(db, tmux: tmux).actuate(resume)
+
+        #expect(outcome == .failed(LimitResumeActuator.holderTransportRefusal),
+                "expected the named refusal, got \(outcome)")
+        #expect(tmux.sends.isEmpty)
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before,
+                "a refused auto-resume mutated the holder row")
+    }
+
+    /// The placement assertion: the guard sits ahead of the tmux question, not
+    /// behind it.
+    ///
+    /// Every check between `windowExists` and the keys passes in this fixture —
+    /// the pane answers alive and anonymous, Claude is foreground, copy-mode is
+    /// off — so a guard placed after the window probe would let "continue" be
+    /// typed at whatever the empty pane id resolves to. That is what makes the
+    /// old behavior an accident rather than a safe default: it depended on
+    /// `TmuxManager.windowExists` swallowing its error.
+    @Test("auto-resume types nothing at a holder row even when tmux claims the window is alive")
+    func autoResumeTypesNothingAtHolderRowWithLiveWindowAnswer() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+        let resume = try await armedResume(db, terminal: terminal)
+
+        let tmux = FakeResumeTmux()
+        tmux.windowAlive = true
+        let outcome = await resumeActuator(db, tmux: tmux).actuate(resume)
+
+        #expect(outcome == .failed(LimitResumeActuator.holderTransportRefusal),
+                "expected the named refusal, got \(outcome)")
+        #expect(tmux.sends.isEmpty,
+                "auto-resume typed into a holder row: \(tmux.sends)")
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+    }
+
+    /// The tmux leg. An inverted transport comparison would disable auto-resume
+    /// for the transport that still has a pane to type into.
+    @Test("auto-resume still types the continue sequence into a tmux row")
+    func autoResumeStillActsOnTmuxRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+        // The activity hook already reports working, so the first verification
+        // poll succeeds without a transcript on disk.
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .working, source: .derived)
+        let resume = try await armedResume(db, terminal: terminal)
+
+        let tmux = FakeResumeTmux()
+        tmux.windowAlive = true
+        let outcome = await resumeActuator(db, tmux: tmux).actuate(resume)
+
+        #expect(outcome == .sent, "expected .sent, got \(outcome)")
+        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+    }
 }
