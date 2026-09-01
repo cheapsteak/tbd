@@ -179,9 +179,8 @@ The headers that matter:
   at which the window resets.
 - **`anthropic-ratelimit-unified-status`**, and a per-window `-status` for each
   of the two windows — `allowed`, `allowed_warning`, or a rejected state.
-- **`anthropic-organization-id`** — stable per account. Not rendered anywhere in
-  this design, but it is the discriminator a future "these two profiles are the
-  same account" feature would need, so parse and retain it.
+- **`anthropic-organization-id`** — stable per account. Captured and persisted
+  but deliberately not rendered; see "Capturing the organization id" below.
 
 ### Mapping onto the existing snapshot
 
@@ -210,6 +209,62 @@ enum credential source (`.configDir(String)` / `.token(String)`) so
 either fetcher works. Everything downstream — `ProfileUsageSnapshot`,
 `OAuthUsageSnapshotStore`, `ProfileUsagePresentation`, the hover cards, the
 account picker — is untouched.
+
+### Capturing the organization id
+
+`anthropic-organization-id` is the only stable account discriminator available
+for a token profile — the identity endpoint is 403, so there is no email. It is
+worth capturing now even though nothing displays it yet: it costs one header
+read, and without it there is no way to later tell that a token profile and a
+signed-in profile are two views of the same account's limits rather than two
+independent pools. Deciding *where* to surface that is deferred; capturing it is
+not, because a field that was never recorded cannot be backfilled for usage that
+already happened.
+
+Store it on the snapshot rather than the profile:
+
+```swift
+public struct ProfileUsageSnapshot {
+    ...
+    /// Organization id from the last successful fetch's
+    /// `anthropic-organization-id` response header. nil when the endpoint sent
+    /// none, or the snapshot predates this field. Captured for account
+    /// correlation; nothing renders it yet.
+    public var organizationID: String?
+}
+```
+
+The snapshot is the right home for three reasons. It is derived from the fetch
+that observed the header, so it refreshes naturally when a profile's token is
+replaced with one for a different account. It is persisted as a regenerating
+JSON blob (`oauth_profile_usage_snapshot`), so an optional field needs **no
+migration** and stays decode-compatible in both directions — `decodeIfPresent`
+yields nil for older stored JSON, and an older app ignores the unknown key. And
+it already reaches the app inside `ModelProfileWithUsage.usageSnapshot`, so
+**no RPC change is required**.
+
+Threading it through takes one seam. `ProfileUsageFetchStatus.ok` widens to
+carry it:
+
+```swift
+case ok([ClaudeUsageLimitBucket], organizationID: String?)
+```
+
+Every `case .ok` site is then a compile error until updated — the enumeration is
+done by the build, not by grep. If a second header ever warrants capturing,
+replace the two associated values with a small reading struct rather than
+growing the case further.
+
+**Both fetchers read the header opportunistically.** The token probe is known to
+return it. Whether `/api/oauth/usage` also returns it on the signed-in path is
+unverified, so `LiveProfileUsageFetcher` reads the same header and records nil
+when absent. That costs nothing, and it means signed-in profiles pick the value
+up for free if the endpoint does supply it — rather than the design asserting an
+answer it has not measured.
+
+The value is an account identifier. Log it at `.public` like other profile
+routing facts — it is not a credential — but it must never appear in an error
+string that also carries token bytes.
 
 ### Rejected tokens reuse `.needsLogin`
 
@@ -399,6 +454,12 @@ Both branches of every conditional this adds, per the repo's branching rule.
   `allowed_warning`, a rejected status, missing headers, and a malformed
   utilization value. Assert the composed buckets, not individual field
   extraction.
+- **Organization id capture** — a response carrying
+  `anthropic-organization-id` lands it on the snapshot; a response without the
+  header yields nil rather than an empty string; a snapshot JSON blob written
+  before the field existed decodes with nil; and a profile whose token is
+  replaced with one for a different account has the new value after the next
+  successful fetch, not the old one.
 - **Polling gate** — a `working → idle` transition on a token profile's terminal
   schedules exactly one probe; a second transition inside five minutes schedules
   none; one after five minutes schedules one. A transition on a `.oauth`
@@ -452,7 +513,9 @@ None blocking. Two things to watch once this is in use:
   If it changes, the probe 4xx's and every token profile reports `.needsLogin`,
   which is misleading — a distinct "probe unsupported" state may be worth adding
   if that happens.
-- Whether `anthropic-organization-id` is worth surfacing to detect that a token
-  profile and a signed-in profile are the same account, which would let the UI
-  show that their bars are two views of one set of limits rather than two
-  independent pools.
+- Where to surface `anthropic-organization-id`. The value is captured and
+  persisted by this design but rendered nowhere. The obvious use is telling the
+  user that a token profile and a signed-in profile are the same account, so
+  their bars are two views of one set of limits rather than two independent
+  pools — but that wants a real UI decision, and it can be made once field data
+  shows how often people actually keep both.
