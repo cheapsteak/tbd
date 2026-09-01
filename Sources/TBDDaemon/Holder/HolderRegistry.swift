@@ -402,11 +402,64 @@ actor HolderRegistry {
     /// failure path has always reaped for exactly this reason; this is the same
     /// obligation on the path that runs every time.
     private func dispose(handle: HolderHandle) async {
+        // Resolved BEFORE the holder is told to let go, and that ordering is the
+        // whole fix. `forget` closes the pty master, which hangs up the
+        // foreground process group and usually kills the job outright — after
+        // which `getpgid` on it answers `ESRCH` and the group can no longer be
+        // named, while a member that ignored `SIGHUP` is still sitting in it.
+        // Reading the group first is what lets the kill below reach that member.
+        let group = Self.jobProcessGroup(childPID: handle.childPID)
         let client = HolderClient(socketPath: handle.socketPath)
         try? await client.forget()
         await client.close()
-        if handle.childPID > 0 { kill(handle.childPID, SIGKILL) }
+        Self.killJob(childPID: handle.childPID, group: group)
         await reap(holderPID: handle.holderPID)
+    }
+
+    /// The process group id to signal for a holder's job, or nil when no group
+    /// may be signalled and only the pid itself is safe to kill.
+    ///
+    /// The job is the session leader of the pty's own session, courtesy of
+    /// `forkpty`, so its group id is its own pid — the closure the design spec
+    /// names for the sibling holder-death path. That is **verified here rather
+    /// than assumed**: a group id that is not the job's own pid names a group
+    /// this daemon did not create, and signalling it would reach processes
+    /// nobody asked us to kill.
+    ///
+    /// The `> 1` guards are not defensive padding. `kill(0, …)` and
+    /// `killpg(0, …)` signal the **caller's** group — the daemon itself and
+    /// every process it owns — so a `0` that reached the negation below would
+    /// take down the fleet, and `getpgid` returns `-1` for a pid that is
+    /// already gone.
+    private static func jobProcessGroup(childPID: Int32) -> Int32? {
+        guard childPID > 1 else { return nil }
+        let pgid = getpgid(childPID)
+        guard pgid > 1, pgid == childPID else { return nil }
+        return pgid
+    }
+
+    /// Kills the job the holder forked: its process group where one could be
+    /// named, and the pid itself always.
+    ///
+    /// The group is what makes this a reclamation rather than a courtesy.
+    /// Closing the pty master hangs the foreground group up, and a job at
+    /// `SIGHUP`'s default disposition dies of that — but `nohup`, a daemonizing
+    /// agent, or a shell with `huponexit` off simply declines, and was left
+    /// reparented to pid 1 with nothing on any sweep that would ever find it
+    /// again (`WorktreeLifecycle+Reconcile` skips holder rows by construction).
+    /// `SIGKILL` to the group cannot be declined.
+    ///
+    /// A descendant that deliberately *leaves* the group — `setsid`, a double
+    /// fork — is outside this closure and survives, exactly as it survives a
+    /// tmux pane kill today. That is a standing fleet-wide problem belonging to
+    /// `AgentReaper`, and the design spec puts it out of scope here.
+    ///
+    /// Both signals are best-effort: a teardown must never fail because
+    /// something it meant to kill was already gone.
+    private static func killJob(childPID: Int32, group: Int32?) {
+        guard childPID > 1 else { return }
+        if let group { _ = kill(-group, SIGKILL) }
+        _ = kill(childPID, SIGKILL)
     }
 
     /// Collects a holder that has been told to let go, bounded.
