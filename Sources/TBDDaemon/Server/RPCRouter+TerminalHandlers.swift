@@ -869,18 +869,22 @@ extension RPCRouter {
         // mid-turn, so it stays closeable without --force.
         //
         // The qualifier is asked of the row's OWN transport — see
-        // `sessionIsRunningForActivityRails`. Asking tmux for every row is how
+        // `sessionLivenessForActivityRails`. Asking tmux for every row is how
         // this rail silently stopped applying to holder-backed sessions.
+        //
+        // It has THREE answers, and only an observed stop lifts the rail: a
+        // rail that cannot establish the session ended must fail closed, or it
+        // skips its own confirmation exactly when nobody can say what is
+        // running.
         if params.respectActivityRails == true,
            terminal.activityState == .working || terminal.activityState == .waitingForUser {
-            if try await sessionIsRunningForActivityRails(
-                terminal: terminal, actuationID: actuationID) {
-                let what = terminal.activityState == .working
-                    ? "mid-turn"
-                    : "waiting on a permission prompt"
-                let message = "Terminal \(params.terminalID) is \(what) "
-                    + "(activityState=\(terminal.activityState.rawValue)). "
-                    + "Closing now would kill in-flight work. Pass --force to close anyway."
+            let liveness = try await sessionLivenessForActivityRails(
+                terminal: terminal, actuationID: actuationID)
+            if liveness != .stopped {
+                let message = Self.closeRailsRefusal(
+                    terminalID: params.terminalID,
+                    activityState: terminal.activityState,
+                    liveness: liveness)
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(
                     error: message,
@@ -968,13 +972,92 @@ extension RPCRouter {
         ))
     }
 
-    /// Is this session still running, as far as its own transport can say?
+    /// What a row's own transport can say about whether its session is still
+    /// running, for `terminal.delete`'s activity rails.
+    ///
+    /// Three answers rather than two, because "nobody can say" is a distinct
+    /// fact from "it stopped" and the rail must treat them differently. Only
+    /// `.stopped` — an observed ending — lifts the rail's protection.
+    enum ActivityRailLiveness: Equatable {
+        /// The transport says the session is running, or nothing has recorded
+        /// that it stopped.
+        case running
+        /// Something observed the session end: a tmux window that is gone, or
+        /// a holder that collected its job's exit status.
+        case stopped
+        /// The session's supervisor is gone, which does not establish that the
+        /// job it supervised is. See `activityRailLiveness(holderStatus:)`.
+        case unknown
+    }
+
+    /// How the holder leg reads a recorded child status.
+    ///
+    /// Split out from the handler so every status can be exercised directly:
+    /// `.exited` is only ever recorded by a holder that really collected an
+    /// exit status, which no in-process fixture can arrange.
+    ///
+    /// **`.exitedStatusUnknown` is an unknown, not an observed exit, and the
+    /// name is the whole point.** `HolderRegistry.adoptAll`'s catch-all records
+    /// it whenever nothing answers at a holder's rendezvous — that establishes
+    /// the *holder* is gone, and nothing about the job it forked. The holder's
+    /// death hangs that job up, and a job that ignores `SIGHUP` survives as an
+    /// orphan; nothing re-adopts a row nobody calls `adopt()` on again, so the
+    /// status then sticks for the daemon's whole lifetime. Reading it as
+    /// "stopped" let a `--respectActivityRails` close skip the mid-turn
+    /// confirmation and tear down a job that was still working.
+    ///
+    /// The other polarity is just as deliberate: a *missing* status is
+    /// `.running`, not `.stopped`. `adoptAll` deliberately records nothing for
+    /// a holder owned by another installation, and nothing for one whose client
+    /// slot is already taken, and both of those are live sessions. Requiring a
+    /// positive `.alive` would put the rail back where it started for exactly
+    /// those rows.
+    static func activityRailLiveness(
+        holderStatus: HolderChildStatus?
+    ) -> ActivityRailLiveness {
+        switch holderStatus {
+        case .exited: return .stopped
+        case .exitedStatusUnknown: return .unknown
+        case .alive, nil: return .running
+        }
+    }
+
+    /// The refusal `terminal.delete`'s activity rails return for a busy row
+    /// they will not close. Named beside its verb, like `holderSendRefusal` and
+    /// its siblings, so the CLI, the app and this handler's tests name the same
+    /// reason rather than three near-misses.
+    ///
+    /// The `.unknown` wording is not decoration. A user whose holder is gone
+    /// would otherwise read the ordinary "would kill in-flight work" text about
+    /// a session they have every reason to believe is dead, and be left
+    /// guessing why `--force` is suddenly required. Saying which fact is
+    /// missing is what makes the escape hatch usable.
+    static func closeRailsRefusal(
+        terminalID: UUID,
+        activityState: TerminalActivityState,
+        liveness: ActivityRailLiveness
+    ) -> String {
+        let what = activityState == .working
+            ? "mid-turn"
+            : "waiting on a permission prompt"
+        let why = liveness == .unknown
+            ? "Its pty holder is gone, which does not establish that the job it forked is: "
+                + "a job that ignores SIGHUP outlives the holder whose death hung it up, and "
+                + "nothing has observed this one exit. "
+            : "Closing now would kill in-flight work. "
+        return "Terminal \(terminalID) is \(what) "
+            + "(activityState=\(activityState.rawValue)). "
+            + why + "Pass --force to close anyway."
+    }
+
+    /// What can this session's own transport say about whether it is running?
     ///
     /// Only `terminal.delete`'s activity rails ask, and only to decide whether
     /// a `.working` / `.waitingForUser` row is worth refusing to close. It is
     /// deliberately an *escape hatch* rather than a liveness guarantee: the
     /// rail is on by default for the CLI, and a wrong "yes" costs a `--force`
-    /// while a wrong "no" kills an in-flight turn.
+    /// while a wrong "no" kills an in-flight turn. That asymmetry is why the
+    /// answer that cannot be established (`.unknown`) refuses.
     ///
     /// **The tmux question and the holder question are different questions,
     /// and asking the tmux one for every row is the defect this replaces.** A
@@ -984,14 +1067,9 @@ extension RPCRouter {
     /// switches the rail off. A busy holder session was closeable without
     /// `--force`, and nothing said so.
     ///
-    /// The holder leg reads the registry's recorded status, and reads it as
-    /// **"running unless something recorded that it ended"** — the two ended
-    /// statuses answer no, and everything else answers yes. That polarity is
-    /// the whole content of the leg, because the states carrying no status at
-    /// all are live sessions, not dead ones: `adoptAll` deliberately records
-    /// nothing for a holder owned by another installation, or for one that
-    /// answered the busy sentinel because somebody else holds its client slot.
-    /// Reading those two as dead would put the rail right back where it was.
+    /// The holder leg reads the registry's recorded status through
+    /// `activityRailLiveness(holderStatus:)`, which owns that mapping and the
+    /// reasoning behind both of its polarities.
     ///
     /// It is the *last known* status, not a fresh probe, and that is the one
     /// place the two legs are not equivalent: a child that exits while the
@@ -1001,19 +1079,17 @@ extension RPCRouter {
     /// than ending). Until Milestone B's holder-death watch lands, such a row
     /// needs `--force` — a nuisance the message names, and the opposite of the
     /// live session it used to close silently.
-    private func sessionIsRunningForActivityRails(
+    private func sessionLivenessForActivityRails(
         terminal: Terminal, actuationID: String
-    ) async throws -> Bool {
+    ) async throws -> ActivityRailLiveness {
         if terminal.transport == .holder {
             // No worktree lookup on this leg: it exists only to name a tmux
             // server, and this row has none. A daemon with no registry wired
             // has adopted nothing and can spawn nothing, so it has no holder
             // sessions to protect and no fact to protect them with.
-            guard let holderRegistry else { return false }
-            switch await holderRegistry.lastKnownStatus(for: terminal.id) {
-            case .exited, .exitedStatusUnknown: return false
-            case .alive, nil: return true
-            }
+            guard let holderRegistry else { return .stopped }
+            return Self.activityRailLiveness(
+                holderStatus: await holderRegistry.lastKnownStatus(for: terminal.id))
         }
         // Resolved inside the rails branch, not in the condition list, so the
         // lookup keeps its short-circuit (only reached when the rails are on
@@ -1022,9 +1098,10 @@ extension RPCRouter {
         let railWorktree = try await actuating(actuationID) {
             try await db.worktrees.getLocal(id: terminal.worktreeID)
         }
-        guard let railWorktree else { return false }
+        guard let railWorktree else { return .stopped }
         return await tmux.windowExists(
             server: railWorktree.tmuxServer, windowID: terminal.tmuxWindowID)
+            ? .running : .stopped
     }
 
     /// Tears down the holder behind a row that is about to be deleted: stops

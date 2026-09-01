@@ -527,11 +527,65 @@ struct HolderTmuxAssumptionGateTests {
                 "the close rails reached tmux for a holder row: \(recorded.snapshot())")
     }
 
-    /// The other half of the escape hatch, on the holder transport. A row
-    /// wedged at `.working` whose holder is gone must stay closeable without
-    /// `--force`, or the rail becomes the trap it was qualified to avoid.
-    @Test("the close rails still release a holder row whose holder is gone")
-    func closeRailsReleaseEndedHolderSession() async throws {
+    /// A holder that nothing answers for is a holder that is GONE, and that is
+    /// not the same fact as the job it forked being gone.
+    ///
+    /// `adoptAll`'s catch-all records `exitedStatusUnknown` for exactly that
+    /// state, and the name is the whole point: nobody collected a status. The
+    /// holder's death hangs its job up, and a job that ignores `SIGHUP` — the
+    /// `nohup` shape `HolderTeardownGroupKillTests` already exercises on the
+    /// disposal path — survives it as an orphan. Nothing re-adopts a row nobody
+    /// calls `adopt()` on again, so the status sticks for the daemon's whole
+    /// lifetime. A safety rail must fail CLOSED on that: when we cannot
+    /// establish the job stopped, the confirmation is what the rail is for.
+    @Test("the close rails refuse a busy holder row whose holder is unreachable")
+    func closeRailsRefuseHolderRowWithUnknownExit() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, childPID: 0)
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .working, source: .derived)
+        let busy = try #require(try await db.terminals.get(id: terminal.id))
+        let before = RowFingerprint(busy)
+
+        let registry = holderRegistry(listing: [busy])
+        // Nothing answers at the derived rendezvous, so the startup sweep
+        // records the session as ended with an unknown status.
+        await registry.adoptAll()
+        let ended = await registry.lastKnownStatus(for: terminal.id)
+        #expect(ended == .exitedStatusUnknown, "the fixture never armed the unknown status")
+
+        let router = router(db, tmux: tmux)
+        router.holderRegistry = registry
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: terminal.id, respectActivityRails: true)))
+
+        #expect(!response.success)
+        #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue,
+                "the CLI maps the code to exit 2 without parsing prose")
+        #expect(response.error?.contains("--force") == true,
+                "the message must name the escape hatch")
+        // The row is the assertion, not the error string: the bug this closes
+        // is a teardown that happened without the confirmation, and only the
+        // row can see that.
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before,
+                "a refused close still mutated the holder row")
+        #expect(recorded.snapshot().isEmpty,
+                "the close rails reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    /// The escape hatch the refusal above names, on the holder transport. A
+    /// user who genuinely lost a holder is not trapped: `--force` drops the
+    /// rails (the CLI sends no `respectActivityRails` at all), and the row —
+    /// and the holder teardown that goes with it — proceeds as before.
+    @Test("--force still closes a busy holder row whose holder is unreachable")
+    func forceClosesHolderRowWithUnknownExit() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -544,23 +598,56 @@ struct HolderTmuxAssumptionGateTests {
         let busy = try #require(try await db.terminals.get(id: terminal.id))
 
         let registry = holderRegistry(listing: [busy])
-        // Nothing answers at the derived rendezvous, so the startup sweep
-        // records the session as ended with an unknown status — the same
-        // arming the delete gate above uses, read here as the fact that ends
-        // the rail's protection.
         await registry.adoptAll()
-        let ended = await registry.lastKnownStatus(for: terminal.id)
-        #expect(ended == .exitedStatusUnknown, "the fixture never armed the ended status")
+        #expect(await registry.lastKnownStatus(for: terminal.id) == .exitedStatusUnknown,
+                "the fixture never armed the unknown status")
 
         let router = router(db, tmux: tmux)
         router.holderRegistry = registry
+        // `--force` is the absence of the rails flag, not a second flag: see
+        // `TerminalCommands`, which sends `force ? nil : true`.
         let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalDelete,
-            params: TerminalDeleteParams(terminalID: terminal.id, respectActivityRails: true)))
+            params: TerminalDeleteParams(terminalID: terminal.id)))
 
         #expect(response.success, "error: \(response.error ?? "nil")")
         #expect(response.errorCode == nil)
         #expect(try await db.terminals.get(id: terminal.id) == nil)
+    }
+
+    /// Every status the holder leg can be handed, including the one no
+    /// in-process fixture can arrange: `.exited` is recorded only by a holder
+    /// that really collected an exit status, so the RPC-level legs above cannot
+    /// reach it. It is also the leg that keeps the fix from being too broad —
+    /// a real observed exit must still close without `--force`, and only
+    /// `.exitedStatusUnknown` moved.
+    @Test("the holder leg treats an unknown status as unknown, not as exited")
+    func holderLivenessReadsUnknownStatusAsUnknown() {
+        #expect(RPCRouter.activityRailLiveness(holderStatus: .exited(code: 0)) == .stopped)
+        #expect(RPCRouter.activityRailLiveness(holderStatus: .exited(code: 137)) == .stopped)
+        #expect(RPCRouter.activityRailLiveness(holderStatus: .exitedStatusUnknown) == .unknown)
+        #expect(RPCRouter.activityRailLiveness(holderStatus: .alive) == .running)
+        #expect(RPCRouter.activityRailLiveness(holderStatus: nil) == .running)
+    }
+
+    /// The refusal has to say WHY it is refusing, or a user whose holder is
+    /// genuinely gone reads "would kill in-flight work" about a session they
+    /// have every reason to believe is dead and is left guessing why `--force`
+    /// became necessary.
+    @Test("the unknown-liveness refusal names the missing fact, not just the rail")
+    func unknownLivenessRefusalNamesTheMissingFact() {
+        let id = UUID()
+        let unknown = RPCRouter.closeRailsRefusal(
+            terminalID: id, activityState: .working, liveness: .unknown)
+        let running = RPCRouter.closeRailsRefusal(
+            terminalID: id, activityState: .working, liveness: .running)
+
+        #expect(unknown.contains("--force"), "the message must name the escape hatch")
+        #expect(unknown.contains("holder"), "the message must name what is actually gone")
+        #expect(unknown.contains("SIGHUP"), "the message must name why that is not enough")
+        #expect(unknown != running,
+                "an unknown liveness must not be reported as a known-live session")
+        #expect(running.contains("--force"))
     }
 
     @Test("the close rails still refuse a busy tmux row whose window is alive")
