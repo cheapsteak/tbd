@@ -311,8 +311,31 @@ public struct AgentReaper: Sendable {
     /// the end of it — at which point the unconditional `forceKill` would land
     /// on a stranger. Re-deciding means the escalation is aimed at a process
     /// that is still, right now, the one the sweep chose.
+    ///
+    /// **Both signals deliberately take the group-widening door, not the
+    /// pid-exact one**, and the choice is the opposite of what it looks like
+    /// from `ProcessSignaller` alone. The job is a session and process-group
+    /// leader (`setsid` then `forkpty` in the holder), so `signal` widens to
+    /// `kill(-pid, …)` — which is the point: the thing being reclaimed is an
+    /// orphaned job *and its descendants*. A job that ignores SIGHUP while
+    /// holding `/dev/null` on its stdio survives a pid-exact kill; that was
+    /// measured, and it is why teardown moved to a group kill in `c12c0386`.
+    /// Reaping pid-exact here would leave behind exactly what this leg exists
+    /// to collect.
+    ///
+    /// The pid-reuse worry that argues for the pid-exact door is real but is
+    /// answered elsewhere and only narrowed, never closed, by that door: if a
+    /// stranger has inherited the number, `kill(pid, …)` lands on the stranger
+    /// just as surely as `kill(-pid, …)` lands on its group. What actually
+    /// protects the escalation is the re-decision below, and the widening is
+    /// itself conditional on `getpgid(pid) == pid`, so a reused pid that is not
+    /// a group leader degrades to pid-exact on its own.
     private func reapVerified(_ record: HolderChildRecord) async {
         let pid = record.childPID
+        // Fresh by construction: the caller signalled `.reap` from
+        // `decideHolderChild` immediately before calling in, so this SIGTERM is
+        // aimed at a decision that is as current as one can be. Only the
+        // escalation, which waits out the grace window, needs re-deciding.
         signaller.terminate(pid)
         for _ in 0..<graceAttempts {
             if !signaller.isAlive(pid) { return }
