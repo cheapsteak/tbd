@@ -248,8 +248,8 @@ struct HolderSpawner {
             unlink(socketPath)
         }
 
-        let stderrPath = holdersDir.appendingPathComponent(
-            "\(sessionID.uuidString.lowercased()).log").path
+        let stderrPath = HolderRendezvous.logPath(
+            sessionID: sessionID, environment: environment)
         let holderPID = try launchHolder(
             sessionID: sessionID,
             socketPath: socketPath,
