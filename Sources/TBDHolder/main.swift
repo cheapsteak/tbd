@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 // TBDHolder — one process per holder-transport session.
@@ -19,6 +20,14 @@ func fail(_ message: String, code: Int32) -> Never {
     FileHandle.standardError.write(Data("TBDHolder: \(message)\n".utf8))
     exit(code)
 }
+
+// The first thing this process does, before argument parsing and before
+// anything that could block. Its presence in a holder's log is what separates
+// "the holder ran and then went wrong" from "the holder never got here" — a
+// process killed during `exec`, a redirect that never applied, and a holder
+// that simply wrote nothing are otherwise the same empty file. See
+// `HolderSpawner.describeFailure`, which reads this log when a spawn fails.
+holderTrace("entered main: pid \(getpid()), \(CommandLine.arguments.count - 1) arguments")
 
 do {
     let arguments = try HolderArguments.parse(Array(CommandLine.arguments.dropFirst()))

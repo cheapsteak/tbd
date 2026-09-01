@@ -406,7 +406,8 @@ struct HolderClientTests {
             thrown = error
         }
 
-        guard case .holderDidNotBind(let holderPID, _, _)? = thrown as? HolderSpawner.Error else {
+        guard case .holderDidNotBind(let holderPID, _, let diagnostics)?
+            = thrown as? HolderSpawner.Error else {
             Issue.record("expected .holderDidNotBind, got \(String(describing: thrown))")
             return
         }
@@ -416,6 +417,25 @@ struct HolderClientTests {
         defer { reapIfAlive(holderPID) }
         #expect(holderPID > 0)
         #expect(!processIsAlive(holderPID))
+
+        // The failure has to say which of the several indistinguishable things
+        // happened, because "<no holder output>" was true of all of them. This
+        // stand-in is alive and silent, so the report must say exactly that —
+        // and must say the log file EXISTS and is empty, which is what
+        // separates a holder that wrote nothing from a redirect that never
+        // applied.
+        #expect(
+            diagnostics.contains("holder=alive"),
+            "the report must distinguish a live holder from a dead one: \(diagnostics)")
+        #expect(
+            diagnostics.contains("file exists") && diagnostics.contains("empty"),
+            "an empty stderr file must not read as a missing one: \(diagnostics)")
+        #expect(
+            diagnostics.contains("socket absent"),
+            "the report must say whether the socket was ever created: \(diagnostics)")
+        #expect(
+            diagnostics.contains("polls over"),
+            "the report must say what the budget bought in real time: \(diagnostics)")
     }
 
     /// A holder that DID create its socket must survive the failed spawn.

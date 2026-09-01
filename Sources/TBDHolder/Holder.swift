@@ -18,6 +18,22 @@ import os
 /// `malloc` before it ever reaches `execve`. Reaping is therefore a `WNOHANG`
 /// `waitpid` inside the same `poll` loop that serves clients, not a thread
 /// blocked in `waitpid`: no thread means no window in which one could exist.
+/// Writes one line to the holder's stderr, which the spawner redirects to a
+/// per-session log file and reads back when a spawn fails.
+///
+/// `write(2)` rather than `FileHandle`, and a monotonic-free timestamp rather
+/// than a formatter, because these lines exist to describe a process that may
+/// be in trouble: the fewer subsystems a breadcrumb needs, the more failures it
+/// survives. It is also the reason the holder's log is never empty in a healthy
+/// run — an empty log is now itself a finding.
+func holderTrace(_ message: String) {
+    var elapsed = timeval()
+    gettimeofday(&elapsed, nil)
+    let line = Array(
+        String(format: "TBDHolder [%ld.%06d]: %@\n", elapsed.tv_sec, elapsed.tv_usec, message).utf8)
+    line.withUnsafeBufferPointer { _ = write(2, $0.baseAddress, $0.count) }
+}
+
 final class Holder {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "holder")
 
@@ -89,7 +105,14 @@ final class Holder {
             throw HolderStartupError.invalidLockDescriptor(arguments.lockFD)
         }
 
+        // Two breadcrumbs around the one step whose success the daemon judges
+        // by looking at the filesystem. An absent socket plus "binding" means
+        // the holder reached `bind` and did not finish; an absent socket with
+        // no line at all means it never got this far. The daemon cannot tell
+        // those apart from the outside, and they are different bugs.
+        holderTrace("binding \(arguments.socketPath)")
         let listenFD = try bindListener(at: arguments.socketPath)
+        holderTrace("bound \(arguments.socketPath); forking the job")
         var socketIsBound = true
         defer {
             if socketIsBound {
