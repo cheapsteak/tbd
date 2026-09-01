@@ -6,6 +6,7 @@ public enum FDChannelError: LocalizedError, Equatable {
     case sendFailed(Int32)          // errno from sendmsg/write or setup
     case receiveFailed(Int32)       // errno from recvmsg
     case peerClosed                 // clean EOF from the peer
+    case emptyPayload               // sendFDMinimal with nothing to carry the fd
 
     public var errorDescription: String? {
         switch self {
@@ -15,6 +16,8 @@ public enum FDChannelError: LocalizedError, Equatable {
             return "fd channel receive failed: errno \(code) (\(Self.errnoText(code)))"
         case .peerClosed:
             return "fd channel peer closed the connection (clean EOF)"
+        case .emptyPayload:
+            return "fd channel send needs at least one payload byte to carry the descriptor"
         }
     }
 
@@ -131,6 +134,34 @@ public enum FDChannel {
                     try sendData(Data(frame.dropFirst(sent)), over: socket)
                 }
             }
+        }
+    }
+
+    /// Send `fd` over `socket` carrying exactly one byte of `payload`, then
+    /// write the remainder with a plain full-write loop.
+    ///
+    /// Why one byte and not the whole frame: `sendmsg` with an `SCM_RIGHTS`
+    /// control block has been observed failing with `EMSGSIZE` at payload sizes
+    /// the man page permits, and an empty payload fails too. One byte is the
+    /// size known to work, which is why an empty payload is a named error here
+    /// rather than a silent no-op — a caller with nothing to say still needs a
+    /// byte for the descriptor to ride on.
+    ///
+    /// The fd is never re-sent for the remainder: a second `sendmsg` carrying
+    /// the same `SCM_RIGHTS` block would materialize a *duplicate* descriptor
+    /// in the recipient, which then leaks (it is a second reference to the same
+    /// open file, so closing one keeps the pty master alive). `sendFD` already
+    /// handles a short `sendmsg` the same way, by sending only the remaining
+    /// bytes through `sendData`.
+    ///
+    /// Like `sendFD`, `fd` remains the caller's to close on return.
+    public static func sendFDMinimal(_ fd: Int32, over socket: Int32, payload: Data) throws {
+        guard let first = payload.first else {
+            throw FDChannelError.emptyPayload
+        }
+        try sendFD(fd, over: socket, frame: Data([first]))
+        if payload.count > 1 {
+            try sendData(payload.dropFirst(), over: socket)
         }
     }
 
