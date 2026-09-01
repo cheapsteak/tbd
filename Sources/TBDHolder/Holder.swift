@@ -242,6 +242,11 @@ final class Holder {
         let chdirFailure = Self.chdirFailureExitCode
         let execFailure = Self.execFailureExitCode
         let descriptorCeiling = Self.descriptorCeiling()
+        // Built here for the same reason: `sigemptyset` is async-signal-safe,
+        // but there is nothing to be gained by doing in the child what can be
+        // done before the fork.
+        var emptyMask = sigset_t()
+        sigemptyset(&emptyMask)
 
         let pid = forkpty(&primaryFD, nameBuffer, nil, &size)
         if pid == 0 {
@@ -254,6 +259,19 @@ final class Holder {
             // `signal(2)` is async-signal-safe, so it is legal in this window.
             signal(SIGHUP, SIG_DFL)
             signal(SIGPIPE, SIG_DFL)
+
+            // **The mask is a second, independent inheritance, and it survives
+            // fork and exec identically.** Resetting the two dispositions above
+            // does nothing for it: a blocked signal is never delivered whatever
+            // its disposition says. This line is what guarantees the job's own
+            // mask, no matter what the holder inherited or who started it — the
+            // holder is spawned with an empty mask (see
+            // `HolderSpawner.launchHolder`), and this is the guarantee that
+            // does not depend on that. Without it a job cannot be Ctrl-C'd or
+            // Ctrl-Z'd, ignores SIGTERM, never sees SIGHUP when its terminal
+            // goes away, and — the one a user watches happen — never relayouts,
+            // because SIGWINCH is blocked. `sigprocmask` is async-signal-safe.
+            sigprocmask(SIG_SETMASK, &emptyMask, nil)
 
             // **A job gets a terminal and nothing else.** Everything above
             // stdio is closed, and two of those descriptors are the reason the

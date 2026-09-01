@@ -285,4 +285,26 @@ public struct WorktreeLifecycle: Sendable {
             paneID: terminal.tmuxPaneID
         )
     }
+
+    /// The holder-transport counterpart of `killWindowAndReap`, for the
+    /// teardown paths that delete a terminal's row: stop the daemon's reader,
+    /// tell the holder to let go of the pty master, and kill the job it forked.
+    /// Returns a description of what was left running, or nil.
+    ///
+    /// It is a *replacement* for the tmux teardown beside it, not an addition.
+    /// A holder row's `tmuxWindowID` and `tmuxPaneID` are the empty string by
+    /// construction, so `captureThenKillWindow` captures nothing, kills nothing,
+    /// and reaps nothing for such a row — which makes it the leak rather than a
+    /// harmless no-op, since the row about to be deleted is the only record of
+    /// the holder and child pids and no sweep covers them until Milestone B's
+    /// holder reconciler lands. Nothing is captured for Closed Terminals
+    /// either: a holder's screen lives in the daemon's own emulator, not in a
+    /// tmux pane, so there was never a capture to preserve.
+    func disposeHolder(for terminal: Terminal) async -> String? {
+        guard let holderRegistry else {
+            return "terminal \(terminal.id) runs on the holder transport but this daemon has "
+                + "no holder registry, so its holder and job were left running"
+        }
+        return await holderRegistry.abandon(terminal: terminal)
+    }
 }

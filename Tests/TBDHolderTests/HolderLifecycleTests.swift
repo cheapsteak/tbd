@@ -190,17 +190,33 @@ struct HolderLifecycleTests {
         defer { fixture.tearDown() }
         fixture.waitForSocket()
 
+        // **The master is taken and held**, which is what keeps the job alive
+        // across the kill below — and it is what the daemon holds in production
+        // while it reads. A job now really does get `SIGHUP` when the *last*
+        // descriptor on its pty closes, which killing the sole holder would
+        // otherwise do: it did not used to, because the job inherited the
+        // spawning thread's signal mask with SIGHUP among nineteen others
+        // blocked, and `Holder.spawnChild` now clears that mask. Arranging the
+        // job's survival through a `trap` instead does not work, and looks like
+        // it does: bash restores a trapped signal to its startup disposition in
+        // any child it forks, so the `sleep` dies and the shell exits with it.
         let childPID: Int32
+        var master: Int32 = -1
         do {
             let client = try fixture.connect()
             defer { client.close() }
-            guard case .described(let description) = try client.request(.describe) else {
-                Issue.record("expected .described\n\(fixture.diagnostics())")
+            let (response, fds) = try client.requestWithFDs(.handOverPTY)
+            guard case .handedOverPTY(let description) = response, let received = fds.first else {
+                for descriptor in fds { close(descriptor) }
+                Issue.record("expected .handedOverPTY with a descriptor\n\(fixture.diagnostics())")
                 return
             }
+            for descriptor in fds.dropFirst() { close(descriptor) }
+            master = received
             childPID = description.childPID
             fixture.trackChild(childPID)
         }
+        defer { close(master) }
 
         kill(fixture.holderPID, SIGKILL)
         waitUntil("the holder to die") { !processIsAlive(fixture.holderPID) }

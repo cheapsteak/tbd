@@ -7,7 +7,10 @@ import Testing
 /// Every argv the dry-run `TmuxManager` was handed. "Nothing was recorded" is
 /// the assertion that a guard sat ahead of the whole tmux mechanic, not merely
 /// ahead of the DB write at the end of it.
-private final class RecordedTmuxArgs: @unchecked Sendable {
+/// Not `private`: the same teardown gate is asserted in `ScratchDeleteRPCTests`
+/// and `DeskSessionManagerTests`, whose fixtures need `TBD_HOME` and so cannot
+/// live in this suite. One recorder rather than three copies.
+final class RecordedTmuxArgs: @unchecked Sendable {
     private let lock = NSLock()
     private var calls: [[String]] = []
 
@@ -475,6 +478,231 @@ struct HolderTmuxAssumptionGateTests {
                 "delete reached tmux for a holder row: \(recorded.snapshot())")
     }
 
+    // MARK: - Gate 6: terminal.delete's activity rails — the one that was OFF
+
+    /// A busy holder session used to be closeable without `--force`.
+    ///
+    /// Not corruption and not a leak: a safety rail that silently stopped
+    /// applying. The rail refuses to close a `.working` row, but qualifies that
+    /// on the session being alive so a row wedged at `.working` by a crash stays
+    /// closeable — and it asked tmux that question for every row. A holder row's
+    /// window id is the empty string, `windowExists` answers `false`, and
+    /// `false` is exactly the answer that switches the rail off.
+    @Test("the close rails refuse a busy holder session, and dispose nothing")
+    func closeRailsRefuseBusyHolderSession() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, childPID: 0)
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .working, source: .derived)
+        let busy = try #require(try await db.terminals.get(id: terminal.id))
+        let before = RowFingerprint(busy)
+
+        // A registry that has recorded nothing about this session: no sweep has
+        // run, so nothing has said the job ended. That is the state a live
+        // holder is in, and it is also the state a holder owned by another
+        // installation is left in, which is why the leg reads "no recorded
+        // ending" as running rather than requiring a positive `.alive`.
+        let router = router(db, tmux: tmux)
+        router.holderRegistry = holderRegistry(listing: [busy])
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: terminal.id, respectActivityRails: true)))
+
+        #expect(!response.success)
+        #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue,
+                "the CLI maps the code to exit 2 without parsing prose")
+        #expect(response.error?.contains("--force") == true,
+                "the message must name the escape hatch")
+        // The row is the assertion, not the error string: a rail that refused
+        // and tore down anyway would be a worse bug than the one it replaces.
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before,
+                "a refused close still mutated the holder row")
+        #expect(recorded.snapshot().isEmpty,
+                "the close rails reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    /// A holder that nothing answers for is a holder that is GONE, and that is
+    /// not the same fact as the job it forked being gone.
+    ///
+    /// `adoptAll`'s catch-all records `exitedStatusUnknown` for exactly that
+    /// state, and the name is the whole point: nobody collected a status. The
+    /// holder's death hangs its job up, and a job that ignores `SIGHUP` — the
+    /// `nohup` shape `HolderTeardownGroupKillTests` already exercises on the
+    /// disposal path — survives it as an orphan. Nothing re-adopts a row nobody
+    /// calls `adopt()` on again, so the status sticks for the daemon's whole
+    /// lifetime. A safety rail must fail CLOSED on that: when we cannot
+    /// establish the job stopped, the confirmation is what the rail is for.
+    @Test("the close rails refuse a busy holder row whose holder is unreachable")
+    func closeRailsRefuseHolderRowWithUnknownExit() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, childPID: 0)
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .working, source: .derived)
+        let busy = try #require(try await db.terminals.get(id: terminal.id))
+        let before = RowFingerprint(busy)
+
+        let registry = holderRegistry(listing: [busy])
+        // Nothing answers at the derived rendezvous, so the startup sweep
+        // records the session as ended with an unknown status.
+        await registry.adoptAll()
+        let ended = await registry.lastKnownStatus(for: terminal.id)
+        #expect(ended == .exitedStatusUnknown, "the fixture never armed the unknown status")
+
+        let router = router(db, tmux: tmux)
+        router.holderRegistry = registry
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: terminal.id, respectActivityRails: true)))
+
+        #expect(!response.success)
+        #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue,
+                "the CLI maps the code to exit 2 without parsing prose")
+        #expect(response.error?.contains("--force") == true,
+                "the message must name the escape hatch")
+        // The row is the assertion, not the error string: the bug this closes
+        // is a teardown that happened without the confirmation, and only the
+        // row can see that.
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before,
+                "a refused close still mutated the holder row")
+        #expect(recorded.snapshot().isEmpty,
+                "the close rails reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    /// The escape hatch the refusal above names, on the holder transport. A
+    /// user who genuinely lost a holder is not trapped: `--force` drops the
+    /// rails (the CLI sends no `respectActivityRails` at all), and the row —
+    /// and the holder teardown that goes with it — proceeds as before.
+    @Test("--force still closes a busy holder row whose holder is unreachable")
+    func forceClosesHolderRowWithUnknownExit() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, childPID: 0)
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .working, source: .derived)
+        let busy = try #require(try await db.terminals.get(id: terminal.id))
+
+        let registry = holderRegistry(listing: [busy])
+        await registry.adoptAll()
+        #expect(await registry.lastKnownStatus(for: terminal.id) == .exitedStatusUnknown,
+                "the fixture never armed the unknown status")
+
+        let router = router(db, tmux: tmux)
+        router.holderRegistry = registry
+        // `--force` is the absence of the rails flag, not a second flag: see
+        // `TerminalCommands`, which sends `force ? nil : true`.
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: terminal.id)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(response.errorCode == nil)
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+    }
+
+    /// Every status the holder leg can be handed, including the one no
+    /// in-process fixture can arrange: `.exited` is recorded only by a holder
+    /// that really collected an exit status, so the RPC-level legs above cannot
+    /// reach it. It is also the leg that keeps the fix from being too broad —
+    /// a real observed exit must still close without `--force`, and only
+    /// `.exitedStatusUnknown` moved.
+    @Test("the holder leg treats an unknown status as unknown, not as exited")
+    func holderLivenessReadsUnknownStatusAsUnknown() {
+        #expect(RPCRouter.activityRailLiveness(holderStatus: .exited(code: 0)) == .stopped)
+        #expect(RPCRouter.activityRailLiveness(holderStatus: .exited(code: 137)) == .stopped)
+        #expect(RPCRouter.activityRailLiveness(holderStatus: .exitedStatusUnknown) == .unknown)
+        #expect(RPCRouter.activityRailLiveness(holderStatus: .alive) == .running)
+        #expect(RPCRouter.activityRailLiveness(holderStatus: nil) == .running)
+    }
+
+    /// The refusal has to say WHY it is refusing, or a user whose holder is
+    /// genuinely gone reads "would kill in-flight work" about a session they
+    /// have every reason to believe is dead and is left guessing why `--force`
+    /// became necessary.
+    @Test("the unknown-liveness refusal names the missing fact, not just the rail")
+    func unknownLivenessRefusalNamesTheMissingFact() {
+        let id = UUID()
+        let unknown = RPCRouter.closeRailsRefusal(
+            terminalID: id, activityState: .working, liveness: .unknown)
+        let running = RPCRouter.closeRailsRefusal(
+            terminalID: id, activityState: .working, liveness: .running)
+
+        #expect(unknown.contains("--force"), "the message must name the escape hatch")
+        #expect(unknown.contains("holder"), "the message must name what is actually gone")
+        #expect(unknown.contains("SIGHUP"), "the message must name why that is not enough")
+        #expect(unknown != running,
+                "an unknown liveness must not be reported as a known-live session")
+        #expect(running.contains("--force"))
+    }
+
+    @Test("the close rails still refuse a busy tmux row whose window is alive")
+    func closeRailsStillRefuseBusyTmuxRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        // The dry-run default reports every window ALIVE, which is the tmux
+        // state this leg is about.
+        let tmux = TmuxManager(dryRun: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .working, source: .derived)
+
+        let router = router(db, tmux: tmux)
+        // Wired in and listing nothing, so an inverted transport comparison
+        // would consult a registry that has never heard of this row rather than
+        // a nil that would make the holder branch unreachable either way.
+        router.holderRegistry = holderRegistry(listing: [])
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: terminal.id, respectActivityRails: true)))
+
+        #expect(!response.success)
+        #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue)
+        #expect(try await db.terminals.get(id: terminal.id) != nil)
+    }
+
+    /// The leg that would redden if the transport comparison were inverted.
+    /// Its window is dead and its registry has recorded nothing, so the tmux
+    /// branch answers "not running" (close) while the holder branch would
+    /// answer "running" (refuse) — the two legs disagree here and nowhere else.
+    @Test("the close rails still release a busy tmux row whose window is dead")
+    func closeRailsReleaseBusyTmuxRowWithDeadWindow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .working, source: .derived)
+
+        let router = router(db, tmux: tmux)
+        router.holderRegistry = holderRegistry(listing: [])
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: terminal.id, respectActivityRails: true)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+    }
+
     @Test("delete still kills an identical tmux row's window")
     func deleteStillKillsTmuxWindow() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -500,5 +728,426 @@ struct HolderTmuxAssumptionGateTests {
         let argv = recorded.snapshot()
         #expect(argv.contains { $0.contains("kill-window") && $0.contains("@7") },
                 "the tmux leg must still kill its own window: \(argv)")
+    }
+
+    // MARK: - Gate 10: the one mechanic that is routed rather than refused
+
+    /// `app.setMainAreaSize` fans a new terminal size out over every terminal
+    /// on an active worktree. For a holder row it called
+    /// `resizeWindow(windowID: "")`, whose failure `try?` swallowed — so the
+    /// session kept the size it was spawned with while the app's main area
+    /// moved out from under it, and the daemon's emulator (what
+    /// `terminal.output` renders) kept the old grid too.
+    ///
+    /// This gate is the one that does NOT refuse. The holder transport can
+    /// answer this question: `HolderReader.resize` reshapes the emulator and
+    /// sets the pty's window size, which is both halves of what the tmux call
+    /// was for. Refusing a mechanic the transport can serve would remove a
+    /// working feature rather than close a hole.
+    ///
+    /// What these two tests pin is the branch: a holder row no longer reaches
+    /// tmux, and a tmux row still does. That the reader is then actually
+    /// resized needs a real `TBDHolder` to observe and belongs in
+    /// `TBDDaemonLiveTests` — here `reader(for:)` answers nil, which is also
+    /// the un-adopted case the branch must survive without throwing.
+    @Test("setMainAreaSize does not reach tmux for a holder row")
+    func setMainAreaSizeSkipsTmuxForHolderRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+
+        let router = router(db, tmux: tmux)
+        router.holderRegistry = holderRegistry(listing: [terminal])
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.setMainAreaSize,
+            params: SetMainAreaSizeParams(cols: 120, rows: 40)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(recorded.snapshot().contains { $0.contains("resize-window") } == false,
+                "setMainAreaSize resized a tmux window for a holder row: \(recorded.snapshot())")
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+    }
+
+    @Test("setMainAreaSize still resizes an identical tmux row's window")
+    func setMainAreaSizeStillResizesTmuxRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = try await seedClaudeTerminal(db, worktreeID: wt.id, transport: .tmux)
+
+        let router = router(db, tmux: tmux)
+        // Wired in and listing nothing, so an inverted transport comparison
+        // reaches a registry that has never heard of this row rather than a nil
+        // that would make the branch unreachable either way.
+        router.holderRegistry = holderRegistry(listing: [])
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.setMainAreaSize,
+            params: SetMainAreaSizeParams(cols: 120, rows: 40)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        let argv = recorded.snapshot()
+        #expect(argv.contains { $0.contains("resize-window") && $0.contains("@7") },
+                "the tmux leg must still resize its own window: \(argv)")
+    }
+
+    // MARK: - Gate 9: the two verbs that refused for the wrong reason
+
+    /// `terminal.send` and `terminal.attachCommand` both consult the pane
+    /// before acting, and both got `.missing` for a holder row — `tmuxPaneID`
+    /// is the empty string, so no line in tmux's answer can match it. Neither
+    /// typed or composed anything, so neither was *unsafe*; both told the
+    /// caller a live session's pane "no longer exists", and `attachCommand`
+    /// said it under the `terminalSessionGone` code the app reads as a window
+    /// worth recovering.
+    ///
+    /// These gates therefore change no outcome. They replace a safe lie with an
+    /// accurate refusal, so the message, the error code and the actuation record
+    /// name the transport rather than blaming a coordinate that was never stale.
+    /// Both refuse rather than serve: Milestone A wires no input path for the
+    /// holder transport — `HolderReader.write` has no caller outside the
+    /// registry — and gives a holder session no tmux session to attach to.
+    @Test("terminal.send refuses a holder row by name and types nothing")
+    func sendRefusesHolderRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+
+        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true)))
+
+        #expect(!response.success)
+        #expect(response.error == RPCRouter.holderSendRefusal(terminalID: terminal.id))
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+        // The strongest half: the refusal sits ahead of the whole tmux
+        // mechanic, not merely ahead of the paste.
+        #expect(recorded.snapshot().isEmpty,
+                "terminal.send reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    @Test("terminal.send still types into an identical tmux row")
+    func sendStillActsOnTmuxRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        // The dry-run pane consultation answers "alive, carrying no identity",
+        // which is the branch that proceeds.
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+
+        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        let argv = recorded.snapshot()
+        #expect(argv.contains { $0.contains("paste-buffer") },
+                "the tmux leg must still paste: \(argv)")
+    }
+
+    @Test("terminal.attachCommand refuses a holder row by name")
+    func attachCommandRefusesHolderRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+
+        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+            method: RPCMethod.terminalAttachCommand,
+            params: TerminalAttachCommandParams(
+                worktreeID: wt.id, terminalID: terminal.id)))
+
+        #expect(!response.success)
+        #expect(response.error == RPCRouter.holderAttachRefusal(terminalID: terminal.id))
+        // Not `terminalSessionGone`: that code is the app's cue to recover a
+        // window, and this session has none to recover.
+        #expect(response.errorCode != RPCErrorCode.terminalSessionGone.rawValue)
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+        #expect(recorded.snapshot().isEmpty,
+                "attachCommand reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    @Test("terminal.attachCommand still composes a command for an identical tmux row")
+    func attachCommandStillActsOnTmuxRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+
+        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+            method: RPCMethod.terminalAttachCommand,
+            params: TerminalAttachCommandParams(
+                worktreeID: wt.id, terminalID: terminal.id)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        let result = try response.decodeResult(TerminalAttachCommandResult.self)
+        #expect(result.paneID == "%7")
+        #expect(result.windowID == "@7")
+    }
+
+    // MARK: - Gate 8: the other teardowns that delete a row
+
+    /// `terminal.delete` was never the only path that deletes a terminal row.
+    /// Worktree archive, forget, `scratch.delete`/`scratch.archive` and the
+    /// Watch Desk close all kill windows and then delete the rows, and every
+    /// one of them leaked a holder for the same reason: `tmuxWindowID` is the
+    /// empty string, so the kill addresses nothing while the holder, the job it
+    /// forked and its rendezvous files outlive the row that was the only record
+    /// of their pids. Nothing reclaims them until Milestone B's reconciler.
+    ///
+    /// The observable is the one the delete gate established: `adoptAll`
+    /// records a status for a session nothing answers for, and `abandon` is the
+    /// only thing that clears it. A row that simply vanished leaves it set.
+    private func armedRegistry(
+        listing terminals: [Terminal], for terminalID: UUID
+    ) async throws -> HolderRegistry {
+        let registry = holderRegistry(listing: terminals)
+        await registry.adoptAll()
+        let armed = await registry.lastKnownStatus(for: terminalID)
+        #expect(armed == .exitedStatusUnknown, "the fixture never armed the observable")
+        return registry
+    }
+
+    private func lifecycle(
+        _ db: TBDDatabase, tmux: TmuxManager, registry: HolderRegistry?
+    ) -> WorktreeLifecycle {
+        var lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        lifecycle.holderRegistry = registry
+        return lifecycle
+    }
+
+    @Test("archiving a worktree disposes its holder instead of killing a window")
+    func archiveDisposesHolder() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // `childPID: 0` for the same reason as the delete gate: it is the one
+        // value the registry's disposal refuses to signal, and every other
+        // value a fixture could name is a pid this shared box may be running.
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, childPID: 0)
+        let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
+
+        _ = try await lifecycle(db, tmux: tmux, registry: registry)
+            .beginArchiveWorktree(worktreeID: wt.id)
+
+        #expect(try await db.terminals.get(id: terminal.id) == nil,
+                "archive is supposed to delete the row; the gate is about what goes with it")
+        let disposed = await registry.lastKnownStatus(for: terminal.id)
+        #expect(disposed == nil,
+                "archive deleted the row without disposing of its holder, so the holder, its child and its rendezvous files are now owned by nothing")
+        #expect(recorded.snapshot().isEmpty,
+                "archive reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    @Test("archiving a worktree still captures and kills an identical tmux row")
+    func archiveStillKillsTmuxWindow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+        // Wired in and listing nothing, so an inverted transport comparison
+        // reaches a registry that has never heard of this row rather than a nil
+        // that would make the branch unreachable either way.
+        let registry = holderRegistry(listing: [])
+
+        _ = try await lifecycle(db, tmux: tmux, registry: registry)
+            .beginArchiveWorktree(worktreeID: wt.id)
+
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        let argv = recorded.snapshot()
+        #expect(argv.contains { $0.contains("kill-window") && $0.contains("@7") },
+                "the tmux leg must still kill its own window: \(argv)")
+    }
+
+    @Test("forgetting a worktree disposes its holder instead of killing a window")
+    func forgetDisposesHolder() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, childPID: 0)
+        let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
+
+        try await lifecycle(db, tmux: tmux, registry: registry)
+            .forgetWorktree(worktreeID: wt.id)
+
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        let disposed = await registry.lastKnownStatus(for: terminal.id)
+        #expect(disposed == nil,
+                "forget deleted the row without disposing of its holder, so the holder, its child and its rendezvous files are now owned by nothing")
+        #expect(recorded.snapshot().isEmpty,
+                "forget reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    @Test("forgetting a worktree still kills an identical tmux row's window")
+    func forgetStillKillsTmuxWindow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+        let registry = holderRegistry(listing: [])
+
+        try await lifecycle(db, tmux: tmux, registry: registry)
+            .forgetWorktree(worktreeID: wt.id)
+
+        #expect(try await db.terminals.get(id: terminal.id) == nil)
+        let argv = recorded.snapshot()
+        #expect(argv.contains { $0.contains("kill-window") && $0.contains("@7") },
+                "the tmux leg must still kill its own window: \(argv)")
+    }
+
+    // MARK: - Gate 7: the auto-resume rail, which types without a user gesture
+
+    /// Arms one pending resume row for `terminal` and returns it, with the
+    /// governing toggle on — production only ever actuates a row that came
+    /// from `scheduler.schedule()`, which always inserts first, and the
+    /// actuator re-reads both facts on every eligibility pass.
+    private func armedResume(
+        _ db: TBDDatabase, terminal: Terminal
+    ) async throws -> ScheduledResume {
+        try await db.config.setAutoResumeOnLimitReset(true)
+        let row = ScheduledResume(
+            terminalID: terminal.id, worktreeID: terminal.worktreeID,
+            claudeSessionID: terminal.claudeSessionID,
+            resetsAt: Date().addingTimeInterval(-120),
+            fireAt: Date().addingTimeInterval(-60),
+            limitType: "session", rawMessage: "limit",
+            createdAt: Date().addingTimeInterval(-3600))
+        _ = try await db.scheduledResumes.insertPending(row)
+        return row
+    }
+
+    /// An actuator whose every side effect is observable: no real sleeping, no
+    /// transcript on disk, and a tmux double that records the keys it is asked
+    /// to type.
+    private func resumeActuator(
+        _ db: TBDDatabase, tmux: FakeResumeTmux
+    ) -> LimitResumeActuator {
+        LimitResumeActuator(
+            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            readTranscript: { _ in nil },
+            transcriptModifiedAt: { _ in nil },
+            waiter: { _ in }, actuationLog: makeTestActuationLog())
+    }
+
+    /// The reproduction, on the answer a real tmux gives.
+    ///
+    /// `windowExists(windowID: "")` is `false`, so the rail cancelled the
+    /// user's armed auto-resume as `.terminalGone` — a silent cancel that
+    /// records "the terminal is gone" for a session that is perfectly alive,
+    /// and leaves nobody told. The refusal is now named, and `.failed` so the
+    /// daemon's notification says so once.
+    @Test("auto-resume refuses a holder row by name instead of cancelling it as gone")
+    func autoResumeRefusesHolderRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+        let resume = try await armedResume(db, terminal: terminal)
+
+        let tmux = FakeResumeTmux()
+        tmux.windowAlive = false   // what a real server answers for ""
+        let outcome = await resumeActuator(db, tmux: tmux).actuate(resume)
+
+        #expect(outcome == .failed(LimitResumeActuator.holderTransportRefusal),
+                "expected the named refusal, got \(outcome)")
+        #expect(tmux.sends.isEmpty)
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before,
+                "a refused auto-resume mutated the holder row")
+    }
+
+    /// The placement assertion: the guard sits ahead of the tmux question, not
+    /// behind it.
+    ///
+    /// Every check between `windowExists` and the keys passes in this fixture —
+    /// the pane answers alive and anonymous, Claude is foreground, copy-mode is
+    /// off — so a guard placed after the window probe would let "continue" be
+    /// typed at whatever the empty pane id resolves to. That is what makes the
+    /// old behavior an accident rather than a safe default: it depended on
+    /// `TmuxManager.windowExists` swallowing its error.
+    @Test("auto-resume types nothing at a holder row even when tmux claims the window is alive")
+    func autoResumeTypesNothingAtHolderRowWithLiveWindowAnswer() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+        let resume = try await armedResume(db, terminal: terminal)
+
+        let tmux = FakeResumeTmux()
+        tmux.windowAlive = true
+        let outcome = await resumeActuator(db, tmux: tmux).actuate(resume)
+
+        #expect(outcome == .failed(LimitResumeActuator.holderTransportRefusal),
+                "expected the named refusal, got \(outcome)")
+        #expect(tmux.sends.isEmpty,
+                "auto-resume typed into a holder row: \(tmux.sends)")
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+    }
+
+    /// The tmux leg. An inverted transport comparison would disable auto-resume
+    /// for the transport that still has a pane to type into.
+    @Test("auto-resume still types the continue sequence into a tmux row")
+    func autoResumeStillActsOnTmuxRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+        // The activity hook already reports working, so the first verification
+        // poll succeeds without a transcript on disk.
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .working, source: .derived)
+        let resume = try await armedResume(db, terminal: terminal)
+
+        let tmux = FakeResumeTmux()
+        tmux.windowAlive = true
+        let outcome = await resumeActuator(db, tmux: tmux).actuate(resume)
+
+        #expect(outcome == .sent, "expected .sent, got \(outcome)")
+        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
     }
 }

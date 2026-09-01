@@ -307,7 +307,7 @@ actor HolderRegistry {
             // The holder is up and supervising a job that no row will ever
             // name, so leaving it would orphan both. Best-effort, and the
             // standing guarantee is still a reconciler (Milestone B).
-            await Self.dispose(handle: spawned.handle)
+            await dispose(handle: spawned.handle)
             throw error
         }
 
@@ -332,19 +332,181 @@ actor HolderRegistry {
     func abandon(terminalID: UUID, handle: HolderHandle) async {
         await release(terminalID: terminalID)
         statuses[terminalID] = nil
-        await Self.dispose(handle: handle)
+        await dispose(handle: handle)
     }
 
-    /// `forget` then kill: the holder closes the pty master and winds down, and
-    /// the job it was supervising is killed by pid. Both are named because
-    /// holder death is deliberately **not** child death — a holder killed on
-    /// its own leaves its job reparented to pid 1 with nobody to reclaim it.
-    private static func dispose(handle: HolderHandle) async {
+    /// Tears down the holder behind a row that is about to lose its DB record,
+    /// deriving the rendezvous from this registry's own environment. Returns a
+    /// description of what was left running, or nil when the whole teardown was
+    /// attempted.
+    ///
+    /// **Every teardown path that deletes terminal rows must call this for a
+    /// holder row, and the `killWindow` beside it is not an adequate
+    /// substitute.** A holder row's `tmuxWindowID` is the empty string by
+    /// construction, so that kill is not merely a no-op for this transport — it
+    /// IS the leak: it addresses a coordinate naming nothing while the holder
+    /// process, the job it forked, and the socket and lock files at its
+    /// rendezvous all outlive the row. The row was the only record of those
+    /// pids, so the moment before it is deleted is the last moment anything can
+    /// reclaim them; until Milestone B's holder reconciler lands, no sweep will
+    /// ever find them again.
+    ///
+    /// `abandon` is best-effort by nature — every step talks to something that
+    /// may already be gone — so it reports nothing, and the only failures
+    /// nameable here are the ones that stop it being *attempted*: an
+    /// unrepresentable rendezvous path, or a row that never recorded the child
+    /// pid. Each one leaks a live process, so each is reported rather than
+    /// swallowed.
+    func abandon(terminal: Terminal) async -> String? {
+        let socketPath: String
+        do {
+            socketPath = try HolderRendezvous.socketPath(
+                sessionID: terminal.id, environment: environment)
+        } catch {
+            return "\(error)"
+        }
+        // `holderPID` is not needed to reclaim anything: `abandon` reaches the
+        // holder over its socket and kills the job by CHILD pid, so a row whose
+        // holder pid was never recorded is still fully reclaimable. `childPID`
+        // is the one that matters, and 0 is the sentinel `dispose` refuses to
+        // signal — deliberately, since `kill(0, …)` would signal the daemon's
+        // own process group.
+        await abandon(
+            terminalID: terminal.id,
+            handle: HolderHandle(
+                holderPID: terminal.holderPID ?? 0,
+                childPID: terminal.childPID ?? 0,
+                socketPath: socketPath))
+        guard terminal.childPID != nil else {
+            return "terminal \(terminal.id) recorded no child pid, so its holder was told to "
+                + "let go but the job it forked was not killed"
+        }
+        return nil
+    }
+
+    /// `forget`, kill, reap: the holder closes the pty master and winds down,
+    /// the job it was supervising is killed by pid, and the holder's corpse is
+    /// collected. All three are named because each is owed to a different
+    /// party.
+    ///
+    /// The kill is separate from the forget because the holder's death does not
+    /// reliably end the job. Closing the last descriptor on the pty master hangs
+    /// the job up, and a job whose `SIGHUP` is at its default disposition dies of
+    /// that — but one that ignores `SIGHUP`, which any job is free to do, would
+    /// be left reparented to pid 1 with nobody to reclaim it.
+    ///
+    /// The reap is owed to this process. A holder is `posix_spawn`ed by the
+    /// daemon, so it is the daemon's own child and **nobody else can collect
+    /// it**: a teardown that stopped at the kill left one zombie per session
+    /// torn down, for the life of the daemon. `HolderSpawner`'s never-bound
+    /// failure path has always reaped for exactly this reason; this is the same
+    /// obligation on the path that runs every time.
+    private func dispose(handle: HolderHandle) async {
+        // Resolved BEFORE the holder is told to let go, and that ordering is the
+        // whole fix. `forget` closes the pty master, which hangs up the
+        // foreground process group and usually kills the job outright — after
+        // which `getpgid` on it answers `ESRCH` and the group can no longer be
+        // named, while a member that ignored `SIGHUP` is still sitting in it.
+        // Reading the group first is what lets the kill below reach that member.
+        let group = Self.jobProcessGroup(childPID: handle.childPID)
         let client = HolderClient(socketPath: handle.socketPath)
         try? await client.forget()
         await client.close()
-        if handle.childPID > 0 { kill(handle.childPID, SIGKILL) }
+        Self.killJob(childPID: handle.childPID, group: group)
+        await reap(holderPID: handle.holderPID)
     }
+
+    /// The process group id to signal for a holder's job, or nil when no group
+    /// may be signalled and only the pid itself is safe to kill.
+    ///
+    /// The job is the session leader of the pty's own session, courtesy of
+    /// `forkpty`, so its group id is its own pid — the closure the design spec
+    /// names for the sibling holder-death path. That is **verified here rather
+    /// than assumed**: a group id that is not the job's own pid names a group
+    /// this daemon did not create, and signalling it would reach processes
+    /// nobody asked us to kill.
+    ///
+    /// The `> 1` guards are not defensive padding. `kill(0, …)` and
+    /// `killpg(0, …)` signal the **caller's** group — the daemon itself and
+    /// every process it owns — so a `0` that reached the negation below would
+    /// take down the fleet, and `getpgid` returns `-1` for a pid that is
+    /// already gone.
+    private static func jobProcessGroup(childPID: Int32) -> Int32? {
+        guard childPID > 1 else { return nil }
+        let pgid = getpgid(childPID)
+        guard pgid > 1, pgid == childPID else { return nil }
+        return pgid
+    }
+
+    /// Kills the job the holder forked: its process group where one could be
+    /// named, and the pid itself always.
+    ///
+    /// The group is what makes this a reclamation rather than a courtesy.
+    /// Closing the pty master hangs the foreground group up, and a job at
+    /// `SIGHUP`'s default disposition dies of that — but `nohup`, a daemonizing
+    /// agent, or a shell with `huponexit` off simply declines, and was left
+    /// reparented to pid 1 with nothing on any sweep that would ever find it
+    /// again (`WorktreeLifecycle+Reconcile` skips holder rows by construction).
+    /// `SIGKILL` to the group cannot be declined.
+    ///
+    /// A descendant that deliberately *leaves* the group — `setsid`, a double
+    /// fork — is outside this closure and survives, exactly as it survives a
+    /// tmux pane kill today. That is a standing fleet-wide problem belonging to
+    /// `AgentReaper`, and the design spec puts it out of scope here.
+    ///
+    /// Both signals are best-effort: a teardown must never fail because
+    /// something it meant to kill was already gone.
+    private static func killJob(childPID: Int32, group: Int32?) {
+        guard childPID > 1 else { return }
+        if let group { _ = kill(-group, SIGKILL) }
+        _ = kill(childPID, SIGKILL)
+    }
+
+    /// Collects a holder that has been told to let go, bounded.
+    ///
+    /// **Bounded, and `WNOHANG`, because this runs on the actor.** A blocking
+    /// `waitpid` on a holder that is slow to exit — or that never answered the
+    /// `forget` at all — would park every other session's adoption and release
+    /// behind it for as long as it took. The budget is generous next to what a
+    /// forgotten holder actually needs (it breaks its poll loop the moment it
+    /// has answered, so the usual case is collected on the first attempt or the
+    /// one after it) and finite next to the wait it replaces.
+    ///
+    /// A negative return ends it immediately rather than after the budget:
+    /// `ECHILD` means the pid is not ours — a holder this daemon adopted from a
+    /// previous one, which no `waitpid` here can ever collect — and waiting out
+    /// the budget on one would delay every teardown after a daemon restart.
+    ///
+    /// What is left when the budget expires is a live holder, not a leak this
+    /// created: it is named in the log, and reclaiming a holder that outlives
+    /// its teardown belongs to the holder reconciler Milestone B adds.
+    private func reap(holderPID: Int32) async {
+        guard holderPID > 0 else { return }
+        var waited: Duration = .zero
+        while true {
+            var status: Int32 = 0
+            let collected = waitpid(holderPID, &status, WNOHANG)
+            if collected == holderPID { return }
+            if collected < 0 && errno != EINTR { return }
+            guard waited < Self.reapBudget else { break }
+            // Accumulated from the interval rather than measured against a
+            // deadline, for the same reason as everywhere else here: `any
+            // Clock<Duration>` pins `Duration` but not `Instant`.
+            try? await clock.sleep(for: Self.reapPollInterval)
+            waited += Self.reapPollInterval
+        }
+        Self.logger.error(
+            """
+            holder pid \(holderPID, privacy: .public) had not exited \
+            \(String(describing: Self.reapBudget), privacy: .public) after being told to let go, \
+            so it was left unreaped
+            """)
+    }
+
+    /// How long a teardown waits for a forgotten holder to exit before giving
+    /// up on collecting it.
+    static let reapBudget: Duration = .seconds(2)
+    static let reapPollInterval: Duration = .milliseconds(20)
 
     // MARK: - Adoption
 

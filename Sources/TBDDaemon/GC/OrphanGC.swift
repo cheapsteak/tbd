@@ -62,6 +62,7 @@ public actor OrphanGC {
     private let scratchpadCollector: ScratchpadCollector
     private let deletionQueueCollector: DeletionQueueCollector
     private let profileDirCollector: ProfileDirCollector
+    private let holderRendezvousCollector: HolderRendezvousCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
     /// keychain, which `scripts/test.sh` cannot fence.
@@ -108,7 +109,8 @@ public actor OrphanGC {
         now: (@Sendable () -> Date)? = nil,
         profileDirBase: URL? = nil,
         credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
-        signaller: any ProcessSignaller = ProductionProcessSignaller()
+        signaller: any ProcessSignaller = ProductionProcessSignaller(),
+        holdersBase: URL? = nil
     ) {
         var wrapped: (@Sendable () async -> [String]?)?
         if let lsofProvider {
@@ -118,7 +120,7 @@ public actor OrphanGC {
             db: db, git: git, broadcast: broadcast, liveCWDsProvider: wrapped,
             scratchpadBase: scratchpadBase, now: now,
             profileDirBase: profileDirBase, credentialsKeychain: credentialsKeychain,
-            signaller: signaller
+            signaller: signaller, holdersBase: holdersBase
         )
     }
 
@@ -143,7 +145,9 @@ public actor OrphanGC {
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
         orphanProcessGraceAttempts: Int = 30,
         orphanProcessPollInterval: Duration = .milliseconds(100),
-        clock: any Clock<Duration> = ContinuousClock()
+        clock: any Clock<Duration> = ContinuousClock(),
+        holdersBase: URL? = nil,
+        holderListenerProbe: (@Sendable (String) async -> Bool)? = nil
     ) {
         let resolvedNow = now ?? Date.init
         let resolvedScratchpadBase = scratchpadBase ?? TBDConstants.claudeScratchpadBase
@@ -169,6 +173,10 @@ public actor OrphanGC {
         self.deletionQueueCollector = DeletionQueueCollector(git: git, now: resolvedNow)
         self.profileDirCollector = ProfileDirCollector(
             base: resolvedProfileDirBase, now: resolvedNow)
+        self.holderRendezvousCollector = HolderRendezvousCollector(
+            base: holdersBase ?? TBDConstants.holdersDir(),
+            now: resolvedNow,
+            isListening: holderListenerProbe ?? HolderRendezvousCollector.probeForListener)
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -260,6 +268,10 @@ public actor OrphanGC {
         await reclaimOrphanProcesses(
             config: config, repos: repos, live: live,
             dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
+        await reclaimHolderRendezvous(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
         // Snapshot retention never runs in dryRun; the outer guard already
@@ -661,6 +673,62 @@ public actor OrphanGC {
                     """)
                 }
                 await insertReapRecord(record)
+                reaped += 1
+            }
+        }
+    }
+
+    // MARK: - Holder rendezvous files
+
+    /// Unlinks the socket, lock and log a dead pty holder left in
+    /// `~/tbd/holders` — the named reconciler for that resource class
+    /// (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+    /// "Reconciliation").
+    ///
+    /// Gated by `gcHolderRendezvousEnabled` on top of `gcEnabled`, both because
+    /// every new background sweep that unlinks files soaks behind its own
+    /// switch and because the transport it reclaims after is itself still
+    /// behind `ptyHolderEnabled` — a machine that has never spawned a holder
+    /// has nothing here for this phase to be right or wrong about.
+    ///
+    /// `dryRun` bypasses the flag exactly as `sweep` lets it bypass `gcEnabled`:
+    /// planning is read-only, and someone deciding whether to enable a
+    /// default-off flag needs to see what enabling it would reclaim before
+    /// flipping it. A NON-dry run still requires the flag.
+    ///
+    /// This phase deliberately reads no rows. It reclaims files whose *process*
+    /// is gone, which the socket and the lock answer directly; the
+    /// holder-versus-database check the design also describes is a separate
+    /// leg, and folding it in here would make a filesystem sweep depend on
+    /// intent it does not need.
+    private func reclaimHolderRendezvous(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        guard config.gcHolderRendezvousEnabled || dryRun else { return }
+        for candidate in holderRendezvousCollector.candidates() {
+            switch await holderRendezvousCollector.decide(
+                candidate, graceSeconds: config.gcGraceSeconds
+            ) {
+            case .keep(let reason):
+                planned.append("KEEP \(reason) \(candidate.socketPath)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) \(candidate.socketPath, privacy: .public)
+                """)
+            case .reap:
+                planned.append("REAP holder-rendezvous \(candidate.socketPath)")
+                // This arm's guard is `gcHolderRendezvousEnabled || dryRun`, so
+                // every line below runs only with the flag actually on.
+                guard !dryRun else { continue }
+                let removed = holderRendezvousCollector.reap(candidate)
+                if removed.isEmpty {
+                    planned.append("KEEP unlink-failed \(candidate.socketPath)")
+                    continue
+                }
+                // Counted once per session, not once per file: the triple is
+                // one holder's residue, and `reaped` is what the sweep reports
+                // as things reclaimed. No `ReapRecord` is written — these files
+                // are unlinked, not quarantined, and there is nothing a
+                // `tbd gc restore` could put back.
                 reaped += 1
             }
         }

@@ -1454,6 +1454,21 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcOrphanProcessesEnabled: Bool
+    /// Gate for the orphan-GC phase that unlinks holder rendezvous files whose
+    /// holder is gone — the socket, and its sibling lock and log
+    /// (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+    /// "Reconciliation"). Read on top of `gcEnabled`: both must be on for the
+    /// phase to run. It ships OFF because it is a brand-new background sweep
+    /// that unlinks files, and the holder transport it reclaims after is itself
+    /// still soaking behind `ptyHolderEnabled`.
+    ///
+    /// **Resolved, not stored**, like `gcProfileDirsEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `gc_holder_rendezvous_enabled ?? Config.gcHolderRendezvousEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var gcHolderRendezvousEnabled: Bool
     /// The single opt-in for remote peer messaging
     /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
     /// rollout"): publishing a shadow peer for each remote session and carrying
@@ -1558,6 +1573,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// change to this constant, with no forcing `UPDATE` migration and every
     /// explicit opt-out left alone.
     public static let ptyHolderDefault = false
+    /// The shipped default for `gcHolderRendezvousEnabled`, and the single place
+    /// it lives. The rendezvous sweep ships off; graduation — after a soak in
+    /// which it never unlinks a socket a live holder was using — is a change to
+    /// this constant, with no forcing `UPDATE` migration and every explicit
+    /// opt-out left alone.
+    public static let gcHolderRendezvousEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1592,6 +1613,7 @@ public struct Config: Codable, Sendable, Equatable {
                 gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
                 remotePeerMessagingEnabled: Bool = Config.remotePeerMessagingDefault,
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
+                gcHolderRendezvousEnabled: Bool = Config.gcHolderRendezvousEnabledDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1627,6 +1649,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
         self.remotePeerMessagingEnabled = remotePeerMessagingEnabled
         self.ptyHolderEnabled = ptyHolderEnabled
+        self.gcHolderRendezvousEnabled = gcHolderRendezvousEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -1716,6 +1739,12 @@ public struct Config: Codable, Sendable, Equatable {
         // rather than hardcoding `false`.
         ptyHolderEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderEnabled) ?? Config.ptyHolderDefault
+        // And the last of them: absent means the sender knew nothing about the
+        // flag, which is the NULL column's situation — follow the shipped
+        // default rather than hardcoding `false`.
+        gcHolderRendezvousEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .gcHolderRendezvousEnabled)
+            ?? Config.gcHolderRendezvousEnabledDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.

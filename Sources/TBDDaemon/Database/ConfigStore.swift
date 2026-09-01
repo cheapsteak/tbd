@@ -93,6 +93,13 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.ptyHolderDefault`, never through `?? false`.
     var pty_holder_enabled: Bool?
+    /// Gate for the GC phase that unlinks holder rendezvous files whose holder
+    /// is gone. **Genuinely tri-state**, same shape as `pty_holder_enabled`:
+    /// the `20260901135111_config_gc_holder_rendezvous` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.gcHolderRendezvousEnabledDefault`, never through
+    /// `?? false`.
+    var gc_holder_rendezvous_enabled: Bool?
     /// This installation's holder owner token, minted once by the first daemon
     /// that needs one and read forever after. **Not a flag**: NULL means "not
     /// yet minted", and the mint is the conditional UPDATE in
@@ -131,6 +138,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   soak gate.
     /// - Parameter ptyHolderDefault: same shape once more, for
     ///   `pty_holder_enabled` — the pty-holder transport's soak gate.
+    /// - Parameter gcHolderRendezvousDefault: and once more, for
+    ///   `gc_holder_rendezvous_enabled` — the holder rendezvous sweep's soak
+    ///   gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -139,7 +149,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
         gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault,
         remotePeerMessagingDefault: Bool = Config.remotePeerMessagingDefault,
-        ptyHolderDefault: Bool = Config.ptyHolderDefault
+        ptyHolderDefault: Bool = Config.ptyHolderDefault,
+        gcHolderRendezvousDefault: Bool = Config.gcHolderRendezvousEnabledDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -199,6 +210,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             remotePeerMessagingEnabled: remote_peer_messaging_enabled ?? remotePeerMessagingDefault,
             // And once more, for the pty-holder transport's gate — NOT `?? false`.
             ptyHolderEnabled: pty_holder_enabled ?? ptyHolderDefault,
+            // And the last of them, for the holder rendezvous sweep's gate —
+            // NOT `?? false`.
+            gcHolderRendezvousEnabled: gc_holder_rendezvous_enabled ?? gcHolderRendezvousDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
             // Passed straight through, NULL included: "not yet minted" is a
             // real state and has no default to resolve to.
@@ -626,6 +640,19 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET pty_holder_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the holder rendezvous sweep gate (default OFF, soaking) — read
+    /// on top of the GC master switch, so both must be on for the phase to run.
+    /// The column is written on every call, because writing either value is the
+    /// explicit gesture that lifts it out of NULL forever after.
+    public func setGCHolderRendezvousEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET gc_holder_rendezvous_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

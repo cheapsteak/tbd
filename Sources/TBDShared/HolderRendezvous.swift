@@ -47,6 +47,25 @@ public enum HolderRendezvous {
         try validated(path(sessionID: sessionID, ext: "lock", environment: environment))
     }
 
+    /// Where the holder's stderr is redirected. Not validated against
+    /// `sun_path`: it is never bound, and a session whose socket already fits
+    /// has a log path of the same length. Unlike the socket and the lock this
+    /// file has no protocol role at all — it exists so a holder that dies
+    /// before it can answer still leaves a reason behind — but it is named and
+    /// placed by the same rule, so it belongs in the same one place rather than
+    /// being re-composed by each caller.
+    public static func logPath(
+        sessionID: UUID,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
+        path(sessionID: sessionID, ext: "log", environment: environment)
+    }
+
+    /// Extensions of every file one session may leave in the holders
+    /// directory. The socket comes first because it is the one the reconciler
+    /// decides on; the rest are swept as its siblings.
+    public static let fileExtensions = ["sock", "lock", "log"]
+
     private static func path(sessionID: UUID, ext: String, environment: [String: String]) -> String {
         TBDConstants.holdersDir(environment: environment)
             .appendingPathComponent("\(sessionID.uuidString.lowercased()).\(ext)")
