@@ -307,7 +307,7 @@ actor HolderRegistry {
             // The holder is up and supervising a job that no row will ever
             // name, so leaving it would orphan both. Best-effort, and the
             // standing guarantee is still a reconciler (Milestone B).
-            await Self.dispose(handle: spawned.handle)
+            await dispose(handle: spawned.handle)
             throw error
         }
 
@@ -332,7 +332,7 @@ actor HolderRegistry {
     func abandon(terminalID: UUID, handle: HolderHandle) async {
         await release(terminalID: terminalID)
         statuses[terminalID] = nil
-        await Self.dispose(handle: handle)
+        await dispose(handle: handle)
     }
 
     /// Tears down the holder behind a row that is about to lose its DB record,
@@ -384,16 +384,76 @@ actor HolderRegistry {
         return nil
     }
 
-    /// `forget` then kill: the holder closes the pty master and winds down, and
-    /// the job it was supervising is killed by pid. Both are named because
-    /// holder death is deliberately **not** child death — a holder killed on
-    /// its own leaves its job reparented to pid 1 with nobody to reclaim it.
-    private static func dispose(handle: HolderHandle) async {
+    /// `forget`, kill, reap: the holder closes the pty master and winds down,
+    /// the job it was supervising is killed by pid, and the holder's corpse is
+    /// collected. All three are named because each is owed to a different
+    /// party.
+    ///
+    /// The kill is separate from the forget because the holder's death does not
+    /// reliably end the job. Closing the last descriptor on the pty master hangs
+    /// the job up, and a job whose `SIGHUP` is at its default disposition dies of
+    /// that — but one that ignores `SIGHUP`, which any job is free to do, would
+    /// be left reparented to pid 1 with nobody to reclaim it.
+    ///
+    /// The reap is owed to this process. A holder is `posix_spawn`ed by the
+    /// daemon, so it is the daemon's own child and **nobody else can collect
+    /// it**: a teardown that stopped at the kill left one zombie per session
+    /// torn down, for the life of the daemon. `HolderSpawner`'s never-bound
+    /// failure path has always reaped for exactly this reason; this is the same
+    /// obligation on the path that runs every time.
+    private func dispose(handle: HolderHandle) async {
         let client = HolderClient(socketPath: handle.socketPath)
         try? await client.forget()
         await client.close()
         if handle.childPID > 0 { kill(handle.childPID, SIGKILL) }
+        await reap(holderPID: handle.holderPID)
     }
+
+    /// Collects a holder that has been told to let go, bounded.
+    ///
+    /// **Bounded, and `WNOHANG`, because this runs on the actor.** A blocking
+    /// `waitpid` on a holder that is slow to exit — or that never answered the
+    /// `forget` at all — would park every other session's adoption and release
+    /// behind it for as long as it took. The budget is generous next to what a
+    /// forgotten holder actually needs (it breaks its poll loop the moment it
+    /// has answered, so the usual case is collected on the first attempt or the
+    /// one after it) and finite next to the wait it replaces.
+    ///
+    /// A negative return ends it immediately rather than after the budget:
+    /// `ECHILD` means the pid is not ours — a holder this daemon adopted from a
+    /// previous one, which no `waitpid` here can ever collect — and waiting out
+    /// the budget on one would delay every teardown after a daemon restart.
+    ///
+    /// What is left when the budget expires is a live holder, not a leak this
+    /// created: it is named in the log, and reclaiming a holder that outlives
+    /// its teardown belongs to the holder reconciler Milestone B adds.
+    private func reap(holderPID: Int32) async {
+        guard holderPID > 0 else { return }
+        var waited: Duration = .zero
+        while true {
+            var status: Int32 = 0
+            let collected = waitpid(holderPID, &status, WNOHANG)
+            if collected == holderPID { return }
+            if collected < 0 && errno != EINTR { return }
+            guard waited < Self.reapBudget else { break }
+            // Accumulated from the interval rather than measured against a
+            // deadline, for the same reason as everywhere else here: `any
+            // Clock<Duration>` pins `Duration` but not `Instant`.
+            try? await clock.sleep(for: Self.reapPollInterval)
+            waited += Self.reapPollInterval
+        }
+        Self.logger.error(
+            """
+            holder pid \(holderPID, privacy: .public) had not exited \
+            \(String(describing: Self.reapBudget), privacy: .public) after being told to let go, \
+            so it was left unreaped
+            """)
+    }
+
+    /// How long a teardown waits for a forgotten holder to exit before giving
+    /// up on collecting it.
+    static let reapBudget: Duration = .seconds(2)
+    static let reapPollInterval: Duration = .milliseconds(20)
 
     // MARK: - Adoption
 
