@@ -290,6 +290,7 @@ public enum RPCMethod {
     public static let configSetGCProfileDirsEnabled = "config.setGCProfileDirsEnabled"
     public static let configSetGCOrphanProcessesEnabled = "config.setGCOrphanProcessesEnabled"
     public static let configSetGCHolderRendezvousEnabled = "config.setGCHolderRendezvousEnabled"
+    public static let configSetGCRowlessHoldersEnabled = "config.setGCRowlessHoldersEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -2944,6 +2945,17 @@ public struct ConfigSetGCProfileDirsEnabledParams: Codable, Sendable {
 /// gone (default OFF during soak, on top of the GC master switch). Design:
 /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
 public struct ConfigSetGCHolderRendezvousEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setGCRowlessHoldersEnabled` — the gate for the sweep that
+/// **kills** a pty holder this installation owns which no session row claims
+/// (default OFF during soak, on top of the GC master switch). A separate opt-in
+/// from the rendezvous-file sweep because it signals processes rather than
+/// unlinking files. Design:
+/// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
+public struct ConfigSetGCRowlessHoldersEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

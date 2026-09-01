@@ -686,6 +686,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetGCOrphanProcessesEnabled(request.paramsData)
             case RPCMethod.configSetGCHolderRendezvousEnabled:
                 return try await handleConfigSetGCHolderRendezvousEnabled(request.paramsData)
+            case RPCMethod.configSetGCRowlessHoldersEnabled:
+                return try await handleConfigSetGCRowlessHoldersEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:

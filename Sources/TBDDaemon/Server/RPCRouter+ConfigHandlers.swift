@@ -224,6 +224,22 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the row-less holder sweep gate — the default-off soak switch for
+    /// killing a pty holder this installation owns which no session row claims,
+    /// read on top of the GC master switch. Deliberately a different verb from
+    /// the rendezvous gate above: enabling file cleanup must never enable a
+    /// process killer. Like the master switch, flipping it off does not cancel
+    /// an in-progress sweep: `OrphanGC.sweep` re-reads the flag on its next
+    /// pass.
+    func handleConfigSetGCRowlessHoldersEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetGCRowlessHoldersEnabledParams.self, from: paramsData)
+        try await db.config.setGCRowlessHoldersEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the orphaned-process collector gate — the default-off soak
     /// switch for reclaiming processes that outlived the worktree they were
     /// rooted in, read on top of the GC master switch.

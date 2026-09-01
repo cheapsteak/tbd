@@ -431,7 +431,11 @@ actor HolderRegistry {
     /// every process it owns — so a `0` that reached the negation below would
     /// take down the fleet, and `getpgid` returns `-1` for a pid that is
     /// already gone.
-    private static func jobProcessGroup(childPID: Int32) -> Int32? {
+    /// Internal rather than private because `ProductionRowlessHolderReclaimer`
+    /// must kill a holder's job by exactly these rules. Reimplementing them
+    /// beside a second caller is how the `> 1` guards and the resolve-before-
+    /// hang-up ordering get quietly dropped.
+    static func jobProcessGroup(childPID: Int32) -> Int32? {
         guard childPID > 1 else { return nil }
         let pgid = getpgid(childPID)
         guard pgid > 1, pgid == childPID else { return nil }
@@ -456,7 +460,9 @@ actor HolderRegistry {
     ///
     /// Both signals are best-effort: a teardown must never fail because
     /// something it meant to kill was already gone.
-    private static func killJob(childPID: Int32, group: Int32?) {
+    /// Internal for the same reason as `jobProcessGroup` above: one
+    /// implementation of the kill, two callers.
+    static func killJob(childPID: Int32, group: Int32?) {
         guard childPID > 1 else { return }
         if let group { _ = kill(-group, SIGKILL) }
         _ = kill(childPID, SIGKILL)
