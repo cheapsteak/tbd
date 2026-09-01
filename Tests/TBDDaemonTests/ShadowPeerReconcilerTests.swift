@@ -62,6 +62,11 @@ private final class FakeSignaller: ProcessSignaller, @unchecked Sendable {
     func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
     func commandLine(_ pid: Int32) -> String? { nil }
     func stat(_ pid: Int32) -> String? { nil }
+    /// The shadow-peer reconciler identifies its helper by the record it
+    /// published, not by process start time, so this fake has nothing to say
+    /// here — and nil is the answer that keeps every identity check that does
+    /// consult it on the safe side.
+    func startTime(_ pid: Int32) -> Date? { nil }
 
     var terminated: [Int32] {
         lock.lock()

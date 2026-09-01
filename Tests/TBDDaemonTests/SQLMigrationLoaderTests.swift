@@ -498,6 +498,7 @@ import Testing
             "20260831200151_config_holder_owner_token",
             "20260901135111_config_gc_holder_rendezvous",
             "20260901161500_config_gc_rowless_holders",
+            "20260901180118_config_reap_holder_children",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)

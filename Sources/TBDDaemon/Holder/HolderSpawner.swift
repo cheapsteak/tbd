@@ -67,10 +67,14 @@ struct HolderSpawnResult: Sendable {
 /// **Who reclaims a holder is not answered here.** The holder is spawned as a
 /// direct child of the daemon, so a daemon that outlives it must reap its exit
 /// status, and a holder orphaned by a daemon crash is reclaimed by nothing
-/// today. Both belong to the reconcilers Milestone B adds (the
-/// `WorktreeLifecycle+Reconcile` holder inventory, the `OrphanGC` socket and
-/// lock sweep, and the `AgentReaper` holder-transport leg); until they land the
-/// flag stays off outside a development machine.
+/// today. Both belong to the reconcilers Milestone B adds. Two of the three now
+/// exist — the `OrphanGC` rendezvous sweep (`HolderRendezvousCollector`, gated
+/// on `gcHolderRendezvousEnabled`) unlinks the files a dead holder left behind,
+/// and `AgentReaper.sweepHolderChildren` (gated on `reapHolderChildrenEnabled`)
+/// kills the **job** a dead holder left running. The third, the
+/// `WorktreeLifecycle+Reconcile` holder inventory that reconciles the *rows*
+/// themselves, is still outstanding; until it lands the flag stays off outside
+/// a development machine.
 struct HolderSpawner {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "holder")
 

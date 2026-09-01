@@ -291,6 +291,7 @@ public enum RPCMethod {
     public static let configSetGCOrphanProcessesEnabled = "config.setGCOrphanProcessesEnabled"
     public static let configSetGCHolderRendezvousEnabled = "config.setGCHolderRendezvousEnabled"
     public static let configSetGCRowlessHoldersEnabled = "config.setGCRowlessHoldersEnabled"
+    public static let configSetReapHolderChildrenEnabled = "config.setReapHolderChildrenEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -2956,6 +2957,13 @@ public struct ConfigSetGCHolderRendezvousEnabledParams: Codable, Sendable {
 /// unlinking files. Design:
 /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
 public struct ConfigSetGCRowlessHoldersEnabledParams: Codable, Sendable {
+/// Params for `config.setReapHolderChildrenEnabled` — the gate on the
+/// `AgentReaper` leg that kills the surviving job of a dead pty holder (default
+/// OFF during soak). This is how the soak is turned on: the leg signals
+/// processes without a user gesture, so leaving it reachable only by editing
+/// the database by hand would make it un-soakable. Design:
+/// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
+public struct ConfigSetReapHolderChildrenEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

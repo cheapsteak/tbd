@@ -1479,6 +1479,17 @@ public struct Config: Codable, Sendable, Equatable {
     /// files; this one signals processes. They are independent opt-ins because
     /// somebody enabling file cleanup must not silently acquire a process
     /// killer, and because what this phase misjudges cannot be restored.
+    /// Gate for the `AgentReaper` leg that kills the surviving child of a dead
+    /// holder (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+    /// "Reconciliation"). The existing sweep enumerates children of tmux server
+    /// pids and structurally cannot see a job re-parented to launchd, so this
+    /// leg sweeps by each holder session's recorded child pid instead.
+    ///
+    /// It ships OFF because it is a background sweep that kills processes
+    /// without a user gesture — the exact shape CLAUDE.md requires to soak
+    /// behind its own switch — and because the transport it backstops is itself
+    /// still behind `ptyHolderEnabled`, so a machine that has never spawned a
+    /// holder has no row for this leg to be right or wrong about.
     ///
     /// **Resolved, not stored**, like `gcHolderRendezvousEnabled`: the backing
     /// column carries no SQL default and stays NULL until somebody touches the
@@ -1487,6 +1498,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcRowlessHoldersEnabled: Bool
+    /// `reap_holder_children_enabled ?? Config.reapHolderChildrenEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var reapHolderChildrenEnabled: Bool
     /// The single opt-in for remote peer messaging
     /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
     /// rollout"): publishing a shadow peer for each remote session and carrying
@@ -1603,6 +1618,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// session — is a change to this constant, with no forcing `UPDATE`
     /// migration and every explicit opt-out left alone.
     public static let gcRowlessHoldersEnabledDefault = false
+    /// The shipped default for `reapHolderChildrenEnabled`, and the single
+    /// place it lives. The holder leg ships off; graduation — after a soak in
+    /// which it never signals a process that was not the recorded child of a
+    /// dead holder — is a change to this constant, with no forcing `UPDATE`
+    /// migration and every explicit opt-out left alone.
+    public static let reapHolderChildrenEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1639,6 +1660,7 @@ public struct Config: Codable, Sendable, Equatable {
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
                 gcHolderRendezvousEnabled: Bool = Config.gcHolderRendezvousEnabledDefault,
                 gcRowlessHoldersEnabled: Bool = Config.gcRowlessHoldersEnabledDefault,
+                reapHolderChildrenEnabled: Bool = Config.reapHolderChildrenEnabledDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1676,6 +1698,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.ptyHolderEnabled = ptyHolderEnabled
         self.gcHolderRendezvousEnabled = gcHolderRendezvousEnabled
         self.gcRowlessHoldersEnabled = gcRowlessHoldersEnabled
+        self.reapHolderChildrenEnabled = reapHolderChildrenEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -1777,6 +1800,10 @@ public struct Config: Codable, Sendable, Equatable {
         gcRowlessHoldersEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcRowlessHoldersEnabled)
             ?? Config.gcRowlessHoldersEnabledDefault
+        // Same shape again, for the `AgentReaper` holder leg.
+        reapHolderChildrenEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .reapHolderChildrenEnabled)
+            ?? Config.reapHolderChildrenEnabledDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.

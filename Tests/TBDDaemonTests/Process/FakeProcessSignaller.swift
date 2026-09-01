@@ -16,6 +16,10 @@ final class FakeProcessSignaller: ProcessSignaller, @unchecked Sendable {
     /// Scriptable `ps -o stat=` result per pid; a missing entry means the
     /// pid reports no stat (as if gone) — mirrors `ProcessSignaller.stat`.
     var stats: [Int32: String] = [:]
+    /// Scriptable process start time per pid. A missing entry means the start
+    /// time could not be read — which every identity check must read as "not
+    /// the same process", so leaving it unset is how a test states that case.
+    var startTimes: [Int32: Date] = [:]
     private(set) var terminated: [Int32] = []
     private(set) var killed: [Int32] = []
     /// Only the pid-exact variants, recorded separately so a caller that must
@@ -35,11 +39,20 @@ final class FakeProcessSignaller: ProcessSignaller, @unchecked Sendable {
             return b.aliveInitially
         }
     }
-    func terminate(_ pid: Int32) { lock.withLock { terminated.append(pid); terminatedSet.insert(pid) } }
+    /// Fired after a SIGTERM is recorded, so a test can mutate the scripted
+    /// process table mid-reap — the only way to state "this pid was freed and
+    /// handed to somebody else inside the grace window".
+    var onTerminate: (@Sendable (Int32) -> Void)?
+
+    func terminate(_ pid: Int32) {
+        lock.withLock { terminated.append(pid); terminatedSet.insert(pid) }
+        onTerminate?(pid)
+    }
     func forceKill(_ pid: Int32) { lock.withLock { killed.append(pid); killedSet.insert(pid) } }
     func children(ofServerPID serverPID: Int32) -> [Int32] { lock.withLock { childrenByServer[serverPID] ?? [] } }
     func commandLine(_ pid: Int32) -> String? { lock.withLock { cmdlines[pid] } }
     func stat(_ pid: Int32) -> String? { lock.withLock { stats[pid] } }
+    func startTime(_ pid: Int32) -> Date? { lock.withLock { startTimes[pid] } }
 
     func terminateProcessOnly(_ pid: Int32) {
         lock.withLock { terminatedProcessOnly.append(pid) }

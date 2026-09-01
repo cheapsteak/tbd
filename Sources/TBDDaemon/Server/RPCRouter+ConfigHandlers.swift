@@ -235,6 +235,16 @@ extension RPCRouter {
         let params = try decoder.decode(
             ConfigSetGCRowlessHoldersEnabledParams.self, from: paramsData)
         try await db.config.setGCRowlessHoldersEnabled(params.enabled)
+    /// Persist the `AgentReaper` holder leg's gate — the default-off soak
+    /// switch for killing the surviving job of a dead pty holder.
+    ///
+    /// This is how the soak is turned on. Flipping it off does not cancel an
+    /// in-progress sweep: the reaper task re-reads the flag on its next pass,
+    /// the same contract the GC gates keep.
+    func handleConfigSetReapHolderChildrenEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetReapHolderChildrenEnabledParams.self, from: paramsData)
+        try await db.config.setReapHolderChildrenEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

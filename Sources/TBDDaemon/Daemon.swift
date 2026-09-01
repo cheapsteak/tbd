@@ -1163,19 +1163,47 @@ public final class Daemon: Sendable {
 
         if mockMode == nil {
             // 11a-reaper. Reap orphaned/wedged agent processes: sweep now, then periodically.
-            let reaper = AgentReaper(tmux: tmux, signaller: ProductionProcessSignaller())
+            // The holder leg's ground truth: every holder-transport row that
+            // recorded the pid of the job its holder forked. Rows on the tmux
+            // transport are the other leg's business, and a holder row with no
+            // recorded child pid names nothing to reap.
+            let holderSessions: @Sendable () async -> [HolderChildRecord] = { [database] in
+                guard let terminals = try? await database.terminals.list() else { return [] }
+                return terminals.compactMap { terminal in
+                    guard terminal.transport == .holder, let childPID = terminal.childPID else {
+                        return nil
+                    }
+                    return HolderChildRecord(
+                        terminalID: terminal.id,
+                        holderPID: terminal.holderPID,
+                        childPID: childPID,
+                        createdAt: terminal.createdAt)
+                }
+            }
+            let reaper = AgentReaper(
+                tmux: tmux, signaller: ProductionProcessSignaller(),
+                holderSessions: holderSessions)
             let ownedServers: () async -> [String] = { [database] in
                 guard let repos = try? await database.repos.list() else { return [] }
                 return Array(Set(repos.map { TmuxManager.serverName(forRepoPath: $0.path) }))
             }
+            // Read once per sweep rather than captured once at startup, so
+            // flipping the toggle takes effect on the next pass instead of the
+            // next daemon restart. A config read that fails leaves the leg OFF:
+            // the flag's whole job is that nothing kills until somebody says so.
+            let holderLegEnabled: @Sendable () async -> Bool = { [database] in
+                (try? await database.config.get().reapHolderChildrenEnabled) ?? false
+            }
             self.reaperTask = Task {
                 // Sweep once immediately (cold recovery), then every 60s.
                 await reaper.sweep(servers: await ownedServers())
+                await reaper.sweepHolderChildren(enabled: await holderLegEnabled())
                 while !Task.isCancelled {
                     // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                     try? await Task.sleep(for: .seconds(60))
                     guard !Task.isCancelled else { break }
                     await reaper.sweep(servers: await ownedServers())
+                    await reaper.sweepHolderChildren(enabled: await holderLegEnabled())
                 }
             }
 

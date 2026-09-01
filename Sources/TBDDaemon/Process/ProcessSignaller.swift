@@ -31,6 +31,20 @@ public protocol ProcessSignaller: Sendable {
     /// `ps -o stat=` for the pid (e.g. "S+", "Ss"), or nil when the pid is
     /// gone. The trailing `+` marks the tty's foreground process group.
     func stat(_ pid: Int32) -> String?
+    /// When the process now holding this pid started, or nil when that cannot
+    /// be read (the pid is gone, or `ps` answered something unparseable).
+    ///
+    /// This is the anti-pid-reuse fact, and the reason it is a protocol
+    /// requirement rather than a convenience: a caller killing by a pid it
+    /// recorded earlier has no other way to tell its own process from a
+    /// stranger that inherited the number. **Nil must be read as "not the same
+    /// process"** by every such caller — never as "close enough".
+    ///
+    /// The value survives `execve`, which is what makes it usable here: a
+    /// holder's job is spawned as a login shell and may replace its image with
+    /// the agent binary moments later, and its start time does not move when
+    /// it does.
+    func startTime(_ pid: Int32) -> Date?
 }
 
 public extension ProcessSignaller {
@@ -98,6 +112,33 @@ public struct ProductionProcessSignaller: ProcessSignaller {
         Self.runPS(["-o", "stat=", "-p", String(pid)])?
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    public func startTime(_ pid: Int32) -> Date? {
+        guard pid > 0, let raw = Self.runPS(["-o", "lstart=", "-p", String(pid)]) else { return nil }
+        return Self.parseLstart(raw)
+    }
+
+    /// Parses `ps -o lstart=` — "Tue Sep  1 14:02:47 2026", in the machine's
+    /// local time zone.
+    ///
+    /// The day-of-month is space-padded to two columns, so the string carries a
+    /// run of two spaces for the first nine days of every month. Collapsing all
+    /// whitespace before parsing is what keeps this from working for three
+    /// weeks and then failing on the first of the month.
+    static func parseLstart(_ raw: String) -> Date? {
+        let normalized = raw.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        guard !normalized.isEmpty else { return nil }
+        return lstartFormatter.date(from: normalized)
+    }
+
+    /// `en_US_POSIX` because the field's weekday and month names are C-locale
+    /// abbreviations regardless of what the user's locale is set to.
+    private static let lstartFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+        return f
+    }()
 
     private static func runPS(_ args: [String]) -> String? {
         let p = Process()
