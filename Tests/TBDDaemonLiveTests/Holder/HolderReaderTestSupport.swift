@@ -60,9 +60,17 @@ final class HolderProcessFixture {
     }
 
     static func launch(command: String) -> HolderLaunchRequest {
+        launch(executable: "/bin/sh", arguments: ["-c", command])
+    }
+
+    /// A launch for a job that cannot be a shell command. `/bin/sh` can say
+    /// nothing about its own signal mask — reading one takes `sigprocmask`, and
+    /// no shell builtin exposes it — so the signal probe runs an interpreter
+    /// directly rather than through `sh -c`.
+    static func launch(executable: String, arguments: [String]) -> HolderLaunchRequest {
         HolderLaunchRequest(
-            executable: "/bin/sh",
-            arguments: ["-c", command],
+            executable: executable,
+            arguments: arguments,
             workingDirectory: "/tmp",
             environment: ["PATH": "/usr/bin:/bin", "TERM": "xterm-256color"],
             columns: 80,
@@ -89,6 +97,14 @@ final class HolderProcessFixture {
         owner: String = "acme-installation",
         session: UUID = UUID()
     ) async throws -> HolderProcessFixture {
+        try await start(launch: launch(command: command), owner: owner, session: session)
+    }
+
+    static func start(
+        launch request: HolderLaunchRequest,
+        owner: String = "acme-installation",
+        session: UUID = UUID()
+    ) async throws -> HolderProcessFixture {
         let home = scratchHome()
         let token = HolderOwnerToken(rawValue: owner)
         let executable = try #require(
@@ -96,7 +112,7 @@ final class HolderProcessFixture {
         let spawner = HolderSpawner(executableURL: executable)
         let spawned = try await spawner.spawn(
             sessionID: session,
-            launch: launch(command: command),
+            launch: request,
             owner: token,
             environment: environment(home: home))
         return HolderProcessFixture(
@@ -119,6 +135,17 @@ final class HolderProcessFixture {
         self.owner = owner
         self.handle = handle
         self.client = client
+    }
+
+    /// Records that the holder has already been reaped by the code under test,
+    /// so `tearDown` neither signals nor waits on that pid again.
+    ///
+    /// Signalling a reaped pid is not harmless: the number is free the instant
+    /// its corpse is collected, and on a machine running dozens of agent
+    /// sessions the next process to take it is somebody else's. Only a test
+    /// that has **observed** the reap may call this.
+    func noteHolderReaped() {
+        reaped = true
     }
 
     /// Kills the holder AND the job, in that order, then removes the scratch
@@ -155,6 +182,31 @@ final class HolderProcessFixture {
 /// Only a job whose exit finished and whose holder reaped it is gone.
 func holderProcessIsAlive(_ pid: Int32) -> Bool {
     pid > 0 && kill(pid, 0) == 0
+}
+
+/// The kernel's run state for `pid`, or nil once the pid names nothing at all.
+///
+/// **A zombie is still there.** It answers `kill(pid, 0)`, so
+/// `holderProcessIsAlive` cannot tell a corpse nobody collected from a process
+/// that is gone — and that is the only distinction a teardown obliged to
+/// `waitpid` its own child can be judged on. `sysctl` reports the corpse as
+/// `SZOMB` and reports a reaped pid as nothing at all.
+func holderProcessState(_ pid: Int32) -> String? {
+    guard pid > 0 else { return nil }
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    var info = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return nil }
+    // Spelled as literals rather than the `SIDL`/`SRUN`/… macros from
+    // `sys/proc.h`, which are not guaranteed to survive the importer.
+    switch Int32(info.kp_proc.p_stat) {
+    case 1: return "SIDL"
+    case 2: return "SRUN"
+    case 3: return "SSLEEP"
+    case 4: return "SSTOP"
+    case 5: return "SZOMB"
+    default: return "p_stat \(info.kp_proc.p_stat)"
+    }
 }
 
 /// Polls an async condition until it holds or the budget runs out.

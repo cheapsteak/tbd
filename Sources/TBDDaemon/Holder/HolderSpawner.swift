@@ -643,7 +643,34 @@ struct HolderSpawner {
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
+
+        // **A signal mask is inherited, and it survives `execve`.** This spawn
+        // runs on whichever Swift-concurrency worker thread the enclosing task
+        // landed on, and those run with nearly everything blocked — measured
+        // here as SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP and SIGWINCH among
+        // nineteen others. Without `SETSIGMASK` the holder inherits that mask,
+        // its `forkpty` child inherits it in turn, and the job at the end of the
+        // chain cannot be interrupted, suspended, hung up on, terminated by
+        // anything short of SIGKILL, or told its terminal changed size. tmux
+        // never showed this because the tmux server resets its own mask.
+        var emptyMask = sigset_t()
+        sigemptyset(&emptyMask)
+        posix_spawnattr_setsigmask(&attributes, &emptyMask)
+
+        // Dispositions are a separate inheritance: `SIG_IGN` survives `execve`
+        // too, so anything the daemon ignores would arrive ignored. `SETSIGDEF`
+        // starts the holder from defaults instead, and the holder then installs
+        // the only two it actually wants — `SIGHUP` and `SIGPIPE` to `SIG_IGN`,
+        // first thing in `Holder.run()`, which is what makes it survive this
+        // daemon's death. Resetting here therefore takes nothing away from the
+        // holder; it stops the daemon's incidental state reaching the job.
+        var everySignal = sigset_t()
+        sigfillset(&everySignal)
+        posix_spawnattr_setsigdefault(&attributes, &everySignal)
+
+        posix_spawnattr_setflags(
+            &attributes,
+            Int16(POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF))
 
         var argv = arguments.map { strdup($0) }
         argv.append(nil)
