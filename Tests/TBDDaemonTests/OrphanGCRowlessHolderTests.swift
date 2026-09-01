@@ -235,6 +235,39 @@ struct OrphanGCRowlessHolderTests: ~Copyable {
         #expect(result.planned.contains("KEEP has-row \(path)"))
     }
 
+    /// **The late gate.** The gates run against one snapshot of the session
+    /// rows, and the handshake round trip that follows is a real window in which
+    /// a session being born can commit its row. The row is therefore re-read
+    /// immediately before the kill — the same pre-reap re-read
+    /// `reapOrphanProfileDirs` keeps.
+    ///
+    /// The injected handshake is what makes the race deterministic: it commits
+    /// the row from inside the window rather than hoping to land in it.
+    @Test func aRowThatCommitsDuringTheHandshakeIsHonored() async throws {
+        let db = try await armedDatabase()
+        let repo = try await db.repos.create(
+            path: "/tmp/gcrh-repo-\(UUID().uuidString)", displayName: "R", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "w", branch: "b",
+            path: "/tmp/gcrh-wt-\(UUID().uuidString)", tmuxServer: "tbd-gcrh")
+        let id = UUID()
+        let path = makeHolderSocket(id)
+        let reclaimer = RecordingReclaimer()
+        let mine = owner
+        let worktreeID = worktree.id
+
+        let result = await makeGC(db: db, reclaimer: reclaimer, handshake: { _ in
+            _ = try? await db.terminals.create(
+                id: id, worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
+                transport: .holder)
+            return Self.described(owner: mine)
+        }).sweep()
+
+        #expect(await reclaimer.calls.isEmpty,
+                "a session whose row committed mid-handshake must not be killed")
+        #expect(result.planned.contains("KEEP raced-row \(path)"))
+    }
+
     /// An installation that never minted an owner token has never spawned a
     /// holder, so nothing out there can be ours. Every candidate is kept, and
     /// none is probed.

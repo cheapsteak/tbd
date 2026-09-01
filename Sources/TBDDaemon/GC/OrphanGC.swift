@@ -816,11 +816,26 @@ public actor OrphanGC {
                 guard !dryRun else { continue }
                 // The late gate. A row that committed during the handshake makes
                 // this holder somebody's live session after all.
-                if let row = try? await db.terminals.get(id: candidate.sessionID), row != nil {
-                    planned.append("KEEP raced-row \(candidate.socketPath)")
-                    logger.info("""
-                    gc: row-less holder \(candidate.socketPath, privacy: .public) acquired a \
-                    session row during the handshake — left alone
+                //
+                // Spelled `do`/`catch` rather than `try?` deliberately: `try?`
+                // on a throwing call that already returns an optional flattens
+                // "the read failed" into "there is no row", which is the one
+                // direction this gate must never fail in.
+                do {
+                    if try await db.terminals.get(id: candidate.sessionID) != nil {
+                        planned.append("KEEP raced-row \(candidate.socketPath)")
+                        logger.info("""
+                        gc: row-less holder \(candidate.socketPath, privacy: .public) acquired a \
+                        session row during the handshake — left alone
+                        """)
+                        continue
+                    }
+                } catch {
+                    planned.append("KEEP row-reread-failed \(candidate.socketPath)")
+                    logger.error("""
+                    gc: could not re-read the session row for \
+                    \(candidate.socketPath, privacy: .public) \
+                    (\(error.localizedDescription, privacy: .public)) — left alone
                     """)
                     continue
                 }

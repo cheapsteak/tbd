@@ -63,6 +63,32 @@ struct OrphanGCRowlessHolderLiveTests {
             .appendingPathComponent("\(session.uuidString.lowercased()).sock").path
     }
 
+    /// Sweeps until `planned` carries `marker`, and returns that pass's result.
+    ///
+    /// **The retry exists for exactly one race and no other.** Closing a client
+    /// is not the same instant the holder notices: it learns its peer is gone on
+    /// its next poll slice, and a probe that lands in between is answered with
+    /// the busy sentinel — after which the sweep, correctly, keeps. A production
+    /// sweep runs hourly and simply sees it the next time round; a test cannot
+    /// wait an hour, and on a loaded box that slice is long enough to have
+    /// reddened a run.
+    ///
+    /// It cannot paper over a real failure: every marker below is one a *single*
+    /// correct sweep produces, so the loop only ever converts "not yet" into
+    /// "now", never "never" into "yes". Exhausting the budget returns the last
+    /// result and the caller's assertion fails on it.
+    private func sweepUntil(
+        _ marker: String, gc: OrphanGC, timeout: TimeInterval = 20.0
+    ) async -> GCSweepResult {
+        var last = await gc.sweep()
+        let deadline = Date().addingTimeInterval(timeout)
+        while !last.planned.contains(marker), Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(100))
+            last = await gc.sweep()
+        }
+        return last
+    }
+
     // MARK: - The kill
 
     /// **The discriminating test.** A live holder we own, claimed by no session
@@ -87,10 +113,11 @@ struct OrphanGCRowlessHolderLiveTests {
         await fixture.client.close()
 
         let db = try await armedDatabase(owner: fixture.owner.rawValue)
-        let result = await makeGC(db: db, home: fixture.home).sweep()
+        let socket = socketPath(home: fixture.home, session: fixture.sessionID)
+        let result = await sweepUntil(
+            "REAP rowless-holder \(socket)", gc: makeGC(db: db, home: fixture.home))
 
-        #expect(result.planned.contains(
-            "REAP rowless-holder \(socketPath(home: fixture.home, session: fixture.sessionID))"))
+        #expect(result.planned.contains("REAP rowless-holder \(socket)"))
         #expect(result.reaped >= 1)
 
         let childGone = await pollUntil("the job to be killed", timeout: 10.0) {
@@ -105,6 +132,43 @@ struct OrphanGCRowlessHolderLiveTests {
         // Only now: the pid number is free the instant its corpse is collected,
         // and the fixture must not signal it again.
         if holderGone { fixture.noteHolderReaped() }
+    }
+
+    /// The kill needs a holder pid, and the handshake deliberately does not
+    /// carry one — the holder is kept small enough to essentially never change,
+    /// so `LOCAL_PEERPID` on the answering connection is where the pid comes
+    /// from. Nothing above can check that number is the *right* one: the kill
+    /// test would pass just as well against a `nil` pid, because `forget` alone
+    /// usually ends a holder. This pins it against the pid the spawner reported.
+    @Test func theHandshakeConnectionNamesTheHolderProcess() async throws {
+        let fixture = try await HolderProcessFixture.start(command: Self.job)
+        defer { fixture.tearDown() }
+        await fixture.client.close()
+
+        // Retried for the same slot-release race `sweepUntil` documents: the
+        // holder notices the handshake connection has gone on its next poll
+        // slice, and answers anything sooner with the busy sentinel.
+        let socket = socketPath(home: fixture.home, session: fixture.sessionID)
+        var peer: Int32?
+        _ = await pollUntil("the holder to answer a fresh client", timeout: 20.0) {
+            let client = HolderClient(socketPath: socket, receiveTimeout: .seconds(5))
+            do {
+                _ = try await client.describe()
+            } catch {
+                await client.close()
+                return false
+            }
+            peer = await client.peerPID()
+            await client.close()
+            return true
+        }
+
+        #expect(
+            peer == fixture.handle.holderPID,
+            """
+            LOCAL_PEERPID named \(String(describing: peer)), not the spawned holder \
+            \(fixture.handle.holderPID)
+            """)
     }
 
     // MARK: - The two holders that must survive
@@ -127,10 +191,11 @@ struct OrphanGCRowlessHolderLiveTests {
         await fixture.client.close()
 
         let db = try await armedDatabase(owner: "a-different-checkout")
-        let result = await makeGC(db: db, home: fixture.home).sweep()
+        let socket = socketPath(home: fixture.home, session: fixture.sessionID)
+        let result = await sweepUntil(
+            "KEEP foreign-owner \(socket)", gc: makeGC(db: db, home: fixture.home))
 
-        #expect(result.planned.contains(
-            "KEEP foreign-owner \(socketPath(home: fixture.home, session: fixture.sessionID))"))
+        #expect(result.planned.contains("KEEP foreign-owner \(socket)"))
         #expect(holderProcessIsAlive(holderPID), "a foreign holder was killed")
         #expect(holderProcessIsAlive(childPID), "a foreign holder's job was killed")
         #expect(result.reaped == 0)
