@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TestSupport
 import Testing
 
 @testable import TBDDaemonLib
