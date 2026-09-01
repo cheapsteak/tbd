@@ -1209,14 +1209,24 @@ public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
     /// poller has attempted a fetch. nil = non-oauth kind, not logged in, or
     /// an older daemon that doesn't send the field.
     public let usageSnapshot: ProfileUsageSnapshot?
+    /// Last four characters of the stored token, computed by the daemon at list
+    /// time and never persisted. Non-nil only for `.oauthToken` profiles with a
+    /// stored secret. nil = other kind, no secret, or an older daemon.
+    ///
+    /// The whole token never leaves the daemon: the app renders
+    /// `Token •••• <tail>` so two token profiles can be told apart, and that is
+    /// all it is ever given.
+    public let tokenTail: String?
     public init(profile: ModelProfile, usage: ModelProfileUsage? = nil,
                 loginIdentity: String? = nil, configDirPath: String? = nil,
-                usageSnapshot: ProfileUsageSnapshot? = nil) {
+                usageSnapshot: ProfileUsageSnapshot? = nil,
+                tokenTail: String? = nil) {
         self.profile = profile
         self.usage = usage
         self.loginIdentity = loginIdentity
         self.configDirPath = configDirPath
         self.usageSnapshot = usageSnapshot
+        self.tokenTail = tokenTail
     }
 }
 

@@ -38,6 +38,11 @@ import TBDShared
 /// process env before .zshrc runs so oh-my-zsh's update prompt can't block
 /// the agent spawn):
 /// - oauth: `CLAUDE_CONFIG_DIR=<profileDir>` (no auth token; user `/login`s into this dir)
+/// - oauth token: `CLAUDE_CODE_OAUTH_TOKEN=<secret>` + `CLAUDE_CONFIG_DIR=<profileDir>`
+///   (same isolated dir as oauth; the stored `claude setup-token` authenticates
+///   it instead of a `/login`). The token rides tmux's `-e` only — like
+///   `ANTHROPIC_API_KEY` it is never a routing key, so it never lands in the
+///   pane's `ps` argv.
 /// - api key (direct or proxy): `ANTHROPIC_API_KEY=<secret>` + `CLAUDE_CONFIG_DIR=<profileDir>`
 ///   (+ `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` for proxy)
 /// - bedrock: `CLAUDE_CODE_USE_BEDROCK=1` + `AWS_REGION` + optional `AWS_PROFILE`
@@ -149,15 +154,28 @@ enum ClaudeSpawnCommandBuilder {
             // Intentionally no ANTHROPIC_API_KEY / CLAUDE_CONFIG_DIR /
             // ANTHROPIC_BASE_URL for bedrock.
         } else {
-            // Inject auth token only for apiKey profiles.
-            if let secret = profileSecret, profileKind == .apiKey {
-                // Secrets flow through tmux's `-e KEY=VALUE` (argv, no shell
-                // parsing), so we don't need shell-escape allowlists here.
-                // Storage-time validation rejects newlines / NULL bytes that would
-                // break tmux's single-line arg parsing.
-                // NEVER a routing key — secrets must not be inlined into the
-                // command string (visible in `ps` for the pane's lifetime).
-                env["ANTHROPIC_API_KEY"] = secret
+            // Inject the profile's stored secret under the env var its kind
+            // uses. Secrets flow through tmux's `-e KEY=VALUE` (argv, no shell
+            // parsing), so we don't need shell-escape allowlists here.
+            // Storage-time validation rejects newlines / NULL bytes that would
+            // break tmux's single-line arg parsing.
+            // NEVER a routing key — secrets must not be inlined into the
+            // command string (visible in `ps` for the pane's lifetime).
+            if let secret = profileSecret, let kind = profileKind {
+                switch kind {
+                case .apiKey:
+                    env["ANTHROPIC_API_KEY"] = secret
+                case .oauthToken:
+                    env["CLAUDE_CODE_OAUTH_TOKEN"] = secret
+                case .oauth, .bedrock:
+                    // `.oauth` authenticates by a `/login` credential inside
+                    // its isolated CLAUDE_CONFIG_DIR, so a secret that somehow
+                    // reached us for one (a stale `<uuid>.token` file, say) is
+                    // ignored rather than injected — injecting it would
+                    // silently outrank the dir's own credential. `.bedrock`
+                    // never reaches this branch.
+                    break
+                }
             }
             // For oauth profiles, no auth token — they use the isolated
             // CLAUDE_CONFIG_DIR to maintain an independent /login credential.

@@ -364,6 +364,220 @@ struct ModelProfileRPCTests {
         #expect(try await db.modelProfiles.list().count == 1)
     }
 
+    // MARK: - token profiles (CredentialKind.oauthToken)
+
+    private func addTokenProfile(_ router: RPCRouter, name: String,
+                                 token: String) async throws -> RPCResponse {
+        await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(name: name, kind: .claudeToken, token: token)))
+    }
+
+    @Test("add: kind .claudeToken stores the secret as an oauthToken profile")
+    func addTokenProfileStoresSecret() async throws {
+        let (router, db, stub) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+
+        let token = freshToken()
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: token)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfileAddResult.self)
+        #expect(result.profile.kind == .oauthToken)
+        // No warning: unlike the signed-in path, the token was kept.
+        #expect(result.warning == nil)
+        let stored = try ModelProfileKeychain.load(id: result.profile.id.uuidString)
+        #expect(stored == token)
+        // The legacy api-key usage endpoint is never consulted for this kind.
+        #expect(stub.callCount == 0)
+    }
+
+    /// A token profile is nothing without its credential, so the row is never
+    /// created half-formed: there is no state where the kind says "token" and
+    /// no token is stored.
+    @Test("add: .claudeToken with no token is rejected and creates nothing")
+    func addTokenProfileWithoutSecretRejected() async throws {
+        let (router, db, _) = makeRouter()
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(name: "NoToken", kind: .claudeToken, token: nil)))
+        #expect(!resp.success)
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    @Test("add: .claudeToken with a whitespace-only token is rejected")
+    func addTokenProfileWithBlankSecretRejected() async throws {
+        let (router, db, _) = makeRouter()
+        let resp = try await addTokenProfile(router, name: "Blank", token: "   ")
+        #expect(!resp.success)
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    @Test("add: .claudeToken with a baseURL is rejected (token profiles are Claude-direct)")
+    func addTokenProfileWithBaseURLRejected() async throws {
+        let (router, db, _) = makeRouter()
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(name: "ProxyToken", kind: .claudeToken,
+                                          token: freshToken(),
+                                          baseURL: "http://127.0.0.1:3456")))
+        #expect(!resp.success)
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    /// A newline would break tmux's single-line `-e KEY=VALUE` parsing, so the
+    /// store refuses it — and refuses it before any row or secret file exists.
+    @Test("add: .claudeToken with an embedded newline is rejected, nothing stored")
+    func addTokenProfileWithNewlineRejected() async throws {
+        let (router, db, _) = makeRouter()
+        let resp = try await addTokenProfile(router, name: "Bad",
+                                             token: Self.oauthPrefix + "abc\ndef")
+        #expect(!resp.success)
+        #expect(resp.error?.contains("invalid characters") == true)
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    @Test("updateToken: replaces the stored secret")
+    func updateTokenReplacesStoredSecret() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+
+        let first = freshToken()
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: first)
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+
+        let second = freshToken()
+        let rotate = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileUpdateToken,
+            params: ModelProfileUpdateTokenParams(id: profile.id, token: second)))
+        #expect(rotate.success)
+        let stored = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        #expect(stored == second)
+        // Rotation keeps the row: the profile's id, config dir and history all
+        // survive, which is the whole point of not delete-and-recreating.
+        let row = try await db.modelProfiles.get(id: profile.id)
+        #expect(row?.kind == .oauthToken)
+    }
+
+    @Test("updateToken: a blank token is rejected and leaves the stored secret alone")
+    func updateTokenRejectsBlank() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+
+        let original = freshToken()
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: original)
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+
+        let rotate = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileUpdateToken,
+            params: ModelProfileUpdateTokenParams(id: profile.id, token: "   ")))
+        #expect(!rotate.success)
+        let stored = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        #expect(stored == original)
+    }
+
+    @Test("updateToken: rejected on a signed-in profile, which stores no secret")
+    func updateTokenRejectedOnOAuthProfile() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+        let profile = try await db.modelProfiles.create(name: "SignedIn", kind: .oauth)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileUpdateToken,
+            params: ModelProfileUpdateTokenParams(id: profile.id, token: freshToken())))
+        #expect(!resp.success)
+        // Nothing was written for a kind that authenticates by /login.
+        let stored = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        #expect(stored == nil)
+    }
+
+    @Test("updateToken: unknown id fails with profile-not-found")
+    func updateTokenUnknownID() async throws {
+        let (router, _, _) = makeRouter()
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileUpdateToken,
+            params: ModelProfileUpdateTokenParams(id: UUID(), token: freshToken())))
+        #expect(!resp.success)
+        #expect(resp.error == "Profile not found")
+    }
+
+    /// A secret that outlives its profile is a credential nothing owns, so
+    /// deletion reclaims a token profile's file exactly as it reclaims an
+    /// api-key profile's.
+    @Test("delete: reclaims a token profile's stored secret")
+    func deleteReclaimsTokenSecret() async throws {
+        let (router, db, _) = makeRouter(claudeCredentialsKeychain: ProfileRowPresenceProbe())
+        defer { Task { await cleanupKeychain(db) } }
+
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: freshToken())
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+        let beforeDelete = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        #expect(beforeDelete != nil, "the secret really was stored — otherwise this proves nothing")
+
+        let del = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileDelete,
+            params: ModelProfileDeleteParams(id: profile.id)))
+        #expect(del.success)
+        let afterDelete = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        #expect(afterDelete == nil)
+    }
+
+    /// The app never holds a profile secret, so the daemon computes the four
+    /// characters the settings row shows — and sends nothing else.
+    @Test("list: a token profile carries the masked tail, a signed-in one does not")
+    func listCarriesTokenTail() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+
+        let resp = try await addTokenProfile(router, name: "Acme (token)",
+                                             token: "sk-ant-oat01-AAAA4f2a")
+        let tokenProfile = try resp.decodeResult(ModelProfileAddResult.self).profile
+        let oauthProfile = try await db.modelProfiles.create(name: "SignedIn", kind: .oauth)
+
+        let listResp = await router.handle(RPCRequest(method: RPCMethod.modelProfileList))
+        #expect(listResp.success)
+        let result = try listResp.decodeResult(ModelProfileListResult.self)
+        let tokenEntry = result.profiles.first { $0.profile.id == tokenProfile.id }
+        let oauthEntry = result.profiles.first { $0.profile.id == oauthProfile.id }
+        #expect(tokenEntry?.tokenTail == "4f2a")
+        #expect(oauthEntry?.tokenTail == nil)
+        // The secret itself never leaves the daemon: the whole encoded list
+        // payload contains the tail and nothing more of the token.
+        let encoded = try JSONEncoder().encode(result)
+        let wirePayload = String(decoding: encoded, as: UTF8.self)
+        #expect(!wirePayload.contains("sk-ant-oat01-AAAA4f2a"))
+        #expect(wirePayload.contains("4f2a"))
+    }
+
+    @Test("list: a stored secret shorter than four characters yields no tail")
+    func listShortSecretYieldsNoTail() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+
+        let resp = try await addTokenProfile(router, name: "Stub", token: "abc")
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+
+        let listResp = await router.handle(RPCRequest(method: RPCMethod.modelProfileList))
+        let result = try listResp.decodeResult(ModelProfileListResult.self)
+        let entry = result.profiles.first { $0.profile.id == profile.id }
+        #expect(entry?.tokenTail == nil)
+    }
+
+    @Test("fetchUsage: rejected for token profiles (the setup token 403s there)")
+    func fetchUsageRejectsTokenProfiles() async throws {
+        let (router, db, stub) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: freshToken())
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+
+        let usage = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileFetchUsage,
+            params: ModelProfileFetchUsageParams(id: profile.id)))
+        #expect(!usage.success)
+        #expect(usage.error?.contains("token") == true)
+        #expect(stub.callCount == 0)
+    }
+
     // MARK: - list
 
     @Test("list joins usage")

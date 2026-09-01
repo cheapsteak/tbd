@@ -22,6 +22,35 @@ func normalizeFallbackModels(_ raw: [String]?) -> [String]? {
     return cleaned.isEmpty ? nil : Array(cleaned)
 }
 
+/// Why a secret cannot be stored, or nil when it can.
+///
+/// Secrets reach a spawned pane through tmux's `-e KEY=VALUE`, which is parsed
+/// as one line, so a newline, carriage return or NULL byte would truncate or
+/// corrupt the argument. Everything else printable is the credential issuer's
+/// business, not ours.
+///
+/// The returned message never echoes the secret — no caller may put token bytes
+/// in an error string.
+func modelProfileSecretRejectionReason(_ secret: String) -> String? {
+    secret.contains(where: { $0 == "\n" || $0 == "\r" || $0 == "\0" })
+        ? "Token contains invalid characters (newlines or NULL bytes are not allowed)"
+        : nil
+}
+
+/// Last four characters of a token profile's stored secret, for the app's
+/// `Token •••• <tail>` caption — or nil when there is nothing safe to show.
+///
+/// nil for a missing or unreadable secret, and nil for a secret shorter than
+/// four characters: a two-character "tail" would be a larger fraction of the
+/// credential than the caption is worth. The whole secret never leaves the
+/// daemon, and this value is computed per list call, never persisted.
+func modelProfileTokenTail(forProfileID id: UUID) -> String? {
+    guard let secret = try? ModelProfileKeychain.load(id: id.uuidString) else { return nil }
+    let trimmed = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.count >= 4 else { return nil }
+    return String(trimmed.suffix(4))
+}
+
 extension RPCRouter {
 
     // MARK: - List
@@ -42,12 +71,21 @@ extension RPCRouter {
             let loginIdentity: String? = profile.kind == .oauth
                 ? configDirManager.loginIdentity(forProfileID: profile.id)
                 : nil
+            // Token profiles have no identity endpoint to ask (a setup token
+            // 403s on /api/oauth/profile), so the masked tail is the only way
+            // to tell two of them apart. Computed here beside loginIdentity,
+            // for the same reason: it is a fact about the credential store,
+            // and the app is never handed the token itself.
+            let tokenTail: String? = profile.kind == .oauthToken
+                ? modelProfileTokenTail(forProfileID: profile.id)
+                : nil
             return ModelProfileWithUsage(
                 profile: profile,
                 usage: usageByID[profile.id],
                 loginIdentity: loginIdentity,
                 configDirPath: configDirPath,
-                usageSnapshot: oauthSnapshots[profile.id]
+                usageSnapshot: oauthSnapshots[profile.id],
+                tokenTail: tokenTail
             )
         }
         let config = try await db.config.get()
@@ -109,6 +147,51 @@ extension RPCRouter {
             return try RPCResponse(result: ModelProfileAddResult(profile: row, warning: nil))
         }
 
+        // ─── Claude token branch (explicit kind, never inferred) ──────────────
+        // A `sk-ant-oat01-` value is ambiguous on its own: it is also what a
+        // user pastes by mistake into a signed-in profile, which the branch
+        // below deliberately discards with a warning. Only an explicit
+        // `kind: .claudeToken` — the Add sheet's visible auth sub-picker —
+        // means "store this and authenticate with it".
+        if params.kind == .claudeToken {
+            guard params.baseURL == nil else {
+                return RPCResponse(error: "Token profiles are Claude-direct and cannot set a base URL")
+            }
+            let token = (params.token ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !token.isEmpty else {
+                return RPCResponse(error: "A setup token is required for token profiles")
+            }
+            // Deliberately no `sk-ant-oat01-` prefix requirement. The token
+            // format belongs to `claude setup-token`, not to TBD, and a
+            // rejected credential surfaces as a rejected-token row the user
+            // fixes with "Replace token" — a shape check here would only
+            // strand people whenever that format moves.
+            if let reason = modelProfileSecretRejectionReason(token) {
+                return RPCResponse(error: reason)
+            }
+
+            let profileRow = try await db.modelProfiles.create(
+                name: name,
+                kind: .oauthToken,
+                baseURL: nil,
+                model: params.model,
+                fallbackModels: fallbackModels
+            )
+            do {
+                try ModelProfileKeychain.store(id: profileRow.id.uuidString, token: token)
+            } catch {
+                // Roll the row back: a token profile whose secret was never
+                // written cannot authenticate at all, and the row is the only
+                // pointer to the config dir it would otherwise grow.
+                try? await db.modelProfiles.delete(id: profileRow.id)
+                // Generic on purpose — an error string must never carry
+                // token bytes.
+                return RPCResponse(error: "Failed to store secret in keychain")
+            }
+            subscriptions.broadcast(delta: .modelProfilesChanged)
+            return try RPCResponse(result: ModelProfileAddResult(profile: profileRow, warning: nil))
+        }
+
         // ─── Claude-direct / proxy branch ─────────────────────────────────────
         let trimmed = (params.token ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -129,11 +212,8 @@ extension RPCRouter {
             return try RPCResponse(result: ModelProfileAddResult(profile: profileRow, warning: nil))
         }
 
-        // Secrets pass through tmux's `-e KEY=VALUE` argv (no shell), so most
-        // printables are safe. Reject only chars that would break a single-line
-        // tmux arg: newlines, carriage returns, NULL bytes.
-        if trimmed.contains(where: { $0 == "\n" || $0 == "\r" || $0 == "\0" }) {
-            return RPCResponse(error: "Token contains invalid characters (newlines or NULL bytes are not allowed)")
+        if let reason = modelProfileSecretRejectionReason(trimmed) {
+            return RPCResponse(error: reason)
         }
 
         // Infer credential kind. Claude-direct profiles can be OAuth (sk-ant-oat01-)
@@ -216,8 +296,10 @@ extension RPCRouter {
         // Individual cleanup failures stay log-only and non-fatal: the user
         // asked for the profile to be gone, and the profile-dir collector
         // reclaims whatever is left behind.
-        // Only API-key profiles store a Keychain entry; OAuth and Bedrock profiles do not.
-        if profile.kind == .apiKey {
+        // API-key and token profiles store a `<uuid>.token` secret file; OAuth
+        // and Bedrock profiles do not. Both stored kinds are reclaimed here —
+        // a secret outliving its profile is a credential nothing owns.
+        if profile.kind == .apiKey || profile.kind == .oauthToken {
             do {
                 try ModelProfileKeychain.delete(id: params.id.uuidString)
             } catch {
@@ -294,6 +376,43 @@ extension RPCRouter {
             model: params.model,
             fallbackModels: normalizeFallbackModels(params.fallbackModels)
         )
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    // MARK: - Update Token
+
+    /// `modelProfile.updateToken` — replace the stored `claude setup-token` on
+    /// an `.oauthToken` profile.
+    ///
+    /// Setup tokens expire, so rotation is the only recovery path for a profile
+    /// whose credential aged out or was revoked. It is deliberately an update
+    /// rather than delete-and-recreate: the profile keeps its id, its isolated
+    /// config dir, its usage history, and every worktree override pointing at
+    /// it. The next usage probe re-reads the account behind the new token.
+    func handleModelProfileUpdateToken(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ModelProfileUpdateTokenParams.self, from: paramsData)
+        guard let profile = try await db.modelProfiles.get(id: params.id) else {
+            return RPCResponse(error: "Profile not found")
+        }
+        guard profile.kind == .oauthToken else {
+            return RPCResponse(error: "Can only replace the token on a token profile")
+        }
+        let token = params.token.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Blank means "the caller sent nothing", not "clear the credential":
+        // leaving the stored token alone is expressed by not calling this.
+        guard !token.isEmpty else {
+            return RPCResponse(error: "Token cannot be empty")
+        }
+        if let reason = modelProfileSecretRejectionReason(token) {
+            return RPCResponse(error: reason)
+        }
+        do {
+            try ModelProfileKeychain.store(id: params.id.uuidString, token: token)
+        } catch {
+            // Generic on purpose — an error string must never carry token bytes.
+            return RPCResponse(error: "Failed to store secret in keychain")
+        }
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
@@ -376,11 +495,27 @@ extension RPCRouter {
             return RPCResponse(error: "Profile not found")
         }
 
-        // Proxy, bedrock, and oauth profiles can't be polled against the Claude API usage endpoint.
-        // OAuth profiles authenticate per-session and don't store a TBD-side secret.
-        // Proxy and bedrock profiles are not supported by the Claude API usage endpoint.
-        if profile.baseURL != nil || profile.kind == .bedrock || profile.kind == .oauth {
-            return RPCResponse(error: "Usage tracking is not available for \(profile.kind == .oauth ? "OAuth" : profile.baseURL != nil ? "proxy" : "bedrock") profiles")
+        // This endpoint serves direct api-key profiles only. OAuth profiles
+        // authenticate per-session and store no TBD-side secret; proxy and
+        // bedrock profiles are not supported by the Claude API usage endpoint;
+        // and a token profile's setup token 403s on it — its utilization comes
+        // from response headers on a separate probe, not from here.
+        // Order preserved from the ternary this replaced, so the wording for
+        // every pre-existing input is unchanged; `.oauthToken` is appended.
+        let unsupportedLabel: String?
+        if profile.kind == .oauth {
+            unsupportedLabel = "OAuth"
+        } else if profile.kind == .oauthToken {
+            unsupportedLabel = "token"
+        } else if profile.baseURL != nil {
+            unsupportedLabel = "proxy"
+        } else if profile.kind == .bedrock {
+            unsupportedLabel = "bedrock"
+        } else {
+            unsupportedLabel = nil
+        }
+        if let unsupportedLabel {
+            return RPCResponse(error: "Usage tracking is not available for \(unsupportedLabel) profiles")
         }
 
         if let cached = try await db.modelProfileUsage.get(profileID: params.id),

@@ -547,6 +547,8 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileRename(request.paramsData)
             case RPCMethod.modelProfileUpdateEndpoint:
                 return try await handleModelProfileUpdateEndpoint(request.paramsData)
+            case RPCMethod.modelProfileUpdateToken:
+                return try await handleModelProfileUpdateToken(request.paramsData)
             case RPCMethod.modelProfileUpdateBedrock:
                 return try await handleModelProfileUpdateBedrock(request.paramsData)
             case RPCMethod.modelProfileSetGlobalDefault:

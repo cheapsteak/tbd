@@ -124,6 +124,25 @@ extension AppState {
         }
     }
 
+    /// Replace the stored setup token on a token profile.
+    ///
+    /// Returns true when the daemon accepted the rotation, so a sheet can stay
+    /// open on failure instead of dismissing over an unchanged credential. The
+    /// raw token bytes never reach a log or an alert — only the daemon's own
+    /// message, which by contract carries none.
+    @discardableResult
+    func updateModelProfileToken(id: UUID, token: String) async -> Bool {
+        do {
+            try await daemonClient.updateModelProfileToken(id: id, token: token)
+            await loadModelProfiles()
+            return true
+        } catch {
+            logger.error("Failed to replace model profile token: \(error, privacy: .public)")
+            showAlert("Failed to replace token: \(error.localizedDescription)", isError: true)
+            return false
+        }
+    }
+
     /// Update a bedrock model profile's region, awsProfile, model, and fallback list in-place.
     func updateModelProfileBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String,
                                    fallbackModels: [String]? = nil) async {
@@ -601,7 +620,8 @@ extension AppState {
                 usage: entry.usage,
                 loginIdentity: entry.loginIdentity,
                 configDirPath: entry.configDirPath,
-                usageSnapshot: snapshot
+                usageSnapshot: snapshot,
+                tokenTail: entry.tokenTail
             )
         }
     }

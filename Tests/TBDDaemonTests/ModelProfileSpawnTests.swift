@@ -147,6 +147,17 @@ struct ModelProfileSpawnTests {
         return row
     }
 
+    /// A token profile plus its stored secret. The secret goes through the real
+    /// `ModelProfileKeychain` because the spawn path reads it back through the
+    /// same static store — this suite runs under `TBDHomeSerialized` so that
+    /// file lands inside the harness fence. `cleanup(_:)` reclaims it.
+    private func seedTokenProfile(_ db: TBDDatabase, name: String,
+                                  secret: String) async throws -> ModelProfile {
+        let row = try await db.modelProfiles.create(name: name, kind: .oauthToken)
+        try ModelProfileKeychain.store(id: row.id.uuidString, token: secret)
+        return row
+    }
+
     private func cleanup(_ db: TBDDatabase) async {
         let toks = (try? await db.modelProfiles.list()) ?? []
         for t in toks { try? ModelProfileKeychain.delete(id: t.id.uuidString) }
@@ -241,6 +252,148 @@ struct ModelProfileSpawnTests {
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.profileID == nil)
         #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+    }
+
+    // MARK: - Spawn: token profiles (CredentialKind.oauthToken)
+
+    /// The whole security property of a token profile in one assertion pair:
+    /// the secret reaches the pane as process env through tmux's `-e`, and it
+    /// is nowhere in the command string, which is `ps`-visible for as long as
+    /// the pane lives.
+    @Test("builder: oauthToken injects CLAUDE_CODE_OAUTH_TOKEN via env only")
+    func builderOAuthTokenInjectsViaEnvOnly() {
+        let secret = "sk-ant-oat01-TESTTOKEN"
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: secret,
+            profileKind: .oauthToken,
+            profileConfigDir: "/tmp/profiles/abc/claude",
+            cmd: nil,
+            shellFallback: ""
+        )
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == secret)
+        #expect(!r.command.contains(secret))
+        #expect(!r.command.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        // ...and it is not an api-key profile, so the other secret var stays
+        // unset: the two kinds pick one variable each, never both.
+        #expect(r.sensitiveEnv["ANTHROPIC_API_KEY"] == nil)
+    }
+
+    /// The config dir *is* a routing key while the token is not: rc files
+    /// clobber CLAUDE_CONFIG_DIR, so it must be re-exported inline after every
+    /// startup file, and a secret must never be.
+    @Test("builder: oauthToken still inlines CLAUDE_CONFIG_DIR")
+    func builderOAuthTokenStillInlinesConfigDir() {
+        let secret = "sk-ant-oat01-TESTTOKEN"
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: secret,
+            profileKind: .oauthToken,
+            profileConfigDir: "/tmp/profiles/abc/claude",
+            cmd: nil,
+            shellFallback: ""
+        )
+        #expect(r.command.contains("export CLAUDE_CONFIG_DIR="))
+        #expect(r.sensitiveEnv["CLAUDE_CONFIG_DIR"] == "/tmp/profiles/abc/claude")
+        #expect(!r.command.contains(secret))
+    }
+
+    /// Off-branch: a signed-in profile is authenticated by the credential in
+    /// its config dir, so a secret that somehow reached the builder for one —
+    /// a stale `<uuid>.token` file, say — must NOT be injected. Injecting it
+    /// would silently outrank the dir's own login.
+    @Test("builder: oauth profile with a stray secret injects nothing")
+    func builderOAuthWithStraySecretInjectsNothing() {
+        let stray = "sk-ant-oat01-STRAY"
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: stray,
+            profileKind: .oauth,
+            profileConfigDir: "/tmp/profiles/abc/claude",
+            cmd: nil,
+            shellFallback: ""
+        )
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
+        #expect(r.sensitiveEnv["ANTHROPIC_API_KEY"] == nil)
+        #expect(!r.command.contains(stray))
+    }
+
+    /// Off-branch: a token profile whose secret is missing spawns with the
+    /// config dir and no token, rather than with an empty one.
+    @Test("builder: oauthToken with no secret injects no token")
+    func builderOAuthTokenWithoutSecretInjectsNothing() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            profileKind: .oauthToken,
+            profileConfigDir: "/tmp/profiles/abc/claude",
+            cmd: nil,
+            shellFallback: ""
+        )
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
+        #expect(r.sensitiveEnv["CLAUDE_CONFIG_DIR"] == "/tmp/profiles/abc/claude")
+    }
+
+    /// The same property end to end, through the real spawn path: the stored
+    /// secret is read by the resolver, injected by tmux's `-e`, and absent from
+    /// the long-running shell command.
+    @Test("spawn: oauthToken default → token via tmux -e, never in the shell body")
+    func spawnWithTokenProfile() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let secret = "sk-ant-oat01-\(UUID().uuidString)"
+        let profile = try await seedTokenProfile(db, name: "Acme (token)", secret: secret)
+        try await db.config.setDefaultProfileID(profile.id)
+
+        let req = try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        )
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let term = try resp.decodeResult(Terminal.self)
+        #expect(term.profileID == profile.id)
+
+        // Delivered as process env via `-e KEY=VALUE`...
+        #expect(recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secret)"))
+        // ...and a token profile still gets its isolated config dir.
+        #expect(recorder.joinedAll.contains("CLAUDE_CONFIG_DIR="))
+        // The shell command body is what `ps` shows for the pane's whole life.
+        #expect(!recorder.shellBodies.contains(secret))
+        #expect(!recorder.shellBodies.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+    }
+
+    /// Off-branch of the same path: a signed-in profile spawned the same way
+    /// carries no token at all, not even when a secret file exists for it.
+    @Test("spawn: oauth default with a stray stored secret → no token injected")
+    func spawnOAuthWithStrayStoredSecret() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let profile = try await seedOAuthProfile(db, name: "SignedIn")
+        let stray = "sk-ant-oat01-\(UUID().uuidString)"
+        try ModelProfileKeychain.store(id: profile.id.uuidString, token: stray)
+        try await db.config.setDefaultProfileID(profile.id)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)))
+        #expect(resp.success)
+        #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        #expect(!recorder.joinedAll.contains(stray))
     }
 
     @Test("terminal.create prepares Codex home before tmux or terminal mutation")

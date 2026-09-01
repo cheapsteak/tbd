@@ -191,6 +191,7 @@ public enum RPCMethod {
     public static let modelProfileDelete = "modelProfile.delete"
     public static let modelProfileRename = "modelProfile.rename"
     public static let modelProfileUpdateEndpoint = "modelProfile.updateEndpoint"
+    public static let modelProfileUpdateToken = "modelProfile.updateToken"
     public static let modelProfileUpdateBedrock = "modelProfile.updateBedrock"
     public static let modelProfileSetGlobalDefault = "modelProfile.setGlobalDefault"
     public static let modelProfileSetPrimaryAgentPreference = "modelProfile.setPrimaryAgentPreference"
@@ -602,7 +603,15 @@ public struct TerminalSwapProfileParams: Codable, Sendable {
 public enum ModelProfileAddKind: String, Codable, Sendable, Equatable {
     case claudeDirect   // existing OAuth / api-key path; uses `token`
     case proxy          // existing proxy path; uses `token` + `baseURL`
-    case bedrock        // NEW; uses `awsRegion` + optional `awsProfile`; no token
+    case bedrock        // uses `awsRegion` + optional `awsProfile`; no token
+    /// Claude-direct profile authenticated by a stored `claude setup-token`
+    /// (`CredentialKind.oauthToken`); requires `token` and forbids `baseURL`.
+    ///
+    /// Explicit rather than inferred: `claudeDirect` reads an `sk-ant-oat01-`
+    /// token as a signed-in `.oauth` profile and discards the value, and that
+    /// behavior is preserved. Which of the two the user meant is a choice they
+    /// make in the Add sheet, not something a prefix can tell us.
+    case claudeToken
 }
 
 public struct ModelProfileAddParams: Codable, Sendable {
@@ -696,6 +705,22 @@ public struct ModelProfileUpdateEndpointParams: Codable, Sendable {
         baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL)
         model = try c.decodeIfPresent(String.self, forKey: .model)
         fallbackModels = try c.decodeIfPresent([String].self, forKey: .fallbackModels)
+    }
+}
+
+/// Replace the stored `claude setup-token` on an `.oauthToken` profile.
+///
+/// Rotation is the only recovery path for a profile whose token expired or was
+/// revoked, so it is a first-class method rather than delete-and-recreate
+/// (which would throw away the profile's isolated config dir and its history).
+/// A blank token is rejected: "leave it alone" is expressed by not calling
+/// this at all, never by sending an empty string.
+public struct ModelProfileUpdateTokenParams: Codable, Sendable {
+    public let id: UUID
+    public let token: String
+    public init(id: UUID, token: String) {
+        self.id = id
+        self.token = token
     }
 }
 
