@@ -643,6 +643,119 @@ struct HolderTmuxAssumptionGateTests {
                 "the tmux leg must still kill its own window: \(argv)")
     }
 
+    // MARK: - Gate 9: the two verbs that refused for the wrong reason
+
+    /// `terminal.send` and `terminal.attachCommand` both consult the pane
+    /// before acting, and both got `.missing` for a holder row — `tmuxPaneID`
+    /// is the empty string, so no line in tmux's answer can match it. Neither
+    /// typed or composed anything, so neither was *unsafe*; both told the
+    /// caller a live session's pane "no longer exists", and `attachCommand`
+    /// said it under the `terminalSessionGone` code the app reads as a window
+    /// worth recovering.
+    ///
+    /// These gates therefore change no outcome. They replace a safe lie with an
+    /// accurate refusal, so the message, the error code and the actuation record
+    /// name the transport rather than blaming a coordinate that was never stale.
+    /// Both refuse rather than serve: Milestone A wires no input path for the
+    /// holder transport — `HolderReader.write` has no caller outside the
+    /// registry — and gives a holder session no tmux session to attach to.
+    @Test("terminal.send refuses a holder row by name and types nothing")
+    func sendRefusesHolderRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+
+        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true)))
+
+        #expect(!response.success)
+        #expect(response.error == RPCRouter.holderSendRefusal(terminalID: terminal.id))
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+        // The strongest half: the refusal sits ahead of the whole tmux
+        // mechanic, not merely ahead of the paste.
+        #expect(recorded.snapshot().isEmpty,
+                "terminal.send reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    @Test("terminal.send still types into an identical tmux row")
+    func sendStillActsOnTmuxRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        // The dry-run pane consultation answers "alive, carrying no identity",
+        // which is the branch that proceeds.
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+
+        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        let argv = recorded.snapshot()
+        #expect(argv.contains { $0.contains("paste-buffer") },
+                "the tmux leg must still paste: \(argv)")
+    }
+
+    @Test("terminal.attachCommand refuses a holder row by name")
+    func attachCommandRefusesHolderRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+
+        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+            method: RPCMethod.terminalAttachCommand,
+            params: TerminalAttachCommandParams(
+                worktreeID: wt.id, terminalID: terminal.id)))
+
+        #expect(!response.success)
+        #expect(response.error == RPCRouter.holderAttachRefusal(terminalID: terminal.id))
+        // Not `terminalSessionGone`: that code is the app's cue to recover a
+        // window, and this session has none to recover.
+        #expect(response.errorCode != RPCErrorCode.terminalSessionGone.rawValue)
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+        #expect(recorded.snapshot().isEmpty,
+                "attachCommand reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    @Test("terminal.attachCommand still composes a command for an identical tmux row")
+    func attachCommandStillActsOnTmuxRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+
+        let response = await router(db, tmux: tmux).handle(try RPCRequest(
+            method: RPCMethod.terminalAttachCommand,
+            params: TerminalAttachCommandParams(
+                worktreeID: wt.id, terminalID: terminal.id)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        let result = try response.decodeResult(TerminalAttachCommandResult.self)
+        #expect(result.paneID == "%7")
+        #expect(result.windowID == "@7")
+    }
+
     // MARK: - Gate 8: the other teardowns that delete a row
 
     /// `terminal.delete` was never the only path that deletes a terminal row.

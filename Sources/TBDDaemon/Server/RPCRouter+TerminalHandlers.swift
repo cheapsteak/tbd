@@ -715,6 +715,14 @@ extension RPCRouter {
     ///
     /// Read-only: it starts nothing, kills nothing, and types nothing. The
     /// caller decides whether to run what it is handed.
+    /// The refusal `terminal.attachCommand` returns for a holder-backed row.
+    /// Named beside its verb so the CLI, the app and this handler's tests
+    /// assert the same text rather than three near-misses.
+    static func holderAttachRefusal(terminalID: UUID) -> String {
+        "Terminal \(terminalID) runs on the pty-holder transport, which has no "
+            + "tmux session to attach to. Its session is unchanged."
+    }
+
     func handleTerminalAttachCommand(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalAttachCommandParams.self, from: paramsData)
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
@@ -731,6 +739,22 @@ extension RPCRouter {
                 Terminal \(terminal.id) belongs to worktree \(terminal.worktreeID), \
                 not the requested worktree \(worktree.id)
                 """)
+        }
+
+        // Ahead of the probe, because the probe cannot answer this question
+        // honestly. A holder row's `tmuxPaneID` is the empty string by
+        // construction, so `paneSendProbe` classifies it `.missing` and this
+        // handler told the caller the pane "no longer exists" — about a session
+        // that is perfectly alive — under the `terminalSessionGone` code the
+        // app reads as a window to recover. Nothing was composed either way, so
+        // this replaces a safe lie with an accurate refusal rather than
+        // changing what the handler does.
+        //
+        // Refused rather than served: Milestone A gives a holder session no
+        // tmux session for an external terminal to attach to. Its screen is the
+        // daemon's own emulator, reachable through `terminal.output`.
+        guard terminal.transport != .holder else {
+            return RPCResponse(error: Self.holderAttachRefusal(terminalID: terminal.id))
         }
 
         // The pane id used for the probe is the pane id reported in the result.
@@ -2646,6 +2670,14 @@ extension RPCRouter {
         case suppressed
     }
 
+    /// The refusal `terminal.send` returns for a holder-backed row. Named
+    /// beside its verb so the CLI, the app, the actuation record and this
+    /// handler's tests all name the same reason.
+    static func holderSendRefusal(terminalID: UUID) -> String {
+        "Terminal \(terminalID) runs on the pty-holder transport, which has no "
+            + "key-send path yet. Nothing was typed and its session is unchanged."
+    }
+
     func handleTerminalSend(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -2741,6 +2773,35 @@ extension RPCRouter {
             message: payload.recordedMessage,
             submit: payload.recordedSubmit,
             verify: payload.recordedVerify)
+
+        // ─── The transport, ahead of every other declining rail ───
+        //
+        // A holder row's `tmuxPaneID` is the empty string by construction, so
+        // `consultPaneBeforeTyping` below classifies it `.missing` and refuses
+        // with "tmux pane  for terminal <id> no longer exists" — about a
+        // session that is perfectly alive. Nothing was ever typed, so this
+        // replaces a safe lie with an accurate refusal rather than changing
+        // what the handler does; what it buys is that the actuation record and
+        // the caller both name the transport instead of blaming a stale
+        // coordinate that was never stale.
+        //
+        // It sits ahead of the `--verify` rails deliberately: those decline an
+        // act that is otherwise possible, and on this transport no send is
+        // possible at all, so the transport is the reason the caller needs. It
+        // sits AFTER `beginActuation` for the reason the first refusal line
+        // above gives — a well-formed act the daemon declined gets a row and a
+        // refusal outcome, unlike a malformed payload that names no act.
+        //
+        // Refused rather than served: Milestone A wires no input path for the
+        // holder transport. `HolderReader.write` exists and has no caller
+        // outside the registry; the daemon can render a holder session's screen
+        // and report its child's last known status, and it cannot type into
+        // one.
+        if terminal.transport == .holder {
+            let message = Self.holderSendRefusal(terminalID: terminal.id)
+            await finishActuation(actuationID, .refused(.notEligible), error: message)
+            return RPCResponse(error: message)
+        }
 
         // ─── The second refusal line: a well-formed act the daemon declines ───
         //
