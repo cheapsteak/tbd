@@ -137,69 +137,13 @@ func makeFakeClient() -> (TmuxControlCommandClient, LineRecorder) {
     return (client, recorder)
 }
 
-/// Carries a bounded wait's OBSERVED state on the primary failure line
-/// (assertion-hygiene rule 4: `#expect(cond, "…")` and `Issue.record(String)`
-/// both demote the message to a trailing `↳` line that CI summaries drop; only
-/// `Issue.record(_: some Error)` survives). `observed` is nil when the caller
-/// supplied no reporter — the text then matches the pre-#494 wording exactly.
-struct ControlModeWaitTimeout: Error, CustomStringConvertible {
-    let what: String
-    let observed: String?
-    let deadline: Duration
-
-    var description: String {
-        let seen = observed.map { " — observed \($0)" } ?? ""
-        return "timed out waiting for \(what)\(seen) after polling up to \(deadline)"
-    }
-}
-
-/// Poll every 10 ms until `condition`, recording an Issue at the caller's
-/// source location after `deadline`. A final post-deadline re-check absorbs
-/// sleep slices that overshoot the deadline AFTER the condition became true
-/// (observed live as `timedOut(got: N, want: N)` at loadavg ~40).
-///
-/// `observed` renders what the waiter actually saw at the moment it gave up; it
-/// is evaluated only on the failing path. Supply it for any wait whose
-/// condition is uninformative on its own ("2 health events" says nothing about
-/// how many arrived).
-///
-/// **The diagnostic reports the state that decided the failure, not the state
-/// at report time** (assertion-hygiene rule 4 — the
-/// `fileBytesMismatch(expected: 6150, actual: 6150)` shape). `observed` and
-/// `condition` are two closures over the same growing state, so reading
-/// `observed` *after* the last `condition()` lets an event that lands in the
-/// gap print the self-contradictory `timed out waiting for 2 health events —
-/// observed 2`. The order below closes that: `observed` is captured first, and
-/// the condition is then re-checked once more, so anything that arrived while
-/// the diagnostic was being composed makes this a PASS rather than a
-/// contradictory failure. The counters these waits watch are monotone, so a
-/// condition that is false after the capture was false at the capture too —
-/// the reported state and the verdict are consistent by construction.
-///
-/// Returns whether the condition was met (false on timeout) so callers that
-/// index into results afterwards can abort via `#require` instead of trapping
-/// out of range; count/equality-checking callers may ignore the result.
-@discardableResult
-func waitFor(
-    _ what: String, deadline: Duration = ciSafeDeadline,
-    observed: (@Sendable () async -> String)? = nil,
-    sourceLocation: SourceLocation = #_sourceLocation,
-    _ condition: @Sendable () async -> Bool
-) async throws -> Bool {
-    let end = ContinuousClock.now + deadline
-    while ContinuousClock.now < end {
-        if await condition() { return true }
-        try await Task.sleep(for: .milliseconds(10))
-    }
-    if await condition() { return true }
-    // Capture BEFORE deciding to fail, then re-check: see the doc comment.
-    let seen = await observed?()
-    if await condition() { return true }
-    Issue.record(
-        ControlModeWaitTimeout(what: what, observed: seen, deadline: deadline),
-        sourceLocation: sourceLocation)
-    return false
-}
+// `waitFor` and its `BoundedWaitTimeout` diagnostic live in
+// `Tests/TestSupport/BoundedGateSupport.swift`, beside the `TestDeadlines`
+// constant they default to. Two targets need them — the suites here and the
+// tier-3 supervisor suites in `Tests/TBDDaemonLiveTests`, which cannot import
+// this file — and one copy is what keeps the diagnostic wording and the
+// capture-then-recheck ordering from drifting apart. They arrive through
+// `import TestSupport` above; call sites read the same either way.
 
 // MARK: - Ordered reply feed
 
