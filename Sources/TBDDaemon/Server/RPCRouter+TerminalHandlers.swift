@@ -1197,6 +1197,14 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// The refusal `terminal.recreateWindow` returns for a holder-backed row.
+    /// Named and centralised so the app, the CLI and this handler's tests all
+    /// assert the same text rather than three near-misses.
+    static func holderRecreateRefusal(terminalID: UUID) -> String {
+        "Terminal \(terminalID) runs on the pty-holder transport, which has no "
+            + "tmux window to recreate. Its session is unchanged."
+    }
+
     func handleTerminalRecreateWindow(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -1204,6 +1212,23 @@ extension RPCRouter {
 
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        }
+
+        // Taken BEFORE the worktree lookup, for the same reason the read path's
+        // holder branch is (see `handleTerminalOutput`): everything downstream
+        // exists only to name a tmux server and window this row does not have.
+        //
+        // This handler is reached automatically, not only by the Retry button:
+        // the app is transport-blind, so a holder tab whose repo happens to
+        // have a tmux server running for any other reason classifies as
+        // `.windowMissing` and fires automatic recovery. Both downstream
+        // branches would then act on `tmuxWindowID == ""`, which
+        // `TmuxManager.windowExists` can only ever answer "gone" for — parking
+        // a resumable row whose holder and child are still running, or standing
+        // up a tmux window under a row that still reads `transport == .holder`.
+        // Refuse, and leave every column exactly as it was.
+        guard terminal.transport != .holder else {
+            return RPCResponse(error: Self.holderRecreateRefusal(terminalID: terminal.id))
         }
 
         guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {

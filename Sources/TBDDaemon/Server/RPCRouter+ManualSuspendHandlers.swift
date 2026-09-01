@@ -80,6 +80,8 @@ extension RPCRouter {
             return RPCResponse(
                 error: "This session was pinned to an account profile (\(profileID.uuidString)) that no longer exists. It stays parked and resumable — wake it on your default account, or restore the profile and retry.",
                 code: RPCErrorCode.profileMissing.rawValue)
+        case .holderTransport:
+            return RPCResponse(error: HibernationCoordinator.holderTransportRefusal)
         }
     }
 

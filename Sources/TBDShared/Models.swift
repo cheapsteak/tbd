@@ -957,6 +957,16 @@ public extension Terminal {
     /// explicitly. Still refuses to hibernate an in-flight turn or a raised
     /// permission hand.
     var isManuallyHibernatable: Bool {
+        // Parking is a tmux mechanic end to end: it `respawn-window`s the pane
+        // to a bare shell and wake respawns `claude --resume` back into that
+        // same pane. A holder row has no pane — its `tmuxWindowID`/`tmuxPaneID`
+        // are empty strings by construction — so every step would address the
+        // empty coordinate, which tmux answers for by reporting the window
+        // gone. The row would flip to parked while the holder and its child
+        // kept running, unreclaimed. Until parking learns the holder transport,
+        // refuse: an ineligible session is recoverable, a row that lies about a
+        // live process is not.
+        guard transport != .holder else { return false }
         guard isClaudeResumable else { return false }
         guard hibernatedAt == nil, suspendedAt == nil else { return false }
         switch activityState {

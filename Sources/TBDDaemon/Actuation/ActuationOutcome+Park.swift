@@ -54,6 +54,8 @@ extension ActuationOutcome {
         // The row is there but cannot be woken as asked: nothing to resume, or
         // the profile it was pinned to no longer exists.
         case .noSessionID, .profileMissing: return .refused(.notEligible)
+        // The transport this row runs on has no park/wake mechanic yet.
+        case .holderTransport: return .refused(.notEligible)
         }
     }
 
@@ -75,6 +77,7 @@ extension ActuationOutcome {
             }
         case .profileMissing(let profileID):
             return "Profile no longer exists: \(profileID.uuidString)"
+        case .holderTransport: return HibernationCoordinator.holderTransportRefusal
         }
     }
 }
