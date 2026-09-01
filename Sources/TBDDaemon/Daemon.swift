@@ -1293,6 +1293,8 @@ public final class Daemon: Sendable {
                 loginIdentity: { id in configDirManager.loginIdentity(forProfileID: id) },
                 configDirPath: { id in configDirManager.configDirectory(forProfileID: id).path },
                 fetcher: LiveProfileUsageFetcher(),
+                tokenFetcher: TokenProfileUsageFetcher(),
+                profileSecret: { id in try? ModelProfileKeychain.load(id: id.uuidString) },
                 broadcast: { [weak subs] in subs?.broadcast(delta: .modelProfilesChanged) },
                 loadPersisted: { [database] in
                     (try? await database.oauthUsageSnapshots.loadAll()) ?? [:]
@@ -1306,6 +1308,14 @@ public final class Daemon: Sendable {
             )
             self.oauthUsagePoller = oauthPoller
             rpcRouter.oauthUsagePoller = oauthPoller
+            // Token profiles are kept off the 90s cadence because their usage
+            // probe is a real billed request; they refresh when a session using
+            // them finishes a turn instead. The store detects the edge (both of
+            // its activity writers commit it); this is the one place it is
+            // wired to a consumer.
+            database.terminals.activityTransitions.onSessionBecameIdle { [weak oauthPoller] profileID in
+                Task { await oauthPoller?.noteSessionBecameIdle(profileID: profileID) }
+            }
             await oauthPoller.start()
 
             // 12d. Session-limit auto-resume scheduler (spec 2026-07-03).

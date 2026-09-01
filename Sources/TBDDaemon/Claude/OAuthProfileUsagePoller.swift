@@ -17,8 +17,14 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "oauthUsagePo
 /// refresh-if-stale sweep via `modelProfile.usageRefresh`.
 ///
 /// Rules:
-/// - Eligible profiles: `kind == .oauth` with a non-nil login identity
+/// - Cadence-swept profiles: `kind == .oauth` with a non-nil login identity
 ///   (someone has completed `/login` in the profile's isolated config dir).
+/// - `kind == .oauthToken` profiles are deliberately NOT cadence-swept. Their
+///   usage comes from the headers of a real billed request (a setup token 403s
+///   on the read-only usage endpoint), so they refresh on a `working -> idle`
+///   session transition instead — `noteSessionBecameIdle(profileID:)` — at most
+///   once per `tokenProfileFloor`. They are still swept by a *targeted* sweep,
+///   and still keep their snapshots across full sweeps.
 /// - Per-profile calls within one sweep are staggered slightly.
 /// - A failing profile records a status ("stale since X; fetch failed: …")
 ///   without poisoning the rest of the sweep; previously fetched buckets are
@@ -37,6 +43,17 @@ public actor OAuthProfileUsagePoller {
     /// was fetched more recently than this — opening the picker repeatedly
     /// must not turn into a fetch per open.
     public static let refreshFreshness: TimeInterval = 30
+
+    /// Floor between two usage probes of the same token profile.
+    ///
+    /// A `.oauthToken` profile's usage cannot be read from the read-only usage
+    /// endpoint (a setup token 403s there); it comes from the headers of a real,
+    /// billed `max_tokens: 0` request. So token profiles are kept off the
+    /// cadence sweep entirely and refresh on session activity instead — and even
+    /// then no more often than this, so a burst of turns collapses into one
+    /// probe. Enforced for EVERY caller by `freshnessWindow(requested:kind:)`,
+    /// including the picker-open refresh, which asks for a 30-second window.
+    public static let tokenProfileFloor: TimeInterval = 300
 
     /// Backoff schedule for a profile whose fetch failed. Doubles per
     /// consecutive failure, jittered, capped. A 429 with a `Retry-After`
@@ -58,6 +75,12 @@ public actor OAuthProfileUsagePoller {
     private let loginIdentity: @Sendable (UUID) -> String?
     private let configDirPath: @Sendable (UUID) -> String
     private let fetcher: ProfileUsageFetching
+    /// Serves `.oauthToken` profiles, whose usage comes from probe response
+    /// headers rather than the OAuth usage endpoint.
+    private let tokenFetcher: ProfileUsageFetching
+    /// The stored `claude setup-token` for a `.oauthToken` profile, or nil when
+    /// no secret is stored. Never logged, never included in an error string.
+    private let profileSecret: @Sendable (UUID) -> String?
     private let broadcast: @Sendable () -> Void
     private let sleeper: @Sendable (TimeInterval) async throws -> Void
     private let now: @Sendable () -> Date
@@ -98,6 +121,8 @@ public actor OAuthProfileUsagePoller {
         loginIdentity: @escaping @Sendable (UUID) -> String?,
         configDirPath: @escaping @Sendable (UUID) -> String,
         fetcher: ProfileUsageFetching,
+        tokenFetcher: ProfileUsageFetching = TokenProfileUsageFetcher(),
+        profileSecret: @escaping @Sendable (UUID) -> String? = { _ in nil },
         broadcast: @escaping @Sendable () -> Void,
         sleeper: (@Sendable (TimeInterval) async throws -> Void)? = nil,
         now: (@Sendable () -> Date)? = nil,
@@ -113,6 +138,8 @@ public actor OAuthProfileUsagePoller {
         self.loginIdentity = loginIdentity
         self.configDirPath = configDirPath
         self.fetcher = fetcher
+        self.tokenFetcher = tokenFetcher
+        self.profileSecret = profileSecret
         self.broadcast = broadcast
         // swiftlint:disable:next no_raw_task_sleep - already seamed: this closure IS the default of the type's own `sleeper:` seam (which sits alongside the `now:` and `jitter:` seams), injected as `sleeper: { _ in }` at 6 sites in Tests/TBDDaemonTests/OAuthProfileUsagePollerTests.swift — but only the `sweep()` inter-profile stagger below is actually REACHED by those tests: no test calls `start()`, so `runLoop()`'s cadence use of this same closure is unexercised; see docs/specs/2026-07-24-test-hardening-design.md
         self.sleeper = sleeper ?? { try await Task.sleep(for: .seconds($0)) }
@@ -220,7 +247,86 @@ public actor OAuthProfileUsagePoller {
         await loadPersistedSnapshots()
     }
 
+    // MARK: - Activity-gated probes (token profiles)
+
+    /// Called when a terminal using this profile transitions `working -> idle`:
+    /// the moment a turn completed and utilization actually moved.
+    ///
+    /// Only `.oauthToken` profiles act on this. A signed-in profile is served
+    /// by the 90-second cadence sweep and its usage endpoint is free to call,
+    /// so there is nothing to gain by probing it here — and the guard is what
+    /// keeps a busy fleet of `.oauth` sessions from turning every turn into a
+    /// fetch.
+    ///
+    /// Probes at most once per `tokenProfileFloor`, so a burst of short turns
+    /// collapses into one billed request. Per-profile backoff still applies on
+    /// top of that, so a rejected or rate-limited token is not hammered by
+    /// activity either.
+    public func noteSessionBecameIdle(profileID: UUID) async {
+        let profiles: [ModelProfile]
+        do {
+            profiles = try await profilesProvider()
+        } catch {
+            logger.warning("profile list failed; skipping activity probe: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        guard let profile = profiles.first(where: { $0.id == profileID }),
+              profile.kind == .oauthToken else { return }
+        await sweep(only: profileID, skipFresherThan: Self.tokenProfileFloor)
+    }
+
+    /// Probe once for a freshly created token profile, so bars appear
+    /// immediately and a bad paste is caught at once rather than at first
+    /// spawn. Asking for no freshness window is safe: a profile that has never
+    /// been fetched has no `fetchedAt` for the floor to compare against, and
+    /// `freshnessWindow(requested:kind:)` re-imposes the floor on every later
+    /// call regardless.
+    public func noteProfileCreated(profileID: UUID) async {
+        await sweep(only: profileID, skipFresherThan: nil)
+    }
+
     // MARK: - Sweep
+
+    /// The freshness window a sweep actually applies to one profile.
+    ///
+    /// For a token profile this is never shorter than `tokenProfileFloor`,
+    /// whatever the caller asked for: the picker-open refresh asks for 30
+    /// seconds, which is the right answer for a free GET and the wrong one for
+    /// a billed probe. Enforcing it here rather than at each call site means
+    /// there is one place a future caller can't forget.
+    static func freshnessWindow(requested: TimeInterval?, kind: CredentialKind) -> TimeInterval? {
+        guard kind == .oauthToken else { return requested }
+        return max(requested ?? 0, tokenProfileFloor)
+    }
+
+    /// Whether this poller can fetch usage for the profile at all.
+    ///
+    /// Wider than the cadence-sweep filter: a token profile is supported (it is
+    /// simply refreshed on a different trigger), so a full sweep's pruning must
+    /// not mistake "not swept on cadence" for "no longer a profile" and delete
+    /// its snapshot.
+    private func isSupported(_ profile: ModelProfile) -> Bool {
+        switch profile.kind {
+        case .oauth: return loginIdentity(profile.id) != nil
+        case .oauthToken: return true
+        case .apiKey, .bedrock: return false
+        }
+    }
+
+    private func credential(for profile: ModelProfile) -> ProfileUsageCredential? {
+        switch profile.kind {
+        case .oauth:
+            return .configDir(configDirPath(profile.id))
+        case .oauthToken:
+            // An absent secret becomes an empty token deliberately: the fetcher
+            // reports `.noCredentials`, which is recorded on the snapshot and
+            // shown. Calling it "unsupported" here would instead silently prune
+            // the profile's snapshot and tell the user nothing.
+            return .token(profileSecret(profile.id) ?? "")
+        case .apiKey, .bedrock:
+            return nil
+        }
+    }
 
     private func sweep(only: UUID?, skipFresherThan: TimeInterval?) async {
         let allProfiles: [ModelProfile]
@@ -231,18 +337,26 @@ public actor OAuthProfileUsagePoller {
             return
         }
 
-        let eligible = allProfiles.filter { $0.kind == .oauth && loginIdentity($0.id) != nil }
-        let eligibleIDs = Set(eligible.map(\.id))
+        // Deliberately `.oauth` only. Token profiles are NOT swept on cadence:
+        // their probe is a real billed API request, so they refresh on session
+        // activity instead (see `noteSessionBecameIdle`). Widening this filter
+        // would defeat that gate and put every token profile back on a
+        // ~960-request-per-day timer.
+        let cadenceEligible = allProfiles.filter { $0.kind == .oauth && loginIdentity($0.id) != nil }
+        let supported = allProfiles.filter { isSupported($0) }
+        let supportedIDs = Set(supported.map(\.id))
 
         let before = snapshots
 
         // Full sweeps prune snapshots for profiles that were deleted, logged
-        // out, or changed kind, so the RPC surface never leaks ghosts.
+        // out, or changed kind, so the RPC surface never leaks ghosts. The
+        // retention set is the SUPPORTED one, not the cadence one — a token
+        // profile keeps its snapshot between activity probes.
         if only == nil {
-            snapshots = snapshots.filter { eligibleIDs.contains($0.key) }
-            backoff = backoff.filter { eligibleIDs.contains($0.key) }
+            snapshots = snapshots.filter { supportedIDs.contains($0.key) }
+            backoff = backoff.filter { supportedIDs.contains($0.key) }
             if let prunePersisted {
-                await prunePersisted(eligibleIDs)
+                await prunePersisted(supportedIDs)
             }
         }
 
@@ -251,11 +365,15 @@ public actor OAuthProfileUsagePoller {
         // picker-open RPC. Stagger + isolation mean the others still poll
         // normally. `skipFresherThan` additionally skips profiles whose data
         // is recent enough (startup sweep, picker-open refresh).
-        let candidates = only.map { id in eligible.filter { $0.id == id } } ?? eligible
+        //
+        // A full sweep covers the cadence set; a targeted sweep may name any
+        // SUPPORTED profile, which is how an activity-gated token probe and the
+        // creation-time probe reach a profile the cadence deliberately skips.
+        let candidates = only.map { id in supported.filter { $0.id == id } } ?? cadenceEligible
         let currentTime = now()
         let targets = candidates.filter { profile in
             guard isEligibleNow(profile.id, at: currentTime) else { return false }
-            if let window = skipFresherThan,
+            if let window = Self.freshnessWindow(requested: skipFresherThan, kind: profile.kind),
                let fetchedAt = snapshots[profile.id]?.fetchedAt,
                currentTime.timeIntervalSince(fetchedAt) < window {
                 return false
@@ -269,8 +387,14 @@ public actor OAuthProfileUsagePoller {
                 try? await sleeper(Self.interProfileStagger)
             }
             if Task.isCancelled { break }
+            guard let usageCredential = credential(for: profile) else { continue }
             didFetch = true
-            let status = await fetcher.fetchUsage(configDirPath: configDirPath(profile.id))
+            // Dispatch by kind: a signed-in profile's usage comes from the
+            // OAuth usage endpoint, a token profile's from probe response
+            // headers. Neither fetcher knows the other exists.
+            let usageFetcher: any ProfileUsageFetching =
+                profile.kind == .oauthToken ? tokenFetcher : fetcher
+            let status = await usageFetcher.fetchUsage(credential: usageCredential)
             await record(status, for: profile.id)
         }
 
@@ -289,14 +413,15 @@ public actor OAuthProfileUsagePoller {
     private func record(_ status: ProfileUsageFetchStatus, for profileID: UUID) async {
         let timestamp = now()
         switch status {
-        case .ok(let buckets):
+        case .ok(let buckets, let organizationID):
             backoff[profileID] = BackoffState()  // reset schedule on success
             let snapshot = ProfileUsageSnapshot(
                 buckets: buckets,
                 fetchedAt: timestamp,
                 lastAttemptAt: timestamp,
                 status: "ok",
-                statusKind: .ok
+                statusKind: .ok,
+                organizationID: organizationID
             )
             snapshots[profileID] = snapshot
             if let persist {
@@ -318,7 +443,11 @@ public actor OAuthProfileUsagePoller {
                 fetchedAt: previous?.fetchedAt,
                 lastAttemptAt: timestamp,
                 status: statusText,
-                statusKind: status.kind
+                statusKind: status.kind,
+                // Retained alongside the stale buckets it was observed with: a
+                // failed fetch says nothing about which account the profile
+                // belongs to.
+                organizationID: previous?.organizationID
             )
             logger.warning("usage sweep failed for profile \(profileID, privacy: .public): \(reason, privacy: .public)")
         }
