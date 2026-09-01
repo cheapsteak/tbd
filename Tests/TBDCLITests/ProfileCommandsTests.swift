@@ -42,6 +42,55 @@ struct ProfileCommandsTests {
         #expect(profileIdentityCell(kind: .bedrock, loginIdentity: "stray@example.com") == "—")
     }
 
+    @Test func identityCell_tokenProfile_showsMaskedTail() {
+        // Mirrors the app's `Token •••• <tail>` caption: no verifiable identity
+        // exists for a setup token, but the tail tells two token profiles apart.
+        #expect(profileIdentityCell(kind: .oauthToken, loginIdentity: nil, tokenTail: "4f2a")
+            == "•••• 4f2a")
+    }
+
+    @Test func identityCell_tokenProfileWithoutTail_saysNoToken() {
+        #expect(profileIdentityCell(kind: .oauthToken, loginIdentity: nil, tokenTail: nil)
+            == "no token")
+        #expect(profileIdentityCell(kind: .oauthToken, loginIdentity: nil, tokenTail: "")
+            == "no token")
+    }
+
+    @Test func identityCell_tokenProfile_ignoresStrayLoginIdentity() {
+        // A token profile has no /login identity; even if a daemon sent one the
+        // column stays on the credential story.
+        #expect(profileIdentityCell(kind: .oauthToken,
+                                    loginIdentity: "stray@example.com",
+                                    tokenTail: "4f2a") == "•••• 4f2a")
+    }
+
+    // MARK: - profile login refusal messages
+
+    @Test func loginRefusal_tokenProfile_namesTheTokenAndTheRepair() {
+        let message = profileLoginUnsupportedMessage(name: "work", kind: .oauthToken)
+        #expect(message.contains("'work'"))
+        #expect(message.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        #expect(message.contains("claude setup-token"))
+        // Points at the affordance that actually exists (the app's Settings
+        // pane); `tbd profile` has no token-replacement subcommand to name.
+        #expect(message.contains("Replace token"))
+        // The old copy attributed the wrong reason to token profiles.
+        #expect(!message.contains("API-key profiles"))
+        #expect(!message.contains("a oauthToken profile"))
+    }
+
+    @Test func loginRefusal_apiKey_keepsItsOwnReason() {
+        let message = profileLoginUnsupportedMessage(name: "direct", kind: .apiKey)
+        #expect(message.contains("API-key profiles carry their own key"))
+        #expect(!message.contains("setup-token"))
+    }
+
+    @Test func loginRefusal_bedrock_keepsItsOwnReason() {
+        let message = profileLoginUnsupportedMessage(name: "aws", kind: .bedrock)
+        #expect(message.contains("AWS credentials"))
+        #expect(!message.contains("setup-token"))
+    }
+
     // MARK: - Usage age marker
 
     @Test func usageAgeMarker_freshOrUnknown_isNil() {

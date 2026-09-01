@@ -21,14 +21,60 @@ struct ProfileCommand: AsyncParsableCommand {
 
 // MARK: - Pure helpers (internal so TBDCLITests can exercise them)
 
-/// Render the IDENTITY column for a profile row. OAuth profiles show the
-/// logged-in account email, or "needs /login" when nobody has logged into
-/// the profile's isolated config dir yet. Non-OAuth kinds (apiKey, bedrock)
-/// have no login identity and render an em dash.
-func profileIdentityCell(kind: CredentialKind, loginIdentity: String?) -> String {
-    guard kind == .oauth else { return "—" }
-    if let loginIdentity, !loginIdentity.isEmpty { return loginIdentity }
-    return "needs /login"
+/// Render the IDENTITY column for a profile row.
+///
+/// OAuth profiles show the logged-in account email, or "needs /login" when
+/// nobody has logged into the profile's isolated config dir yet. Token profiles
+/// have no verifiable identity — the profile endpoint 403s for a
+/// `claude setup-token` credential — so they show the masked tail the daemon
+/// computes at list time (`•••• 4f2a`), matching the app's `Token •••• <tail>`
+/// caption; it is enough to tell two token profiles apart, and it is all the
+/// CLI is ever given. "no token" when the secret is missing (or an older daemon
+/// sent no tail) — the profile cannot spawn until one is stored. The remaining
+/// kinds (apiKey, bedrock) have no identity to show and render an em dash.
+func profileIdentityCell(kind: CredentialKind, loginIdentity: String?, tokenTail: String? = nil) -> String {
+    switch kind {
+    case .oauth:
+        if let loginIdentity, !loginIdentity.isEmpty { return loginIdentity }
+        return "needs /login"
+    case .oauthToken:
+        if let tokenTail, !tokenTail.isEmpty { return "•••• \(tokenTail)" }
+        return "no token"
+    case .apiKey, .bedrock:
+        return "—"
+    }
+}
+
+/// Why `tbd profile login` cannot serve a profile of `kind`, and what to do
+/// instead. Only `.oauth` profiles have an interactive `/login`; every other
+/// kind carries its credential with it, but for a different reason each, and
+/// the repair differs too.
+///
+/// The token arm points at the app rather than at a CLI command because there
+/// is none: `tbd profile` exposes `list`, `set-default` and `login`, and the
+/// `modelProfile.updateToken` RPC is only reachable from Settings → Model
+/// Profiles. Naming a command that does not exist would be worse than naming
+/// the pane that does.
+func profileLoginUnsupportedMessage(name: String, kind: CredentialKind) -> String {
+    let lead = "Profile '\(name)' does not use /login."
+    switch kind {
+    case .oauthToken:
+        return lead + " It authenticates with a stored setup token, injected as "
+            + "CLAUDE_CODE_OAUTH_TOKEN when a session spawns, so there is no interactive "
+            + "login to perform. To install a different token, mint one with "
+            + "`claude setup-token` and paste it into Settings → Model Profiles → "
+            + "\"Replace token…\" in the TBD app."
+    case .apiKey:
+        return lead + " API-key profiles carry their own key, so there is nothing to log into."
+    case .bedrock:
+        return lead + " Bedrock profiles authenticate with AWS credentials, so there is "
+            + "nothing to log into."
+    case .oauth:
+        // Unreachable: the caller only asks about non-oauth kinds. The switch is
+        // exhaustive rather than defaulted so a new credential kind is a compile
+        // error here instead of a wrong sentence at runtime.
+        return "Profile '\(name)' is an OAuth profile and does use /login."
+    }
 }
 
 /// First bucket in the snapshot matching `kind` (and, for scoped buckets,
@@ -328,7 +374,8 @@ struct ProfileList: AsyncParsableCommand {
         for entry in result.profiles {
             let identity = profileIdentityCell(
                 kind: entry.profile.kind,
-                loginIdentity: entry.loginIdentity
+                loginIdentity: entry.loginIdentity,
+                tokenTail: entry.tokenTail
             )
             let snapshot = entry.usageSnapshot
             let session = usageBucket(in: snapshot, kind: "session")
@@ -409,7 +456,8 @@ struct ProfileSetDefault: AsyncParsableCommand {
         )
         let identity = profileIdentityCell(
             kind: entry.profile.kind,
-            loginIdentity: entry.loginIdentity
+            loginIdentity: entry.loginIdentity,
+            tokenTail: entry.tokenTail
         )
         print("Global default profile is now '\(entry.profile.name)' (\(entry.profile.kind.rawValue), \(identity)).")
         print("New sessions will use it unless a repo-level override applies.")
@@ -442,12 +490,10 @@ struct ProfileLogin: AsyncParsableCommand {
         let entry = try resolveProfile(named: name, in: list.profiles)
 
         guard entry.profile.kind == .oauth else {
-            let detail = entry.profile.kind == .bedrock
-                ? "Bedrock profiles authenticate with AWS credentials"
-                : "API-key profiles carry their own key"
-            throw CLIError.invalidArgument(
-                "Profile '\(entry.profile.name)' is a \(entry.profile.kind.rawValue) profile. "
-                    + "Only OAuth profiles log in via /login — \(detail), so there is nothing to log into.")
+            throw CLIError.invalidArgument(profileLoginUnsupportedMessage(
+                name: entry.profile.name,
+                kind: entry.profile.kind
+            ))
         }
 
         // Provision (or re-verify) the isolated config dir daemon-side.

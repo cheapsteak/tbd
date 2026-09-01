@@ -385,6 +385,12 @@ public struct TmuxManager: Sendable {
 
     /// tmux `-e KEY=VALUE` flags, sorted by key. Shared by the two spawn
     /// builders for the same reason as `envExportPrefixed`.
+    ///
+    /// Every value routed through here is sensitive by construction — that is
+    /// what `-e` is *for* on the spawn path (`ANTHROPIC_API_KEY`,
+    /// `CLAUDE_CODE_OAUTH_TOKEN`, whatever secret comes next). The flags land
+    /// in tmux's own argv, so anything that renders argv as text must go
+    /// through `redactedCommandDescription` below.
     static func sensitiveEnvFlags(_ sensitiveEnv: [String: String]) -> [String] {
         var eFlags: [String] = []
         for (key, value) in sensitiveEnv.sorted(by: { $0.key < $1.key }) {
@@ -392,6 +398,62 @@ public struct TmuxManager: Sendable {
             eFlags.append("\(key)=\(value)")
         }
         return eFlags
+    }
+
+    /// Stand-in printed in place of a secret's value.
+    static let redactedValuePlaceholder = "<redacted>"
+
+    /// The one place a tmux argv becomes human-readable text.
+    ///
+    /// Every sink that has ever carried a failed tmux command — the daemon log,
+    /// `TmuxError`'s `description`, the append-only actuation log
+    /// (`RPCRouter+Actuation` stringifies the thrown error and fsyncs it under
+    /// `~/tbd`), and the `RPCResponse(error:)` string that crosses the socket
+    /// into a user-visible alert — is downstream of this function. Redacting
+    /// here rather than at each sink means no code path exists that *can* put a
+    /// secret into any of them: callers hand over `[String]` argv and only ever
+    /// get the redacted rendering back.
+    ///
+    /// The variable NAME is kept (`-e CLAUDE_CODE_OAUTH_TOKEN=<redacted>`) so a
+    /// spawn failure stays diagnosable; only the value is replaced.
+    static func redactedCommandDescription(label: String, arguments: [String]) -> String {
+        ([label] + redactedArguments(arguments)).joined(separator: " ")
+    }
+
+    /// Replaces the value of every `-e NAME=VALUE` pair with
+    /// `redactedValuePlaceholder`.
+    ///
+    /// Structural, not a scan for known secret shapes: the rule is "the operand
+    /// of tmux's environment flag", so a secret variable nobody has invented yet
+    /// is redacted the day it is added, and a value that happens not to look
+    /// like a token is still hidden. `capture-pane -p -e -J` is untouched
+    /// because tmux's `-e` there is a boolean flag whose neighbour is not a
+    /// `NAME=VALUE` assignment.
+    static func redactedArguments(_ arguments: [String]) -> [String] {
+        var result: [String] = []
+        result.reserveCapacity(arguments.count)
+        var previousWasEnvFlag = false
+        for argument in arguments {
+            if previousWasEnvFlag, let name = environmentAssignmentName(argument) {
+                result.append("\(name)=\(redactedValuePlaceholder)")
+            } else {
+                result.append(argument)
+            }
+            previousWasEnvFlag = argument == "-e"
+        }
+        return result
+    }
+
+    /// The `NAME` of a `NAME=VALUE` assignment, or nil when `argument` is not
+    /// one. Names follow the POSIX environment-variable shape
+    /// (`[A-Za-z_][A-Za-z0-9_]*`) so an ordinary tmux operand that merely
+    /// contains an `=` is not mistaken for an assignment.
+    private static func environmentAssignmentName(_ argument: String) -> String? {
+        guard let separator = argument.firstIndex(of: "=") else { return nil }
+        let name = argument[argument.startIndex..<separator]
+        guard let first = name.first, first == "_" || (first.isASCII && first.isLetter) else { return nil }
+        guard name.allSatisfy({ $0 == "_" || ($0.isASCII && ($0.isLetter || $0.isNumber)) }) else { return nil }
+        return String(name)
     }
 
     /// Shell flags for spawning the user's shell with a command string,
@@ -1527,7 +1589,7 @@ public struct TmuxManager: Sendable {
     private func runTmux(_ arguments: [String]) async throws -> String {
         guard let executable = Self.tmuxPath() else {
             throw TmuxError.commandFailed(
-                command: "tmux " + arguments.joined(separator: " "),
+                command: Self.redactedCommandDescription(label: "tmux", arguments: arguments),
                 status: 127,
                 output: "tmux executable is unavailable"
             )
@@ -1562,7 +1624,10 @@ public struct TmuxManager: Sendable {
         timeout: Duration,
         clock: any Clock<Duration> = ContinuousClock()
     ) async throws -> String {
-        let commandDescription = "\(label) " + arguments.joined(separator: " ")
+        // Redacted at the point argv becomes text, so the secret cannot reach
+        // the warning below, `TmuxError`'s description, the actuation log, or
+        // the RPC error string. See `redactedCommandDescription`.
+        let commandDescription = redactedCommandDescription(label: label, arguments: arguments)
         switch try await runBoundedProcess(
             executable: executable,
             arguments: arguments,
@@ -1612,6 +1677,12 @@ final class ContinuationGuard: @unchecked Sendable {
 /// `NSError` bridge prints "TBDDaemonLib.TmuxError error 0", which names the
 /// type and the case index and nothing else — every daemon log line that formats
 /// a caught error through `localizedDescription` would throw the payload away.
+///
+/// The `command` payload is always the redacted rendering produced by
+/// `TmuxManager.redactedCommandDescription`, never raw argv: these errors are
+/// stringified into the daemon log, into the fsync'd actuation log, and into
+/// the RPC error string the app shows, so a `-e SECRET=…` spawn flag must not
+/// survive into the payload in the first place.
 public enum TmuxError: Error, Sendable, CustomStringConvertible, LocalizedError {
     case commandFailed(command: String, status: Int32, output: String)
     case unexpectedOutput(String)

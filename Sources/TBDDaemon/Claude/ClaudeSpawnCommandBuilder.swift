@@ -223,8 +223,10 @@ enum ClaudeSpawnCommandBuilder {
         //
         // Scope: only the profile routing keys (config dir, base URL, model,
         // bedrock/AWS vars) — they are non-secret and are what account
-        // switchers clobber. ANTHROPIC_API_KEY stays -e-only: inlining it
-        // would leak the secret into the long-running shell's `ps` argv.
+        // switchers clobber. The credential vars — ANTHROPIC_API_KEY for an
+        // API-key profile, CLAUDE_CODE_OAUTH_TOKEN for a token profile — stay
+        // -e-only: inlining either would leak the secret into the
+        // long-running shell's `ps` argv.
         let inlineExports = env
             .filter { routingKeys.contains($0.key) }
             .sorted(by: { $0.key < $1.key })

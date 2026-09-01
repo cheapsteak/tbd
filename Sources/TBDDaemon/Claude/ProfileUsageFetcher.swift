@@ -181,12 +181,25 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
 /// directly. The enum exists so `OAuthProfileUsagePoller` can dispatch on
 /// profile kind without knowing how either fetcher obtains its credential.
 ///
-/// `Equatable` is deliberate and `CustomStringConvertible` is deliberately
-/// absent: a `.token` value carries secret bytes, so it must never be
-/// interpolated into a log line or an error string.
-public enum ProfileUsageCredential: Equatable, Sendable {
+/// A `.token` value carries secret bytes, so `CustomStringConvertible` is
+/// implemented to *enforce* that it never reaches a log line or an error
+/// string. Merely omitting the conformance would not: Swift's default
+/// reflection renders `String(describing:)` of this enum as
+/// `token("sk-ant-oat01-…")`, printing the secret in full. The conformance
+/// below makes every interpolation, every `String(describing:)`, and every
+/// `%@`-style rendering safe by construction. The config-dir path is not
+/// secret and stays visible, because it is the only thing that makes a
+/// `.configDir` failure diagnosable.
+public enum ProfileUsageCredential: Equatable, Sendable, CustomStringConvertible {
     case configDir(String)
     case token(String)
+
+    public var description: String {
+        switch self {
+        case let .configDir(path): return "configDir(\(path))"
+        case .token: return "token(<redacted>)"
+        }
+    }
 }
 
 public protocol ProfileUsageFetching: Sendable {
