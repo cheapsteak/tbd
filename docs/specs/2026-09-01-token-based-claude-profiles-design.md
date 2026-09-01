@@ -305,8 +305,32 @@ So:
 - **Failure backoff is unchanged.** The existing per-profile schedule and its
   `Retry-After` override apply, so a rejected or rate-limited token is not
   hammered by activity.
-- **One probe on profile creation**, so a freshly pasted token shows bars
-  immediately and a bad paste is caught at once rather than at first spawn.
+- **One probe whenever the credential changes** — creation *and* rotation — so a
+  freshly pasted token shows bars immediately and a bad paste is caught at once
+  rather than at first spawn. Rotation matters as much as creation: the user
+  pasting a replacement for a revoked token is watching the row wait for
+  "Token rejected" to clear, and without a probe it would not clear until the
+  next session happened to finish a turn.
+
+  **That probe releases both of the poller's gates, and must.** A rotation hits
+  each of them, and reusing the ordinary path would produce a probe that never
+  fires in its own motivating case:
+
+  - *Backoff.* A rejected token has already earned an exponential backoff
+    (30 s and doubling). Pasting the fix seconds later lands inside that window.
+  - *Freshness.* A profile that previously succeeded keeps its `fetchedAt`, and
+    the five-minute floor applies to a request that names no window — so a
+    rotation within five minutes of any successful probe, including the
+    creation probe, is skipped.
+
+  Both gates are bookkeeping about a credential that no longer exists: the
+  backoff was earned by the old token's failures, and the snapshot's freshness
+  describes the old token's numbers. So the backoff is **cleared** rather than
+  bypassed — a fresh credential restarts the exponential schedule instead of
+  inheriting a dead one's exponent — and the freshness floor is waived for that
+  single call, leaving the cadence, manual-refresh and activity paths floored.
+  It is a per-gesture release, not a hole in the gate: a user cannot rotate in
+  a loop.
 - **Manual refresh** in the profile row's `⋯` menu, subject to the same floor.
 
 An idle token profile issues zero requests. A continuously busy one issues at
@@ -432,7 +456,8 @@ expire — so this is the only way to recover a profile whose token has aged out
 - **Token rejected later** (revoked, expired) — the probe records `.needsLogin`;
   the row shows `Token rejected — Replace token…`. Spawning still works as far
   as TBD is concerned; the session itself will fail to authenticate, and the row
-  is where the user finds out first.
+  is where the user finds out first. Replacing the token probes immediately, so
+  the row clears (or re-reports) on the spot rather than at the next turn.
 - **Probe rate-limited (429)** — existing backoff with `Retry-After` override.
   Bars keep showing last-known values with a staleness note; they are never
   presented as current.
@@ -467,6 +492,15 @@ Both branches of every conditional this adds, per the repo's branching rule.
   none; one after five minutes schedules one. A transition on a `.oauth`
   profile's terminal schedules none. The cadence sweep never targets a token
   profile.
+- **Credential-change probe** — creation probes once, carrying the new token;
+  rotation probes once, and the assertion is that the probe carried the
+  *replacement* credential rather than the one it replaced. Each gate is
+  isolated: one test rotates inside the freshness floor, another inside the
+  backoff window with nothing ever having succeeded. An activity probe at the
+  same instant must still be held, proving the release did not leak. Renaming a
+  profile probes nothing, and `updateToken` against a signed-in profile is
+  rejected by message rather than merely failing to probe — a probe count of
+  zero would pass for the wrong reason.
 - **Staleness threshold** — a token profile fetched four minutes ago renders no
   staleness note; a signed-in profile fetched four minutes ago does.
 - **Presentation** — `needsLogin` is false for `.oauthToken` regardless of
