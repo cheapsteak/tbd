@@ -5,14 +5,45 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 2: short-lived local stub scripts this suite fully controls, driven
-/// entirely on virtual time.
+/// Tier 3: every test spawns real children and races a deadline to drive them,
+/// which is the tier-3 definition in `Tests/CLAUDE.md`. `ProviderEventsSupervisorTests`
+/// — the supervisor this one is modelled on, sharing its generation-guarded
+/// teardown, its backoff and its process-group kill — sits in this target for
+/// the same reason.
 ///
-/// The stubs are real `bash` children — a duplex NDJSON stream over two real
+/// The stubs are real `bash` children: a duplex NDJSON stream over two real
 /// pipes is the thing under test, and a fake would test the fake. Everything
-/// that *waits*, though, is on the injected `TestClock`: backoff, the keepalive
-/// cadence, the silence watchdog and the SIGTERM→SIGKILL grace. No test here
-/// waits out a production interval in real time.
+/// that *waits* is on the injected `TestClock` — backoff, the keepalive cadence,
+/// the silence watchdog and the SIGTERM→SIGKILL grace — so no test here waits
+/// out a production interval in real time.
+///
+/// **Advancing that clock is what makes the suite tier 3, not the waiting.**
+/// `advanceVirtualTime` cannot bind to an event, because `TestClock` publishes
+/// no "a sleeper armed" notification: each step has to *poll* `checkSuspension()`,
+/// and each poll pays a `megaYield` that re-enqueues the caller behind every
+/// runnable task in the process (`Tests/CLAUDE.md`, "Population is the
+/// scheduler"; `Tests/TestSupport/ClockTestSupport.swift` measured the same
+/// construct not converging under a large target). Driving one reconnect —
+/// drain grace, kill grace, backoff — takes roughly eight such steps, all
+/// inside a single wall-clock budget. So this suite's runtime is set by how
+/// many other tests are in flight, which it does not control.
+///
+/// Measured, and the contrast is the whole argument. Run alone the suite is
+/// 16 tests in 11.1 s, and `helloIsWrittenOnConnectAndOnEveryReconnect` — the
+/// heaviest, since it drives a full reconnect — takes **0.450 s**. Run inside
+/// the 4,600-test fast parallel pass, the same test takes **107.7 s** locally
+/// and took **81.1 s** on the one CI run it survived before timing out at
+/// **227.4 s** on the runs after. Its fifteen siblings in this same
+/// `.serialized` suite stay at 0.03–5.1 s in every one of those configurations,
+/// because a serialized suite runs its first test at peak population and the
+/// rest in the drained tail. Which side of that a run lands on is a coin flip,
+/// not a margin, and raising the budget only moves the coin.
+///
+/// The time limit is a hang catcher pinned here rather than inherited from
+/// `.clockDriven`, whose 240 s is sized for the fast parallel pass (the tier-3
+/// convention in `Tests/CLAUDE.md`). It must clear the worst-case failing chain
+/// in one test — a 45 s `advanceVirtualTime` budget, a 90 s `waitFor`, and
+/// `stopDriven`'s own 45 s, so ~180 s — with room for the run to report.
 ///
 /// `.serialized` because each test spawns children and drives a clock; running
 /// them against each other floods the pool with exactly the low-priority work
@@ -21,7 +52,7 @@ import Testing
 ///
 /// Contract under test: `docs/remote-provider-contract.md` § `messages`, and
 /// `docs/specs/2026-08-29-remote-peer-messaging-design.md`.
-@Suite("PeerLinkSupervisor", .clockDriven, .serialized)
+@Suite("PeerLinkSupervisor (live)", .timeLimit(.minutes(5)), .serialized)
 struct PeerLinkSupervisorTests {
 
     /// Mirrors the daemon's process-wide SIGPIPE stance (`Sources/TBDDaemon/main.swift`),
