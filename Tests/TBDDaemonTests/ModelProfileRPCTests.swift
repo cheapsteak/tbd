@@ -491,19 +491,32 @@ struct ModelProfileRPCTests {
         #expect(stored == original)
     }
 
+    /// Off-branch: rotation is not reachable for a signed-in profile at all, so
+    /// the assertion is the rejection itself rather than only a probe count,
+    /// which would pass for the wrong reason. A `.oauth` profile stores no
+    /// TBD-side secret; its repair is `/login`, not a paste.
     @Test("updateToken: rejected on a signed-in profile, which stores no secret")
     func updateTokenRejectedOnOAuthProfile() async throws {
         let (router, db, _) = makeRouter()
         defer { Task { await cleanupKeychain(db) } }
+        let oauthFetcher = CountingProfileUsageFetcher()
+        let tokenFetcher = CountingProfileUsageFetcher()
+        router.oauthUsagePoller = makeCountingPoller(
+            db: db, fetcher: oauthFetcher, tokenFetcher: tokenFetcher)
         let profile = try await db.modelProfiles.create(name: "SignedIn", kind: .oauth)
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.modelProfileUpdateToken,
             params: ModelProfileUpdateTokenParams(id: profile.id, token: freshToken())))
         #expect(!resp.success)
+        #expect(resp.error == "Can only replace the token on a token profile")
         // Nothing was written for a kind that authenticates by /login.
         let stored = try ModelProfileKeychain.load(id: profile.id.uuidString)
         #expect(stored == nil)
+        // ...and no billed probe was spent on the rejected call.
+        await settleProbes()
+        #expect(tokenFetcher.callCount == 0)
+        #expect(oauthFetcher.callCount == 0)
     }
 
     @Test("updateToken: unknown id fails with profile-not-found")
@@ -600,18 +613,57 @@ struct ModelProfileRPCTests {
         )
     }
 
-    /// The creation probe is deliberately fire-and-forget — it must not delay
-    /// the add response — so it lands after the RPC returns. Bounded, so a
-    /// wiring regression fails fast instead of hanging the suite; the same
-    /// window is reused for the negative cases, where the positive test above
-    /// is the evidence that the window is long enough to have caught a probe.
+    /// Reported when a probe that should have fired never did. Handed to
+    /// `Issue.record` as an Error rather than left to a bare
+    /// `#expect(count == n)`, whose `condition(value → 1)` rendering drops the
+    /// whole finding from a CI summary — `Tests/CLAUDE.md`, "Timeout errors
+    /// must report observed state".
+    private struct ProbeCountUnmet: Error, CustomStringConvertible {
+        let expected: Int
+        let observed: Int
+        let after: Double
+
+        var description: String {
+            "usage probe never reached \(expected) call(s) — observed \(observed) "
+                + "after polling up to \(after) seconds. The probe is dispatched "
+                + "fire-and-forget from the RPC handler, so either it was never "
+                + "dispatched or the poller never reached its fetcher."
+        }
+    }
+
+    /// Waits for a probe that MUST arrive. A credential probe is deliberately
+    /// fire-and-forget — it must not delay the RPC response — so it lands after
+    /// the handler returns, and bounded polling is the sound way to observe it
+    /// (`Tests/CLAUDE.md` assertion-hygiene rule 3).
+    ///
+    /// The deadline is a hang-catcher, not a latency budget: it costs a passing
+    /// run nothing, and it is sized for the fast parallel pass, where a task
+    /// can sit suspended for tens of seconds behind the whole population rather
+    /// than behind anything this test did.
     private func waitForProbes(_ fetcher: CountingProfileUsageFetcher,
                                toReach target: Int,
-                               within seconds: Double = 3) async {
+                               within seconds: Double = 30,
+                               sourceLocation: SourceLocation = #_sourceLocation) async {
         let deadline = Date().addingTimeInterval(seconds)
         while fetcher.callCount < target, Date() < deadline {
             try? await Task.sleep(for: .milliseconds(5))
         }
+        if fetcher.callCount < target {
+            Issue.record(
+                ProbeCountUnmet(expected: target, observed: fetcher.callCount, after: seconds),
+                sourceLocation: sourceLocation)
+        }
+    }
+
+    /// Grace window for asserting that NO probe fires. Weaker than the positive
+    /// wait by construction, and named so nobody reads it otherwise: it samples
+    /// once at the end of a fixed window, so under enough load it can pass
+    /// because a probe had not landed *yet* rather than because none was
+    /// dispatched. The real evidence for these branches is that the handler
+    /// contains no dispatch at all; this guards against one being added
+    /// silently, and pairs with an exact count at the call site.
+    private func settleProbes(_ seconds: Double = 1) async {
+        try? await Task.sleep(for: .milliseconds(Int(seconds * 1000)))
     }
 
     /// A bad paste must be caught at creation — the row shows a rejected token
@@ -654,16 +706,21 @@ struct ModelProfileRPCTests {
             params: ModelProfileAddParams(name: "SignedIn", token: nil)))
         #expect(resp.success)
 
-        await waitForProbes(tokenFetcher, toReach: 1, within: 0.5)
+        await settleProbes()
         #expect(tokenFetcher.callCount == 0)
         #expect(oauthFetcher.callCount == 0)
     }
 
-    /// Off-branch: rotation is not creation. Each probe is a real billed
-    /// request, and the spec asks for one per creation only — the next session
-    /// turn refreshes a rotated profile.
-    @Test("updateToken: rotating a token spends no additional probe")
-    func updateTokenProbesNothing() async throws {
+    /// Rotation probes too, and must: the user is looking at a row that says
+    /// "Token rejected" and has just pasted the fix. Leaving that to the next
+    /// `working -> idle` transition reproduces the exact confusion the creation
+    /// probe removes, at the moment the user is most certainly watching.
+    ///
+    /// This also pins the released freshness gate end to end. The creation
+    /// probe left a snapshot seconds old, so the second probe fires only
+    /// because a credential change is exempt from the five-minute floor.
+    @Test("updateToken: rotating a token probes once with the new credential")
+    func updateTokenProbesOnce() async throws {
         let (router, db, _) = makeRouter()
         defer { Task { await cleanupKeychain(db) } }
         let oauthFetcher = CountingProfileUsageFetcher()
@@ -676,12 +733,41 @@ struct ModelProfileRPCTests {
         await waitForProbes(tokenFetcher, toReach: 1)
         #expect(tokenFetcher.callCount == 1, "the creation probe is the baseline this test measures against")
 
+        let replacement = freshToken()
         let rotate = await router.handle(try RPCRequest(
             method: RPCMethod.modelProfileUpdateToken,
-            params: ModelProfileUpdateTokenParams(id: profile.id, token: freshToken())))
+            params: ModelProfileUpdateTokenParams(id: profile.id, token: replacement)))
         #expect(rotate.success)
 
-        await waitForProbes(tokenFetcher, toReach: 2, within: 0.5)
+        await waitForProbes(tokenFetcher, toReach: 2)
+        #expect(tokenFetcher.callCount == 2)
+        // The second probe carried the REPLACEMENT, not the token it replaced —
+        // otherwise the row would be "corrected" with the dead credential's answer.
+        #expect(tokenFetcher.credentials.last == .token(replacement))
+        #expect(oauthFetcher.callCount == 0)
+    }
+
+    /// Off-branch: a rename changes no credential, so it spends no billed
+    /// probe. Only a credential gesture is worth one.
+    @Test("rename: renaming a token profile probes nothing")
+    func renameProbesNothing() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+        let oauthFetcher = CountingProfileUsageFetcher()
+        let tokenFetcher = CountingProfileUsageFetcher()
+        router.oauthUsagePoller = makeCountingPoller(
+            db: db, fetcher: oauthFetcher, tokenFetcher: tokenFetcher)
+
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: freshToken())
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+        await waitForProbes(tokenFetcher, toReach: 1)
+
+        let renamed = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileRename,
+            params: ModelProfileRenameParams(id: profile.id, name: "Acme (renamed)")))
+        #expect(renamed.success)
+
+        await settleProbes()
         #expect(tokenFetcher.callCount == 1)
     }
 

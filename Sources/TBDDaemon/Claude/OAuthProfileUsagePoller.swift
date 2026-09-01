@@ -23,8 +23,10 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "oauthUsagePo
 ///   usage comes from the headers of a real billed request (a setup token 403s
 ///   on the read-only usage endpoint), so they refresh on a `working -> idle`
 ///   session transition instead — `noteSessionBecameIdle(profileID:)` — at most
-///   once per `tokenProfileFloor`. They are still swept by a *targeted* sweep,
-///   and still keep their snapshots across full sweeps.
+///   once per `tokenProfileFloor`, plus once per credential change
+///   (`noteCredentialChanged(profileID:)`, on creation and on rotation). They
+///   are still swept by a *targeted* sweep, and still keep their snapshots
+///   across full sweeps.
 /// - Per-profile calls within one sweep are staggered slightly.
 /// - A failing profile records a status ("stale since X; fetch failed: …")
 ///   without poisoning the rest of the sweep; previously fetched buckets are
@@ -275,14 +277,28 @@ public actor OAuthProfileUsagePoller {
         await sweep(only: profileID, skipFresherThan: Self.tokenProfileFloor)
     }
 
-    /// Probe once for a freshly created token profile, so bars appear
-    /// immediately and a bad paste is caught at once rather than at first
-    /// spawn. Asking for no freshness window is safe: a profile that has never
-    /// been fetched has no `fetchedAt` for the floor to compare against, and
-    /// `freshnessWindow(requested:kind:)` re-imposes the floor on every later
-    /// call regardless.
-    public func noteProfileCreated(profileID: UUID) async {
-        await sweep(only: profileID, skipFresherThan: nil)
+    /// Probe once because this profile's credential just changed — it was
+    /// created, or its token was replaced. Bars then appear immediately and a
+    /// bad paste is caught at once rather than at the user's first spawn.
+    ///
+    /// Both per-profile gates are released for this one probe, and both for the
+    /// same reason: they are bookkeeping about a credential that no longer
+    /// exists. The backoff schedule was earned by the old token's failures, and
+    /// the snapshot's freshness describes the old token's numbers. Leaving
+    /// either in force would defeat the gesture in exactly the case it exists
+    /// for — the overwhelmingly common repair is pasting a good token seconds
+    /// after a bad one was rejected, which lands inside both the 30s backoff
+    /// window and the 300s floor, so the row would go on asserting "Token
+    /// rejected" about a token the user has already fixed.
+    ///
+    /// This is a per-gesture release, not a hole in the activity gate: a user
+    /// cannot rotate in a loop, and every timer- and activity-driven caller
+    /// still goes through `freshnessWindow(requested:kind:)` and the backoff.
+    /// Clearing rather than bypassing the backoff also restarts the exponential
+    /// schedule, so a fresh credential does not inherit the dead one's exponent.
+    public func noteCredentialChanged(profileID: UUID) async {
+        backoff[profileID] = nil
+        await sweep(only: profileID, skipFresherThan: nil, ignoringFreshness: true)
     }
 
     // MARK: - Sweep
@@ -294,6 +310,11 @@ public actor OAuthProfileUsagePoller {
     /// seconds, which is the right answer for a free GET and the wrong one for
     /// a billed probe. Enforcing it here rather than at each call site means
     /// there is one place a future caller can't forget.
+    ///
+    /// One caller does not consult this at all: `noteCredentialChanged` passes
+    /// `ignoringFreshness`, because a snapshot's age cannot gate a probe of a
+    /// credential that snapshot never described. That is a per-gesture
+    /// exception, not a window this function can express.
     static func freshnessWindow(requested: TimeInterval?, kind: CredentialKind) -> TimeInterval? {
         guard kind == .oauthToken else { return requested }
         return max(requested ?? 0, tokenProfileFloor)
@@ -328,7 +349,13 @@ public actor OAuthProfileUsagePoller {
         }
     }
 
-    private func sweep(only: UUID?, skipFresherThan: TimeInterval?) async {
+    /// `ignoringFreshness` is for a credential-change probe only: the stored
+    /// snapshot then describes a credential that no longer exists, so its age
+    /// says nothing about whether a fetch is warranted. Every other caller
+    /// leaves it false and is floored by `freshnessWindow(requested:kind:)`.
+    private func sweep(only: UUID?,
+                       skipFresherThan: TimeInterval?,
+                       ignoringFreshness: Bool = false) async {
         let allProfiles: [ModelProfile]
         do {
             allProfiles = try await profilesProvider()
@@ -373,7 +400,8 @@ public actor OAuthProfileUsagePoller {
         let currentTime = now()
         let targets = candidates.filter { profile in
             guard isEligibleNow(profile.id, at: currentTime) else { return false }
-            if let window = Self.freshnessWindow(requested: skipFresherThan, kind: profile.kind),
+            if !ignoringFreshness,
+               let window = Self.freshnessWindow(requested: skipFresherThan, kind: profile.kind),
                let fetchedAt = snapshots[profile.id]?.fetchedAt,
                currentTime.timeIntervalSince(fetchedAt) < window {
                 return false

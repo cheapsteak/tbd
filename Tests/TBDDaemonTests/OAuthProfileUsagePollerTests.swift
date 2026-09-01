@@ -927,9 +927,61 @@ private func makeTokenPoller(
             profiles: [profile], tokens: [profile.id: "sk-ant-oat01-A"],
             fetcher: fetcher, clock: clock)
 
-        await poller.noteProfileCreated(profileID: profile.id)
+        await poller.noteCredentialChanged(profileID: profile.id)
 
         #expect(fetcher.tokenProbeCount == 1)
+    }
+
+    /// Rotation is what the released freshness gate exists for: a snapshot
+    /// fetched seconds ago describes the OLD token, so its age cannot say
+    /// whether the NEW one is worth reading.
+    @Test func credentialChangeProbesInsideTheFloor() async {
+        let profile = tokenProfile(named: "Acme (token)")
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets, organizationID: nil))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-A"],
+            fetcher: fetcher, clock: clock)
+
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        // 5s in — deep inside the 300s floor that
+        // `pickerRefreshCannotBypassTheTokenFloor` shows holds every other
+        // caller back at this point.
+        clock.advance(5)
+        await poller.noteCredentialChanged(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 2)
+
+        // The off-branch, at the same instant: releasing the gate for the
+        // gesture must not leave it released for the activity path.
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 2)
+    }
+
+    /// The other released gate, isolated: nothing here ever succeeded, so there
+    /// is no `fetchedAt` for the floor to act on and the backoff window is the
+    /// only thing that could hold the probe back. It is also the realistic
+    /// case — the repair for a rejected token is pasting a good one seconds
+    /// later, well inside the 30s window that rejection just armed.
+    @Test func credentialChangeProbesInsideTheBackoffWindow() async {
+        let profile = tokenProfile(named: "Acme (token)")
+        let fetcher = ScriptedProfileUsageFetcher(
+            default: .needsLogin("token rejected (HTTP 401)"))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-DEAD"],
+            fetcher: fetcher, clock: clock)
+
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .needsLogin)
+
+        // 10s in: `rejectedTokenRecordsNeedsLoginAndBacksOff` pins that an
+        // activity probe is still held here.
+        clock.advance(10)
+        await poller.noteCredentialChanged(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 2)
     }
 
     /// A rejected token records `.needsLogin` — the existing case, deliberately

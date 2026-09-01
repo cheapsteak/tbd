@@ -200,11 +200,12 @@ extension RPCRouter {
             // it must neither delay this response nor be able to fail it. The
             // poller broadcasts its own delta once the snapshot lands.
             //
-            // Creation ONLY. Each probe is a real billed request, so nothing
-            // else calls this — not rename, and not `updateToken` rotation.
+            // Credential gestures only. Each probe is a real billed request,
+            // so this fires on creation and on `updateToken` rotation, and on
+            // nothing else — a rename changes no credential.
             if let poller = oauthUsagePoller {
                 let createdProfileID = profileRow.id
-                Task { await poller.noteProfileCreated(profileID: createdProfileID) }
+                Task { await poller.noteCredentialChanged(profileID: createdProfileID) }
             }
 
             subscriptions.broadcast(delta: .modelProfilesChanged)
@@ -432,6 +433,21 @@ extension RPCRouter {
             // Generic on purpose — an error string must never carry token bytes.
             return RPCResponse(error: "Failed to store secret in keychain")
         }
+
+        // Same probe as creation, for the same reason and under the same
+        // rules: fired only once the NEW secret is on disk, and fire-and-forget
+        // so a network round trip can neither delay this response nor fail it.
+        //
+        // Rotation is where it matters most. The user is looking at a row that
+        // says "Token rejected" and has just pasted the fix; without this the
+        // row would keep saying it until the next `working -> idle` transition
+        // — which is the very confusion the creation probe removes, reproduced
+        // at the moment the user is most certainly watching.
+        if let poller = oauthUsagePoller {
+            let rotatedProfileID = params.id
+            Task { await poller.noteCredentialChanged(profileID: rotatedProfileID) }
+        }
+
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
