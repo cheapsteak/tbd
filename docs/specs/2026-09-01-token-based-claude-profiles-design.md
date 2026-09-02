@@ -553,11 +553,14 @@ None blocking. Two things to watch once this is in use:
   and whether `anthropic-version: 2023-06-01` stays the version to pin. A
   required header that is missing, renamed, or carrying a value the API no
   longer accepts surfaces the same way: a **400** naming the offending header,
-  with no rate-limit headers on the response. That is why any 4xx other than
-  401/403/429 maps to `.httpError` (`ProfileUsageStatusKind.unknown`) rather
+  with no rate-limit headers on the response. That is why a 4xx that is not
+  *retryable* maps to `.httpError` (`ProfileUsageStatusKind.unknown`) rather
   than `.networkError` — the request is the faulty party, an identical retry
   cannot succeed, and a status string that says so beats one that reads as a
-  passing outage. Retries continue at the backoff cap regardless, because the
+  passing outage. The retryable set is 401, 403 and 429 (each with its own
+  handling) plus 408 Request Timeout and 425 Too Early, which invite the
+  identical request again — RFC 9110 §15.5.9 and RFC 8470 respectively — and so
+  must not be told the user cannot fix them by waiting. Retries continue at the backoff cap regardless, because the
   repair is a TBD change and the profile must recover on its own once it ships.
   A distinct "probe unsupported" state may still be worth adding if the beta
   header moves, but it cannot be a new `ProfileUsageStatusKind` case:

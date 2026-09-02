@@ -161,15 +161,32 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
         }
     }
 
+    /// The 4xx statuses that describe a recoverable condition rather than a
+    /// defect in the request's shape, so repeating the same request can
+    /// succeed.
+    ///
+    /// - 401, 403: credential states — a fresh token or a refresh clears them.
+    /// - 408 Request Timeout: RFC 9110 §15.5.9 explicitly says the client "MAY
+    ///   repeat the request without modifications at any later time".
+    /// - 425 Too Early: RFC 8470 — the server declined to risk replaying an
+    ///   early-data request; the same request succeeds once the TLS handshake
+    ///   completes.
+    /// - 429: a rate limit — time clears it.
+    ///
+    /// Deliberately not here: 409 Conflict and 423 Locked describe resource
+    /// state a *different* request would have to resolve, and neither can
+    /// arise from a `max_tokens: 0` POST; 420 and 449 are vendor extensions no
+    /// RFC defines; 499 is nginx's record of a client that hung up, not a
+    /// response an HTTP client ever receives.
+    static let retryableClientErrorCodes: Set<Int> = [401, 403, 408, 425, 429]
+
     /// Whether an HTTP status means *the request we sent is wrong* rather than
     /// *try again later*.
     ///
-    /// True for 4xx except the three that describe a recoverable condition
-    /// outside the request's shape: 401 and 403 are credential states (a fresh
-    /// token or a refresh clears them) and 429 is a rate limit (time clears
-    /// it). 5xx is the server's problem and is genuinely retryable.
+    /// True for 4xx except `retryableClientErrorCodes`. 5xx is the server's
+    /// problem and is genuinely retryable.
     public static func isPermanentRequestError(_ code: Int) -> Bool {
-        (400..<500).contains(code) && code != 401 && code != 403 && code != 429
+        (400..<500).contains(code) && !retryableClientErrorCodes.contains(code)
     }
 
     /// Machine-readable classification for the snapshot / UI.

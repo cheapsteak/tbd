@@ -417,21 +417,51 @@ struct TokenProfileUsageFetcherTests {
         #expect(!reason.contains("sk-ant-oat01-SECRET"))
     }
 
-    /// The three recoverable 4xx statuses keep their own handling and must not
-    /// be swept into the malformed-request bucket.
+    /// The recoverable 4xx statuses keep their own handling and must not be
+    /// swept into the malformed-request bucket. 408 and 425 are the ones the
+    /// original predicate got wrong: both invite the *identical* request again
+    /// (RFC 9110 §15.5.9 for 408, RFC 8470 for 425), so calling them
+    /// "malformed, retrying cannot fix it" is a wrong answer shown to a user.
     @Test func recoverableFourHundredsAreNotClassifiedAsMalformedRequests() {
-        #expect(!ProfileUsageFetchStatus.isPermanentRequestError(401))
-        #expect(!ProfileUsageFetchStatus.isPermanentRequestError(403))
-        #expect(!ProfileUsageFetchStatus.isPermanentRequestError(429))
+        for code in [401, 403, 408, 425, 429] {
+            #expect(!ProfileUsageFetchStatus.isPermanentRequestError(code),
+                    "HTTP \(code) is retryable")
+        }
         #expect(!ProfileUsageFetchStatus.isPermanentRequestError(500))
         #expect(!ProfileUsageFetchStatus.isPermanentRequestError(503))
-        #expect(ProfileUsageFetchStatus.isPermanentRequestError(400))
-        #expect(ProfileUsageFetchStatus.isPermanentRequestError(499))
+        // Neighbours of the retryable codes stay permanent, so the predicate is
+        // pinned to exact values rather than a widened range.
+        for code in [400, 404, 407, 409, 422, 424, 426, 499] {
+            #expect(ProfileUsageFetchStatus.isPermanentRequestError(code),
+                    "HTTP \(code) is a malformed request")
+        }
         // A recoverable code keeps the terse reason; only a malformed-request
         // code gets the "retrying cannot fix it" wording.
         #expect(ProfileUsageFetchStatus.httpError(401).failureReason == "HTTP 401")
+        #expect(ProfileUsageFetchStatus.httpError(408).failureReason == "HTTP 408")
+        #expect(ProfileUsageFetchStatus.httpError(425).failureReason == "HTTP 425")
         #expect(ProfileUsageFetchStatus.httpError(400).failureReason?
             .contains("retrying cannot fix it") == true)
+    }
+
+    /// End to end through the probe: a retryable 4xx must come back as the
+    /// transient status the poller retries, NOT as `.httpError`, whose UI
+    /// wording tells the user to stop waiting for something that will clear.
+    @Test(arguments: [408, 425])
+    func retryableClientErrorsAreReportedAsTransient(code: Int) async {
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: code, httpVersion: "HTTP/1.1",
+                             headerFields: nil)!, Data())
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-SECRET"))
+        guard case .networkError(let message) = status else {
+            Issue.record("expected .networkError, got \(status)"); return
+        }
+        #expect(message.contains("\(code)"))
+        #expect(!message.contains("sk-ant-oat01-SECRET"))
+        #expect(status.kind == .networkError)
+        #expect(status.failureReason?.contains("retrying cannot fix it") != true)
     }
 
     /// A config-dir credential belongs to `LiveProfileUsageFetcher`. This

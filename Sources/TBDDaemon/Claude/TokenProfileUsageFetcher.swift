@@ -181,18 +181,21 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
                 .flatMap(TimeInterval.init)
             return .rateLimited(retryAfter: retryAfter)
         default:
-            // A 4xx that is not 401/403/429 is a defect in the request TBD
-            // sent — a missing required header, an unknown field — not a
-            // transport hiccup. `.networkError` promises "transient, will
-            // clear on its own", so reporting one here both misclassifies the
-            // failure and gives the UI wording that misleads. `.httpError`
+            // A 4xx outside `retryableClientErrorCodes` is a defect in the
+            // request TBD sent — a missing required header, an unknown field —
+            // not a transport hiccup. `.networkError` promises "transient,
+            // will clear on its own", so reporting one here both misclassifies
+            // the failure and gives the UI wording that misleads. `.httpError`
             // (kind `.unknown`) is the existing case for it; no
             // `ProfileUsageStatusKind` case is added, because that enum
             // decodes with `decodeIfPresent`, which THROWS on an unrecognised
             // raw value and would break snapshot decode on older apps.
             //
-            // 5xx stays `.networkError`: the server may well recover, and a
-            // retry is exactly the right response.
+            // A RETRYABLE 4xx does stay `.networkError`, and correctly so: 408
+            // Request Timeout and 425 Too Early both invite the identical
+            // request again (401/403/429 are handled above, each with its own
+            // case). 5xx stays `.networkError` too: the server may well
+            // recover, and a retry is exactly the right response.
             if ProfileUsageFetchStatus.isPermanentRequestError(http.statusCode) {
                 tokenProbeLogger.error(
                     "token usage probe request rejected: HTTP \(http.statusCode, privacy: .public) — the probe request itself is malformed; retrying cannot fix it")
