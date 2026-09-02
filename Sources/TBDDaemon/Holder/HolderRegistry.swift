@@ -929,6 +929,14 @@ actor HolderRegistry {
     ///     row is still live. So the holder is asked, and a child it still
     ///     reports as alive keeps its reader.
     ///
+    /// The second condition is only a condition if it takes an *answer*. A
+    /// holder that could not be reached has told us nothing, and a probe that
+    /// failed must never be read as one that succeeded — otherwise a single
+    /// dropped connection at the instant the drain runs dry collapses the two
+    /// conditions back to the first, which is the shape that throws a live
+    /// session's scrollback away. `exitProbeOutcome` is where each way a probe
+    /// can fail is ruled on.
+    ///
     /// Idempotent and safe to call for any session: it re-reads the slot on
     /// both sides of every suspension and does nothing unless the reader it
     /// finds is one that has genuinely finished.
@@ -990,9 +998,10 @@ actor HolderRegistry {
     /// edge, where there is nothing left to lose — and winding the holder down
     /// is then the right outcome rather than a cost.
     ///
-    /// An unreachable rendezvous is `exitedStatusUnknown`, the same convention
-    /// `adoptAll` uses: the holder is gone, the session is over, and the only
-    /// honest thing to say about how it ended is that nobody collected it.
+    /// **A failed probe is not an answer.** Only a holder that says so, or a
+    /// rendezvous that provably has nobody behind it, establishes that this
+    /// session is over; every other way a round trip can fail is retried within
+    /// the same budget and then kept. See `exitProbeOutcome`.
     private static func confirmChildExit(
         socketPath: String,
         expecting owner: HolderOwnerToken,
@@ -1012,16 +1021,131 @@ actor HolderRegistry {
                 case .alive:
                     break
                 }
-            } catch HolderClient.Error.rejected {
-                await client.close()
-                return nil
             } catch {
                 await client.close()
-                return .exitedStatusUnknown
+                switch exitProbeOutcome(for: error) {
+                case .established(let status):
+                    return status
+                case .keep:
+                    return nil
+                case .retry:
+                    break
+                }
             }
-            guard waited < budget else { return nil }
+            guard waited < budget else {
+                Self.logger.debug(
+                    """
+                    keeping the reader for a session at \(socketPath, privacy: .public): its \
+                    holder never established that the job had exited within \
+                    \(String(describing: budget), privacy: .public)
+                    """)
+                return nil
+            }
             try? await clock.sleep(for: Self.exitConfirmationInterval)
             waited += Self.exitConfirmationInterval
+        }
+    }
+
+    /// What one failed exit probe bears on the question "is this session over?".
+    ///
+    /// Three outcomes rather than two, because "the round trip failed" and "the
+    /// holder is gone" are different facts and only the second one is evidence.
+    enum ExitProbeOutcome: Equatable {
+        /// The session is over, and this is how it ended.
+        case established(HolderChildStatus)
+        /// This attempt failed in a way another one might not. Ask again, on
+        /// the same budget the "alive" answer is retried on.
+        case retry
+        /// Nothing here says the session ended. The reader stays.
+        case keep
+    }
+
+    /// How a thrown `describe` bears on releasing a reader.
+    ///
+    /// **The two conditions are only two if the second one takes positive
+    /// evidence.** A release is irreversible and asymmetric: it stops the drain
+    /// thread, closes the pty dup, and drops an emulator holding everything the
+    /// session ever printed, while a reader kept in error costs one emulator
+    /// until its session row is closed or the daemon restarts. So a probe that
+    /// merely failed must never stand in for a holder that answered — otherwise
+    /// one dropped connection at the instant the drain runs dry silently
+    /// collapses "end of output **and** confirmed exit" back to "end of
+    /// output", which is the condition that would throw away a job that closed
+    /// its terminal and kept running.
+    ///
+    /// Exhaustive on purpose: a new `HolderClient.Error` case must be classified
+    /// here rather than inheriting a catch-all.
+    ///
+    /// Internal rather than private so the classification can be pinned case by
+    /// case without standing up a holder for each one.
+    static func exitProbeOutcome(for error: Swift.Error) -> ExitProbeOutcome {
+        guard let clientError = error as? HolderClient.Error else {
+            // Nothing else is thrown on this path today. Whatever a future one
+            // throws, it is not an answer from a holder, so it cannot license a
+            // release.
+            return .keep
+        }
+        switch clientError {
+        case .rejected:
+            // A live holder, busy serving somebody else. That is evidence of
+            // liveness and explicitly not of exit — the same reading `adoptAll`
+            // and the row-less sweep both take of a refusal.
+            return .keep
+
+        case .cannotConnect(_, let code) where code == ENOENT || code == ECONNREFUSED:
+            // Nothing is listening at the rendezvous, so the holder process is
+            // gone. These are the only two errnos that mean absence rather than
+            // this daemon's own failure to reach a socket, and they are read
+            // that way in exactly one other place already —
+            // `RowlessHolderCollector.productionHandshake` and
+            // `HolderRendezvousCollector.probeForListener` — which must not
+            // disagree with this one.
+            //
+            // Established rather than retried, because absence is monotone
+            // here: this session's holder provably bound the path once, since a
+            // hand-over came over it, and a holder that has gone does not come
+            // back. Recorded the way `adoptAll` records the same observation —
+            // `exitedStatusUnknown`, never a fabricated code, which downstream
+            // could not tell from a real one.
+            return .established(.exitedStatusUnknown)
+
+        case .cannotConnect:
+            // Any other errno describes *this* process failing to open a
+            // connection — `EINTR`, `EMFILE`/`ENFILE` under descriptor
+            // pressure, `ENOBUFS`/`ENOMEM`, `ETIMEDOUT` — and says nothing
+            // whatever about the child.
+            return .retry
+
+        case .peerClosed, .transportFailed:
+            // The socket was reached and the round trip failed: a hang-up
+            // between the accept and the answer, `EPIPE`, `ECONNRESET`, or the
+            // receive timeout expiring. A holder winding down looks exactly
+            // like this, and so does one killed mid-frame — and neither says
+            // whether the child exited. The next attempt either finds no
+            // listener, which is established above, or gets a real answer.
+            return .retry
+
+        case .unexpectedResponse:
+            // A frame that is not the description that was asked for. Retried
+            // because the client's queue can carry an unsolicited push that
+            // crossed the wire with somebody else's answer, and kept if it
+            // persists: a protocol disagreement is a reason to stop trusting
+            // the answer, never a reason to believe the job is dead.
+            return .retry
+
+        case .socketPathTooLong:
+            // Deterministic, so retrying is pointless — and nothing was ever
+            // asked, so there is nothing to conclude either.
+            return .keep
+
+        case .noDescriptor, .notConnected:
+            // Neither is reachable from a `describe` over a client built for
+            // this one call: `noDescriptor` belongs to the hand-over, and
+            // `notConnected` to a client that has already been closed. Named so
+            // that they are classified rather than swept into a fall-through,
+            // and classified as keeps for the same reason as everything else
+            // here.
+            return .keep
         }
     }
 
