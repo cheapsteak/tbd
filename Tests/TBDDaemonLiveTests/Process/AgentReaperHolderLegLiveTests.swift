@@ -31,6 +31,18 @@ struct AgentReaperHolderLegLiveTests {
 
     // MARK: - Process helpers
 
+    // **Nothing in this file calls `Process.waitUntilExit()`, anywhere.** On
+    // macOS 26.1 that call can spin forever with `isRunning` already false, on
+    // any thread that did not launch the task — which is every `defer` that runs
+    // after an `await`, because an async test resumes on whichever
+    // cooperative-pool thread is free. `BoundedProcessTeardown` polls
+    // `isRunning` against a deadline instead and carries the measured defect,
+    // the reap proof, and the reason there is no injected clock; the
+    // deterministic reproduction is
+    // `scripts/diag/nstask-waituntilexit-stale-entry.swift`. The rule is written
+    // as "nowhere in this file" rather than "only where the wait is
+    // cross-thread" because the second is not checkable by reading a call site.
+
     /// A job that survives a hangup — the shape the acceptance harness measured
     /// outliving its teardown at `ppid=1` while its default-disposition sibling
     /// died. Spawned through `zsh -c` with no `-l`/`-i`, so it sources nothing
@@ -71,7 +83,9 @@ struct AgentReaperHolderLegLiveTests {
     /// to be handed to somebody else mid-test.
     private static func spentPID() throws -> Int32 {
         let p = try spawn("/usr/bin/true", [])
-        p.waitUntilExit()
+        guard case .exited = BoundedProcessTeardown.awaitExit(p) else {
+            throw FixtureSpawnFailure(code: ETIMEDOUT)
+        }
         return p.processIdentifier
     }
 
@@ -93,9 +107,17 @@ struct AgentReaperHolderLegLiveTests {
         return !pidExists(pid)
     }
 
+    /// SIGKILL, then a bounded wait for Foundation to observe the exit. A bound
+    /// that fires reds this test with what the kernel said about the pid, rather
+    /// than wedging the whole serial live pass in a `defer`.
+    ///
+    /// Recorded as an `Error` rather than a string: only
+    /// `Issue.record(_: some Error)` puts the diagnostic on the primary failure
+    /// line, which is the only line a CI summary keeps.
     private static func killAndReap(_ process: Process) {
-        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-        process.waitUntilExit()
+        if case .unobserved(let pid, let diagnostic) = BoundedProcessTeardown.killAndReap(process) {
+            Issue.record(TeardownBoundExpired(pid: pid, diagnostic: diagnostic))
+        }
     }
 
     // MARK: - A job that only SIGKILL can end
@@ -312,7 +334,7 @@ struct AgentReaperHolderLegLiveTests {
         p.standardError = FileHandle.nullDevice
         guard (try? p.run()) != nil else { return [:] }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+        _ = BoundedProcessTeardown.awaitExit(p)
         var result: [String: String] = [:]
         var fd: String?
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
