@@ -7,9 +7,9 @@ import TestSupport
 /// A worktree created from a PR row carries `Worktree.prNumber` and, before
 /// this, no binding — so its PR was invisible to `tbd pr list`, to the toolbar
 /// dropdown and to the status-bar chips. Fork PRs are the sharpest case: a fork
-/// head never appears in the viewer-authored batch, so branch matching is
-/// structurally unable to find them and the stored number is the only handle
-/// that exists.
+/// head lives in the fork, so it appears under none of the base repo's head refs
+/// — branch matching is structurally unable to find them and the stored number
+/// is the only handle that exists.
 ///
 /// Two levels are covered here: the coordinator's `seedProvenance` policy, and
 /// the poll call site that actually runs it.

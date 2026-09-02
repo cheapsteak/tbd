@@ -20,18 +20,19 @@ struct PRPollReconcileTests {
 
     // MARK: - Scripted `gh`
 
-    /// Answers the four query shapes a poll issues: `repo view`, the viewer
-    /// batch, the aliased by-number lookup, and the per-PR check query. Nodes
-    /// are green (`SUCCESS`), so the check query is never reached.
+    /// Answers the four query shapes a poll issues: `repo view`, the
+    /// repo-scoped branch query, the aliased by-number lookup, and the per-PR
+    /// check query. Nodes are green (`SUCCESS`), so the check query is never
+    /// reached.
     ///
     /// Mutable between polls, which is the whole point: a heal is a *later*
     /// pass contradicting an earlier one.
     private actor ScriptedGH {
         var nameWithOwner = "acme/acme-prod"
-        var viewerNodes: [String] = []
+        var branchNodes: [String] = []
         var nodesByNumber: [Int: String] = [:]
 
-        func set(viewerNodes: [String]) { self.viewerNodes = viewerNodes }
+        func set(branchNodes: [String]) { self.branchNodes = branchNodes }
         func set(nodesByNumber: [Int: String]) { self.nodesByNumber = nodesByNumber }
 
         func run(args: [String], repoPath: String) -> GHCommandResult? {
@@ -43,10 +44,8 @@ struct PRPollReconcileTests {
             }
             guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
             if query.contains("commits(last: 1)") { return nil }
-            if query.contains("viewer {") {
-                return GHCommandResult(
-                    stdout: "{\"data\":{\"viewer\":{\"pullRequests\":{\"nodes\":["
-                        + viewerNodes.joined(separator: ",") + "]}}}}")
+            if BranchQueryStub.isBranchQuery(query) {
+                return BranchQueryStub.response(args: args, nodes: branchNodes)
             }
             if query.contains("pullRequest(number:") {
                 let fields = Self.aliasedNumbers(inQuery: query).map { alias, number in
@@ -280,20 +279,20 @@ struct PRPollReconcileTests {
         let harness = try await Harness()
         let wt = try await harness.newWorktree()
 
-        // Poll 1: the viewer batch matches the worktree's own branch, so the
-        // branch matcher binds PR #90.
-        await harness.gh.set(viewerNodes: [Self.nodeJSON(number: 90, head: "tbd/feature")])
+        // Poll 1: the branch query answers with the worktree's own branch, so
+        // the branch matcher binds PR #90.
+        await harness.gh.set(branchNodes: [Self.nodeJSON(number: 90, head: "tbd/feature")])
         #expect(await harness.poll())
         let afterFirst = try await harness.bindings(wt)
         #expect(afterFirst.map(\.number) == [90])
         #expect(afterFirst.first?.source == .branch)
 
-        // Poll 2: `@{push}` now resolves and the batch no longer offers the PR,
+        // Poll 2: `@{push}` now resolves and the branch query no longer offers the PR,
         // so the cached number is re-resolved — and its head turns out to be the
         // branch this worktree merely TRACKS, which is the repo default. The
         // heal clears the cache; without this fix the binding row survived,
         // kept driving the icon, and on merge auto-archived the worktree.
-        await harness.gh.set(viewerNodes: [])
+        await harness.gh.set(branchNodes: [])
         await harness.gh.set(nodesByNumber: [90: Self.nodeJSON(number: 90, head: "main")])
         #expect(await harness.poll())
 
@@ -370,7 +369,7 @@ struct PRPollReconcileTests {
 
         // #1 resolves green by branch match and by number; #2 does not resolve,
         // so it keeps its previous failing status.
-        await harness.gh.set(viewerNodes: [Self.nodeJSON(number: 1, head: "tbd/feature")])
+        await harness.gh.set(branchNodes: [Self.nodeJSON(number: 1, head: "tbd/feature")])
         await harness.gh.set(nodesByNumber: [1: Self.nodeJSON(number: 1, head: "tbd/feature")])
         #expect(await harness.poll())
 
@@ -535,11 +534,11 @@ struct PRPollReconcileTests {
         try await harness.db.worktrees.setAutoHibernateOnMerge(id: wt, value: true)
         #expect(try await harness.bindings(wt).isEmpty)
 
-        // The viewer batch offers PR #30, already MERGED, on the worktree's own
+        // The branch query offers PR #30, already MERGED, on the worktree's own
         // branch: `fetchAll` matches it (firing the un-bound fallback) and the
         // branch matcher binds it in the same pass.
         let merged = Self.nodeJSON(number: 30, head: "tbd/feature", state: "MERGED")
-        await harness.gh.set(viewerNodes: [merged])
+        await harness.gh.set(branchNodes: [merged])
         await harness.gh.set(nodesByNumber: [30: merged])
         #expect(await harness.poll())
 

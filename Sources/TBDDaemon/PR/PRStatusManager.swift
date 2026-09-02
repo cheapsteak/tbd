@@ -49,7 +49,12 @@ enum PRUndeterminedCause {
 
 /// In-memory cache of GitHub PR status per worktree.
 ///
-/// `fetchAll` runs one batch GraphQL call for all viewer PRs, plus one combined per-PR
+/// `fetchAll` runs repo-scoped GraphQL calls — one per repo the fleet spans,
+/// split again when a repo's worktrees carry more candidate head refs than one
+/// query may ask about, and all of them concurrently. Each carries one aliased
+/// `pullRequests(headRefName:)` field per candidate head branch, so the forge
+/// does the matching and a pull request opened by a bot, a teammate, or
+/// the web UI is found — plus one combined per-PR
 /// GraphQL call (run concurrently) for each OPEN PR whose aggregate rollup isn't SUCCESS —
 /// that call returns the aggregate state, every check context with its `isRequired`
 /// flag, and a pagination flag in a single round trip. `refresh` runs
@@ -388,7 +393,11 @@ public actor PRStatusManager {
     /// Whether a forge CLI could be launched at all — the difference between
     /// "asked and got nothing back" and "there was nobody to ask". An injected
     /// runner counts as available: it is what stands in for the binary.
-    private var forgeCLIAvailable: Bool {
+    ///
+    /// `nonisolated` because the GitHub branch-match path is, and it reads only
+    /// immutable state — a `let` runner and a static path. Isolated callers
+    /// still read it unchanged.
+    private nonisolated var forgeCLIAvailable: Bool {
         ghRunner != nil || Self.resolvedGHPath != nil
     }
 
@@ -595,7 +604,7 @@ public actor PRStatusManager {
         public var disproved: [(worktreeID: UUID, parsed: ParsedPRURL)] = []
     }
 
-    /// Fetch all viewer PRs in one GraphQL call and update cache for all known worktrees.
+    /// Fetch every worktree's pull request state and update the cache for all known worktrees.
     /// worktrees: one `PollWorktree` per active non-main worktree.
     ///
     /// Returns the branch-matched PRs as `ParsedPRURL`s in `discovered` — the
@@ -637,28 +646,32 @@ public actor PRStatusManager {
         // "every considered worktree gets exactly one observation" rule is
         // visible in one place instead of spread across six early exits.
         var outcomes: [UUID: PRObservation.Outcome] = [:]
-        // Worktrees may span multiple repos. repoPath is only gh's working
-        // directory for the viewer batch (gh auth is host-scoped, so any
-        // checkout works); by-number lookups resolve each worktree's own repo.
-        // Any entry's path serves, and every entry has a real directory —
+        // Worktrees may span multiple repos. `repoPath` is only gh's working
+        // directory for the per-PR check queries, which carry their own
+        // owner/name in the query text (gh auth is host-scoped, so any checkout
+        // works); the branch and by-number queries scope themselves to each
+        // worktree's own repo and run in that repo's own checkout. Any entry's
+        // path serves, and every entry has a real directory —
         // `RPCRouter.pollWorkingDirectory` is where that is guaranteed.
         let repoPath = worktrees[0].worktreePath
 
         // Worktrees created from a PR row carry its number; resolve those
-        // directly (a fork PR's head never appears in the viewer-authored batch).
-        // Everything else uses the viewer-batch branch-name matching, scoped to
-        // each worktree's own repo (see `matchUnnumbered`).
+        // directly — a fork PR's head ref lives in the fork, so no query against
+        // this repo's head refs can name it. Everything else is matched by head
+        // branch, scoped to each worktree's own repo (see `matchUnnumbered`).
         let (numbered, unnumbered) = Self.partitionByPRNumber(worktrees) { $0.prNumber }
 
-        // Do NOT clear entries for missing worktrees — the batch query is
-        // limited to 100 PRs across all repos, so older PRs may not appear.
-        // Those entries may have been populated by a targeted `refresh` call.
+        // Do NOT clear entries for missing worktrees. A branch query answers
+        // only about head refs the candidate list could name, so a pull request
+        // on a ref nobody named (a fork head, a rename-push) is absent from the
+        // answer without being absent from the forge — and those entries may
+        // have been populated by a targeted `refresh` call.
         var matches: [(worktreeID: UUID, node: PRNode)] = []
 
         // Which of `matches` came from the branch matcher, so the emitter can
         // tell a branch discovery from a by-number resolution. The two sets are
         // disjoint by construction (the fallback only re-queries worktrees the
-        // batch left unmatched).
+        // branch query left unmatched).
         var branchMatchedIDs: Set<UUID> = []
 
         // Numbered path: one aliased by-number query (skipped when none stored).
@@ -666,21 +679,23 @@ public actor PRStatusManager {
             matches += await fetchNumberedMatches(numbered)
         }
 
-        // Legacy path: viewer-authored batch + branch-name matching, scoped to
-        // each worktree's own repo (the batch spans every repo the viewer
-        // authored PRs in, and the same branch name can exist in several). On a
-        // fetch or parse failure it contributes no matches, but the numbered
-        // path above has already resolved independently.
-        var batchSucceeded = false
-        /// Which failure class the viewer batch hit, when it hit one. Retained
-        /// rather than collapsed to a Bool so an unnumbered worktree's
-        /// `.undetermined` names what actually went wrong.
-        var batchFailureCause = PRUndeterminedCause.queryFailed
-        /// Which unnumbered worktrees are on a GitLab host, which of those a
-        /// project query actually answered for, and — for the ones it matched —
-        /// whether their project gates merges on the pipeline. The GitLab side
-        /// is judged per project rather than by one fleet-wide batch, so
-        /// `batchSucceeded` cannot speak for it.
+        // By-branch path: repo-scoped queries, matched back to each worktree's
+        // own repo (several repos can hold the same branch name, and
+        // `matchUnnumbered` is what keeps one repo's PR off another's worktree).
+        // Both forges degrade per query: one whose query fails contributes no
+        // matches and no answered ids, while the numbered path above has already
+        // resolved independently.
+        /// Which unnumbered GitHub worktrees a repo query actually answered for,
+        /// and which failure class the rest hit. The cause is retained rather
+        /// than collapsed to a Bool so an unnumbered worktree's `.undetermined`
+        /// can say something about why — one value per forge, so read it as a
+        /// display hint rather than a per-worktree verdict (see
+        /// `fetchGitHubBranchMatches`).
+        var gitHubAnsweredIDs: Set<UUID> = []
+        var gitHubFailureCause = PRUndeterminedCause.queryFailed
+        /// The same two facts on the GitLab side, plus which unnumbered
+        /// worktrees are on a GitLab host at all and — for the ones a project
+        /// matched — whether that project gates merges on the pipeline.
         var gitLabUnnumberedIDs: Set<UUID> = []
         var gitLabAnsweredIDs: Set<UUID> = []
         // Keyed only where the project said; see `fetchGitLabBranchMatches`.
@@ -742,31 +757,21 @@ public actor PRStatusManager {
             let gitHubUnnumbered = unnumbered.filter { !gitLabPaths.contains($0.worktreePath) }
             gitLabUnnumberedIDs = Set(gitLabUnnumbered.map(\.id))
 
-            // The viewer batch is GitHub's only branch-matching route, and it is
-            // skipped outright when no worktree is on GitHub — a GitLab-only
+            // GitHub asks each repo about its worktrees' candidate head refs,
+            // in one query per repo per alias-cap chunk, all run concurrently.
+            // Skipped outright when no worktree is on GitHub — a GitLab-only
             // fleet never spawns `gh`.
             if !gitHubUnnumbered.isEmpty {
-                if let jsonData = await runGHGraphQL(repoPath: repoPath) {
-                    if let nodes = try? Self.parsePRNodes(from: jsonData) {
-                        batchSucceeded = true   // empty nodes is still a valid answer (viewer has no PRs)
-                        let branchMatches = Self.matchUnnumbered(gitHubUnnumbered, nodes: nodes,
-                                                                 resolveRepo: { unnumberedRepos[$0] })
-                        branchMatchedIDs.formUnion(branchMatches.map(\.worktreeID))
-                        matches += branchMatches
-                    } else {
-                        logger.warning("Failed to parse GraphQL response")
-                        batchFailureCause = PRUndeterminedCause.unparseableResponse
-                    }
-                } else {
-                    batchFailureCause = forgeCLIAvailable
-                        ? PRUndeterminedCause.queryFailed
-                        : PRUndeterminedCause.cliUnavailable
-                }
+                let gitHub = await fetchGitHubBranchMatches(gitHubUnnumbered, repos: unnumberedRepos)
+                branchMatchedIDs.formUnion(gitHub.matches.map(\.worktreeID))
+                matches += gitHub.matches
+                gitHubAnsweredIDs = gitHub.answeredIDs
+                gitHubFailureCause = gitHub.failureCause
             }
 
-            // GitLab asks the server for the branches instead, one query per
-            // project — author-blind, so a merge request opened through the web
-            // UI or by a teammate is found, which the viewer batch can never do.
+            // GitLab asks the same author-blind question one project at a time,
+            // carrying the whole branch list in a single argument rather than
+            // one alias per branch — the only difference between the two paths.
             if !gitLabUnnumbered.isEmpty {
                 let gitLab = await fetchGitLabBranchMatches(
                     gitLabUnnumbered, repos: unnumberedRepos, hosts: unnumberedHosts)
@@ -778,10 +783,10 @@ public actor PRStatusManager {
             }
         }
 
-        // Fallback: unnumbered worktrees a *successful* batch left unmatched
-        // whose cached status still carries a PR number — resolve those by
-        // number (one extra aliased round trip, only when such worktrees
-        // exist). See `cachedNumberFallback` for the gating rationale.
+        // Fallback: unnumbered worktrees whose own repo answered and left them
+        // unmatched, and whose cached status still carries a PR number —
+        // resolve those by number (one extra aliased round trip, only when such
+        // worktrees exist). See `cachedNumberFallback` for the gating rationale.
         //
         // GitHub worktrees only: both this fallback and the head-ref
         // verification below resolve their numbers through the `gh` by-number
@@ -792,7 +797,7 @@ public actor PRStatusManager {
         let fallback = Self.cachedNumberFallback(
             unnumbered: gitHubUnnumberedEntries,
             matchedIDs: Set(matches.map(\.worktreeID)),
-            batchSucceeded: batchSucceeded,
+            answeredIDs: gitHubAnsweredIDs,
             cachedStatus: { cache[$0] })
         if !fallback.isEmpty {
             matches += await fetchNumberedMatches(fallback)
@@ -834,7 +839,7 @@ public actor PRStatusManager {
         let verificationTargets = Self.headRefVerificationTargets(
             unnumbered: gitHubUnnumberedEntries,
             matchedIDs: Set(matches.map(\.worktreeID)).union(fallback.map(\.id)),
-            batchSucceeded: batchSucceeded,
+            answeredIDs: gitHubAnsweredIDs,
             verifiedIDs: headRefVerifiedIDs,
             cachedStatus: { cache[$0] })
         if !verificationTargets.isEmpty {
@@ -919,13 +924,17 @@ public actor PRStatusManager {
         // - A NUMBERED worktree that did not resolve is always `.undetermined`.
         //   It carries a PR number, so "this branch has no PR" is a conclusion
         //   the evidence cannot support — only the lookup failing can explain it.
-        // - An UNNUMBERED worktree is `.none` only when the viewer batch
-        //   actually parsed. `batchSucceeded` is exactly the "the forge
-        //   answered" predicate the fallback and the head-ref heals already
-        //   gate on: with a failed batch, "unmatched" means nothing at all.
+        // - An UNNUMBERED worktree is `.none` only when the query covering ITS
+        //   OWN repo actually parsed. That per-repo "the forge answered"
+        //   predicate — `gitHubAnsweredIDs` on one forge, `gitLabAnsweredIDs` on
+        //   the other — is exactly what the fallback and the head-ref heals
+        //   already gate on: where no query answered, "unmatched" means nothing
+        //   at all. A worktree whose repo could not be named is grouped into no
+        //   query, so nobody answered for it and it lands here `.undetermined`
+        //   rather than reading as "no pull request".
         //
-        // Worktrees cleared by a head-ref heal land here unmatched and, on a
-        // succeeded batch, correctly read `.none`: the heal's evidence is that
+        // Worktrees cleared by a head-ref heal land here unmatched and, on an
+        // answered repo, correctly read `.none`: the heal's evidence is that
         // the PR belonged to a branch this worktree merely tracks, so this
         // worktree has none of its own.
         for wt in numbered where outcomes[wt.id] == nil && !directRefreshLanded(wt.id, after: batchStartedAt) {
@@ -934,14 +943,17 @@ public actor PRStatusManager {
         for wt in unnumbered where outcomes[wt.id] == nil && !directRefreshLanded(wt.id, after: batchStartedAt) {
             if gitLabUnnumberedIDs.contains(wt.id) {
                 // Judged by the project query that covered THIS worktree, never
-                // by the viewer batch — which was not asked about it, and on a
-                // GitLab-only fleet was not run at all.
+                // by a query that was not asked about it — and on a GitHub-only
+                // fleet was not run at all.
                 outcomes[wt.id] = gitLabAnsweredIDs.contains(wt.id)
                     ? PRObservation.Outcome.none
                     : .undetermined(cause: gitLabFailureCause)
             } else {
-                outcomes[wt.id] = batchSucceeded ? PRObservation.Outcome.none
-                                                 : .undetermined(cause: batchFailureCause)
+                // The symmetric judgment on GitHub: the repo query that covered
+                // THIS worktree, never one that covered some other repo.
+                outcomes[wt.id] = gitHubAnsweredIDs.contains(wt.id)
+                    ? PRObservation.Outcome.none
+                    : .undetermined(cause: gitHubFailureCause)
             }
         }
         for (id, observedOutcome) in outcomes {
@@ -1026,8 +1038,8 @@ public actor PRStatusManager {
     /// The binding-keyed sibling of `fetchAll`'s worktree-keyed path, and
     /// deliberately not a replacement for it: one worktree may own several PRs,
     /// so its answer cannot be a `[worktreeID: PRStatus]`. Bindings already
-    /// carry their own `owner`/`repo`, so this needs neither the viewer batch
-    /// nor `gh repo view` — one aliased `pullRequest(number:)` query per
+    /// carry their own `owner`/`repo`, so this needs neither a branch query nor
+    /// `gh repo view` — one aliased `pullRequest(number:)` query per
     /// (host, owner, repo) group, through the same `numberedPRQuery` /
     /// `parseNumberedPRNodes` / `mapStateAndReason` / `fetchCheckSignals` path
     /// the by-number poll uses.
@@ -1357,7 +1369,8 @@ public actor PRStatusManager {
         case .answered(let nodes, let pipelineGated):
             return .success(nodes: nodes, pipelineGated: pipelineGated)
         case .unreadable:
-            // The same outcome the `gh` arm reaches when `parsePRNodes` throws.
+            // The same outcome the `gh` arm reaches when `parseBranchPRNodes`
+            // returns nil.
             // A response nobody could read settles nothing, so the worktrees it
             // covers record undetermined rather than "no merge request".
             logger.warning("GitLab query for \(projectPath, privacy: .public) returned a response this build could not read")
@@ -1423,9 +1436,10 @@ public actor PRStatusManager {
     /// `isInMergeQueue` nor `mergeQueueEntry`, so a manual refresh through it
     /// would clobber `mergeQueuePosition` back to nil and flicker the bus away
     /// until the next batch poll. The GraphQL path requests the same
-    /// merge-queue field set the batch query does. `gh repo view` resolves the
-    /// checkout's `owner/name` so the query can scope to this repo+branch —
-    /// which, unlike the 100-PR viewer batch, always finds an old PR.
+    /// merge-queue field set the poll's queries do. `gh repo view` resolves the
+    /// checkout's `owner/name` so the query can scope to this repo+branch — the
+    /// same repo-scoped, author-blind question the poll asks, narrowed to the
+    /// one branch a user asked about.
     public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, defaultBranch: String?,
                         pushBranch: GitManager.PushBranchResolution,
                         repoPath: String, prNumber: Int? = nil) async -> PRStatus? {
@@ -2004,11 +2018,16 @@ public actor PRStatusManager {
         """
     }
 
-    /// Single-PR refresh query: the same per-PR field set as the batch query
-    /// (including `mergeQueueEntry { position }`), scoped to one repo + head
-    /// branch. Ordered newest-first so `parsePRByBranch` can pick the best node
-    /// without a separate `createdAt` tiebreak. `first: 10` covers a branch
-    /// reused across a closed+reopened PR pair.
+    /// Single-PR refresh query: one repo + head branch, asking for the fields
+    /// this path renders. It shares the poll's `mergeQueueEntry { position }` —
+    /// the field this note exists for, since a refresh that dropped it would
+    /// blank a merge-queue chip the poll had just set — but it is deliberately
+    /// not `prNodeFieldSelection` itself, which additionally carries `title`,
+    /// `headRefName`, `baseRefName`, `createdAt` and `statusCheckRollup { state
+    /// }`, none of which this path has anywhere to put. Ordered newest-first so
+    /// `parsePRByBranch` can pick the best node without a separate `createdAt`
+    /// tiebreak. `first: 10` covers a branch reused across a closed+reopened
+    /// PR pair.
     ///
     /// `owner`/`name`/`branch` are GraphQL **variables**, never interpolated
     /// into the query text: a git ref may legally contain `"`, and interpolating
@@ -2216,9 +2235,10 @@ public actor PRStatusManager {
     }
 
     /// Split poll inputs by whether the worktree carries a stored PR number.
-    /// Numbered entries resolve via a direct `pullRequest(number:)` lookup (the
-    /// only way to reach a fork PR, whose head never appears in the viewer batch);
-    /// the rest fall through to the legacy viewer-authored branch-name matching.
+    /// Numbered entries resolve via a direct `pullRequest(number:)` lookup — the
+    /// only way to reach a fork PR, whose head ref lives in the fork and so
+    /// appears under none of this repo's head refs. The rest are matched by head
+    /// branch against their own repo's pull requests.
     static func partitionByPRNumber<T>(_ items: [T], prNumber: (T) -> Int?) -> (numbered: [T], unnumbered: [T]) {
         var numbered: [T] = []
         var unnumbered: [T] = []
@@ -2228,39 +2248,44 @@ public actor PRStatusManager {
         return (numbered, unnumbered)
     }
 
-    /// Select the unnumbered worktrees the viewer batch left unmatched whose
+    /// Select the unnumbered worktrees the branch query left unmatched whose
     /// cached status still carries a PR number, rewriting each with that number
-    /// so `fetchNumberedMatches` can resolve it directly. Once 100 newer PRs
-    /// exist, an old PR falls out of the viewer-authored batch (first 100 by
-    /// CREATED_AT DESC) and the cached number is the only remaining handle —
-    /// without it the stale cached status (e.g. "in merge queue") persists
-    /// forever and the merged transition / auto-archive never fires. Batch
-    /// matches always win: a branch re-pointed to a NEW PR must not get pinned
-    /// to the stale cached number, so only unmatched worktrees fall back.
+    /// so `fetchNumberedMatches` can resolve it directly.
     ///
-    /// `batchSucceeded` must reflect whether the viewer batch actually parsed
-    /// (empty nodes still counts — the viewer legitimately has no PRs). On a
-    /// fetch/parse failure "unmatched" means nothing, and falling back would
-    /// resolve stale cached numbers for branches that may point at NEW PRs
-    /// (worst case: a stale MERGED number fires auto-archive off an unrelated
-    /// PR) — keeping the stale cache on failure is the pre-existing, safe
-    /// behavior, so a failed batch yields no fallback at all.
+    /// The branch query is repo-scoped and asks about every candidate head ref,
+    /// so what it cannot see is precisely a pull request on a head ref no
+    /// candidate names — a fork head, a rename-push nothing tracks — and for
+    /// those the cached number is the only remaining handle. Without it the stale cached
+    /// status (e.g. "in merge queue") persists forever and the merged transition
+    /// / auto-archive never fires. Branch matches always win: a branch
+    /// re-pointed to a NEW pull request must not get pinned to the stale cached
+    /// number, so only unmatched worktrees fall back.
+    ///
+    /// `answeredIDs` is the set of worktrees whose own repo query actually
+    /// parsed (an empty node list still counts — a repo legitimately has no pull
+    /// request on that branch). For a worktree outside it "unmatched" means
+    /// nothing, and falling back would resolve a stale cached number for a
+    /// branch that may point at a NEW pull request (worst case: a stale MERGED
+    /// number fires auto-archive off an unrelated PR) — keeping the stale cache
+    /// is the safe direction, so an unanswered worktree yields no fallback. The
+    /// gate is per worktree rather than fleet-wide: one repo going dark must not
+    /// suspend the fallback for every other repo in the fleet.
     ///
     /// Terminal cached states are excluded: `.merged` has no further transition
     /// to observe, and `.closed` would otherwise be a permanent per-poll
     /// by-number re-query — a reopened PR is recovered by the on-select
-    /// `refresh()` path (or a restored batch match), not this fallback. The
+    /// `refresh()` path (or a restored branch match), not this fallback. The
     /// merged-transition case is unaffected: the pre-transition cached state is
     /// non-terminal by definition.
     static func cachedNumberFallback(
         unnumbered: [PollWorktree],
         matchedIDs: Set<UUID>,
-        batchSucceeded: Bool,
+        answeredIDs: Set<UUID>,
         cachedStatus: (UUID) -> PRStatus?
     ) -> [PollWorktree] {
-        guard batchSucceeded else { return [] }
-        return unnumbered.compactMap { wt in
-            guard !matchedIDs.contains(wt.id),
+        unnumbered.compactMap { wt in
+            guard answeredIDs.contains(wt.id),
+                  !matchedIDs.contains(wt.id),
                   let cached = cachedStatus(wt.id),
                   cached.state != .merged, cached.state != .closed else { return nil }
             return (wt.id, wt.branch, wt.upstreamBranch, wt.defaultBranch, wt.pushBranch,
@@ -2277,11 +2302,12 @@ public actor PRStatusManager {
         "\(owner.lowercased())\u{1}\(name.lowercased())\u{1}\(branch)"
     }
 
-    /// Build the (repo, branch) → best-PR lookup used by the legacy (unnumbered)
-    /// path. The viewer batch spans every repo the viewer authored PRs in, and
-    /// the same branch name can legitimately exist in several of them; keying on
-    /// branch alone handed one repo's PR to another repo's worktree (and
-    /// persisted it) — the cross-repo collision this fix removes. Nodes whose
+    /// Build the (repo, branch) → best-PR lookup used by the by-branch
+    /// (unnumbered) path. One pass carries nodes from every repo the fleet
+    /// spans, and the same branch name legitimately exists in several of them;
+    /// keying on branch alone handed one repo's PR to another repo's worktree
+    /// (and persisted it) — the cross-repo collision this scoping removes.
+    /// Nodes whose
     /// URL doesn't parse to owner/name are dropped: they cannot be scoped, and
     /// an unscoped match is exactly the bug. When multiple PRs share a
     /// repo+branch, pick the best: highest state priority
@@ -2306,10 +2332,11 @@ public actor PRStatusManager {
         return byKey
     }
 
-    /// Match unnumbered worktrees against the viewer batch, scoped to each
-    /// worktree's own repo: a node only matches when its URL's owner/name
-    /// equals the worktree's resolved repo. Candidate order is preserved
-    /// (own branch first, then any tracked/push branch — see `branchCandidates`). A worktree
+    /// Match unnumbered worktrees against the nodes a branch query returned,
+    /// scoped to each worktree's own repo: a node only matches when its URL's
+    /// owner/name equals the worktree's resolved repo. Candidate order is
+    /// preserved (own branch first, then any tracked/push branch — see
+    /// `branchCandidates`). A worktree
     /// whose repo can't be resolved gets NO match, so the caller keeps its
     /// cached status — the same degrade behavior as the numbered path
     /// (`groupNumberedByRepo`); matching it unscoped could apply another
@@ -2364,10 +2391,11 @@ public actor PRStatusManager {
 
     /// Matches this worktree can be *positively shown* to be mis-attached to.
     ///
-    /// A clear deletes state a user cannot recreate once the PR ages out of the
-    /// 100-PR viewer batch, so "not a candidate" alone is not enough to justify
-    /// one. `matches` reaches here from two producers with different strengths:
-    /// the viewer batch matches BY CANDIDATE, but `cachedNumberFallback` →
+    /// A clear deletes state a user cannot recreate once the PR's head ref drops
+    /// off the candidate list, so "not a candidate" alone is not enough to
+    /// justify one. `matches` reaches here from two producers with different
+    /// strengths: the branch query matches BY CANDIDATE, but
+    /// `cachedNumberFallback` →
     /// `fetchNumberedMatches` resolves BY NUMBER and never consults candidates.
     /// So a momentarily narrower candidate list would otherwise turn a
     /// conservative failure-to-attach into a destructive delete.
@@ -2435,9 +2463,10 @@ public actor PRStatusManager {
     /// deliberately never re-queries — precisely the ones that would otherwise
     /// display a mis-attached PR forever.
     ///
-    /// `batchSucceeded` gates it for the same reason the fallback is gated: on a
-    /// fetch/parse failure every worktree is "unmatched" and the word means
-    /// nothing. Absence of evidence is not proof of mis-attachment.
+    /// `answeredIDs` gates it for the same reason the fallback is gated, and per
+    /// worktree for the same reason: where this worktree's own repo query did
+    /// not parse, it is "unmatched" only because nobody asked, and the word
+    /// means nothing. Absence of evidence is not proof of mis-attachment.
     ///
     /// Worktrees that could never satisfy `headRefMismatchedMatches` — a
     /// `.lookupFailed` push resolution, no known tracked branch, or no known
@@ -2446,13 +2475,13 @@ public actor PRStatusManager {
     static func headRefVerificationTargets(
         unnumbered: [PollWorktree],
         matchedIDs: Set<UUID>,
-        batchSucceeded: Bool,
+        answeredIDs: Set<UUID>,
         verifiedIDs: Set<UUID>,
         cachedStatus: (UUID) -> PRStatus?
     ) -> [PollWorktree] {
-        guard batchSucceeded else { return [] }
-        return unnumbered.compactMap { wt in
-            guard !matchedIDs.contains(wt.id),
+        unnumbered.compactMap { wt in
+            guard answeredIDs.contains(wt.id),
+                  !matchedIDs.contains(wt.id),
                   !verifiedIDs.contains(wt.id),
                   wt.pushBranch != .lookupFailed,
                   wt.upstreamBranch != nil, wt.defaultBranch != nil,
@@ -2462,17 +2491,18 @@ public actor PRStatusManager {
         }
     }
 
-    /// The per-PR field selection shared by the viewer batch and the by-number
+    /// The per-PR field selection shared by the branch query and the by-number
     /// aliased query, so the two can't drift and both parse into `PRNode`.
     /// `title` rides along because it is what turns a bare `#21156` into
     /// something a person can decide about. It is a real addition to the poll's
-    /// payload, not a free one: this selection is shared with the viewer batch,
-    /// which pulls up to 100 PRs, so it costs one short string per PR per pass
-    /// there — and those titles are discarded, since only the by-number path
-    /// has a binding row to persist them onto. One title is a rounding error
-    /// beside the check rollup the same node already carries, and splitting the
-    /// selection in two to avoid it would give up the guarantee that the two
-    /// queries cannot drift and both parse into `PRNode`.
+    /// payload, not a free one: the branch query pulls this selection for up to
+    /// ten pull requests per candidate branch, so it costs one short string per
+    /// pull request per pass there — and those titles are discarded, since only
+    /// the by-number path has a binding row to persist them onto. Ten per branch
+    /// is a narrow bill, and one title is a rounding error beside the check
+    /// rollup the same node already carries; splitting the selection in two to
+    /// avoid it would give up the guarantee that the two queries cannot drift
+    /// and both parse into `PRNode`.
     static let prNodeFieldSelection =
         "number url title state mergeStateStatus reviewDecision headRefName baseRefName createdAt isDraft "
         + "statusCheckRollup { state } mergeQueueEntry { position }"
@@ -2494,6 +2524,153 @@ public actor PRStatusManager {
         """
     }
 
+    /// One aliased query asking a repo about several head refs in a single
+    /// round trip: `b0: pullRequests(headRefName: $b0, …)` etc. under the repo
+    /// object, `first: 10` each so a branch reused across a closed-and-reopened
+    /// pair is fully covered, newest-first so `bestNodeByRepoBranch`'s
+    /// `createdAt` tiebreak and the server agree.
+    ///
+    /// Repo-scoped and author-blind: it asks what pull requests exist on these
+    /// head refs, not who opened them, so a pull request from a bot, a teammate,
+    /// or the web UI is found exactly as the author's own is.
+    ///
+    /// Every branch is a declared `String!` **variable**, and its text appears
+    /// nowhere in the query: a git ref may legally contain `"`, and
+    /// interpolating `headRefName: "\(branch)"` for a branch like `foo"bar`
+    /// produced a malformed query. `branchPRsArgs` binds the values as
+    /// raw-string fields.
+    static func branchPRsQuery(aliasCount: Int) -> String {
+        let variables = (["$owner: String!", "$name: String!"]
+                         + (0..<aliasCount).map { "$b\($0): String!" }).joined(separator: ", ")
+        let selections = (0..<aliasCount).map {
+            "b\($0): pullRequests(headRefName: $b\($0), first: 10, "
+            + "orderBy: {field: CREATED_AT, direction: DESC}) { nodes { \(prNodeFieldSelection) } }"
+        }.joined(separator: "\n    ")
+        return """
+        query(\(variables)) {
+          repository(owner: $owner, name: $name) {
+            \(selections)
+          }
+        }
+        """
+    }
+
+    /// The `gh api graphql` argument vector for the branch query, binding
+    /// `owner`, `name` and one `b<N>` per branch as GraphQL variables. Uses `-f`
+    /// (raw string), not `-F` (typed): the variables are declared `String!`, and
+    /// `-F` would coerce a branch named like a number or `true`/`false`/`null`
+    /// into the wrong JSON type and be rejected. Passing the branches as fields
+    /// — not interpolated text — also makes a `"` in any ref harmless.
+    ///
+    /// An **empty `branches` yields an empty argument vector**, and an empty
+    /// vector means "there is nothing to ask" rather than "ask about nothing".
+    /// A zero-alias document is `repository(owner: $owner, name: $name) { }` —
+    /// an empty selection set, which is not a valid GraphQL document — so
+    /// returning `[]` here makes that document unrepresentable through the only
+    /// path that ever runs one, instead of leaving it merely unreached behind a
+    /// caller's guard. Callers treat an empty vector as a skip.
+    static func branchPRsArgs(owner: String, name: String, branches: [String]) -> [String] {
+        guard !branches.isEmpty else { return [] }
+        var args = [
+            "api", "graphql",
+            "-f", "query=\(branchPRsQuery(aliasCount: branches.count))",
+            "-f", "owner=\(owner)",
+            "-f", "name=\(name)"
+        ]
+        for (index, branch) in branches.enumerated() {
+            args += ["-f", "b\(index)=\(branch)"]
+        }
+        return args
+    }
+
+    /// The most head refs one branch query may carry.
+    ///
+    /// Not a limit the forge imposes. Measured against a real large monorepo, 96
+    /// aliases came back in 3.96 s and 288 aliases in 5.25 s, both at a GraphQL
+    /// rate-limit cost of 3 points — so the cap is not rescuing a query that
+    /// would otherwise fail today. It buys two other things. First, blast
+    /// radius: `pullRequests` is a non-null `PullRequestConnection!`, so an
+    /// error on ONE aliased field null-propagates up to the nullable
+    /// `repository`, and `parseBranchPRNodes` then reads the whole response as
+    /// "the forge did not answer" — one bad head ref would otherwise cost every
+    /// worktree in that repo its answer, every poll, for as long as it stayed
+    /// bad. Second, headroom: a repository much larger than the one measured
+    /// stays inside GitHub's request timeout.
+    static let branchQueryAliasCap = 50
+
+    /// Split one repo's poll entries into the chunks its branch queries ask
+    /// about, each holding at most `branchQueryAliasCap` distinct head refs.
+    ///
+    /// **Chunked by worktree, never by branch, and that is load-bearing.**
+    /// `matchUnnumbered` walks a worktree's candidates in priority order and
+    /// takes the first hit. Split one worktree's candidates across two chunks
+    /// and a failure of the chunk holding candidate[0] would let candidate[1] —
+    /// the branch this worktree merely tracks, or its push target — answer in
+    /// its place, attaching the worktree to its SECOND-choice branch's pull
+    /// request while its own branch's pull request went unseen. That is a
+    /// mis-attachment, and this file's mis-attachments reach
+    /// `onMergedTransition` and auto-archive, so a second-choice answer is not a
+    /// smaller version of the right one.
+    ///
+    /// Chunking by worktree instead makes a chunk atomic over whole worktrees: a
+    /// failed chunk contributes no matches and no answered ids for exactly the
+    /// worktrees in it, and its siblings are unaffected. A chunk therefore
+    /// always holds at least one worktree, even one whose own candidate list
+    /// exceeds the cap — a worktree nobody can ask about is strictly worse than
+    /// one oversized query.
+    static func branchQueryChunks(
+        _ entries: [PollWorktree]
+    ) -> [(entries: [PollWorktree], branches: [String])] {
+        var chunks: [(entries: [PollWorktree], branches: [String])] = []
+        var currentEntries: [PollWorktree] = []
+        var currentBranches: [String] = []
+        for wt in entries {
+            let combined = orderedUniqueBranches(currentBranches + candidatesFor(wt))
+            if !currentEntries.isEmpty && combined.count > branchQueryAliasCap {
+                chunks.append((entries: currentEntries, branches: currentBranches))
+                currentEntries = [wt]
+                currentBranches = orderedUniqueBranches(candidatesFor(wt))
+                continue
+            }
+            currentEntries.append(wt)
+            currentBranches = combined
+        }
+        if !currentEntries.isEmpty {
+            chunks.append((entries: currentEntries, branches: currentBranches))
+        }
+        return chunks
+    }
+
+    /// Pure parse of the branch query's aliased response, flattened to one node
+    /// list for `matchUnnumbered` to scope and rank.
+    ///
+    /// **nil and `[]` are different answers, and the distinction is the whole
+    /// point of the `PRObservation` vocabulary this feeds.** nil means the forge
+    /// did not answer — no `data`, or a null/absent `repository` (renamed,
+    /// inaccessible, or a token that lost access), so the worktrees this query
+    /// covered learned nothing and must record `.undetermined`. `[]` means it
+    /// answered and there is no pull request on any of these head refs, which is
+    /// settled knowledge a program can act on.
+    ///
+    /// An alias that is absent or null is skipped rather than failing the whole
+    /// response: `gh api graphql` emits partial `data` alongside per-node
+    /// errors, and one unreadable branch says nothing about the others.
+    static func parseBranchPRNodes(from data: Data, aliasCount: Int) -> [PRNode]? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dataObj = root["data"] as? [String: Any],
+              let repository = dataObj["repository"] as? [String: Any] else {
+            logger.debug("fetchAll: branch query response carried no repository object; the forge did not answer")
+            return nil
+        }
+        var out: [PRNode] = []
+        for index in 0..<aliasCount {
+            guard let alias = repository["b\(index)"] as? [String: Any],
+                  let nodes = alias["nodes"] as? [Any] else { continue }
+            out += nodes.compactMap { $0 as? [String: Any] }.compactMap(prNode(from:))
+        }
+        return out
+    }
+
     /// Pure parse of the by-number aliased response. Each alias maps to a
     /// worktree; a null/absent `pullRequest` (deleted or inaccessible PR) or a
     /// malformed shape yields no match for that worktree — never a crash.
@@ -2511,19 +2688,7 @@ public actor PRStatusManager {
         }
     }
 
-    public static func parsePRNodes(from data: Data) throws -> [PRNode] {
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let dataObj = root["data"] as? [String: Any],
-              let viewer = dataObj["viewer"] as? [String: Any],
-              let prs = viewer["pullRequests"] as? [String: Any],
-              let nodes = prs["nodes"] as? [Any] else {
-            throw PRStatusError.invalidJSON
-        }
-
-        return nodes.compactMap { $0 as? [String: Any] }.compactMap(prNode(from:))
-    }
-
-    /// Extract one `PRNode` from a GraphQL PR object, shared by the viewer-batch
+    /// Extract one `PRNode` from a GraphQL PR object, shared by the branch-query
     /// parse and the by-number parse (same `prNodeFieldSelection`).
     static func prNode(from node: [String: Any]) -> PRNode? {
         guard let number = node["number"] as? Int,
@@ -2642,7 +2807,8 @@ public actor PRStatusManager {
         // `gh api graphql` exits non-zero when ANY node errors (a stale/deleted/
         // inaccessible fork PR) yet still emits usable `data` for the rest. Parse
         // whatever came back rather than discarding the whole batch — mirrors
-        // `runGHGraphQL`'s partial-results tolerance (regression guard, PR #208).
+        // the branch and by-number queries' partial-results tolerance
+        // (regression guard, PR #208).
         if result.exitStatus != 0 {
             let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             logger.debug("listOpenPRs: gh graphql exited \(result.exitStatus, privacy: .public) with partial data: \(errSuffix, privacy: .public)")
@@ -3030,9 +3196,9 @@ public actor PRStatusManager {
     }
 
     /// Resolve stored PR numbers directly via aliased `pullRequest(number:)`
-    /// queries — the only way to reach a fork PR, whose head branch never
-    /// appears in the viewer-authored batch. Each worktree's number is scoped
-    /// to its OWN repo: one aliased query per repo group (see
+    /// queries — the only way to reach a fork PR, whose head ref lives in the
+    /// fork and so appears under none of this repo's head refs. Each
+    /// worktree's number is scoped to its OWN repo: one aliased query per repo group (see
     /// `groupNumberedByRepo`), with the TTL cache keeping `gh repo view`
     /// spawns bounded. Degrades per group to no matches on any failure
     /// (owner/name unresolved, gh missing, non-zero exit, unparseable); the
@@ -3088,16 +3254,207 @@ public actor PRStatusManager {
         return matches
     }
 
+    /// Branch matching on GitHub: repo-scoped queries with each candidate head
+    /// ref bound to its own aliased `pullRequests(headRefName:)` field.
+    ///
+    /// The sibling of `fetchGitLabBranchMatches`, and deliberately the same
+    /// shape. Both ask the forge itself, scoped to one repository or project and
+    /// blind to who authored anything, so a pull request opened by a bot, a
+    /// teammate, or the web UI is found exactly as the authenticated account's
+    /// own is. They differ only in how the branch list is carried: GitHub takes
+    /// one head ref per aliased field, GitLab takes the whole list in a single
+    /// argument.
+    ///
+    /// **Chunked, and run concurrently.** Each repo's entries are split by
+    /// `branchQueryChunks` into queries of at most `branchQueryAliasCap`
+    /// distinct head refs (that cap states why), and every (repo, chunk) query
+    /// runs inside one `withTaskGroup` rather than one after another — the poll
+    /// interval this feeds is 30 seconds (`GitPollingPolicy.prInterval`), which
+    /// a serial walk of a many-repo fleet has no business spending. The fan-out
+    /// is unbounded, matching the `signalsByID` fan-out `fetchAll` already runs
+    /// over every match — a far larger set than the repo chunks here — so this
+    /// introduces no concurrency shape the same function does not already have.
+    /// Results are folded back in the chunks' first-seen order, so two runs of
+    /// the same poll cannot disagree about anything an ordering could decide.
+    ///
+    /// Degrades per chunk: a chunk whose query fails contributes no matches and
+    /// no answered ids, so its worktrees keep whatever they had and record
+    /// `.undetermined` rather than "no pull request", while every other chunk —
+    /// in this repo and in every other — is unaffected. A worktree whose repo
+    /// could not be named lands in no group at all, so nobody answers for it and
+    /// it degrades the same way — which is why the question is asked per repo
+    /// rather than once for the fleet: a worktree that could not even be asked
+    /// about must never read as "there is no pull request here".
+    ///
+    /// `failureCause` is a single value for the whole call, overwritten by each
+    /// failing chunk in fold order. So with two differently-failing repos every
+    /// unanswered worktree records the last cause folded, and a worktree whose
+    /// repo could not be named records the initial default though no query was
+    /// ever issued on its behalf. That is tolerable because the cause is
+    /// display-only — it reaches a tooltip — while the distinction that carries
+    /// weight, answered versus not, is `answeredIDs` and is per worktree. The
+    /// GitLab sibling behaves the same way.
+    ///
+    /// Matching goes through `matchUnnumbered` rather than a second matcher, and
+    /// that is what gives these results their precedence for free. It already
+    /// scopes each node to the worktree's own repo by parsing the node URL,
+    /// already walks `candidatesFor` in priority order, and already picks the
+    /// best node per repo+branch through `bestNodeByRepoBranch` — highest
+    /// `prPriority` (OPEN > MERGED > CLOSED), then newest `createdAt`. That is
+    /// the same precedence `parsePRByBranch` applies for the single-PR refresh,
+    /// said the same way (the query's `CREATED_AT DESC` order and the `createdAt`
+    /// tiebreak express one rule), so a branch carrying a closed pull request
+    /// and a newer open one — a reopen, or a second attempt at the same work —
+    /// resolves to the open one through code that is already tested.
+    ///
+    /// KNOWN RESIDUAL, in the spirit of the list at `branchCandidates`: a fork
+    /// pull request whose head ref name collides with a local branch.
+    /// `repository.pullRequests(headRefName:)` filters on the head **ref name**
+    /// regardless of which repository that head lives in, so a pull request an
+    /// outside fork opened into this repo comes back too. `prNodeFieldSelection`
+    /// carries no `isCrossRepository`, and `parseOwnerRepo(fromURL:)` reads the
+    /// BASE repo out of a fork pull request's URL, so such a node satisfies
+    /// every scoping check here and can be matched to a local worktree whose
+    /// branch happens to share that name.
+    ///
+    /// Cross-repository nodes are deliberately **not** filtered out.
+    /// `resolveNameWithOwner` resolves the *base* repo for a fork checkout on
+    /// purpose — that is where a fork's pull requests actually live — so for
+    /// anyone working from a fork every pull request of theirs is
+    /// cross-repository, and dropping those would remove branch discovery for
+    /// them entirely. The collision is accepted instead: it takes an outside
+    /// fork opening a pull request into this repo whose head ref name exactly
+    /// equals a local worktree's branch, TBD's own branches are
+    /// `tbd/<slug>`-shaped, and the actions a mis-attachment could trigger on
+    /// merge are default-off. The same exposure is already carried by
+    /// `prByBranchQuery`, which the interactive `refresh()` runs, and by the
+    /// GitLab `sourceBranches` path — it is a property of asking a forge by head
+    /// ref, not of asking it per repo. Closing it needs a fact the poll does not
+    /// resolve: the worktree's own HEAD-repository identity, which `gh repo
+    /// view` deliberately does not report.
+    private nonisolated func fetchGitHubBranchMatches(
+        _ unnumbered: [PollWorktree],
+        repos: [String: (owner: String, name: String)]
+    ) async -> (matches: [(worktreeID: UUID, node: PRNode)],
+                answeredIDs: Set<UUID>,
+                failureCause: String) {
+        // One group per repo, so several worktrees in one repo share as few
+        // round trips as the alias cap allows — the same economy the aliased
+        // by-number query buys. A worktree whose repo could not be resolved is
+        // in no group, so it is never answered for.
+        var order: [String] = []
+        var groups: [String: (owner: String, name: String, entries: [PollWorktree])] = [:]
+        for wt in unnumbered {
+            guard let repo = repos[wt.worktreePath] else { continue }
+            let key = "\(repo.owner.lowercased())\u{1}\(repo.name.lowercased())"
+            if groups[key] == nil {
+                groups[key] = (repo.owner, repo.name, [])
+                order.append(key)
+            }
+            groups[key]?.entries.append(wt)
+        }
+
+        // Flatten the groups into (repo, chunk) queries in first-seen order.
+        // That order is what makes the fold below deterministic; the queries
+        // themselves are all issued at once.
+        var queries: [(owner: String, name: String, repoPath: String,
+                       entries: [PollWorktree], branches: [String])] = []
+        for key in order {
+            guard let group = groups[key] else { continue }
+            for chunk in Self.branchQueryChunks(group.entries) where !chunk.branches.isEmpty {
+                queries.append((owner: group.owner, name: group.name,
+                                repoPath: chunk.entries[0].worktreePath,
+                                entries: chunk.entries, branches: chunk.branches))
+            }
+        }
+
+        typealias ChunkResult = (matches: [(worktreeID: UUID, node: PRNode)],
+                                 answered: Set<UUID>,
+                                 failureCause: String?)
+        let results = await withTaskGroup(
+            of: (index: Int, result: ChunkResult).self,
+            returning: [Int: ChunkResult].self
+        ) { group in
+            for (index, query) in queries.enumerated() {
+                group.addTask {
+                    let chunkResult = await self.fetchGitHubBranchChunk(
+                        owner: query.owner, name: query.name, repoPath: query.repoPath,
+                        entries: query.entries, branches: query.branches, repos: repos)
+                    return (index: index, result: chunkResult)
+                }
+            }
+            var out: [Int: ChunkResult] = [:]
+            for await finished in group { out[finished.index] = finished.result }
+            return out
+        }
+
+        var matches: [(worktreeID: UUID, node: PRNode)] = []
+        var answered: Set<UUID> = []
+        var failureCause = PRUndeterminedCause.queryFailed
+        for index in queries.indices {
+            guard let result = results[index] else { continue }
+            matches += result.matches
+            answered.formUnion(result.answered)
+            if let cause = result.failureCause { failureCause = cause }
+        }
+        return (matches: matches, answeredIDs: answered, failureCause: failureCause)
+    }
+
+    /// One branch query: the round trip, the parse, and the match for exactly
+    /// the worktrees this chunk carries — the unit `fetchGitHubBranchMatches`
+    /// fans out over.
+    ///
+    /// A failure yields no matches AND no answered ids, so the chunk's worktrees
+    /// keep whatever they had and record `.undetermined` rather than "no pull
+    /// request". `failureCause` is nil exactly when the chunk answered.
+    private nonisolated func fetchGitHubBranchChunk(
+        owner: String,
+        name: String,
+        repoPath: String,
+        entries: [PollWorktree],
+        branches: [String],
+        repos: [String: (owner: String, name: String)]
+    ) async -> (matches: [(worktreeID: UUID, node: PRNode)],
+                answered: Set<UUID>,
+                failureCause: String?) {
+        let args = Self.branchPRsArgs(owner: owner, name: name, branches: branches)
+        // Belt and braces beside `branchPRsArgs`' own empty-vector rule: with
+        // nothing to ask about there is no query to run, and the only query
+        // there would be to run is an invalid document.
+        guard !args.isEmpty else { return (matches: [], answered: [], failureCause: nil) }
+        guard let result = await runGHResult(args: args, repoPath: repoPath),
+              let data = Self.graphQLOutputData(stdout: result.stdout) else {
+            logger.debug("fetchAll: branch query produced no data for \(owner, privacy: .public)/\(name, privacy: .public)")
+            return (matches: [], answered: [],
+                    failureCause: forgeCLIAvailable
+                        ? PRUndeterminedCause.queryFailed
+                        : PRUndeterminedCause.cliUnavailable)
+        }
+        // `gh api graphql` exits non-zero when ONE aliased field errors while
+        // still emitting usable `data` for the others. Parse whatever came
+        // back regardless of exit status; log the partial failure
+        // (regression guard, PR #208).
+        if result.exitStatus != 0 {
+            let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.debug("fetchAll: branch query exited \(result.exitStatus, privacy: .public) with partial data for \(owner, privacy: .public)/\(name, privacy: .public): \(errSuffix, privacy: .public)")
+        }
+        guard let nodes = Self.parseBranchPRNodes(from: data, aliasCount: branches.count) else {
+            logger.warning("fetchAll: branch query for \(owner, privacy: .public)/\(name, privacy: .public) returned a response this build could not read")
+            return (matches: [], answered: [],
+                    failureCause: PRUndeterminedCause.unparseableResponse)
+        }
+        // An empty node list is still an answer: this repo has no pull request
+        // on any of these head refs.
+        return (matches: Self.matchUnnumbered(entries, nodes: nodes, resolveRepo: { repos[$0] }),
+                answered: Set(entries.map(\.id)),
+                failureCause: nil)
+    }
+
     /// Branch matching on GitLab: one `sourceBranches` query per project.
     ///
-    /// The counterpart of `runGHGraphQL` + `matchUnnumbered`, and deliberately
-    /// shaped differently. GitHub can only be asked for the *viewer's* pull
-    /// requests, so branch matching there is a local join over whatever the
-    /// authenticated account happens to have authored. GitLab takes the branch
-    /// list as a query argument with no author filter, so the instance does the
-    /// matching and a merge request opened by a teammate or through the web UI
-    /// is found — the coverage gap that makes this the discovery route worth
-    /// having.
+    /// The sibling of `fetchGitHubBranchMatches`, which states the shape both
+    /// share; the only difference here is that the whole branch list rides in
+    /// one query argument instead of one aliased field per branch.
     ///
     /// Degrades per project: a project whose query fails contributes no matches
     /// and no answered ids, so its worktrees keep whatever they had and record
@@ -3178,35 +3535,6 @@ public actor PRStatusManager {
             out.append(branch)
         }
         return out
-    }
-
-    private nonisolated func runGHGraphQL(repoPath: String) async -> Data? {
-        let query = """
-        {
-          viewer {
-            pullRequests(first: 100, states: [OPEN, MERGED, CLOSED],
-                         orderBy: {field: CREATED_AT, direction: DESC}) {
-              nodes { \(Self.prNodeFieldSelection) }
-            }
-          }
-        }
-        """
-        let args = ["api", "graphql", "-f", "query=\(query)"]
-        guard let result = await runGHResult(args: args, repoPath: repoPath),
-              let data = Self.graphQLOutputData(stdout: result.stdout) else {
-            return nil
-        }
-
-        if result.exitStatus != 0 {
-            let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            if errSuffix.isEmpty {
-                logger.debug("gh graphql exited \(result.exitStatus, privacy: .public) with partial stdout")
-            } else {
-                logger.debug("gh graphql exited \(result.exitStatus, privacy: .public) with partial stdout: \(errSuffix, privacy: .public)")
-            }
-        }
-
-        return data
     }
 
     /// One combined GraphQL round trip for a PR's check signals.
