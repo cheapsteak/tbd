@@ -30,9 +30,11 @@
 // EXIT CODES
 //   0  waitUntilExit returned on the thread with the stale entry (no hang)
 //   1  the hang reproduced — waitUntilExit did not return within 3 seconds
-//   2  the probe could not set itself up (no `_CFGetTSD`, no per-thread list,
-//      or the task under test never started, or never exited so there is no
-//      completed exit for the wait to observe)
+//   2  the probe could not set itself up, or its premise did not hold (no
+//      `_CFGetTSD`, no per-thread list, a finished `Process` that was never
+//      deallocated so no stale entry can arise at all, or a task under test that
+//      never started, or never exited so there is no completed exit for the wait
+//      to observe)
 //
 // `_CFGetTSD` is private CoreFoundation API. It is used here only to READ and
 // APPEND TO the per-thread list that Foundation itself creates and populates —
@@ -124,7 +126,10 @@ func finishedProcessIsDeallocated(on worker: Worker) -> Bool {
         box.value = task
         task = nil
     }
-    usleep(300_000)
+    // Bounded poll rather than one fixed sleep: a slow autorelease drain would
+    // otherwise read as a failed premise.
+    let drainDeadline = Date().addingTimeInterval(2)
+    while box.value != nil && Date() < drainDeadline { usleep(10_000) }
     return box.value == nil
 }
 
@@ -144,7 +149,14 @@ let threadA = Worker("A")
 let threadB = Worker("B")
 let threadC = Worker("C")
 
-print("finished Process deallocated: \(finishedProcessIsDeallocated(on: threadA))")
+let deallocated = finishedProcessIsDeallocated(on: threadA)
+print("finished Process deallocated: \(deallocated)")
+// Enforced, not merely reported: if a finished task is never freed, its entry in
+// the per-thread list stays valid and the reuse this probe plants cannot happen.
+guard deallocated else {
+    print("premise failed: a finished Process was not deallocated, so a stale entry cannot arise")
+    exit(2)
+}
 
 // 1. Thread A has now launched a task, so its per-thread list exists.
 threadA.run {

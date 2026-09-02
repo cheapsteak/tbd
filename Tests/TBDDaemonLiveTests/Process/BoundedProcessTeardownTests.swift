@@ -59,10 +59,13 @@ struct BoundedProcessTeardownTests {
     private static func spawnUnownedLongLived() throws -> pid_t {
         let path = "/bin/zsh"
         let script = #"trap "" HUP; for _ in {1..1500}; do sleep 0.2; done"#
-        // `-f` so zsh reads no rc file at all — without it `.zshenv` is read on
-        // every invocation, `-c` included — and an explicit `HOME` inside the
-        // fence, because an env without one makes zsh look `HOME` up in the
-        // password database and land on the developer's real home.
+        // `-f` so zsh reads no user rc file (`/etc/zshenv` is read regardless of
+        // `-f`) — without it `.zshenv` is read on every invocation, `-c`
+        // included — and an explicit `HOME` inside the fence via
+        // `NSHomeDirectory()`, which honours `CFFIXED_USER_HOME` and is how
+        // `TestSupport/ShellHelpers.swift` resolves it. An env with no `HOME` at
+        // all is not neutral: zsh looks the value up in the password database
+        // and lands on the developer's real home.
         //
         // The environment is built by hand rather than passed through because
         // `environ` is linked into the main executable and is not reachable from
@@ -71,7 +74,7 @@ struct BoundedProcessTeardownTests {
         let arguments: [String] = [path, "-f", "-c", script]
         var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) }
         argv.append(nil)
-        let environment: [String] = ["PATH=/usr/bin:/bin", "HOME=\(NSTemporaryDirectory())"]
+        let environment: [String] = ["PATH=/usr/bin:/bin", "HOME=\(NSHomeDirectory())"]
         var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup($0) }
         envp.append(nil)
         defer {
@@ -81,7 +84,10 @@ struct BoundedProcessTeardownTests {
 
         // No file actions and no attributes: the child inherits this process's
         // stdio (it writes nothing) and its signal mask, which cannot matter
-        // because every signal sent to it here is SIGKILL.
+        // because every signal sent to it here is SIGKILL. `POSIX_SPAWN_SETSID`
+        // is deliberately omitted too — the only descendant is a `sleep 0.2`,
+        // which orphans to launchd for at most 0.2 s when zsh is SIGKILLed, so
+        // nothing outlives the test for a reconciler to have to collect.
         var pid: pid_t = 0
         let rc = posix_spawn(&pid, path, nil, nil, &argv, &envp)
         guard rc == 0 else { throw SpawnFailure(code: rc) }
@@ -216,24 +222,42 @@ struct BoundedProcessTeardownTests {
     /// including the ones that would report a failure.
     @Test func theBoundFiresWhenTheExitIsNeverObserved() async throws {
         let pid = try Self.spawnUnownedLongLived()
+        let stub = ExitNeverObserved(pid: pid)
+        let box = OutcomeBox()
         defer {
-            // Only `0` — "still our child, and not yet collected" — licenses a
-            // signal. By the time this runs the diagnostic probe has usually
-            // collected the corpse already, and a pid whose corpse is gone may
-            // name somebody else's process by now; `pid` (a zombie we own) and
-            // `-1`/`ECHILD` (already collected) both mean there is nothing left
-            // to signal. The blocking `waitpid` after the kill is bounded
-            // because SIGKILL cannot be blocked — the same shape as
-            // `SIGTERMProofJob.tearDown` in the sibling suite.
+            // Only reap once the helper has published an outcome. Until it does,
+            // its thread still owns this pid's `waitpid`, and a second waiter
+            // here would race it for one corpse. Declining leaks nothing: the
+            // helper's own SIGKILL has already landed, and the fixture's counted
+            // loop ends on its own regardless. Written as one condition rather
+            // than an early `return`, which a `defer` body may not use.
+            //
+            // The second half: only `0` — "still our child, and not yet
+            // collected" — licenses a signal. By the time this runs the
+            // diagnostic probe has usually collected the corpse already, and a
+            // pid whose corpse is gone may name somebody else's process by now;
+            // `pid` (a zombie we own) and `-1`/`ECHILD` (already collected) both
+            // mean there is nothing left to signal. The blocking `waitpid` after
+            // the kill is bounded because SIGKILL cannot be blocked — the same
+            // shape as `SIGTERMProofJob.tearDown` in the sibling suite.
             var status: Int32 = 0
-            if waitpid(pid, &status, WNOHANG) == 0 {
+            if box.value != nil, waitpid(pid, &status, WNOHANG) == 0 {
                 kill(pid, SIGKILL)
                 _ = waitpid(pid, &status, 0)
             }
         }
 
-        let stub = ExitNeverObserved(pid: pid)
-        let box = OutcomeBox()
+        // The premise, in two halves because the cheap half cannot state it: a
+        // zombie answers `kill(pid, 0)` with success, so liveness needs `ps` as
+        // well. Asking `ps` from a test body is fine — it is the helper's
+        // failure path, which must spawn nothing, that cannot.
+        #expect(
+            Self.kernelView(of: pid) == "alive",
+            "the unowned fixture must be running before the bound is exercised")
+        #expect(
+            ProductionProcessSignaller().stat(pid).map { !$0.hasPrefix("Z") } == true,
+            "the unowned fixture was already a corpse before the bound was exercised")
+
         let clock = ContinuousClock()
         let started = clock.now
 

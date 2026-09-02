@@ -1,8 +1,6 @@
 import Darwin
 import Foundation
 
-@testable import TBDDaemonLib
-
 /// What teardown needs to know about a child — and nothing that can block.
 ///
 /// `Process.waitUntilExit()` is deliberately absent from this protocol, so a
@@ -52,7 +50,7 @@ extension Process: ExitObservableProcess {}
 ///   against what the wait costs while it runs: it parks the calling thread —
 ///   a cooperative-pool thread, when it is reached from a `defer` in an async
 ///   test — so it is sized to how long a SIGKILLed child's exit handler takes
-///   under CI load, which is milliseconds, leaving two orders of magnitude of
+///   under CI load, which is milliseconds, leaving orders of magnitude of
 ///   headroom. It is not sized to the unbounded wait it replaces.
 /// - **There is no injected clock, deliberately.** This is a synchronous helper
 ///   called from `defer`, where `Task.sleep` is unavailable and the repo's
@@ -88,7 +86,10 @@ enum BoundedProcessTeardown {
     }
 
     /// Polls `isRunning` every 20 ms until it flips or `seconds` elapse. Never
-    /// signals anything, so it is safe on a process the caller must leave alive.
+    /// signals, so it is safe on a process that must keep running. It is not
+    /// observe-only on expiry: the diagnostic's `waitpid` collects the corpse of
+    /// a child that has exited, so after a fired bound the child is gone from
+    /// Foundation's view as well as the kernel's.
     @discardableResult
     static func awaitExit(
         _ process: any ExitObservableProcess, within seconds: Double = 5
@@ -108,8 +109,15 @@ enum BoundedProcessTeardown {
         return .unobserved(pid: pid, diagnostic: diagnose(pid, after: seconds))
     }
 
-    /// One `waitpid(…, WNOHANG)` plus one `ps -o stat=`, to say which of the
-    /// several very different situations the bound just fired on.
+    /// One `kill(pid, 0)` reading plus one `waitpid(…, WNOHANG)`, to say which of
+    /// the several very different situations the bound just fired on.
+    ///
+    /// **It spawns nothing, and that is not fastidiousness.** A `Process`
+    /// launched here would be one more entry in this thread's per-thread task
+    /// list — the precondition of the hazard this helper exists for — and `ps` is
+    /// reached through a `waitUntilExit()`, so asking `ps` would put an unbounded
+    /// wait into the one path that runs only when a wait has already failed.
+    /// `kill(pid, 0)` answers the same question with a syscall.
     ///
     /// **The WNOHANG probe is acceptable here and only here.** Foundation owns
     /// the corpse of every child it launched, and racing its handler for one is
@@ -127,9 +135,14 @@ enum BoundedProcessTeardown {
         // corpse this helper was never asked about.
         guard pid > 0 else { return "pid \(pid): no pid to probe (never launched?)" }
 
+        // Read BEFORE the probe, deliberately: a WNOHANG that collects a zombie
+        // frees the number, and the kernel may hand it to somebody else
+        // immediately after — so a reading taken afterwards could describe a
+        // stranger.
+        let kernelBeforeProbe = kernelView(of: pid)
+
         var status: Int32 = 0
         let reaped = waitpid(pid, &status, WNOHANG)
-        // Captured immediately: `stat` below spawns `ps`, which overwrites errno.
         let probeErrno = errno
 
         let finding: String
@@ -143,8 +156,19 @@ enum BoundedProcessTeardown {
             finding = "waitpid errno \(probeErrno)"
         }
 
-        let psStat = ProductionProcessSignaller().stat(pid)
-        return "pid \(pid): \(finding) (ps stat: '\(psStat ?? "nil")')"
+        return "pid \(pid): \(finding) (kill(pid, 0) before the probe: \(kernelBeforeProbe))"
+    }
+
+    /// What `kill(pid, 0)` says about a pid, in one word. `"alive"` covers a
+    /// zombie too — an uncollected corpse answers with success — which is why it
+    /// is reported alongside the `waitpid` finding rather than instead of it.
+    private static func kernelView(of pid: Int32) -> String {
+        if kill(pid, 0) == 0 { return "alive" }
+        switch errno {
+        case ESRCH: return "ESRCH"
+        case EPERM: return "EPERM"
+        default: return "errno \(errno)"
+        }
     }
 }
 
