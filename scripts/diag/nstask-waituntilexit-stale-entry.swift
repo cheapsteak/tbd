@@ -164,13 +164,17 @@ guard deallocated else {
 }
 
 // 1. Thread A has now launched a task, so its per-thread list exists.
-threadA.run {
+let listRead = threadA.run {
     guard let raw = getTSD(taskListSlot) else {
         print("thread A has no task list after one launch")
         return
     }
     let list = Unmanaged<CFMutableArray>.fromOpaque(raw).takeUnretainedValue()
     print("thread A task-list count after one launch: \(CFArrayGetCount(list))")
+}
+guard listRead else {
+    print("thread A did not finish reading its task list within its bound")
+    exit(2)
 }
 
 // 2. Thread B launches the task under test; a third party kills it. The loop is

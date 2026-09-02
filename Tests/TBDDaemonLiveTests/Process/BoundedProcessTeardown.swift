@@ -41,7 +41,10 @@ extension Process: ExitObservableProcess {}
 ///   Foundation's exit handler clears that flag only *after* its own blocking
 ///   `waitpid` has collected the corpse, so a child observed not-running has
 ///   been reaped and is not a zombie. Teardown therefore needs no `waitpid` of
-///   its own, and Foundation stays the sole waiter for the pids it owns.
+///   its own on the success path, and Foundation stays the sole waiter for the
+///   pids it owns. The single `waitpid` in this file is reached only after
+///   `killAndReap` has sent its own SIGKILL and then watched a full bound
+///   expire; `awaitExit` never reaches it at all.
 /// - **The bound exists because a hung teardown is worse than a red test.** The
 ///   live target runs `--no-parallel` on one machine; a `defer` that never
 ///   returns burns the whole step's budget and reports nothing, while a bound
@@ -71,7 +74,9 @@ enum BoundedProcessTeardown {
         case unobserved(pid: Int32, diagnostic: String)
     }
 
-    /// SIGKILL if the child is still running, then `awaitExit`.
+    /// SIGKILL if the child is still running, then a bounded wait for
+    /// Foundation to observe the exit — and, if that bound expires, the one
+    /// `waitpid` probe in this file.
     ///
     /// The signal is pid-exact and guarded on `pid > 1`, matching
     /// `ProductionProcessSignaller.signalPIDOnly`'s "never signal pid<=1":
@@ -83,18 +88,35 @@ enum BoundedProcessTeardown {
     ) -> Outcome {
         let pid = process.processIdentifier
         if process.isRunning && pid > 1 { kill(pid, SIGKILL) }
-        return awaitExit(process, within: seconds)
+        if poll(process, within: seconds) { return .exited }
+        // This path, and only this path, may probe: the caller asked for a reap,
+        // the SIGKILL has landed, and the bound has already expired.
+        return .unobserved(pid: pid, diagnostic: reapingDiagnostic(pid, after: seconds))
     }
 
-    /// Polls `isRunning` every 20 ms until it flips or `seconds` elapse. Never
-    /// signals, so it is safe on a process that must keep running. It is not
-    /// observe-only on expiry: the diagnostic's `waitpid` collects the corpse of
-    /// a child that has exited, so after a fired bound the child is gone from
-    /// Foundation's view as well as the kernel's.
+    /// Waits, bounded, for Foundation to observe the exit. **Never signals and
+    /// never reaps**, on any path.
+    ///
+    /// That makes it safe on two kinds of process a reaping wait is not: one
+    /// that must keep running, and one the caller intends to signal afterwards
+    /// — a reaped pid is a freed number, and the next thing signalled through it
+    /// may be a stranger. On expiry it reports what `kill(pid, 0)` says and
+    /// nothing more, so it cannot tell a running child from an uncollected
+    /// zombie and does not pretend to. A caller that wants the corpse collected
+    /// wants `killAndReap`.
     @discardableResult
     static func awaitExit(
         _ process: any ExitObservableProcess, within seconds: Double = 5
     ) -> Outcome {
+        if poll(process, within: seconds) { return .exited }
+        let pid = process.processIdentifier
+        return .unobserved(pid: pid, diagnostic: observeOnlyDiagnostic(pid, after: seconds))
+    }
+
+    /// The wait itself: true when `isRunning` goes false before the deadline.
+    private static func poll(
+        _ process: any ExitObservableProcess, within seconds: Double
+    ) -> Bool {
         // `ContinuousClock`, not `Date()`: the bound must not be extendable by a
         // wall-clock correction landing mid-wait.
         let clock = ContinuousClock()
@@ -102,16 +124,31 @@ enum BoundedProcessTeardown {
         while true {
             // Checked before the deadline and before any sleep, so a child that
             // has already exited costs nothing.
-            if !process.isRunning { return .exited }
-            if clock.now >= deadline { break }
+            if !process.isRunning { return true }
+            if clock.now >= deadline { return false }
             usleep(20_000)
         }
-        let pid = process.processIdentifier
-        return .unobserved(pid: pid, diagnostic: diagnose(pid, after: seconds))
+    }
+
+    /// Everything the bound can say without touching anything: one
+    /// `kill(pid, 0)`, no `waitpid`, no spawn.
+    ///
+    /// It therefore cannot separate a running child from an uncollected zombie
+    /// — a corpse nobody has collected answers `kill(pid, 0)` with success — and
+    /// says so rather than guessing. That ambiguity is the price of leaving the
+    /// pid alone, and it is the right price for a caller who has not asked for a
+    /// reap.
+    private static func observeOnlyDiagnostic(_ pid: Int32, after seconds: Double) -> String {
+        guard pid > 1 else { return "pid \(pid): not a pid this helper will touch" }
+        return """
+            pid \(pid): still running or a zombie \(seconds)s into the bound \
+            (kill(pid, 0): \(kernelView(of: pid))); observe-only, nothing probed
+            """
     }
 
     /// One `kill(pid, 0)` reading plus one `waitpid(…, WNOHANG)`, to say which of
-    /// the several very different situations the bound just fired on.
+    /// the several very different situations `killAndReap`'s bound just fired
+    /// on. Reached from that one path — `awaitExit` never gets here.
     ///
     /// **It spawns nothing, and that is not fastidiousness.** A `Process`
     /// launched here would be one more entry in this thread's per-thread task
@@ -120,16 +157,18 @@ enum BoundedProcessTeardown {
     /// wait into the one path that runs only when a wait has already failed.
     /// `kill(pid, 0)` answers the same question with a syscall.
     ///
-    /// **The WNOHANG probe is acceptable here and only here.** Foundation owns
+    /// **The WNOHANG probe is acceptable at this one point.** Foundation owns
     /// the corpse of every child it launched, and racing its handler for one is
-    /// how a sole waiter stops being sole. After the bound has already fired,
-    /// though, "the handler is merely late" is not a live possibility worth
-    /// protecting: the flag it would have cleared has not moved for the whole
-    /// deadline. And losing the race is survivable in the direction that matters
-    /// — Foundation's handler treats `ECHILD` as status −1 and still clears
-    /// `isRunning`, verified against the running implementation — so the probe
-    /// cannot wedge the process it is diagnosing.
-    private static func diagnose(_ pid: Int32, after seconds: Double) -> String {
+    /// how a sole waiter stops being sole. Here the race is not live: this runs
+    /// only after this helper sent its own SIGKILL and then watched `isRunning`
+    /// fail to move for a full bound, so "the handler is merely late" is not a
+    /// possibility worth protecting. And losing the race is survivable in the
+    /// direction that matters — Foundation's handler treats `ECHILD` as status
+    /// −1 and still clears `isRunning`. Verified rather than assumed: a
+    /// standalone probe collected the corpse with a raw `waitpid` ahead of
+    /// Foundation's handler 30 times out of 30 on macOS 26.1 (25B78);
+    /// `isRunning` flipped false and `waitUntilExit()` returned every time.
+    private static func reapingDiagnostic(_ pid: Int32, after seconds: Double) -> String {
         // Guarded on `pid > 1` for the same reason the kill above is:
         // `waitpid(0, …)` collects any child in the caller's process group and
         // `waitpid(-1, …)` any child at all, so a non-positive pid would reap a

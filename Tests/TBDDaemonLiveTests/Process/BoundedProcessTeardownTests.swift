@@ -82,14 +82,25 @@ struct BoundedProcessTeardownTests {
             for entry in envp { free(entry) }
         }
 
-        // No file actions and no attributes: the child inherits this process's
-        // stdio (it writes nothing) and its signal mask, which cannot matter
-        // because every signal sent to it here is SIGKILL. `POSIX_SPAWN_SETSID`
-        // is deliberately omitted too — the only descendant is a `sleep 0.2`,
-        // which orphans to launchd for at most 0.2 s when zsh is SIGKILLed, so
-        // nothing outlives the test for a reconciler to have to collect.
+        // stdio goes to `/dev/null` explicitly rather than being inherited, so
+        // the fixture can never write into the test runner's own streams.
+        var fileActions: posix_spawn_file_actions_t?
+        guard posix_spawn_file_actions_init(&fileActions) == 0 else {
+            throw SpawnFailure(code: errno)
+        }
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+        posix_spawn_file_actions_addopen(&fileActions, 0, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_addopen(&fileActions, 1, "/dev/null", O_WRONLY, 0)
+        posix_spawn_file_actions_addopen(&fileActions, 2, "/dev/null", O_WRONLY, 0)
+
+        // No attributes, though: the child inherits this process's signal mask,
+        // which cannot matter because every signal sent to it here is SIGKILL.
+        // `POSIX_SPAWN_SETSID` is deliberately omitted too — the only descendant
+        // is a `sleep 0.2`, which orphans to launchd for at most 0.2 s when zsh
+        // is SIGKILLed, so nothing outlives the test for a reconciler to have to
+        // collect.
         var pid: pid_t = 0
-        let rc = posix_spawn(&pid, path, nil, nil, &argv, &envp)
+        let rc = posix_spawn(&pid, path, &fileActions, nil, &argv, &envp)
         guard rc == 0 else { throw SpawnFailure(code: rc) }
         return pid
     }
@@ -192,6 +203,11 @@ struct BoundedProcessTeardownTests {
         #expect(
             diagnostic.contains("still running"),
             "the diagnostic did not name what the kernel saw: \(diagnostic)")
+        // The branch matters as much as the text: `awaitExit` must report
+        // through the path that probes nothing, never through `killAndReap`'s.
+        #expect(
+            diagnostic.contains("observe-only"),
+            "awaitExit did not report through its observe-only branch: \(diagnostic)")
 
         let psStat = ProductionProcessSignaller().stat(pid) ?? ""
         #expect(
