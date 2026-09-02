@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SwiftTerm
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -22,6 +23,32 @@ import Testing
 /// the reason a screenful of expected output is never enough on its own.
 @Suite(.serialized)
 struct HolderReaderTests {
+
+    // MARK: - What a session's history costs
+
+    /// The per-cell size the scrollback budget is computed from.
+    ///
+    /// `HolderReader.scrollbackLines` is a memory decision as much as a history
+    /// one, and the design spec states the worst case it implies. That number is
+    /// computed from SwiftTerm's cell layout, so it is only true while the
+    /// layout is: a `BufferLine` holds a flat `UnsafeMutableBufferPointer` of
+    /// `CharData`, one per column, and `CharData` carries a rune, a width, an
+    /// atom and a full `Attribute` (two colours, a style, an underline style and
+    /// an optional underline colour).
+    ///
+    /// This goes red when a SwiftTerm upgrade changes that layout — which is its
+    /// whole job. The fix is to recompute the figure in
+    /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md` and update
+    /// the number here, not to relax the assertion.
+    @Test func theScrollbackBudgetIsComputedFromSwiftTermsCellSize() {
+        let bytesPerCell = MemoryLayout<CharData>.stride
+        #expect(
+            bytesPerCell == 40,
+            """
+            SwiftTerm's per-cell size is now \(bytesPerCell) bytes, so the worst-case scrollback \
+            figure in docs/specs/2026-08-30-pty-holder-session-transport-design.md is stale
+            """)
+    }
 
     // MARK: - The drain is what lets jobs die
 

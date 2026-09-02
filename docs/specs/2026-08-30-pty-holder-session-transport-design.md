@@ -434,13 +434,30 @@ history is the argument against a purpose-built minimal parser: the
 and a `hasPrefix` broke title parsing — the escape-sequence long tail is
 precisely what bites.
 
-The emulator keeps a bounded in-memory scrollback (on the order of 10k lines;
-a plain constant, not a flag) and is **not persisted to disk**. The constant
-is a memory decision as much as a history one: at the design point there are
-~150 emulators resident, and a naive per-cell buffer representation across
-150 sessions can reach into gigabytes, so the limit must be sized against
-SwiftTerm's measured per-line cost at implementation time — and the limit, or
-the representation, gives way first if field memory pressure says so.
+The emulator keeps a bounded in-memory scrollback — 5,000 lines, a plain
+constant (`HolderReader.scrollbackLines`), not a flag — and is **not persisted
+to disk**. The constant is a memory decision as much as a history one, and the
+cost follows from SwiftTerm's layout rather than from a measurement: a
+`BufferLine` holds a flat buffer of one `CharData` per column, and `CharData`
+is 40 bytes (a rune, a width, an atom, and an `Attribute` carrying two colours,
+a style, an underline style and an optional underline colour). So a line is
+`columns × 40` bytes, a full 120-column scrollback is
+`5,000 × 120 × 40 ≈ 24 MB`, and at the design point's ~150 resident emulators
+the worst case is several gigabytes.
+
+Three things keep that worst case off the table in practice, and none of them
+is a promise:
+
+- **Lines are materialized lazily.** The buffer preallocates a
+  `[BufferLine?]` of `scrollback + rows` slots — around 40 KB of pointers —
+  and fills a slot only when a line is written, so a session that has printed
+  a screenful costs a screenful.
+- **The figure is per *filled* session.** Reaching 24 MB takes 5,000 lines of
+  120-column output that nothing has scrolled past; an agent session that goes
+  quiet holds what it printed and no more.
+- **The limit and the representation are both still open.** If field memory
+  pressure says so, the constant comes down or the per-cell representation
+  changes; nothing else in the design depends on either.
 
 A daemon restart starts the emulator empty; the jiggle on re-adoption makes
 full-screen programs repaint into the fresh emulator, and the durable record

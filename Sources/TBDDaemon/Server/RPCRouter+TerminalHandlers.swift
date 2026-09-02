@@ -1072,13 +1072,13 @@ extension RPCRouter {
     /// reasoning behind both of its polarities.
     ///
     /// It is the *last known* status, not a fresh probe, and that is the one
-    /// place the two legs are not equivalent: a child that exits while the
-    /// daemon is up leaves `.alive` behind until the next adoption, because
-    /// Milestone A publishes no holder-death fact for this rail to read (the
-    /// drain loop keeps polling a pty that will yield no more bytes rather
-    /// than ending). Until Milestone B's holder-death watch lands, such a row
-    /// needs `--force` — a nuisance the message names, and the opposite of the
-    /// live session it used to close silently.
+    /// place the two legs are not equivalent. What keeps the gap small is the
+    /// registry's own reclaimer: when a session's drain reaches the end of its
+    /// output it asks the holder whether the child exited, records the answer,
+    /// and releases the reader — so a child that exits while the daemon is up
+    /// stops reading as `.alive` within a poll slice or two of its exit rather
+    /// than waiting for the next adoption. A session whose job closed its
+    /// terminal and kept running still reads `.alive`, correctly.
     private func sessionLivenessForActivityRails(
         terminal: Terminal, actuationID: String
     ) async throws -> ActivityRailLiveness {

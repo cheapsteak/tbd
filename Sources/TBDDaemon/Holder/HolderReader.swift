@@ -85,6 +85,8 @@ actor HolderReader {
     private let emulator: HolderEmulator
     private let stopTimeout: Duration
     private let clock: any Clock<Duration>
+    /// Handed to the drain loop when it starts; see `init`.
+    private let onEndOfOutput: (@Sendable () -> Void)?
 
     private var state: State = .idle
     /// The write end of the self-pipe that wakes a blocked `poll`. Held by the
@@ -100,6 +102,10 @@ actor HolderReader {
     ///   throughout still says "pty master", which is what `forkpty` calls it.
     /// - Parameter readFault: a test seam. Production passes nothing; see
     ///   `HolderReadFault` for why the branch it reaches has no other way in.
+    /// - Parameter onEndOfOutput: announced once, on the drain thread, when the
+    ///   session's output is exhausted — see `hasReachedEndOfOutput`. It must
+    ///   not block, and must not stop this reader inline; the registry's
+    ///   reclaimer hops onto the actor instead.
     init(
         sessionID: UUID,
         ptyFD: Int32,
@@ -108,11 +114,13 @@ actor HolderReader {
         scrollbackLines: Int = HolderReader.scrollbackLines,
         stopTimeout: Duration = HolderReader.defaultStopTimeout,
         readFault: HolderReadFault? = nil,
+        onEndOfOutput: (@Sendable () -> Void)? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.sessionID = sessionID
         self.stopTimeout = stopTimeout
         self.clock = clock
+        self.onEndOfOutput = onEndOfOutput
         let descriptor = PTYDescriptor(fd: ptyFD, readFault: readFault)
         self.descriptor = descriptor
         // The emulator's replies go straight back down the same descriptor.
@@ -163,6 +171,53 @@ actor HolderReader {
         return !drain.isFinished
     }
 
+    /// Whether the drain has reached the end of this session's output — end of
+    /// file on the pty master, or a read failure no waiting can undo.
+    ///
+    /// **It is the only safe moment to let go of a session's output**, and that
+    /// is what it is for. The drain reads until the descriptor would block
+    /// before it can ever see end of file, so once this is true nothing the job
+    /// wrote is still queued anywhere; before it is true, whatever is queued is
+    /// still owed to somebody. `HolderRegistry` releases a finished session's
+    /// reader on exactly this edge.
+    ///
+    /// Reads the drain thread's own flag rather than the actor's intent, for
+    /// the same reason `isDraining` does.
+    var hasReachedEndOfOutput: Bool {
+        drain?.hasReachedEndOfOutput ?? false
+    }
+
+    /// The emulator's grid, in columns and rows.
+    ///
+    /// Test-facing, and the honest instrument for adoption geometry: a
+    /// re-adopted session whose grid does not match its pty is a job painting
+    /// into a differently-shaped screen, and nothing else in the daemon can see
+    /// the difference.
+    var gridSize: (columns: Int, rows: Int) {
+        emulator.size
+    }
+
+    /// The window size the pty itself reports, or nil when the ioctl fails or
+    /// answers a degenerate size.
+    ///
+    /// **The pty is the authority on its own geometry.** A launch request
+    /// records the size a session was *asked* for once, and nothing updates it
+    /// afterwards; `TIOCSWINSZ` — which every resize goes through — moves the
+    /// terminal itself. So anything reconstructing a session's screen asks the
+    /// descriptor, not the request that opened it.
+    ///
+    /// The parameter is spelled `ptyFD` for the reason given on `init`.
+    static func windowSize(ptyFD: Int32) -> (columns: Int, rows: Int)? {
+        guard ptyFD >= 0 else { return nil }
+        var size = winsize(ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0)
+        guard ioctl(ptyFD, TIOCGWINSZ, &size) == 0 else { return nil }
+        // A zero in either axis is not a size a grid can be built at, and a
+        // terminal that has never been sized reports one. Answering nil sends
+        // the caller to its fallback rather than to `max(1, 0)`.
+        guard size.ws_col > 0, size.ws_row > 0 else { return nil }
+        return (Int(size.ws_col), Int(size.ws_row))
+    }
+
     // MARK: - Lifecycle
 
     /// Starts draining. Idempotent; a stopped reader stays stopped.
@@ -183,7 +238,8 @@ actor HolderReader {
             sessionID: sessionID,
             descriptor: descriptor,
             emulator: emulator,
-            wakeReadFD: pipeFDs[0])
+            wakeReadFD: pipeFDs[0],
+            onEndOfOutput: onEndOfOutput)
         drain = loop
         state = .draining
 
@@ -337,20 +393,55 @@ private final class DrainLoop: @unchecked Sendable {
     private let descriptor: PTYDescriptor
     private let emulator: HolderEmulator
     private let wakeReadFD: Int32
+    /// Announced once, the first time the descriptor is classified as
+    /// exhausted. Called **on the drain thread**, so it must not block: the
+    /// thread's next job is to keep answering the wake pipe, and a reclaimer
+    /// that stopped this reader from inside the callback would be waiting on
+    /// the very thread it is running on.
+    private let onEndOfOutput: (@Sendable () -> Void)?
     private let stateLock = NSLock()
     private var finished = false
+    private var endOfOutput = false
 
-    init(sessionID: UUID, descriptor: PTYDescriptor, emulator: HolderEmulator, wakeReadFD: Int32) {
+    init(
+        sessionID: UUID,
+        descriptor: PTYDescriptor,
+        emulator: HolderEmulator,
+        wakeReadFD: Int32,
+        onEndOfOutput: (@Sendable () -> Void)? = nil
+    ) {
         self.sessionID = sessionID
         self.descriptor = descriptor
         self.emulator = emulator
         self.wakeReadFD = wakeReadFD
+        self.onEndOfOutput = onEndOfOutput
     }
 
     var isFinished: Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
         return finished
+    }
+
+    var hasReachedEndOfOutput: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return endOfOutput
+    }
+
+    /// Records the exhausted edge and announces it exactly once.
+    ///
+    /// Once, because the announcement is a *transition* — a second one for the
+    /// same reader would ask a reclaimer to reclaim what it has already
+    /// reclaimed, and the reader whose slot it names may by then be a different
+    /// one.
+    private func noteEndOfOutput() {
+        stateLock.lock()
+        let firstTime = !endOfOutput
+        endOfOutput = true
+        stateLock.unlock()
+        guard firstTime else { return }
+        onEndOfOutput?()
     }
 
     func run() {
@@ -467,6 +558,11 @@ private final class DrainLoop: @unchecked Sendable {
             canYield = false
             failures = 0
             backoff = 0
+            // Announced only from here, which is the one place the loop knows
+            // the descriptor was read until it would block and then said it was
+            // done. Everything the job wrote has reached the emulator; nothing
+            // more ever will.
+            noteEndOfOutput()
         case .retryable(let code):
             failures += 1
             backoff = Self.backoffMilliseconds(forAttempt: failures)
@@ -819,6 +915,11 @@ private final class HolderEmulator: @unchecked Sendable {
         terminal.terminalLock.withLock {
             terminal.resize(cols: columns, rows: rows)
         }
+    }
+
+    /// The grid's dimensions, read under the same lock as everything else here.
+    var size: (columns: Int, rows: Int) {
+        terminal.terminalLock.withLock { (terminal.cols, terminal.rows) }
     }
 
     /// Trailing blank lines are dropped — a screen is 24 rows whether or not
