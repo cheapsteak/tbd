@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+@testable import SwiftTerm
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -22,6 +23,38 @@ import Testing
 /// the reason a screenful of expected output is never enough on its own.
 @Suite(.serialized)
 struct HolderReaderTests {
+
+    // MARK: - What a session's history costs
+
+    /// The per-cell size the scrollback budget is computed from.
+    ///
+    /// `HolderReader.scrollbackLines` is a memory decision as much as a history
+    /// one, and the design spec states the worst case it implies. The type that
+    /// governs that number is **`PackedCell`**, not `CharData`: a `BufferLine`
+    /// holds a `CellStoragePage` (`BufferLine.swift:122`), which owns the row's
+    /// cells as an `UnsafeMutableBufferPointer<PackedCell>`
+    /// (`CellStorage.swift:811`), and a `PackedCell` is one `UInt64`
+    /// (`CellStorage.swift:16,31`). `CharData` is the read-side interface —
+    /// what `arena.unpack` expands a cell into — and is several times larger,
+    /// so measuring it would overstate a session's cost by that factor.
+    ///
+    /// `PackedCell` is internal to SwiftTerm, hence `@testable import`: the size
+    /// that governs storage is not visible to an ordinary importer, and pinning
+    /// the public type that is visible would pin the wrong number.
+    ///
+    /// This goes red when a SwiftTerm upgrade changes the representation —
+    /// which is its whole job. The fix is to recompute the figure in
+    /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md` and update
+    /// the number here, not to relax the assertion.
+    @Test func theScrollbackBudgetIsComputedFromSwiftTermsPackedCellSize() {
+        let bytesPerCell = MemoryLayout<PackedCell>.stride
+        #expect(
+            bytesPerCell == 8,
+            """
+            SwiftTerm stores \(bytesPerCell) bytes per cell, so the worst-case scrollback figure \
+            in docs/specs/2026-08-30-pty-holder-session-transport-design.md is stale
+            """)
+    }
 
     // MARK: - The drain is what lets jobs die
 

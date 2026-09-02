@@ -434,13 +434,41 @@ history is the argument against a purpose-built minimal parser: the
 and a `hasPrefix` broke title parsing — the escape-sequence long tail is
 precisely what bites.
 
-The emulator keeps a bounded in-memory scrollback (on the order of 10k lines;
-a plain constant, not a flag) and is **not persisted to disk**. The constant
-is a memory decision as much as a history one: at the design point there are
-~150 emulators resident, and a naive per-cell buffer representation across
-150 sessions can reach into gigabytes, so the limit must be sized against
-SwiftTerm's measured per-line cost at implementation time — and the limit, or
-the representation, gives way first if field memory pressure says so.
+The emulator keeps a bounded in-memory scrollback — 5,000 lines, a plain
+constant (`HolderReader.scrollbackLines`), not a flag — and is **not persisted
+to disk**. The constant is a memory decision as much as a history one, and the
+cost follows from SwiftTerm's cell layout rather than from a measurement.
+
+**Storage is 8 bytes per cell.** A `BufferLine` holds a `CellStoragePage`
+(`BufferLine.swift:122`), which owns the row's cells as an
+`UnsafeMutableBufferPointer<PackedCell>` (`CellStorage.swift:811`), and a
+`PackedCell` is a single `UInt64` (`CellStorage.swift:16,31`) packing the
+content tag, the codepoint or grapheme id, a 16-bit style id, the width state
+and a payload id. Everything variable-sized lives in a `CellArena`
+(`CellStorage.swift:284`) shared by every line of one terminal, which interns
+each distinct attribute and grapheme **once** rather than per cell — so a
+heavily coloured screen costs the same per cell as a plain one. `CharData` is
+the read-side interface the arena expands a cell into, not what is stored;
+sizing the budget against it would overstate a session by several times.
+
+So a line is `columns × 8` bytes, a fully materialized 120-column 5,000-line
+scrollback is `5,000 × 120 × 8 ≈ 4.8 MB` of cell bytes — call it 5–6 MB with
+the per-line `BufferLine` and `CellStoragePage` objects — and the design
+point's ~150 resident emulators come to roughly 0.8 GB in the worst case.
+
+That worst case is a ceiling, not an expectation, for two reasons:
+
+- **Lines are materialized lazily.** The buffer preallocates a
+  `[BufferLine?]` of `scrollback + rows` slots — around 40 KB of pointers —
+  and fills a slot only when a line is written, so a session that has printed
+  a screenful costs a screenful.
+- **Reaching it takes a filled scrollback.** It needs 5,000 lines of
+  120-column output that nothing has scrolled past; an agent session that goes
+  quiet holds what it printed and no more.
+
+The limit and the representation both remain open: if field memory pressure
+says so, the constant comes down or the per-cell representation changes, and
+nothing else in the design depends on either.
 
 A daemon restart starts the emulator empty; the jiggle on re-adoption makes
 full-screen programs repaint into the fresh emulator, and the durable record
@@ -637,6 +665,113 @@ the process table — the same argument as every other resource here.
   killing, and reaps children whose session row is exited or absent. This is
   the backstop for holder deaths the daemon was down for; the prompt path is
   the daemon's own holder-connection watch ("Holder death" above).
+
+### Letting go of a finished session's reader
+
+The reconcilers above reclaim things that outlive the daemon. A `HolderReader`
+does not, and it is expensive all the same: a dedicated thread with a 1 MB
+stack, a 64 KB read buffer, an emulator holding thousands of lines of
+scrollback, and a dup of the pty master. After end of file its drain thread
+parks on its wake pipe rather than exiting — deliberately, so the descriptor's
+close stays on the stop path where no `write` can race a reused fd number — so
+nothing but an explicit release unwinds any of it. Without one the daemon's
+memory tracks sessions **adopted since it started** rather than sessions alive,
+and a long-lived daemon on a busy fleet grows without bound.
+
+**Release takes two conditions, and both are load-bearing.**
+
+- **The drain has reached the end of the session's output.** A holder hands its
+  master over even after its child has exited, precisely so the bytes the job
+  wrote and nobody read can still be drained; releasing on the exit alone would
+  throw away exactly what that rule rescues. The exhausted edge — the drain read
+  until the descriptor would block and then classified it as done — is the proof
+  that nothing is left queued.
+- **The holder says the child exited.** End of file means the last slave closed,
+  which is nearly always the job exiting — but a job is entitled to close its
+  terminal and keep running, and its session row is still live. So the holder is
+  asked over a fresh connection, and a child it still reports as alive keeps its
+  reader.
+
+The second condition is only a condition if it takes an **answer**. A probe that
+merely failed collapses the pair back to the first, which is the shape that
+discards a live session's scrollback — so the ruling on a failed probe is where
+the policy is actually decided.
+
+**Only positive evidence licenses a release**, because the two errors are not
+symmetric. A reader kept in error costs one emulator until its session row is
+closed or the daemon restarts; a reader released in error stops the drain
+thread, closes the pty dup and drops everything the session ever printed, for
+good. Each way a round trip can fail is therefore classified by name:
+
+- **A refusal** — the holder answered with the busy sentinel — is a *live*
+  holder serving somebody else. Evidence of liveness, explicitly not of exit,
+  and the same reading the row-less sweep and startup adoption both take. Keeps.
+- **Nothing listening at the rendezvous** — `ENOENT` or `ECONNREFUSED` on the
+  connect — is the one failure that establishes something: the holder process is
+  gone. Those two errnos are the only ones that mean absence rather than this
+  daemon failing to reach a socket, and they are read that way in two other
+  places already, which must not disagree. It is *established* rather than
+  retried because absence is monotone here: the session's holder provably bound
+  the path once, since a hand-over came over it, and a holder that has gone does
+  not come back. Recorded as **status unknown**, never a fabricated code, the
+  same convention startup adoption uses for the same observation.
+- **Any other connect failure** — an interrupted syscall, descriptor exhaustion,
+  buffer pressure, a connect timeout — describes this daemon's own attempt and
+  says nothing whatever about the child. Retried.
+- **A round trip that reached the socket and then failed** — a hang-up between
+  the accept and the answer, a broken pipe, a connection reset, the receive
+  timeout expiring — is what a holder winding down looks like, and equally what
+  one killed mid-frame looks like. Which of the two arrives is decided by
+  microseconds, so neither may reach a different conclusion. Retried.
+- **An answer that is not the description asked for** is retried, because the
+  client's frame queue can carry an unsolicited push that crossed the wire with
+  somebody else's answer. A disagreement that persists is a reason to stop
+  trusting the answer, never a reason to believe the job is dead.
+- **Everything else** — a path too long for `sun_path`, a case structurally
+  unreachable from this call, anything a future client throws — keeps. The
+  fall-through is the conservative direction by construction.
+
+A session whose holder stays reachable but never answers is therefore kept
+indefinitely, and that is the intended trade: the cost is one emulator, ended by
+the session's own teardown or by a daemon restart, against the permanent loss of
+a live session's screen.
+
+**The constants.** The probe retries on a **2-second budget** at a **50 ms
+interval**. End of file on the master and the holder's `waitpid` are two
+observations of one event made by two processes — the slave closes as the job's
+descriptors are released, and the holder learns of the exit on its next poll
+slice — so the first ask can legitimately answer "alive", and a reclaimer that
+gave up on that would keep every reader forever. The budget is comfortably
+longer than the holder's 50 ms poll slice, and finite next to the ten-second
+window a holder keeps its rendezvous bound after its child dies; the interval
+matches that poll slice, so a retry costs one connect per slice rather than
+spinning. The same budget covers the retried failures above: they are asking the
+same question, and giving them a second budget would only be a second number to
+get wrong.
+
+**The lifecycle is a weak closure, and that is not a formality.** The reader
+announces its exhausted edge on a callback the registry supplies, which captures
+the registry weakly and hops onto a task. Weakly, because the registry owns the
+reader: a strong capture would be a cycle keeping every reader — and its thread,
+its emulator and its pty dup — alive for as long as the process runs, which is
+the leak this whole mechanism exists to close. Onto a task, because the callback
+runs on the drain thread, and a release driven inline would be waiting on the
+very thread it is running on. The announcement fires **once**, on the
+transition: a second one would ask the registry to reclaim what it has already
+reclaimed, and the slot it names may by then belong to a different reader.
+
+**This is not an `AgentReaper` leg, and not a sweep at all.** The named-reconciler
+doctrine asks who reclaims the orphans of a *durable* resource — one the external
+world commits to before TBD records the intent, which survives a crash with
+nobody owning it. A reader is the opposite: it lives only in the memory of the
+daemon that made it, and a daemon that dies takes every reader with it, so there
+is no orphan for a sweep to find. What is left behind on that path is the
+holder, the job and the rendezvous files, and those already have their
+reconcilers above. A periodic sweep would also be strictly worse at the job: the
+only safe moment to let go is the exhausted edge, which is an edge rather than a
+state a sweep could sample, and asking every session's holder on a timer would
+put a fleet's worth of round trips per interval against holders that wind down
+when they answer.
 
 ## Rollout
 
