@@ -220,17 +220,45 @@ def report(lines: list[str]) -> None:
 
 
 def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
-    """Run claude with stdio inherited; Ctrl-C reaches it, we still summarize."""
+    """Run claude with stdio inherited; signals reach it, we still summarize.
+
+    The child deliberately stays in this process's own group and session: the
+    interactive TUI has to remain in the terminal's foreground process group to
+    own the tty, so it cannot be put behind `start_new_session`. Signals are
+    therefore forwarded by pid. Without that forwarding a SIGTERM to the
+    wrapper takes the interpreter's default disposition — the process dies
+    where it stands, `main`'s `finally` never runs, the sandbox is left on
+    disk, and `claude` keeps running with nobody waiting on it.
+
+    PEP 475 retries the interrupted `wait()` once a handler returns, so the
+    call resumes and returns the child's status as soon as the forwarded
+    signal lands.
+    """
     try:
         child = subprocess.Popen([binary, *claude_args], env=env)
     except FileNotFoundError:
         report([f"claude binary not found: {binary}"])
         return 127
-    while True:
-        try:
-            return child.wait()
-        except KeyboardInterrupt:
-            child.send_signal(signal.SIGINT)
+
+    def forward(signum: int, _frame: Any) -> None:
+        child.send_signal(signum)
+
+    previous: dict[int, Any] = {}
+    try:
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            previous[sig] = signal.signal(sig, forward)
+        while True:
+            try:
+                status = child.wait()
+                break
+            except KeyboardInterrupt:
+                child.send_signal(signal.SIGINT)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    # Popen.wait reports a signal death as a negative signal number; callers
+    # reading an exit status expect the shell's conventional 128 + signal.
+    return status if status >= 0 else 128 - status
 
 
 def serve_until_signalled(
@@ -286,12 +314,16 @@ def main(argv: list[str]) -> int:
 
     keep = args.keep or args.sandbox is not None
     sandbox = Path(args.sandbox) if args.sandbox else Path(tempfile.mkdtemp(prefix="claude-stub-"))
-    sandbox.mkdir(parents=True, exist_ok=True)
-    (sandbox / "tmp").mkdir(exist_ok=True)
-    write_config(sandbox, Path.cwd())
 
     routes = build_routes(role_turns)
+    # Everything after the directory exists belongs inside the cleanup scope:
+    # a corrupted `.claude.json` in a reused sandbox or an unwritable path
+    # would otherwise fail between creation and the `finally`, stranding a
+    # fresh temp dir that nothing ever removes.
     try:
+        sandbox.mkdir(parents=True, exist_ok=True)
+        (sandbox / "tmp").mkdir(exist_ok=True)
+        write_config(sandbox, Path.cwd())
         with StubServer(turns, role_turns=routes) as server:
             base_url = server.base_url
             extra_env = parse_env_assignments(args.env)

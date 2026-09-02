@@ -1,9 +1,11 @@
 """Tests for scripts/claude-stub.py (stdlib only).
 
 Mostly the pure parts: turn scripting, the env overlay, the `--print-env`
-exports, the sandbox config, and the closing summary. One smoke test spawns the
-real `claude` against the stub end to end, and skips when no `claude` is on
-PATH. The e2e suite under `.github/workflows/claude-review-v2/tests/e2e/`
+exports, the sandbox config, and the closing summary. A second group runs the
+wrapper as a process against a shell script standing in for `claude`, which is
+the only way to observe signal handling and sandbox cleanup. One smoke test
+spawns the real `claude` against the stub end to end, and skips when no
+`claude` is on PATH. The e2e suite under `.github/workflows/claude-review-v2/tests/e2e/`
 exercises the same fake server, but it drives the review gate's own scenarios
 and never runs this wrapper, so nothing there covers the code here.
 """
@@ -15,12 +17,15 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -333,6 +338,174 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config["hasTrustDialogAccepted"])
         for project in (first, second):
             self.assertTrue(config["projects"][str(project)]["hasTrustDialogAccepted"])
+
+
+class WrapperProcessTests(unittest.TestCase):
+    """The wrapper as a process: signal handling and the cleanup scope.
+
+    These run the wrapper by subprocess against a shell script standing in for
+    `claude`, so they need no CLI and cost no tokens. Every wait is bounded and
+    the wrapper gets its own process group, so a hang is killed rather than
+    left behind.
+    """
+
+    DEADLINE = 30.0
+
+    def _root(self) -> Path:
+        root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return root
+
+    @staticmethod
+    def _fake_claude(path: Path, body: str) -> Path:
+        path.write_text(f"#!/bin/sh\n{body}", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def _spawn_wrapper(self, root: Path, binary: Path, *extra: str) -> subprocess.Popen:
+        cwd = root / "project"
+        cwd.mkdir(exist_ok=True)
+        devnull = open(os.devnull, "rb")
+        self.addCleanup(devnull.close)
+        # A new process group so a hung run is killed whole, never orphaned.
+        wrapper = subprocess.Popen(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--text",
+                "stubbed",
+                "--claude-binary",
+                str(binary),
+                *extra,
+                "--",
+                "-p",
+                "hi",
+            ],
+            cwd=cwd,
+            stdin=devnull,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        self.addCleanup(self._kill_group, wrapper)
+        return wrapper
+
+    @staticmethod
+    def _kill_group(wrapper: subprocess.Popen) -> None:
+        """Kill the whole group, whether or not the wrapper is still alive.
+
+        `start_new_session` made the wrapper its own group leader, so its pid
+        is the group id and stays usable while any member survives — which is
+        exactly the case that matters: a wrapper that died without forwarding
+        leaves the stub `claude` behind in that group.
+        """
+        try:
+            os.killpg(wrapper.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        if wrapper.poll() is None:
+            wrapper.communicate()
+
+    def _wait_for(self, predicate, description: str):
+        deadline = time.monotonic() + self.DEADLINE
+        while time.monotonic() < deadline:
+            result = predicate()
+            if result:
+                return result
+            time.sleep(0.05)
+        self.fail(f"timed out after {self.DEADLINE}s waiting for {description}")
+
+    def test_a_sigterm_to_the_wrapper_reaches_claude_and_still_cleans_up(self):
+        # Without signal forwarding the interpreter dies where it stands: the
+        # sandbox survives and `claude` is left running with nobody waiting.
+        root = self._root()
+        report = root / "child.txt"
+        binary = self._fake_claude(
+            root / "fake-claude.sh",
+            f'printf \'%s\\n%s\\n\' "$$" "$HOME" > {shlex.quote(str(report))}\n'
+            # `exec` keeps the pid just written, and the sleep outlasts the
+            # deadline so "the child is gone" cannot pass by expiry.
+            "exec sleep 600\n",
+        )
+        wrapper = self._spawn_wrapper(root, binary)
+
+        def spawned():
+            if wrapper.poll() is not None:
+                self.fail("the wrapper exited before the stub claude reported in")
+            lines = report.read_text(encoding="utf-8").splitlines() if report.exists() else []
+            return lines if len(lines) == 2 else None
+
+        child_pid, sandbox = self._wait_for(spawned, "the stub claude to report its pid")
+        child_pid = int(child_pid)
+        sandbox = Path(sandbox)
+        time.sleep(0.2)  # the wrapper installs its handlers just after spawning
+
+        wrapper.send_signal(signal.SIGTERM)
+        try:
+            stdout, stderr = wrapper.communicate(timeout=self.DEADLINE)
+        except subprocess.TimeoutExpired:
+            # An unforwarded SIGTERM kills the wrapper but leaves the child
+            # holding its pipes open, so this is the shape that failure takes.
+            self.fail(f"the wrapper did not finish {self.DEADLINE}s after SIGTERM")
+
+        def child_gone():
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        self._wait_for(child_gone, f"the stub claude (pid {child_pid}) to exit")
+        self.assertFalse(sandbox.exists(), f"the temp sandbox {sandbox} leaked")
+        # A signal death is negative from Popen.wait; callers get 128 + signal.
+        self.assertEqual(128 + int(signal.SIGTERM), wrapper.returncode, stderr)
+        self.assertIn("request(s) served", stderr, stdout)
+
+    def test_a_corrupted_reused_sandbox_config_fails_without_running_claude(self):
+        # An explicit --sandbox is always kept, so this is about the failure
+        # being reported and bounded rather than about cleanup.
+        root = self._root()
+        sandbox = root / "sandbox"
+        (sandbox / "config").mkdir(parents=True)
+        (sandbox / "config" / ".claude.json").write_text("{not json", encoding="utf-8")
+        marker = root / "ran.txt"
+        binary = self._fake_claude(
+            root / "fake-claude.sh", f"touch {shlex.quote(str(marker))}\n"
+        )
+        wrapper = self._spawn_wrapper(root, binary, "--sandbox", str(sandbox))
+
+        _, stderr = wrapper.communicate(timeout=self.DEADLINE)
+
+        self.assertNotEqual(0, wrapper.returncode)
+        self.assertIn("JSONDecodeError", stderr)
+        self.assertFalse(marker.exists(), "claude ran despite the unreadable config")
+
+
+class SandboxCleanupTests(unittest.TestCase):
+    def test_a_failure_after_the_temp_sandbox_exists_still_removes_it(self):
+        # The auto-created sandbox is only reclaimable by the wrapper's own
+        # `finally`, so setup that can fail has to sit inside it.
+        root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        created: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def recording_mkdtemp(*args, **kwargs):
+            kwargs["dir"] = str(root)
+            path = real_mkdtemp(*args, **kwargs)
+            created.append(path)
+            return path
+
+        with mock.patch.object(claude_stub.tempfile, "mkdtemp", recording_mkdtemp):
+            with mock.patch.object(
+                claude_stub, "write_config", side_effect=RuntimeError("boom")
+            ):
+                with self.assertRaises(RuntimeError):
+                    claude_stub.main(["--text", "x", "--", "-p", "hi"])
+
+        self.assertEqual(1, len(created), "the wrapper did not create a temp sandbox")
+        self.assertFalse(Path(created[0]).exists(), "the temp sandbox leaked")
 
 
 @unittest.skipUnless(shutil.which("claude"), "no claude binary on PATH")
