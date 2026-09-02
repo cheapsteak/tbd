@@ -659,6 +659,13 @@ extension WorktreeLifecycle {
                             }
                         case .missing:
                             break
+                        case .unverifiable(let error):
+                            // Same rule as the thrown-error case right below:
+                            // an unanswerable identity check is not evidence of
+                            // staleness. Keep the row and let a later sweep
+                            // retry the probe.
+                            logger.warning("reconcile: could not verify pane ownership for terminal \(terminal.id, privacy: .public): \(error, privacy: .public)")
+                            continue
                         }
                     } catch {
                         // An unreadable identity is not evidence of staleness.
