@@ -234,11 +234,12 @@ class Terminated(Exception):
 class SignalTargets:
     """Who owns a stop signal right now, as the run moves through its phases.
 
-    The handler tests these in order: a live `claude` owns the signal and gets
-    it forwarded; a spawn in flight queues it, because the fork may already
-    exist under a name nothing has been handed yet; a `--print-env` server
-    stops serving; otherwise nothing is running that can take it, so the
-    signal becomes a `Terminated`.
+    The handler tests these in order: once the run is `finishing` there is
+    nothing left to signal and the signal is swallowed; a live `claude` owns
+    the signal and gets it forwarded; a spawn in flight queues it, because the
+    fork may already exist under a name nothing has been handed yet; a
+    `--print-env` server stops serving; otherwise nothing is running that can
+    take it, so the signal becomes a `Terminated`.
     """
 
     def __init__(self) -> None:
@@ -246,21 +247,46 @@ class SignalTargets:
         self.spawning = False
         self.pending_signum: int | None = None
         self.serving_event: threading.Event | None = None
+        # Set once the child has been waited for (or the `--print-env` server
+        # has stopped): from there on the wrapper is only unwinding.
+        self.finishing = False
+        # A stop signal that arrived during that unwind, kept for the summary.
+        self.late_signum: int | None = None
 
 
 SIGNAL_TARGETS = SignalTargets()
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
 
+def forward(child: subprocess.Popen, signum: int) -> None:
+    """Hand `signum` to the child, tolerating a child that just exited.
+
+    Every forwarding site races the child's own exit: between deciding to
+    forward and the `kill(2)` the child can die and be reaped, and signalling
+    a pid that is gone raises `ProcessLookupError`. There is nothing left to
+    signal, which is the outcome that was wanted, so it is not an error.
+    """
+    try:
+        child.send_signal(signum)
+    except OSError:  # the child died between the check and the signal
+        pass
+
+
 def handle_stop_signal(signum: int, _frame: Any) -> None:
+    if SIGNAL_TARGETS.finishing:
+        # The child has already been waited for and the wrapper is at most a
+        # few milliseconds from returning through its own cleanup, so nothing
+        # here can take the signal and nothing needs to. Raising `Terminated`
+        # instead would clobber the status the child actually exited with, and
+        # could unwind out of `shutil.rmtree` mid-walk and strand half a
+        # sandbox. Record it for the summary and swallow it.
+        SIGNAL_TARGETS.late_signum = signum
+        return
     child = SIGNAL_TARGETS.child
     if child is not None:
         # PEP 475 retries the interrupted `wait()` once this returns, so the
         # wrapper's own status follows however the child answers the signal.
-        try:
-            child.send_signal(signum)
-        except OSError:  # the child died between the check and the signal
-            pass
+        forward(child, signum)
         return
     if SIGNAL_TARGETS.spawning:
         SIGNAL_TARGETS.pending_signum = signum
@@ -325,19 +351,28 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
     if child is None:
         if queued is not None:
             raise Terminated(queued)
+        # Nothing was spawned and nothing else will be, so the same rule as
+        # below applies: a stop signal from here on has nothing to act on.
+        SIGNAL_TARGETS.finishing = True
         return 127
 
     try:
         if queued is not None:
-            child.send_signal(queued)
+            forward(child, queued)
         while True:
             try:
                 status = child.wait()
                 break
             except KeyboardInterrupt:
-                child.send_signal(signal.SIGINT)
+                forward(child, signal.SIGINT)
     finally:
         SIGNAL_TARGETS.child = None
+        # The child has been waited for, so from here the wrapper is only
+        # unwinding — a few milliseconds of summary, sandbox removal, and
+        # return. A stop signal landing in that window has nothing to reach,
+        # so the handler swallows it rather than replacing the child's status
+        # with a `Terminated` or interrupting the sandbox removal.
+        SIGNAL_TARGETS.finishing = True
     # Popen.wait reports a signal death as a negative signal number; callers
     # reading an exit status expect the shell's conventional 128 + signal.
     return status if status >= 0 else 128 - status
@@ -369,6 +404,10 @@ def serve_until_signalled(
             pass
     finally:
         SIGNAL_TARGETS.serving_event = None
+        # Same as after the child is waited for: serving is over, so a stop
+        # signal arriving during the summary and the sandbox removal has
+        # nothing left to stop and must not unwind the cleanup.
+        SIGNAL_TARGETS.finishing = True
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -404,8 +443,12 @@ def main(argv: list[str]) -> int:
     The stop-signal handlers go on first, before a single resource exists, so
     a SIGTERM or SIGHUP anywhere below — building the sandbox, binding the
     stub server, spawning claude — unwinds through the cleanup instead of
-    taking the interpreter's default disposition. Only SIGKILL or a hard crash
-    can leave the sandbox on disk or the child unwaited-for.
+    taking the interpreter's default disposition. Once the run is finishing —
+    the child waited for, or the `--print-env` server stopped — a stop signal
+    is instead recorded and swallowed, so the last few milliseconds of summary
+    and sandbox removal cannot be interrupted either, and the status stays the
+    one the child exited with. Only SIGKILL or a hard crash can leave the
+    sandbox on disk or the child unwaited-for.
     """
     previous_handlers = install_signal_handlers()
     try:
@@ -459,6 +502,13 @@ def main(argv: list[str]) -> int:
                     report([f"sandbox kept at {sandbox}"])
                 else:
                     shutil.rmtree(sandbox, ignore_errors=True)
+        if SIGNAL_TARGETS.late_signum is not None:
+            report(
+                [
+                    f"signal {SIGNAL_TARGETS.late_signum} arrived while exiting; "
+                    "nothing left to stop"
+                ]
+            )
         return status
     except Terminated as terminated:
         report([f"stopped by signal {terminated.signum}"])

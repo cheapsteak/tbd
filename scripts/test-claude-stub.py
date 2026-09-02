@@ -340,6 +340,110 @@ class ConfigTests(unittest.TestCase):
             self.assertTrue(config["projects"][str(project)]["hasTrustDialogAccepted"])
 
 
+class FakeChild:
+    """Stands in for `subprocess.Popen`, recording what was sent to it."""
+
+    def __init__(self, send_error: BaseException | None = None) -> None:
+        self.sent: list[int] = []
+        self.send_error = send_error
+
+    def send_signal(self, signum: int) -> None:
+        self.sent.append(signum)
+        if self.send_error is not None:
+            raise self.send_error
+
+
+class SignalTargetsFixture(unittest.TestCase):
+    """A private `SignalTargets` for tests that drive the handler directly.
+
+    `handle_stop_signal` reads the module global, and `finishing` is a one-way
+    latch, so a test that set it on the real one would silence every later
+    in-process test that expects a signal to be acted on.
+    """
+
+    def setUp(self):
+        self.targets = claude_stub.SignalTargets()
+        patch = mock.patch.object(claude_stub, "SIGNAL_TARGETS", self.targets)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+
+class SignalHandlerStateTests(SignalTargetsFixture):
+    def test_a_stop_signal_while_finishing_is_recorded_and_swallowed(self):
+        # After the child is waited for there is nothing to forward to and
+        # nothing to unwind: raising here would replace the child's status and
+        # could interrupt the sandbox removal.
+        child = FakeChild()
+        self.targets.child = child
+        self.targets.finishing = True
+
+        self.assertIsNone(claude_stub.handle_stop_signal(signal.SIGTERM, None))
+
+        self.assertEqual([], child.sent, "a finishing run still forwarded")
+        self.assertEqual(int(signal.SIGTERM), self.targets.late_signum)
+
+    def test_a_stop_signal_with_nothing_finishing_still_terminates(self):
+        # The discriminator for the test above: without `finishing`, a signal
+        # nobody owns is still the `Terminated` that unwinds through cleanup.
+        with self.assertRaises(claude_stub.Terminated) as raised:
+            claude_stub.handle_stop_signal(signal.SIGHUP, None)
+        self.assertEqual(int(signal.SIGHUP), raised.exception.signum)
+        self.assertIsNone(self.targets.late_signum)
+
+    def test_a_live_child_is_still_sent_the_signal(self):
+        child = FakeChild()
+        self.targets.child = child
+        self.assertIsNone(claude_stub.handle_stop_signal(signal.SIGTERM, None))
+        self.assertEqual([int(signal.SIGTERM)], child.sent)
+
+    def test_forwarding_tolerates_a_child_that_exited_first(self):
+        # The race every forwarding site runs: the pid is gone by the time the
+        # signal is sent, which is the outcome that was wanted, not a crash.
+        child = FakeChild(send_error=ProcessLookupError())
+        claude_stub.forward(child, signal.SIGINT)
+        self.assertEqual([int(signal.SIGINT)], child.sent)
+
+    def test_forwarding_a_signal_to_a_live_child_delivers_it(self):
+        child = FakeChild()
+        claude_stub.forward(child, signal.SIGTERM)
+        self.assertEqual([int(signal.SIGTERM)], child.sent)
+
+
+class LateSignalExitStatusTests(SignalTargetsFixture):
+    def test_a_signal_after_the_child_exits_keeps_the_status_and_cleans_up(self):
+        # A self-signal is delivered to the calling thread before `os.kill`
+        # returns, so this lands exactly in the window between the child being
+        # waited for and `main` finishing its cleanup. Unswallowed it becomes
+        # a `Terminated`: status 143 instead of 7, out of a `shutil.rmtree`
+        # that may have walked only half the sandbox.
+        root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        created: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def recording_mkdtemp(*args, **kwargs):
+            kwargs["dir"] = str(root)
+            path = real_mkdtemp(*args, **kwargs)
+            created.append(path)
+            return path
+
+        def finishing_then_signalled(binary, claude_args, env):
+            claude_stub.SIGNAL_TARGETS.finishing = True
+            os.kill(os.getpid(), signal.SIGTERM)
+            return 7
+
+        with mock.patch.object(claude_stub.tempfile, "mkdtemp", recording_mkdtemp):
+            with mock.patch.object(
+                claude_stub, "run_claude", finishing_then_signalled
+            ):
+                status = claude_stub.main(["--text", "x", "--", "-p", "hi"])
+
+        self.assertEqual(7, status)
+        self.assertEqual(int(signal.SIGTERM), self.targets.late_signum)
+        self.assertEqual(1, len(created), "the wrapper did not create a temp sandbox")
+        self.assertFalse(Path(created[0]).exists(), "the temp sandbox leaked")
+
+
 class WrapperProcessTests(unittest.TestCase):
     """The wrapper as a process: signal handling and the cleanup scope.
 
