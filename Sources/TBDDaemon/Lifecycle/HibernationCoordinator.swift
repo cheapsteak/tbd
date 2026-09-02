@@ -794,13 +794,19 @@ public actor HibernationCoordinator {
         case .dead:
             disagreement = .processExited
         case .unverifiable(let error):
-            // Could not verify the pane's status (tmux unreachable). Fail closed:
-            // do not resume, treat as a disagreement condition.
-            disagreement = .paneMissing
+            // Not a POSITIVE disagreement — the same "probe merely threw" case
+            // the doc comment above already carves out, just arriving as a
+            // return value instead of a thrown error now that `paneSendTarget`
+            // can say "I could not look" directly. Conflating it with
+            // `.paneMissing` here would be exactly the fail-open collapse this
+            // PR removes everywhere else: an unanswerable tmux consultation
+            // reported as `sessionGone` on an already-awake row, dropping a
+            // caller's `initialPrompt` on a session that never actually died.
             logger.notice("""
                 wake: could not verify pane \(terminal.tmuxPaneID, privacy: .public) \
-                (tmux unreachable: \(error, privacy: .public)) — treating as missing
+                (tmux unreachable: \(error, privacy: .public)) — keeping the benign no-op
                 """)
+            return .notHibernated
         }
 
         logger.warning("""

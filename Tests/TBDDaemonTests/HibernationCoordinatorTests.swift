@@ -1118,6 +1118,24 @@ struct HibernationCoordinatorTests {
         #expect(await coord.wake(terminalID: terminalID) == .notHibernated)
     }
 
+    /// The same safety property as the thrown-error case above, but through
+    /// `PaneSendTarget.unverifiable` — a non-throwing return value that says
+    /// the same thing ("I could not look"), not a positive disagreement.
+    /// `classifyUnparkedWake`'s own doc comment states this must keep the
+    /// benign no-op, and this is the case a prior bug conflated with
+    /// `.paneMissing`, reporting a healthy already-awake session as
+    /// `sessionGone` on a transient tmux fault.
+    @Test func unverifiablePaneProbeFailsClosedToBenignNoOp() async throws {
+        let (db, _, terminalID) = try await setup()
+        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in
+            .unverifiable(error: "tmux list-panes exited 1: error connecting to socket")
+        })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+        #expect(await coord.wake(terminalID: terminalID) == .notHibernated)
+    }
+
     /// A live pane carrying no identity is left alone — refusal requires
     /// POSITIVE disagreement, the same rule the send path follows.
     @Test func wakeOnUnparkedRowWithLivePaneStaysBenignNoOp() async throws {

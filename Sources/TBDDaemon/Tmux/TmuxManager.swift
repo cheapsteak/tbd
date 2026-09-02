@@ -1604,12 +1604,17 @@ public struct TmuxManager: Sendable {
     /// Check whether a tmux window exists by querying list-panes.
     ///
     /// Collapses `.unverifiable` into `false`, which is what this method has
-    /// always done and what its Bool-shaped callers already assume: they use it
-    /// to decide whether to bother with a window, and skipping one they could not
-    /// consult is harmless. Callers that act *because* a window is gone — the
-    /// Watch Desk's spawn and lease-revocation rails — must use
-    /// `windowExistence` instead, so absence of evidence cannot license a
-    /// creating or destroying act.
+    /// always done. That collapse is harmless for a caller that merely skips a
+    /// window it could not consult, but NOT audited or guaranteed harmless for
+    /// every existing Bool-shaped caller in this codebase — at least one
+    /// (`HibernationCoordinator.wakeTmuxSection`) acts on a `false` result by
+    /// creating a replacement window, which is exactly the kind of act
+    /// `.unverifiable` must not license. Migrating every such caller to
+    /// `windowExistence` is a larger change than this fix; new callers that act
+    /// *because* a window is gone — the Watch Desk's spawn and
+    /// lease-revocation rails already do — must use `windowExistence`, and an
+    /// existing caller found to have the same problem should migrate too
+    /// rather than lean on this doc comment's old, overstated claim.
     public func windowExists(server: String, windowID: String) async -> Bool {
         await windowExistence(server: server, windowID: windowID) == .exists
     }
