@@ -148,10 +148,28 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
         case .needsLogin(let reason): return "needs re-login (\(reason))"
         case .rateLimited(let ra):
             return ra.map { "rate limited (retry \(Int($0))s)" } ?? "rate limited"
-        case .httpError(let code): return "HTTP \(code)"
+        case .httpError(let code):
+            // A permanent request error must not read like a transient one:
+            // "HTTP 400" alongside a "retrying" note tells the reader to wait
+            // for something that will never happen. Naming the request as the
+            // faulty party is the whole value of the string.
+            return Self.isPermanentRequestError(code)
+                ? "request rejected (HTTP \(code)) — malformed request, retrying cannot fix it"
+                : "HTTP \(code)"
         case .networkError(let msg): return "network error: \(msg)"
         case .decodeError(let msg): return "decode error: \(msg)"
         }
+    }
+
+    /// Whether an HTTP status means *the request we sent is wrong* rather than
+    /// *try again later*.
+    ///
+    /// True for 4xx except the three that describe a recoverable condition
+    /// outside the request's shape: 401 and 403 are credential states (a fresh
+    /// token or a refresh clears them) and 429 is a rate limit (time clears
+    /// it). 5xx is the server's problem and is genuinely retryable.
+    public static func isPermanentRequestError(_ code: Int) -> Bool {
+        (400..<500).contains(code) && code != 401 && code != 403 && code != 429
     }
 
     /// Machine-readable classification for the snapshot / UI.

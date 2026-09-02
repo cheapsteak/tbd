@@ -242,6 +242,39 @@ struct TokenProfileUsageFetcherTests {
         #expect(request.url?.absoluteString == "https://api.anthropic.com/v1/messages")
     }
 
+    /// The outgoing request is the part the probe lives or dies by, and it is
+    /// the part no parser test can see. `anthropic-version` in particular is
+    /// REQUIRED by `/v1/messages`: without it the API answers 400 with none of
+    /// the rate-limit headers, so a profile shows no bars at all — a failure
+    /// mode invisible to every test that feeds synthetic headers to the parser
+    /// or stubs a canned response.
+    ///
+    /// Assertions go through `value(forHTTPHeaderField:)` rather than
+    /// `allHTTPHeaderFields`, because that accessor is case-insensitive the way
+    /// HTTP is and is the only reliable read of a request URLSession has
+    /// already normalised on its way to the protocol.
+    @Test func probeSendsEveryHeaderTheAPIRequires() async throws {
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                             headerFields: successHeaders)!, Data("{}".utf8))
+        }
+        _ = await makeTokenFetcher().fetchUsage(credential: .token("sk-ant-oat01-TEST"))
+
+        let request = try #require(TokenProbeMockURLProtocol.lastRequest)
+        #expect(request.httpMethod == "POST")
+        #expect(request.url?.absoluteString == "https://api.anthropic.com/v1/messages")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer sk-ant-oat01-TEST")
+        #expect(request.value(forHTTPHeaderField: "anthropic-beta") == "oauth-2025-04-20")
+        #expect(request.value(forHTTPHeaderField: "anthropic-version")
+            == TokenProfileUsageFetcher.apiVersion)
+        #expect(TokenProfileUsageFetcher.apiVersion == "2023-06-01")
+        #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
+
+        let body = try #require(TokenProbeMockURLProtocol.lastBody)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(json["max_tokens"] as? Int == 0)
+    }
+
     /// `max_tokens: 0` is what makes the probe cheap: it returns 200 with the
     /// rate-limit headers and generates no output.
     @Test func probeBodyRequestsZeroOutputTokens() async throws {
@@ -341,7 +374,9 @@ struct TokenProfileUsageFetcherTests {
         #expect(status == .rateLimited(retryAfter: nil))
     }
 
-    @Test func otherHTTPStatusesMapToNetworkError() async {
+    /// 5xx is the server's problem and may clear on its own, so it stays a
+    /// retryable `.networkError`.
+    @Test func serverErrorsMapToNetworkError() async {
         TokenProbeMockURLProtocol.handler = { req in
             (HTTPURLResponse(url: req.url!, statusCode: 500, httpVersion: "HTTP/1.1",
                              headerFields: nil)!, Data())
@@ -353,6 +388,50 @@ struct TokenProfileUsageFetcherTests {
         }
         #expect(message.contains("500"))
         #expect(!message.contains("sk-ant-oat01-TEST"))
+        #expect(status.kind == .networkError)
+    }
+
+    /// A 4xx that is not 401/403/429 means the request TBD built is wrong. It
+    /// must NOT surface as `.networkError`, whose contract is "transient, will
+    /// clear on its own" — that is what made a missing `anthropic-version`
+    /// header read as an outage instead of a bug.
+    @Test(arguments: [400, 404, 422])
+    func malformedRequestStatusesAreNotReportedAsTransient(code: Int) async {
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: code, httpVersion: "HTTP/1.1",
+                             headerFields: nil)!, Data())
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-SECRET"))
+        guard case .httpError(let reported) = status else {
+            Issue.record("expected .httpError, got \(status)"); return
+        }
+        #expect(reported == code)
+        // No new `ProfileUsageStatusKind` case: widening that enum would break
+        // snapshot decode on older apps.
+        #expect(status.kind == .unknown)
+
+        let reason = status.failureReason ?? ""
+        #expect(reason.contains("\(code)"))
+        #expect(reason.contains("retrying cannot fix it"))
+        #expect(!reason.contains("sk-ant-oat01-SECRET"))
+    }
+
+    /// The three recoverable 4xx statuses keep their own handling and must not
+    /// be swept into the malformed-request bucket.
+    @Test func recoverableFourHundredsAreNotClassifiedAsMalformedRequests() {
+        #expect(!ProfileUsageFetchStatus.isPermanentRequestError(401))
+        #expect(!ProfileUsageFetchStatus.isPermanentRequestError(403))
+        #expect(!ProfileUsageFetchStatus.isPermanentRequestError(429))
+        #expect(!ProfileUsageFetchStatus.isPermanentRequestError(500))
+        #expect(!ProfileUsageFetchStatus.isPermanentRequestError(503))
+        #expect(ProfileUsageFetchStatus.isPermanentRequestError(400))
+        #expect(ProfileUsageFetchStatus.isPermanentRequestError(499))
+        // A recoverable code keeps the terse reason; only a malformed-request
+        // code gets the "retrying cannot fix it" wording.
+        #expect(ProfileUsageFetchStatus.httpError(401).failureReason == "HTTP 401")
+        #expect(ProfileUsageFetchStatus.httpError(400).failureReason?
+            .contains("retrying cannot fix it") == true)
     }
 
     /// A config-dir credential belongs to `LiveProfileUsageFetcher`. This

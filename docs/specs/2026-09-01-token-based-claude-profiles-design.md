@@ -166,10 +166,14 @@ Measured behavior of a `claude setup-token` credential:
 - `GET /api/oauth/usage` and `GET /api/oauth/profile` return **403**. Setup
   tokens lack the `user:profile` scope. `ClaudeUsageFetcher` and
   `LiveProfileUsageFetcher` therefore cannot serve token profiles at all.
-- `POST /v1/messages` with `"max_tokens": 0`, `Authorization: Bearer <token>`
-  and `anthropic-beta: oauth-2025-04-20` returns **200**, bills roughly eight
-  input tokens and zero output tokens, and carries usage in its **response
-  headers**.
+- `POST /v1/messages` with `"max_tokens": 0`, `Authorization: Bearer <token>`,
+  `anthropic-beta: oauth-2025-04-20`, `anthropic-version: 2023-06-01` and
+  `Content-Type: application/json` returns **200**, bills roughly eight input
+  tokens and zero output tokens, and carries usage in its **response headers**.
+  All four headers are load-bearing. `anthropic-version` in particular is
+  *required* by the endpoint: omit it and the call returns
+  `400 {"error":{"message":"anthropic-version: header is required"}}` carrying
+  none of the rate-limit headers, so the profile shows no bars at all.
 - `POST /v1/messages/count_tokens` returns no usage headers and is not a
   substitute.
 
@@ -545,10 +549,20 @@ use the existing date seam.
 
 None blocking. Two things to watch once this is in use:
 
-- Whether `anthropic-beta: oauth-2025-04-20` remains the correct beta header.
-  If it changes, the probe 4xx's and every token profile reports `.needsLogin`,
-  which is misleading — a distinct "probe unsupported" state may be worth adding
-  if that happens.
+- Whether `anthropic-beta: oauth-2025-04-20` remains the correct beta header,
+  and whether `anthropic-version: 2023-06-01` stays the version to pin. A
+  required header that is missing, renamed, or carrying a value the API no
+  longer accepts surfaces the same way: a **400** naming the offending header,
+  with no rate-limit headers on the response. That is why any 4xx other than
+  401/403/429 maps to `.httpError` (`ProfileUsageStatusKind.unknown`) rather
+  than `.networkError` — the request is the faulty party, an identical retry
+  cannot succeed, and a status string that says so beats one that reads as a
+  passing outage. Retries continue at the backoff cap regardless, because the
+  repair is a TBD change and the profile must recover on its own once it ships.
+  A distinct "probe unsupported" state may still be worth adding if the beta
+  header moves, but it cannot be a new `ProfileUsageStatusKind` case:
+  `decodeIfPresent` throws on an unrecognised raw value, so widening that enum
+  breaks snapshot decode on older apps.
 - Where to surface `anthropic-organization-id`. The value is captured and
   persisted by this design but rendered nowhere. The obvious use is telling the
   user that a token profile and a signed-in profile are the same account, so

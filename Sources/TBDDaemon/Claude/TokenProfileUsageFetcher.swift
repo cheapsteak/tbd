@@ -98,6 +98,15 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
     /// model the account may call.
     public static let probeModel = "claude-haiku-4-5-20251001"
 
+    /// The Anthropic API version the probe pins, sent as `anthropic-version`.
+    ///
+    /// The header is **required** on `/v1/messages`. Omitting it returns
+    /// `HTTP 400 {"error":{"message":"anthropic-version: header is required"}}`
+    /// with none of the `anthropic-ratelimit-unified-*` headers the probe
+    /// exists to read, so every token profile reports a failure and renders no
+    /// usage bars at all.
+    public static let apiVersion = "2023-06-01"
+
     private let session: URLSession
     private let endpoint: URL
 
@@ -119,6 +128,7 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.setValue(Self.apiVersion, forHTTPHeaderField: "anthropic-version")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // max_tokens: 0 makes this the cheapest possible real request: it
         // returns 200 with the rate-limit headers and generates no output.
@@ -171,6 +181,23 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
                 .flatMap(TimeInterval.init)
             return .rateLimited(retryAfter: retryAfter)
         default:
+            // A 4xx that is not 401/403/429 is a defect in the request TBD
+            // sent — a missing required header, an unknown field — not a
+            // transport hiccup. `.networkError` promises "transient, will
+            // clear on its own", so reporting one here both misclassifies the
+            // failure and gives the UI wording that misleads. `.httpError`
+            // (kind `.unknown`) is the existing case for it; no
+            // `ProfileUsageStatusKind` case is added, because that enum
+            // decodes with `decodeIfPresent`, which THROWS on an unrecognised
+            // raw value and would break snapshot decode on older apps.
+            //
+            // 5xx stays `.networkError`: the server may well recover, and a
+            // retry is exactly the right response.
+            if ProfileUsageFetchStatus.isPermanentRequestError(http.statusCode) {
+                tokenProbeLogger.error(
+                    "token usage probe request rejected: HTTP \(http.statusCode, privacy: .public) — the probe request itself is malformed; retrying cannot fix it")
+                return .httpError(http.statusCode)
+            }
             return .networkError("HTTP \(http.statusCode)")
         }
     }
