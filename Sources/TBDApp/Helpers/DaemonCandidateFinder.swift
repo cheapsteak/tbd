@@ -8,7 +8,16 @@ enum DaemonCandidateFinder {
     ///
     /// Candidates include:
     /// 1. The app executable's sibling directory (the .app bundle's MacOS/)
-    /// 2. The source worktree's `.build/debug/TBDDaemon` (if known)
+    /// 2. The source worktree's `.build/<config>/TBDDaemon` (if known), trying
+    ///    THIS app's own build configuration first and the other second.
+    ///
+    /// The configuration order matters. This list previously named only
+    /// `debug`, so a release app that auto-spawned its daemon — which is what
+    /// happens after a reboot, when the app launches with no daemon running —
+    /// silently paired a release app with a DEBUG daemon. Preferring the
+    /// matching configuration keeps a `--release` install release end-to-end,
+    /// while the fallback means a developer who has only ever built one
+    /// configuration still gets a daemon rather than an error.
     ///
     /// Paths are returned as absolute strings for immediate filesystem checks;
     /// they are NOT yet resolved for symlinks. The caller is responsible for
@@ -36,12 +45,28 @@ enum DaemonCandidateFinder {
             candidates.append(siblingPath)
         }
 
-        // Second candidate: daemon in the source worktree's build directory
+        // Next candidates: the source worktree's build directories, this app's
+        // own configuration first (see the note above).
         if let worktreePath = sourceWorktreePath, !worktreePath.isEmpty {
-            let worktreeDaemonPath = worktreePath + "/.build/debug/TBDDaemon"
-            candidates.append(worktreeDaemonPath)
+            for config in buildConfigurationSearchOrder {
+                candidates.append(worktreePath + "/.build/\(config)/TBDDaemon")
+            }
         }
 
         return candidates
+    }
+
+    /// Build configurations to search, matching this app's own first.
+    ///
+    /// `#if DEBUG` is the only thing the running app knows about how it was
+    /// compiled; SwiftPM sets it for `-c debug` and not for `-c release`.
+    /// Exposed (rather than inlined) so the ordering is assertable in tests,
+    /// which can only observe the configuration they themselves run under.
+    static var buildConfigurationSearchOrder: [String] {
+        #if DEBUG
+        ["debug", "release"]
+        #else
+        ["release", "debug"]
+        #endif
     }
 }

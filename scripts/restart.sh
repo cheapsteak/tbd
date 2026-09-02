@@ -11,6 +11,7 @@ set -e
 #   scripts/restart.sh --quick  # skip rebuild, restart everything
 #   scripts/restart.sh --dry-run # print install-ready/not-install-ready decision, touch nothing
 #   scripts/restart.sh --wip    # force install even if on a WIP branch
+#   scripts/restart.sh --release # build/launch optimized (-c release) instead of debug
 #   TBD_INSTALL_WIP=1 scripts/restart.sh # same as --wip
 
 SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
@@ -27,13 +28,13 @@ source "$SCRIPT_DIR/restart-environment-lib.sh"
 require_restart_path "${PATH-}"
 
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="$REPO_ROOT/.build/debug"
 
 app_only=false
 daemon_only=false
 skip_build=false
 dry_run=false
 force_wip=false
+build_config=debug
 
 for arg in "$@"; do
     case "$arg" in
@@ -42,8 +43,14 @@ for arg in "$@"; do
         --quick) skip_build=true ;;
         --dry-run) dry_run=true ;;
         --wip) force_wip=true ;;
+        --release) build_config=release ;;
     esac
 done
+
+# Everything downstream (bundle assembly, daemon launch, pgrep patterns)
+# derives from BUILD_DIR, so pointing it at the release layout is the whole
+# of --release. Set after arg parsing since the flag decides it.
+BUILD_DIR="$REPO_ROOT/.build/$build_config"
 
 # Check TBD_INSTALL_WIP env var as well
 if [ -n "${TBD_INSTALL_WIP:-}" ]; then
@@ -82,7 +89,7 @@ if [ "$dry_run" = true ]; then
             echo "Would install to /Applications and restart daemon (--wip override)."
         else
             echo "Would SKIP /Applications install and daemon restart."
-            echo "Would launch app from .build/debug/TBD.app instead."
+            echo "Would launch app from .build/$build_config/TBD.app instead."
         fi
     fi
     exit 0
@@ -151,8 +158,42 @@ MODULE_CACHE_FLAGS=(
 if [ "$skip_build" = false ]; then
     echo "Building..."
     t0=$SECONDS
-    (cd "$REPO_ROOT" && scripts/swift-safe build "${MODULE_CACHE_FLAGS[@]}") 2>&1 | tail -3
+    # Build the two PRODUCTS rather than the whole package.
+    #
+    # A whole-package build compiles the test targets too, and
+    # Tests/TestSupport does `@testable import TBDDaemonLib`, which needs
+    # testability enabled. Debug builds enable it by default; release builds
+    # do NOT, so `swift build -c release` always fails with
+    # ModuleNotTestable — after having already linked both products. That
+    # made --release look like it worked (correct binaries on disk) while
+    # reporting failure, and it is why the exit code below could not be
+    # checked before this change.
+    #
+    # SwiftPM honors only the LAST --product, so these are two invocations.
+    # Restarting needs exactly these two products; the test targets are
+    # scripts/test.sh's job, not the restart path's.
+    build_ok=true
+    for product in TBDDaemon TBDApp; do
+        # Capture the status, THEN print. Piping the build straight into
+        # `tail` would make the pipeline's status `tail`'s (always 0) — the
+        # very status-discarding bug this block exists to fix.
+        if ! build_out=$( (cd "$REPO_ROOT" && scripts/swift-safe build \
+                -c "$build_config" --product "$product" \
+                "${MODULE_CACHE_FLAGS[@]}") 2>&1 ); then
+            build_ok=false
+        fi
+        printf '%s\n' "$build_out" | tail -3
+    done
     echo "  Build: $((SECONDS - t0))s"
+
+    # Stop on a failed build. Previously the build was piped straight to
+    # `tail`, discarding its status, so a broken build fell through to the
+    # bundle assembly and daemon restart and silently relaunched the STALE
+    # binary — a failed build that looked like a successful restart.
+    if [ "$build_ok" = false ]; then
+        echo "ERROR: build failed — not restarting. The running daemon/app are unchanged." >&2
+        exit 1
+    fi
 fi
 
 # MARK: - Assemble TBD.app bundle
@@ -363,7 +404,7 @@ if [ "$daemon_only" = false ]; then
         if [ "$install_to_applications" = true ]; then
             echo "  App launched from /Applications (PID $APP_PID) — logs: /tmp/tbdapp.log"
         else
-            echo "  App launched from .build/debug (PID $APP_PID) — logs: /tmp/tbdapp.log"
+            echo "  App launched from .build/$build_config (PID $APP_PID) — logs: /tmp/tbdapp.log"
         fi
     else
         echo "  ERROR: App failed to launch. Last lines of /tmp/tbdapp.log:"
