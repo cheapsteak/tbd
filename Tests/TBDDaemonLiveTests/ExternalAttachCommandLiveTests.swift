@@ -1013,15 +1013,10 @@ private final class PTYProcess: @unchecked Sendable {
     }
 
     /// True once the child is no longer running, false when `limit` elapses
-    /// first. Bounded by construction — see `terminate()` for why the obvious
-    /// `waitUntilExit()` is not usable here.
+    /// first. Bounded by construction — `BoundedProcessTeardown` carries the
+    /// mechanism; see `terminate()` for the wedge measured here.
     private func awaitExit(within limit: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(limit)
-        while Date() < deadline {
-            if !process.isRunning { return true }
-            usleep(20_000)
-        }
-        return !process.isRunning
+        BoundedProcessTeardown.awaitExit(process, within: limit) == .exited
     }
 
     /// Head-capped so a chatty tmux client cannot grow this without bound; the

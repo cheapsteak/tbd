@@ -46,11 +46,16 @@ struct AgentReaperHolderLegLiveTests {
     /// A job that survives a hangup — the shape the acceptance harness measured
     /// outliving its teardown at `ppid=1` while its default-disposition sibling
     /// died. Spawned through `zsh` with no `-l`/`-i`, and `-f`, so it reads no
-    /// user rc file — `.zshenv` is otherwise read on every invocation, `-c`
-    /// included, which would pull the developer's shell configuration in from
-    /// outside the test fence.
+    /// user rc file (`/etc/zshenv` is read regardless of `-f`) — `.zshenv` is
+    /// otherwise read on every invocation, `-c` included, which would pull the
+    /// developer's shell configuration in from outside the test fence.
+    ///
+    /// The loop is **counted** for the reason `spawnSIGTERMProofJob` gives
+    /// below: a test host killed mid-run must not leave a `while :` running at
+    /// `ppid=1` that no reconciler can see.
     private static func spawnHangupProofShell() throws -> Process {
-        try spawn("/bin/zsh", ["-f", "-c", #"trap "" HUP; while :; do sleep 0.2; done"#])
+        try spawn(
+            "/bin/zsh", ["-f", "-c", #"trap "" HUP; for _ in {1..1500}; do sleep 0.2; done"#])
     }
 
     /// A live process that is emphatically not a holder's job: `cat` blocking

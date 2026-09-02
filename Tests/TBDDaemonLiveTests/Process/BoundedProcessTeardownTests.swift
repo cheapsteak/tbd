@@ -104,7 +104,7 @@ struct BoundedProcessTeardownTests {
         if kill(pid, 0) == 0 { return "alive" }
         switch errno {
         case ESRCH: return "ESRCH"
-        case EPERM: return "EPERM (alive, another uid)"
+        case EPERM: return "EPERM"
         default: return "errno \(errno)"
         }
     }
@@ -144,9 +144,14 @@ struct BoundedProcessTeardownTests {
     }
 
     /// A child that exited before teardown reached it costs nothing. This is the
-    /// common case in practice — the test killed it, or it ended on its own —
-    /// and the helper must return on the first check rather than sleeping out a
-    /// poll interval per child.
+    /// common case in practice — the test killed it, or it ended on its own.
+    ///
+    /// What the one-second assertion discriminates: the helper must not wait out
+    /// its bound on an already-exited child. The bound here is the default, 5 s,
+    /// so a helper that polled to the deadline regardless would miss by four
+    /// seconds. It does **not** pin "returns without sleeping the 20 ms poll
+    /// interval" — no assertion that survives a loaded shared box can measure
+    /// 20 ms, and one that tried would be a flake rather than a proof.
     @Test func aChildThatAlreadyExitedIsReportedWithoutWaiting() async throws {
         let child = try Self.spawn("/usr/bin/true", [])
         defer { BoundedProcessTeardown.killAndReap(child) }
@@ -173,7 +178,7 @@ struct BoundedProcessTeardownTests {
     /// for what it does not do — and a contract nothing pins is one a later
     /// "signal just to be sure" edit can quietly break, under a name that still
     /// reads as harmless at every call site.
-    @Test func awaitExitNeverSignals() async throws {
+    @Test func awaitExitNeverSignals() throws {
         let child = try Self.spawnLongLived()
         defer { BoundedProcessTeardown.killAndReap(child) }
         let pid = child.processIdentifier
@@ -211,8 +216,11 @@ struct BoundedProcessTeardownTests {
     /// than on a made-up number that may belong to anybody — and because that
     /// child is `posix_spawn`ed rather than Foundation-launched, this test is
     /// its only waiter. So the sequence is deterministic: the SIGKILL lands at
-    /// t≈0, the child is a zombie well before the 0.3 s bound, and the
-    /// diagnostic probe is the thing that collects it. That is exactly what
+    /// t≈0, the child is a zombie well before the 2 s bound, and the
+    /// diagnostic probe is the thing that collects it. The bound is 2 s rather
+    /// than a few hundred milliseconds because under induced load a zsh and its
+    /// `sleep` are not always torn down that fast, and the corpse has to exist
+    /// before the probe can find it. That is exactly what
     /// production teardown does when Foundation has lost the exit, which is why
     /// the composed diagnostic is asserted rather than only its pid. And the
     /// bounded wait runs on a dedicated `Thread`, per `Tests/CLAUDE.md`
@@ -262,12 +270,12 @@ struct BoundedProcessTeardownTests {
         let started = clock.now
 
         let thread = Thread {
-            box.store(BoundedProcessTeardown.killAndReap(stub, within: 0.3))
+            box.store(BoundedProcessTeardown.killAndReap(stub, within: 2))
         }
         thread.name = "BoundedProcessTeardownTests.bound"
         thread.start()
 
-        let watchdog = Date().addingTimeInterval(5)
+        let watchdog = Date().addingTimeInterval(10)
         var collected: BoundedProcessTeardown.Outcome?
         while Date() < watchdog {
             if let value = box.value {
@@ -283,11 +291,11 @@ struct BoundedProcessTeardownTests {
         // `Issue.record(_: some Error)` puts its text where a CI summary keeps
         // it (`Tests/CLAUDE.md`, "Assertion hygiene" rule 4).
         guard let delivered = collected else {
-            Issue.record(BoundNeverReturned(pid: pid, watchdogSeconds: 5))
+            Issue.record(BoundNeverReturned(pid: pid, watchdogSeconds: 10))
             return
         }
         guard case .unobserved(let reportedPID, let diagnostic) = delivered else {
-            Issue.record("the bound did not fire; the wait reported \(delivered)")
+            Issue.record(BoundDidNotFire(outcome: delivered))
             return
         }
         #expect(reportedPID == pid)
@@ -299,8 +307,8 @@ struct BoundedProcessTeardownTests {
                 && diagnostic.contains("zombie collected by the teardown diagnostic"),
             "the diagnostic did not report the corpse it collected: \(diagnostic)")
         #expect(
-            elapsed >= .milliseconds(300),
-            "the wait returned after \(elapsed), which is short of its own 0.3 s bound")
+            elapsed >= .seconds(2),
+            "the wait returned after \(elapsed), which is short of its own 2 s bound")
     }
 }
 
@@ -308,6 +316,18 @@ struct BoundedProcessTeardownTests {
 /// `FixtureSpawnFailure` in the sibling suite.
 private struct SpawnFailure: Error {
     let code: Int32
+}
+
+/// The bound was reported as satisfied against a stub that can never satisfy it.
+///
+/// An `Error` for the same reason as `BoundNeverReturned`: this is the other
+/// half of the mutation check's verdict, and its text is the whole finding.
+private struct BoundDidNotFire: Error, CustomStringConvertible {
+    let outcome: BoundedProcessTeardown.Outcome
+
+    var description: String {
+        "the bound did not fire: the wait reported \(outcome) for a stub whose isRunning never flips"
+    }
 }
 
 /// The watchdog in the mutation check fired: the bounded wait published no

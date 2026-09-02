@@ -73,15 +73,16 @@ enum BoundedProcessTeardown {
 
     /// SIGKILL if the child is still running, then `awaitExit`.
     ///
-    /// The signal is pid-exact and guarded on `pid > 0`: `kill(0, …)` signals
-    /// the caller's entire process group, which in a test process is the test
-    /// runner itself.
+    /// The signal is pid-exact and guarded on `pid > 1`, matching
+    /// `ProductionProcessSignaller.signalPIDOnly`'s "never signal pid<=1":
+    /// `kill(0, …)` signals the caller's entire process group — in a test
+    /// process, the test runner itself — and pid 1 is launchd.
     @discardableResult
     static func killAndReap(
         _ process: any ExitObservableProcess, within seconds: Double = 5
     ) -> Outcome {
         let pid = process.processIdentifier
-        if process.isRunning && pid > 0 { kill(pid, SIGKILL) }
+        if process.isRunning && pid > 1 { kill(pid, SIGKILL) }
         return awaitExit(process, within: seconds)
     }
 
@@ -129,11 +130,11 @@ enum BoundedProcessTeardown {
     /// `isRunning`, verified against the running implementation — so the probe
     /// cannot wedge the process it is diagnosing.
     private static func diagnose(_ pid: Int32, after seconds: Double) -> String {
-        // Guarded on `pid > 0` for the same reason the kill above is:
+        // Guarded on `pid > 1` for the same reason the kill above is:
         // `waitpid(0, …)` collects any child in the caller's process group and
         // `waitpid(-1, …)` any child at all, so a non-positive pid would reap a
-        // corpse this helper was never asked about.
-        guard pid > 0 else { return "pid \(pid): no pid to probe (never launched?)" }
+        // corpse this helper was never asked about — and pid 1 is launchd.
+        guard pid > 1 else { return "pid \(pid): not a pid this helper will touch" }
 
         // Read BEFORE the probe, deliberately: a WNOHANG that collects a zombie
         // frees the number, and the kernel may hand it to somebody else

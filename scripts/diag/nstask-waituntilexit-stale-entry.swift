@@ -30,11 +30,13 @@
 // EXIT CODES
 //   0  waitUntilExit returned on the thread with the stale entry (no hang)
 //   1  the hang reproduced — waitUntilExit did not return within 3 seconds
-//   2  the probe could not set itself up, or its premise did not hold (no
-//      `_CFGetTSD`, no per-thread list, a finished `Process` that was never
-//      deallocated so no stale entry can arise at all, or a task under test that
-//      never started, or never exited so there is no completed exit for the wait
-//      to observe)
+//   2  the probe could not set itself up, or a premise did not hold. Every
+//      case: `_CFGetTSD` could not be resolved; thread A has no per-thread task
+//      list; a finished `Process` was not deallocated, so no stale entry can
+//      arise at all; the task under test never started; it never exited, so
+//      there is no completed exit for the wait to observe; the plant job did not
+//      finish within its bound; or the control arm hung, which would leave a
+//      step-5 hang unattributable.
 //
 // `_CFGetTSD` is private CoreFoundation API. It is used here only to READ and
 // APPEND TO the per-thread list that Foundation itself creates and populates —
@@ -116,7 +118,7 @@ func launch(_ process: Process) -> Bool {
 /// entry it never earned.
 func finishedProcessIsDeallocated(on worker: Worker) -> Bool {
     let box = WeakProcessBox()
-    worker.run(timeout: 10) {
+    let ran = worker.run(timeout: 10) {
         var task: Process? = make("/usr/bin/true", [])
         if let task, launch(task) {
             // Same-thread launch and wait: this shape is not exposed to the
@@ -126,6 +128,9 @@ func finishedProcessIsDeallocated(on worker: Worker) -> Bool {
         box.value = task
         task = nil
     }
+    // A job that never ran is not a satisfied premise, so it must not read as
+    // one.
+    guard ran else { return false }
     // Bounded poll rather than one fixed sleep: a slow autorelease drain would
     // otherwise read as a failed premise.
     let drainDeadline = Date().addingTimeInterval(2)
@@ -171,7 +176,8 @@ threadA.run {
 // 2. Thread B launches the task under test; a third party kills it. The loop is
 //    counted, not `while :`, so a probe that is itself killed leaves nothing
 //    spinning for longer than five minutes.
-let task = make("/bin/zsh", ["-c", #"trap "" HUP; for _ in {1..1500}; do sleep 0.2; done"#])
+let task = make(
+    "/bin/zsh", ["-f", "-c", #"trap "" HUP; for _ in {1..1500}; do sleep 0.2; done"#])
 if useHandler { task.terminationHandler = { _ in } }
 let launchedOnB = threadB.run(timeout: 10, { _ = launch(task) })
 guard launchedOnB else {
@@ -220,6 +226,14 @@ guard planted else {
 //    blamed on the task rather than on the thread the wait ran on.
 let controlReturned = threadC.run { task.waitUntilExit() }
 print("waitUntilExit on thread C (no entry): \(controlReturned ? "returned" : "HUNG")")
+guard controlReturned else {
+    print(
+        """
+        control failed: waitUntilExit did not return on a thread with no entry, so a hang in \
+        step 5 could not be attributed to the stale entry
+        """)
+    exit(2)
+}
 
 // 5. The hazard: thread A's stale entry says "launched here", but the
 //    notification block went to thread B's run loop and will never run here.
