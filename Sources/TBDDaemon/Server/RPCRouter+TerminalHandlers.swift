@@ -715,6 +715,14 @@ extension RPCRouter {
     ///
     /// Read-only: it starts nothing, kills nothing, and types nothing. The
     /// caller decides whether to run what it is handed.
+    /// The refusal `terminal.attachCommand` returns for a holder-backed row.
+    /// Named beside its verb so the CLI, the app and this handler's tests
+    /// assert the same text rather than three near-misses.
+    static func holderAttachRefusal(terminalID: UUID) -> String {
+        "Terminal \(terminalID) runs on the pty-holder transport, which has no "
+            + "tmux session to attach to. Its session is unchanged."
+    }
+
     func handleTerminalAttachCommand(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalAttachCommandParams.self, from: paramsData)
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
@@ -731,6 +739,22 @@ extension RPCRouter {
                 Terminal \(terminal.id) belongs to worktree \(terminal.worktreeID), \
                 not the requested worktree \(worktree.id)
                 """)
+        }
+
+        // Ahead of the probe, because the probe cannot answer this question
+        // honestly. A holder row's `tmuxPaneID` is the empty string by
+        // construction, so `paneSendProbe` classifies it `.missing` and this
+        // handler told the caller the pane "no longer exists" — about a session
+        // that is perfectly alive — under the `terminalSessionGone` code the
+        // app reads as a window to recover. Nothing was composed either way, so
+        // this replaces a safe lie with an accurate refusal rather than
+        // changing what the handler does.
+        //
+        // Refused rather than served: Milestone A gives a holder session no
+        // tmux session for an external terminal to attach to. Its screen is the
+        // daemon's own emulator, reachable through `terminal.output`.
+        guard terminal.transport != .holder else {
+            return RPCResponse(error: Self.holderAttachRefusal(terminalID: terminal.id))
         }
 
         // The pane id used for the probe is the pane id reported in the result.
@@ -836,31 +860,31 @@ extension RPCRouter {
         // does). Refuse to kill an in-flight turn or a raised permission hand,
         // matching `isManuallyHibernatable`'s rails.
         //
-        // Qualified on the window actually being ALIVE. `activityState` is
+        // Qualified on the session actually being ALIVE. `activityState` is
         // hook-fed and carries no timestamp, so a session that died mid-turn
         // (crash, OOM, killed pane) stays `.working` forever. An unqualified
         // rail would then refuse forever on exactly the wedged terminal a
         // caller most needs to close — turning the safety rail into a trap for
-        // this command's primary cleanup use case. A dead-window row cannot be
+        // this command's primary cleanup use case. A dead session cannot be
         // mid-turn, so it stays closeable without --force.
+        //
+        // The qualifier is asked of the row's OWN transport — see
+        // `sessionLivenessForActivityRails`. Asking tmux for every row is how
+        // this rail silently stopped applying to holder-backed sessions.
+        //
+        // It has THREE answers, and only an observed stop lifts the rail: a
+        // rail that cannot establish the session ended must fail closed, or it
+        // skips its own confirmation exactly when nobody can say what is
+        // running.
         if params.respectActivityRails == true,
            terminal.activityState == .working || terminal.activityState == .waitingForUser {
-            // Resolved inside the rails branch, not in the condition list, so
-            // the lookup keeps its short-circuit (only reached when the rails
-            // are on and the row looks busy) while a DB failure still confirms
-            // the request row before it propagates.
-            let railWorktree = try await actuating(actuationID) {
-                try await db.worktrees.getLocal(id: terminal.worktreeID)
-            }
-            if let railWorktree,
-               await tmux.windowExists(
-                server: railWorktree.tmuxServer, windowID: terminal.tmuxWindowID) {
-                let what = terminal.activityState == .working
-                    ? "mid-turn"
-                    : "waiting on a permission prompt"
-                let message = "Terminal \(params.terminalID) is \(what) "
-                    + "(activityState=\(terminal.activityState.rawValue)). "
-                    + "Closing now would kill in-flight work. Pass --force to close anyway."
+            let liveness = try await sessionLivenessForActivityRails(
+                terminal: terminal, actuationID: actuationID)
+            if liveness != .stopped {
+                let message = Self.closeRailsRefusal(
+                    terminalID: params.terminalID,
+                    activityState: terminal.activityState,
+                    liveness: liveness)
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(
                     error: message,
@@ -881,12 +905,31 @@ extension RPCRouter {
         let worktree = try await actuating(actuationID) {
             try await db.worktrees.getLocal(id: terminal.worktreeID)
         }
-        // Set when the kill itself failed. The deletion proceeds regardless
-        // (pre-existing contract — the row goes and the response is the same),
-        // so the failure is invisible in the response and has to be carried out
-        // separately, or the record would call a failed kill `dispatched`.
-        var killWindowFailure: String?
-        if let worktree {
+        // Set when the transport-level teardown failed. The deletion proceeds
+        // regardless (pre-existing contract — the row goes and the response is
+        // the same), so the failure is invisible in the response and has to be
+        // carried out separately, or the record would call a close that
+        // reclaimed nothing `dispatched`.
+        var transportCleanupFailure: String?
+        if terminal.transport == .holder {
+            // The one path in the holder family that DOES the work instead of
+            // refusing it. Its siblings refuse because acting on a holder row's
+            // empty tmux coordinate would corrupt a row describing a live
+            // process; here the row is going away either way, and a refusal
+            // would cause the leak rather than prevent it.
+            //
+            // The tmux branch below is not merely a no-op for this row, it is
+            // the leak: `tmuxPaneID`/`tmuxWindowID` are empty by construction,
+            // so the capture and the kill address a coordinate that names
+            // nothing while the holder process, the job it forked, and the
+            // socket and lock files at its rendezvous all outlive the row. The
+            // row was the only record of those pids, so this is the last moment
+            // anything can reclaim them. Nothing is captured for Session
+            // History: the holder's screen lives in the daemon's own emulator,
+            // not in a tmux pane, and asking tmux for pane "" never produced a
+            // history entry for a holder row anyway.
+            transportCleanupFailure = await disposeHolder(for: terminal)
+        } else if let worktree {
             await db.terminalHistory.captureOnClose(terminal: terminal) {
                 try await tmux.capturePaneScrollback(
                     server: worktree.tmuxServer, paneID: terminal.tmuxPaneID)
@@ -896,7 +939,7 @@ extension RPCRouter {
                 try await tmux.killWindow(
                     server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
             } catch {
-                killWindowFailure = "\(error)"
+                transportCleanupFailure = "\(error)"
             }
         }
 
@@ -917,8 +960,8 @@ extension RPCRouter {
             terminalID: terminal.id
         )))
 
-        if let killWindowFailure {
-            await finishActuation(actuationID, .transportFailed, error: killWindowFailure)
+        if let transportCleanupFailure {
+            await finishActuation(actuationID, .transportFailed, error: transportCleanupFailure)
         } else {
             await finishActuation(actuationID, .dispatched)
         }
@@ -927,6 +970,163 @@ extension RPCRouter {
             alreadyGone: false,
             claudeSessionID: terminal.claudeSessionID
         ))
+    }
+
+    /// What a row's own transport can say about whether its session is still
+    /// running, for `terminal.delete`'s activity rails.
+    ///
+    /// Three answers rather than two, because "nobody can say" is a distinct
+    /// fact from "it stopped" and the rail must treat them differently. Only
+    /// `.stopped` — an observed ending — lifts the rail's protection.
+    enum ActivityRailLiveness: Equatable {
+        /// The transport says the session is running, or nothing has recorded
+        /// that it stopped.
+        case running
+        /// Something observed the session end: a tmux window that is gone, or
+        /// a holder that collected its job's exit status.
+        case stopped
+        /// The session's supervisor is gone, which does not establish that the
+        /// job it supervised is. See `activityRailLiveness(holderStatus:)`.
+        case unknown
+    }
+
+    /// How the holder leg reads a recorded child status.
+    ///
+    /// Split out from the handler so every status can be exercised directly:
+    /// `.exited` is only ever recorded by a holder that really collected an
+    /// exit status, which no in-process fixture can arrange.
+    ///
+    /// **`.exitedStatusUnknown` is an unknown, not an observed exit, and the
+    /// name is the whole point.** `HolderRegistry.adoptAll`'s catch-all records
+    /// it whenever nothing answers at a holder's rendezvous — that establishes
+    /// the *holder* is gone, and nothing about the job it forked. The holder's
+    /// death hangs that job up, and a job that ignores `SIGHUP` survives as an
+    /// orphan; nothing re-adopts a row nobody calls `adopt()` on again, so the
+    /// status then sticks for the daemon's whole lifetime. Reading it as
+    /// "stopped" let a `--respectActivityRails` close skip the mid-turn
+    /// confirmation and tear down a job that was still working.
+    ///
+    /// The other polarity is just as deliberate: a *missing* status is
+    /// `.running`, not `.stopped`. `adoptAll` deliberately records nothing for
+    /// a holder owned by another installation, and nothing for one whose client
+    /// slot is already taken, and both of those are live sessions. Requiring a
+    /// positive `.alive` would put the rail back where it started for exactly
+    /// those rows.
+    static func activityRailLiveness(
+        holderStatus: HolderChildStatus?
+    ) -> ActivityRailLiveness {
+        switch holderStatus {
+        case .exited: return .stopped
+        case .exitedStatusUnknown: return .unknown
+        case .alive, nil: return .running
+        }
+    }
+
+    /// The refusal `terminal.delete`'s activity rails return for a busy row
+    /// they will not close. Named beside its verb, like `holderSendRefusal` and
+    /// its siblings, so the CLI, the app and this handler's tests name the same
+    /// reason rather than three near-misses.
+    ///
+    /// The `.unknown` wording is not decoration. A user whose holder is gone
+    /// would otherwise read the ordinary "would kill in-flight work" text about
+    /// a session they have every reason to believe is dead, and be left
+    /// guessing why `--force` is suddenly required. Saying which fact is
+    /// missing is what makes the escape hatch usable.
+    static func closeRailsRefusal(
+        terminalID: UUID,
+        activityState: TerminalActivityState,
+        liveness: ActivityRailLiveness
+    ) -> String {
+        let what = activityState == .working
+            ? "mid-turn"
+            : "waiting on a permission prompt"
+        let why = liveness == .unknown
+            ? "Its pty holder is gone, which does not establish that the job it forked is: "
+                + "a job that ignores SIGHUP outlives the holder whose death hung it up, and "
+                + "nothing has observed this one exit. "
+            : "Closing now would kill in-flight work. "
+        return "Terminal \(terminalID) is \(what) "
+            + "(activityState=\(activityState.rawValue)). "
+            + why + "Pass --force to close anyway."
+    }
+
+    /// What can this session's own transport say about whether it is running?
+    ///
+    /// Only `terminal.delete`'s activity rails ask, and only to decide whether
+    /// a `.working` / `.waitingForUser` row is worth refusing to close. It is
+    /// deliberately an *escape hatch* rather than a liveness guarantee: the
+    /// rail is on by default for the CLI, and a wrong "yes" costs a `--force`
+    /// while a wrong "no" kills an in-flight turn. That asymmetry is why the
+    /// answer that cannot be established (`.unknown`) refuses.
+    ///
+    /// **The tmux question and the holder question are different questions,
+    /// and asking the tmux one for every row is the defect this replaces.** A
+    /// holder row's `tmuxWindowID` is the empty string by construction and
+    /// `TmuxManager.windowExists` swallows its errors, so tmux answered "that
+    /// window is gone" for every holder-backed session — the one answer that
+    /// switches the rail off. A busy holder session was closeable without
+    /// `--force`, and nothing said so.
+    ///
+    /// The holder leg reads the registry's recorded status through
+    /// `activityRailLiveness(holderStatus:)`, which owns that mapping and the
+    /// reasoning behind both of its polarities.
+    ///
+    /// It is the *last known* status, not a fresh probe, and that is the one
+    /// place the two legs are not equivalent: a child that exits while the
+    /// daemon is up leaves `.alive` behind until the next adoption, because
+    /// Milestone A publishes no holder-death fact for this rail to read (the
+    /// drain loop keeps polling a pty that will yield no more bytes rather
+    /// than ending). Until Milestone B's holder-death watch lands, such a row
+    /// needs `--force` — a nuisance the message names, and the opposite of the
+    /// live session it used to close silently.
+    private func sessionLivenessForActivityRails(
+        terminal: Terminal, actuationID: String
+    ) async throws -> ActivityRailLiveness {
+        if terminal.transport == .holder {
+            // No worktree lookup on this leg: it exists only to name a tmux
+            // server, and this row has none. A daemon with no registry wired
+            // has adopted nothing and can spawn nothing, so it has no holder
+            // sessions to protect and no fact to protect them with.
+            guard let holderRegistry else { return .stopped }
+            return Self.activityRailLiveness(
+                holderStatus: await holderRegistry.lastKnownStatus(for: terminal.id))
+        }
+        // Resolved inside the rails branch, not in the condition list, so the
+        // lookup keeps its short-circuit (only reached when the rails are on
+        // and the row looks busy) while a DB failure still confirms the request
+        // row before it propagates.
+        let railWorktree = try await actuating(actuationID) {
+            try await db.worktrees.getLocal(id: terminal.worktreeID)
+        }
+        guard let railWorktree else { return .stopped }
+        return await tmux.windowExists(
+            server: railWorktree.tmuxServer, windowID: terminal.tmuxWindowID)
+            ? .running : .stopped
+    }
+
+    /// Tears down the holder behind a row that is about to be deleted: stops
+    /// the daemon's reader, tells the holder to let go of the pty master, and
+    /// kills the job it forked. Returns a description of what was left running,
+    /// or nil when the whole teardown was attempted.
+    ///
+    /// `HolderRegistry.abandon(terminal:)` is best-effort by nature — every
+    /// step talks to something that may already be gone — so the only failures
+    /// nameable are the ones that stop it being *attempted*: no registry wired
+    /// into this daemon, an unrepresentable rendezvous path, or a row that never
+    /// recorded the child pid. Each one leaks a live process, and until the
+    /// Milestone B holder reconciler lands nothing else will ever find it, so
+    /// each is reported rather than swallowed.
+    ///
+    /// Not `private`: `closeScratchTerminals` tears down rows the same way and
+    /// must reclaim the same holders. The teardown itself lives on the registry
+    /// so the lifecycle's own paths (archive, forget) share one implementation
+    /// rather than three near-copies.
+    func disposeHolder(for terminal: Terminal) async -> String? {
+        guard let holderRegistry else {
+            return "terminal \(terminal.id) runs on the holder transport but this daemon has "
+                + "no holder registry, so its holder and job were left running"
+        }
+        return await holderRegistry.abandon(terminal: terminal)
     }
 
     /// Closed-terminal capture metadata for a worktree, newest first. Content
@@ -1197,6 +1397,26 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// The refusal `terminal.recreateWindow` returns for a holder-backed row.
+    /// Named and centralised so the app, the CLI and this handler's tests all
+    /// assert the same text rather than three near-misses.
+    static func holderRecreateRefusal(terminalID: UUID) -> String {
+        "Terminal \(terminalID) runs on the pty-holder transport, which has no "
+            + "tmux window to recreate. Its session is unchanged."
+    }
+
+    /// The refusal an `.inPlace` `terminal.swapProfile` returns for a
+    /// holder-backed row. A sibling of `holderRecreateRefusal` rather than a
+    /// reuse of it: both refuse the same transport for the same reason, and the
+    /// only thing that differs is the tmux verb each one had no coordinate for,
+    /// so the wording tracks the verb and nothing else. One named factory per
+    /// verb, so the app, the CLI and the tests assert the same text.
+    static func holderInPlaceSwapRefusal(terminalID: UUID) -> String {
+        "Terminal \(terminalID) runs on the pty-holder transport, which has no "
+            + "tmux window to respawn in place. Its session and profile are unchanged "
+            + "— fork the session instead."
+    }
+
     func handleTerminalRecreateWindow(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -1204,6 +1424,23 @@ extension RPCRouter {
 
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        }
+
+        // Taken BEFORE the worktree lookup, for the same reason the read path's
+        // holder branch is (see `handleTerminalOutput`): everything downstream
+        // exists only to name a tmux server and window this row does not have.
+        //
+        // This handler is reached automatically, not only by the Retry button:
+        // the app is transport-blind, so a holder tab whose repo happens to
+        // have a tmux server running for any other reason classifies as
+        // `.windowMissing` and fires automatic recovery. Both downstream
+        // branches would then act on `tmuxWindowID == ""`, which
+        // `TmuxManager.windowExists` can only ever answer "gone" for — parking
+        // a resumable row whose holder and child are still running, or standing
+        // up a tmux window under a row that still reads `transport == .holder`.
+        // Refuse, and leave every column exactly as it was.
+        guard terminal.transport != .holder else {
+            return RPCResponse(error: Self.holderRecreateRefusal(terminalID: terminal.id))
         }
 
         guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
@@ -1563,6 +1800,15 @@ extension RPCRouter {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
 
+        // A holder-backed session has no tmux coordinate to capture — its
+        // `tmuxPaneID` is empty and the repo's server may never have been
+        // started — so the branch is taken BEFORE the worktree lookup that only
+        // exists to name that server. The daemon's own emulator, fed by the
+        // reader that drains this session's pty, is the screen.
+        if terminal.transport == .holder {
+            return try await holderTerminalOutput(terminal: terminal, params: params)
+        }
+
         guard let worktree = try await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
@@ -1577,6 +1823,36 @@ extension RPCRouter {
         let trimmed = outputLines.suffix(lines).joined(separator: "\n")
 
         return try RPCResponse(result: TerminalOutputResult(output: trimmed))
+    }
+
+    /// The holder half of `terminal.output`: render the daemon's own emulator
+    /// for a session whose pty master it is draining.
+    ///
+    /// A missing reader is reported rather than papered over. It means the
+    /// registry never adopted this session — the holder is gone, or startup
+    /// adoption found it unreachable — and an empty screen would read as "the
+    /// session is quiet", which is a different and much more comfortable claim
+    /// than the true one.
+    private func holderTerminalOutput(
+        terminal: Terminal,
+        params: TerminalOutputParams
+    ) async throws -> RPCResponse {
+        guard let holderRegistry else {
+            return RPCResponse(
+                error: "Holder transport is not wired in this daemon: \(terminal.id)")
+        }
+        guard let reader = await holderRegistry.reader(for: terminal.id) else {
+            return RPCResponse(
+                error: "No live holder reader for terminal \(terminal.id); "
+                    + "its session is gone or was never adopted")
+        }
+        let lines = params.lines ?? 50
+        // Rendered to the requested depth directly. The tmux path asks for a
+        // whole pane and trims afterwards because `capture-pane` has no such
+        // knob; the emulator does, and going through it means the scrollback
+        // above the viewport is available rather than discarded.
+        let output = await reader.renderScreenWithScrollback(maxLines: lines)
+        return try RPCResponse(result: TerminalOutputResult(output: output))
     }
 
     func handleTerminalConversation(_ paramsData: Data) async throws -> RPCResponse {
@@ -1902,6 +2178,32 @@ extension RPCRouter {
         // session is blank, resuming would produce "no conversation found",
         // so we spawn a brand-new session instead.
         let mode = params.resolvedMode
+
+        // Taken the instant the mode is known, and deliberately not one line
+        // later: everything below — the actuation row, the transcript carried
+        // into the destination profile's config dir, the trust seed — is
+        // already state outside this handler, and `inPlaceSwapRespawn` then
+        // commits the new profile and session identity to the row BEFORE it
+        // touches tmux. On a holder row every one of those steps would land and
+        // only the last would fail, because the graceful interrupt addresses
+        // `tmuxPaneID == ""` (so the real process is never interrupted) and the
+        // `respawn-window` addresses `tmuxWindowID == ""`. The row would end up
+        // naming a session that never started while the original process ran on
+        // under an identity nothing records.
+        //
+        // Scoped to `.inPlace`, not to the whole handler: `.fork` builds a
+        // fresh tmux window and a fresh row and never touches this one, and the
+        // cold (parked) swap above only re-homes `profile_id`. Refusing those
+        // would take away a working action to close a hole they do not have.
+        //
+        // Milestone A has no holder equivalent for an in-place respawn, so this
+        // refuses rather than teaching one. An action the user has to take
+        // another way is recoverable; a row that lies about a live process is
+        // not.
+        if mode == .inPlace, oldTerminal.transport == .holder {
+            return RPCResponse(error: Self.holderInPlaceSwapRefusal(terminalID: oldTerminal.id))
+        }
+
         let repo: Repo?
         if let rid = worktree.repoID {
             repo = try await db.repos.get(id: rid)
@@ -2445,6 +2747,14 @@ extension RPCRouter {
         case suppressed
     }
 
+    /// The refusal `terminal.send` returns for a holder-backed row. Named
+    /// beside its verb so the CLI, the app, the actuation record and this
+    /// handler's tests all name the same reason.
+    static func holderSendRefusal(terminalID: UUID) -> String {
+        "Terminal \(terminalID) runs on the pty-holder transport, which has no "
+            + "key-send path yet. Nothing was typed and its session is unchanged."
+    }
+
     func handleTerminalSend(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -2540,6 +2850,35 @@ extension RPCRouter {
             message: payload.recordedMessage,
             submit: payload.recordedSubmit,
             verify: payload.recordedVerify)
+
+        // ─── The transport, ahead of every other declining rail ───
+        //
+        // A holder row's `tmuxPaneID` is the empty string by construction, so
+        // `consultPaneBeforeTyping` below classifies it `.missing` and refuses
+        // with "tmux pane  for terminal <id> no longer exists" — about a
+        // session that is perfectly alive. Nothing was ever typed, so this
+        // replaces a safe lie with an accurate refusal rather than changing
+        // what the handler does; what it buys is that the actuation record and
+        // the caller both name the transport instead of blaming a stale
+        // coordinate that was never stale.
+        //
+        // It sits ahead of the `--verify` rails deliberately: those decline an
+        // act that is otherwise possible, and on this transport no send is
+        // possible at all, so the transport is the reason the caller needs. It
+        // sits AFTER `beginActuation` for the reason the first refusal line
+        // above gives — a well-formed act the daemon declined gets a row and a
+        // refusal outcome, unlike a malformed payload that names no act.
+        //
+        // Refused rather than served: Milestone A wires no input path for the
+        // holder transport. `HolderReader.write` exists and has no caller
+        // outside the registry; the daemon can render a holder session's screen
+        // and report its child's last known status, and it cannot type into
+        // one.
+        if terminal.transport == .holder {
+            let message = Self.holderSendRefusal(terminalID: terminal.id)
+            await finishActuation(actuationID, .refused(.notEligible), error: message)
+            return RPCResponse(error: message)
+        }
 
         // ─── The second refusal line: a well-formed act the daemon declines ───
         //
@@ -3016,6 +3355,27 @@ extension RPCRouter {
 
         for terminal in allTerminals {
             guard let server = serverByWorktree[terminal.worktreeID] else { continue }
+            // Not a refusal: this is the one mechanic in the holder family the
+            // transport can answer, so it is asked rather than skipped. A
+            // holder row's `tmuxWindowID` is the empty string, so `resizeWindow`
+            // addressed nothing and the failure was swallowed by `try?` — the
+            // session stayed at the size it was spawned with while the app's
+            // main area moved out from under it, and the daemon's own emulator
+            // (the surface `terminal.output` renders) kept the old grid too.
+            // `HolderReader.resize` is the authority for both halves: it
+            // reshapes the emulator so rendering matches, and sets the pty's
+            // window size so the child gets `SIGWINCH` and can lay itself out.
+            //
+            // A row whose reader is missing is skipped silently, unlike
+            // `terminal.output`, which reports it. There a caller asked about
+            // one named session and an empty screen would be a false claim;
+            // this is a fan-out over every terminal on a resize-debounce tick,
+            // and a session nothing has adopted has no grid to reshape.
+            if terminal.transport == .holder {
+                await holderRegistry?.reader(for: terminal.id)?
+                    .resize(columns: params.cols, rows: params.rows)
+                continue
+            }
             try? await tmux.resizeWindow(
                 server: server,
                 windowID: terminal.tmuxWindowID,

@@ -1,0 +1,15 @@
+-- Gate for the orphan-GC phase that kills a pty holder this installation owns
+-- which no session row claims — the holder-versus-database half of the design
+-- spec's Reconciliation section.
+--
+-- Deliberately NOT the same flag as gc_holder_rendezvous_enabled. That one
+-- unlinks files; this one kills processes. Someone who opted into file cleanup
+-- must not silently acquire a process killer.
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" (0) — which is what made auto_hibernate_enabled impossible to
+-- graduate without a forcing UPDATE that also reset deliberate opt-ins.
+-- The shipped default lives in exactly one place:
+-- Config.gcRowlessHoldersEnabledDefault.
+ALTER TABLE config ADD COLUMN gc_rowless_holders_enabled INTEGER;

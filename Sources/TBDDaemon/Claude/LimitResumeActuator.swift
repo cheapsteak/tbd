@@ -66,6 +66,17 @@ public struct LimitResumeActuator: LimitResumeActuating {
     static let interKeyPause: Duration = .milliseconds(150)
     /// The literal typed into the pane, recorded verbatim in the rail's row.
     static let continueMessage = "continue"
+
+    /// The one refusal text this rail returns for a holder-backed row, so the
+    /// notification, the log line and this file's tests all name the same
+    /// reason rather than three near-misses.
+    ///
+    /// Written to complete the daemon's sentence: the notification reads
+    /// "Auto-resume failed — \(reason). Claude may still be parked at the
+    /// limit screen."
+    static let holderTransportRefusal =
+        "this session runs on the pty-holder transport, which has no key-send "
+        + "path yet, so nothing was typed"
     static let verifyPollInterval: Duration = .seconds(1)
     static let verifyPolls = 20   // ~20s window
 
@@ -230,6 +241,9 @@ public struct LimitResumeActuator: LimitResumeActuating {
 
     /// Runs eligibility steps 1-4 (spec §Actuation), in order: terminal
     /// alive → user-already-continued → Claude foreground → copy-mode.
+    /// A transport guard runs between the terminal lookup and everything else,
+    /// because every one of those steps addresses a tmux pane and a
+    /// holder-backed row has none.
     /// Foreground is checked before copy-mode so a dead/backgrounded shell
     /// classifies `.failed` rather than endlessly rescheduling on a stale
     /// copy-mode flag. Two additional checks (0a the row's own limitType-aware toggle, 1b row
@@ -257,8 +271,42 @@ public struct LimitResumeActuator: LimitResumeActuating {
         //    pending row (spec §Cancellation), so this is the fire-time backstop
         //    for a park that raced the scheduler. Classify as `.terminalGone`
         //    (cancel silently), same as a dead window.
-        guard let terminal = ((try? await db.terminals.get(id: resume.terminalID)) ?? nil),
-              !terminal.isParked,
+        guard let terminal = ((try? await db.terminals.get(id: resume.terminalID)) ?? nil)
+        else { return .notEligible(.terminalGone) }
+
+        // Transport, ahead of every remaining check — including the parked rail
+        // and the worktree lookup, which exists only to name a tmux server this
+        // row does not have. EVERY step below this point addresses a tmux pane:
+        // `windowExists`, the pane-identity consultation, `panePID`, copy-mode,
+        // and finally the keys themselves. A holder row's `tmuxWindowID` and
+        // `tmuxPaneID` are the empty string by construction, so without this
+        // guard the rail exited at step 1 with `.terminalGone` — silently
+        // cancelling the user's armed auto-resume on a session that is
+        // perfectly alive, and recording "the terminal is gone" for a row that
+        // is not.
+        //
+        // That accident was also fragile rather than safe: it rested entirely
+        // on `TmuxManager.windowExists` swallowing its error and answering
+        // `false` for an empty window id. Any future change to that answer
+        // would have sent this rail on to type "continue" at whatever pane the
+        // empty coordinate resolved to.
+        //
+        // Refused rather than served, because Milestone A wires no input path
+        // for the holder transport: the registry can render a session's screen
+        // and report its child's last known status, but nothing writes to a
+        // holder's pty. `.failed` rather than a silent cancel, because a user
+        // who armed auto-resume and will not get it should be told once, not
+        // left watching a limit screen behind an "auto-resume scheduled" badge
+        // that quietly expired.
+        guard terminal.transport != .holder else {
+            logger.info("""
+                actuate: terminal \(terminal.id.uuidString, privacy: .public) runs on the \
+                pty-holder transport — typing nothing
+                """)
+            return .notEligible(.failed(Self.holderTransportRefusal))
+        }
+
+        guard !terminal.isParked,
               let worktree = ((try? await db.worktrees.getLocal(id: terminal.worktreeID)) ?? nil)
         else { return .notEligible(.terminalGone) }
         let server = worktree.tmuxServer

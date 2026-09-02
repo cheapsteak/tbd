@@ -777,9 +777,22 @@ public actor DeskSessionManager: DeskSessionManaging {
                 return
             }
 
-            // Kill tmux windows
+            // Kill tmux windows — and, for a holder-backed desk terminal, the
+            // holder instead. The rows are deleted a few lines below either
+            // way, so refusing would leak rather than protect: a holder row's
+            // `tmuxWindowID` is the empty string by construction, so this kill
+            // addresses nothing while the holder and the `claude` it forked
+            // outlive the only record of their pids. Same branch, same reason,
+            // as `handleTerminalDelete` and `closeScratchTerminals`.
             for t in terminals {
-                try? await tmux.killWindow(server: wt.tmuxServer, windowID: t.tmuxWindowID)
+                if t.transport == .holder {
+                    if let failure = await lifecycle.disposeHolder(for: t) {
+                        logger.warning(
+                            "Watch Desk close left a holder running: \(failure, privacy: .public)")
+                    }
+                } else {
+                    try? await tmux.killWindow(server: wt.tmuxServer, windowID: t.tmuxWindowID)
+                }
             }
             await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
 

@@ -113,6 +113,16 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
+                // The daemon is the default reader for a holder-backed session:
+                // it drains that session's pty master into a headless SwiftTerm
+                // `Terminal` so an unattended job never wedges behind a full tty
+                // queue (Sources/TBDDaemon/Holder/HolderReader.swift).
+                //
+                // This pulls an AppKit-importing target into the daemon binary.
+                // SwiftTerm ships one target with no core/views split, so there
+                // is no headless-only product to depend on instead; the daemon
+                // simply never touches the view types.
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
             ],
             path: "Sources/TBDDaemon",
             exclude: ["main.swift"],
@@ -159,6 +169,26 @@ let package = Package(
                 "TBDShared",
             ],
             path: "Sources/TBDPeerHelper"
+        ),
+        // One process per holder-transport session
+        // (docs/specs/2026-08-30-pty-holder-session-transport-design.md). It
+        // `forkpty()`s the job, owns the pty master for the session's life, and
+        // hands a `dup` of it to whoever asks over SCM_RIGHTS — so the session
+        // outlives the daemon that started it.
+        //
+        // A separate executable rather than a thread in the daemon for the
+        // whole point of the design: the pty master must survive a daemon
+        // restart, and a descriptor cannot outlive the process that holds it.
+        //
+        // Deliberately NOT linked against TBDDaemonLib. It needs the rendezvous
+        // paths, the creation lock and the wire protocol, all of which live in
+        // TBDShared, and nothing else.
+        .executableTarget(
+            name: "TBDHolder",
+            dependencies: [
+                "TBDShared",
+            ],
+            path: "Sources/TBDHolder"
         ),
         .systemLibrary(
             name: "CComrakFFI",
@@ -239,6 +269,13 @@ let package = Package(
                 // TmuxBridge (app side) drives a real tmux server in
                 // TmuxBridgeViewSessionLiveTests, which makes it tier 3.
                 "TBDApp",
+                // Load-bearing for the same reason `TBDPeerHelperTests` depends
+                // on `TBDPeerHelper` below: the suites under `Holder/` spawn the
+                // real `TBDHolder` binary through the real `HolderSpawner`, so
+                // the product has to be built and sit in the same products
+                // directory as the test bundle. Nothing here imports it.
+                "TBDHolder",
+                .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),
             ]
         ),
@@ -281,6 +318,19 @@ let package = Package(
             name: "TBDPeerHelperTests",
             dependencies: [
                 "TBDPeerHelper",
+                "TBDShared",
+            ]
+        ),
+        // The holder's own suite. Like `TBDPeerHelperTests` above, its
+        // dependency on the EXECUTABLE target is load-bearing rather than
+        // cosmetic: the tests spawn the real `TBDHolder` binary, so the product
+        // has to be built and sit in the same products directory as the test
+        // bundle. `@testable import` reaching the holder's internals is the
+        // lesser half.
+        .testTarget(
+            name: "TBDHolderTests",
+            dependencies: [
+                "TBDHolder",
                 "TBDShared",
             ]
         ),

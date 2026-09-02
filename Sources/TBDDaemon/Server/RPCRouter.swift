@@ -218,6 +218,16 @@ public final class RPCRouter: Sendable {
     /// signature does not leak the internal bridge type).
     nonisolated(unsafe) var controlMode: TmuxControlModeBridge?
 
+    /// The daemon's single owner of every live `HolderReader`. `terminal.output`
+    /// renders a holder-backed session from it; every other transport ignores
+    /// it entirely. Set by `Daemon` after construction, from the same value the
+    /// lifecycle's spawn path registers into — one registry per daemon, because
+    /// two would each drain their own dup of a session's pty master and steal
+    /// bytes from each other. `nil` in mock mode and in tests that never
+    /// exercise the transport, where a holder row reports that it has no live
+    /// reader rather than crashing.
+    nonisolated(unsafe) var holderRegistry: HolderRegistry?
+
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
 
@@ -676,6 +686,10 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetGCProfileDirsEnabled(request.paramsData)
             case RPCMethod.configSetGCOrphanProcessesEnabled:
                 return try await handleConfigSetGCOrphanProcessesEnabled(request.paramsData)
+            case RPCMethod.configSetGCHolderRendezvousEnabled:
+                return try await handleConfigSetGCHolderRendezvousEnabled(request.paramsData)
+            case RPCMethod.configSetGCRowlessHoldersEnabled:
+                return try await handleConfigSetGCRowlessHoldersEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -706,6 +720,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetRemoteBackends(request.paramsData)
             case RPCMethod.configSetRemotePeerMessagingEnabled:
                 return try await handleConfigSetRemotePeerMessagingEnabled(request.paramsData)
+            case RPCMethod.configSetPtyHolderEnabled:
+                return try await handleConfigSetPtyHolderEnabled(request.paramsData)
             case RPCMethod.peerStatus:
                 return try await handlePeerStatus()
             case RPCMethod.gcList:

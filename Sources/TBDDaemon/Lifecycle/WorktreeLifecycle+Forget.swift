@@ -65,10 +65,22 @@ extension WorktreeLifecycle {
         // archive hook.
         let terminals = try await db.terminals.list(worktreeID: worktreeID)
         for terminal in terminals {
-            try? await tmux.killWindow(
-                server: worktree.tmuxServer,
-                windowID: terminal.tmuxWindowID
-            )
+            // A holder row is reclaimed, not refused: its row goes away below
+            // either way, and the kill in the else-branch addresses an empty
+            // window id while the holder and the job it forked outlive the only
+            // record of their pids. Same branch, same reason, as
+            // `handleTerminalDelete` and `closeScratchTerminals`.
+            if terminal.transport == .holder {
+                if let failure = await disposeHolder(for: terminal) {
+                    forgetLogger.warning(
+                        "forget left a holder running: \(failure, privacy: .public)")
+                }
+            } else {
+                try? await tmux.killWindow(
+                    server: worktree.tmuxServer,
+                    windowID: terminal.tmuxWindowID
+                )
+            }
         }
 
         try await db.terminals.deleteForWorktree(worktreeID: worktreeID)

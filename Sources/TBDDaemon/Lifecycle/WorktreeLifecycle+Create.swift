@@ -1178,6 +1178,50 @@ extension WorktreeLifecycle {
         return "'\(escaped)'; exec \(defaultShell)"
     }
 
+    /// Restates a tmux window spawn as a holder launch, without restating any
+    /// of the decisions behind it.
+    ///
+    /// The two transports must start the *same* program in the *same* place, so
+    /// this reuses `TmuxManager`'s own composition rather than paraphrasing it:
+    ///
+    ///   - `envExportPrefixed` inlines `env` as `export K='v';` in front of the
+    ///     command, so those variables land after every startup file has run —
+    ///     which is where the tmux path puts them, and what code reading
+    ///     `TBD_TERMINAL_ID` from a pane expects.
+    ///   - `sensitiveEnv` is tmux's `-e`: the spawned PROCESS environment,
+    ///     visible while the profile and rc files execute. Here that is the
+    ///     job's environment directly, which is the same position.
+    ///   - `shellInvocation` picks the user's login shell and its flags. The
+    ///     tmux path reaches it through the tmux server, whose environment came
+    ///     from the daemon; the holder path reads the same daemon environment,
+    ///     passed in explicitly so tests are not at the mercy of `$SHELL`.
+    ///
+    /// The job inherits `environment` as its base for the same reason: a tmux
+    /// pane inherits the server's environment, and the server inherited the
+    /// daemon's.
+    static func holderLaunch(
+        shellCommand: String,
+        env: [String: String],
+        sensitiveEnv: [String: String],
+        workingDirectory: String,
+        cols: Int,
+        rows: Int,
+        environment: [String: String]
+    ) -> HolderLaunchRequest {
+        let fullCommand = TmuxManager.envExportPrefixed(shellCommand, env: env)
+        let argv = TmuxManager.shellInvocation(fullCommand, environment: environment)
+        return HolderLaunchRequest(
+            executable: argv[0],
+            arguments: Array(argv.dropFirst()),
+            workingDirectory: workingDirectory,
+            environment: environment.merging(sensitiveEnv) { _, sensitive in sensitive },
+            // Clamped into `UInt16` the same way the pty's `winsize` is: a
+            // caller-supplied size that could not fit would otherwise wrap to a
+            // one-column terminal rather than fail.
+            columns: UInt16(clamping: cols),
+            rows: UInt16(clamping: rows))
+    }
+
     /// Spawns the primary agent terminal, the parallel `setup` hook terminal,
     /// and any archived-session restores; persists tab order + active tab and
     /// kills the untracked initial tmux window. This is the pre-existing
@@ -1294,15 +1338,57 @@ extension WorktreeLifecycle {
         // the user later attaches a wider SwiftTerm view.
         let resolvedCols = cols ?? TmuxManager.defaultCols
         let resolvedRows = rows ?? TmuxManager.defaultRows
-        // Ensure tmux server exists — capture initial window ID to kill later
-        let initialWindowID = try await tmux.ensureServer(
-            server: tmuxServer,
-            session: "main",
-            cwd: worktreePath,
-            cols: resolvedCols,
-            rows: resolvedRows
-        )
-        await controlMode?.enableIfGated(serverName: tmuxServer)
+
+        // The transport gate. Off is today's behavior, exactly; on puts the
+        // PRIMARY terminal on a holder. It is read once, here, and the decision
+        // is then carried in the row: flipping the flag must never migrate a
+        // running session, because the transport is a property of a live pty
+        // that already exists, not of a preference.
+        //
+        // Both halves of "can this create put a session on a holder" are asked
+        // here, and they are different questions. Mock mode has no registry at
+        // all; a daemon whose `TBDHolder` binary is missing has one that cannot
+        // spawn — it is still built, because adoption reaches an already-running
+        // holder through its socket and must keep working across an upgrade that
+        // moved the binary. Gating on the registry's mere presence would take
+        // the holder path with nothing able to start a holder, and the
+        // `holderExecutableUnavailable` that `spawn` then throws has nothing
+        // catching it: the whole worktree create would fail. Either way the
+        // fallback is tmux, because a worktree that will not open is a worse
+        // answer than one that opens on the old transport.
+        let holderRegistry = self.holderRegistry
+        let useHolderTransport = config.ptyHolderEnabled && holderRegistry?.canSpawn == true
+
+        // The tmux server is ensured LAZILY on the holder path, and eagerly —
+        // in exactly the place it always was — on the tmux path.
+        //
+        // That asymmetry is the point of the transport. A holder-backed session
+        // needs no tmux server at all, and calling `ensureServer` anyway would
+        // resurrect the very resource this design exists to remove: a server
+        // process, its socket, and a window nobody reads. But the setup-hook
+        // terminal below is still tmux for Milestone A, so the holder path can
+        // still end up needing one — and when it does, it must get the same
+        // server, the same control-mode wiring, and the same untracked-initial-
+        // window cleanup the tmux path gets. Hence one memoized ensure rather
+        // than two spellings that could drift.
+        var initialWindowID: String?
+        var tmuxServerEnsured = false
+        func ensureTmuxServerOnce() async throws {
+            guard !tmuxServerEnsured else { return }
+            tmuxServerEnsured = true
+            // Capture the initial window ID to kill later.
+            initialWindowID = try await tmux.ensureServer(
+                server: tmuxServer,
+                session: "main",
+                cwd: worktreePath,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
+            await controlMode?.enableIfGated(serverName: tmuxServer)
+        }
+        if !useHolderTransport {
+            try await ensureTmuxServerOnce()
+        }
 
         // Resolve model profile. An explicit per-creation `overrideProfileID`
         // (chosen in the sidebar `+` profile picker) wins over the precedence
@@ -1478,16 +1564,45 @@ extension WorktreeLifecycle {
             primaryProfileID = resolvedProfile?.profileID
             primaryLabel = TerminalLabel.claudeCode
         }
-        let window1 = try await tmux.createWindow(
-            server: tmuxServer,
-            session: "main",
-            cwd: worktreePath,
-            shellCommand: primaryCommand,
-            env: primaryEnv,
-            sensitiveEnv: primarySensitiveEnv,
-            cols: resolvedCols,
-            rows: resolvedRows
-        )
+        // The two transports diverge for exactly this one spawn, and converge
+        // again on the row below. Everything that decided WHAT to run —
+        // `primaryCommand`, `primaryEnv`, `primarySensitiveEnv`, the size — is
+        // shared verbatim, because the env precedence behind it (global < repo
+        // < profile, with the spawn builder's auth env merged on top) is subtle
+        // and already correct; a second derivation is a second thing to get
+        // wrong.
+        let window1: (windowID: String, paneID: String)
+        let holderHandle: HolderHandle?
+        if useHolderTransport, let holderRegistry {
+            holderHandle = try await holderRegistry.spawn(
+                terminalID: plannedTerminalID1,
+                launch: Self.holderLaunch(
+                    shellCommand: primaryCommand,
+                    env: primaryEnv,
+                    sensitiveEnv: primarySensitiveEnv,
+                    workingDirectory: worktreePath,
+                    cols: resolvedCols,
+                    rows: resolvedRows,
+                    environment: holderRegistry.environment))
+            // A holder session has no tmux coordinate. The columns are NOT NULL
+            // from the v1 schema, so they take the empty string — and nothing
+            // may read them back: a holder row is discriminated by `transport`
+            // alone. See `WorktreeLifecycle+Reconcile`'s exemption.
+            window1 = (windowID: "", paneID: "")
+        } else {
+            holderHandle = nil
+            window1 = try await tmux.createWindow(
+                server: tmuxServer,
+                session: "main",
+                cwd: worktreePath,
+                shellCommand: primaryCommand,
+                env: primaryEnv,
+                sensitiveEnv: primarySensitiveEnv,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
+        }
+        let primaryTransport: TerminalTransport = holderHandle == nil ? .tmux : .holder
         do {
             _ = try await db.terminals.create(
                 id: plannedTerminalID1,
@@ -1502,14 +1617,32 @@ extension WorktreeLifecycle {
                 // row so the fact outlives this call. A desk woken from
                 // hibernation reuses this row, and the wake site has nothing
                 // else to read.
-                watchDeskRole: watchDeskRole
+                watchDeskRole: watchDeskRole,
+                transport: primaryTransport,
+                holderPID: holderHandle?.holderPID,
+                childPID: holderHandle?.childPID
             )
         } catch {
-            try? await tmux.killWindow(server: tmuxServer, windowID: window1.windowID)
+            // Best-effort creation-time cleanup on both transports: a resource
+            // that exists with no row naming it is one nothing will ever find
+            // again. On the holder path that means `forget` (the holder closes
+            // the pty master and winds down) and then killing the job by pid,
+            // because holder death is deliberately not child death.
+            if let holderHandle {
+                await holderRegistry?.abandon(
+                    terminalID: plannedTerminalID1, handle: holderHandle)
+            } else {
+                try? await tmux.killWindow(server: tmuxServer, windowID: window1.windowID)
+            }
             throw error
         }
-        if carryover != nil {
-            SessionRecaptureScheduler(db: db, tmux: tmux).schedule(
+        // Recapture reads a tmux pane's screen, so it has nothing to read on a
+        // holder session — `paneID` is empty there by construction. Scheduling
+        // it anyway would poll a coordinate that can never resolve.
+        if carryover != nil, primaryTransport == .tmux {
+            let recapture = sessionRecaptureFactory?(db, tmux)
+                ?? SessionRecaptureScheduler(db: db, tmux: tmux)
+            recapture.schedule(
                 terminalID: plannedTerminalID1,
                 paneID: window1.paneID,
                 server: tmuxServer,
@@ -1533,16 +1666,30 @@ extension WorktreeLifecycle {
         // spaces (repo == nil) have no repo path/setup hook and get just the
         // primary terminal, so the tab order stays `[primary]`.
         var setupAutoCloseSpawn: PreSessionSpawn?
-        if let repo {
+        let setupHookPath = repo == nil ? nil : hooks.resolve(
+            event: .setup,
+            repoPath: worktreePath,
+            appHookPath: worktree.repoID.map {
+                TBDConstants.hookPath(repoID: $0, eventName: HookEvent.setup.rawValue)
+            }
+        )
+        // The setup terminal stays on tmux for Milestone A, whatever the
+        // primary's transport. It is a hook runner, not an agent surface, and
+        // moving it would mean a second holder per worktree before anything has
+        // soaked one.
+        //
+        // The cost is that on the holder path it is the ONLY thing that wants a
+        // tmux server. So it is spawned there only when the repo actually has a
+        // setup hook: without one this tab is a bare shell, and starting a tmux
+        // server, a session and a window for a bare shell is exactly the cost
+        // the transport exists to remove. On the tmux path the server exists
+        // regardless and the tab is created unconditionally, as it always has
+        // been — the flag must not change what the flag-off path does.
+        let wantsSetupTerminal = repo != nil && (!useHolderTransport || setupHookPath != nil)
+        if let repo, wantsSetupTerminal {
+            try await ensureTmuxServerOnce()
             let plannedTerminalID2 = UUID()
             createdTerminalIDs.append(plannedTerminalID2)
-            let setupHookPath = hooks.resolve(
-                event: .setup,
-                repoPath: worktreePath,
-                appHookPath: worktree.repoID.map {
-                    TBDConstants.hookPath(repoID: $0, eventName: HookEvent.setup.rawValue)
-                }
-            )
             let setupCommand: String
             var setupMarkerPath: String?
             if config.autoCloseSetupEnabled, let setupHookPath {
@@ -1687,6 +1834,11 @@ extension WorktreeLifecycle {
                     "TBD_WORKTREE_ID": worktreeID.uuidString,
                     "TBD_TERMINAL_ID": plannedID.uuidString,
                 ]
+                // Archived-session restores stay on tmux for Milestone A, for
+                // the same reason as the setup terminal: one holder per
+                // worktree is the shape being soaked. They therefore need the
+                // server, which the holder path has not started.
+                try await ensureTmuxServerOnce()
                 let window = try await tmux.createWindow(
                     server: tmuxServer,
                     session: "main",

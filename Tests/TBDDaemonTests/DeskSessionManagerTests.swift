@@ -1351,5 +1351,119 @@ extension TBDHomeSerialized {
             #expect(recovered.terminalID == successor.id)
             #expect(recovered.generation == first.generation + 1)
         }
+
+        // MARK: - The holder transport
+
+        /// `closeDeskSession` kills each desk terminal's tmux window and then
+        /// deletes the rows. A holder row's `tmuxWindowID` is the empty string
+        /// by construction, so that kill addressed nothing while the holder and
+        /// the `claude` it forked outlived the row that was the only record of
+        /// their pids — and no sweep covers them until Milestone B's holder
+        /// reconciler lands. Same branch, same reason, as `handleTerminalDelete`
+        /// and `closeScratchTerminals`: the row goes away either way, so
+        /// refusing would cause the leak rather than prevent it.
+        ///
+        /// The observable is `adoptAll`'s recorded status, which nothing but
+        /// `abandon` clears. A row that merely vanished leaves it set.
+        @Test("closeDeskSession disposes a holder-backed desk terminal")
+        func closeDeskSessionDisposesHolder() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-holder-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
+
+            let db = try TBDDatabase(inMemory: true)
+            let recorded = RecordedTmuxArgs()
+            let tmux = TmuxManager(
+                dryRun: true, dryRunRecorder: { recorded.append($0) },
+                dryRunWindowIsDead: { _ in true })
+            // The registry is created before the manager because the manager
+            // copies the lifecycle struct, and the struct holds the registry by
+            // actor reference. `listTerminals` reads the DB rather than a fixed
+            // array so the holder row seeded below is visible to `adoptAll`.
+            let registry = HolderRegistry(
+                owner: HolderOwnerToken(rawValue: "acme-installation"),
+                environment: ["TBD_HOME": "/tmp/tbd-dk-\(UUID().uuidString.prefix(8))"],
+                listTerminals: { try await db.terminals.list() })
+            var lifecycle = WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+            lifecycle.holderRegistry = registry
+            let manager = DeskSessionManager(
+                db: db, lifecycle: lifecycle, tmux: tmux,
+                skillDir: tmpHome.appendingPathComponent("skills/nightwatch").path,
+                actuationLog: makeTestActuationLog())
+
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            // Ensure spawns its own tmux-backed terminals; clear them so this
+            // test controls the fixture.
+            try await db.terminals.deleteForWorktree(worktreeID: desk.id)
+            // `childPID: 0` deliberately: it is the one value the registry's
+            // disposal refuses to signal, and any other value a fixture could
+            // name is a pid this shared box may really be running.
+            let terminal = try await db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "", tmuxPaneID: "",
+                kind: .claude, transport: .holder, holderPID: 9101, childPID: 0)
+            await registry.adoptAll()
+            let armed = await registry.lastKnownStatus(for: terminal.id)
+            #expect(armed == .exitedStatusUnknown, "the fixture never armed the observable")
+
+            // Everything above stood a desk up through the real create path, so
+            // only the argv recorded from here on belongs to the close.
+            let beforeClose = recorded.snapshot().count
+            await manager.closeDeskSession()
+            let duringClose = Array(recorded.snapshot().dropFirst(beforeClose))
+
+            #expect(try await db.terminals.list(worktreeID: desk.id).isEmpty)
+            let disposed = await registry.lastKnownStatus(for: terminal.id)
+            #expect(disposed == nil,
+                    "the desk close deleted the row without disposing of its holder, so the holder, its child and its rendezvous files are now owned by nothing")
+            #expect(duringClose.contains { $0.contains("kill-window") } == false,
+                    "the desk close reached tmux kill-window for a holder row: \(duringClose)")
+        }
+
+        /// The other leg. An inverted transport comparison would leave a real
+        /// tmux window running while its row was deleted.
+        @Test("closeDeskSession still kills an identical tmux row's window")
+        func closeDeskSessionStillKillsTmuxWindow() async throws {
+            let tmpHome = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("tbd-desk-tmuxleg-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: tmpHome, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: tmpHome) }
+            let priorTBDHome = setTBDHome(tmpHome.path)
+            defer { restoreTBDHome(priorTBDHome) }
+
+            let db = try TBDDatabase(inMemory: true)
+            let recorded = RecordedTmuxArgs()
+            let tmux = TmuxManager(
+                dryRun: true, dryRunRecorder: { recorded.append($0) },
+                dryRunWindowIsDead: { _ in true })
+            // Wired in and listing nothing, so an inverted comparison reaches a
+            // registry that has never heard of this row rather than a nil that
+            // would make the branch unreachable either way.
+            var lifecycle = WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+            lifecycle.holderRegistry = HolderRegistry(
+                owner: HolderOwnerToken(rawValue: "acme-installation"),
+                environment: ["TBD_HOME": "/tmp/tbd-dk-\(UUID().uuidString.prefix(8))"],
+                listTerminals: { [] })
+            let manager = DeskSessionManager(
+                db: db, lifecycle: lifecycle, tmux: tmux,
+                skillDir: tmpHome.appendingPathComponent("skills/nightwatch").path,
+                actuationLog: makeTestActuationLog())
+
+            let desk = try await manager.ensureDeskSession(mode: .daywatch)
+            try await db.terminals.deleteForWorktree(worktreeID: desk.id)
+            _ = try await db.terminals.create(
+                worktreeID: desk.id, tmuxWindowID: "@7", tmuxPaneID: "%7", kind: .claude)
+
+            let beforeClose = recorded.snapshot().count
+            await manager.closeDeskSession()
+            let duringClose = Array(recorded.snapshot().dropFirst(beforeClose))
+
+            #expect(duringClose.contains { $0.contains("kill-window") && $0.contains("@7") },
+                    "the tmux leg must still kill its own window: \(duringClose)")
+        }
     }
 }
