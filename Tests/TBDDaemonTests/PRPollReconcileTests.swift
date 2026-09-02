@@ -287,9 +287,10 @@ struct PRPollReconcileTests {
         #expect(afterFirst.map(\.number) == [90])
         #expect(afterFirst.first?.source == .branch)
 
-        // Poll 2: `@{push}` now resolves and the branch query no longer offers the PR,
-        // so the cached number is re-resolved — and its head turns out to be the
-        // branch this worktree merely TRACKS, which is the repo default. The
+        // Poll 2: the branch query answers with nothing, so this worktree is
+        // answered-but-unmatched and its cached number is re-resolved — and its
+        // head turns out to be the branch this worktree merely TRACKS, which is
+        // the repo default. The
         // heal clears the cache; without this fix the binding row survived,
         // kept driving the icon, and on merge auto-archived the worktree.
         await harness.gh.set(branchNodes: [])
