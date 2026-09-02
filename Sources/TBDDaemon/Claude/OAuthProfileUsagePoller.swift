@@ -134,20 +134,28 @@ public actor OAuthProfileUsagePoller {
     /// the freshness floor rather than racing again.
     private var inFlight: Set<UUID> = []
 
-    /// Ids of the `.oauthToken` profiles seen by the most recent read of the
-    /// profile table, or nil when no read has happened yet.
+    /// Ids of every `.oauthToken` profile any read of the profile table has
+    /// ever seen, or nil when no read has happened yet.
     ///
     /// Purely a cheap negative gate for `noteSessionBecameIdle`, which every
     /// completed turn in the fleet reaches. nil means "unknown", never
     /// "empty": before the first read the slow path decides, so a daemon that
     /// has not swept yet cannot silently drop probes.
     ///
-    /// It cannot go stale in the direction that loses a probe. A profile's
-    /// `kind` is immutable — `ModelProfileStore` exposes no writer for it — so
-    /// a row cannot become a token profile after creation, and creation itself
-    /// calls `noteCredentialChanged`, whose sweep reads the table. A stale
-    /// entry in the other direction (a deleted profile) merely costs the full
-    /// lookup that then finds nothing.
+    /// **The set only ever grows** (`rememberTokenProfiles(in:)` unions), and
+    /// that is what makes it safe. Every read happens across an `await` on a
+    /// reentrant actor, so reads complete out of order: a sweep whose read
+    /// began before a token profile existed can finish after one that saw it.
+    /// Replacing the set on each read would let that late arrival erase the new
+    /// id, and the profile's next `working -> idle` would early-return here and
+    /// silently drop its probe. A union cannot lose an id, whatever order the
+    /// reads land in.
+    ///
+    /// Growing-only is affordable because the set is a *negative* gate: an id
+    /// in it costs one profile-table read that then finds nothing (or finds a
+    /// non-token profile, which the `kind` check below rejects), never a probe.
+    /// It is bounded by the number of token profiles the daemon has ever seen,
+    /// it holds UUIDs that are never reused, and it is in-memory only.
     private var tokenProfileIDs: Set<UUID>?
 
     // MARK: - Init
@@ -303,8 +311,9 @@ public actor OAuthProfileUsagePoller {
     /// an install with no token profiles at all none of them can act. So the
     /// kind guard is preceded by a cached one that costs no query: the profile
     /// table is read only once it is already known that this profile might be
-    /// a token profile. See `tokenProfileIDs` for why that cache cannot go
-    /// stale in the direction that would lose a probe.
+    /// a token profile. The cache is grow-only, which is what keeps a read that
+    /// completes out of order from erasing an id and dropping its probe — see
+    /// `tokenProfileIDs`.
     public func noteSessionBecameIdle(profileID: UUID) async {
         if let known = tokenProfileIDs, !known.contains(profileID) { return }
         let profiles: [ModelProfile]
@@ -323,8 +332,16 @@ public actor OAuthProfileUsagePoller {
     /// Refresh the `noteSessionBecameIdle` negative gate. Called from every
     /// path that has just read the profile table, so the cache tracks it
     /// without a query of its own.
+    ///
+    /// Unions rather than replaces. Callers reach here after an `await` on a
+    /// reentrant actor, so a read that started earlier can commit later; a
+    /// replacing write would then reinstate a set that predates a just-created
+    /// token profile and lose its probes for good. Union is the whole fix: it
+    /// is order-independent, so no sequencing or read-generation bookkeeping is
+    /// needed to make it correct.
     private func rememberTokenProfiles(in profiles: [ModelProfile]) {
-        tokenProfileIDs = Set(profiles.filter { $0.kind == .oauthToken }.map(\.id))
+        let seen = Set(profiles.filter { $0.kind == .oauthToken }.map(\.id))
+        tokenProfileIDs = (tokenProfileIDs ?? []).union(seen)
     }
 
     /// Probe once because this profile's credential just changed — it was

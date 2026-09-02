@@ -1431,4 +1431,69 @@ private func makeGatedTokenPoller(
         await poller.noteSessionBecameIdle(profileID: profile.id)
         #expect(fetcher.probeCount == 2)
     }
+
+    /// A profile-table read that COMPLETES OUT OF ORDER — the staleness
+    /// direction the double-billing tests above do not cover.
+    ///
+    /// Both `sweep` and `noteSessionBecameIdle` read the profile table across
+    /// an `await`, and the actor admits other callers there. So a sweep whose
+    /// read began before a token profile existed can commit after a read that
+    /// saw it. If the activity gate's cache were REPLACED on every read, that
+    /// late arrival would put the cache back to a set without the new profile,
+    /// and the profile's next `working -> idle` would early-return: a probe
+    /// dropped silently, with nothing in the log and no bars ever appearing.
+    /// The cache unions instead, so read order cannot lose an id.
+    @Test func aReadThatCompletesOutOfOrderCannotEraseANewTokenProfile() async {
+        let signedIn = oauthProfile(named: "Acme")
+        let token = tokenProfile(named: "Acme (token)")
+        let profiles = LockedBox<[ModelProfile]>([signedIn])
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets, organizationID: nil))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        // Never auto-opens: this test releases the held read explicitly, so the
+        // completion order it asserts about is the order it actually produced.
+        let readGate = ProbeGate(autoOpenAt: Int.max)
+        let reads = LockedBox<Int>(0)
+
+        let poller = OAuthProfileUsagePoller(
+            profilesProvider: {
+                var index = 0
+                reads.mutate { index = $0; $0 += 1 }
+                // Observed BEFORE parking: this read sees the table as it was
+                // when it started, which is the whole point of the exercise.
+                let observed = profiles.value
+                if index == 0 { await readGate.arrive() }
+                return observed
+            },
+            loginIdentity: { id in id == signedIn.id ? "someone@example.com" : nil },
+            configDirPath: { id in "/profiles/\(id.uuidString.lowercased())/claude" },
+            fetcher: fetcher,
+            tokenFetcher: fetcher,
+            profileSecret: { _ in "sk-ant-oat01-A" },
+            broadcast: {},
+            sleeper: { _ in },
+            now: { clock.now },
+            jitter: { _ in 0 }
+        )
+
+        // A cadence sweep starts while no token profile exists and parks inside
+        // its profile-table read, holding the pre-creation view of the table.
+        let staleSweep = Task { await poller.sweepForTest() }
+        await readGate.waitForArrivals(1)
+
+        // The profile is created, and its credential-change probe runs to
+        // completion — so the gate's cache now knows the id.
+        profiles.mutate { $0.append(token) }
+        await poller.noteCredentialChanged(profileID: token.id)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        // Only now does the stale read land, carrying a table that predates the
+        // profile.
+        await readGate.open()
+        await staleSweep.value
+
+        // The activity gate must still recognise the profile.
+        clock.advance(301)
+        await poller.noteSessionBecameIdle(profileID: token.id)
+        #expect(fetcher.tokenProbeCount == 2)
+    }
 }
