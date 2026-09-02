@@ -83,8 +83,10 @@ struct AgentReaperHolderLegLiveTests {
     /// to be handed to somebody else mid-test.
     private static func spentPID() throws -> Int32 {
         let p = try spawn("/usr/bin/true", [])
-        guard case .exited = BoundedProcessTeardown.awaitExit(p) else {
-            throw FixtureSpawnFailure(code: ETIMEDOUT)
+        // Thrown with the bound's own diagnostic rather than a bare code: this
+        // is a bounded-wait failure, and the text is the whole finding.
+        if case .unobserved(let pid, let diagnostic) = BoundedProcessTeardown.awaitExit(p) {
+            throw TeardownBoundExpired(pid: pid, diagnostic: diagnostic)
         }
         return p.processIdentifier
     }

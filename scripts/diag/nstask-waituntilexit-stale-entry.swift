@@ -186,11 +186,17 @@ guard !task.isRunning else {
 // 3. Plant the stale entry: thread A's list gets this task's pointer, exactly as
 //    it would have after a task A launched was freed and its address reused.
 var planted = false
-threadA.run {
+let plantFinished = threadA.run {
     guard let raw = getTSD(taskListSlot) else { return }
     let list = Unmanaged<CFMutableArray>.fromOpaque(raw).takeUnretainedValue()
     CFArrayAppendValue(list, Unmanaged.passUnretained(task).toOpaque())
     planted = true
+}
+// Two distinct failures, two distinct messages: a worker that never got to the
+// job at all, and a worker that ran it and found no list to plant into.
+guard plantFinished else {
+    print("thread A did not finish planting the entry within its bound")
+    exit(2)
 }
 guard planted else {
     print("thread A has no per-thread task list to plant into")

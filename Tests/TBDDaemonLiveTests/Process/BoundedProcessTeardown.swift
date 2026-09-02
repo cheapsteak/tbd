@@ -48,7 +48,12 @@ extension Process: ExitObservableProcess {}
 ///   live target runs `--no-parallel` on one machine; a `defer` that never
 ///   returns burns the whole step's budget and reports nothing, while a bound
 ///   that fires reds exactly one test and carries a diagnostic saying what the
-///   kernel thought of the pid at that moment.
+///   kernel thought of the pid at that moment. The 5-second default is sized
+///   against what the wait costs while it runs: it parks the calling thread —
+///   a cooperative-pool thread, when it is reached from a `defer` in an async
+///   test — so it is sized to how long a SIGKILLed child's exit handler takes
+///   under CI load, which is milliseconds, leaving two orders of magnitude of
+///   headroom. It is not sized to the unbounded wait it replaces.
 /// - **There is no injected clock, deliberately.** This is a synchronous helper
 ///   called from `defer`, where `Task.sleep` is unavailable and the repo's
 ///   `Clock` seam — which is async — cannot be used. The deadline is a plain
@@ -75,7 +80,7 @@ enum BoundedProcessTeardown {
     /// runner itself.
     @discardableResult
     static func killAndReap(
-        _ process: any ExitObservableProcess, within seconds: Double = 10
+        _ process: any ExitObservableProcess, within seconds: Double = 5
     ) -> Outcome {
         let pid = process.processIdentifier
         if process.isRunning && pid > 0 { kill(pid, SIGKILL) }
@@ -86,7 +91,7 @@ enum BoundedProcessTeardown {
     /// signals anything, so it is safe on a process the caller must leave alive.
     @discardableResult
     static func awaitExit(
-        _ process: any ExitObservableProcess, within seconds: Double = 10
+        _ process: any ExitObservableProcess, within seconds: Double = 5
     ) -> Outcome {
         // `ContinuousClock`, not `Date()`: the bound must not be extendable by a
         // wall-clock correction landing mid-wait.
@@ -131,7 +136,7 @@ enum BoundedProcessTeardown {
         if reaped == pid {
             finding = "zombie collected by the teardown diagnostic; Foundation never observed the exit"
         } else if reaped == 0 {
-            finding = "still running \(seconds)s after the signal"
+            finding = "still running \(seconds)s into the bound"
         } else if reaped == -1 && probeErrno == ECHILD {
             finding = "already collected by another waiter (sole-waiter violation)"
         } else {

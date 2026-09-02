@@ -29,7 +29,8 @@ struct BoundedProcessTeardownTests {
     /// reconciler that can see it. 1500 × 0.2 s is ~5 minutes, two orders of
     /// magnitude past what any assertion here needs.
     private static func spawnLongLived() throws -> Process {
-        try spawn("/bin/zsh", ["-c", #"trap "" HUP; for _ in {1..1500}; do sleep 0.2; done"#])
+        try spawn(
+            "/bin/zsh", ["-f", "-c", #"trap "" HUP; for _ in {1..1500}; do sleep 0.2; done"#])
     }
 
     private static func spawn(_ path: String, _ args: [String]) throws -> Process {
@@ -58,15 +59,19 @@ struct BoundedProcessTeardownTests {
     private static func spawnUnownedLongLived() throws -> pid_t {
         let path = "/bin/zsh"
         let script = #"trap "" HUP; for _ in {1..1500}; do sleep 0.2; done"#
-        let arguments: [String] = [path, "-c", script]
+        // `-f` so zsh reads no rc file at all — without it `.zshenv` is read on
+        // every invocation, `-c` included — and an explicit `HOME` inside the
+        // fence, because an env without one makes zsh look `HOME` up in the
+        // password database and land on the developer's real home.
+        //
+        // The environment is built by hand rather than passed through because
+        // `environ` is linked into the main executable and is not reachable from
+        // a test bundle; beyond `HOME`, the fixture needs nothing but a PATH
+        // that resolves `sleep`.
+        let arguments: [String] = [path, "-f", "-c", script]
         var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) }
         argv.append(nil)
-        // An explicit one-entry environment rather than this process's own:
-        // `environ` is linked into the main executable and is not reachable from
-        // a test bundle, and the fixture needs nothing but a PATH that resolves
-        // `sleep`. No `-l`/`-i` either, so it sources nothing from the
-        // developer's shell configuration.
-        let environment: [String] = ["PATH=/usr/bin:/bin"]
+        let environment: [String] = ["PATH=/usr/bin:/bin", "HOME=\(NSTemporaryDirectory())"]
         var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup($0) }
         envp.append(nil)
         defer {
@@ -212,13 +217,19 @@ struct BoundedProcessTeardownTests {
     @Test func theBoundFiresWhenTheExitIsNeverObserved() async throws {
         let pid = try Self.spawnUnownedLongLived()
         defer {
-            kill(pid, SIGKILL)
+            // Only `0` — "still our child, and not yet collected" — licenses a
+            // signal. By the time this runs the diagnostic probe has usually
+            // collected the corpse already, and a pid whose corpse is gone may
+            // name somebody else's process by now; `pid` (a zombie we own) and
+            // `-1`/`ECHILD` (already collected) both mean there is nothing left
+            // to signal. The blocking `waitpid` after the kill is bounded
+            // because SIGKILL cannot be blocked — the same shape as
+            // `SIGTERMProofJob.tearDown` in the sibling suite.
             var status: Int32 = 0
-            // SIGKILL cannot be blocked, so this is bounded; it returns
-            // immediately with ECHILD when the diagnostic probe already
-            // collected the corpse. Same shape as `SIGTERMProofJob.tearDown` in
-            // the sibling suite.
-            _ = waitpid(pid, &status, 0)
+            if waitpid(pid, &status, WNOHANG) == 0 {
+                kill(pid, SIGKILL)
+                _ = waitpid(pid, &status, 0)
+            }
         }
 
         let stub = ExitNeverObserved(pid: pid)
