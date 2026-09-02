@@ -1,14 +1,14 @@
-# Stand-ins for external dependencies
+# Test doubles: stand-ins for external dependencies and TBD's own state
 
-TBD's development loop leans on four fakes. Each replaces a different external
-dependency, and picking the wrong one wastes an afternoon, so this is the
-index.
+TBD's development loop leans on four fakes. Three replace an external
+dependency and one replaces TBD's own state; each answers a different question,
+and picking the wrong one wastes an afternoon, so this is the index.
 
 - **Fake model API** — `scripts/claude-stub.py`, documented in
   [`fake-model-api.md`](fake-model-api.md). Fakes the Anthropic Messages API on
   loopback and runs the **real** `claude` CLI against it, headless or in the
-  interactive TUI, for zero tokens and with no API key. Reach for it when you
-  need a genuine live agent session but not a genuine answer: terminal
+  interactive TUI, for zero tokens and without a real API key. Reach for it
+  when you need a genuine live agent session but not a genuine answer: terminal
   rendering and resize behavior, hook wiring, session files, spawn plumbing.
   The server itself is `stub_server.py` under
   `.github/workflows/claude-review-v2/tests/e2e/`, where it also scripts the

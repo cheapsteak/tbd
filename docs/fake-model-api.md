@@ -2,11 +2,11 @@
 
 `scripts/claude-stub.py` starts a mock of the Anthropic Messages API on
 loopback and runs the **real** `claude` CLI against it, so a whole session —
-headless `-p` or the interactive TUI — happens offline, with no API key and
-without spending tokens. The stub is a fake model, not a fake CLI: the binary,
-its config, its hooks, its terminal rendering are all the genuine article;
-only the answers are scripted locally, which makes them deterministic and
-makes the run structurally zero-token.
+headless `-p` or the interactive TUI — happens offline, without a real API key
+and without spending tokens. The stub is a fake model, not a fake CLI: the
+binary, its config, its hooks, its terminal rendering are all the genuine
+article; only the answers are scripted locally, which makes them deterministic
+and makes the run structurally zero-token.
 
 Reach for it when you need a live agent session to look at something that has
 nothing to do with what the model says — terminal rendering, resize behavior,
@@ -35,7 +35,7 @@ Headless, one scripted answer:
 scripts/claude-stub.py --text "hello from the stub" -- -p "say hello"
 ```
 
-```
+```text
 hello from the stub
 claude-stub: 1 request(s) served at http://127.0.0.1:49431
 claude-stub: unexpected paths: none
@@ -65,7 +65,7 @@ scripts/claude-stub.py --lines 50
 Driven inside a 120x40 tmux window, typing a prompt renders the whole scripted
 answer:
 
-```
+```text
   47. stub answer line 47 of 50 — filler so the answer is long enough to scroll.
   48. stub answer line 48 of 50 — filler so the answer is long enough to scroll.
   49. stub answer line 49 of 50 — filler so the answer is long enough to scroll.
@@ -79,7 +79,7 @@ long answer on screen, resize, read what came back.
 
 `/exit` ends the session and the summary follows:
 
-```
+```text
 claude-stub: 2 request(s) served at http://127.0.0.1:50079
 claude-stub:   route (ordered turns): 1
 claude-stub:   route session title: 1
@@ -121,7 +121,7 @@ scripts/claude-stub.py --print-env --text 'served via print-env' \
 
 That leaves `/tmp/stub-sandbox-exports.sh` holding:
 
-```
+```sh
 export ANTHROPIC_API_KEY=stub-key
 export ANTHROPIC_BASE_URL=http://127.0.0.1:49593
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
@@ -138,7 +138,7 @@ export TMPDIR=/tmp/stub-sandbox/tmp
 
 while pane 1 keeps serving and says so on stderr:
 
-```
+```text
 claude-stub: serving; Ctrl-C (or SIGTERM) to stop
 ```
 
@@ -158,7 +158,7 @@ block prints.
 `COLORTERM` and `LANG` are whatever pane 1's own terminal had. Ctrl-C (or a
 `SIGTERM` to the process) stops the server and prints the same summary:
 
-```
+```text
 claude-stub: 1 request(s) served at http://127.0.0.1:49593
 claude-stub: unexpected paths: none
 claude-stub: client disconnects: 0

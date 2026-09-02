@@ -3,9 +3,9 @@
 
 A mock/stub of the Anthropic Messages API stands in for the model, so a real
 `claude` session (interactive TUI or `-p` headless) runs end to end without
-spending tokens and with no API key: `ANTHROPIC_BASE_URL` points at a loopback
-server started here, and every answer is scripted locally. Nothing leaves the
-machine.
+spending tokens and without a real API key: `ANTHROPIC_BASE_URL` points at a
+loopback server started here, and every answer is scripted locally. Nothing
+leaves the machine.
 
 The fake server itself is `stub_server.py` under
 `.github/workflows/claude-review-v2/tests/e2e/` (SSE streaming, canned turns,
@@ -282,8 +282,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         prog="claude-stub.py",
         description=(
             "Run the real claude CLI against a fake model API on loopback. "
-            "Zero tokens, no network, no real API key. Arguments after `--` go "
-            "to claude (none = interactive TUI; `-p PROMPT` = headless)."
+            "Zero tokens, no network, runs without a real API key. Arguments "
+            "after `--` go to claude (none = interactive TUI; `-p PROMPT` = "
+            "headless)."
         ),
         epilog=(
             "Requests past the end of the scripted turns are answered with the "
