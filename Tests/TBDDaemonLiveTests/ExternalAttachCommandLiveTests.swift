@@ -999,7 +999,10 @@ private final class PTYProcess: @unchecked Sendable {
     /// the same few hundred milliseconds on the ordinary path and gives up
     /// rather than hanging on the pathological one. The escalation goes through
     /// `BoundedProcessTeardown.killAndReap`, so the SIGKILL precedes any reap
-    /// and carries that helper's `pid > 1` guard.
+    /// and carries that helper's `pid > 1` guard. An expired bound there is
+    /// recorded as `TeardownBoundExpired` rather than discarded, so a lost exit
+    /// reds the test that owned this client instead of passing silently — the
+    /// same shape as `AgentReaperHolderLegLiveTests.killAndReap`.
     func terminate() {
         terminationLock.lock()
         let alreadyTerminated = isTerminated
@@ -1010,7 +1013,11 @@ private final class PTYProcess: @unchecked Sendable {
         if process.isRunning {
             process.terminate()
             if !awaitExit(within: 2) {
-                _ = BoundedProcessTeardown.killAndReap(process, within: 2)
+                if case .unobserved(let pid, let diagnostic) =
+                    BoundedProcessTeardown.killAndReap(process, within: 2)
+                {
+                    Issue.record(TeardownBoundExpired(pid: pid, diagnostic: diagnostic))
+                }
             }
         }
         // Closing the primary ends the drain thread's blocking read.

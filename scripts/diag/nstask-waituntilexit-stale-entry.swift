@@ -132,9 +132,12 @@ func finishedProcessIsDeallocated(on worker: Worker) -> Bool {
     // one.
     guard ran else { return false }
     // Bounded poll rather than one fixed sleep: a slow autorelease drain would
-    // otherwise read as a failed premise.
-    let drainDeadline = Date().addingTimeInterval(2)
-    while box.value != nil && Date() < drainDeadline { usleep(10_000) }
+    // otherwise read as a failed premise. Monotonic, like the deadlines in
+    // `BoundedProcessTeardown`, so a wall-clock step cannot stretch or shorten
+    // the bound.
+    let clock = ContinuousClock()
+    let drainDeadline = clock.now.advanced(by: .seconds(2))
+    while box.value != nil && clock.now < drainDeadline { usleep(10_000) }
     return box.value == nil
 }
 
@@ -195,8 +198,9 @@ guard pid > 0 else {
 }
 kill(pid, SIGTERM)
 
-let exitDeadline = Date().addingTimeInterval(10)
-while task.isRunning && Date() < exitDeadline { usleep(5_000) }
+let exitClock = ContinuousClock()
+let exitDeadline = exitClock.now.advanced(by: .seconds(10))
+while task.isRunning && exitClock.now < exitDeadline { usleep(5_000) }
 print("pid \(pid) isRunning=\(task.isRunning) kill(pid, 0)=\(kill(pid, 0))")
 // A child still running is not the hang under test: without this, exit code 1
 // would report "hang reproduced" for a wait that is simply waiting.
