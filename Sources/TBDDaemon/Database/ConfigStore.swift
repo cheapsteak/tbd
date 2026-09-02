@@ -108,6 +108,14 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.gcRowlessHoldersEnabledDefault`, never through
     /// `?? false`.
     var gc_rowless_holders_enabled: Bool?
+    /// Gate for the `AgentReaper` leg that kills a holder session's surviving
+    /// child process. **Genuinely tri-state**, same shape as
+    /// `gc_holder_rendezvous_enabled`: the
+    /// `20260901180118_config_reap_holder_children` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.reapHolderChildrenEnabledDefault`, never through
+    /// `?? false`.
+    var reap_holder_children_enabled: Bool?
     /// This installation's holder owner token, minted once by the first daemon
     /// that needs one and read forever after. **Not a flag**: NULL means "not
     /// yet minted", and the mint is the conditional UPDATE in
@@ -153,6 +161,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   `gc_rowless_holders_enabled` — the row-less holder sweep's soak gate,
     ///   which is a separate opt-in because it kills processes rather than
     ///   unlinking files.
+    /// - Parameter reapHolderChildrenDefault: and the last of them, for
+    ///   `reap_holder_children_enabled` — the `AgentReaper` holder leg's soak
+    ///   gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -163,7 +174,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         remotePeerMessagingDefault: Bool = Config.remotePeerMessagingDefault,
         ptyHolderDefault: Bool = Config.ptyHolderDefault,
         gcHolderRendezvousDefault: Bool = Config.gcHolderRendezvousEnabledDefault,
-        gcRowlessHoldersDefault: Bool = Config.gcRowlessHoldersEnabledDefault
+        gcRowlessHoldersDefault: Bool = Config.gcRowlessHoldersEnabledDefault,
+        reapHolderChildrenDefault: Bool = Config.reapHolderChildrenEnabledDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -229,6 +241,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // And its process-killing sibling, resolved the same way and from
             // its own column — NOT `?? false`, and NOT the rendezvous flag.
             gcRowlessHoldersEnabled: gc_rowless_holders_enabled ?? gcRowlessHoldersDefault,
+            // And truly the last of them, for the `AgentReaper` holder leg's
+            // gate — NOT `?? false`.
+            reapHolderChildrenEnabled: reap_holder_children_enabled ?? reapHolderChildrenDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
             // Passed straight through, NULL included: "not yet minted" is a
             // real state and has no default to resolve to.
@@ -684,6 +699,19 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_rowless_holders_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the `AgentReaper` holder leg's gate (default OFF, soaking) — the
+    /// sweep that kills the surviving job of a dead holder. The column is
+    /// written on every call, because writing either value is the explicit
+    /// gesture that lifts it out of NULL forever after.
+    public func setReapHolderChildrenEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET reap_holder_children_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

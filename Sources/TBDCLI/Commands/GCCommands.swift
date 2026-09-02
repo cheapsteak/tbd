@@ -9,6 +9,7 @@ struct GCCommand: ParsableCommand {
         subcommands: [
             GCList.self, GCRestore.self, GCSweep.self, GCProfileDirs.self,
             GCOrphanProcesses.self, GCHolders.self, GCRowlessHolders.self,
+            GCHolderChildren.self,
         ]
     )
 }
@@ -103,6 +104,34 @@ struct GCRowlessHolders: AsyncParsableCommand {
             method: RPCMethod.configSetGCRowlessHoldersEnabled,
             params: ConfigSetGCRowlessHoldersEnabledParams(enabled: enabled))
         print("Row-less holder GC \(enabled ? "enabled" : "disabled").")
+    }
+}
+
+/// The soak switch for the reaper leg that kills the surviving job of a pty
+/// holder that died. It is the `AgentReaper` counterpart to `tbd gc
+/// rowless-holders`, and lives here rather than under a group of its own
+/// because this is where a soak participant already looks for the switch on a
+/// reclaimer that signals processes. The two cover disjoint halves: this leg
+/// reaches the child through the session row the database still has, while
+/// `rowless-holders` covers the holders no row names at all.
+///
+/// Off — the shipped default — the leg walks nothing and signals nothing.
+struct GCHolderChildren: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "holder-children",
+        abstract: "Enable or disable killing the surviving job of a dead pty holder (default off)")
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetReapHolderChildrenEnabled,
+            params: ConfigSetReapHolderChildrenEnabledParams(enabled: enabled))
+        print("Holder-child reaping \(enabled ? "enabled" : "disabled").")
     }
 }
 
