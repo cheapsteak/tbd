@@ -309,13 +309,37 @@ def restore_signal_handlers(previous: dict[int, Any]) -> None:
             signal.signal(sig, handler)
 
 
+def sigint_reached_child_already(stdin_fd: int = 0) -> bool:
+    """True when the terminal delivered this Ctrl-C to the child as well.
+
+    A tty sends its SIGINT to every process in the terminal's foreground
+    process group, and `claude` deliberately stays in the wrapper's own group
+    so it can own the tty — so when the wrapper is that foreground group, the
+    child already has the signal. Forwarding a second one is not harmless: the
+    TUI exits on a double Ctrl-C, so the wrapper would be answering the user's
+    first press with the confirmation for a second.
+
+    False whenever that reasoning does not hold — stdin is not a tty, there is
+    no controlling terminal, or the wrapper is in the background — because the
+    SIGINT then came from a `kill` aimed at the wrapper alone and the child
+    has not seen it. False is the safe answer either way: it forwards.
+    """
+    try:
+        return os.isatty(stdin_fd) and os.tcgetpgrp(stdin_fd) == os.getpgrp()
+    except OSError:  # no controlling tty, or a closed or unreadable fd
+        return False
+
+
 def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
     """Run claude with stdio inherited; signals reach it, we still summarize.
 
     The child deliberately stays in this process's own group and session: the
     interactive TUI has to remain in the terminal's foreground process group to
-    own the tty, so it cannot be put behind `start_new_session`. Signals are
-    therefore forwarded by pid, and all this has to do is publish the child for
+    own the tty, so it cannot be put behind `start_new_session`. That shared
+    group is also why a Ctrl-C typed at the terminal is not forwarded — the tty
+    already delivered it to the child, and a second one would read as the
+    double Ctrl-C the TUI exits on (`sigint_reached_child_already`). Other
+    signals are forwarded by pid, and all this has to do is publish the child for
     the handlers `main` installed before any resource existed. Without that
     forwarding a SIGTERM to the wrapper would take the interpreter's default
     disposition — the process dies where it stands, `main`'s `finally` never
@@ -364,7 +388,10 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
                 status = child.wait()
                 break
             except KeyboardInterrupt:
-                forward(child, signal.SIGINT)
+                # Only when the child cannot have had it already; either way
+                # the loop goes back to waiting for the child to answer.
+                if not sigint_reached_child_already():
+                    forward(child, signal.SIGINT)
     finally:
         SIGNAL_TARGETS.child = None
         # The child has been waited for, so from here the wrapper is only
@@ -513,6 +540,13 @@ def main(argv: list[str]) -> int:
     except Terminated as terminated:
         report([f"stopped by signal {terminated.signum}"])
         return 128 + terminated.signum
+    except KeyboardInterrupt:
+        # A Ctrl-C before `claude` is running — while the sandbox is built or
+        # the stub server binds — has nowhere to be forwarded, and is the same
+        # outcome as the SIGTERM above: report the signal, keep the cleanup the
+        # `finally` blocks already did, and answer 130 rather than a traceback.
+        report([f"stopped by signal {int(signal.SIGINT)}"])
+        return 128 + int(signal.SIGINT)
     finally:
         restore_signal_handlers(previous_handlers)
 

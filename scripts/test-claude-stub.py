@@ -17,6 +17,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pty
 import shlex
 import shutil
 import signal
@@ -440,6 +441,95 @@ class LateSignalExitStatusTests(SignalTargetsFixture):
 
         self.assertEqual(7, status)
         self.assertEqual(int(signal.SIGTERM), self.targets.late_signum)
+        self.assertEqual(1, len(created), "the wrapper did not create a temp sandbox")
+        self.assertFalse(Path(created[0]).exists(), "the temp sandbox leaked")
+
+
+class TerminalSigintTests(unittest.TestCase):
+    """When a Ctrl-C has already reached the child through the shared tty."""
+
+    def test_a_tty_the_wrapper_is_not_the_foreground_group_of_is_not_shared(self):
+        # A fresh pty is nobody's controlling terminal, so this process cannot
+        # be its foreground group: the SIGINT did not come from there.
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        self.assertTrue(os.isatty(slave))
+        self.assertFalse(claude_stub.sigint_reached_child_already(slave))
+
+    def test_a_non_tty_stdin_means_the_signal_came_from_a_kill(self):
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        self.addCleanup(os.close, write_fd)
+        self.assertFalse(claude_stub.sigint_reached_child_already(read_fd))
+
+    def test_owning_the_terminals_foreground_group_means_the_child_got_it_too(self):
+        with mock.patch.object(claude_stub.os, "isatty", return_value=True), \
+             mock.patch.object(claude_stub.os, "tcgetpgrp", return_value=4242), \
+             mock.patch.object(claude_stub.os, "getpgrp", return_value=4242):
+            self.assertTrue(claude_stub.sigint_reached_child_already(0))
+
+
+class RunClaudeInterruptTests(SignalTargetsFixture):
+    """Both branches of the Ctrl-C decision, with a stand-in for Popen."""
+
+    def _run_with_interrupt(self, already_delivered: bool) -> list[int]:
+        sent: list[int] = []
+
+        class InterruptingChild(FakeChild):
+            def __init__(self) -> None:
+                super().__init__()
+                self.waits = 0
+
+            def send_signal(self, signum):
+                sent.append(signum)
+
+            def wait(self):
+                self.waits += 1
+                if self.waits == 1:
+                    raise KeyboardInterrupt
+                return 0
+
+        with mock.patch.object(
+            claude_stub.subprocess, "Popen", lambda *a, **k: InterruptingChild()
+        ), mock.patch.object(
+            claude_stub,
+            "sigint_reached_child_already",
+            return_value=already_delivered,
+        ):
+            self.assertEqual(0, claude_stub.run_claude("claude", [], {}))
+        return sent
+
+    def test_a_terminal_ctrl_c_is_not_delivered_to_the_child_a_second_time(self):
+        # The TUI exits on a double Ctrl-C, so forwarding the one the tty
+        # already delivered would turn one press into the exit confirmation.
+        self.assertEqual([], self._run_with_interrupt(True))
+
+    def test_an_interrupt_the_child_cannot_have_seen_is_forwarded(self):
+        self.assertEqual([int(signal.SIGINT)], self._run_with_interrupt(False))
+
+
+class EarlyInterruptTests(SignalTargetsFixture):
+    def test_a_ctrl_c_before_claude_runs_exits_130_and_removes_the_sandbox(self):
+        root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        created: list[str] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def recording_mkdtemp(*args, **kwargs):
+            kwargs["dir"] = str(root)
+            path = real_mkdtemp(*args, **kwargs)
+            created.append(path)
+            return path
+
+        def interrupted(binary, claude_args, env):
+            raise KeyboardInterrupt
+
+        with mock.patch.object(claude_stub.tempfile, "mkdtemp", recording_mkdtemp):
+            with mock.patch.object(claude_stub, "run_claude", interrupted):
+                status = claude_stub.main(["--text", "x", "--", "-p", "hi"])
+
+        self.assertEqual(130, status)
         self.assertEqual(1, len(created), "the wrapper did not create a temp sandbox")
         self.assertFalse(Path(created[0]).exists(), "the temp sandbox leaked")
 
