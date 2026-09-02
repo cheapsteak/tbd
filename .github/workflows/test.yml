@@ -150,7 +150,10 @@ jobs:
       #
       # Nothing here touches the network, a real remote, `~/tbd`, or a real
       # `gh`: each harness builds a fixture repo in a temp dir and puts a stub
-      # `gh` first on PATH.
+      # `gh` first on PATH. `test-claude-stub.py` does bind a loopback socket,
+      # and where a `claude` binary is on PATH it runs the real CLI against
+      # that socket — still no egress, and it self-skips on runners, which
+      # have no `claude` installed.
       - name: Test agent guardrails and the script harnesses
         run: |
           python3 .claude/hooks/guardrails/dispatch.py --self-test

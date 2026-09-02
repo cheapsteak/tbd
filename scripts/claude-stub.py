@@ -87,9 +87,11 @@ def parse_turns_document(document: Any) -> tuple[list[Turn], dict[str, list[Turn
 def build_routes(role_turns: dict[str, list[Turn]]) -> dict[str, list[Turn]]:
     """Content-keyed routes, with `</session>` reserved for the title request.
 
-    A turn file may define any sentinel it likes, including that one; the
-    wrapper's own route wins, so a turn file cannot silently take over the
-    route that keeps the title request from eating a scripted turn.
+    The reservation is over the key alone: a turn file that names `</session>`
+    does not replace the wrapper's title turn. It does not change how the
+    server matches, which is still a substring test over the first message, so
+    a user sentinel that also happens to appear inside the CLI's title prompt
+    can still win that request on its own.
     """
     return {**role_turns, TITLE_SENTINEL: [TITLE_TURN]}
 
@@ -137,12 +139,18 @@ def build_env(
     return env
 
 
-def export_lines(env: dict[str, str]) -> list[str]:
-    """`export` lines for --print-env, minus the PATH the caller already has."""
+def export_lines(env: dict[str, str], extra_env: dict[str, str] | None = None) -> list[str]:
+    """`export` lines for --print-env, minus the PATH the caller already has.
+
+    Only the *inherited* PATH is dropped. An explicit `--env PATH=...` is the
+    caller asking for a different one, and the run mode honours it, so
+    --print-env has to hand it over too or the two modes disagree.
+    """
+    overridden = extra_env or {}
     return [
         f"export {key}={shlex.quote(value)}"
         for key, value in sorted(env.items())
-        if key not in UNEXPORTED_ENV
+        if key not in UNEXPORTED_ENV or key in overridden
     ]
 
 
@@ -172,8 +180,16 @@ def write_config(sandbox: Path, project: Path) -> None:
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
 
-def summary_lines(server: StubServer, base_url: str) -> list[str]:
+def summary_lines(server: StubServer, env: dict[str, str]) -> list[str]:
+    """What the stub served, and whether claude was actually pointed at it.
+
+    `env` is the environment claude was handed, not the server's own view:
+    `--env ANTHROPIC_BASE_URL=...` can aim the CLI somewhere else entirely,
+    and the loopback claim would be a lie about traffic the stub never saw.
+    """
     capture = server.capture
+    base_url = server.base_url
+    claude_url = env.get("ANTHROPIC_BASE_URL", "")
     unexpected = harness.tolerated_unexpected_paths(capture.unexpected_paths)
     lines = [f"{len(capture.raw_bodies)} request(s) served at {base_url}"]
     counts: dict[str, int] = {}
@@ -185,9 +201,16 @@ def summary_lines(server: StubServer, base_url: str) -> list[str]:
             lines.append(f"  route {label}: {count}")
     lines.append(f"unexpected paths: {', '.join(unexpected) if unexpected else 'none'}")
     lines.append(f"client disconnects: {len(capture.client_disconnects)}")
-    lines.append(
-        f"no model request left this machine — ANTHROPIC_BASE_URL was {base_url} (loopback)"
-    )
+    if claude_url == base_url:
+        lines.append(
+            f"no model request left this machine — ANTHROPIC_BASE_URL was {base_url} (loopback)"
+        )
+    else:
+        lines.append(
+            f"ANTHROPIC_BASE_URL was overridden to {claude_url}; the stub served "
+            f"{len(capture.raw_bodies)} request(s), and requests to that URL are "
+            "not counted here"
+        )
     return lines
 
 
@@ -210,11 +233,14 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
             child.send_signal(signal.SIGINT)
 
 
-def serve_until_signalled(env: dict[str, str], binary: str) -> None:
+def serve_until_signalled(
+    env: dict[str, str], binary: str, extra_env: dict[str, str] | None = None
+) -> None:
     """--print-env: hand the caller exports, keep serving until SIGINT/SIGTERM."""
-    for line in export_lines(env):
+    for line in export_lines(env, extra_env):
         print(line)
     print(f"# eval these in another pane, then run: {shlex.quote(binary)}")
+    print(f"# run claude from this directory (the sandbox trusts it): {Path.cwd()}")
     sys.stdout.flush()
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -268,13 +294,14 @@ def main(argv: list[str]) -> int:
     try:
         with StubServer(turns, role_turns=routes) as server:
             base_url = server.base_url
-            env = build_env(sandbox, base_url, dict(os.environ), parse_env_assignments(args.env))
+            extra_env = parse_env_assignments(args.env)
+            env = build_env(sandbox, base_url, dict(os.environ), extra_env)
             if args.print_env:
-                serve_until_signalled(env, args.claude_binary)
+                serve_until_signalled(env, args.claude_binary, extra_env)
                 status = 0
             else:
                 status = run_claude(args.claude_binary, claude_args, env)
-            report(summary_lines(server, base_url))
+            report(summary_lines(server, env))
     finally:
         if keep:
             report([f"sandbox kept at {sandbox}"])

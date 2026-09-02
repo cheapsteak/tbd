@@ -133,6 +133,7 @@ export NO_PROXY=127.0.0.1,localhost
 export TERM=tmux-256color
 export TMPDIR=/tmp/stub-sandbox/tmp
 # eval these in another pane, then run: claude
+# run claude from this directory (the sandbox trusts it): /path/to/your/repo
 ```
 
 while pane 1 keeps serving and says so on stderr:
@@ -146,6 +147,12 @@ claude-stub: serving; Ctrl-C (or SIGTERM) to stop
 eval "$(cat /tmp/stub-sandbox-exports.sh)"
 claude -p 'hi'          # -> served via print-env
 ```
+
+Run pane 2's `claude` from the same directory pane 1 was started in — the
+trusted-project entry pane 1 wrote into the sandbox names that one cwd, and
+from anywhere else the CLI treats the project as untrusted and silently skips
+its project hooks. That is the directory the last comment line of the exports
+block prints.
 
 `PATH` is deliberately not exported — you already have your own. `TERM`,
 `COLORTERM` and `LANG` are whatever pane 1's own terminal had. Ctrl-C (or a
@@ -227,7 +234,11 @@ its own `TMPDIR` and a pre-written `.claude.json`. Your real `~/.claude` is
 untouched, and the session's transcript lands in the sandbox. It is deleted at
 exit unless you pass `--keep` or name it with `--sandbox` (an explicit sandbox
 is always kept). `TERM`, `COLORTERM`, `LANG` and `LC_ALL` pass through from
-your terminal, and `--env KEY=VALUE` overrides anything.
+your terminal, and `--env KEY=VALUE` overrides anything — including
+`ANTHROPIC_BASE_URL`, which is how you would point `claude` at some other
+server while still holding this one open. Do that and the summary says so
+instead of claiming loopback: it names the URL the CLI was given and notes
+that requests to it are not counted here.
 
 Tokens are zero by construction rather than by policy: `ANTHROPIC_BASE_URL`
 points at `http://127.0.0.1:<port>`, so no model request can leave the machine,

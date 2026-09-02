@@ -13,8 +13,10 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -203,6 +205,19 @@ class PrintEnvTests(unittest.TestCase):
         lines = claude_stub.export_lines({"PATH": "/usr/bin", "HOME": "/tmp/x"})
         self.assertEqual(["export HOME=/tmp/x"], lines)
 
+    def test_a_path_the_caller_overrode_with_env_is_exported(self):
+        # The run mode honours --env PATH=..., so --print-env must too.
+        lines = claude_stub.export_lines(
+            {"PATH": "/opt/stub/bin", "HOME": "/tmp/x"}, {"PATH": "/opt/stub/bin"}
+        )
+        self.assertEqual(["export HOME=/tmp/x", "export PATH=/opt/stub/bin"], lines)
+
+    def test_overriding_an_unrelated_variable_still_drops_the_inherited_path(self):
+        lines = claude_stub.export_lines(
+            {"PATH": "/usr/bin", "HOME": "/tmp/x"}, {"TERM": "vt100"}
+        )
+        self.assertEqual(["export HOME=/tmp/x"], lines)
+
 
 class SummaryTests(unittest.TestCase):
     def _server(self, **kwargs):
@@ -212,22 +227,44 @@ class SummaryTests(unittest.TestCase):
         self.addCleanup(server._httpd.server_close)
         return server
 
+    @staticmethod
+    def _env(server, base_url=None):
+        """The env claude was handed; by default the one aimed at this server."""
+        return {"ANTHROPIC_BASE_URL": base_url or server.base_url}
+
     def test_the_summary_counts_requests_and_names_the_loopback_url(self):
         server = self._server()
         server.capture.raw_bodies.extend([b"{}", b"{}"])
         server.capture.routes.extend([None, None])
-        lines = claude_stub.summary_lines(server, "http://127.0.0.1:4242")
-        self.assertIn("2 request(s) served at http://127.0.0.1:4242", lines)
+        lines = claude_stub.summary_lines(server, self._env(server))
+        self.assertIn(f"2 request(s) served at {server.base_url}", lines)
         self.assertIn(
             "no model request left this machine — ANTHROPIC_BASE_URL was "
-            "http://127.0.0.1:4242 (loopback)",
+            f"{server.base_url} (loopback)",
             lines,
         )
+
+    def test_an_overridden_base_url_is_reported_instead_of_a_loopback_claim(self):
+        # --env ANTHROPIC_BASE_URL=... points claude somewhere the stub cannot
+        # see, so the summary must not vouch for traffic it never observed.
+        server = self._server()
+        server.capture.raw_bodies.append(b"{}")
+        server.capture.routes.append(None)
+        lines = claude_stub.summary_lines(
+            server, self._env(server, "https://api.example.invalid")
+        )
+        self.assertIn(
+            "ANTHROPIC_BASE_URL was overridden to https://api.example.invalid; "
+            "the stub served 1 request(s), and requests to that URL are not "
+            "counted here",
+            lines,
+        )
+        self.assertFalse([line for line in lines if "loopback" in line])
 
     def test_the_connectivity_preflight_is_not_reported_as_unexpected(self):
         server = self._server()
         server.capture.unexpected_paths.extend(["/api/hello", "/v1/messages/count_tokens"])
-        lines = claude_stub.summary_lines(server, "http://127.0.0.1:4242")
+        lines = claude_stub.summary_lines(server, self._env(server))
         self.assertIn("unexpected paths: /v1/messages/count_tokens", lines)
 
     def test_routes_are_broken_out_when_the_run_uses_content_keyed_routing(self):
@@ -239,7 +276,7 @@ class SummaryTests(unittest.TestCase):
         )
         server.capture.raw_bodies.extend([b"{}", b"{}", b"{}"])
         server.capture.routes.extend([claude_stub.TITLE_SENTINEL, "ROLE-SECURITY", None])
-        lines = claude_stub.summary_lines(server, "http://127.0.0.1:4242")
+        lines = claude_stub.summary_lines(server, self._env(server))
         self.assertIn(f"  route {claude_stub.TITLE_LABEL}: 1", lines)
         self.assertIn("  route ROLE-SECURITY: 1", lines)
         self.assertIn("  route (ordered turns): 1", lines)
@@ -248,7 +285,7 @@ class SummaryTests(unittest.TestCase):
         server = self._server()
         server.capture.raw_bodies.append(b"{}")
         server.capture.routes.append(None)
-        lines = claude_stub.summary_lines(server, "http://127.0.0.1:4242")
+        lines = claude_stub.summary_lines(server, self._env(server))
         self.assertFalse([line for line in lines if line.startswith("  route ")])
 
 
@@ -303,20 +340,45 @@ class LiveSmokeTests(unittest.TestCase):
     """One end-to-end run of the real CLI against the stub. Costs no tokens."""
 
     def test_a_headless_run_answers_from_the_stub_and_reports_one_request(self):
-        cwd = Path(tempfile.mkdtemp(prefix="claudestub-smoke-"))
-        self.addCleanup(shutil.rmtree, cwd, ignore_errors=True)
+        root = Path(tempfile.mkdtemp(prefix="claudestub-smoke-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        cwd = root / "project"
+        cwd.mkdir()
+        # An explicit sandbox under the temp dir this test already reclaims:
+        # on a timeout the wrapper is killed outright and its own `finally`
+        # never runs, so the cleanup above has to be what removes the sandbox.
+        sandbox = root / "sandbox"
         with open("/dev/null", "rb") as devnull:
-            result = subprocess.run(
-                [sys.executable, str(SCRIPT), "--text", "smoke", "--", "-p", "hi"],
+            # A new process group, so a timeout kills claude too rather than
+            # orphaning it when only the wrapper is signalled.
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--text",
+                    "smoke",
+                    "--sandbox",
+                    str(sandbox),
+                    "--",
+                    "-p",
+                    "hi",
+                ],
                 cwd=cwd,
                 stdin=devnull,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=180,
+                start_new_session=True,
             )
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("smoke", result.stdout)
-        self.assertIn("1 request(s) served", result.stderr)
+            try:
+                stdout, stderr = child.communicate(timeout=180)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(child.pid), signal.SIGKILL)
+                stdout, stderr = child.communicate()
+                self.fail(f"the wrapper did not finish in 180s\n{stderr}")
+        self.assertEqual(0, child.returncode, stderr)
+        self.assertIn("smoke", stdout)
+        self.assertIn("1 request(s) served", stderr)
 
 
 if __name__ == "__main__":
