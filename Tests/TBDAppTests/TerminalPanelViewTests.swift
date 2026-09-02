@@ -40,6 +40,13 @@ struct TerminalPanelViewTests {
     }
 
     // MARK: - Transport gate (holder-backed sessions are not a tmux mechanic)
+    //
+    // These cover the pure decision (`transportPreparationNotice(for:)`) and
+    // the `panelTransport()` lookup under it, and nothing more: they would all
+    // stay green if the `handleUnsupportedTransport` guard were dropped from
+    // either attach path. `TerminalHolderTransportGateTests` is the suite that
+    // drives `startTmuxClient` and `startControlModeClient` themselves and
+    // pins that the guard is actually called, and called first.
 
     @Test("a holder-backed session is never prepared through tmux")
     func holderTransportSkipsTmuxPreparation() {
