@@ -107,6 +107,59 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
     /// usage bars at all.
     public static let apiVersion = "2023-06-01"
 
+    /// Upper bound on the response-body slice a failure reason keeps.
+    ///
+    /// 500 characters, matching `TmuxError.truncate` — long enough for the
+    /// messages this endpoint actually emits
+    /// (`{"error":{"message":"anthropic-version: header is required"}}`) and
+    /// short enough that the snapshot's status line stays one readable record
+    /// in the picker and in the log.
+    static let maxBodyDetailLength = 500
+
+    /// A bounded, single-line, credential-free rendering of a non-2xx response
+    /// body, or nil when there is nothing usable to show.
+    ///
+    /// Why keep it at all: a missing `anthropic-version` header shipped once
+    /// and produced `HTTP 400` with
+    /// `{"error":{"message":"anthropic-version: header is required"}}` in the
+    /// body. The status code alone took a live API probe to diagnose; the body
+    /// names the cause outright.
+    ///
+    /// Three properties, each deliberate:
+    /// - **Bounded.** `data(for:)` has already buffered the whole body, so the
+    ///   cap is about what gets RETAINED in a status string a user reads, not
+    ///   about avoiding a read.
+    /// - **Redacted.** The body is the server's, and no server sends our
+    ///   credential back — but the guarantee that no error string carries token
+    ///   bytes should not rest on that. Any occurrence of the token is replaced
+    ///   before anything else happens to the text. Nothing from the REQUEST or
+    ///   its headers is interpolated here at all.
+    /// - **Single line.** Whitespace runs collapse to one space, so a
+    ///   pretty-printed JSON error stays one record and spends its 500
+    ///   characters on content rather than indentation.
+    ///
+    /// A body that is not valid UTF-8 yields nil rather than mojibake: the
+    /// failure is then reported by status code alone, exactly as before.
+    static func bodyDetail(_ body: Data, redacting token: String) -> String? {
+        guard let text = String(data: body, encoding: .utf8) else { return nil }
+        let redacted = token.isEmpty
+            ? text
+            : text.replacingOccurrences(of: token, with: "<redacted>")
+        let collapsed = redacted.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !collapsed.isEmpty else { return nil }
+        guard collapsed.count > maxBodyDetailLength else { return collapsed }
+        return String(collapsed.prefix(maxBodyDetailLength)) + "…"
+    }
+
+    /// Appends a body slice to a failure summary when there is one to append.
+    static func compose(_ summary: String, detail: String?) -> String {
+        detail.map { "\(summary): \($0)" } ?? summary
+    }
+
+    static func compose(_ summary: String, body: Data, token: String) -> String {
+        compose(summary, detail: bodyDetail(body, redacting: token))
+    }
+
     private let session: URLSession
     private let endpoint: URL
 
@@ -138,9 +191,10 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
             "messages": [["role": "user", "content": "."]],
         ])
 
+        let body: Data
         let response: URLResponse
         do {
-            (_, response) = try await session.data(for: request)
+            (body, response) = try await session.data(for: request)
         } catch {
             // The token is in the request, never in the error: URLError's
             // description names the URL and the failure, not the headers.
@@ -173,9 +227,14 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
             // `ProfileUsageStatusKind` would break snapshot decode on older
             // apps, because `decodeIfPresent` THROWS on an unrecognised raw
             // value rather than returning nil. The reason carries the status
-            // code only — never token bytes.
-            return .needsLogin("token rejected (HTTP \(http.statusCode))")
+            // code and the server's own explanation — never token bytes.
+            return .needsLogin(Self.compose("token rejected (HTTP \(http.statusCode))",
+                                            body: body, token: token))
         case 429:
+            // No body slice here, and deliberately: `.rateLimited` already
+            // carries the structured answer (`Retry-After`, or its absence),
+            // which is the whole of what a caller can act on. Nothing the body
+            // adds would change the wait.
             let retryAfter = http
                 .value(forHTTPHeaderField: "Retry-After")
                 .flatMap(TimeInterval.init)
@@ -196,12 +255,13 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
             // request again (401/403/429 are handled above, each with its own
             // case). 5xx stays `.networkError` too: the server may well
             // recover, and a retry is exactly the right response.
+            let detail = Self.bodyDetail(body, redacting: token)
             if ProfileUsageFetchStatus.isPermanentRequestError(http.statusCode) {
                 tokenProbeLogger.error(
-                    "token usage probe request rejected: HTTP \(http.statusCode, privacy: .public) — the probe request itself is malformed; retrying cannot fix it")
-                return .httpError(http.statusCode)
+                    "token usage probe request rejected: HTTP \(http.statusCode, privacy: .public) — the probe request itself is malformed; retrying cannot fix it: \(detail ?? "(no body)", privacy: .public)")
+                return .httpError(http.statusCode, detail: detail)
             }
-            return .networkError("HTTP \(http.statusCode)")
+            return .networkError(Self.compose("HTTP \(http.statusCode)", detail: detail))
         }
     }
 }

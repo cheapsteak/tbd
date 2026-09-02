@@ -135,7 +135,12 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
     /// HTTP 429. `retryAfter` carries the server's `Retry-After` (seconds) when
     /// present, so the poller can honor it instead of guessing a backoff.
     case rateLimited(retryAfter: TimeInterval?)
-    case httpError(Int)
+    /// A status code with no dedicated case. `detail` is a bounded, redacted
+    /// slice of the response body when the fetcher captured one — the server's
+    /// own account of what it disliked, which for a malformed request is the
+    /// entire diagnosis (`anthropic-version: header is required`). nil when no
+    /// body was read or it was empty.
+    case httpError(Int, detail: String?)
     case networkError(String)
     case decodeError(String)
 
@@ -148,14 +153,15 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
         case .needsLogin(let reason): return "needs re-login (\(reason))"
         case .rateLimited(let ra):
             return ra.map { "rate limited (retry \(Int($0))s)" } ?? "rate limited"
-        case .httpError(let code):
+        case .httpError(let code, let detail):
             // A permanent request error must not read like a transient one:
             // "HTTP 400" alongside a "retrying" note tells the reader to wait
             // for something that will never happen. Naming the request as the
             // faulty party is the whole value of the string.
-            return Self.isPermanentRequestError(code)
+            let base = Self.isPermanentRequestError(code)
                 ? "request rejected (HTTP \(code)) — malformed request, retrying cannot fix it"
                 : "HTTP \(code)"
+            return detail.map { "\(base): \($0)" } ?? base
         case .networkError(let msg): return "network error: \(msg)"
         case .decodeError(let msg): return "decode error: \(msg)"
         }
@@ -310,7 +316,7 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
 
         // 3. Fetch usage. On 401/403, refresh once and retry.
         let firstAttempt = await requestUsage(accessToken: creds.accessToken)
-        if case .httpError(let code) = firstAttempt, code == 401 || code == 403 {
+        if case .httpError(let code, _) = firstAttempt, code == 401 || code == 403 {
             switch await refreshAndPersist(creds, blob: blob, configDirPath: configDirPath) {
             case .refreshed(let updated):
                 return await requestUsage(accessToken: updated.accessToken)
@@ -369,7 +375,7 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
             case .network(let msg):
                 return .transient(.networkError("refresh: \(msg)"))
             case .http(let code):
-                return .transient(.httpError(code))
+                return .transient(.httpError(code, detail: nil))
             case .badResponse(let msg):
                 return .transient(.networkError("refresh: \(msg)"))
             }
@@ -417,7 +423,10 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
             let ra = (http.value(forHTTPHeaderField: "Retry-After")).flatMap(TimeInterval.init)
             return .rateLimited(retryAfter: ra)
         default:
-            return .httpError(http.statusCode)
+            // The signed-in fetcher does not retain a body slice: its failures
+            // are credential states with dedicated cases, not requests TBD
+            // could have built wrong.
+            return .httpError(http.statusCode, detail: nil)
         }
     }
 }

@@ -155,7 +155,7 @@ struct OAuthProfileUsagePollerTests {
         let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets, organizationID: nil))
         fetcher.enqueue(
             configDirPath: "/profiles/\(bad.id.uuidString.lowercased())/claude",
-            .httpError(401)
+            .httpError(401, detail: nil)
         )
         let broadcasts = BroadcastCounter()
         let poller = makePoller(
@@ -218,7 +218,7 @@ struct OAuthProfileUsagePollerTests {
 
     @Test func repeatedIdenticalFailuresBroadcastOnlyOnce() async {
         let profile = oauthProfile(named: "Dead")
-        let fetcher = ScriptedProfileUsageFetcher(default: .httpError(401))
+        let fetcher = ScriptedProfileUsageFetcher(default: .httpError(401, detail: nil))
         let broadcasts = BroadcastCounter()
         let clock = MutableClock(Date(timeIntervalSince1970: 1_750_000_000))
         let poller = OAuthProfileUsagePoller(
@@ -398,7 +398,7 @@ struct OAuthProfileUsagePollerTests {
     @Test func failedFetchDoesNotPersist() async {
         let profile = oauthProfile(named: "Bad")
         let box = SnapshotBox()
-        let fetcher = ScriptedProfileUsageFetcher(default: .httpError(500))
+        let fetcher = ScriptedProfileUsageFetcher(default: .httpError(500, detail: nil))
         let broadcasts = BroadcastCounter()
         let poller = makePoller(
             profiles: [profile], loggedIn: [profile.id],

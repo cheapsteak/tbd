@@ -403,7 +403,7 @@ struct TokenProfileUsageFetcherTests {
         }
         let status = await makeTokenFetcher()
             .fetchUsage(credential: .token("sk-ant-oat01-SECRET"))
-        guard case .httpError(let reported) = status else {
+        guard case .httpError(let reported, _) = status else {
             Issue.record("expected .httpError, got \(status)"); return
         }
         #expect(reported == code)
@@ -437,10 +437,10 @@ struct TokenProfileUsageFetcherTests {
         }
         // A recoverable code keeps the terse reason; only a malformed-request
         // code gets the "retrying cannot fix it" wording.
-        #expect(ProfileUsageFetchStatus.httpError(401).failureReason == "HTTP 401")
-        #expect(ProfileUsageFetchStatus.httpError(408).failureReason == "HTTP 408")
-        #expect(ProfileUsageFetchStatus.httpError(425).failureReason == "HTTP 425")
-        #expect(ProfileUsageFetchStatus.httpError(400).failureReason?
+        #expect(ProfileUsageFetchStatus.httpError(401, detail: nil).failureReason == "HTTP 401")
+        #expect(ProfileUsageFetchStatus.httpError(408, detail: nil).failureReason == "HTTP 408")
+        #expect(ProfileUsageFetchStatus.httpError(425, detail: nil).failureReason == "HTTP 425")
+        #expect(ProfileUsageFetchStatus.httpError(400, detail: nil).failureReason?
             .contains("retrying cannot fix it") == true)
     }
 
@@ -462,6 +462,101 @@ struct TokenProfileUsageFetcherTests {
         #expect(!message.contains("sk-ant-oat01-SECRET"))
         #expect(status.kind == .networkError)
         #expect(status.failureReason?.contains("retrying cannot fix it") != true)
+    }
+
+    // MARK: - Response bodies on non-2xx
+
+    /// The field failure this behaviour exists for: a missing
+    /// `anthropic-version` header shipped, and the API answered `HTTP 400` with
+    /// a body naming the offending header. From the status code alone that took
+    /// a live API probe to diagnose; the body names the cause outright, so it
+    /// has to survive into the reason the snapshot records.
+    @Test func malformedRequestReasonCarriesTheServerErrorBody() async {
+        let body = #"{"error":{"message":"anthropic-version: header is required"}}"#
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 400, httpVersion: "HTTP/1.1",
+                             headerFields: nil)!, Data(body.utf8))
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-SECRET"))
+        guard case .httpError(400, let detail) = status else {
+            Issue.record("expected .httpError(400, _), got \(status)"); return
+        }
+        #expect(detail == body)
+
+        let reason = status.failureReason ?? ""
+        #expect(reason.contains("anthropic-version: header is required"))
+        #expect(reason.contains("400"))
+        #expect(!reason.contains("sk-ant-oat01-SECRET"))
+    }
+
+    /// Every non-2xx path that has somewhere to put a reason gets the body, not
+    /// just the 400 that motivated it — an unexpected status has to be equally
+    /// diagnosable. (429 is the one exception, and deliberate: `.rateLimited`
+    /// carries the structured answer already.)
+    @Test(arguments: [401, 503])
+    func otherNonSuccessReasonsCarryTheBodyToo(code: Int) async {
+        let body = "the server's own account of it"
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: code, httpVersion: "HTTP/1.1",
+                             headerFields: nil)!, Data(body.utf8))
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-SECRET"))
+        let reason = status.failureReason ?? ""
+        #expect(reason.contains(body))
+        #expect(reason.contains("\(code)"))
+        #expect(!reason.contains("sk-ant-oat01-SECRET"))
+    }
+
+    /// A wall of body text must not become the status line the picker renders.
+    @Test func overLongErrorBodyIsTruncated() async {
+        let body = String(repeating: "x", count: 4_000)
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 400, httpVersion: "HTTP/1.1",
+                             headerFields: nil)!, Data(body.utf8))
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-SECRET"))
+        guard case .httpError(_, let detail?) = status else {
+            Issue.record("expected .httpError with a detail, got \(status)"); return
+        }
+        // The cap plus the one-character ellipsis that marks the cut.
+        #expect(detail.count == TokenProfileUsageFetcher.maxBodyDetailLength + 1)
+        #expect(detail.hasSuffix("…"))
+        #expect(detail.hasPrefix("xxxx"))
+        // And the composed reason inherits the bound rather than reintroducing
+        // the wall of text around it.
+        #expect((status.failureReason ?? "").count
+            < TokenProfileUsageFetcher.maxBodyDetailLength + 200)
+    }
+
+    /// The body is the SERVER's, so it should never contain our credential —
+    /// but the "no error string carries token bytes" rule does not rest on
+    /// that. A body that echoes the token is redacted before anything else.
+    @Test func aBodyEchoingTheTokenIsRedacted() async {
+        let token = "sk-ant-oat01-SECRET"
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 400, httpVersion: "HTTP/1.1",
+                             headerFields: nil)!,
+             Data("rejected credential \(token) is malformed".utf8))
+        }
+        let status = await makeTokenFetcher().fetchUsage(credential: .token(token))
+        let reason = status.failureReason ?? ""
+        #expect(!reason.contains(token))
+        #expect(reason.contains("<redacted>"))
+        #expect(reason.contains("is malformed"))
+    }
+
+    /// The slice's own rules, exercised directly: one line, nothing unusable.
+    @Test func bodyDetailCollapsesWhitespaceAndRefusesUnusableBodies() {
+        #expect(TokenProfileUsageFetcher.bodyDetail(Data(), redacting: "tok") == nil)
+        #expect(TokenProfileUsageFetcher.bodyDetail(Data("  \n\t ".utf8), redacting: "tok") == nil)
+        // Not valid UTF-8: reported by status code alone rather than as mojibake.
+        #expect(TokenProfileUsageFetcher.bodyDetail(Data([0xFF, 0xFE, 0xFD]), redacting: "tok") == nil)
+        // Pretty-printed JSON collapses to one record.
+        #expect(TokenProfileUsageFetcher.bodyDetail(
+            Data("{\n  \"error\": \"nope\"\n}".utf8), redacting: "tok") == "{ \"error\": \"nope\" }")
     }
 
     /// A config-dir credential belongs to `LiveProfileUsageFetcher`. This
