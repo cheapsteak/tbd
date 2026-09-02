@@ -148,7 +148,9 @@ struct ScratchPromoteReconcileTests {
                 }
             ),
             hooks: HookResolver())
-        try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(
+            repoID: promoted.repoID, actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: true)
 
         let mainAfter = try #require(try await db.worktrees.get(id: promoted.mainWorktree.id))
         #expect(
@@ -178,7 +180,9 @@ struct ScratchPromoteReconcileTests {
                 }
             ),
             hooks: HookResolver())
-        try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(
+            repoID: promoted.repoID, actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: true)
 
         let mainAfter = try #require(try await db.worktrees.get(id: promoted.mainWorktree.id))
         #expect(
@@ -202,7 +206,9 @@ struct ScratchPromoteReconcileTests {
             git: GitManager(),
             tmux: TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true }),
             hooks: HookResolver())
-        try await lifecycle.reconcile(repoID: promoted.repoID, actuationLog: makeTestActuationLog())
+        try await lifecycle.reconcile(
+            repoID: promoted.repoID, actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: true)
 
         let mainAfter = try #require(try await db.worktrees.get(id: promoted.mainWorktree.id))
         #expect(
