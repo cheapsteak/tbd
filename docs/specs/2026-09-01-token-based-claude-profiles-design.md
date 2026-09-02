@@ -367,7 +367,7 @@ fifteen for `.oauthToken`. The rendering, wording, and call sites are unchanged.
 Bedrock). Inside the Claude segment a second, smaller picker chooses how to
 authenticate:
 
-```
+```text
 ┌─ Add Model Profile ──────────────────────────────┐
 │  ┏━━━━━━━━┓┌───────┐┌─────────┐                  │
 │  ┃ Claude ┃│ Proxy ││ Bedrock │                  │
@@ -407,7 +407,7 @@ is undiscoverable, and it makes the kind awkward to reason about when editing.
 
 ### The profile list
 
-```
+```text
 Model Profiles
 
   Acme                 [OAuth]       [Edit] [⋯]
@@ -438,7 +438,7 @@ Model Profiles
   `Replace token…` link opening the edit sheet, mirroring the shape of today's
   "Open login session" affordance:
 
-```
+```text
   Acme (token)         [Token]       [Edit] [⋯]
   Token rejected — Replace token…
 ```
