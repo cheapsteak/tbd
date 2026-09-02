@@ -13,6 +13,7 @@ import importlib.machinery
 import importlib.util
 import os
 from pathlib import Path
+import pwd
 import shlex
 import signal
 import subprocess
@@ -132,7 +133,13 @@ def _dead_pid() -> int:
     return finished.pid
 
 
-class SwiftSafeTests(unittest.TestCase):
+class RunnerFixture(unittest.TestCase):
+    """A temp `TBD_HOME` and a fake `swift` that echoes the argv it was given.
+
+    Shared by the job-governor cases and the module-cache cases, which need
+    the same fixture but disagree about one knob (see `runner_env`).
+    """
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
@@ -159,30 +166,79 @@ class SwiftSafeTests(unittest.TestCase):
         wrapper invites exactly that — must not decide what these cases
         observe, or the default cases assert their job count instead of the
         shipped one.  Each case states the settings it depends on itself.
+
+        `CI` is cleared for the same reason and matters more than it looks:
+        this harness runs inside GitHub Actions, where `CI=true` is exported,
+        and the wrapper reads it.  Inherited, it would silently switch every
+        case here onto the no-flags branch — green locally, vacuous in CI.
+
+        The shared module cache is turned OFF here, so that the cases below
+        keep asserting SwiftPM's argv exactly and stay about the job
+        governor.  `sharing_env` is the same environment with that opt-out
+        removed, which is what a real caller gets.
         """
         env = {
             name: value
             for name, value in os.environ.items()
             if not name.startswith("TBD_SWIFT_")
         }
+        env.pop("CI", None)
         env.update(
             {
                 "TBD_HOME": str(self.tbd_home),
                 "TBD_SWIFT_BIN": str(self.fake_swift),
+                "TBD_SWIFT_SHARED_MODULE_CACHE": "0",
                 **extra_env,
             }
         )
         return env
 
-    def run_runner(self, *arguments, **extra_env):
+    def sharing_env(self, **extra_env) -> dict[str, str]:
+        """`runner_env` without the module-cache opt-out: the shipped default."""
+        env = self.runner_env(**extra_env)
+        if "TBD_SWIFT_SHARED_MODULE_CACHE" not in extra_env:
+            env.pop("TBD_SWIFT_SHARED_MODULE_CACHE", None)
+        return env
+
+    def _run(self, env: dict[str, str], arguments):
         return subprocess.run(
             [str(RUNNER), *arguments],
             text=True,
             capture_output=True,
-            env=self.runner_env(**extra_env),
+            env=env,
             check=False,
         )
 
+    def run_runner(self, *arguments, **extra_env):
+        return self._run(self.runner_env(**extra_env), arguments)
+
+    def run_sharing(self, *arguments, **extra_env):
+        """Run with the module cache left at its shipped (shared) default."""
+        return self._run(self.sharing_env(**extra_env), arguments)
+
+    @contextlib.contextmanager
+    def in_process_environment(self, **overrides):
+        """`sharing_env`'s twin for helpers called in-process, not as a subprocess.
+
+        `_shares_the_module_cache` reads `os.environ` directly, so calling it
+        from a test inherits the *real* environment — and this harness runs
+        inside GitHub Actions, where `CI=true` is exported.  Left alone, every
+        in-process assertion silently evaluates the no-flags branch: the
+        `assertFalse` legs then pass for entirely the wrong reason, and only an
+        `assertTrue` control leg reveals it.  One did, in CI, after the
+        subprocess half had already been sanitised here — which is the whole
+        argument for routing both halves through a named helper rather than
+        remembering the environment at each call site.
+        """
+        env = dict(os.environ)
+        env.pop("CI", None)
+        env.pop("TBD_SWIFT_SHARED_MODULE_CACHE", None)
+        env.update(overrides)
+        with mock.patch.dict(os.environ, env, clear=True):
+            yield
+
+
+class SwiftSafeTests(RunnerFixture):
     def test_compile_commands_default_to_two_jobs(self):
         result = self.run_runner("test", "--filter", "Foo")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -581,6 +637,224 @@ class SwiftSafeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn(self.EXIT_STATUS_PREFIX, result.stderr)
         self.assertNotIn(self.EXIT_STATUS_PREFIX, result.stdout)
+
+
+class SharedModuleCacheTests(RunnerFixture):
+    """Where precompiled modules land, decided here for every governed build.
+
+    Each case asserts both directions of the condition it names: the flags
+    present when the condition is absent, and absent when it holds.  A case
+    that only ever asserts absence would pass against a wrapper that never
+    added the flags at all.
+    """
+
+    def flags_for(self, path) -> str:
+        """The flags as the fake `swift` prints them: argv joined by spaces."""
+        return (
+            f"-Xswiftc -module-cache-path -Xswiftc {path} "
+            f"-Xcc -fmodules-cache-path={path}"
+        )
+
+    @property
+    def shipped_path(self) -> Path:
+        """The location the wrapper resolves with nothing configured."""
+        return Path(pwd.getpwuid(os.getuid()).pw_dir) / (
+            "Library/Caches/tbd/swift-module-cache"
+        )
+
+    # ---- the resolved path ------------------------------------------------
+
+    def test_the_path_comes_from_the_passwd_database_not_from_home(self):
+        """THE regression this whole change turns on, asserted directly.
+
+        `scripts/test.sh` points `HOME` and `CFFIXED_USER_HOME` at a scratch
+        fence.  A `$HOME`-derived cache would resolve inside that fence on
+        every test run, minting an empty cache each time — so every run would
+        pay a full rebuild while looking like nothing worse than slow tests.
+        `Path.home()` reads `$HOME` first and is the same bug spelled shorter.
+        """
+        with tempfile.TemporaryDirectory() as fence:
+            with mock.patch.dict(
+                os.environ, {"HOME": fence, "CFFIXED_USER_HOME": fence}
+            ):
+                resolved = swift_safe._shared_module_cache_path()
+        self.assertEqual(resolved, self.shipped_path)
+        self.assertNotIn(fence, str(resolved))
+
+    def test_a_fenced_home_does_not_move_the_flags_end_to_end(self):
+        """The same fact through the real script, where the fence really is set."""
+        with tempfile.TemporaryDirectory() as fence:
+            result = self.run_sharing("build", HOME=fence, CFFIXED_USER_HOME=fence)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.flags_for(self.shipped_path), result.stdout)
+        self.assertNotIn(fence, result.stdout)
+
+    def test_an_explicit_path_overrides_the_shipped_one(self):
+        override = Path(self.temp.name) / "elsewhere"
+        result = self.run_sharing("build", TBD_SWIFT_MODULE_CACHE_PATH=str(override))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.flags_for(override), result.stdout)
+        self.assertNotIn(str(self.shipped_path), result.stdout)
+
+    # ---- which subcommands get them ---------------------------------------
+
+    def test_every_compile_subcommand_gets_the_flags(self):
+        for subcommand in ("build", "test"):
+            with self.subTest(subcommand=subcommand):
+                result = self.run_sharing(subcommand)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(self.flags_for(self.shipped_path), result.stdout)
+
+    def test_run_places_the_flags_before_the_executable(self):
+        """Past the executable name SwiftPM stops reading its own arguments."""
+        result = self.run_sharing("run", "TBDApp", "--jobs", "99")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "run --jobs 2 "
+            + self.flags_for(self.shipped_path)
+            + " TBDApp --jobs 99",
+        )
+
+    def test_a_non_compiling_subcommand_is_never_flagged(self):
+        """`package resolve` plans nothing, so it has no cache to place."""
+        with self.in_process_environment():
+            self.assertFalse(swift_safe._shares_the_module_cache("package", []))
+            self.assertTrue(swift_safe._shares_the_module_cache("build", []))
+
+    def test_the_in_process_control_leg_survives_a_ci_runner(self):
+        """The regression that reached CI: `CI=true` disarmed the control leg.
+
+        Pins the helper rather than the predicate.  Without the environment
+        scrubbing, this is exactly the assertion that failed on a runner while
+        passing on every developer machine.
+        """
+        with mock.patch.dict(os.environ, {"CI": "true"}):
+            with self.in_process_environment():
+                self.assertTrue(swift_safe._shares_the_module_cache("build", []))
+
+    # ---- continuous integration -------------------------------------------
+
+    def test_ci_keeps_swiftpms_own_per_worktree_cache(self):
+        """Ephemeral runners share nothing, and `test.yml` also builds
+        without this wrapper — flagging only some of its steps would make CI
+        alternate against its own cached `.build` on every run."""
+        flagged = self.run_sharing("build")
+        self.assertIn(self.flags_for(self.shipped_path), flagged.stdout)
+
+        for value in ("1", "true"):
+            with self.subTest(value=value):
+                result = self.run_sharing("build", CI=value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("-module-cache-path", result.stdout)
+                self.assertNotIn("-fmodules-cache-path", result.stdout)
+
+    def test_an_empty_ci_variable_does_not_count_as_ci(self):
+        """`CI=` is how a shell unsets-in-place; it is not a CI runner."""
+        result = self.run_sharing("build", CI="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.flags_for(self.shipped_path), result.stdout)
+
+    # ---- the opt-out -------------------------------------------------------
+
+    def test_the_opt_out_restores_the_per_worktree_default(self):
+        off = self.run_sharing("build", TBD_SWIFT_SHARED_MODULE_CACHE="0")
+        self.assertEqual(off.returncode, 0, off.stderr)
+        self.assertNotIn("-module-cache-path", off.stdout)
+        self.assertNotIn("-fmodules-cache-path", off.stdout)
+
+        for value in ("1", ""):
+            with self.subTest(value=value):
+                on = self.run_sharing("build", TBD_SWIFT_SHARED_MODULE_CACHE=value)
+                self.assertEqual(on.returncode, 0, on.stderr)
+                self.assertIn(self.flags_for(self.shipped_path), on.stdout)
+
+    # ---- a caller that already chose --------------------------------------
+
+    def test_a_caller_supplied_cache_path_is_left_alone(self):
+        """A second, differently-spelled copy would be a third plan variant —
+        exactly the alternation this change exists to remove."""
+        chosen = Path(self.temp.name) / "callers-cache"
+        spellings = (
+            ("-Xswiftc", "-module-cache-path", "-Xswiftc", str(chosen)),
+            ("-Xcc", f"-fmodules-cache-path={chosen}"),
+        )
+        for arguments in spellings:
+            with self.subTest(arguments=arguments):
+                result = self.run_sharing("build", *arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(str(self.shipped_path), result.stdout)
+                self.assertEqual(
+                    result.stdout.strip(),
+                    "build " + " ".join(arguments) + " --jobs 2",
+                )
+
+        # The other direction: the same command without that flag is flagged.
+        result = self.run_sharing("build")
+        self.assertIn(self.flags_for(self.shipped_path), result.stdout)
+
+    def test_a_cache_flag_meant_for_the_program_does_not_disarm_a_run(self):
+        """Mutation guard: `run` scans only SwiftPM's own prefix, as `--jobs`
+        does — an argument past the executable name belongs to the program."""
+        result = self.run_sharing(
+            "run", "TBDApp", "-Xcc", "-fmodules-cache-path=/tmp/not-swiftpms"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.flags_for(self.shipped_path), result.stdout)
+
+    # ---- the directory itself ----------------------------------------------
+
+    def test_the_cache_directory_is_created_only_when_it_will_be_used(self):
+        created = Path(self.temp.name) / "made-here"
+        result = self.run_sharing("build", TBD_SWIFT_MODULE_CACHE_PATH=str(created))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(created.is_dir(), "the shared cache directory was not created")
+
+        skipped = Path(self.temp.name) / "not-made-here"
+        off = self.run_sharing(
+            "build",
+            TBD_SWIFT_MODULE_CACHE_PATH=str(skipped),
+            TBD_SWIFT_SHARED_MODULE_CACHE="0",
+        )
+        self.assertEqual(off.returncode, 0, off.stderr)
+        self.assertFalse(skipped.exists(), "a directory was created for an unused path")
+
+    def test_an_uncreatable_cache_directory_falls_back_rather_than_failing(self):
+        """A cache we cannot make is a slower build, never a failed one — the
+        default per-worktree cache still works, and the wrapper says so."""
+        blocked = Path(self.temp.name) / "a-file" / "cache"
+        blocked.parent.write_text("not a directory", encoding="utf-8")
+        result = self.run_sharing("build", TBD_SWIFT_MODULE_CACHE_PATH=str(blocked))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "build --jobs 2")
+        self.assertIn("shared module cache", result.stderr)
+
+    def test_a_uid_with_no_passwd_entry_falls_back_rather_than_crashing(self):
+        """The same promise, one step earlier: home resolution can fail too.
+
+        `pwd.getpwuid` raises `KeyError` for a uid with no passwd entry —
+        minimal containers, sandboxes and arbitrary-UID environments all make
+        one. This wrapper is the sole mandatory gate for every SwiftPM command
+        in the repo, so an unhandled raise here would abort every build, test
+        and run for such a uid, with no way out short of already knowing to set
+        the opt-out. Degrade like an uncreatable directory instead.
+        """
+        with self.in_process_environment():
+            with mock.patch.object(
+                swift_safe.pwd, "getpwuid", side_effect=KeyError("uid not found")
+            ):
+                self.assertIsNone(swift_safe._shared_module_cache_path())
+                self.assertEqual(swift_safe._module_cache_arguments("build", []), [])
+
+    def test_an_explicit_path_still_works_without_a_passwd_entry(self):
+        """The override is read before the passwd lookup, so it remains the
+        escape hatch for exactly the environment that has no home to find."""
+        target = Path(self.temp.name) / "explicit"
+        with self.in_process_environment(TBD_SWIFT_MODULE_CACHE_PATH=str(target)):
+            with mock.patch.object(
+                swift_safe.pwd, "getpwuid", side_effect=KeyError("uid not found")
+            ):
+                self.assertEqual(swift_safe._shared_module_cache_path(), target)
 
 
 class WaitReportingTests(unittest.TestCase):
