@@ -437,27 +437,38 @@ precisely what bites.
 The emulator keeps a bounded in-memory scrollback — 5,000 lines, a plain
 constant (`HolderReader.scrollbackLines`), not a flag — and is **not persisted
 to disk**. The constant is a memory decision as much as a history one, and the
-cost follows from SwiftTerm's layout rather than from a measurement: a
-`BufferLine` holds a flat buffer of one `CharData` per column, and `CharData`
-is 40 bytes (a rune, a width, an atom, and an `Attribute` carrying two colours,
-a style, an underline style and an optional underline colour). So a line is
-`columns × 40` bytes, a full 120-column scrollback is
-`5,000 × 120 × 40 ≈ 24 MB`, and at the design point's ~150 resident emulators
-the worst case is several gigabytes.
+cost follows from SwiftTerm's cell layout rather than from a measurement.
 
-Three things keep that worst case off the table in practice, and none of them
-is a promise:
+**Storage is 8 bytes per cell.** A `BufferLine` holds a `CellStoragePage`
+(`BufferLine.swift:122`), which owns the row's cells as an
+`UnsafeMutableBufferPointer<PackedCell>` (`CellStorage.swift:811`), and a
+`PackedCell` is a single `UInt64` (`CellStorage.swift:16,31`) packing the
+content tag, the codepoint or grapheme id, a 16-bit style id, the width state
+and a payload id. Everything variable-sized lives in a `CellArena`
+(`CellStorage.swift:284`) shared by every line of one terminal, which interns
+each distinct attribute and grapheme **once** rather than per cell — so a
+heavily coloured screen costs the same per cell as a plain one. `CharData` is
+the read-side interface the arena expands a cell into, not what is stored;
+sizing the budget against it would overstate a session by several times.
+
+So a line is `columns × 8` bytes, a fully materialized 120-column 5,000-line
+scrollback is `5,000 × 120 × 8 ≈ 4.8 MB` of cell bytes — call it 5–6 MB with
+the per-line `BufferLine` and `CellStoragePage` objects — and the design
+point's ~150 resident emulators come to roughly 0.8 GB in the worst case.
+
+That worst case is a ceiling, not an expectation, for two reasons:
 
 - **Lines are materialized lazily.** The buffer preallocates a
   `[BufferLine?]` of `scrollback + rows` slots — around 40 KB of pointers —
   and fills a slot only when a line is written, so a session that has printed
   a screenful costs a screenful.
-- **The figure is per *filled* session.** Reaching 24 MB takes 5,000 lines of
+- **Reaching it takes a filled scrollback.** It needs 5,000 lines of
   120-column output that nothing has scrolled past; an agent session that goes
   quiet holds what it printed and no more.
-- **The limit and the representation are both still open.** If field memory
-  pressure says so, the constant comes down or the per-cell representation
-  changes; nothing else in the design depends on either.
+
+The limit and the representation both remain open: if field memory pressure
+says so, the constant comes down or the per-cell representation changes, and
+nothing else in the design depends on either.
 
 A daemon restart starts the emulator empty; the jiggle on re-adoption makes
 full-screen programs repaint into the fresh emulator, and the durable record

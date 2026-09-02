@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import SwiftTerm
+@testable import SwiftTerm
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -29,24 +29,30 @@ struct HolderReaderTests {
     /// The per-cell size the scrollback budget is computed from.
     ///
     /// `HolderReader.scrollbackLines` is a memory decision as much as a history
-    /// one, and the design spec states the worst case it implies. That number is
-    /// computed from SwiftTerm's cell layout, so it is only true while the
-    /// layout is: a `BufferLine` holds a flat `UnsafeMutableBufferPointer` of
-    /// `CharData`, one per column, and `CharData` carries a rune, a width, an
-    /// atom and a full `Attribute` (two colours, a style, an underline style and
-    /// an optional underline colour).
+    /// one, and the design spec states the worst case it implies. The type that
+    /// governs that number is **`PackedCell`**, not `CharData`: a `BufferLine`
+    /// holds a `CellStoragePage` (`BufferLine.swift:122`), which owns the row's
+    /// cells as an `UnsafeMutableBufferPointer<PackedCell>`
+    /// (`CellStorage.swift:811`), and a `PackedCell` is one `UInt64`
+    /// (`CellStorage.swift:16,31`). `CharData` is the read-side interface —
+    /// what `arena.unpack` expands a cell into — and is several times larger,
+    /// so measuring it would overstate a session's cost by that factor.
     ///
-    /// This goes red when a SwiftTerm upgrade changes that layout — which is its
-    /// whole job. The fix is to recompute the figure in
+    /// `PackedCell` is internal to SwiftTerm, hence `@testable import`: the size
+    /// that governs storage is not visible to an ordinary importer, and pinning
+    /// the public type that is visible would pin the wrong number.
+    ///
+    /// This goes red when a SwiftTerm upgrade changes the representation —
+    /// which is its whole job. The fix is to recompute the figure in
     /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md` and update
     /// the number here, not to relax the assertion.
-    @Test func theScrollbackBudgetIsComputedFromSwiftTermsCellSize() {
-        let bytesPerCell = MemoryLayout<CharData>.stride
+    @Test func theScrollbackBudgetIsComputedFromSwiftTermsPackedCellSize() {
+        let bytesPerCell = MemoryLayout<PackedCell>.stride
         #expect(
-            bytesPerCell == 40,
+            bytesPerCell == 8,
             """
-            SwiftTerm's per-cell size is now \(bytesPerCell) bytes, so the worst-case scrollback \
-            figure in docs/specs/2026-08-30-pty-holder-session-transport-design.md is stale
+            SwiftTerm stores \(bytesPerCell) bytes per cell, so the worst-case scrollback figure \
+            in docs/specs/2026-08-30-pty-holder-session-transport-design.md is stale
             """)
     }
 
