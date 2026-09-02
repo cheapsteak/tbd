@@ -612,6 +612,10 @@ extension AppState {
     /// reachable from no other gesture in the app. Naming the id puts it on the
     /// daemon's targeted path, which covers every *supported* profile.
     ///
+    /// Naming the id is also what tells the daemon a user is asking, which
+    /// releases the hold it places on a token profile whose token was rejected
+    /// — the row's way out of "Token rejected" short of pasting a replacement.
+    ///
     /// The five-minute floor between token probes stays the daemon's to enforce
     /// (`OAuthProfileUsagePoller.freshnessWindow` raises any caller's requested
     /// window to `tokenProfileFloor` for that kind): this asks, it does not

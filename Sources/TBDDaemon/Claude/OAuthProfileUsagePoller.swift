@@ -37,6 +37,15 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "oauthUsagePo
 /// - A failing profile records a status ("stale since X; fetch failed: …")
 ///   without poisoning the rest of the sweep; previously fetched buckets are
 ///   retained so the picker can show stale-but-real numbers.
+/// - Two failure regimes, because two different things release them. A
+///   transient failure backs off on a timed schedule that elapses on its own.
+///   A `.oauthToken` profile whose token was rejected (`.needsLogin`) is
+///   instead HELD: no automatic retry at all, because every retry is a billed
+///   request that cannot succeed until the user replaces the token. The hold
+///   is released only by a credential change or the profile row's manual
+///   refresh. A signed-in `.oauth` profile is never held — its `.needsLogin`
+///   clears when the user re-runs `/login`, an act that emits no event, so the
+///   free cadence sweep re-reading the login identity IS its recovery path.
 /// - `broadcast` fires (once per sweep) only when snapshot data actually
 ///   changed — `lastAttemptAt` alone doesn't count, so a persistently failing
 ///   profile doesn't emit a delta every 90 s.
@@ -63,11 +72,12 @@ public actor OAuthProfileUsagePoller {
     /// including the picker-open refresh, which asks for a 30-second window.
     public static let tokenProfileFloor: TimeInterval = 300
 
-    /// Backoff schedule for a profile whose fetch failed. Doubles per
-    /// consecutive failure, jittered, capped. A 429 with a `Retry-After`
+    /// Backoff schedule for a profile whose fetch failed transiently. Doubles
+    /// per consecutive failure, jittered, capped. A 429 with a `Retry-After`
     /// overrides this with the server's own value. Kept below the picker's
     /// stale threshold at the low end so a single hiccup doesn't visibly stall
-    /// a profile.
+    /// a profile. A rejected token is not on this schedule at all — see
+    /// `BackoffState.awaitingUserAction`.
     public static let baseBackoff: TimeInterval = 30
     public static let maxBackoff: TimeInterval = 15 * 60
 
@@ -110,15 +120,30 @@ public actor OAuthProfileUsagePoller {
     /// can't launch a second loop.
     private var started = false
 
-    /// Per-profile backoff bookkeeping. `consecutiveFailures` drives the
-    /// exponential schedule; `nextEligibleAt` is when a sweep may try this
-    /// profile again. Isolated per profile so one account's rate limit never
-    /// delays another's polling. Every sweep honors this gate — including the
-    /// picker-open RPC path (`sweepNow`), which must not re-hammer a
-    /// rate-limited endpoint. In-memory only; a daemon restart resets it.
+    /// Per-profile retry bookkeeping. Isolated per profile so one account's
+    /// rate limit never delays another's polling. Every sweep honors it —
+    /// including the picker-open RPC path (`sweepNow`), which must not
+    /// re-hammer a rate-limited endpoint. In-memory only; a daemon restart
+    /// resets it.
+    ///
+    /// It carries two independent kinds of "not now", because they are
+    /// released by two different things and a timer can only ever release one
+    /// of them:
+    ///
+    /// - A **timed** window: `consecutiveFailures` drives the exponential
+    ///   schedule and `nextEligibleAt` is when a sweep may try again. It
+    ///   elapses on its own.
+    /// - A **hold**, `awaitingUserAction`: no sweep may retry this profile
+    ///   until the user acts, however long anyone waits. Set for an
+    ///   `.oauthToken` profile whose token was rejected, where a retry is a
+    ///   billed request that cannot succeed until the token is replaced.
+    ///   Released by a credential change (which clears the whole state) or by
+    ///   the profile row's manual refresh.
     private struct BackoffState {
         var consecutiveFailures: Int = 0
         var nextEligibleAt: Date?
+        /// Held until a user gesture, not until a deadline. See above.
+        var awaitingUserAction: Bool = false
     }
     private var backoff: [UUID: BackoffState] = [:]
 
@@ -267,12 +292,25 @@ public actor OAuthProfileUsagePoller {
     ///
     /// This is the RPC path (`modelProfile.usageRefresh`, fired on every
     /// picker open and by `tbd profile list --refresh`). It does NOT bypass
-    /// per-profile backoff windows — opening the picker against a 429ing
+    /// per-profile timed backoff windows — opening the picker against a 429ing
     /// endpoint must not re-hammer it — and skips profiles whose snapshot is
-    /// younger than `refreshFreshness`.
+    /// younger than `refreshFreshness` (floored to `tokenProfileFloor` for a
+    /// token profile).
+    ///
+    /// A NAMED profile does release the user-action hold, and only that. A
+    /// non-nil id reaches the daemon from exactly one place: the profile row's
+    /// explicit `⋯ ▸ Refresh usage`. Picker-open and `tbd profile list
+    /// --refresh` pass nil, which sweeps the cadence set — no held token
+    /// profile is in it — so the gesture stays a gesture. The hold exists
+    /// because only the user can clear a rejected token; asking for a refresh
+    /// on that very row IS the user acting, and if the token is still dead the
+    /// probe re-arms the hold. The timed window is untouched by the release:
+    /// a 429's `Retry-After` still holds this path back.
     @discardableResult
     public func sweepNow(profileID: UUID? = nil) async -> [UUID: ProfileUsageSnapshot] {
-        await sweep(only: profileID, skipFresherThan: Self.refreshFreshness)
+        await sweep(only: profileID,
+                    skipFresherThan: Self.refreshFreshness,
+                    releasingUserHold: profileID != nil)
         if let profileID {
             return snapshots.filter { $0.key == profileID }
         }
@@ -303,9 +341,10 @@ public actor OAuthProfileUsagePoller {
     /// fetch.
     ///
     /// Probes at most once per `tokenProfileFloor`, so a burst of short turns
-    /// collapses into one billed request. Per-profile backoff still applies on
-    /// top of that, so a rejected or rate-limited token is not hammered by
-    /// activity either.
+    /// collapses into one billed request. Per-profile retry state still applies
+    /// on top of that: a rate-limited token waits out its window, and a
+    /// rejected one is held indefinitely, so no amount of activity re-probes a
+    /// token only the user can fix.
     ///
     /// EVERY completed turn on every session in the fleet arrives here, and in
     /// an install with no token profiles at all none of them can act. So the
@@ -350,19 +389,24 @@ public actor OAuthProfileUsagePoller {
     ///
     /// Both per-profile gates are released for this one probe, and both for the
     /// same reason: they are bookkeeping about a credential that no longer
-    /// exists. The backoff schedule was earned by the old token's failures, and
-    /// the snapshot's freshness describes the old token's numbers. Leaving
-    /// either in force would defeat the gesture in exactly the case it exists
-    /// for — the overwhelmingly common repair is pasting a good token seconds
-    /// after a bad one was rejected, which lands inside both the 30s backoff
-    /// window and the 300s floor, so the row would go on asserting "Token
-    /// rejected" about a token the user has already fixed.
+    /// exists. The retry state was earned by the old token's failures, and the
+    /// snapshot's freshness describes the old token's numbers. Leaving either
+    /// in force would defeat the gesture in exactly the case it exists for —
+    /// the overwhelmingly common repair is pasting a good token seconds after a
+    /// bad one was rejected. That rejection is what put the profile in a
+    /// user-action hold, which by construction no wait can lift, and the
+    /// snapshot is inside the 300s floor; so without this release the row would
+    /// go on asserting "Token rejected" about a token the user has already
+    /// fixed.
+    ///
+    /// The retry state is dropped wholesale rather than probed around, which
+    /// releases the hold and the timed schedule at once and starts the fresh
+    /// credential on rung one instead of the dead one's exponent.
     ///
     /// This is a per-gesture release, not a hole in the activity gate: a user
     /// cannot rotate in a loop, and every timer- and activity-driven caller
-    /// still goes through `freshnessWindow(requested:kind:)` and the backoff.
-    /// Clearing rather than bypassing the backoff also restarts the exponential
-    /// schedule, so a fresh credential does not inherit the dead one's exponent.
+    /// still goes through `freshnessWindow(requested:kind:)` and the retry
+    /// state.
     public func noteCredentialChanged(profileID: UUID) async {
         backoff[profileID] = nil
         await sweep(only: profileID, skipFresherThan: nil, ignoringFreshness: true)
@@ -420,9 +464,14 @@ public actor OAuthProfileUsagePoller {
     /// snapshot then describes a credential that no longer exists, so its age
     /// says nothing about whether a fetch is warranted. Every other caller
     /// leaves it false and is floored by `freshnessWindow(requested:kind:)`.
+    ///
+    /// `releasingUserHold` says this sweep is the user gesture a held profile
+    /// has been waiting for (see `BackoffState.awaitingUserAction`). It lifts
+    /// the hold and nothing else — a timed backoff window still applies.
     private func sweep(only: UUID?,
                        skipFresherThan: TimeInterval?,
-                       ignoringFreshness: Bool = false) async {
+                       ignoringFreshness: Bool = false,
+                       releasingUserHold: Bool = false) async {
         let allProfiles: [ModelProfile]
         do {
             allProfiles = try await profilesProvider()
@@ -467,7 +516,9 @@ public actor OAuthProfileUsagePoller {
         let candidates = only.map { id in supported.filter { $0.id == id } } ?? cadenceEligible
         let currentTime = now()
         let targets = candidates.filter { profile in
-            guard isEligibleNow(profile.id, at: currentTime) else { return false }
+            guard isEligibleNow(profile.id,
+                                at: currentTime,
+                                releasingUserHold: releasingUserHold) else { return false }
             if !ignoringFreshness,
                let window = Self.freshnessWindow(requested: skipFresherThan, kind: profile.kind),
                let fetchedAt = snapshots[profile.id]?.fetchedAt,
@@ -515,7 +566,7 @@ public actor OAuthProfileUsagePoller {
             let usageFetcher: any ProfileUsageFetching =
                 profile.kind == .oauthToken ? tokenFetcher : fetcher
             let status = await usageFetcher.fetchUsage(credential: usageCredential)
-            await record(status, for: profile.id)
+            await record(status, for: profile.id, kind: profile.kind)
         }
 
         if hasMeaningfulChange(from: before, to: snapshots) {
@@ -523,14 +574,29 @@ public actor OAuthProfileUsagePoller {
         }
     }
 
-    /// Whether a scheduled sweep may attempt this profile now (its backoff
-    /// window, if any, has elapsed).
-    private func isEligibleNow(_ profileID: UUID, at time: Date) -> Bool {
-        guard let next = backoff[profileID]?.nextEligibleAt else { return true }
+    /// Whether a sweep may attempt this profile now: it is not held for a user
+    /// action, and its timed backoff window, if any, has elapsed.
+    ///
+    /// `releasingUserHold` lifts the hold for this one sweep. The timed check
+    /// below still runs, so releasing the hold never doubles as ignoring a
+    /// `Retry-After`.
+    private func isEligibleNow(_ profileID: UUID,
+                               at time: Date,
+                               releasingUserHold: Bool) -> Bool {
+        guard let state = backoff[profileID] else { return true }
+        if state.awaitingUserAction && !releasingUserHold { return false }
+        guard let next = state.nextEligibleAt else { return true }
         return time >= next
     }
 
-    private func record(_ status: ProfileUsageFetchStatus, for profileID: UUID) async {
+    /// Commit a fetch outcome. `kind` decides which retry regime a failure
+    /// enters — a timed backoff, or a hold until the user acts — and nothing
+    /// else: the recorded snapshot (status text, `statusKind`, retained
+    /// buckets and organization id) is identical either way, so the row goes
+    /// on reading `Token rejected — Replace token…` off `statusKind`.
+    private func record(_ status: ProfileUsageFetchStatus,
+                        for profileID: UUID,
+                        kind: CredentialKind) async {
         let timestamp = now()
         switch status {
         case .ok(let buckets, let organizationID):
@@ -557,7 +623,11 @@ public actor OAuthProfileUsagePoller {
             } else {
                 statusText = "fetch failed: \(reason)"
             }
-            scheduleBackoff(for: profileID, status: status, at: timestamp)
+            if kind == .oauthToken, case .needsLogin = status {
+                holdForUserAction(profileID)
+            } else {
+                scheduleBackoff(for: profileID, status: status, at: timestamp)
+            }
             snapshots[profileID] = ProfileUsageSnapshot(
                 buckets: previous?.buckets ?? [],
                 fetchedAt: previous?.fetchedAt,
@@ -573,13 +643,42 @@ public actor OAuthProfileUsagePoller {
         }
     }
 
-    /// Advance a profile's backoff after a failure. Honors a 429 `Retry-After`
-    /// verbatim; otherwise uses exponential backoff (base·2^failures) plus
-    /// additive jitter, capped at `maxBackoff`. `needsLogin`/`noCredentials`
-    /// aren't retry-worthy at high frequency, so they also back off (they'll
-    /// clear when the user re-logs in and the identity/credential reappears).
+    /// Stop retrying this profile until the user acts.
+    ///
+    /// A `.oauthToken` profile's probe is a real billed `max_tokens: 0`
+    /// request, and a rejected token (401/403 → `.needsLogin`) cannot start
+    /// working again on its own: only replacing the token can fix it. A timed
+    /// schedule would therefore bill the user forever at the `maxBackoff` cap
+    /// for an outcome that is known in advance. So the profile is held, and
+    /// the two gestures that can actually change the answer release it:
+    /// `noteCredentialChanged` (which clears this state outright) and the
+    /// profile row's manual refresh (`sweepNow(profileID:)`).
+    ///
+    /// The timed schedule is dropped rather than carried alongside the hold.
+    /// A hold cannot expire, so an exponent accumulated under it could never
+    /// be consumed as a wait; and whichever gesture releases the hold issues a
+    /// probe whose own outcome re-arms whichever regime that outcome belongs
+    /// to. A transient failure after the release is a new problem and starts
+    /// at rung one, which is also what a credential change gives it.
+    private func holdForUserAction(_ profileID: UUID) {
+        backoff[profileID] = BackoffState(awaitingUserAction: true)
+    }
+
+    /// Advance a profile's timed backoff after a failure. Honors a 429
+    /// `Retry-After` verbatim; otherwise uses exponential backoff
+    /// (base·2^failures) plus additive jitter, capped at `maxBackoff`.
+    ///
+    /// This is the regime for every failure that a later, identical request
+    /// might still resolve — including `.needsLogin` on a signed-in `.oauth`
+    /// profile, whose free cadence sweep re-reading the login identity is the
+    /// only way the daemon ever learns the user re-ran `/login`. The one
+    /// failure that goes elsewhere is a rejected token: see
+    /// `holdForUserAction(_:)`.
     private func scheduleBackoff(for profileID: UUID, status: ProfileUsageFetchStatus, at time: Date) {
         var state = backoff[profileID] ?? BackoffState()
+        // A timed window supersedes any hold: this outcome is one a wait can
+        // resolve, so the profile must not stay pinned behind a user gesture.
+        state.awaitingUserAction = false
         state.consecutiveFailures += 1
         let delay: TimeInterval
         if let retryAfter = status.retryAfter, retryAfter > 0 {

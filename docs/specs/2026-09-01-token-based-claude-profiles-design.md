@@ -306,9 +306,36 @@ So:
 - **The refresh is `sweepNow(only: profileID)` with `skipFresherThan: 300`.**
   The five-minute floor is the existing freshness parameter, not new machinery,
   so a burst of turns collapses into at most one probe per five minutes.
-- **Failure backoff is unchanged.** The existing per-profile schedule and its
-  `Retry-After` override apply, so a rejected or rate-limited token is not
-  hammered by activity.
+- **Failures fall into two regimes, released by two different things.** A
+  *transient* failure — rate limiting, a network error, a 4xx whose repair
+  ships as a TBD change — goes on the existing per-profile exponential
+  schedule, with a 429's `Retry-After` overriding it, so a busy fleet does not
+  hammer a struggling endpoint and the profile recovers on its own. A *rejected
+  token* (401/403, recorded as `.needsLogin`) instead **holds** the profile:
+  no automatic retry at all, on any cadence, however long anyone waits. Every
+  token probe is a billed request and one against a revoked or expired token
+  cannot succeed until the user replaces it, so a timed schedule would bill
+  forever at its 15-minute cap for an outcome known in advance. The hold is
+  released by the two gestures that can change that answer: a credential
+  change, and the profile row's manual refresh. Releasing it lifts the hold and
+  nothing else — a timed window still applies, so clicking Refresh usage inside
+  a 429's `Retry-After` does not re-hammer the endpoint.
+
+  The hold is scoped to `.oauthToken`, and the contrast with signed-in profiles
+  is the reason. An `.oauth` profile's `.needsLogin` clears when the user
+  re-runs `/login`, which emits no event the daemon can observe — the free
+  90-second cadence sweep re-reading `loginIdentity` *is* the recovery path, so
+  holding it would strand a re-logged-in profile on "needs re-login"
+  indefinitely. A held state is only correct where the retry costs money and
+  the user is the only one who can change the outcome.
+
+  It is a state, not a sentinel deadline: a timer never releases a hold and a
+  user gesture never shortens a 429 window, so the poller's per-profile retry
+  record carries the hold as its own flag rather than folding it into
+  `nextEligibleAt`. `.needsLogin` stays an existing `ProfileUsageStatusKind`
+  either way — the row goes on reading `Token rejected — Replace token…` off
+  the status kind, and widening that enum would break snapshot decode on older
+  apps, where `decodeIfPresent` throws on an unrecognised raw value.
 - **One probe whenever the credential changes** — creation *and* rotation — so a
   freshly pasted token shows bars immediately and a bad paste is caught at once
   rather than at first spawn. Rotation matters as much as creation: the user
@@ -320,22 +347,30 @@ So:
   each of them, and reusing the ordinary path would produce a probe that never
   fires in its own motivating case:
 
-  - *Backoff.* A rejected token has already earned an exponential backoff
-    (30 s and doubling). Pasting the fix seconds later lands inside that window.
+  - *Retry state.* A rejected token is held, and a hold is by construction
+    something no wait can lift — the rotation is exactly the user action it is
+    waiting for. A token failing transiently instead sits inside an
+    exponential window that the paste, seconds later, lands well inside.
   - *Freshness.* A profile that previously succeeded keeps its `fetchedAt`, and
     the five-minute floor applies to a request that names no window — so a
     rotation within five minutes of any successful probe, including the
     creation probe, is skipped.
 
   Both gates are bookkeeping about a credential that no longer exists: the
-  backoff was earned by the old token's failures, and the snapshot's freshness
-  describes the old token's numbers. So the backoff is **cleared** rather than
-  bypassed — a fresh credential restarts the exponential schedule instead of
-  inheriting a dead one's exponent — and the freshness floor is waived for that
-  single call, leaving the cadence, manual-refresh and activity paths floored.
-  It is a per-gesture release, not a hole in the gate: a user cannot rotate in
-  a loop.
-- **Manual refresh** in the profile row's `⋯` menu, subject to the same floor.
+  retry state was earned by the old token's failures, and the snapshot's
+  freshness describes the old token's numbers. So the retry state is **cleared**
+  rather than bypassed — which releases the hold and the timed schedule at once,
+  and starts a fresh credential on the first rung instead of the dead one's
+  exponent — and the freshness floor is waived for that single call, leaving the
+  cadence, manual-refresh and activity paths floored. It is a per-gesture
+  release, not a hole in the gate: a user cannot rotate in a loop.
+- **Manual refresh** in the profile row's `⋯` menu, subject to the same floor,
+  and the second release of the hold. It names a profile id, and a named id
+  reaches the daemon from that gesture alone — picker-open and
+  `tbd profile list --refresh` sweep the cadence set unnamed, which excludes
+  token profiles — so the name is the daemon's evidence that a user is asking.
+  It releases the hold only: the freshness floor and any timed backoff still
+  apply, and if the token is still dead the probe re-arms the hold.
 
 An idle token profile issues zero requests. A continuously busy one issues at
 most 288 per day, and each is fresher than a timer's would be because it fires
@@ -460,11 +495,15 @@ expire — so this is the only way to recover a profile whose token has aged out
 - **Token rejected later** (revoked, expired) — the probe records `.needsLogin`;
   the row shows `Token rejected — Replace token…`. Spawning still works as far
   as TBD is concerned; the session itself will fail to authenticate, and the row
-  is where the user finds out first. Replacing the token probes immediately, so
-  the row clears (or re-reports) on the spot rather than at the next turn.
-- **Probe rate-limited (429)** — existing backoff with `Retry-After` override.
-  Bars keep showing last-known values with a staleness note; they are never
-  presented as current.
+  is where the user finds out first. The profile is then held: it is not probed
+  again by any timer or by session activity, because each attempt would be a
+  billed request that cannot succeed. Replacing the token probes immediately, so
+  the row clears (or re-reports) on the spot; clicking `⋯ ▸ Refresh usage` on
+  the row probes too, for a user who believes the token has come good.
+- **Probe rate-limited (429)** — the timed backoff with `Retry-After` override,
+  which elapses on its own; the profile is not held, because waiting is exactly
+  what resolves it. Bars keep showing last-known values with a staleness note;
+  they are never presented as current.
 - **Network failure** — `.networkError`, retried, last-known buckets retained.
 - **Missing secret file** — `.noCredentials`. Reachable if the secret file is
   removed out from under the profile.
@@ -499,12 +538,28 @@ Both branches of every conditional this adds, per the repo's branching rule.
 - **Credential-change probe** — creation probes once, carrying the new token;
   rotation probes once, and the assertion is that the probe carried the
   *replacement* credential rather than the one it replaced. Each gate is
-  isolated: one test rotates inside the freshness floor, another inside the
-  backoff window with nothing ever having succeeded. An activity probe at the
-  same instant must still be held, proving the release did not leak. Renaming a
-  profile probes nothing, and `updateToken` against a signed-in profile is
-  rejected by message rather than merely failing to probe — a probe count of
-  zero would pass for the wrong reason.
+  isolated: one test rotates inside the freshness floor, another inside a timed
+  backoff window with nothing ever having succeeded, a third out of a hold. An
+  activity probe at the same instant must still be held, proving the release did
+  not leak. Renaming a profile probes nothing, and `updateToken` against a
+  signed-in profile is rejected by message rather than merely failing to probe —
+  a probe count of zero would pass for the wrong reason.
+- **The hold on a rejected token** — a rejected token is probed once and then
+  never again by activity, however far the clock is advanced past the backoff
+  cap, nor by a targeted internal sweep. Both releases are exercised: a
+  credential change probes, and a manual refresh naming the profile probes,
+  each after an activity leg at the same instant has been shown to buy nothing
+  — without which a probe would not distinguish the gesture from an expiring
+  window. Two guards bound the release. Manual refresh against a token inside a
+  429's `Retry-After` still does not probe, so "release the hold" did not become
+  "ignore the retry state"; and an unnamed sweep releases nothing.
+- **The regimes stay separate** — a token profile failing transiently
+  (rate-limited, network, a 400) is still retried on the timed schedule; and a
+  *signed-in* profile recording `.needsLogin` is still retried by the free
+  cadence sweep once its window elapses, and recovers to `ok` when the identity
+  starts working. That second one is the load-bearing guard: holding every
+  `.needsLogin` rather than only a token profile's would strand a re-logged-in
+  profile forever, and nothing else in the suite would notice.
 - **Staleness threshold** — a token profile fetched four minutes ago renders no
   staleness note; a signed-in profile fetched four minutes ago does.
 - **Presentation** — `needsLogin` is false for `.oauthToken` regardless of
@@ -560,8 +615,10 @@ None blocking. Two things to watch once this is in use:
   passing outage. The retryable set is 401, 403 and 429 (each with its own
   handling) plus 408 Request Timeout and 425 Too Early, which invite the
   identical request again — RFC 9110 §15.5.9 and RFC 8470 respectively — and so
-  must not be told the user cannot fix them by waiting. Retries continue at the backoff cap regardless, because the
-  repair is a TBD change and the profile must recover on its own once it ships.
+  must not be told the user cannot fix them by waiting. Timed retries continue
+  at the backoff cap regardless — a `.httpError` never earns the hold a rejected
+  token does — because the repair is a TBD change and the profile must recover
+  on its own once it ships.
   A distinct "probe unsupported" state may still be worth adding if the beta
   header moves, but it cannot be a new `ProfileUsageStatusKind` case:
   `decodeIfPresent` throws on an unrecognised raw value, so widening that enum
