@@ -44,15 +44,18 @@ PASSTHROUGH_ENV = ("TERM", "COLORTERM", "LANG", "LC_ALL")
 UNEXPORTED_ENV = ("PATH",)
 
 # The one dialog the e2e harness has no reason to pre-accept and the
-# interactive TUI raises anyway: the custom-API-key approval, keyed on the
-# trailing characters of ANTHROPIC_API_KEY. Headless `-p` never asks.
-STUB_API_KEY = "stub-key"
+# interactive TUI raises anyway: the custom-API-key approval, keyed on a
+# fingerprint of ANTHROPIC_API_KEY. Headless `-p` never asks. The key is read
+# back out of the harness rather than restated here, so the value approved in
+# the config cannot drift from the value the environment actually carries.
+STUB_API_KEY = harness.sandbox_env(Path("/"), "http://127.0.0.1:0")["ANTHROPIC_API_KEY"]
 
 # The interactive TUI opens every session with a second, concurrent request
 # that asks the model to name the session; headless `-p` sends none. Left
 # unrouted it eats a scripted turn (and racing with the real request, a
 # nondeterministic one), so it gets its own content-keyed route: the CLI wraps
-# the user's message in <session>…</session> there and nowhere else.
+# the user's message in <session>…</session> there and nowhere else. Observed
+# on claude 2.1.258.
 TITLE_SENTINEL = "</session>"
 TITLE_LABEL = "session title"
 TITLE_TURN = Turn(text="Stub session")
@@ -79,6 +82,16 @@ def parse_turns_document(document: Any) -> tuple[list[Turn], dict[str, list[Turn
         for sentinel, entries in (document.get("role_turns") or {}).items()
     }
     return turns, role_turns
+
+
+def build_routes(role_turns: dict[str, list[Turn]]) -> dict[str, list[Turn]]:
+    """Content-keyed routes, with `</session>` reserved for the title request.
+
+    A turn file may define any sentinel it likes, including that one; the
+    wrapper's own route wins, so a turn file cannot silently take over the
+    route that keeps the title request from eating a scripted turn.
+    """
+    return {**role_turns, TITLE_SENTINEL: [TITLE_TURN]}
 
 
 def long_answer(lines: int) -> str:
@@ -152,6 +165,8 @@ def write_config(sandbox: Path, project: Path) -> None:
         "hasTrustDialogAccepted": True,
         "hasCompletedProjectOnboarding": True,
     }
+    # The CLI stores an approval under the key's last 20 characters rather than
+    # the key itself; a key shorter than that is its own fingerprint.
     config["customApiKeyResponses"] = {"approved": [STUB_API_KEY[-20:]], "rejected": []}
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -171,7 +186,7 @@ def summary_lines(server: StubServer, base_url: str) -> list[str]:
     lines.append(f"unexpected paths: {', '.join(unexpected) if unexpected else 'none'}")
     lines.append(f"client disconnects: {len(capture.client_disconnects)}")
     lines.append(
-        f"no request left this machine — ANTHROPIC_BASE_URL was {base_url} (loopback)"
+        f"no model request left this machine — ANTHROPIC_BASE_URL was {base_url} (loopback)"
     )
     return lines
 
@@ -195,11 +210,11 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
             child.send_signal(signal.SIGINT)
 
 
-def serve_until_signalled(env: dict[str, str]) -> None:
+def serve_until_signalled(env: dict[str, str], binary: str) -> None:
     """--print-env: hand the caller exports, keep serving until SIGINT/SIGTERM."""
     for line in export_lines(env):
         print(line)
-    print(f"# eval these in another pane, then run: {shlex.quote('claude')}")
+    print(f"# eval these in another pane, then run: {shlex.quote(binary)}")
     sys.stdout.flush()
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -249,13 +264,13 @@ def main(argv: list[str]) -> int:
     (sandbox / "tmp").mkdir(exist_ok=True)
     write_config(sandbox, Path.cwd())
 
-    routes = {TITLE_SENTINEL: [TITLE_TURN], **role_turns}
+    routes = build_routes(role_turns)
     try:
         with StubServer(turns, role_turns=routes) as server:
             base_url = server.base_url
             env = build_env(sandbox, base_url, dict(os.environ), parse_env_assignments(args.env))
             if args.print_env:
-                serve_until_signalled(env)
+                serve_until_signalled(env, args.claude_binary)
                 status = 0
             else:
                 status = run_claude(args.claude_binary, claude_args, env)

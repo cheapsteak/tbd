@@ -1,9 +1,11 @@
 """Tests for scripts/claude-stub.py (stdlib only).
 
-Only the pure parts: turn scripting, the env overlay, the `--print-env`
-exports, and the closing summary. Nothing here spawns `claude` — the live
-sessions against the fake model API are covered by the e2e suite under
-`.github/workflows/claude-review-v2/tests/e2e/`.
+Mostly the pure parts: turn scripting, the env overlay, the `--print-env`
+exports, the sandbox config, and the closing summary. One smoke test spawns the
+real `claude` against the stub end to end, and skips when no `claude` is on
+PATH. The e2e suite under `.github/workflows/claude-review-v2/tests/e2e/`
+exercises the same fake server, but it drives the review gate's own scenarios
+and never runs this wrapper, so nothing there covers the code here.
 """
 
 from __future__ import annotations
@@ -12,6 +14,9 @@ import importlib.machinery
 import importlib.util
 import json
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -111,16 +116,37 @@ class TurnScriptTests(unittest.TestCase):
         self.assertEqual(200, len(turns[0].text.splitlines()))
 
 
+class RouteTests(unittest.TestCase):
+    def test_role_turns_keep_their_own_routes(self):
+        role_turns = {"ROLE-SECURITY": [claude_stub.Turn(text="security")]}
+        routes = claude_stub.build_routes(role_turns)
+        self.assertEqual(
+            ["security"], [turn.text for turn in routes["ROLE-SECURITY"]]
+        )
+        self.assertEqual(
+            [claude_stub.TITLE_TURN], routes[claude_stub.TITLE_SENTINEL]
+        )
+
+    def test_the_reserved_title_route_beats_a_turn_file_that_claims_it(self):
+        routes = claude_stub.build_routes(
+            {claude_stub.TITLE_SENTINEL: [claude_stub.Turn(text="hijacked")]}
+        )
+        self.assertEqual(
+            [claude_stub.TITLE_TURN], routes[claude_stub.TITLE_SENTINEL]
+        )
+
+
 class EnvOverlayTests(unittest.TestCase):
     def setUp(self):
         self.sandbox = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, self.sandbox, ignore_errors=True)
 
     def test_the_harness_isolation_is_the_base(self):
         env = claude_stub.build_env(self.sandbox, "http://127.0.0.1:1", {}, {})
         self.assertEqual(str(self.sandbox), env["HOME"])
         self.assertEqual(str(self.sandbox / "config"), env["CLAUDE_CONFIG_DIR"])
         self.assertEqual("http://127.0.0.1:1", env["ANTHROPIC_BASE_URL"])
-        self.assertEqual("stub-key", env["ANTHROPIC_API_KEY"])
+        self.assertEqual(claude_stub.STUB_API_KEY, env["ANTHROPIC_API_KEY"])
 
     def test_a_real_terminal_beats_the_harness_dumb_terminal(self):
         bare = claude_stub.build_env(self.sandbox, "http://127.0.0.1:1", {}, {})
@@ -193,7 +219,7 @@ class SummaryTests(unittest.TestCase):
         lines = claude_stub.summary_lines(server, "http://127.0.0.1:4242")
         self.assertIn("2 request(s) served at http://127.0.0.1:4242", lines)
         self.assertIn(
-            "no request left this machine — ANTHROPIC_BASE_URL was "
+            "no model request left this machine — ANTHROPIC_BASE_URL was "
             "http://127.0.0.1:4242 (loopback)",
             lines,
         )
@@ -227,8 +253,13 @@ class SummaryTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
-    def test_the_config_pre_accepts_trust_and_the_custom_api_key_dialog(self):
+    def _sandbox(self) -> Path:
         sandbox = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, sandbox, ignore_errors=True)
+        return sandbox
+
+    def test_the_config_pre_accepts_trust_and_the_custom_api_key_dialog(self):
+        sandbox = self._sandbox()
         project = sandbox / "project"
         project.mkdir()
         claude_stub.write_config(sandbox, project)
@@ -237,11 +268,17 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertTrue(config["hasTrustDialogAccepted"])
         self.assertTrue(config["projects"][str(project)]["hasTrustDialogAccepted"])
-        # The interactive TUI otherwise stops on "use this API key?".
-        self.assertEqual(["stub-key"], config["customApiKeyResponses"]["approved"])
+        # The interactive TUI otherwise stops on "use this API key?". The
+        # approved fingerprint must be of the key claude actually gets, so it
+        # is checked against the env rather than against a restated literal.
+        env = claude_stub.build_env(sandbox, "http://127.0.0.1:1", {}, {})
+        self.assertEqual(
+            [env["ANTHROPIC_API_KEY"][-20:]],
+            config["customApiKeyResponses"]["approved"],
+        )
 
     def test_a_reused_sandbox_keeps_its_transcripts_and_gains_the_new_project(self):
-        sandbox = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        sandbox = self._sandbox()
         first, second = sandbox / "one", sandbox / "two"
         first.mkdir()
         second.mkdir()
@@ -259,6 +296,27 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config["hasTrustDialogAccepted"])
         for project in (first, second):
             self.assertTrue(config["projects"][str(project)]["hasTrustDialogAccepted"])
+
+
+@unittest.skipUnless(shutil.which("claude"), "no claude binary on PATH")
+class LiveSmokeTests(unittest.TestCase):
+    """One end-to-end run of the real CLI against the stub. Costs no tokens."""
+
+    def test_a_headless_run_answers_from_the_stub_and_reports_one_request(self):
+        cwd = Path(tempfile.mkdtemp(prefix="claudestub-smoke-"))
+        self.addCleanup(shutil.rmtree, cwd, ignore_errors=True)
+        with open("/dev/null", "rb") as devnull:
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--text", "smoke", "--", "-p", "hi"],
+                cwd=cwd,
+                stdin=devnull,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("smoke", result.stdout)
+        self.assertIn("1 request(s) served", result.stderr)
 
 
 if __name__ == "__main__":
