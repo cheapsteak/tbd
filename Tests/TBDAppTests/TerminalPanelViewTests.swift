@@ -39,6 +39,85 @@ struct TerminalPanelViewTests {
         #expect(action == .requestAutomaticRecovery(failedStage: .selectWindow))
     }
 
+    // MARK: - Transport gate (holder-backed sessions are not a tmux mechanic)
+    //
+    // These cover the pure decision (`transportPreparationNotice(for:)`) and
+    // the `panelTransport()` lookup under it, and nothing more: they would all
+    // stay green if the `handleUnsupportedTransport` guard were dropped from
+    // either attach path. `TerminalHolderTransportGateTests` is the suite that
+    // drives `startTmuxClient` and `startControlModeClient` themselves and
+    // pins that the guard is actually called, and called first.
+
+    @Test("a holder-backed session is never prepared through tmux")
+    func holderTransportSkipsTmuxPreparation() {
+        #expect(TerminalPanelRepresentable.Coordinator.transportPreparationNotice(for: .holder) ==
+            "This session runs on the pty-holder transport, which TBD can't display yet. The session is unaffected and keeps running.")
+    }
+
+    @Test("a tmux-backed session still prepares through tmux")
+    func tmuxTransportStillPreparesThroughTmux() {
+        #expect(TerminalPanelRepresentable.Coordinator.transportPreparationNotice(for: .tmux) == nil)
+    }
+
+    @Test("the holder notice replaces the copy of BOTH tmux failure classifications")
+    func holderNoticeReplacesBothClassificationMessages() {
+        // A holder row's tmux preparation fails either way, and *which* way
+        // depends on whether an unrelated tmux server happens to be running for
+        // the repo: `.windowMissing` (recovery + Retry banner) when one is,
+        // `.commandFailed` (diagnostics copy) when none is. Neither classifier's
+        // copy may survive for a holder row.
+        let notice = TerminalPanelRepresentable.Coordinator.transportPreparationNotice(for: .holder)
+        #expect(notice != nil)
+        #expect(notice != TerminalPreparationPresentation.commandFailedMessage)
+        #expect(notice != TerminalPreparationPresentation.tmuxExecutableUnavailableMessage)
+        #expect(notice != TerminalRecoveryPresentation.failedMessage)
+        #expect(notice != TerminalRecoveryPresentation.exhaustedMessage)
+    }
+
+    @MainActor
+    @Test("a holder-backed terminal short-circuits preparation before tmux classification")
+    func holderTerminalShortCircuitsPreparation() {
+        let state = AppState()
+        let terminalID = UUID()
+        seedTerminal(terminalID, in: state, transport: .holder)
+
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        coordinator.appState = state
+        coordinator.panelID = terminalID
+
+        #expect(coordinator.panelTransport() == .holder)
+        #expect(coordinator.transportPreparationNoticeForPanel() ==
+            TerminalPreparationPresentation.holderTransportMessage)
+    }
+
+    @MainActor
+    @Test("a tmux-backed terminal is unaffected by the transport gate")
+    func tmuxTerminalIsUnaffectedByTransportGate() {
+        let state = AppState()
+        let terminalID = UUID()
+        seedTerminal(terminalID, in: state, transport: .tmux)
+
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        coordinator.appState = state
+        coordinator.panelID = terminalID
+
+        #expect(coordinator.panelTransport() == .tmux)
+        #expect(coordinator.transportPreparationNoticeForPanel() == nil)
+    }
+
+    @MainActor
+    @Test("an unresolvable terminal falls back to the tmux path")
+    func unresolvableTerminalFallsBackToTmuxPath() {
+        // AppState has not loaded this terminal (or it was removed). The gate
+        // must not invent a holder row and suppress a real tmux panel.
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        coordinator.appState = AppState()
+        coordinator.panelID = UUID()
+
+        #expect(coordinator.panelTransport() == .tmux)
+        #expect(coordinator.transportPreparationNoticeForPanel() == nil)
+    }
+
     @Test("prepared session starts the viewer")
     func preparedSessionStartsViewer() {
         let prepared = TmuxPreparedSession(
@@ -471,15 +550,21 @@ struct TerminalPanelViewTests {
     private func seedTerminal(
         _ terminalID: UUID,
         in state: AppState,
-        worktreeID: UUID = UUID()
+        worktreeID: UUID = UUID(),
+        transport: TerminalTransport = .tmux
     ) {
+        // A holder row carries EMPTY tmux coordinates by construction — the v1
+        // schema's NOT NULL columns cannot be relaxed — so it must be
+        // discriminated by `transport` alone, never by those strings.
+        let isHolder = transport == .holder
         state.terminals[worktreeID] = [Terminal(
             id: terminalID,
             worktreeID: worktreeID,
-            tmuxWindowID: "@1",
-            tmuxPaneID: "%1",
+            tmuxWindowID: isHolder ? "" : "@1",
+            tmuxPaneID: isHolder ? "" : "%1",
             label: "Shell",
-            kind: .shell
+            kind: .shell,
+            transport: transport
         )]
     }
 }
