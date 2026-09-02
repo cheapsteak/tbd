@@ -362,7 +362,13 @@ class WrapperProcessTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def _spawn_wrapper(self, root: Path, binary: Path, *extra: str) -> subprocess.Popen:
+    def _spawn_wrapper(
+        self,
+        root: Path,
+        binary: Path,
+        *extra: str,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.Popen:
         cwd = root / "project"
         cwd.mkdir(exist_ok=True)
         devnull = open(os.devnull, "rb")
@@ -382,6 +388,7 @@ class WrapperProcessTests(unittest.TestCase):
                 "hi",
             ],
             cwd=cwd,
+            env=env,
             stdin=devnull,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -439,7 +446,6 @@ class WrapperProcessTests(unittest.TestCase):
         child_pid, sandbox = self._wait_for(spawned, "the stub claude to report its pid")
         child_pid = int(child_pid)
         sandbox = Path(sandbox)
-        time.sleep(0.2)  # the wrapper installs its handlers just after spawning
 
         wrapper.send_signal(signal.SIGTERM)
         try:
@@ -480,6 +486,127 @@ class WrapperProcessTests(unittest.TestCase):
         self.assertNotEqual(0, wrapper.returncode)
         self.assertIn("JSONDecodeError", stderr)
         self.assertFalse(marker.exists(), "claude ran despite the unreadable config")
+
+    @staticmethod
+    def _exit_status(returncode: int) -> int:
+        """Popen reports a signal death as -N; a shell would report 128 + N.
+
+        Both spellings are legitimate answers here: dying under the default
+        disposition before the handlers exist and returning 128 + N from a
+        handled signal are the same outcome to anyone reading `$?`.
+        """
+        return returncode if returncode >= 0 else 128 - returncode
+
+    @staticmethod
+    def _pid_gone(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
+    def _stop_signal_leaves_nothing_behind(self, sig: int, *, at_sandbox: bool) -> None:
+        """Signal one wrapper run and assert the three invariants hold.
+
+        `at_sandbox` waits for the temp sandbox to appear first, which puts the
+        signal inside the window between the first resource existing and
+        `claude` being spawned — the window the handlers used to leave open.
+        Otherwise the signal goes immediately, landing before any resource
+        exists at all. Whichever window it hits, the wrapper must report the
+        signal, strand no sandbox, and leave no `claude` behind.
+        """
+        root = self._root()
+        tmpdir = root / "tmp"
+        tmpdir.mkdir()
+        child_report = root / "child.txt"
+        binary = self._fake_claude(
+            root / "fake-claude.sh",
+            f'printf \'%s\\n\' "$$" > {shlex.quote(str(child_report))}\n'
+            # `exec` keeps the pid just written, and the sleep outlasts the
+            # deadline so "the child is gone" cannot pass by expiry.
+            "exec sleep 600\n",
+        )
+        wrapper = self._spawn_wrapper(
+            root, binary, env={**os.environ, "TMPDIR": str(tmpdir)}
+        )
+        if at_sandbox:
+            # Polled tightly on purpose: the window this aims at is only a few
+            # milliseconds wide, so `_wait_for`'s 50 ms step would step over it.
+            deadline = time.monotonic() + self.DEADLINE
+            while time.monotonic() < deadline and not list(tmpdir.glob("claude-stub-*")):
+                if wrapper.poll() is not None:
+                    self.fail("the wrapper exited before creating a sandbox")
+                time.sleep(0.001)
+
+        wrapper.send_signal(sig)
+        try:
+            _, stderr = wrapper.communicate(timeout=self.DEADLINE)
+        except subprocess.TimeoutExpired:
+            self.fail(f"the wrapper did not finish {self.DEADLINE}s after signal {sig}")
+
+        self.assertEqual([], list(tmpdir.glob("claude-stub-*")), f"a sandbox leaked\n{stderr}")
+        if child_report.exists():
+            child_pid = int(child_report.read_text(encoding="utf-8").split()[0])
+            self._wait_for(
+                lambda: self._pid_gone(child_pid),
+                f"the stub claude (pid {child_pid}) to exit",
+            )
+        self.assertEqual(
+            128 + int(sig), self._exit_status(wrapper.returncode), stderr
+        )
+
+    def test_a_sigterm_before_claude_starts_strands_neither_sandbox_nor_child(self):
+        # The handlers have to be installed before the first resource exists.
+        # Installed inside `run_claude` instead, a signal arriving while the
+        # sandbox is built, the config written, or the stub server bound takes
+        # the interpreter's default disposition: the wrapper dies where it
+        # stands and the sandbox is stranded. Five runs are signalled the
+        # instant the sandbox appears — inside that window — and one before
+        # any resource exists at all.
+        for attempt in range(5):
+            with self.subTest(attempt=attempt):
+                self._stop_signal_leaves_nothing_behind(signal.SIGTERM, at_sandbox=True)
+        self._stop_signal_leaves_nothing_behind(signal.SIGTERM, at_sandbox=False)
+
+    def test_a_sighup_before_claude_starts_is_handled_like_a_sigterm(self):
+        self._stop_signal_leaves_nothing_behind(signal.SIGHUP, at_sandbox=True)
+
+    def test_print_env_stops_on_sighup_and_still_reports_the_summary(self):
+        # `serve_until_signalled` used to take SIGINT and SIGTERM only, so a
+        # SIGHUP — the signal a closing terminal sends — killed the server
+        # outright: no summary, and the temp sandbox left on disk.
+        root = self._root()
+        tmpdir = root / "tmp"
+        tmpdir.mkdir()
+        cwd = root / "project"
+        cwd.mkdir()
+        out, err = root / "out.txt", root / "err.txt"
+        with open(out, "w") as stdout, open(err, "w") as stderr, open(os.devnull, "rb") as devnull:
+            wrapper = subprocess.Popen(
+                [sys.executable, str(SCRIPT), "--print-env", "--text", "hi"],
+                cwd=cwd,
+                env={**os.environ, "TMPDIR": str(tmpdir)},
+                stdin=devnull,
+                stdout=stdout,
+                stderr=stderr,
+                start_new_session=True,
+            )
+        self.addCleanup(self._kill_group, wrapper)
+        self._wait_for(
+            lambda: "ANTHROPIC_BASE_URL" in out.read_text(encoding="utf-8"),
+            "the export lines on stdout",
+        )
+
+        wrapper.send_signal(signal.SIGHUP)
+        try:
+            wrapper.communicate(timeout=self.DEADLINE)
+        except subprocess.TimeoutExpired:
+            self.fail(f"the wrapper kept serving {self.DEADLINE}s after SIGHUP")
+
+        stderr_text = err.read_text(encoding="utf-8")
+        self.assertEqual(0, wrapper.returncode, stderr_text)
+        self.assertIn("request(s) served", stderr_text)
+        self.assertEqual([], list(tmpdir.glob("claude-stub-*")), "a sandbox leaked")
 
 
 class SandboxCleanupTests(unittest.TestCase):

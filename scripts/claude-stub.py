@@ -219,34 +219,117 @@ def report(lines: list[str]) -> None:
         print(f"claude-stub: {line}", file=sys.stderr)
 
 
+class Terminated(Exception):
+    """SIGTERM or SIGHUP arrived with nothing else to hand it to.
+
+    Raised out of the signal handler so the signal unwinds through `main`'s
+    cleanup instead of the interpreter dying where it stands.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"terminated by signal {signum}")
+        self.signum = signum
+
+
+class SignalTargets:
+    """Who owns a stop signal right now, as the run moves through its phases.
+
+    The handler tests these in order: a live `claude` owns the signal and gets
+    it forwarded; a spawn in flight queues it, because the fork may already
+    exist under a name nothing has been handed yet; a `--print-env` server
+    stops serving; otherwise nothing is running that can take it, so the
+    signal becomes a `Terminated`.
+    """
+
+    def __init__(self) -> None:
+        self.child: subprocess.Popen | None = None
+        self.spawning = False
+        self.pending_signum: int | None = None
+        self.serving_event: threading.Event | None = None
+
+
+SIGNAL_TARGETS = SignalTargets()
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+
+
+def handle_stop_signal(signum: int, _frame: Any) -> None:
+    child = SIGNAL_TARGETS.child
+    if child is not None:
+        # PEP 475 retries the interrupted `wait()` once this returns, so the
+        # wrapper's own status follows however the child answers the signal.
+        try:
+            child.send_signal(signum)
+        except OSError:  # the child died between the check and the signal
+            pass
+        return
+    if SIGNAL_TARGETS.spawning:
+        SIGNAL_TARGETS.pending_signum = signum
+        return
+    event = SIGNAL_TARGETS.serving_event
+    if event is not None:
+        event.set()
+        return
+    raise Terminated(signum)
+
+
+def install_signal_handlers() -> dict[int, Any]:
+    """Take SIGTERM and SIGHUP; return what they were, for restoring after."""
+    return {sig: signal.signal(sig, handle_stop_signal) for sig in STOP_SIGNALS}
+
+
+def restore_signal_handlers(previous: dict[int, Any]) -> None:
+    for sig, handler in previous.items():
+        if handler is not None:  # None = a handler Python cannot reinstate
+            signal.signal(sig, handler)
+
+
 def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
     """Run claude with stdio inherited; signals reach it, we still summarize.
 
     The child deliberately stays in this process's own group and session: the
     interactive TUI has to remain in the terminal's foreground process group to
     own the tty, so it cannot be put behind `start_new_session`. Signals are
-    therefore forwarded by pid. Without that forwarding a SIGTERM to the
-    wrapper takes the interpreter's default disposition — the process dies
-    where it stands, `main`'s `finally` never runs, the sandbox is left on
-    disk, and `claude` keeps running with nobody waiting on it.
+    therefore forwarded by pid, and all this has to do is publish the child for
+    the handlers `main` installed before any resource existed. Without that
+    forwarding a SIGTERM to the wrapper would take the interpreter's default
+    disposition — the process dies where it stands, `main`'s `finally` never
+    runs, the sandbox is left on disk, and `claude` keeps running with nobody
+    waiting on it.
 
     PEP 475 retries the interrupted `wait()` once a handler returns, so the
     call resumes and returns the child's status as soon as the forwarded
     signal lands.
+
+    The spawn itself is the one moment the child cannot be named: a signal
+    landing inside `Popen` — after the fork, before the object comes back —
+    would unwind past a process nothing can signal or wait for, orphaning it.
+    Masking the signals across the spawn is not the fix, because the mask
+    survives `exec` and would hand `claude` a blocked SIGTERM. So the handler
+    queues instead, and the signal is delivered by hand once the child has a
+    name.
     """
+    SIGNAL_TARGETS.pending_signum = None
+    SIGNAL_TARGETS.spawning = True
+    child: subprocess.Popen | None = None
     try:
         child = subprocess.Popen([binary, *claude_args], env=env)
+        # Published before `spawning` is cleared, so no signal can fall
+        # between the two and find nothing willing to take it.
+        SIGNAL_TARGETS.child = child
     except FileNotFoundError:
         report([f"claude binary not found: {binary}"])
+    finally:
+        SIGNAL_TARGETS.spawning = False
+
+    queued = SIGNAL_TARGETS.pending_signum
+    if child is None:
+        if queued is not None:
+            raise Terminated(queued)
         return 127
 
-    def forward(signum: int, _frame: Any) -> None:
-        child.send_signal(signum)
-
-    previous: dict[int, Any] = {}
     try:
-        for sig in (signal.SIGTERM, signal.SIGHUP):
-            previous[sig] = signal.signal(sig, forward)
+        if queued is not None:
+            child.send_signal(queued)
         while True:
             try:
                 status = child.wait()
@@ -254,8 +337,7 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
             except KeyboardInterrupt:
                 child.send_signal(signal.SIGINT)
     finally:
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
+        SIGNAL_TARGETS.child = None
     # Popen.wait reports a signal death as a negative signal number; callers
     # reading an exit status expect the shell's conventional 128 + signal.
     return status if status >= 0 else 128 - status
@@ -264,17 +346,29 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
 def serve_until_signalled(
     env: dict[str, str], binary: str, extra_env: dict[str, str] | None = None
 ) -> None:
-    """--print-env: hand the caller exports, keep serving until SIGINT/SIGTERM."""
+    """--print-env: hand the caller exports, keep serving until a stop signal.
+
+    No handler is installed here: SIGTERM and SIGHUP are already `main`'s, and
+    publishing the event is what turns them into a clean stop rather than a
+    `Terminated` unwind. SIGINT keeps its default disposition and arrives as a
+    KeyboardInterrupt, which stops serving the same way. Either route returns
+    normally, so the caller still gets the closing summary.
+    """
     for line in export_lines(env, extra_env):
         print(line)
     print(f"# eval these in another pane, then run: {shlex.quote(binary)}")
     print(f"# run claude from this directory (the sandbox trusts it): {Path.cwd()}")
     sys.stdout.flush()
     stop = threading.Event()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: stop.set())
-    report(["serving; Ctrl-C (or SIGTERM) to stop"])
-    stop.wait()
+    SIGNAL_TARGETS.serving_event = stop
+    try:
+        report(["serving; Ctrl-C (or SIGTERM) to stop"])
+        try:
+            stop.wait()
+        except KeyboardInterrupt:
+            pass
+    finally:
+        SIGNAL_TARGETS.serving_event = None
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -305,42 +399,72 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str]) -> int:
-    if "--" in argv:
-        split = argv.index("--")
-        argv, claude_args = argv[:split], argv[split + 1 :]
-    else:
-        claude_args = []
-    args = parse_args(argv)
-    turns, role_turns = resolve_turns(args)
+    """Serve the fake API for one run, and reclaim the sandbox afterwards.
 
-    keep = args.keep or args.sandbox is not None
-    sandbox = Path(args.sandbox) if args.sandbox else Path(tempfile.mkdtemp(prefix="claude-stub-"))
-
-    routes = build_routes(role_turns)
-    # Everything after the directory exists belongs inside the cleanup scope:
-    # a corrupted `.claude.json` in a reused sandbox or an unwritable path
-    # would otherwise fail between creation and the `finally`, stranding a
-    # fresh temp dir that nothing ever removes.
+    The stop-signal handlers go on first, before a single resource exists, so
+    a SIGTERM or SIGHUP anywhere below — building the sandbox, binding the
+    stub server, spawning claude — unwinds through the cleanup instead of
+    taking the interpreter's default disposition. Only SIGKILL or a hard crash
+    can leave the sandbox on disk or the child unwaited-for.
+    """
+    previous_handlers = install_signal_handlers()
     try:
-        sandbox.mkdir(parents=True, exist_ok=True)
-        (sandbox / "tmp").mkdir(exist_ok=True)
-        write_config(sandbox, Path.cwd())
-        with StubServer(turns, role_turns=routes) as server:
-            base_url = server.base_url
-            extra_env = parse_env_assignments(args.env)
-            env = build_env(sandbox, base_url, dict(os.environ), extra_env)
-            if args.print_env:
-                serve_until_signalled(env, args.claude_binary, extra_env)
-                status = 0
-            else:
-                status = run_claude(args.claude_binary, claude_args, env)
-            report(summary_lines(server, env))
-    finally:
-        if keep:
-            report([f"sandbox kept at {sandbox}"])
+        if "--" in argv:
+            split = argv.index("--")
+            argv, claude_args = argv[:split], argv[split + 1 :]
         else:
-            shutil.rmtree(sandbox, ignore_errors=True)
-    return status
+            claude_args = []
+        args = parse_args(argv)
+        turns, role_turns = resolve_turns(args)
+
+        keep = args.keep or args.sandbox is not None
+        routes = build_routes(role_turns)
+        sandbox: Path | None = None
+        # The sandbox is created inside the cleanup scope, not before it: a
+        # corrupted `.claude.json` in a reused sandbox, an unwritable path, or
+        # a signal would otherwise fail between creation and the `finally`,
+        # stranding a fresh temp dir that nothing ever removes.
+        try:
+            # The one gap a stop signal must not land in: `tempfile.mkdtemp`
+            # creates the directory and only then returns its name, and a
+            # handler runs between the two, so a `Terminated` raised there
+            # would unwind past a sandbox nobody can name, let alone remove.
+            # Held off across the assignment the signal merely stays pending,
+            # and lands the moment the sandbox is reachable by the `finally`.
+            blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+            try:
+                sandbox = (
+                    Path(args.sandbox)
+                    if args.sandbox
+                    else Path(tempfile.mkdtemp(prefix="claude-stub-"))
+                )
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+            sandbox.mkdir(parents=True, exist_ok=True)
+            (sandbox / "tmp").mkdir(exist_ok=True)
+            write_config(sandbox, Path.cwd())
+            with StubServer(turns, role_turns=routes) as server:
+                base_url = server.base_url
+                extra_env = parse_env_assignments(args.env)
+                env = build_env(sandbox, base_url, dict(os.environ), extra_env)
+                if args.print_env:
+                    serve_until_signalled(env, args.claude_binary, extra_env)
+                    status = 0
+                else:
+                    status = run_claude(args.claude_binary, claude_args, env)
+                report(summary_lines(server, env))
+        finally:
+            if sandbox is not None:
+                if keep:
+                    report([f"sandbox kept at {sandbox}"])
+                else:
+                    shutil.rmtree(sandbox, ignore_errors=True)
+        return status
+    except Terminated as terminated:
+        report([f"stopped by signal {terminated.signum}"])
+        return 128 + terminated.signum
+    finally:
+        restore_signal_handlers(previous_handlers)
 
 
 if __name__ == "__main__":
