@@ -155,6 +155,7 @@ jobs:
         run: |
           python3 .claude/hooks/guardrails/dispatch.py --self-test
           python3 scripts/test-swift-safe.py
+          python3 scripts/test-claude-stub.py
           python3 scripts/test-remote-verify.py
           bash scripts/remote-verify.test.sh
           bash scripts/sweep-preflight-refs.test.sh

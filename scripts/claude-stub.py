@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""Run the real `claude` CLI against a fake model API — zero tokens, offline.
+
+A mock/stub of the Anthropic Messages API stands in for the model, so a real
+`claude` session (interactive TUI or `-p` headless) runs end to end without
+spending tokens and with no API key: `ANTHROPIC_BASE_URL` points at a loopback
+server started here, and every answer is scripted locally. Nothing leaves the
+machine.
+
+The fake server itself is `stub_server.py` under
+`.github/workflows/claude-review-v2/tests/e2e/` (SSE streaming, canned turns,
+content-keyed routing); this wrapper makes it usable outside the review gate.
+See `docs/fake-model-api.md`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+E2E_DIR = REPO_ROOT / ".github" / "workflows" / "claude-review-v2" / "tests" / "e2e"
+sys.path.insert(0, str(E2E_DIR))
+
+import harness  # noqa: E402
+from stub_server import StubServer, ToolCall, Turn  # noqa: E402
+
+# Env the caller's terminal owns. The e2e harness forces TERM=dumb, which is
+# right for `-p` and wrong for the TUI, so these pass through when set.
+PASSTHROUGH_ENV = ("TERM", "COLORTERM", "LANG", "LC_ALL")
+
+# Passed through from the caller's own shell, so --print-env leaves it out —
+# re-exporting a plugin-laden PATH buries the four lines that matter.
+UNEXPORTED_ENV = ("PATH",)
+
+# The one dialog the e2e harness has no reason to pre-accept and the
+# interactive TUI raises anyway: the custom-API-key approval, keyed on the
+# trailing characters of ANTHROPIC_API_KEY. Headless `-p` never asks.
+STUB_API_KEY = "stub-key"
+
+# The interactive TUI opens every session with a second, concurrent request
+# that asks the model to name the session; headless `-p` sends none. Left
+# unrouted it eats a scripted turn (and racing with the real request, a
+# nondeterministic one), so it gets its own content-keyed route: the CLI wraps
+# the user's message in <session>…</session> there and nowhere else.
+TITLE_SENTINEL = "</session>"
+TITLE_LABEL = "session title"
+TITLE_TURN = Turn(text="Stub session")
+
+
+def turn_from_dict(entry: dict[str, Any]) -> Turn:
+    """One scripted assistant turn: `{"text": ..., "tool_calls": [...]}`."""
+    calls = [
+        ToolCall(call["name"], call.get("input", {}), id=call.get("id", "toolu_stub"))
+        for call in entry.get("tool_calls", [])
+    ]
+    return Turn(text=entry.get("text", ""), tool_calls=calls)
+
+
+def parse_turns_document(document: Any) -> tuple[list[Turn], dict[str, list[Turn]]]:
+    """A turn file is either a plain list of turns or `{turns, role_turns}`."""
+    if isinstance(document, list):
+        return [turn_from_dict(entry) for entry in document], {}
+    if not isinstance(document, dict):
+        raise ValueError("turn file must be a JSON list or object")
+    turns = [turn_from_dict(entry) for entry in document.get("turns", [])]
+    role_turns = {
+        sentinel: [turn_from_dict(entry) for entry in entries]
+        for sentinel, entries in (document.get("role_turns") or {}).items()
+    }
+    return turns, role_turns
+
+
+def long_answer(lines: int) -> str:
+    """A numbered multi-line answer — the shape that scrolls in the TUI."""
+    return "\n".join(
+        f"{n}. stub answer line {n} of {lines} "
+        "— filler so the answer is long enough to scroll."
+        for n in range(1, lines + 1)
+    )
+
+
+def resolve_turns(args: argparse.Namespace) -> tuple[list[Turn], dict[str, list[Turn]]]:
+    """The scripted conversation: --turns, --text, or the default long answer."""
+    if args.turns:
+        return parse_turns_document(json.loads(Path(args.turns).read_text(encoding="utf-8")))
+    if args.text is not None:
+        return [Turn(text=args.text)], {}
+    return [Turn(text=long_answer(args.lines))], {}
+
+
+def parse_env_assignments(assignments: list[str]) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for item in assignments:
+        key, separator, value = item.partition("=")
+        if not separator or not key:
+            raise ValueError(f"--env expects KEY=VALUE, got {item!r}")
+        env[key] = value
+    return env
+
+
+def build_env(
+    sandbox: Path,
+    base_url: str,
+    parent_env: dict[str, str],
+    extra_env: dict[str, str],
+) -> dict[str, str]:
+    """Harness isolation, with the caller's terminal env and --env on top."""
+    env = harness.sandbox_env(sandbox, base_url)
+    for key in PASSTHROUGH_ENV:
+        if parent_env.get(key):
+            env[key] = parent_env[key]
+    env.update(extra_env)
+    return env
+
+
+def export_lines(env: dict[str, str]) -> list[str]:
+    """`export` lines for --print-env, minus the PATH the caller already has."""
+    return [
+        f"export {key}={shlex.quote(value)}"
+        for key, value in sorted(env.items())
+        if key not in UNEXPORTED_ENV
+    ]
+
+
+def write_config(sandbox: Path, project: Path) -> None:
+    """Pre-accept every dialog, including the one only the TUI raises.
+
+    A reused --sandbox is patched rather than rebuilt: its config dir also
+    holds the session transcripts, which is what `claude --resume` reads. The
+    keys re-asserted here are the ones a second run can find stale — a run
+    from a different cwd needs its own trusted-project entry.
+    """
+    config_dir = sandbox / "config"
+    config_path = config_dir / ".claude.json"
+    if not config_dir.exists():
+        harness.write_config(sandbox, project)
+    config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+    config["hasTrustDialogAccepted"] = True
+    config["hasCompletedOnboarding"] = True
+    config.setdefault("projects", {})[str(project)] = {
+        "hasTrustDialogAccepted": True,
+        "hasCompletedProjectOnboarding": True,
+    }
+    config["customApiKeyResponses"] = {"approved": [STUB_API_KEY[-20:]], "rejected": []}
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
+def summary_lines(server: StubServer, base_url: str) -> list[str]:
+    capture = server.capture
+    unexpected = harness.tolerated_unexpected_paths(capture.unexpected_paths)
+    lines = [f"{len(capture.raw_bodies)} request(s) served at {base_url}"]
+    counts: dict[str, int] = {}
+    for route in capture.routes:
+        label = TITLE_LABEL if route == TITLE_SENTINEL else (route or "(ordered turns)")
+        counts[label] = counts.get(label, 0) + 1
+    if len(counts) > 1:  # a single route is just the request count again
+        for label, count in sorted(counts.items()):
+            lines.append(f"  route {label}: {count}")
+    lines.append(f"unexpected paths: {', '.join(unexpected) if unexpected else 'none'}")
+    lines.append(f"client disconnects: {len(capture.client_disconnects)}")
+    lines.append(
+        f"no request left this machine — ANTHROPIC_BASE_URL was {base_url} (loopback)"
+    )
+    return lines
+
+
+def report(lines: list[str]) -> None:
+    for line in lines:
+        print(f"claude-stub: {line}", file=sys.stderr)
+
+
+def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
+    """Run claude with stdio inherited; Ctrl-C reaches it, we still summarize."""
+    try:
+        child = subprocess.Popen([binary, *claude_args], env=env)
+    except FileNotFoundError:
+        report([f"claude binary not found: {binary}"])
+        return 127
+    while True:
+        try:
+            return child.wait()
+        except KeyboardInterrupt:
+            child.send_signal(signal.SIGINT)
+
+
+def serve_until_signalled(env: dict[str, str]) -> None:
+    """--print-env: hand the caller exports, keep serving until SIGINT/SIGTERM."""
+    for line in export_lines(env):
+        print(line)
+    print(f"# eval these in another pane, then run: {shlex.quote('claude')}")
+    sys.stdout.flush()
+    stop = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: stop.set())
+    report(["serving; Ctrl-C (or SIGTERM) to stop"])
+    stop.wait()
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="claude-stub.py",
+        description=(
+            "Run the real claude CLI against a fake model API on loopback. "
+            "Zero tokens, no network, no real API key. Arguments after `--` go "
+            "to claude (none = interactive TUI; `-p PROMPT` = headless)."
+        ),
+        epilog=(
+            "Requests past the end of the scripted turns are answered with the "
+            "server's overflow turn, whose text is STUB-TERMINAL, so a session "
+            "never hangs waiting for a turn that was never written."
+        ),
+    )
+    script = parser.add_mutually_exclusive_group()
+    script.add_argument("--turns", metavar="FILE.json", help="JSON list of turns, or {turns, role_turns}")
+    script.add_argument("--text", help="serve a single text turn with this content")
+    parser.add_argument("--lines", type=int, default=200, help="lines in the default long answer (default: 200)")
+    parser.add_argument("--sandbox", help="sandbox dir (default: a fresh temp dir; an explicit one is kept)")
+    parser.add_argument("--keep", action="store_true", help="keep the sandbox dir at exit")
+    parser.add_argument("--env", action="append", default=[], metavar="KEY=VALUE", help="extra env for claude (repeatable)")
+    parser.add_argument("--print-env", action="store_true", help="print `export` lines and keep serving instead of running claude")
+    parser.add_argument("--claude-binary", default="claude", help="claude executable (default: claude from PATH)")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    if "--" in argv:
+        split = argv.index("--")
+        argv, claude_args = argv[:split], argv[split + 1 :]
+    else:
+        claude_args = []
+    args = parse_args(argv)
+    turns, role_turns = resolve_turns(args)
+
+    keep = args.keep or args.sandbox is not None
+    sandbox = Path(args.sandbox) if args.sandbox else Path(tempfile.mkdtemp(prefix="claude-stub-"))
+    sandbox.mkdir(parents=True, exist_ok=True)
+    (sandbox / "tmp").mkdir(exist_ok=True)
+    write_config(sandbox, Path.cwd())
+
+    routes = {TITLE_SENTINEL: [TITLE_TURN], **role_turns}
+    try:
+        with StubServer(turns, role_turns=routes) as server:
+            base_url = server.base_url
+            env = build_env(sandbox, base_url, dict(os.environ), parse_env_assignments(args.env))
+            if args.print_env:
+                serve_until_signalled(env)
+                status = 0
+            else:
+                status = run_claude(args.claude_binary, claude_args, env)
+            report(summary_lines(server, base_url))
+    finally:
+        if keep:
+            report([f"sandbox kept at {sandbox}"])
+        else:
+            shutil.rmtree(sandbox, ignore_errors=True)
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
