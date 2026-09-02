@@ -373,6 +373,7 @@ enum ProfileUsagePresentation {
         MenuLineModel(
             primary: ProfileLoginPresentation.menuItemTitle(for: entry),
             secondary: secondaryLine(for: entry.usageSnapshot,
+                                     kind: entry.profile.kind,
                                      timeZone: timeZone, now: now)
         )
     }
@@ -382,7 +383,12 @@ enum ProfileUsagePresentation {
     /// when older data exists). Detail line wins when present AND healthy so a
     /// rate-limited profile with old numbers still shows the retry note rather
     /// than silently presenting stale figures as current.
+    ///
+    /// `kind` is required rather than defaulted: the staleness threshold and
+    /// the failure copy are both kind-dependent, and a silent default would
+    /// quietly mis-age token profiles at every new call site.
     static func secondaryLine(for snapshot: ProfileUsageSnapshot?,
+                              kind: CredentialKind,
                               timeZone: TimeZone = .current,
                               now: Date = Date()) -> String? {
         // Healthy + fresh: numbers.
@@ -391,13 +397,13 @@ enum ProfileUsagePresentation {
             // A fresh healthy snapshot may still be aging; append the age note
             // when it crosses the stale threshold so "5h 12% used …" doesn't
             // masquerade as up-to-the-second.
-            if let note = stalenessNote(for: snapshot, now: now) {
+            if let note = stalenessNote(for: snapshot, kind: kind, now: now) {
                 return "\(detail) · \(note)"
             }
             return detail
         }
         // Otherwise the honest note carries the row (nil for no-snapshot rows).
-        return stalenessNote(for: snapshot, now: now)
+        return stalenessNote(for: snapshot, kind: kind, now: now)
     }
 
     // MARK: - Picker ordering & row state
@@ -440,8 +446,20 @@ enum ProfileUsagePresentation {
     }
 
     /// Threshold past which snapshot data is called out as stale in the picker.
-    /// The daemon poller sweeps ~every 90s, so 5 minutes means several misses.
-    static let staleAge: TimeInterval = 300
+    ///
+    /// Cadence-relative — roughly 3x the polling interval for that kind — and
+    /// therefore NOT a single shared constant. Signed-in profiles are swept
+    /// every ~90s, so five minutes means several consecutive misses. Token
+    /// profiles refresh on a five-minute activity floor, so the same five
+    /// minutes would mark every one of them stale the instant it was fetched:
+    /// a permanent false alarm on correct data. Fifteen minutes is three
+    /// missed opportunities for that kind.
+    static func staleAge(forKind kind: CredentialKind) -> TimeInterval {
+        switch kind {
+        case .oauthToken: return 900
+        case .oauth, .apiKey, .bedrock: return 300
+        }
+    }
 
     /// Compact "how long ago" for a fetch timestamp: "just now", "3m", "2h",
     /// "1d". Used to age both fresh-but-old and stale-with-old-data rows.
@@ -460,8 +478,9 @@ enum ProfileUsagePresentation {
     /// never a silent blank — so the three failure modes read differently:
     ///
     /// - fresh & healthy → nil (no note; the usage line speaks for itself)
-    /// - fresh but aging (>= staleAge) → "updated 6m ago"
-    /// - `needsLogin` → "needs re-login" (actionable: the user must `/login`)
+    /// - fresh but aging (>= `staleAge(forKind:)`) → "updated 6m ago"
+    /// - `needsLogin` → "needs re-login" (actionable: the user must `/login`),
+    ///   or "token rejected" for `.oauthToken`, whose repair is a new token
     /// - `noCredentials` → "not logged in"
     /// - `rateLimited` → "usage unavailable — retrying" (+ "· last data 2h ago"
     ///   when we still have older numbers to show alongside)
@@ -471,14 +490,18 @@ enum ProfileUsagePresentation {
     /// The daemon's verbose `status` string is no longer surfaced verbatim
     /// (it leaked ISO timestamps into the UI); the typed `statusKind` drives
     /// the copy instead.
+    ///
+    /// `kind` is required, not defaulted: it selects both the staleness
+    /// threshold and the wording of the rejected-credential case.
     static func stalenessNote(for snapshot: ProfileUsageSnapshot?,
+                              kind: CredentialKind,
                               now: Date = Date()) -> String? {
         guard let snapshot else { return nil }
 
         if snapshot.isOK {
             guard let fetchedAt = snapshot.fetchedAt else { return "no usage data yet" }
             let age = now.timeIntervalSince(fetchedAt)
-            guard age >= staleAge else { return nil }
+            guard age >= staleAge(forKind: kind) else { return nil }
             return "updated \(ageText(since: fetchedAt, now: now)) ago"
         }
 
@@ -489,7 +512,10 @@ enum ProfileUsagePresentation {
             // fall through to a generic note.
             return retryingNote(for: snapshot, now: now)
         case .needsLogin:
-            return "needs re-login"
+            // A token profile is repaired by pasting a fresh setup-token, not
+            // by /login — telling its owner to "re-login" would point at the
+            // exact affordance this kind exists to avoid.
+            return kind == .oauthToken ? "token rejected" : "needs re-login"
         case .noCredentials:
             return "not logged in"
         case .rateLimited, .networkError, .decodeError, .unknown:

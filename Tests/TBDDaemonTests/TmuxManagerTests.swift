@@ -642,3 +642,101 @@ final class LockedCommandRecorder: @unchecked Sendable {
         #expect(String(describing: error).contains("can't find window: main"))
     }
 }
+
+/// A spawn for a token or API-key profile puts the secret into tmux's argv as
+/// `-e NAME=VALUE`. Every failure of that spawn stringifies the argv, and the
+/// resulting string reaches four sinks: the daemon log, `TmuxError`'s
+/// description, the fsync'd append-only actuation log under `~/tbd`, and the
+/// `RPCResponse(error:)` string the app renders in an alert. A tmux that merely
+/// timed out or exited nonzero for an ordinary reason would therefore have
+/// published the credential permanently.
+///
+/// These pin the single chokepoint: `redactedCommandDescription` is the only
+/// place argv becomes text, so redacting there covers all four sinks at once.
+@Suite struct TmuxCommandRedactionTests {
+    static let secret = "sk-ant-oat01-supersecrettokenvalue"
+
+    private static func spawnArguments() -> [String] {
+        TmuxManager.newWindowCommand(
+            server: "tbd-a1b2c3d4",
+            session: "main",
+            cwd: "/worktrees/example",
+            shellCommand: "claude",
+            sensitiveEnv: [
+                "CLAUDE_CODE_OAUTH_TOKEN": secret,
+                "ANTHROPIC_API_KEY": "sk-ant-api03-anotherssecret",
+            ],
+            environment: ["SHELL": "/bin/zsh"]
+        )
+    }
+
+    @Test func argvStillCarriesTheSecretSoRedactionIsNotVacuous() {
+        // Guards the test itself: if the spawn path ever stopped putting the
+        // token in argv, the assertions below would pass for the wrong reason.
+        #expect(Self.spawnArguments().contains("CLAUDE_CODE_OAUTH_TOKEN=\(Self.secret)"))
+    }
+
+    @Test func descriptionKeepsTheVariableNameAndDropsTheValue() {
+        let rendered = TmuxManager.redactedCommandDescription(
+            label: "tmux", arguments: Self.spawnArguments()
+        )
+        #expect(!rendered.contains(Self.secret))
+        #expect(!rendered.contains("sk-ant-api03-anotherssecret"))
+        // Name kept: a spawn failure must stay diagnosable.
+        #expect(rendered.contains("-e CLAUDE_CODE_OAUTH_TOKEN=<redacted>"))
+        #expect(rendered.contains("-e ANTHROPIC_API_KEY=<redacted>"))
+        // The rest of the command is untouched.
+        #expect(rendered.hasPrefix("tmux -L tbd-a1b2c3d4 new-window -t main -c /worktrees/example"))
+    }
+
+    @Test func redactionIsStructuralNotAScanForKnownSecretShapes() {
+        // A variable nobody has invented yet, whose value looks like nothing in
+        // particular, is redacted all the same — the rule is "operand of tmux's
+        // -e flag", not "looks like a token".
+        let rendered = TmuxManager.redactedCommandDescription(
+            label: "tmux",
+            arguments: ["-L", "srv", "new-window", "-e", "FUTURE_SECRET=hunter2", "zsh"]
+        )
+        #expect(rendered == "tmux -L srv new-window -e FUTURE_SECRET=<redacted> zsh")
+    }
+
+    @Test func nonSensitiveFlagsAreUntouched() {
+        // capture-pane's `-e` is a boolean flag, not an env assignment: its
+        // neighbour is not NAME=VALUE and must survive verbatim.
+        let capture = TmuxManager.capturePaneWithAnsiCommand(server: "tbd-a1b2c3d4", paneID: "%7")
+        let rendered = TmuxManager.redactedCommandDescription(label: "tmux", arguments: capture)
+        #expect(rendered == "tmux " + capture.joined(separator: " "))
+        #expect(!rendered.contains("<redacted>"))
+
+        // An ordinary operand containing "=" is not an assignment either.
+        let sendKeys = TmuxManager.redactedCommandDescription(
+            label: "tmux",
+            arguments: ["-L", "srv", "send-keys", "-l", "-t", "%7", "x = y"]
+        )
+        #expect(sendKeys == "tmux -L srv send-keys -l -t %7 x = y")
+    }
+
+    @Test func timedOutErrorCarriesNoSecret() {
+        let description = TmuxManager.redactedCommandDescription(
+            label: "tmux", arguments: Self.spawnArguments()
+        )
+        let error = TmuxError.timedOut(command: description, timeout: .seconds(30))
+        #expect(!error.localizedDescription.contains(Self.secret))
+        #expect(!String(describing: error).contains(Self.secret))
+        #expect(error.localizedDescription.contains("CLAUDE_CODE_OAUTH_TOKEN=<redacted>"))
+    }
+
+    @Test func commandFailedErrorCarriesNoSecret() {
+        let description = TmuxManager.redactedCommandDescription(
+            label: "tmux", arguments: Self.spawnArguments()
+        )
+        let error = TmuxError.commandFailed(
+            command: description, status: 1, output: "can't find window: main"
+        )
+        // `commandFailed` truncates only `output`; the command is rendered whole,
+        // which is exactly why it must arrive already redacted.
+        #expect(!error.localizedDescription.contains(Self.secret))
+        #expect(!String(describing: error).contains(Self.secret))
+        #expect(error.localizedDescription.contains("CLAUDE_CODE_OAUTH_TOKEN=<redacted>"))
+    }
+}

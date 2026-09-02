@@ -12,7 +12,9 @@ private func makeEntry(
     baseURL: String? = nil,
     model: String? = nil,
     awsRegion: String? = nil,
-    loginIdentity: String? = nil
+    loginIdentity: String? = nil,
+    usageSnapshot: ProfileUsageSnapshot? = nil,
+    tokenTail: String? = nil
 ) -> ModelProfileWithUsage {
     ModelProfileWithUsage(
         profile: ModelProfile(
@@ -20,8 +22,15 @@ private func makeEntry(
             baseURL: baseURL, model: model, awsRegion: awsRegion
         ),
         usage: nil,
-        loginIdentity: loginIdentity
+        loginIdentity: loginIdentity,
+        usageSnapshot: usageSnapshot,
+        tokenTail: tokenTail
     )
+}
+
+private func probeSnapshot(_ statusKind: ProfileUsageStatusKind) -> ProfileUsageSnapshot {
+    ProfileUsageSnapshot(buckets: [], fetchedAt: nil, lastAttemptAt: Date(),
+                         status: "fixture", statusKind: statusKind)
 }
 
 // MARK: - needsLogin
@@ -110,4 +119,74 @@ private func makeEntry(
     // detailCaption — the row simply renders no caption line.
     let bare = makeEntry(kind: .apiKey)
     #expect(ProfileLoginPresentation.settingsCaption(for: bare) == nil)
+}
+
+// MARK: - Token profiles
+
+@Test func needsLogin_oauthToken_isFalseWhateverTheIdentity() {
+    // A token profile authenticates by its stored setup-token. A /login run
+    // inside its config dir would be shadowed by the injected
+    // CLAUDE_CODE_OAUTH_TOKEN, so the affordance must never be offered — that
+    // skipped step is the entire friction this kind removes.
+    #expect(!ProfileLoginPresentation.needsLogin(kind: .oauthToken, loginIdentity: nil))
+    #expect(!ProfileLoginPresentation.needsLogin(kind: .oauthToken, loginIdentity: ""))
+    #expect(!ProfileLoginPresentation.needsLogin(kind: .oauthToken, loginIdentity: "a@acme.com"))
+}
+
+@Test func menuTitleSuffix_oauthToken_isBare() {
+    // No identity is readable for a setup token (the profile endpoint 403s),
+    // so the menu row must not claim one — nor demand a /login.
+    #expect(ProfileLoginPresentation.menuTitleSuffix(kind: .oauthToken, loginIdentity: nil) == "")
+    #expect(ProfileLoginPresentation.menuTitleSuffix(kind: .oauthToken,
+                                                    loginIdentity: "a@acme.com") == "")
+}
+
+@Test func maskedTokenCaption_rendersTailAndNilsWhenAbsent() {
+    #expect(ProfileLoginPresentation.maskedTokenCaption(tokenTail: "4f2a") == "Token •••• 4f2a")
+    // No tail from the daemon (older daemon, or the secret file is gone):
+    // invent nothing.
+    #expect(ProfileLoginPresentation.maskedTokenCaption(tokenTail: nil) == nil)
+    #expect(ProfileLoginPresentation.maskedTokenCaption(tokenTail: "  ") == nil)
+}
+
+@Test func settingsCaption_oauthToken_showsMaskedTail() {
+    let entry = makeEntry(kind: .oauthToken, tokenTail: "4f2a")
+    #expect(ProfileLoginPresentation.settingsCaption(for: entry) == "Token •••• 4f2a")
+}
+
+@Test func settingsCaption_oauthToken_keepsEndpointDetails() {
+    let entry = makeEntry(kind: .oauthToken, baseURL: "http://127.0.0.1:8080",
+                          model: "opus", tokenTail: "4f2a")
+    #expect(ProfileLoginPresentation.settingsCaption(for: entry)
+            == "Token •••• 4f2a · via http://127.0.0.1:8080 · opus")
+}
+
+@Test func settingsCaption_oauthToken_neverAdvertisesLogin() {
+    // The .oauth branch's "No login detected — run /login once" copy must not
+    // leak onto a token profile through a grouped switch case.
+    let entry = makeEntry(kind: .oauthToken, model: "opus")
+    let caption = ProfileLoginPresentation.settingsCaption(for: entry)
+    #expect(caption == "opus")
+    #expect(caption?.contains("/login") != true)
+}
+
+@Test func settingsCaption_oauthToken_withNothingToSay_isNil() {
+    #expect(ProfileLoginPresentation.settingsCaption(for: makeEntry(kind: .oauthToken)) == nil)
+}
+
+@Test func tokenRejected_onlyForTokenProfilesWithARejectedProbe() {
+    // On-branch: a token profile whose probe came back 401/403.
+    #expect(ProfileLoginPresentation.tokenRejected(
+        for: makeEntry(kind: .oauthToken, usageSnapshot: probeSnapshot(.needsLogin))))
+
+    // Off-branches. An oauth profile in the same snapshot state needs /login,
+    // not a new token — a different repair with a different affordance.
+    #expect(!ProfileLoginPresentation.tokenRejected(
+        for: makeEntry(kind: .oauth, usageSnapshot: probeSnapshot(.needsLogin))))
+    #expect(!ProfileLoginPresentation.tokenRejected(
+        for: makeEntry(kind: .oauthToken, usageSnapshot: probeSnapshot(.ok))))
+    #expect(!ProfileLoginPresentation.tokenRejected(
+        for: makeEntry(kind: .oauthToken, usageSnapshot: probeSnapshot(.rateLimited))))
+    // Never probed yet: not a rejection.
+    #expect(!ProfileLoginPresentation.tokenRejected(for: makeEntry(kind: .oauthToken)))
 }

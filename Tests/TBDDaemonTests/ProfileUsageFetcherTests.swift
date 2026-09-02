@@ -355,8 +355,8 @@ struct LiveProfileUsageFetcherTests {
     @Test func happyPathSendsBearerTokenAndParsesBuckets() async throws {
         ProfileUsageMockURLProtocol.handler = { req in okResponse(req, body: capturedUsageJSON) }
         let store = StubCredentialStore(read: .blob(credentialBlob(accessToken: "sk-ant-oat01-TEST")))
-        let status = await makeProfileFetcher(store: store).fetchUsage(configDirPath: "/tmp/x")
-        guard case .ok(let buckets) = status else {
+        let status = await makeProfileFetcher(store: store).fetchUsage(credential: .configDir("/tmp/x"))
+        guard case .ok(let buckets, _) = status else {
             Issue.record("expected .ok, got \(status)")
             return
         }
@@ -374,7 +374,7 @@ struct LiveProfileUsageFetcherTests {
             throw URLError(.badServerResponse)
         }
         let store = StubCredentialStore(read: .absent)
-        let status = await makeProfileFetcher(store: store).fetchUsage(configDirPath: "/tmp/x")
+        let status = await makeProfileFetcher(store: store).fetchUsage(credential: .configDir("/tmp/x"))
         guard case .noCredentials = status else {
             Issue.record("expected .noCredentials, got \(status)")
             return
@@ -383,7 +383,7 @@ struct LiveProfileUsageFetcherTests {
 
     @Test func credentialReadErrorMapsToNoCredentials() async {
         let store = StubCredentialStore(read: .failure("security exited 51"))
-        let status = await makeProfileFetcher(store: store).fetchUsage(configDirPath: "/tmp/x")
+        let status = await makeProfileFetcher(store: store).fetchUsage(credential: .configDir("/tmp/x"))
         guard case .noCredentials(let reason) = status else {
             Issue.record("expected .noCredentials, got \(status)")
             return
@@ -397,7 +397,7 @@ struct LiveProfileUsageFetcherTests {
                              headerFields: ["Retry-After": "120"])!, Data())
         }
         let store = StubCredentialStore(read: .blob(credentialBlob()))
-        let status = await makeProfileFetcher(store: store).fetchUsage(configDirPath: "/tmp/x")
+        let status = await makeProfileFetcher(store: store).fetchUsage(credential: .configDir("/tmp/x"))
         #expect(status == .rateLimited(retryAfter: 120))
     }
 
@@ -406,7 +406,7 @@ struct LiveProfileUsageFetcherTests {
             okResponse(req, body: Data("<!doctype html>".utf8))
         }
         let store = StubCredentialStore(read: .blob(credentialBlob()))
-        let status = await makeProfileFetcher(store: store).fetchUsage(configDirPath: "/tmp/x")
+        let status = await makeProfileFetcher(store: store).fetchUsage(credential: .configDir("/tmp/x"))
         guard case .decodeError = status else {
             Issue.record("expected .decodeError, got \(status)")
             return
@@ -426,7 +426,7 @@ struct LiveProfileUsageFetcherTests {
         // now well past the 1000ms expiry.
         let status = await makeProfileFetcher(
             store: store, refresher: refresher, now: { Date(timeIntervalSince1970: 2_000_000) }
-        ).fetchUsage(configDirPath: "/tmp/x")
+        ).fetchUsage(credential: .configDir("/tmp/x"))
 
         guard case .ok = status else { Issue.record("expected .ok, got \(status)"); return }
         let request = try #require(ProfileUsageMockURLProtocol.lastRequest)
@@ -445,7 +445,7 @@ struct LiveProfileUsageFetcherTests {
         let refresher = StubRefresher(result: .failure(.invalidGrant))
         let status = await makeProfileFetcher(
             store: store, refresher: refresher, now: { Date(timeIntervalSince1970: 2_000_000) }
-        ).fetchUsage(configDirPath: "/tmp/x")
+        ).fetchUsage(credential: .configDir("/tmp/x"))
         guard case .needsLogin = status else {
             Issue.record("expected .needsLogin, got \(status)"); return
         }
@@ -461,7 +461,7 @@ struct LiveProfileUsageFetcherTests {
             accessToken: "fresh-at", refreshToken: "fresh-rt", expiresAtMillis: 9_999_999_999_999)))
         let status = await makeProfileFetcher(
             store: store, refresher: refresher, now: { Date(timeIntervalSince1970: 2_000_000) }
-        ).fetchUsage(configDirPath: "/tmp/x")
+        ).fetchUsage(credential: .configDir("/tmp/x"))
         guard case .needsLogin = status else {
             Issue.record("expected .needsLogin, got \(status)"); return
         }
@@ -476,7 +476,7 @@ struct LiveProfileUsageFetcherTests {
         let refresher = StubRefresher(result: .success(RefreshedOAuthToken(
             accessToken: "fresh-at", refreshToken: "fresh-rt", expiresAtMillis: 9_999_999_999_999)))
         let status = await makeProfileFetcher(store: store, refresher: refresher)
-            .fetchUsage(configDirPath: "/tmp/x")
+            .fetchUsage(credential: .configDir("/tmp/x"))
         guard case .ok = status else { Issue.record("expected .ok, got \(status)"); return }
         #expect(store.writes.count == 1)  // refresh persisted
     }
@@ -488,8 +488,74 @@ struct LiveProfileUsageFetcherTests {
             (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1", headerFields: nil)!, Data())
         }
         let store = StubCredentialStore(read: .blob(credentialBlob()))
-        let status = await makeProfileFetcher(store: store).fetchUsage(configDirPath: "/tmp/x")
+        let status = await makeProfileFetcher(store: store).fetchUsage(credential: .configDir("/tmp/x"))
         #expect(status == .rateLimited(retryAfter: nil))
+        #expect(store.writes.isEmpty)
+    }
+
+    // MARK: Organization id capture
+
+    /// Read opportunistically: whether this endpoint sends the header is
+    /// unverified, so the fetcher takes it when it is there rather than
+    /// asserting it will be.
+    @Test func capturesOrganizationIDHeaderWhenPresent() async {
+        ProfileUsageMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                             headerFields: ["anthropic-organization-id": "org_abc123"])!,
+             capturedUsageJSON)
+        }
+        let store = StubCredentialStore(read: .blob(credentialBlob()))
+        let status = await makeProfileFetcher(store: store)
+            .fetchUsage(credential: .configDir("/tmp/x"))
+        guard case .ok(_, let organizationID) = status else {
+            Issue.record("expected .ok, got \(status)"); return
+        }
+        #expect(organizationID == "org_abc123")
+    }
+
+    @Test func reportsNilOrganizationIDWhenHeaderAbsent() async {
+        ProfileUsageMockURLProtocol.handler = { req in okResponse(req, body: capturedUsageJSON) }
+        let store = StubCredentialStore(read: .blob(credentialBlob()))
+        let status = await makeProfileFetcher(store: store)
+            .fetchUsage(credential: .configDir("/tmp/x"))
+        guard case .ok(_, let organizationID) = status else {
+            Issue.record("expected .ok, got \(status)"); return
+        }
+        #expect(organizationID == nil)
+    }
+
+    /// nil, not "" — an empty string would read as "this account has an id that
+    /// is the empty string".
+    @Test func emptyOrganizationIDHeaderIsNilNotEmptyString() async {
+        ProfileUsageMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                             headerFields: ["anthropic-organization-id": ""])!,
+             capturedUsageJSON)
+        }
+        let store = StubCredentialStore(read: .blob(credentialBlob()))
+        let status = await makeProfileFetcher(store: store)
+            .fetchUsage(credential: .configDir("/tmp/x"))
+        guard case .ok(_, let organizationID) = status else {
+            Issue.record("expected .ok, got \(status)"); return
+        }
+        #expect(organizationID == nil)
+    }
+
+    /// The config-dir fetcher cannot serve a setup token (that credential 403s
+    /// on this endpoint), and it must say so rather than reaching the network.
+    @Test func tokenCredentialIsRefusedWithoutAnyHTTPCall() async {
+        ProfileUsageMockURLProtocol.handler = { _ in
+            Issue.record("no HTTP call expected for a token credential")
+            throw URLError(.badServerResponse)
+        }
+        let store = StubCredentialStore(read: .blob(credentialBlob()))
+        let status = await makeProfileFetcher(store: store)
+            .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
+        guard case .noCredentials(let reason) = status else {
+            Issue.record("expected .noCredentials, got \(status)"); return
+        }
+        // The refusal must not echo the token back.
+        #expect(!reason.contains("sk-ant-oat01-TEST"))
         #expect(store.writes.isEmpty)
     }
 }

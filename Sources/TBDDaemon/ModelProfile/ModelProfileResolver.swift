@@ -43,7 +43,9 @@ public struct ModelProfileResolver: Sendable {
     /// Used by per-terminal pinning (resume) and mid-conversation swap.
     /// Returns nil if the row is missing. For .apiKey profiles, also returns
     /// nil if the keychain secret is missing or empty. OAuth and bedrock
-    /// profiles carry no TBD-stored secret and always succeed if the row exists.
+    /// profiles carry no TBD-stored secret and always succeed if the row
+    /// exists; an .oauthToken profile carries one but still resolves without
+    /// it (see `loadResolved`).
     public func loadByID(_ id: UUID) async throws -> ResolvedModelProfile? {
         try await loadResolved(id: id)
     }
@@ -52,11 +54,29 @@ public struct ModelProfileResolver: Sendable {
         guard let row = try await profiles.get(id: id) else { return nil }
 
         let secret: String?
-        if row.kind == .apiKey {
+        switch row.kind {
+        case .apiKey:
+            // An api-key profile is nothing but its key: with no secret there
+            // is no credential to spawn under at all, so the row resolves to
+            // nil and the caller falls through the precedence chain.
             guard let s = try keychain(id.uuidString), !s.isEmpty else { return nil }
             secret = s
-        } else {
-            secret = nil   // oauth + bedrock: no TBD-stored secret
+        case .oauthToken:
+            // A token profile carries a TBD-stored secret like `.apiKey`, but
+            // a MISSING one deliberately does NOT fail resolution. The profile
+            // still owns an isolated config dir, so spawning without the token
+            // yields an unauthenticated pane that asks for a login — visible
+            // and recoverable. Falling through the chain instead would
+            // silently run the session under some other account.
+            let stored = try keychain(id.uuidString)
+            if let stored, !stored.isEmpty {
+                secret = stored
+            } else {
+                logger.warning("token profile \(row.id, privacy: .public) has no stored secret; spawning without CLAUDE_CODE_OAUTH_TOKEN")
+                secret = nil
+            }
+        case .oauth, .bedrock:
+            secret = nil   // no TBD-stored secret
         }
 
         try await profiles.touchLastUsed(id: row.id)
