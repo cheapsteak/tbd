@@ -52,7 +52,11 @@ extension Process: ExitObservableProcess {}
 /// - **There is no injected clock, deliberately.** This is a synchronous helper
 ///   called from `defer`, where `Task.sleep` is unavailable and the repo's
 ///   `Clock` seam — which is async — cannot be used. The deadline is a plain
-///   parameter instead, so a caller that needs a different bound states it.
+///   parameter instead, so a caller that needs a different bound states it. It
+///   is measured monotonically on purpose: a wall-clock step backwards, which
+///   an NTP correction on a shared box produces, would push a `Date()` deadline
+///   further into the future and re-open the unbounded wait this helper exists
+///   to close.
 enum BoundedProcessTeardown {
     enum Outcome: Equatable {
         /// Foundation observed the exit. Its handler clears `isRunning` only
@@ -84,12 +88,15 @@ enum BoundedProcessTeardown {
     static func awaitExit(
         _ process: any ExitObservableProcess, within seconds: Double = 10
     ) -> Outcome {
-        let deadline = Date().addingTimeInterval(seconds)
+        // `ContinuousClock`, not `Date()`: the bound must not be extendable by a
+        // wall-clock correction landing mid-wait.
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(seconds))
         while true {
             // Checked before the deadline and before any sleep, so a child that
             // has already exited costs nothing.
             if !process.isRunning { return .exited }
-            if Date() >= deadline { break }
+            if clock.now >= deadline { break }
             usleep(20_000)
         }
         let pid = process.processIdentifier
@@ -109,6 +116,12 @@ enum BoundedProcessTeardown {
     /// `isRunning`, verified against the running implementation — so the probe
     /// cannot wedge the process it is diagnosing.
     private static func diagnose(_ pid: Int32, after seconds: Double) -> String {
+        // Guarded on `pid > 0` for the same reason the kill above is:
+        // `waitpid(0, …)` collects any child in the caller's process group and
+        // `waitpid(-1, …)` any child at all, so a non-positive pid would reap a
+        // corpse this helper was never asked about.
+        guard pid > 0 else { return "pid \(pid): no pid to probe (never launched?)" }
+
         var status: Int32 = 0
         let reaped = waitpid(pid, &status, WNOHANG)
         // Captured immediately: `stat` below spawns `ps`, which overwrites errno.

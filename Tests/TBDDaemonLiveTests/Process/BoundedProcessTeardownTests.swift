@@ -43,6 +43,46 @@ struct BoundedProcessTeardownTests {
         return p
     }
 
+    /// A long-lived child that **Foundation does not own**: `posix_spawn`ed
+    /// directly, so no `Process` object is monitoring it and this test is the
+    /// only waiter for its corpse.
+    ///
+    /// The mutation check needs that. A Foundation-launched child has a monitor
+    /// racing for the same corpse, and there the bounded wait polls a *stub's*
+    /// flag rather than that child's — so the helper's post-bound safety
+    /// argument, which is about the process whose own flag was polled, would not
+    /// cover the diagnostic's `waitpid`. With nothing else waiting, the probe is
+    /// the sole waiter and the outcome is deterministic.
+    ///
+    /// The loop is counted for the same reason `spawnLongLived`'s is.
+    private static func spawnUnownedLongLived() throws -> pid_t {
+        let path = "/bin/zsh"
+        let script = #"trap "" HUP; for _ in {1..1500}; do sleep 0.2; done"#
+        let arguments: [String] = [path, "-c", script]
+        var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) }
+        argv.append(nil)
+        // An explicit one-entry environment rather than this process's own:
+        // `environ` is linked into the main executable and is not reachable from
+        // a test bundle, and the fixture needs nothing but a PATH that resolves
+        // `sleep`. No `-l`/`-i` either, so it sources nothing from the
+        // developer's shell configuration.
+        let environment: [String] = ["PATH=/usr/bin:/bin"]
+        var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup($0) }
+        envp.append(nil)
+        defer {
+            for arg in argv { free(arg) }
+            for entry in envp { free(entry) }
+        }
+
+        // No file actions and no attributes: the child inherits this process's
+        // stdio (it writes nothing) and its signal mask, which cannot matter
+        // because every signal sent to it here is SIGKILL.
+        var pid: pid_t = 0
+        let rc = posix_spawn(&pid, path, nil, nil, &argv, &envp)
+        guard rc == 0 else { throw SpawnFailure(code: rc) }
+        return pid
+    }
+
     /// What `kill(pid, 0)` says about a pid, as one word, so an assertion can be
     /// made on composed output rather than on a bare `-1`.
     ///
@@ -117,10 +157,11 @@ struct BoundedProcessTeardownTests {
 
     // MARK: - The bound
 
-    /// `awaitExit` observes and never actuates. The distinction matters because
-    /// two call sites in `AgentReaperHolderLegLiveTests` use it on processes the
-    /// test still needs alive, and a helper that signalled "just to be sure"
-    /// would silently invalidate their premises.
+    /// `awaitExit` observes and never actuates. That split is the API's contract
+    /// — `killAndReap` is the only actuator, and the observe-only half is named
+    /// for what it does not do — and a contract nothing pins is one a later
+    /// "signal just to be sure" edit can quietly break, under a name that still
+    /// reads as harmless at every call site.
     @Test func awaitExitNeverSignals() async throws {
         let child = try Self.spawnLongLived()
         defer { BoundedProcessTeardown.killAndReap(child) }
@@ -154,17 +195,31 @@ struct BoundedProcessTeardownTests {
     /// compiles at all, because the stub cannot be a `Process`.
     ///
     /// Two details keep it honest. The stub carries the pid of a **real**
-    /// long-lived child this test spawned, so the SIGKILL `killAndReap` sends
-    /// lands on something the test owns rather than on a made-up number that may
-    /// belong to anybody. And the bounded wait runs on a dedicated `Thread`, per
-    /// `Tests/CLAUDE.md` "Thread-blocking gates run off the cooperative pool":
-    /// the cooperative pool is only as wide as the machine has cores, and
-    /// parking one of its threads for the whole bound starves every suspended
-    /// task in the process, including the ones that would report a failure.
+    /// long-lived child this test spawned and owns, so the SIGKILL
+    /// `killAndReap` sends lands on something the test is responsible for rather
+    /// than on a made-up number that may belong to anybody — and because that
+    /// child is `posix_spawn`ed rather than Foundation-launched, this test is
+    /// its only waiter. So the sequence is deterministic: the SIGKILL lands at
+    /// t≈0, the child is a zombie well before the 0.3 s bound, and the
+    /// diagnostic probe is the thing that collects it. That is exactly what
+    /// production teardown does when Foundation has lost the exit, which is why
+    /// the composed diagnostic is asserted rather than only its pid. And the
+    /// bounded wait runs on a dedicated `Thread`, per `Tests/CLAUDE.md`
+    /// "Thread-blocking gates run off the cooperative pool": the cooperative
+    /// pool is only as wide as the machine has cores, and parking one of its
+    /// threads for the whole bound starves every suspended task in the process,
+    /// including the ones that would report a failure.
     @Test func theBoundFiresWhenTheExitIsNeverObserved() async throws {
-        let child = try Self.spawnLongLived()
-        defer { BoundedProcessTeardown.killAndReap(child) }
-        let pid = child.processIdentifier
+        let pid = try Self.spawnUnownedLongLived()
+        defer {
+            kill(pid, SIGKILL)
+            var status: Int32 = 0
+            // SIGKILL cannot be blocked, so this is bounded; it returns
+            // immediately with ECHILD when the diagnostic probe already
+            // collected the corpse. Same shape as `SIGTERMProofJob.tearDown` in
+            // the sibling suite.
+            _ = waitpid(pid, &status, 0)
+        }
 
         let stub = ExitNeverObserved(pid: pid)
         let box = OutcomeBox()
@@ -201,17 +256,23 @@ struct BoundedProcessTeardownTests {
             return
         }
         #expect(reportedPID == pid)
+        // Composed, not just the pid: with this test the sole waiter, the probe
+        // must find and collect the corpse, so the branch it reports is itself
+        // part of the contract.
         #expect(
-            diagnostic.contains("\(pid)"),
-            "the diagnostic must name the pid it gave up on: \(diagnostic)")
+            diagnostic.contains("\(pid)")
+                && diagnostic.contains("zombie collected by the teardown diagnostic"),
+            "the diagnostic did not report the corpse it collected: \(diagnostic)")
         #expect(
             elapsed >= .milliseconds(300),
             "the wait returned after \(elapsed), which is short of its own 0.3 s bound")
-
-        #expect(
-            BoundedProcessTeardown.killAndReap(child) == .exited,
-            "the real child the stub borrowed its pid from was not reaped")
     }
+}
+
+/// `posix_spawn` refused. Bare `Error` with the raw code, matching
+/// `FixtureSpawnFailure` in the sibling suite.
+private struct SpawnFailure: Error {
+    let code: Int32
 }
 
 /// The watchdog in the mutation check fired: the bounded wait published no

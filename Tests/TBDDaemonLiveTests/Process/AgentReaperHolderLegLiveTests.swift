@@ -334,7 +334,11 @@ struct AgentReaperHolderLegLiveTests {
         p.standardError = FileHandle.nullDevice
         guard (try? p.run()) != nil else { return [:] }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        _ = BoundedProcessTeardown.awaitExit(p)
+        // stdout is already drained to EOF, so ending a straggler cannot lose
+        // output — and going through this file's own wrapper means an expired
+        // bound reds the test instead of leaving `lsof` running and returning a
+        // partial map with no signal at all.
+        Self.killAndReap(p)
         var result: [String: String] = [:]
         var fd: String?
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {

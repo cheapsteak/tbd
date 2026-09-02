@@ -31,7 +31,8 @@
 //   0  waitUntilExit returned on the thread with the stale entry (no hang)
 //   1  the hang reproduced — waitUntilExit did not return within 3 seconds
 //   2  the probe could not set itself up (no `_CFGetTSD`, no per-thread list,
-//      or the task under test never started)
+//      or the task under test never started, or never exited so there is no
+//      completed exit for the wait to observe)
 //
 // `_CFGetTSD` is private CoreFoundation API. It is used here only to READ and
 // APPEND TO the per-thread list that Foundation itself creates and populates —
@@ -175,6 +176,12 @@ kill(pid, SIGTERM)
 let exitDeadline = Date().addingTimeInterval(10)
 while task.isRunning && Date() < exitDeadline { usleep(5_000) }
 print("pid \(pid) isRunning=\(task.isRunning) kill(pid, 0)=\(kill(pid, 0))")
+// A child still running is not the hang under test: without this, exit code 1
+// would report "hang reproduced" for a wait that is simply waiting.
+guard !task.isRunning else {
+    print("the task under test did not exit within 10 s; cannot test the wait")
+    exit(2)
+}
 
 // 3. Plant the stale entry: thread A's list gets this task's pointer, exactly as
 //    it would have after a task A launched was freed and its address reused.
