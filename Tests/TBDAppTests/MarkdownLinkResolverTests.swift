@@ -387,7 +387,14 @@ struct MarkdownLinkResolverTests {
         let resolver = MarkdownLinkResolver(documentDirectory: dir, worktreeRoot: dir)
         let out = resolver.resolve(html: #"<a href="this%20&amp;%20that.md">both</a>"#)
 
-        #expect(out.contains(target.standardizedFileURL.absoluteString))
+        // The emitted attribute is HTML-escaped, so the `&` the entity decoded
+        // to comes back out as `&amp;` — the round trip, not a failure to
+        // decode. Asserting the raw `absoluteString` here would pin the wrong
+        // contract and would only pass if the attribute were left unescaped.
+        let escaped = target.standardizedFileURL.absoluteString
+            .replacingOccurrences(of: "&", with: "&amp;")
+        #expect(out.contains(escaped))
+        #expect(!out.contains("&amp;amp;"), "the entity is decoded once, not re-escaped twice")
     }
 
     @Test("an encoded # in a filename is not mistaken for a fragment")
