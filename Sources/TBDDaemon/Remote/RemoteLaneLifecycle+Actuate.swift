@@ -49,8 +49,21 @@ extension RemoteLaneLifecycle {
 
     enum ReviveStep: Equatable {
         case invokeUnarchive(provider: String, sessionID: String)
+        /// Create a new session seeded from a retained transcript and rebind
+        /// this row to it — Revive on a lane whose session was destroyed. See
+        /// `RemoteLaneLifecycle.reseedPlan`.
+        case reseed(provider: String, key: String)
         case rowOnly
     }
+
+    /// The budget for the seeded `create` behind a reseed. The same 60 seconds
+    /// `remote.create` gets, because it is the same verb doing the same work
+    /// with one more field on its stdin.
+    ///
+    /// Stated here rather than reached for on `RPCRouter`: the lifecycle does
+    /// not depend on the router, and inverting that to share a number would be
+    /// the wrong dependency for the smaller gain.
+    static let reseedCreateTimeout: TimeInterval = 60
 
     /// Routes an archive of `worktree`, applying the verb path's two guards.
     ///
@@ -102,12 +115,46 @@ extension RemoteLaneLifecycle {
     /// reads as `false` here (`isArchived`, the contract's display reading):
     /// a provider that made no claim is not one asserting a retirement this
     /// flip would fight with.
-    func reviveDecision(for worktree: Worktree) async throws -> ReviveDecision {
+    ///
+    /// **The reseed question is asked first, and it is asked of the mirror
+    /// row's absence.** `remote.delete` drops the mirror row the moment the
+    /// provider confirms the destruction, so an archived lane with a receipt
+    /// and no row is one whose session no longer exists — and `unarchive` on a
+    /// destroyed id would degrade to a row-only filing, quietly returning a
+    /// lane bound to nothing to the active list. See
+    /// `RemoteLaneLifecycle.reseedPlan` for why a receipt alone is not the
+    /// discriminator.
+    ///
+    /// The reseed path is deliberately **not** behind the stale-snapshot gate,
+    /// for the same reason `.rowOnly` is not: that gate exists because the
+    /// guards read `agentState` and `meta.workspace_dirty` out of a mirror a
+    /// stale inventory makes untrustworthy, and this path reads no mirror at
+    /// all — there is none to read. Gating it would make a deleted lane
+    /// unrevivable for as long as its provider stayed unhealthy.
+    ///
+    /// `now` is the date seam: `expiresAt` is a persisted timestamp compared
+    /// against the present, never a duration (`Tests/CLAUDE.md`, "Clock and
+    /// date seams"). Defaulted, so no call site changes.
+    func reviveDecision(
+        for worktree: Worktree, now: @Sendable () -> Date = { Date() }
+    ) async throws -> ReviveDecision {
         guard case .remote(let provider, let sessionID) = worktree.location else {
             return .refused("Cannot revive \(worktree.name) through the remote path: it is a local worktree.")
         }
         let row = try await db.remoteSessions.row(provider: provider, sessionID: sessionID)
         let capabilities = await manager.declaredCapabilities(provider: provider)
+        let receipt = try? await db.retainedTranscripts.latest(originWorktreeID: worktree.id)
+        switch Self.reseedPlan(
+            receipt: receipt, sessionStillListed: row != nil,
+            capabilities: capabilities, now: now()
+        ) {
+        case .reseed(let key):
+            return .proceed(.reseed(provider: provider, key: key))
+        case .expired(let message), .refusedNoSeed(let message):
+            return .refused("Cannot revive \(worktree.name): \(message)")
+        case .unarchive:
+            break
+        }
         switch Self.revivePlan(
             capabilities: capabilities,
             providerReportsArchived: row?.decodedPayload?.isArchived ?? false
@@ -232,7 +279,10 @@ extension RemoteLaneLifecycle {
         let decidedAt = now()
         let prior = await manager.noteFilingDecision(worktreeID: worktree.id, at: decidedAt)
         var mirrored: (session: RemoteSessionPayload, provider: String)?
-        if case .invokeUnarchive(let provider, let sessionID) = step {
+        switch step {
+        case .rowOnly:
+            break
+        case .invokeUnarchive(let provider, let sessionID):
             switch await invokeRetirementVerb(
                 "unarchive", provider: provider, sessionID: sessionID) {
             case .failed(let message):
@@ -241,6 +291,37 @@ extension RemoteLaneLifecycle {
                 return message
             case .succeeded(let session):
                 mirrored = session.map { ($0, provider) }
+            }
+        case .reseed(let provider, let key):
+            switch await invokeSeededCreate(provider: provider, key: key, worktree: worktree) {
+            case .failed(let message):
+                await manager.withdrawFilingDecision(
+                    worktreeID: worktree.id, restoring: prior, ifStillAt: decidedAt)
+                return message
+            case .succeeded(let session):
+                guard let session else {
+                    // A create that answers with nothing readable has failed at
+                    // the transport however healthy its exit code looked, and
+                    // there is no session id to rebind the row to. Reporting
+                    // success would leave a revived lane pointing at a session
+                    // that was destroyed.
+                    await manager.withdrawFilingDecision(
+                        worktreeID: worktree.id, restoring: prior, ifStillAt: decidedAt)
+                    return "provider '\(provider)' returned an unreadable session from a seeded create"
+                }
+                do {
+                    // Before the row write and before any mirror: adoption keys
+                    // off `findRemote(provider:sessionID:)`, so rebinding first
+                    // is what makes the new session land on THIS lane instead
+                    // of minting a second one beside it.
+                    try await db.worktrees.rebindRemote(
+                        id: worktree.id, provider: provider, sessionID: session.id)
+                } catch {
+                    await manager.withdrawFilingDecision(
+                        worktreeID: worktree.id, restoring: prior, ifStillAt: decidedAt)
+                    throw error
+                }
+                mirrored = (session, provider)
             }
         }
         do {
@@ -259,6 +340,109 @@ extension RemoteLaneLifecycle {
             worktreeID: worktree.id, repoID: worktree.repoID,
             name: worktree.name, path: worktree.localPath)))
         return nil
+    }
+
+    /// Files an adopted lane whose remote session has just been **destroyed**
+    /// by `remote.delete`.
+    ///
+    /// A deleted lane keeps its place: the worktree row goes to the repo's
+    /// Archived tab with its branch and PR context intact, which is where a
+    /// human looks for work they finished with, and where Revive-as-reseed
+    /// later finds the receipt. Losing the row would lose that context along
+    /// with the session.
+    ///
+    /// It reuses `performArchive` rather than writing a second archive path —
+    /// the watermark ordering, the row write and the broadcast are all the same
+    /// obligations — with `.rowOnly` as the step, and only `.rowOnly`. The
+    /// session no longer exists on the provider, so there is no `archive <id>`
+    /// left to invoke: a verb call here would address an id the provider has
+    /// just been told to forget, and the `gone` exemption `.rowOnly` was built
+    /// for describes exactly this situation — nothing live to misdescribe, and
+    /// no verb that could reach it.
+    ///
+    /// Returns `nil` on success, or the message to surface. The `.rowOnly` step
+    /// invokes nothing, so the only failure it can report is a row write that
+    /// threw — and that throws rather than returning a message, as it does for
+    /// every other caller of `performArchive`.
+    func archiveLaneAfterDelete(
+        _ worktree: Worktree, now: @Sendable () -> Date = { Date() }
+    ) async throws -> String? {
+        try await performArchive(.rowOnly, worktree: worktree, now: now)
+    }
+
+    /// Runs the seeded `create` behind a reseed and decodes the session it
+    /// returns.
+    ///
+    /// Shares `VerbOutcome` with `invokeRetirementVerb` because the caller
+    /// wants the same two answers — a message to surface, or a session to
+    /// mirror — but deliberately does **not** share its `not_found`
+    /// degradation: `create` addresses no existing id, so it has nothing to
+    /// report missing, and treating a failure here as "file the row anyway"
+    /// would return a lane to the active list with no session behind it.
+    ///
+    /// This creates a provider session, which is a durable external resource —
+    /// but through the same `create` verb `remote.create` uses, so the same
+    /// reconcilers cover it: the provider's own `list` poll is ground truth,
+    /// adoption binds a session to a row, and the drift rule retires a row
+    /// whose session stops being enumerated. It is a routine call site on an
+    /// existing creation path, not a new kind of resource.
+    private func invokeSeededCreate(
+        provider: String, key: String, worktree: Worktree
+    ) async -> VerbOutcome {
+        let body = ProviderCreateBody.compose(
+            paramsJSON: ProviderCreateBody.paramsJSON(from: await reseedParams(for: worktree)),
+            seedRetainedKey: key,
+            idempotencyKey: "tbd-\(UUID().uuidString.lowercased())")
+        let result: ProviderResult
+        do {
+            result = try await manager.invoke(
+                providerName: provider, verb: ["create"], stdin: Data(body.utf8),
+                timeout: Self.reseedCreateTimeout)
+        } catch let error as ProviderRunError {
+            remoteLaneLogger.error(
+                "seeded create provider=\(provider, privacy: .public) timed out")
+            switch error {
+            case .timeout(let timedOutVerb):
+                return .failed("provider '\(provider)' timed out running '\(timedOutVerb)'")
+            }
+        } catch {
+            remoteLaneLogger.error(
+                "seeded create provider=\(provider, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+            return .failed("\(error)")
+        }
+        if result.failureClass != nil {
+            let message = result.decodedError?.message ?? "create failed (exit \(result.exitCode))"
+            remoteLaneLogger.error(
+                "seeded create provider=\(provider, privacy: .public) failed: \(message, privacy: .public)")
+            return .failed(message)
+        }
+        return .succeeded(try? result.decoded(RemoteSessionPayload.self, provider: provider))
+    }
+
+    /// The `params` object a reseed's `create` carries.
+    ///
+    /// **TBD replays its stored create-param defaults and invents nothing
+    /// else.** `Repo.remoteCreateDefaults` over `Config.remoteCreateDefaults`
+    /// is the same fall-through the create form uses, and the maps are keyed by
+    /// the provider's own field names precisely so TBD can store and replay
+    /// them without interpreting them. The form's other levels — the ambient
+    /// repo prefill, a freshly generated slug — belong to a human filling in a
+    /// sheet, and re-deriving them here would be a second implementation of
+    /// rules that already have one.
+    ///
+    /// The consequence is worth stating rather than hiding: a provider with a
+    /// required field neither map supplies rejects the create with its own
+    /// `invalid_params` naming that field. That is an actionable failure with a
+    /// remedy the user already has — set the repo's remote create defaults —
+    /// and it is a great deal better than TBD guessing a value for a field
+    /// whose meaning is the provider's alone.
+    private func reseedParams(for worktree: Worktree) async -> [String: String] {
+        var values = (try? await db.config.get().remoteCreateDefaults) ?? [:]
+        if let repoID = worktree.repoID,
+           let repo = try? await db.repos.get(id: repoID) {
+            for (field, value) in repo.remoteCreateDefaults { values[field] = value }
+        }
+        return values
     }
 
     /// What a retirement verb came back with.

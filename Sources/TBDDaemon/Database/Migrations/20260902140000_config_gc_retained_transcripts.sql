@@ -1,0 +1,13 @@
+-- Gate for the orphan-GC leg that reclaims retained transcripts nobody
+-- references — JSONL files under ~/tbd/transcripts/ that no retained_transcript
+-- row points at, and rows whose provider-stated expiry has passed
+-- (docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md,
+-- "Reclamation").
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" (0) — which is what made auto_hibernate_enabled impossible to
+-- graduate without a forcing UPDATE that also reset deliberate opt-ins.
+-- The shipped default lives in exactly one place:
+-- Config.gcRetainedTranscriptsEnabledDefault.
+ALTER TABLE config ADD COLUMN gc_retained_transcripts_enabled INTEGER;

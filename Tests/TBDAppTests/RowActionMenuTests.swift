@@ -343,6 +343,88 @@ struct RowActionMenuRemoteArchiveTests {
     }
 }
 
+/// Delete on a remote lane, behind the default-off `remote_delete_enabled`
+/// flag. Both branches of the flag, and both branches of the capability.
+@Suite("RowActionMenu — remote delete")
+struct RowActionMenuRemoteDeleteTests {
+    private static let remoteLocation = WorktreeLocation.remote(provider: "acme", sessionID: "s1")
+
+    private func deleteAction(_ ctx: RowActionMenu.Context) -> RowActionMenu.Action? {
+        RowActionMenu.items(context: ctx)
+            .compactMap(\.action).first { $0.kind == .deleteRemoteSession }
+    }
+
+    /// The flag's off branch — the shipped default. Nothing is composed, so a
+    /// destructive action is never offered that the daemon would refuse.
+    @Test func deleteOmittedWhenFlagOff() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: ["delete"],
+                                        remoteDeleteEnabled: false)
+        #expect(deleteAction(ctx) == nil)
+    }
+
+    /// The flag's on branch, with the capability: present, enabled, destructive.
+    @Test func deletePresentAndEnabledWithTheCapability() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: ["delete", "archive"],
+                                        remoteDeleteEnabled: true)
+        let delete = deleteAction(ctx)
+        #expect(delete?.title == RowActionMenu.deleteRemoteSessionLabel)
+        #expect(delete?.isEnabled == true)
+        #expect(delete?.role == .destructive)
+        #expect(delete?.disabledHelp == nil)
+    }
+
+    /// **Present but disabled**, not omitted — the treatment an unarchivable
+    /// lane's Archive already gets, and a deliberate departure from omitting an
+    /// undeclared capability. A user looking for the way to reclaim a lane is
+    /// told the way exists and this provider has not built it yet.
+    @Test func deletePresentButDisabledWithoutTheCapability() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: ["archive"],
+                                        remoteDeleteEnabled: true)
+        let delete = deleteAction(ctx)
+        #expect(delete?.title == RowActionMenu.deleteProviderCannotDeleteLabel)
+        #expect(delete?.title == "Delete Remote Session (provider can't delete)")
+        #expect(delete?.isEnabled == false)
+        #expect(delete?.role == .destructive)
+        #expect(delete?.disabledHelp == RowActionMenu.deleteNeedsProviderCapabilityHelp)
+    }
+
+    /// A local row has no remote session to destroy, flag or no flag.
+    @Test func localRowNeverOffersDelete() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        providerCapabilities: ["delete"],
+                                        remoteDeleteEnabled: true)
+        #expect(ctx.location.isLocal)
+        #expect(deleteAction(ctx) == nil)
+    }
+
+    /// Delete sits beside Archive: the two ways a lane leaves the working set,
+    /// shown together so a user choosing between them sees both.
+    @Test func deleteIsComposedImmediatelyAfterArchive() {
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b",
+                                        location: Self.remoteLocation,
+                                        provider: "acme",
+                                        providerCapabilities: ["delete", "archive"],
+                                        remoteDeleteEnabled: true)
+        let kinds = RowActionMenu.items(context: ctx).compactMap(\.action).map(\.kind)
+        let archiveIndex = kinds.firstIndex(of: .archive)
+        let deleteIndex = kinds.firstIndex(of: .deleteRemoteSession)
+        #expect(archiveIndex != nil)
+        #expect(deleteIndex != nil)
+        if let archiveIndex, let deleteIndex {
+            #expect(deleteIndex == archiveIndex + 1)
+        }
+    }
+}
+
 // MARK: - Scratch branch
 
 @Suite("RowActionMenu — scratch")

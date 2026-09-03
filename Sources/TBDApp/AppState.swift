@@ -509,6 +509,15 @@ final class AppState {
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
     var remoteSessions: [RemoteSessionInfo] = []
+    /// Every retain/import receipt the daemon holds, fetched by
+    /// `refreshRemote()`.
+    ///
+    /// Read by the archived list, where a lane whose remote session was
+    /// destroyed is revived by reseeding from its receipt rather than by
+    /// unarchiving a session that no longer exists — so the Revive button has
+    /// to know whether the transcript behind it is still good. Small by
+    /// construction: one row per key a human deliberately created.
+    var retainedTranscripts: [RetainedTranscript] = []
     /// TBD-owned display-name overrides for remote sessions, keyed by
     /// `AppState.remoteSessionKey(provider:sessionID:)`. Mirrors the
     /// worktree pattern (`Worktree.displayName` living in TBD's own DB
@@ -1570,6 +1579,10 @@ final class AppState {
     /// same reason as `remoteProvidersFetcher`.
     @ObservationIgnored lazy var remoteSessionsFetcher: @MainActor () async throws -> RemoteSessionsResult =
         { [daemonClient] in try await daemonClient.remoteSessions() }
+    /// How `refreshRemote()` fetches the retained-transcript receipts —
+    /// injectable for the same reason as `remoteProvidersFetcher`.
+    @ObservationIgnored lazy var retainedTranscriptsFetcher: @MainActor () async throws -> [RetainedTranscript] =
+        { [daemonClient] in try await daemonClient.remoteRetainedList() }
     /// How `pushRemoteRenameIfSupported` pushes a rename to the provider —
     /// injectable for the same reason as `remoteProvidersFetcher` (`DaemonClient`
     /// is concrete, no protocol), so tests can assert whether it fires per
@@ -1593,6 +1606,26 @@ final class AppState {
             try await daemonClient.setRemoteSessionPin(
                 provider: provider, sessionID: sessionID, pinned: pinned)
         }
+
+    /// How `deleteRemoteSession` destroys a provider session — injectable for
+    /// the same reason as `remoteSessionPinSetter` (`DaemonClient` is concrete,
+    /// no protocol), so both outcomes of a delete are testable without a real
+    /// daemon and without anything actually being destroyed. Arguments are
+    /// `(provider, sessionID, retain)`.
+    @ObservationIgnored lazy var remoteSessionDeleter: @MainActor (String, String, Bool) async throws -> RemoteDeleteResult =
+        { [daemonClient] provider, sessionID, retain in
+            try await daemonClient.remoteDelete(
+                provider: provider, sessionID: sessionID, retain: retain)
+        }
+
+    /// How `deleteRemoteSession` asks the user before destroying something.
+    /// A seam rather than a direct `NSAlert` call for two reasons: the success
+    /// path is otherwise untestable, and a headless test that reached
+    /// `runModal()` would not fail — it would hang the whole suite waiting for
+    /// a click nobody is there to make. Returns whether the user confirmed;
+    /// a state that has gone away confirms nothing.
+    @ObservationIgnored lazy var remoteDeleteConfirmer: @MainActor (String) -> Bool =
+        { [weak self] message in self?.confirmRemoteDelete(message: message) ?? false }
 
     /// How `createRemoteLane` starts a provider session — injectable for the
     /// same reason as `remoteRenamePusher` (`DaemonClient` is concrete, no

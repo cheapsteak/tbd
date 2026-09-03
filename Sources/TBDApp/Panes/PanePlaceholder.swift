@@ -399,7 +399,7 @@ struct PanePlaceholder: View {
                     if let screenshot = appState.suspendingSnapshots[terminal.id] {
                         Image(nsImage: screenshot)
                             .resizable()
-                            .aspectRatio(contentMode: .fill)
+                            .scaledToFill()
                     } else {
                         Color.black
                     }

@@ -548,7 +548,8 @@ exist without it.
 
 No recreation of a session for a lane whose session was terminated, so revive
 reaches only as far as `unarchive` does. No `delete` verb, and no mapping of any
-TBD gesture onto one — retiring and destroying are different acts and the
-contract names only the first. No per-repo policy for which providers may be
-archived automatically. No change to attach, log, send, stop, or the reconnect
-policy.
+TBD gesture onto one — retiring and destroying are different acts, and this
+design specifies only the first; destruction is specified in
+[`2026-09-02-remote-session-delete-and-transcript-exchange-design.md`](2026-09-02-remote-session-delete-and-transcript-exchange-design.md).
+No per-repo policy for which providers may be archived automatically. No change
+to attach, log, send, stop, or the reconnect policy.

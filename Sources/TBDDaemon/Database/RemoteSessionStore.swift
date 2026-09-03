@@ -292,6 +292,41 @@ public struct RemoteSessionStore: Sendable {
         }
     }
 
+    /// Removes the mirror row outright, for a session THIS daemon just
+    /// destroyed through `remote.delete`.
+    ///
+    /// **This is deliberately not `markGone`, and the difference is the whole
+    /// point.** `gone` is what an *observed* disappearance produces: the drift
+    /// rule needs two consecutive complete absences before it will believe a
+    /// session is missing, because one absence is as likely to be transport
+    /// trouble as death. A delete is a *requested* disappearance — the caller
+    /// has positive knowledge that the record is gone, from the provider's own
+    /// answer — so there is nothing to disambiguate and no reason to wait. Left
+    /// to the drift rule, a session the user just deleted would render as live,
+    /// then stale, then gone, across two poll intervals.
+    ///
+    /// **On its own this write is not enough**, and the missing half lives in
+    /// `RemoteProviderManager.noteDeletion`: a `list` whose snapshot was
+    /// captured before the provider committed the deletion still names the
+    /// session, and applying it after this DELETE would silently insert the row
+    /// back with `gone` false. The caller stamps a deletion watermark that the
+    /// snapshot-apply path checks, so such a snapshot is dropped rather than
+    /// applied.
+    ///
+    /// Returns whether a row actually went away, mirroring `markGone` and
+    /// `dismiss` so the handler can skip a pointless UI broadcast. Deleting a
+    /// session TBD never mirrored changes nothing, which is a normal outcome:
+    /// the contract has `delete` succeed on an unknown id.
+    @discardableResult
+    public func deleteRow(provider: String, sessionID: String) async throws -> Bool {
+        try await writer.write { db in
+            try db.execute(
+                sql: "DELETE FROM remote_session WHERE provider = ? AND sessionID = ?",
+                arguments: [provider, sessionID])
+            return db.changesCount > 0
+        }
+    }
+
     /// One provider's mirror rows. Adoption reads these straight after a
     /// snapshot to learn the repo association this store just PINNED, rather
     /// than resolving `meta["repo"]` a second time — a second resolution could

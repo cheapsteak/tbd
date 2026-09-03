@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import TBDShared
 import os
@@ -49,6 +50,16 @@ extension AppState {
                 self.selectedRemoteProvider = nil
             }
             pruneRemoteSessionState(toKnownSessions: sessions.sessions)
+            // Best-effort and last, deliberately. The receipts only decide
+            // whether an archived lane's Revive means reseeding, so a failure
+            // here must not clear the roster and the mirror that did arrive —
+            // and the previous answer is a better one to keep than none.
+            do {
+                retainedTranscripts = try await retainedTranscriptsFetcher()
+            } catch {
+                remoteLogger.error(
+                    "Failed to refresh retained transcripts: \(error, privacy: .public)")
+            }
         } catch {
             switch AppState.classifyRemoteRefreshFailure(error) {
             case .unavailable:
@@ -59,6 +70,10 @@ extension AppState {
                 // rename overrides or unread bookkeeping.
                 remoteProviders = []
                 remoteSessions = []
+                // Safe to clear outright, unlike the two maps above: this is a
+                // cache of daemon rows, not user state, and the same refusal
+                // covers the verb that reads it.
+                retainedTranscripts = []
             case .error:
                 remoteLogger.error("Failed to refresh remote backends: \(error, privacy: .public)")
             }
@@ -233,6 +248,88 @@ extension AppState {
     /// offers the correct Pin/Unpin verb.
     func remoteSessionIsPinned(provider: String, sessionID: String) -> Bool {
         remoteSessions.first { $0.provider == provider && $0.payload.id == sessionID }?.pinnedAt != nil
+    }
+
+    // MARK: - Destroying a session
+
+    /// Whether the daemon currently permits `remote.delete`
+    /// (`remote_delete_enabled`). Read from the capability payload rather than
+    /// assumed, so with the flag off the menus compose no Delete at all instead
+    /// of offering a destructive action the daemon would refuse.
+    var remoteDeleteEnabled: Bool {
+        daemonCapabilities?.remoteDeleteEnabled ?? Config.remoteDeleteEnabledDefault
+    }
+
+    /// Destroy a remote session, confirming first unless nothing is at stake.
+    ///
+    /// **TBD asks for a receipt whenever the provider can give one.** The
+    /// contract forbids a *provider* from implying retention, not a caller from
+    /// requesting it, and the request is what this whole design is for:
+    /// destroying a session should not destroy the conversation. The receipt is
+    /// also what a later Revive-as-reseed reads. When the provider does not
+    /// declare `retain` no receipt is possible, and the confirmation says so in
+    /// as many words — that is the branch a user most needs to see.
+    ///
+    /// The confirmation itself is `RemoteDeleteConfirmation.decide`, which is
+    /// pure; this method supplies the facts and runs the alert. `expiresAt` is
+    /// nil at this point on purpose: no receipt exists yet, and the contract
+    /// makes stating an expiry TBD does not know a MUST NOT.
+    func deleteRemoteSession(provider: String, sessionID: String) async {
+        let session = remoteSessions.first {
+            $0.provider == provider && $0.payload.id == sessionID
+        }
+        let capabilities = remoteProviders.first { $0.config.name == provider }?
+            .describe?.capabilities ?? []
+        let willRetain = capabilities.contains("retain")
+        let decision = RemoteDeleteConfirmation.decide(
+            state: session?.payload.state ?? .unknown,
+            workspaceDirty: session?.payload.reportsDirtyWorkspace ?? false,
+            willRetain: willRetain,
+            sessionTitle: session?.payload.title ?? "",
+            expiresAt: nil)
+        if case .confirm(let message) = decision, !remoteDeleteConfirmer(message) {
+            return
+        }
+        do {
+            let outcome = try await remoteSessionDeleter(provider, sessionID, willRetain)
+            if !outcome.deleted {
+                // Not a failure: the contract has `delete` succeed on an id the
+                // provider no longer has. Say so rather than reporting nothing,
+                // because a gesture that appears to do nothing is
+                // indistinguishable from one that missed.
+                showAlert("That session was already gone on \(provider).")
+            }
+            await refreshRemote()
+        } catch {
+            remoteLogger.error(
+                "remoteDelete failed for \(provider, privacy: .public)/\(sessionID, privacy: .public): \(error, privacy: .public)")
+            showAlert("Couldn't delete the session: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Present the destructive confirm. Modal, mirroring
+    /// `confirmDefaultAccountFallback` for structure. "Delete" is still the
+    /// first button added — on macOS that's the rightmost, conventional
+    /// position for the confirming action, and `.alertFirstButtonReturn`
+    /// keeps meaning "the user chose to delete." But AppKit also makes the
+    /// first button the Return-key default, and this action is irreversible,
+    /// so the key equivalents are reassigned explicitly: Delete loses Return,
+    /// Cancel gets it (Escape already cancels). No keystroke by itself
+    /// destroys a session.
+    @MainActor
+    func confirmRemoteDelete(message: String) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete this remote session?"
+        alert.informativeText = message
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        // HIG: destructive action shouldn't be the Return-key default (same
+        // pattern as AppState.noteCloseConfirmer / LegacyHooksCoordinator's
+        // migrate dialog).
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     // MARK: - Creating a session

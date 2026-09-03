@@ -9,7 +9,7 @@ struct GCCommand: ParsableCommand {
         subcommands: [
             GCList.self, GCRestore.self, GCSweep.self, GCProfileDirs.self,
             GCOrphanProcesses.self, GCHolders.self, GCRowlessHolders.self,
-            GCHolderChildren.self,
+            GCHolderChildren.self, GCRetainedTranscripts.self,
         ]
     )
 }
@@ -132,6 +132,50 @@ struct GCHolderChildren: AsyncParsableCommand {
             method: RPCMethod.configSetReapHolderChildrenEnabled,
             params: ConfigSetReapHolderChildrenEnabledParams(enabled: enabled))
         print("Holder-child reaping \(enabled ? "enabled" : "disabled").")
+    }
+}
+
+/// The soak switch for the retained-transcript collector. It reclaims the
+/// residue of the transcript exchange on this machine: JSONL files under
+/// `~/tbd/transcripts/` that no `retained_transcript` row references, and rows
+/// whose stated expiry has passed. Read on top of the GC master switch, so both
+/// must be on for the leg to run.
+///
+/// A separate opt-in from `tbd remote allow-delete`: that gate destroys a
+/// session on a provider, this one only unlinks TBD's own local copies, and
+/// opting into either must never opt into the other. It ships off and is opted
+/// into by hand — here rather than by editing `state.db`, which the project's
+/// own rules put out of bounds.
+struct GCRetainedTranscripts: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "retained-transcripts",
+        abstract: "Enable or disable reclaiming unreferenced retained transcripts (default off)",
+        discussion: """
+            The soak switch for the orphan-GC leg that unlinks retained \
+            transcript files nobody references and drops receipts whose expiry \
+            has passed. Off — the shipped default — the leg reads nothing and \
+            unlinks nothing.
+
+            It is read on top of `gcEnabled`, so both must be on for the leg to \
+            run, and `tbd gc sweep --dry-run` prints the candidates either way — \
+            so the decision to turn it on can be made against real ones.
+
+            Turning it off stops the next sweep. It cannot restore a file an \
+            earlier one unlinked.
+            """
+    )
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetGCRetainedTranscriptsEnabled,
+            params: ConfigSetGCRetainedTranscriptsParams(enabled: enabled))
+        print("Retained-transcript GC \(enabled ? "enabled" : "disabled").")
     }
 }
 

@@ -109,6 +109,54 @@ struct RemoteSessionActionMenuTests {
         #expect(RemoteSessionActionMenu.items(capabilities: ["attach", "log", "send"], gone: false, isPinned: false).count == 8)
     }
 
+    // MARK: - Dismiss: offered for gone OR exited, never for a live running row
+
+    /// The gate this parameter opens. A provider may keep an exited session
+    /// listed indefinitely, so the row is not `gone`; on a provider that
+    /// never implements `delete`, Dismiss is the only thing that removes it.
+    @Test func dismissOfferedForExitedSession() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: [], gone: false, isPinned: false, exited: true)
+        #expect(kinds(items).contains(.dismiss))
+        // Immediately after the pin toggle and before the divider, so Stop
+        // stays the last destructive item.
+        #expect(kinds(items) == [.rename, .copySessionID, .pin, .dismiss, nil, .stop])
+    }
+
+    /// The pre-existing branch is untouched: a `gone` row still collapses to
+    /// Copy + pin + Dismiss, whatever `exited` says.
+    @Test func dismissOfferedForGoneSession() {
+        for exited in [true, false] {
+            let items = RemoteSessionActionMenu.items(
+                capabilities: [], gone: true, isPinned: false, exited: exited)
+            #expect(kinds(items) == [.copySessionID, .pin, .dismiss])
+        }
+    }
+
+    /// The discriminating arm: a live, running row must NOT offer Dismiss —
+    /// tombstoning a session the agent is still working in would hide live
+    /// work behind a local-only gesture with no undo in the menu.
+    @Test func dismissNotOfferedForLiveRunningSession() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["attach", "log", "send"], gone: false, isPinned: false, exited: false)
+        #expect(!kinds(items).contains(.dismiss))
+        // And the default keeps every existing call site on that branch.
+        #expect(!kinds(RemoteSessionActionMenu.items(
+            capabilities: [], gone: false, isPinned: false)).contains(.dismiss))
+    }
+
+    /// An exited row takes the LIVE branch, not the collapsed `gone` one: it
+    /// keeps every inspection action plus Stop, and merely gains Dismiss.
+    @Test func exitedSessionKeepsInspectionActions() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["attach", "log", "send"], gone: false, isPinned: false, exited: true)
+        #expect(kinds(items) == [
+            .rename, .attach, .viewLog, .sendText, .copySessionID, .pin, .dismiss, nil, .stop,
+        ])
+        #expect(items.last == .action(RemoteSessionActionMenu.Action(
+            kind: .stop, title: RemoteSessionActionMenu.stopLabel, role: .destructive)))
+    }
+
     // MARK: - unrecognized capability strings are ignored, not erroring
 
     @Test func unrecognizedCapabilityStringsAreIgnored() {
@@ -164,5 +212,87 @@ struct RemoteSessionActionMenuTests {
     @Test func pinWordingMatchesTheWorktreeRowMenu() {
         #expect(RemoteSessionActionMenu.pinLabel == RowActionMenu.pinLabel)
         #expect(RemoteSessionActionMenu.unpinLabel == RowActionMenu.unpinLabel)
+    }
+
+    // MARK: - Delete, behind the default-off flag
+
+    private func deleteAction(_ items: [Item]) -> RemoteSessionActionMenu.Action? {
+        items.compactMap { item -> RemoteSessionActionMenu.Action? in
+            if case let .action(action) = item, action.kind == .delete { return action }
+            return nil
+        }.first
+    }
+
+    /// The flag's off branch — the shipped default, and the default of the
+    /// parameter, so every pre-existing call site in this suite composes no
+    /// Delete at all.
+    @Test func deleteOmittedWhenFlagOff() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["delete"], gone: false, isPinned: false, deleteEnabled: false)
+        #expect(!kinds(items).contains(.delete))
+    }
+
+    /// The flag's on branch, with the capability: present, enabled, destructive.
+    @Test func deletePresentAndEnabledWithTheCapability() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["delete"], gone: false, isPinned: false, deleteEnabled: true)
+        let delete = deleteAction(items)
+        #expect(delete?.title == RemoteSessionActionMenu.deleteLabel)
+        #expect(delete?.isEnabled == true)
+        #expect(delete?.role == .destructive)
+        #expect(delete?.disabledHelp == nil)
+    }
+
+    /// **Present but disabled**, not omitted — the one deliberate departure
+    /// from this menu's omit-when-absent convention. Attach, View Log and Send
+    /// Text vanish when undeclared; Delete stays and says why, because a user
+    /// looking for the way to reclaim a session needs to be told the way exists
+    /// and this provider has not built it yet.
+    @Test func deletePresentButDisabledWithoutTheCapability() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["attach", "log"], gone: false, isPinned: false, deleteEnabled: true)
+        let delete = deleteAction(items)
+        #expect(delete?.title == RemoteSessionActionMenu.deleteProviderCannotDeleteLabel)
+        #expect(delete?.title == "Delete (provider can't delete)")
+        #expect(delete?.isEnabled == false)
+        #expect(delete?.role == .destructive)
+        #expect(delete?.disabledHelp == RemoteSessionActionMenu.deleteNeedsProviderCapabilityHelp)
+    }
+
+    /// The discriminating pair for the departure: an absent `attach` is
+    /// omitted while an absent `delete` is present-and-disabled, in the very
+    /// same menu. If someone "fixed" Delete into consistency, this goes red.
+    @Test func anAbsentDeleteIsShownWhileAnAbsentAttachIsNot() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: [], gone: false, isPinned: false, deleteEnabled: true)
+        #expect(!kinds(items).contains(.attach))
+        #expect(kinds(items).contains(.delete))
+    }
+
+    /// Delete is last: it strictly outranks Stop, which ends compute without
+    /// removing the record.
+    @Test func deleteIsTheLastItemAfterStop() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["delete"], gone: false, isPinned: false, deleteEnabled: true)
+        #expect(kinds(items) == [.rename, .copySessionID, .pin, nil, .stop, .delete])
+    }
+
+    /// A `gone` row keeps its collapsed shape: the provider has stopped
+    /// enumerating that session, so there is nothing left there to destroy and
+    /// Dismiss is the row's removal gesture.
+    @Test func deleteNotOfferedForAGoneRow() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["delete"], gone: true, isPinned: false, deleteEnabled: true)
+        #expect(kinds(items) == [.copySessionID, .pin, .dismiss])
+    }
+
+    /// A stale inventory omits Delete with Stop, for the same reason: provider
+    /// mutations wait for an inventory worth trusting.
+    @Test func deleteOmittedWhileTheSnapshotIsStale() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["delete"], gone: false, snapshotFresh: false,
+            isPinned: false, deleteEnabled: true)
+        #expect(!kinds(items).contains(.delete))
+        #expect(!kinds(items).contains(.stop))
     }
 }

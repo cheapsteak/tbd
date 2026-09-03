@@ -402,9 +402,12 @@ struct ArchivedWorktreesView: View {
                             .listRowSeparator(.hidden)
                             .contextMenu {
                                 if row.reviveState == nil {
+                                    let availability = reviveAvailability(for: row.worktree)
                                     Button("Revive") {
                                         Task { await appState.reviveWorktree(id: row.worktree.id) }
                                     }
+                                    .disabled(availability != .enabled)
+                                    .help(reviveHelp(availability))
                                 }
                                 // The status bar covers live worktrees, but an
                                 // archived one is never the selection it reads
@@ -643,6 +646,25 @@ struct ArchivedWorktreesView: View {
         }
     }
 
+    /// Whether this archived row's Revive is still good, and why not when it
+    /// is not. A remote lane whose session was destroyed is revived by
+    /// reseeding from its retained transcript, and past the provider's stated
+    /// expiry there is nothing left to reseed from — see
+    /// `RemoteLaneReviveAvailability`, which owns the rule, and
+    /// `RemoteLaneLifecycle.reseedPlan`, which enforces it daemon-side whether
+    /// or not this button was disabled first.
+    private func reviveAvailability(for worktree: Worktree) -> RemoteLaneReviveAvailability.Decision {
+        RemoteLaneReviveAvailability.decide(
+            worktree: worktree, receipts: appState.retainedTranscripts, now: Date())
+    }
+
+    private func reviveHelp(_ decision: RemoteLaneReviveAvailability.Decision) -> String {
+        switch decision {
+        case .enabled: return ""
+        case .expired(let reason): return reason
+        }
+    }
+
     private func noSessionsState(for worktree: Worktree) -> some View {
         VStack(spacing: 12) {
             Image(systemName: "bubble.left.and.bubble.right")
@@ -651,10 +673,21 @@ struct ArchivedWorktreesView: View {
             Text("No archived sessions")
                 .foregroundStyle(.secondary)
                 .font(.callout)
+            let availability = reviveAvailability(for: worktree)
             Button("Revive") {
                 Task { await appState.reviveWorktree(id: worktree.id) }
             }
             .buttonStyle(.borderedProminent)
+            .disabled(availability != .enabled)
+            .help(reviveHelp(availability))
+            if case .expired(let reason) = availability {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 24)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

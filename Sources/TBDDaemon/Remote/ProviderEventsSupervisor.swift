@@ -424,7 +424,13 @@ actor ProviderEventsSupervisor {
                 snapshot: sessions, provider: config.name, complete: complete,
                 requestStartedAt: connectionOpenedAt)
         case .session(let session):
-            await manager.applyUpsert(session, provider: config.name)
+            // `composedSince` for the same reason `snapshot` above passes
+            // `requestStartedAt`: a line pushed over this connection may have
+            // been composed at any point since it opened, so a delete this
+            // daemon issued in the meantime is newer than the line and the
+            // mirror row must not come back.
+            await manager.applyUpsert(
+                session, provider: config.name, composedSince: connectionOpenedAt)
         case .removed(let id):
             await manager.applyRemoval(sessionID: id, provider: config.name)
         }

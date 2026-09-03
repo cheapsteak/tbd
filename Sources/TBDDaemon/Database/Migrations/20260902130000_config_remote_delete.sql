@@ -1,0 +1,12 @@
+-- Gate for `remote.delete`, the verb that destroys a provider-hosted agent
+-- session (docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md).
+-- It gates the destructive verb only: `retain`, `import` and `recall` are
+-- non-destructive and are gated by the provider's declared capabilities alone.
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" (0) — which is what made auto_hibernate_enabled impossible to
+-- graduate without a forcing UPDATE that also reset deliberate opt-ins.
+-- The shipped default lives in exactly one place:
+-- Config.remoteDeleteEnabledDefault.
+ALTER TABLE config ADD COLUMN remote_delete_enabled INTEGER;

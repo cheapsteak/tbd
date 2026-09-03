@@ -20,6 +20,10 @@ Three verbs are **required**: `describe`, `create`, and `list`. Every other verb
 | `stop` | capability `stop` | `<exec> stop <id>` | — | JSON session | 30s |
 | `archive` | capability `archive` | `<exec> archive <id>` | — | JSON session | 30s |
 | `unarchive` | capability `unarchive` | `<exec> unarchive <id>` | — | JSON session | 30s |
+| `delete` | capability `delete` | `<exec> delete <id> [--retain]` | — | JSON result | 30s |
+| `retain` | capability `retain` | `<exec> retain <id>` | — | JSON receipt | 60s |
+| `import` | capability `import` | `<exec> import` | JSONL | JSON receipt | 60s |
+| `recall` | capability `recall` | `<exec> recall <key>` | — | JSONL | 60s |
 | `log` | capability `log` | `<exec> log <id> [--lines N]` | — | raw bytes | 30s |
 | `transcript` | capability `transcript` | `<exec> transcript <id> [--since <cursor>]` | — | JSONL bytes | 60s |
 | `send` | capability `send` | `<exec> send <id>` | raw bytes | JSON `{}` | 30s |
@@ -219,7 +223,7 @@ Why credentials never travel, by kind:
   "contract_versions": [1, 2],
   "name": "example-provider",
   "provider_version": "0.4.2",
-  "capabilities": ["stop", "log", "transcript", "send", "attach", "events", "messages", "rename", "profile", "set-profile", "archive", "unarchive", "land"],
+  "capabilities": ["stop", "log", "transcript", "send", "attach", "events", "messages", "rename", "profile", "set-profile", "archive", "unarchive", "delete", "retain", "import", "recall", "seed", "land"],
   "create_params": [
     {"name": "repo",   "type": "string", "label": "Repository", "required": true},
     {"name": "branch", "type": "string", "label": "Branch", "default": "main"},
@@ -233,7 +237,7 @@ Why credentials never travel, by kind:
 
 - `contract_versions` — every contract major version this provider supports (see Versioning).
 - `name` — a stable machine identifier for the provider (used, along with each session id, as the caller's key for this provider's sessions).
-- `capabilities` — which optional verbs/features (`stop`, `log`, `transcript`, `send`, `attach`, `events`, `messages`, `rename`, `profile`, `set-profile`, `archive`, `unarchive`, `land`) this provider implements. Every capability string except `profile` names the verb of the same name: declaring it means the verb is implemented, and omitting it means the caller never invokes it and never offers the corresponding action. `profile` is the exception — it gates whether `create`'s `profile` field is honored (see `create` and the Profile object above), while `set-profile` gates the verb of the same name.
+- `capabilities` — which optional verbs/features (`stop`, `log`, `transcript`, `send`, `attach`, `events`, `messages`, `rename`, `profile`, `set-profile`, `archive`, `unarchive`, `delete`, `retain`, `import`, `recall`, `seed`, `land`) this provider implements. Every capability string except `profile` and `seed` names the verb of the same name: declaring it means the verb is implemented, and omitting it means the caller never invokes it and never offers the corresponding action. `profile` and `seed` are the two exceptions — each gates whether `create` honors the stdin field of the same name (see `create` and Format scope below, and the Profile object above) rather than admitting a verb — while `set-profile` gates the verb of the same name.
 - `create_params` — a flat field list, not a JSON Schema, describing the form for `create`. Supported `type` values: `string`, `text`, `bool`, `int`, `enum`. The caller renders this generically (the most complex widget is an enum dropdown) and only does required/type checks client-side — the provider is the validator of record, via the error model below. The field names `repo`, `slug`, `branch`, `prompt`, and `title` are well-known: a caller may prefill them from ambient context (e.g. a currently selected repository) when present, and for `slug` a caller may generate a lane identifier of its own choosing. Well-known is a caller-side prefill convention and nothing more: it obliges a provider to nothing, changes no validation, and a provider that declares any of these names is simply one whose form a caller can fill in without asking. A caller that can answer every `required` field this way may skip the form entirely and create straight away; one that cannot must ask rather than guess.
 - `profile_kinds` and `credential_ref_hint` are meaningful only when `capabilities` includes `profile`; a provider without that capability SHOULD omit both, and a caller MUST ignore them if present without it. `profile_kinds` lists which `kind` values (from the Profile object above) this provider can actually realize. `credential_ref_hint` is placeholder text — not validation — describing the shape of a `credential_ref` this provider expects; a caller shows it as placeholder text in its credential-reference input.
 
@@ -247,11 +251,18 @@ stdin:
 {
   "params": {"repo": "acme/api", "branch": "fix-ci", "prompt": "..."},
   "profile": {"name": "acme-default", "kind": "oauth", "credential_ref": "acme-vault://oauth/acme-default"},
+  "seed": {"retained_key": "opaque-provider-string"},
   "idempotency_key": "tbd-9a1c..."
 }
 ```
 
 `profile` (optional) is a Profile object (see above) selecting the identity the new session's agent should run as. It is meaningful only when the provider declares the `profile` capability; a provider that doesn't declare it MUST ignore the field — per the ignore-unknown-fields rule in Versioning — and create the session against its own default identity rather than error. An absent `profile` always means the provider's default identity, regardless of capability.
+
+`seed` (optional) names a retained transcript the new session begins with as its history: `{"retained_key": "<key>"}`, where the key came from a `retain` or `import` receipt this same provider issued (see Keys below). It is a top-level sibling of `profile` and `idempotency_key`, never a member of the provider-defined `params`, and the payload it names is Claude Code transcript JSONL (see Format scope below).
+
+`seed` is gated by the `seed` capability, which names the field it gates rather than a verb — the same shape `profile` has. A provider that has not declared `seed` MUST ignore the field, per the ignore-unknown-fields rule in Versioning, and a caller MUST NOT send it to such a provider. That obligation is the whole point of gating the field: because an unrecognized stdin field is dropped silently rather than refused, an ungated `seed` sent to a provider that does not implement it would produce an unseeded session the caller believed carried a conversation, with nothing on either side to say so. `idempotency_key` dedupe covers a seeded create unchanged — replaying a key that already produced a session returns that same session rather than seeding a second one.
+
+`seed` is an object rather than a bare key string so that a future inline source — `{"transcript": [...]}` — needs neither a new field nor a new capability.
 
 If `create_params` exposes the well-known `prompt` field, the provider owns clearing any agent startup or trust gate before delivering that prompt. Writing prompt bytes while another interactive gate owns the TTY does not count as delivery. Providers SHOULD use agent flags or machine interfaces to clear and verify such gates, and MUST NOT infer readiness by parsing cosmetic TUI output.
 
@@ -311,6 +322,89 @@ The verb is optional and declared via the `stop` capability. Not every backend e
 The two verbs are declared separately (`archive`, `unarchive`), because a backend may be able to retire a session without being able to bring it back. A provider that declares `archive` alone is conformant; a caller then offers archiving and simply has no unarchive action.
 
 Failure follows the standard error model below — for example, exit 1 with `code: "not_found"` if `<id>` no longer exists.
+
+## `delete <id> [--retain]` (optional)
+
+Destroys the session: ends its compute if it is still running, and removes it from the inventory permanently. It is the third act alongside the two above — `stop` ends compute without retiring the session, `archive` retires the session without ending compute, and `delete` leaves nothing behind.
+
+**A provider MUST NOT declare `delete` unless a successful delete of a running session also ends that session's compute.** A provider that cannot end compute for a given session MUST refuse that delete with exit 1 rather than remove the record. This contract already recognizes backends with no client-facing kill and forbids them from declaring `stop`; such a backend declaring `delete` would strand compute that nothing enumerates and no reconciler can reach.
+
+Response:
+
+```json
+{"id": "fix-flaky-ci", "deleted": true}
+```
+
+- `id` (required) — MUST be the same `<id>` passed on the invocation line.
+- `deleted` (required) — `true` when this call destroyed a session, `false` when there was nothing to destroy.
+
+**The response is deliberately not a Session object.** Every other verb that changes a session returns one; this verb must not, because a caller that has just been told a session no longer exists must not be handed inventory-shaped data about it. The caller's adoption path reads a session object as a session to track, so returning one here would re-adopt the very session the response declares gone.
+
+**`delete` is idempotent.** Deleting an unknown or already-deleted id exits 0 with `"deleted": false`, matching the idempotence `stop` and `archive` already have: asking for a state a session is already in is not an error.
+
+**Filing never gates destruction.** An archived session MAY be deleted, and a caller need not unarchive one first: `archived` is a filing decision and says nothing about whether a session may be destroyed.
+
+**`delete` overrides the exited-session retention SHOULD.** Providers SHOULD keep exited sessions listable for at least 24 hours (see `list` above) so that a disappearance can be told apart from transport drift. A deleted session is exempt, because its disappearance was requested by the caller rather than observed by it, and there is nothing to tell apart.
+
+**A provider that declares `events` MUST emit `{"event": "removed", "id": ...}` after a successful delete.** `removed` already means "stop tracking this at all", which is exactly the fact a delete establishes.
+
+**`--retain` retains the session's transcript before destroying it**, and is valid only where the provider also declares the `retain` capability. When the flag is passed — and only then — the response carries the same receipt `retain` returns:
+
+```json
+{"id": "fix-flaky-ci", "deleted": true, "retained": {"key": "opaque-provider-string", "expires_at": "2026-10-01T00:00:00Z", "bytes": 148213}}
+```
+
+Without the flag, nothing is retained and no `retained` object appears. **Retention is never implied by capability presence.** A caller that did not ask for storage MUST NOT have storage allocated on its behalf, and a response shape MUST NOT vary with which capabilities a provider happens to hold.
+
+There is no `--force` at this layer. Refusing to destroy live or dirty work is caller policy — the caller has `stop` to sequence and the `workspace_dirty` key to consult — and a provider that second-guesses an explicit delete leaves the caller no way through.
+
+Failure follows the standard error model below.
+
+## `retain <id>` / `import` (optional)
+
+Both verbs put a transcript into the provider's own durable store and return the same receipt:
+
+```json
+{"key": "opaque-provider-string", "expires_at": "2026-10-01T00:00:00Z", "bytes": 148213}
+```
+
+`retain <id>` stores the transcript of a session this provider owns. `import` reads Claude Code transcript JSONL on stdin and stores it, with no session on this provider involved at all — that is how a conversation from somewhere else, including one that ran on the caller's own machine, enters the store.
+
+- `key` (required) — the opaque handle `recall` and `create`'s `seed` field take. See Keys below.
+- `bytes` (required) — the count of transcript bytes stored. It is how a caller detects a truncated `recall`, so a provider MUST emit it.
+- `expires_at` (optional) — when the provider intends to drop the record. **An absent `expires_at` means the provider makes no claim, never "kept forever".** A caller MUST NOT render its absence as a guarantee of permanence.
+
+Malformed JSONL on `import` is a permanent error with `code: "invalid_params"`.
+
+Providers SHOULD expire retained transcripts nobody recalls. Retention is storage a caller asked for, and a store with no expiry policy grows without bound.
+
+**These are two verbs and two capabilities rather than one verb with an operand or a `--stdin` flag.** Every capability string but the two that gate a `create` field names the verb of the same name, and the two acts have genuinely different prerequisites: a backend may be able to snapshot its own sessions while being unable to accept a foreign blob, and one capability cannot say that. Separately, stdin is a property of a verb here — `create`, `send`, and `set-profile` read it unconditionally, and nothing else reads it at all — so a flag that switched it on would be the only one of its kind. Detecting a tty instead would be worse: TBD always invokes providers without one, so the heuristic would be constant-true in the caller that matters.
+
+Failure follows the standard error model below — for example, exit 1 with `code: "not_found"` if `retain`'s `<id>` no longer exists.
+
+## `recall <key>` (optional)
+
+Writes a retained transcript to stdout as Claude Code transcript JSONL, in the same format `transcript` returns (see `transcript` below). It works for any key the provider issued, whether or not the session that produced the transcript still exists — which is the point of retaining one.
+
+**`recall` writes nothing to stderr**, so this contract keeps exactly one stderr exception. `recall` does not inherit `transcript`'s cursor envelope: a cursor exists because a live transcript grows and is fetched incrementally, while a retained transcript is immutable, so `--since` would have nothing to mean. Truncation — the cursor's other job — is detected against the `bytes` the receipt carried.
+
+- Unknown key: exit 1 with `code: "not_found"`.
+- A key the provider issued and has since aged out: exit 1 with `code: "expired"` (see Error model below), so a caller can say that a record lapsed rather than claim it never existed.
+
+Both are permanent errors.
+
+**It is a separate verb rather than `transcript --key`.** The operand is a different identifier namespace — a key is not a session id — and the `transcript` capability must keep meaning "live transcripts work" rather than becoming ambiguous about which of two paths a provider implements.
+
+### Keys
+
+A key is an opaque provider-issued string, on the same terms as a `transcript` cursor or a `credential_ref`. A caller MUST NOT parse, order, compare, construct, or pattern-match one; it stores whatever a receipt gave it and passes that value back verbatim.
+
+- **Keys are provider-scoped.** A key is meaningful only to the provider that issued it, so a caller keys every key by the pair `(provider name, key)` and MUST NOT present one to a different provider.
+- **A key is an identifier, not an authorization.** `recall` authenticates exactly as every other verb does, and holding a key grants nothing on its own. A key is therefore not a bearer secret — which is what lets a caller log it, print it, and store it beside the rest of its inventory rather than treating it as credential material.
+
+### Format scope
+
+`import`, `recall`, and `create`'s `seed` field all fix the payload as Claude Code transcript JSONL, the same format `transcript` returns. The rest of this contract assumes no particular agent, so these three are a real narrowing of it: a provider whose sessions are not Claude Code sessions simply declines these capabilities and remains fully conformant, and other agents' transcript formats are out of scope.
 
 ## `log <id> [--lines N]`
 
@@ -560,7 +654,9 @@ On a nonzero exit, the provider SHOULD emit one JSON error object on stdout:
 }
 ```
 
-Well-known `code` values: `auth_expired`, `auth_missing`, `not_found`, `already_exists`, `unreachable`, `invalid_params`, `credential_unresolvable`. Providers may return other codes; callers should treat unrecognized codes as opaque strings and still show `message`.
+Well-known `code` values: `auth_expired`, `auth_missing`, `not_found`, `expired`, `already_exists`, `unreachable`, `invalid_params`, `credential_unresolvable`. Providers may return other codes; callers should treat unrecognized codes as opaque strings and still show `message`.
+
+`expired` means the thing named existed and has since lapsed — `recall` returns it for a key the provider issued and has since aged out (see `recall` above). It is distinct from `not_found` because the two say different things to a human: `not_found` claims the identifier was never issued, which for a key a caller is holding a receipt for is simply false, and hides the fact that the record lapsed on a schedule the provider declared.
 
 `credential_unresolvable` means a `credential_ref` in a `profile` object didn't resolve against the provider's own secret store. It's distinct from `invalid_params` because the remedy is provisioning — registering or fixing the secret on the provider side — not correcting the shape of the request. It carries the same `remediation` shape as any other code:
 
@@ -604,6 +700,8 @@ The one asymmetry runs the other way: a provider that **drops** `stop` altogethe
 Within a major version: providers may add new response fields at any time — a scalar or a structured object alike, such as `pending_question` on the Session object — and callers MUST ignore fields they don't recognize. This is symmetric: callers may send new optional fields in structured stdin (for example, `profile` on `create`) that an older provider doesn't recognize, and **providers MUST likewise ignore fields they don't recognize in structured stdin** rather than fail on them — the same forward-compatibility contract applies in both directions. Removing or renaming a field, or changing the semantics of a verb, requires a new major version.
 
 **A caller's silence is not confirmation.** That ignore-unknown-fields rule, read from the sending end, means an optional field a caller does not consume is dropped at decode rather than rejected: nothing is returned, nothing is logged on the sender's side, and a run in which a field was understood is indistinguishable from one in which it was never looked at. A provider therefore MUST NOT read the absence of an error, or the absence of any complaint at all, as evidence that a caller consumes a field it sends. Where this document states what TBD's own caller does with an optional field, that statement sits at the field; where it makes no such statement, a provider that needs to know has to ask the caller's implementers rather than infer it from a quiet run. Adding a new optional verb — gated behind a new entry in `capabilities`, as `rename`, `set-profile`, and `messages` were — is likewise additive within a major version: a caller that doesn't recognize the capability string simply never invokes the verb, so no version bump is needed for it either. **A provider declaring `contract_versions: [1]` may implement any capability-gated verb this document specifies, `messages` included.** The capability string is what admits a verb at either major — a caller invokes one because the provider declared it, never because a major was negotiated — and the optional response fields such a verb arrives with are readable at either major under the rule above. Declaring one therefore obliges nobody to add `2`, and adding `2` for a verb alone is the expensive mistake: it carries the `stop` pairing above with it. `messages` is the worked example of both halves at once: a capability-gated verb plus one optional response field (`peer_messaging`), added within major 2 and requiring no bump, no change to any existing verb, and nothing at all from a provider that declines it.
+
+**`delete`, `retain`, `import`, `recall`, and `seed` are additive within major 2 on exactly those terms, and require no bump.** Four are capability-gated verbs, admitted by their capability strings the way `rename` and `messages` are; `seed` is a capability-gated field on `create`, admitted the way `profile` is. No required verb changes, no existing field is removed or renamed, and no existing verb's semantics move, so a provider that declares none of the five behaves precisely as it always has. **None of this changes `stop`'s status.** `delete`'s obligation to end a running session's compute is a statement about `delete` alone: it neither requires nor implies the `stop` capability, and the pairing rule above — a provider that implements `stop` and declares major 2 MUST declare the `stop` capability — is untouched by it.
 
 ## Identity & drift
 

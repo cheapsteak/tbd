@@ -35,6 +35,11 @@ public final class TBDDatabase: Sendable {
     /// and detection"). Durable because a shadow's record carries no marker of
     /// TBD's own, so a row that is lost is a shadow nothing can recognise.
     public let shadowPeerArtifacts: ShadowPeerArtifactStore
+    /// TBD's record of the transcripts a provider has retained
+    /// (`docs/remote-provider-contract.md` § `retain <id>` / `import`). The
+    /// provider contract gives no way to enumerate the keys a provider issued,
+    /// so these rows are the only listing a caller has.
+    public let retainedTranscripts: RetainedTranscriptStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -78,6 +83,7 @@ public final class TBDDatabase: Sendable {
         self.prBindings = PRBindingStore(writer: pool)
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: pool)
         self.shadowPeerArtifacts = ShadowPeerArtifactStore(writer: pool)
+        self.retainedTranscripts = RetainedTranscriptStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         // Both refusal gates before touching the database: rethrow a
@@ -126,6 +132,7 @@ public final class TBDDatabase: Sendable {
         self.prBindings = PRBindingStore(writer: queue)
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: queue)
         self.shadowPeerArtifacts = ShadowPeerArtifactStore(writer: queue)
+        self.retainedTranscripts = RetainedTranscriptStore(writer: queue)
         // The same gates `init(path:)` runs. `migrationsForRegistration()`
         // cannot throw, so without this a resource bundle that failed to
         // resolve under `scripts/test.sh` would surface as scattered "no such

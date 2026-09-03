@@ -109,6 +109,45 @@ struct RemoteSectionViewTests {
         #expect(RemoteSectionView.shouldShowHeader(provider: status(health: .ok), sessions: sessions, knownRepoIDs: []))
     }
 
+    // MARK: - archived sessions are display policy, applied here
+
+    /// Built through the PRODUCTION decode path — the payload is decoded from
+    /// provider-shaped JSON, so the absent-reads-as-false semantics of
+    /// `archived` are the real ones and not a hand-assembled stand-in.
+    private func decodedSession(
+        provider: String = "acme", id: String, archivedJSON: String? = nil
+    ) throws -> RemoteSessionInfo {
+        var fields = ["\"id\": \"\(id)\"", "\"state\": \"running\""]
+        if let archivedJSON { fields.append("\"archived\": \(archivedJSON)") }
+        let json = "{ \(fields.joined(separator: ", ")) }"
+        let payload = try JSONDecoder().decode(RemoteSessionPayload.self, from: Data(json.utf8))
+        return RemoteSessionInfo(
+            provider: provider, payload: payload,
+            gone: false, dismissed: false, lastSeen: Date())
+    }
+
+    /// Same display policy as `RepoSectionView.matchedRemoteSessions`: the
+    /// provider keeps archived sessions in `list`, and the caller decides
+    /// which of them a human sees.
+    @Test func providerSectionExcludesArchivedSessions() throws {
+        let sessions = [
+            try decodedSession(id: "archived", archivedJSON: "true"),
+            try decodedSession(id: "active"),
+        ]
+        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
+        #expect(result.map(\.payload.id) == ["active"])
+    }
+
+    /// The other arm — an explicit `false` and an omitted key both stay.
+    @Test func providerSectionIncludesUnarchivedSessions() throws {
+        let sessions = [
+            try decodedSession(id: "explicit-false", archivedJSON: "false"),
+            try decodedSession(id: "absent"),
+        ]
+        let result = RemoteSectionView.sessions(in: sessions, forProvider: "acme", knownRepoIDs: [])
+        #expect(Set(result.map(\.payload.id)) == ["explicit-false", "absent"])
+    }
+
     // MARK: - knownRepoIDs(repos:repoFilter:) — final review item 3
 
     private func repo(id: UUID = UUID(), hidden: Bool = false) -> Repo {

@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// The remote half of retiring and reviving a lane
 /// (`docs/specs/2026-08-16-remote-lane-archive-design.md`, "Archive",
@@ -60,6 +61,75 @@ struct RemoteLaneLifecycle: Sendable {
         case refusedNoUnarchive(String)
     }
 
+    /// What Revive means for an archived remote lane once the question "is
+    /// there still a session to unarchive?" has been asked
+    /// (`docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`,
+    /// "A deleted lane keeps its place").
+    ///
+    /// A deleted lane is archived like any other, and the row is deliberately
+    /// kept — with its branch, its PR context, and its place in the repo's
+    /// Archived tab. What it no longer has is a session: `delete` destroyed it
+    /// and the mirror row went with it. So Revive on such a row cannot mean
+    /// `unarchive`; it means creating a new session seeded from the transcript
+    /// the delete retained. The gesture, the place and the word already mean
+    /// this, which is why it is not a second button.
+    enum RemoteLaneReseedPlan: Equatable {
+        /// Create a new session seeded from this key, and rebind the row to it.
+        case reseed(key: String)
+        /// The provider's stated expiry has passed. Refuse, naming the date.
+        /// The row stays as history — a lane whose conversation lapsed is
+        /// still a record of work that happened.
+        case expired(String)
+        /// A receipt survives, but this provider cannot begin a session from
+        /// one. Refuse naming `seed` rather than sending it and hoping: the
+        /// contract has providers ignore stdin fields they do not recognize,
+        /// so an unchecked reseed would produce an empty session wearing a
+        /// revived lane's name.
+        case refusedNoSeed(String)
+        /// Nothing about this lane calls for a reseed — take the ordinary
+        /// archive/unarchive path, unchanged.
+        case unarchive
+    }
+
+    /// Decides whether `worktree.revive` on a remote lane means reseeding.
+    ///
+    /// `sessionStillListed` is the discriminator, and it is the mirror row's
+    /// existence rather than anything about the receipt. A receipt on its own
+    /// proves only that somebody retained a transcript — `tbd remote retain`
+    /// is an ordinary thing to do to a session that is alive and well, and
+    /// reviving *that* lane must still be an `unarchive`. `remote.delete` drops
+    /// the mirror row the instant the provider confirms the destruction, so an
+    /// archived lane with a receipt and no row is the deleted one.
+    ///
+    /// `now` is passed rather than read: `expiresAt` is a persisted timestamp
+    /// compared against the present, which is the date seam and not the clock
+    /// seam (`Duration` is behavior; `Date` is data).
+    ///
+    /// Messages come back bare, as `archivePlan`'s and `revivePlan`'s do, and
+    /// the caller prefixes them with the lane's name.
+    static func reseedPlan(
+        receipt: RetainedTranscript?, sessionStillListed: Bool,
+        capabilities: Set<String>, now: Date
+    ) -> RemoteLaneReseedPlan {
+        guard !sessionStillListed else { return .unarchive }
+        guard let receipt else { return .unarchive }
+        if receipt.hasExpired(asOf: now), let expiresAt = receipt.expiresAt {
+            return .expired(
+                "the transcript retained from its session expired on " +
+                "\(RetainReceipt.formatTimestamp(expiresAt)), so there is nothing left to " +
+                "recreate the conversation from. The row stays as a record of the work."
+            )
+        }
+        guard capabilities.contains("seed") else {
+            return .refusedNoSeed(
+                "its session was destroyed, so reviving it means creating a new one seeded " +
+                "from the retained transcript — and this provider does not declare the " +
+                "\"seed\" capability. See docs/remote-provider-contract.md"
+            )
+        }
+        return .reseed(key: receipt.key)
+    }
+
     /// Decides how `worktree.archive` should treat a remote row.
     ///
     /// Order matters: a provider that declares `archive` takes the verb
@@ -112,23 +182,16 @@ struct RemoteLaneLifecycle: Sendable {
     /// here; one that says nothing degrades to the `working` guard alone.
     /// **The guard is therefore inert until a provider adopts the key, and
     /// TBD never fabricates the fact.**
-    static let dirtyWorkspaceMetaKey = "workspace_dirty"
+    static let dirtyWorkspaceMetaKey = RemoteSessionPayload.dirtyWorkspaceMetaKey
 
     /// Reads the dirty-checkout claim out of a session's `meta`.
     ///
-    /// `meta` is a flat string-to-string map, so the claim arrives as text.
-    /// Only `"true"` and `"1"` (trimmed, case-insensitively) are read as a
-    /// claim; an absent key, an empty value, and anything unrecognized all
-    /// mean "no claim was made" and leave the guard inert. Deliberately not
-    /// a permissive truthiness test: this value decides whether a user's
-    /// archive is refused, and inventing a claim out of a value a provider
-    /// meant for display would refuse a gesture nobody asked to block.
+    /// The reading itself lives on `RemoteSessionPayload` in `TBDShared`,
+    /// because the app's delete confirmation asks the same question of the same
+    /// key and two copies of a rule this sharp would drift. This name stays as
+    /// the daemon's way in.
     static func metaReportsDirtyWorkspace(_ meta: [String: String]?) -> Bool {
-        guard let raw = meta?[dirtyWorkspaceMetaKey] else { return false }
-        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "true", "1": return true
-        default: return false
-        }
+        RemoteSessionPayload.metaReportsDirtyWorkspace(meta)
     }
 
     /// The refusal for a lane whose agent is mid-task. Parallels how local

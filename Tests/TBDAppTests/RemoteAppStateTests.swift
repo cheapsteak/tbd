@@ -27,6 +27,18 @@ private final class Recorder {
 
 private enum TestPinError: Error { case boom }
 
+/// What a `deleteRemoteSession` run did, recorded through the injected seams.
+/// A reference type for the same reason `Recorder` is one: the seams are
+/// escaping closures, and a captured local `var` cannot be mutated from one.
+@MainActor
+private final class DeleteProbe {
+    var confirmAnswer = false
+    var confirmed = false
+    var confirmMessage: String?
+    var deleteCalls: [(provider: String, sessionID: String, retain: Bool)] = []
+    var deletedFlag = true
+}
+
 @MainActor
 @Suite("Remote backends — app state")
 struct RemoteAppStateTests {
@@ -548,6 +560,124 @@ struct RemoteAppStateTests {
 
     // Helper: run an async body against a freshly-isolated AppState with
     // proper UserDefaults suite teardown (async variant of `withState`).
+    // MARK: - deleteRemoteSession
+
+    private func seedForDelete(
+        _ state: AppState, capabilities: [String],
+        sessionState: RemoteProcessState, meta: [String: String]? = nil
+    ) {
+        state.remoteProviders = [RemoteProviderStatus(
+            config: RemoteProviderConfig(name: "acme", exec: "/bin/acme"),
+            describe: ProviderDescribe(name: "acme", capabilities: capabilities),
+            health: .ok, errorMessage: nil, remediationLabel: nil, remediationCommand: nil)]
+        state.remoteSessions = [RemoteSessionInfo(
+            provider: "acme",
+            payload: RemoteSessionPayload(
+                id: "s1", title: "fix flaky CI", state: sessionState, meta: meta),
+            gone: false, dismissed: false, lastSeen: Date())]
+    }
+
+    /// Wires both seams at a probe and makes the refresh that follows a delete
+    /// a no-op, so no test here reaches a daemon — and, crucially, none reaches
+    /// `NSAlert.runModal()`, which in a headless run would hang rather than
+    /// fail.
+    private func attachDeleteProbe(_ state: AppState, _ probe: DeleteProbe) {
+        state.remoteDeleteConfirmer = { message in
+            probe.confirmed = true
+            probe.confirmMessage = message
+            return probe.confirmAnswer
+        }
+        state.remoteSessionDeleter = { provider, sessionID, retain in
+            probe.deleteCalls.append((provider, sessionID, retain))
+            return RemoteDeleteResult(id: sessionID, deleted: probe.deletedFlag)
+        }
+        state.remoteProvidersFetcher = { RemoteProvidersResult(providers: []) }
+        state.remoteSessionsFetcher = { RemoteSessionsResult(sessions: []) }
+    }
+
+    /// Exited, clean, and the provider can retain: nothing is at stake, so the
+    /// gesture goes straight through without asking.
+    @Test func deleteSkipsTheConfirmWhenNothingIsAtStake() async {
+        await withStateAsync { state in
+            seedForDelete(state, capabilities: ["delete", "retain"], sessionState: .exited)
+            let probe = DeleteProbe()
+            attachDeleteProbe(state, probe)
+
+            await state.deleteRemoteSession(provider: "acme", sessionID: "s1")
+
+            #expect(!probe.confirmed)
+            #expect(probe.deleteCalls.count == 1)
+            #expect(probe.deleteCalls.first?.provider == "acme")
+            #expect(probe.deleteCalls.first?.sessionID == "s1")
+            #expect(probe.deleteCalls.first?.retain == true,
+                    "TBD asks for a receipt whenever the provider can give one")
+        }
+    }
+
+    /// A running session confirms, and declining destroys nothing. The
+    /// discriminating half is the deleter never being called.
+    @Test func decliningTheConfirmDeletesNothing() async {
+        await withStateAsync { state in
+            seedForDelete(state, capabilities: ["delete", "retain"], sessionState: .running)
+            let probe = DeleteProbe()
+            probe.confirmAnswer = false
+            attachDeleteProbe(state, probe)
+
+            await state.deleteRemoteSession(provider: "acme", sessionID: "s1")
+
+            #expect(probe.confirmed)
+            #expect(probe.deleteCalls.isEmpty)
+        }
+    }
+
+    /// A provider that cannot retain gets `retain: false` — TBD requests a
+    /// receipt, it never assumes one — and the delete still confirms, because
+    /// no record will survive it.
+    @Test func aProviderWithoutRetainIsNotAskedToRetain() async {
+        await withStateAsync { state in
+            seedForDelete(state, capabilities: ["delete"], sessionState: .exited)
+            let probe = DeleteProbe()
+            probe.confirmAnswer = true
+            attachDeleteProbe(state, probe)
+
+            await state.deleteRemoteSession(provider: "acme", sessionID: "s1")
+
+            #expect(probe.confirmed, "a delete that keeps no record always confirms")
+            #expect(probe.deleteCalls.first?.retain == false)
+        }
+    }
+
+    /// A session claiming `workspace_dirty` confirms even though it has exited
+    /// and a receipt is coming — the uncommitted work is on the provider's
+    /// machine and goes with the session.
+    @Test func aDirtyWorkspaceConfirmsEvenWhenExitedAndRetaining() async {
+        await withStateAsync { state in
+            seedForDelete(
+                state, capabilities: ["delete", "retain"], sessionState: .exited,
+                meta: [RemoteSessionPayload.dirtyWorkspaceMetaKey: "true"])
+            let probe = DeleteProbe()
+            probe.confirmAnswer = false
+            attachDeleteProbe(state, probe)
+
+            await state.deleteRemoteSession(provider: "acme", sessionID: "s1")
+
+            #expect(probe.confirmed)
+            #expect(probe.confirmMessage?.contains("uncommitted") == true)
+            #expect(probe.deleteCalls.isEmpty)
+        }
+    }
+
+    /// The flag the menus read comes from the daemon, and falls back to the
+    /// shipped default when the daemon has not answered.
+    @Test func remoteDeleteEnabledFollowsTheDaemon() async {
+        await withStateAsync { state in
+            #expect(state.remoteDeleteEnabled == Config.remoteDeleteEnabledDefault)
+            state.daemonCapabilities = DaemonCapabilitiesResult(
+                controlModeEnabled: false, remoteDeleteEnabled: true)
+            #expect(state.remoteDeleteEnabled)
+        }
+    }
+
     private func withStateAsync(_ body: (AppState) async -> Void) async {
         let suiteName = "TBDAppTests.Remote.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

@@ -230,6 +230,69 @@ public enum TBDConstants {
         terminalHistoryPath(worktreeID: worktreeID, terminalID: terminalID, environment: ProcessInfo.processInfo.environment)
     }
 
+    /// Base directory for transcripts recalled from a provider's retained
+    /// store: `~/tbd/transcripts`. Honors TBD_HOME.
+    ///
+    /// Derived from `configDir` rather than composed from `$HOME`, which is
+    /// the mistake `WorktreeLayout.basePath` made and which defeated the test
+    /// fence outright — every TBD-owned path comes from here.
+    public static func retainedTranscriptsDir(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("transcripts")
+    }
+    public static var retainedTranscriptsDir: URL {
+        retainedTranscriptsDir(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Path to one recalled transcript:
+    /// `~/tbd/transcripts/<provider>/<key>.jsonl`. Honors TBD_HOME.
+    ///
+    /// **Both components are percent-encoded, and the mapping is injective.**
+    /// A key is opaque by contract — a caller may not parse or construct one,
+    /// and a provider may issue any bytes it likes — so neither component may
+    /// be trusted to be a safe filename. Everything outside RFC 3986's
+    /// unreserved set *minus `.`* is percent-encoded, which gives three
+    /// properties at once:
+    ///
+    /// - **Injective.** `%` is itself escaped, so no two distinct inputs can
+    ///   produce the same output, and two different keys can never collide on
+    ///   one file.
+    /// - **No traversal.** `/` becomes `%2F`, so a key containing a separator
+    ///   stays a single path component, and `.` is escaped too, so a key of
+    ///   `.` or `..` can never name a relative directory.
+    /// - **Reversible by eye.** A human reading the directory can still
+    ///   recognise an ordinary key, which matters because this directory is
+    ///   the recovery surface when a key is lost.
+    ///
+    /// Composed as a filesystem path string and handed to
+    /// `URL(fileURLWithPath:)`, rather than built with `appendingPathComponent`.
+    /// The escaped components contain `%`, and `appendingPathComponent` decides
+    /// for itself whether a component needs further URL encoding — so a
+    /// component that already reads as a percent escape could survive into the
+    /// URL and decode back to the very separator the escaping removed.
+    /// `URL(fileURLWithPath:)` treats its argument as a path and round-trips
+    /// through `.path` unchanged, which is the property this needs.
+    public static func retainedTranscriptPath(
+        provider: String, key: String, environment: [String: String]
+    ) -> URL {
+        let directory = retainedTranscriptsDir(environment: environment).path
+        return URL(fileURLWithPath:
+            "\(directory)/\(filenameEscaped(provider))/\(filenameEscaped(key)).jsonl")
+    }
+    public static func retainedTranscriptPath(provider: String, key: String) -> URL {
+        retainedTranscriptPath(
+            provider: provider, key: key, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// RFC 3986's unreserved set less `.`, so no encoded component can be `.`
+    /// or `..`. See `retainedTranscriptPath` for why each exclusion is
+    /// load-bearing.
+    private static let filenameSafe = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_~")
+
+    private static func filenameEscaped(_ component: String) -> String {
+        component.addingPercentEncoding(withAllowedCharacters: filenameSafe) ?? component
+    }
+
     /// Path to a scratch worktree's notepad file:
     /// `~/tbd/worktrees/<worktreeID>/notes.md`. Honors TBD_HOME.
     public static func notesPath(worktreeID: UUID, environment: [String: String]) -> String {

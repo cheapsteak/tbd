@@ -114,6 +114,7 @@ final class AppStateEmissionTracker {
         _ = state.reapRecords
         _ = state.remoteProviders
         _ = state.remoteSessions
+        _ = state.retainedTranscripts
         _ = state.remoteSessionDisplayNames
         _ = state.highlightedArchivedWorktreeID
         _ = state.activeToast
@@ -223,6 +224,7 @@ final class AppStateEmissionTracker {
         "reapRecords",
         "remoteProviders",
         "remoteSessions",
+        "retainedTranscripts",
         "remoteSessionDisplayNames",
         "highlightedArchivedWorktreeID",
         "activeToast",

@@ -37,6 +37,10 @@ enum RowActionMenu {
         /// Create a child worktree based on THIS worktree's current branch.
         case newWorktreeFromBranch
         case archive
+        /// Destroy the remote session behind this lane
+        /// (`docs/remote-provider-contract.md` § `delete <id>`), behind the
+        /// default-off `remote_delete_enabled` flag. Local rows never offer it.
+        case deleteRemoteSession
         /// Pin this worktree to the sidebar dock.
         case pin
         /// Remove this worktree from the sidebar dock.
@@ -166,6 +170,11 @@ enum RowActionMenu {
         /// gesture the daemon will still perform. Always `false` for a local
         /// row.
         var isGone: Bool
+        /// The daemon's `remote_delete_enabled` gate, read from
+        /// `DaemonCapabilitiesResult`. Off — the shipped default — Delete is
+        /// not composed at all, so a destructive action is never offered that
+        /// the daemon would refuse. Always irrelevant for a local row.
+        var remoteDeleteEnabled: Bool
 
         init(hasHibernatableClaude: Bool = false,
              hasHibernatedClaude: Bool = false,
@@ -186,7 +195,8 @@ enum RowActionMenu {
              location: WorktreeLocation = .local,
              provider: String? = nil,
              providerCapabilities: Set<String> = [],
-             isGone: Bool = false) {
+             isGone: Bool = false,
+             remoteDeleteEnabled: Bool = false) {
             self.hasHibernatableClaude = hasHibernatableClaude
             self.hasHibernatedClaude = hasHibernatedClaude
             self.hasUnpinnedClaude = hasUnpinnedClaude
@@ -207,6 +217,7 @@ enum RowActionMenu {
             self.provider = provider
             self.providerCapabilities = providerCapabilities
             self.isGone = isGone
+            self.remoteDeleteEnabled = remoteDeleteEnabled
         }
     }
 
@@ -227,6 +238,19 @@ enum RowActionMenu {
     /// Disabled-help paired with `archiveProviderCannotArchiveLabel`: names the
     /// capability that would need to exist, not an action for the user to take.
     static let archiveNeedsProviderCapabilityHelp = "This provider hasn't implemented the archive capability yet"
+    /// Delete title for a remote lane whose provider declares `delete`.
+    static let deleteRemoteSessionLabel = "Delete Remote Session"
+    /// Delete title for a remote lane whose provider has not declared
+    /// `delete`: the same visible-but-disabled treatment
+    /// `archiveProviderCannotArchiveLabel` gets, and for the same reason —
+    /// naming what is missing rather than implying anything about the user or
+    /// the session's own state.
+    static let deleteProviderCannotDeleteLabel = "Delete Remote Session (provider can't delete)"
+    /// Disabled-help paired with `deleteProviderCannotDeleteLabel`. Wording
+    /// mirrors `archiveNeedsProviderCapabilityHelp`, not re-invented, so the
+    /// same absence reads the same wherever it shows up.
+    static let deleteNeedsProviderCapabilityHelp =
+        "This provider hasn't implemented the delete capability yet"
     static let forkSessionLabel = "Fork session"
     static let newWorktreeFromBranchLabel = "New worktree from this branch…"
     static let hibernateNowLabel = "Hibernate now"
@@ -405,6 +429,31 @@ enum RowActionMenu {
         return filesystemActions(context: context)
     }
 
+    /// Delete for a remote lane, beside Archive — retiring the lane and
+    /// destroying the session it points at, offered next to each other because
+    /// they are the two ways a lane leaves the working set and a user choosing
+    /// between them should see both.
+    ///
+    /// Empty for a local row (there is no remote session to destroy) and while
+    /// `remoteDeleteEnabled` is off, so the shipped default composes nothing at
+    /// all. When the provider has not declared `delete` the item is
+    /// **present but disabled**, exactly as an unarchivable lane's Archive is:
+    /// a user looking for the way to reclaim a lane must be told the way exists
+    /// and this provider has not built it, which an omitted item cannot say,
+    /// and the disabled item is the hook a later design uses to offer
+    /// implementing the capability. Do not "simplify" it into omission.
+    private static func deleteRemoteSessionActions(context: Context) -> [Item] {
+        guard context.remoteDeleteEnabled, !context.location.isLocal else { return [] }
+        let declared = context.providerCapabilities.contains("delete")
+        return [.action(Action(
+            kind: .deleteRemoteSession,
+            title: declared ? deleteRemoteSessionLabel : deleteProviderCannotDeleteLabel,
+            role: .destructive,
+            isEnabled: declared,
+            disabledHelp: declared ? nil : deleteNeedsProviderCapabilityHelp
+        ))]
+    }
+
     private static func regularItems(context: Context) -> [Item] {
         // A remote lane whose provider has not declared `archive` cannot be
         // retired on the backend (docs/specs/2026-08-16-remote-lane-archive-design.md
@@ -463,7 +512,7 @@ enum RowActionMenu {
                     isEnabled: !archiveBlocked,
                     disabledHelp: archiveHelp
                 )),
-            ],
+            ] + deleteRemoteSessionActions(context: context),
             pinActions(context: context).map(Item.action),
             hibernationActions(context: context).map(Item.action),
             spawning,

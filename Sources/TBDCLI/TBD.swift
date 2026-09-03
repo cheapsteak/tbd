@@ -15,6 +15,7 @@ struct TBDCommand: AsyncParsableCommand {
             ProfileCommand.self,
             TerminalCommand.self,
             PeerCommand.self,
+            RemoteCommand.self,
             PanelCommand.self,
             NotifyCommand.self,
             SessionEventCommand.self,

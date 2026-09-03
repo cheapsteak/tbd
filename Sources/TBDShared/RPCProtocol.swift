@@ -293,6 +293,17 @@ public enum RPCMethod {
     public static let configSetGCHolderRendezvousEnabled = "config.setGCHolderRendezvousEnabled"
     public static let configSetGCRowlessHoldersEnabled = "config.setGCRowlessHoldersEnabled"
     public static let configSetReapHolderChildrenEnabled = "config.setReapHolderChildrenEnabled"
+    /// The retained-transcript GC gate (`gc_retained_transcripts_enabled`) —
+    /// the soak switch on the `OrphanGC` leg that unlinks retained transcripts
+    /// nobody references and drops receipts whose expiry has passed. Reading
+    /// needs no method of its own: `config.get` already carries the resolved
+    /// value.
+    public static let configSetGCRetainedTranscriptsEnabled =
+        "config.setGCRetainedTranscriptsEnabled"
+    /// The remote-delete gate (`remote_delete_enabled`) — the feature's only
+    /// opt-in, and the supported way to turn the soak on. Reading needs no
+    /// method of its own: `config.get` already carries the resolved value.
+    public static let configSetRemoteDeleteEnabled = "config.setRemoteDeleteEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -303,6 +314,33 @@ public enum RPCMethod {
     public static let remoteLog = "remote.log"
     public static let remoteRename = "remote.rename"
     public static let remoteDismiss = "remote.dismiss"
+    /// The transcript exchange (`docs/remote-provider-contract.md` §
+    /// `retain <id>` / `import`, § `recall <key>`). All three are
+    /// non-destructive and gated by their capabilities alone — no feature flag
+    /// stands in front of them.
+    public static let remoteRetain = "remote.retain"
+    public static let remoteImport = "remote.import"
+    public static let remoteRecall = "remote.recall"
+    /// The live transcript of a session the provider still has
+    /// (`docs/remote-provider-contract.md` § `transcript <id>`). A sibling of
+    /// the exchange verbs rather than one of them: `recall` reads an immutable
+    /// blob out of the provider's store by key, this reads a growing
+    /// conversation out of a live session by id, and the contract keeps the two
+    /// capabilities separate so `transcript` never becomes ambiguous about
+    /// which of the two a provider implements.
+    public static let remoteTranscript = "remote.transcript"
+    /// Lists the receipts TBD holds. Deliberately absent from
+    /// `providerNamedRemoteMethods` below: it invokes no provider verb, and its
+    /// `provider` field is an optional *filter* rather than an address, so
+    /// there is nothing for the cloud gate to refuse and no provider name to
+    /// refuse it by.
+    public static let remoteRetainedList = "remote.retainedList"
+    /// Destroys a provider-hosted session outright
+    /// (`docs/remote-provider-contract.md` § `delete <id> [--retain]`).
+    /// The one `remote.*` verb behind a feature flag of its own
+    /// (`config.remoteDeleteEnabled`), because it is the one whose effect no
+    /// reconciler on this machine can undo.
+    public static let remoteDelete = "remote.delete"
     public static let remoteSetPin = "remote.setPin"
     public static let remoteReportAttachExit = "remote.reportAttachExit"
 
@@ -325,6 +363,7 @@ public enum RPCMethod {
     public static let providerNamedRemoteMethods: [String] = [
         remoteCreate, remoteStop, remoteArchive, remoteUnarchive,
         remoteSend, remoteLog, remoteRename, remoteDismiss,
+        remoteRetain, remoteImport, remoteRecall, remoteTranscript, remoteDelete,
         remoteSetPin, remoteReportAttachExit,
     ]
 
@@ -1518,9 +1557,32 @@ public struct RemoteCreateParams: Codable, Sendable {
     ///
     /// Optional and defaulted: params encoded by an older app still decode.
     public let parentWorktreeID: UUID?
-    public init(provider: String, paramsJSON: String, parentWorktreeID: UUID? = nil) {
+    /// The retained transcript the new session should begin with as its
+    /// history — the key from a `retain` or `import` receipt **this same
+    /// provider** issued (`docs/remote-provider-contract.md` § `create`,
+    /// § Keys).
+    ///
+    /// It rides as a bare key rather than as the contract's `{"retained_key":
+    /// ...}` object because the object exists to leave room for a future
+    /// inline source, and inventing that shape on this protocol before the
+    /// contract has one would be two guesses instead of one. The daemon builds
+    /// the object when it composes `create`'s stdin.
+    ///
+    /// **Nil is not "no opinion" — it is "do not send the field".** The daemon
+    /// refuses to send `seed` to a provider that has not declared the
+    /// capability rather than sending it and hoping: the contract requires
+    /// providers to ignore stdin fields they do not recognize, so an ungated
+    /// send would silently produce an unseeded session the caller believed
+    /// carried its conversation.
+    ///
+    /// Optional, so params encoded by a client that predates the field still
+    /// decode (Optional properties synthesize `decodeIfPresent`).
+    public let seedRetainedKey: String?
+    public init(provider: String, paramsJSON: String, parentWorktreeID: UUID? = nil,
+                seedRetainedKey: String? = nil) {
         self.provider = provider
         self.paramsJSON = paramsJSON
+        self.seedRetainedKey = seedRetainedKey
         self.parentWorktreeID = parentWorktreeID
     }
 }
@@ -1578,6 +1640,156 @@ public struct RemoteDismissParams: Codable, Sendable {
     public init(provider: String, sessionID: String) {
         self.provider = provider; self.sessionID = sessionID
     }
+}
+
+// MARK: - The transcript exchange
+
+/// Params for `remote.retain` — ask a provider to put one of its own sessions'
+/// transcripts into its durable store (`docs/remote-provider-contract.md` §
+/// `retain <id>`). The result is a `RetainReceipt`.
+public struct RemoteRetainParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Params for `remote.import` — put a transcript from somewhere else, including
+/// this machine, into a provider's durable store with no session of the
+/// provider's involved (`docs/remote-provider-contract.md` § `import`). The
+/// result is a `RetainReceipt`.
+///
+/// `jsonl` is Claude Code transcript JSONL, which the contract's format-scope
+/// paragraph fixes for this verb. It rides as a `String` rather than `Data`
+/// because that is what every other text-bearing param on this protocol does
+/// (`RemoteSendParams.text`), and because the daemon hands it straight to the
+/// provider's stdin without interpreting it.
+public struct RemoteImportParams: Codable, Sendable {
+    public let provider: String
+    public let jsonl: String
+    public init(provider: String, jsonl: String) {
+        self.provider = provider; self.jsonl = jsonl
+    }
+}
+
+/// Params for `remote.recall` — read back a transcript the provider retained
+/// (`docs/remote-provider-contract.md` § `recall <key>`).
+///
+/// `key` is opaque and provider-scoped, so the provider travels with it: the
+/// same string may mean different things to two providers, and a caller MUST
+/// NOT present one to a provider that did not issue it.
+public struct RemoteRecallParams: Codable, Sendable {
+    public let provider: String
+    public let key: String
+    /// Whether the daemon also writes the JSONL to
+    /// `TBDConstants.retainedTranscriptPath(provider:key:)` and records that
+    /// path on the receipt row.
+    ///
+    /// Decoded with a `false` default so params from a client that predates
+    /// the field still decode — and `false` is the right default besides:
+    /// reading a transcript should not put a file on disk unless asked.
+    public let saveLocally: Bool
+    public init(provider: String, key: String, saveLocally: Bool = false) {
+        self.provider = provider; self.key = key; self.saveLocally = saveLocally
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case provider, key, saveLocally
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decode(String.self, forKey: .provider)
+        key = try c.decode(String.self, forKey: .key)
+        saveLocally = try c.decodeIfPresent(Bool.self, forKey: .saveLocally) ?? false
+    }
+}
+
+/// Result of `remote.recall`.
+///
+/// `jsonl` carries the records whether or not they were also written to disk —
+/// a caller that asked to save still gets the bytes, so a short read is
+/// detectable at the caller as well as logged by the daemon. `localPath` is
+/// non-nil only when `saveLocally` was set and the write succeeded; a failed
+/// write leaves it nil rather than failing the recall, because the records
+/// themselves arrived.
+public struct RemoteRecallResult: Codable, Sendable {
+    public let jsonl: String?
+    public let localPath: String?
+    public init(jsonl: String?, localPath: String?) {
+        self.jsonl = jsonl; self.localPath = localPath
+    }
+}
+
+/// Params for `remote.transcript` — the conversation of a session the provider
+/// still has (`docs/remote-provider-contract.md` § `transcript <id>`).
+///
+/// No cursor. The verb's `--since` exists so a *live* view can fetch a growing
+/// transcript incrementally, and this RPC serves a one-shot read of the whole
+/// thing; adding a cursor would mean carrying the contract's one stderr
+/// exception — the continuation envelope — across the RPC boundary for a caller
+/// that has nowhere to keep it. A caller that wants the tail refetches.
+public struct RemoteTranscriptParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Result of `remote.transcript` — Claude Code transcript JSONL, one record per
+/// line, exactly as the provider wrote it.
+public struct RemoteTranscriptResult: Codable, Sendable {
+    public let jsonl: String
+    public init(jsonl: String) { self.jsonl = jsonl }
+}
+
+/// Params for `remote.delete` — destroy a provider-hosted session
+/// (`docs/remote-provider-contract.md` § `delete <id> [--retain]`). The result
+/// is a `RemoteDeleteResult`.
+///
+/// `retain` maps to the verb's `--retain` flag, and is a request rather than a
+/// preference: the contract makes retention something a caller asks for
+/// explicitly, never something implied by the provider declaring `retain`. So
+/// an absent field decodes as `false` — a caller that said nothing did not ask
+/// for storage, and allocating it anyway would put a copy of a conversation on
+/// a remote store nobody asked to write to. The hand-written decoder exists for
+/// that default, and so params from a client that predates the field still
+/// decode.
+public struct RemoteDeleteParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let retain: Bool
+    public init(provider: String, sessionID: String, retain: Bool = false) {
+        self.provider = provider; self.sessionID = sessionID; self.retain = retain
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case provider, sessionID, retain
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decode(String.self, forKey: .provider)
+        sessionID = try c.decode(String.self, forKey: .sessionID)
+        retain = try c.decodeIfPresent(Bool.self, forKey: .retain) ?? false
+    }
+}
+
+/// Params for `remote.retainedList` — the receipts TBD holds.
+///
+/// `provider` is an optional filter, not an address: nil lists every provider's
+/// receipts. Nothing here reaches a provider, which is why this verb needs no
+/// capability and appears in no capability check.
+public struct RemoteRetainedListParams: Codable, Sendable {
+    public let provider: String?
+    public init(provider: String? = nil) { self.provider = provider }
+}
+
+public struct RemoteRetainedListResult: Codable, Sendable {
+    public let transcripts: [RetainedTranscript]
+    public init(transcripts: [RetainedTranscript]) { self.transcripts = transcripts }
 }
 
 /// Pin or unpin a remote session for the sidebar dock. Purely local — no
@@ -2997,6 +3209,29 @@ public struct ConfigSetReapHolderChildrenEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setGCRetainedTranscriptsEnabled` — the gate on the
+/// `OrphanGC` leg that reclaims retained-transcript residue: files under
+/// `~/tbd/transcripts/` that no row references, and rows whose `expires_at` has
+/// passed (default OFF during soak, on top of the GC master switch). This is
+/// how the soak is turned on. A separate opt-in from `remote_delete_enabled`:
+/// that gate destroys a session on a provider, this one reclaims TBD's own
+/// local residue, and opting into either must never opt into the other. Design:
+/// `docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`.
+public struct ConfigSetGCRetainedTranscriptsParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setRemoteDeleteEnabled` — the gate on `remote.delete`,
+/// the verb that destroys a provider-hosted session (default OFF during soak).
+/// This is how the soak is turned on: without it the one irreversible verb
+/// would be the one reachable only by hand-editing `~/tbd/state.db`. Design:
+/// `docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`.
+public struct ConfigSetRemoteDeleteEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setGCOrphanProcessesEnabled` — the gate for the
 /// orphaned-process collector, which reclaims processes that outlived the
 /// worktree they were rooted in (default OFF during soak, on top of the GC
@@ -3216,6 +3451,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// verb and parsing its error string, exactly as `remoteBackendsLive` does
     /// for the outer flag.
     public let claudeCloudLive: Bool
+    /// Whether `remote.delete` is permitted (`remote_delete_enabled`). Default
+    /// OFF while it soaks. The app gates the Delete item on this, so with it
+    /// false the destructive action is not offered at all rather than offered
+    /// and refused — resolved through `Config.remoteDeleteEnabledDefault`, so
+    /// an install that never touched the toggle reports whatever the shipped
+    /// default currently is.
+    public let remoteDeleteEnabled: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -3229,7 +3471,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 remoteBackendsLive: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
-                claudeCloudLive: Bool = false) {
+                claudeCloudLive: Bool = false,
+                remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -3243,6 +3486,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.queuedPromptEnabled = queuedPromptEnabled
         self.claudeCloudEnabled = claudeCloudEnabled
         self.claudeCloudLive = claudeCloudLive
+        self.remoteDeleteEnabled = remoteDeleteEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -3279,6 +3523,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         claudeCloudEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .claudeCloudEnabled) ?? Config.claudeCloudEnabledDefault
         claudeCloudLive = try c.decodeIfPresent(Bool.self, forKey: .claudeCloudLive) ?? false
+        // New field for the remote-delete gate. A daemon that does not send it
+        // would refuse the verb anyway, so fall through to the shipped default
+        // rather than offering a destructive action nothing can carry out.
+        remoteDeleteEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteDeleteEnabled) ?? Config.remoteDeleteEnabledDefault
     }
 }
 

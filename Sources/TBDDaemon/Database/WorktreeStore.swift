@@ -756,6 +756,39 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Point a remote lane row at a different provider session.
+    ///
+    /// Written for Revive-as-reseed and used nowhere else: a lane whose remote
+    /// session was destroyed keeps its row — its branch, its PR context, its
+    /// place in the repo's Archived tab — and Revive gives that row a freshly
+    /// created session seeded from the retained transcript. Rebinding is what
+    /// keeps the history and the new session the same lane instead of two.
+    ///
+    /// **`path` moves with the binding, and that is not bookkeeping.** A remote
+    /// row's `path` is `WorktreeLocation.storagePath`, a pure function of
+    /// `(provider, sessionID)`, and `worktree.path` is NOT NULL UNIQUE — it is
+    /// the constraint that stops two rows claiming one session. Leaving the old
+    /// path behind would leave the row occupying the destroyed session's
+    /// address, so the next lane to be created for that id would collide with a
+    /// row that no longer means anything.
+    ///
+    /// The caller rebinds **before** mirroring the new session, so adoption
+    /// finds this row by `findRemote(provider:sessionID:)` and nests nothing
+    /// new; rebinding afterwards would let adoption mint a second lane first.
+    public func rebindRemote(id: UUID, provider: String, sessionID: String) async throws {
+        let location = WorktreeLocation.remote(provider: provider, sessionID: sessionID)
+        try await writer.write { db in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Worktree not found")
+            }
+            record.location = "remote"
+            record.providerName = provider
+            record.providerSessionID = sessionID
+            if let path = location.storagePath { record.path = path }
+            try record.update(db)
+        }
+    }
+
     /// Update a worktree's hasConflicts flag.
     public func updateHasConflicts(id: UUID, hasConflicts: Bool) async throws {
         try await writer.write { db in

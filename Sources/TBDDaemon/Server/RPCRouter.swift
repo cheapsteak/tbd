@@ -692,6 +692,10 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetGCRowlessHoldersEnabled(request.paramsData)
             case RPCMethod.configSetReapHolderChildrenEnabled:
                 return try await handleConfigSetReapHolderChildrenEnabled(request.paramsData)
+            case RPCMethod.configSetGCRetainedTranscriptsEnabled:
+                return try await handleConfigSetGCRetainedTranscriptsEnabled(request.paramsData)
+            case RPCMethod.configSetRemoteDeleteEnabled:
+                return try await handleConfigSetRemoteDeleteEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -714,6 +718,18 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteRename(request.paramsData)
             case RPCMethod.remoteDismiss:
                 return try await handleRemoteDismiss(request.paramsData)
+            case RPCMethod.remoteRetain:
+                return try await handleRemoteRetain(request.paramsData)
+            case RPCMethod.remoteImport:
+                return try await handleRemoteImport(request.paramsData)
+            case RPCMethod.remoteRecall:
+                return try await handleRemoteRecall(request.paramsData)
+            case RPCMethod.remoteTranscript:
+                return try await handleRemoteTranscript(request.paramsData)
+            case RPCMethod.remoteRetainedList:
+                return try await handleRemoteRetainedList(request.paramsData)
+            case RPCMethod.remoteDelete:
+                return try await handleRemoteDelete(request.paramsData, actor: request.actor)
             case RPCMethod.remoteSetPin:
                 return try await handleRemoteSetPin(request.paramsData)
             case RPCMethod.remoteReportAttachExit:
@@ -803,7 +819,8 @@ public final class RPCRouter: Sendable {
             remoteBackendsLive: remoteManager != nil,
             queuedPromptEnabled: config.queuedPromptEnabled,
             claudeCloudEnabled: config.claudeCloudEnabled,
-            claudeCloudLive: claudeCloudLive))
+            claudeCloudLive: claudeCloudLive,
+            remoteDeleteEnabled: config.remoteDeleteEnabled))
     }
 
     // MARK: - PR Status
