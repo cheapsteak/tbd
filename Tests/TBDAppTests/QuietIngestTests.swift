@@ -10,8 +10,8 @@ import TBDShared
 /// emulator. This suite drives `Coordinator.feedSnapshot` on the production
 /// wiring — a real `TBDTerminalView` whose `terminalDelegate` is a real
 /// `Coordinator`, exactly as `makeNSView` wires one — and asserts on **what did
-/// not happen**: no bytes reached the child, no interrupt was raised, no
-/// pasteboard write, no `TIOCSWINSZ`, no notification.
+/// not happen**: no bytes reached the child, no interrupt was raised, no ring,
+/// no pasteboard write, no `TIOCSWINSZ`, no notification.
 ///
 /// Every one of those is an assertion about an absence, so every test carries a
 /// positive control on the same path: the same bytes fed **live** must produce
@@ -85,18 +85,34 @@ struct QuietIngestTests {
         #expect(raised, "a live Ctrl-C must still reach handleTerminalInterrupt")
     }
 
-    /// The bell guard's *premise*, pinned — the ring itself cannot be observed.
+    @Test("A BEL in a snapshot does not ring")
+    func bellIsSilent() async {
+        let harness = makeCoordinatorHarness()
+        defer { harness.tearDown() }
+        harness.coordinator.feedSnapshot(Data("hello\u{07}".utf8), into: harness.terminalView)
+        await harness.settle()
+        #expect(harness.beepCount == 0)
+
+        // Positive control: the same BEL fed live rings, so both the seam and
+        // the fixture bytes are real. Re-fed on a loop because SwiftTerm
+        // coalesces bells 100 ms apart — and the suppressed one above still
+        // consumed that window, since `BellPolicy` runs before the delegate.
+        var rang = false
+        for _ in 0..<20 where !rang {
+            harness.terminalView.feed(text: "\u{07}")
+            rang = await harness.waitUntil({ harness.beepCount >= 1 }, deadline: 0.3)
+        }
+        #expect(rang, "a live BEL must still ring")
+    }
+
+    /// The bell guard's *premise*, pinned separately from the guard itself.
     ///
-    /// `bell(source:)` calls `NSSound.beep()` and nothing else, and that call
-    /// is unobservable from a test: `NSSound.beep()` is a pure Swift shim in
-    /// the AppKit overlay, with no `+[NSSound beep]` in the Objective-C runtime
-    /// to swizzle (checked at runtime, not assumed). So this asserts the fact
-    /// the guard depends on and that a plausible refactor would break: a BEL
-    /// inside a snapshot reaches the delegate a main-queue turn *after* the
-    /// feed returned, with the flag still raised. Lower the flag on return —
-    /// the obvious way to write `feedSnapshot` — and this goes red while the
-    /// guard in `bell` stays untouched. Suppression of the ring itself is not
-    /// covered by any test; see the task report.
+    /// `bellIsSilent` above shows the ring is suppressed; this shows why it can
+    /// be. A BEL inside a snapshot reaches the delegate a main-queue turn
+    /// *after* the feed returned, with the flag still raised. Lower the flag on
+    /// return — the obvious way to write `feedSnapshot`, and the way it was
+    /// first drafted — and this goes red while the guard in `bell` stays
+    /// untouched. The two tests fail to different mutations on purpose.
     @Test("A BEL in a snapshot reaches the delegate while the ingest flag is still raised")
     func bellArrivesDuringIngest() async {
         let harness = makeCoordinatorHarness()
@@ -231,6 +247,7 @@ final class QuietIngestHarness {
     private let defaults: UserDefaults
     private let defaultsSuiteName: String
     private let notifications = MainCounter()
+    private let beeps = MainCounter()
 
     init(
         appState: AppState,
@@ -255,7 +272,15 @@ final class QuietIngestHarness {
         self.childPID = process.shellPid
         let counter = notifications
         terminalView.onNotification = { _, _ in counter.increment() }
+        let bells = beeps
+        coordinator.ringBell = { bells.increment() }
     }
+
+    /// Rings counted through the coordinator's injected `ringBell` seam —
+    /// `NSSound.beep()` itself is unobservable (a pure Swift shim in the AppKit
+    /// overlay, with no `+[NSSound beep]` in the Objective-C runtime to
+    /// swizzle, checked at runtime rather than assumed).
+    var beepCount: Int { beeps.value }
 
     /// What came back off the child's tty. The line discipline echoes whatever
     /// the coordinator wrote, so a non-empty buffer means bytes escaped.

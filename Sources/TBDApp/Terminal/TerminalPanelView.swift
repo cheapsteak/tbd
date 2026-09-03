@@ -493,6 +493,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// so plain-var access is race-free.
         private var isTornDown = false
 
+        /// How the bell rings. Injectable because `NSSound.beep()` is
+        /// unobservable from a test — it is a pure Swift shim in the AppKit
+        /// overlay, with no `+[NSSound beep]` in the Objective-C runtime and no
+        /// `NSBeep()` interposition available in-process — so without this seam
+        /// the ingest guard in `bell(source:)` has no way to fail a test, which
+        /// is the same as having no evidence at all.
+        var ringBell: () -> Void = { NSSound.beep() }
+
         /// Depth of the snapshot-preamble feeds currently in flight; > 0 while
         /// `isIngestingSnapshot` is raised. A counter rather than a Bool so two
         /// overlapping feeds cannot have the first one's restore lower the flag
@@ -528,6 +536,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             snapshotIngestDepth += 1
             let observation = (terminalView as? TBDTerminalView)?.suspendOscObservation()
             terminalView.feed(byteArray: [UInt8](data)[...])
+            // NOT a `defer`, however much more obviously correct that reads:
+            // the parse returns before SwiftTerm has delivered a single one of
+            // the callbacks it queued, so a synchronous restore lowers the flag
+            // while every reply is still in flight. Measured against the
+            // `defer` shape, 5 of the 7 tests in `QuietIngestTests` go red —
+            // including the replies escaping into the child's stdin, which is
+            // the hazard this whole method exists to prevent.
             DispatchQueue.main.async { [weak self] in
                 observation?.resume()
                 self?.snapshotIngestDepth -= 1
@@ -1661,7 +1676,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // A BEL in replayed history rang minutes ago; ringing it again on
             // restore is noise the user cannot act on.
             guard !isIngestingSnapshot else { return }
-            NSSound.beep()
+            ringBell()
         }
 
         func clipboardCopy(source: TerminalView, content: Data) {
