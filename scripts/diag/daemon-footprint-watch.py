@@ -51,6 +51,15 @@ that makes a spike shorter than the sampling interval impossible to miss: the
 current footprint can be back down by the time we look, but the interval max
 cannot hide. Both calls are declared in <libproc.h>.
 
+The interval is reset once more, at acquire, before the very first sample is
+read. Until somebody resets it the kernel reports the peak since process start,
+so an un-reset first read hands back a lifetime peak as if it had just happened:
+on the incident daemon that is 7.4 GB, which would fire a capture at t0 on a
+process that is merely old and would then dominate `--report`. If that reset
+ever fails the run records one `interval_reset_failed` marker for the target, so
+an interval max that only ever climbs is diagnosable from the record instead of
+being read as a real spike.
+
 One JSON line per tick lands in `samples.jsonl`, flushed on every write, because
 the person reading this file at 3am is not the process writing it.
 
@@ -67,9 +76,14 @@ THREE LAYERS
 
 HOW TO READ THE RESULTS
 -----------------------
-Point `--report` at a run directory. It replays `samples.jsonl` and prints each
-spike with its onset, peak, end and duration, the captures that belong to it,
-and what the daemon was logging in the 60 s before onset and during the spike.
+Point `--report` at a run directory. It replays `samples.jsonl` through the same
+`SpikeDetector` the live run used, with that run's own thresholds read back from
+`run.json`, and prints each spike with its onset, trigger rule, peak, end and
+duration, the captures that belong to it, and what the daemon was logging in the
+60 s before onset and during the spike. Replaying the detector rather than
+re-testing the threshold is what keeps the report and the live run in agreement:
+a rise-triggered spike well under the absolute threshold is a spike in both, or
+in neither.
 
 In the raw samples the two things worth reading together are the footprint and
 the interval max. A tick whose interval max is far above its own footprint saw a
@@ -104,6 +118,11 @@ and `captures/`. These files outlive the run and no reconciler covers them: this
 is operator scratch, and the operator who started the watch deletes it. Nothing
 here writes to the database, signals the daemon, or restarts anything; the only
 state it changes in the target is the footprint interval counter it resets.
+
+A run directory is written once and never reused. If `--out` already holds a
+`samples.jsonl` or a `run.json` the watch refuses to start and exits 2, because
+appending a second run to the first one's sample stream produces a file whose
+gaps and pid changes read as the target's behaviour rather than as two runs.
 
 REJECTED ALTERNATIVES
 ---------------------
@@ -174,6 +193,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+# Python 3.9 floor: this must run on the stock /usr/bin/python3, so no `match`,
+# no `dataclass(slots=True)`, and the `__future__` import above is what keeps
+# 3.10-style `X | None` annotations from being evaluated at definition time.
+
 SCRIPT_VERSION = "1"
 
 DEFAULT_INTERVAL = 1.0
@@ -188,6 +211,13 @@ MB = 1024 * 1024
 # falls this far below the level that fired it. Hysteresis: without it a
 # footprint hovering at the threshold captures on every tick.
 RELEASE_FRACTION = 0.75
+
+# The second release rule: back within this fraction of a rise of the rolling
+# trough. RELEASE_FRACTION alone can never fire when the trough itself sits
+# above it, and the incident daemon idled at 990 MB against a 1024 MB threshold,
+# so it would have stayed "in spike" for the rest of the night and the 7 GB and
+# 8 GB spikes that followed would have captured nothing.
+RELEASE_RISE_FRACTION = 0.5
 
 # At most an onset capture and one high-water capture per spike. A capture costs
 # seconds of `sample`; a two minute spike must not spend all of it capturing.
@@ -287,7 +317,7 @@ class LibProc:
 # ----------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class CaptureRequest:
     """One decision to capture, and everything the record needs about why."""
 
@@ -314,6 +344,7 @@ class SpikeDetector:
         rearm_bytes: int,
         baseline_window: float,
         release_fraction: float = RELEASE_FRACTION,
+        release_rise_fraction: float = RELEASE_RISE_FRACTION,
         max_captures_per_spike: int = MAX_CAPTURES_PER_SPIKE,
     ) -> None:
         self.threshold_bytes = threshold_bytes
@@ -321,6 +352,7 @@ class SpikeDetector:
         self.rearm_bytes = rearm_bytes
         self.baseline_window = baseline_window
         self.release_fraction = release_fraction
+        self.release_rise_fraction = release_rise_fraction
         self.max_captures_per_spike = max_captures_per_spike
         self._window: deque[tuple[float, int]] = deque()
         self._in_spike = False
@@ -363,7 +395,7 @@ class SpikeDetector:
                 actions.append(CaptureRequest(now, reason, footprint, interval_max, peak, baseline))
             return actions
 
-        if peak < self._trigger_level * self.release_fraction:
+        if self._releases(peak, baseline):
             # Fallen far enough below what fired it. The spike is over and the
             # onset trigger is armed again; no capture on the way down.
             self._in_spike = False
@@ -382,6 +414,29 @@ class SpikeDetector:
                 CaptureRequest(now, "highwater", footprint, interval_max, peak, baseline)
             )
         return actions
+
+    def _releases(self, peak: int, baseline: int) -> bool:
+        """Whether this tick ends the spike. Either rule is enough.
+
+        (a) The original hysteresis: the peak has fallen well below the level
+        that fired the spike. It is the only rule that can end a spike which is
+        still above the absolute threshold, and it cannot fire at all when the
+        trough sits above `release_fraction` of that level.
+
+        (b) Back within half a rise of the rolling trough, and below the
+        absolute threshold. This is the case (a) cannot reach: a daemon idling
+        at 990 MB against a 1024 MB threshold, or a rise-triggered spike whose
+        baseline is more than three times the rise. The `peak < threshold` guard
+        is what stops (b) from turning a sustained plateau into a capture on
+        every tick: hold a plateau for longer than the baseline window and the
+        rolling minimum climbs up to meet it, so `peak - baseline` goes to zero
+        and (b) would release, re-arm, and fire a fresh onset capture the very
+        next tick, forever. Above the threshold the plateau stays one spike.
+        """
+        if peak < self._trigger_level * self.release_fraction:
+            return True
+        below_threshold = self.threshold_bytes <= 0 or peak < self.threshold_bytes
+        return below_threshold and peak - baseline < self.rise_bytes * self.release_rise_fraction
 
     def _trigger_for(self, peak: int, baseline: int) -> tuple[str | None, int]:
         """Which rule fires on this peak, and the level to release against."""
@@ -421,6 +476,19 @@ class CaptureRunner:
     def busy(self) -> bool:
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
+
+    def worst_case_seconds(self) -> float:
+        """How long one capture can take, from the commands actually enabled.
+
+        The commands run in sequence, so their timeouts add up. A join bounded
+        by one command's timeout abandons a capture that was still writing.
+        """
+        total = float(FOOTPRINT_TIMEOUT)
+        if self.want_sample:
+            total += SAMPLE_TIMEOUT
+        if self.want_vmmap:
+            total += VMMAP_TIMEOUT
+        return total + 5
 
     def start(self, pid: int, request: CaptureRequest) -> str | None:
         """Kick off a capture, returning its directory name, or None if busy."""
@@ -680,6 +748,7 @@ class Watch:
         self.sidecar: LogSidecar | None = None
         self.pid: int | None = None
         self._prev_cpu: tuple[float, int, int] | None = None
+        self._reset_failure_noted = False
 
     # -- record ------------------------------------------------------------
 
@@ -699,6 +768,12 @@ class Watch:
     def acquire(self, pid: int) -> None:
         self.pid = pid
         self._prev_cpu = None
+        self._reset_failure_noted = False
+        # Reset before the first read, not just after it. Nobody has reset this
+        # counter since the target launched, so an un-reset first sample reports
+        # the peak since process start: 7.4 GB on the incident daemon, which
+        # would fire a capture at t0 and then dominate every report of the run.
+        reset_ok = self.libproc.reset_footprint_interval(pid)
         self.emit(
             {
                 "event": "target_acquired",
@@ -706,6 +781,21 @@ class Watch:
                 "start_time": process_start_time(pid),
             }
         )
+        if not reset_ok:
+            self.note_reset_failure()
+
+    def note_reset_failure(self) -> None:
+        """Record, once per acquired target, that the interval reset is failing.
+
+        Once per target rather than once per tick: the failure is a property of
+        the target, and a marker on every tick would bury the samples. Without
+        the marker an interval max that only ever climbs looks like a real spike
+        that never released.
+        """
+        if self._reset_failure_noted:
+            return
+        self._reset_failure_noted = True
+        self.emit({"event": "interval_reset_failed", "pid": self.pid})
 
     def lose(self) -> None:
         if self.pid is not None:
@@ -803,7 +893,8 @@ class Watch:
 
         # Reset immediately after the read, so the next tick's interval max is
         # exactly the peak reached between these two ticks.
-        self.libproc.reset_footprint_interval(self.pid)
+        if not self.libproc.reset_footprint_interval(self.pid):
+            self.note_reset_failure()
 
         cpu_pct = None
         if self._prev_cpu is not None:
@@ -851,7 +942,7 @@ class Watch:
         self.emit({"event": "watch_stopped"})
         # An in-flight capture gets a bounded chance to finish; it is a child we
         # spawned and it holds nothing the target needs.
-        self.capture_runner.join(timeout=SAMPLE_TIMEOUT + 5)
+        self.capture_runner.join(timeout=self.capture_runner.worst_case_seconds())
         if self.sidecar is not None:
             self.sidecar.stop()
         with self._emit_lock:
@@ -866,12 +957,13 @@ class Watch:
 # ----------------------------------------------------------------------------
 
 
-@dataclass(slots=True)
+@dataclass
 class Spike:
     onset: float
     end: float
     peak: int
     peak_at: float
+    reason: str = "unknown"
     captures: list[str] = field(default_factory=list)
 
     @property
@@ -908,24 +1000,38 @@ def load_run(run_dir: Path) -> tuple[list[dict], list[dict], dict]:
     return samples, events, config
 
 
-def find_spikes(samples: list[dict], threshold_bytes: int) -> list[Spike]:
-    """Maximal runs of samples at or above the threshold, by footprint or interval max."""
+def find_spikes(samples: list[dict], detector: SpikeDetector) -> list[Spike]:
+    """Replay the live detector over recorded samples and bracket its spikes.
+
+    The report used to re-test `value >= threshold` on its own, which could not
+    see a rise-triggered spike at all and disagreed with the live run about
+    where a spike ended. Driving the same pure detector makes the two agree by
+    construction: a spike is the interval from the tick that put the detector
+    into `in_spike` to the tick that took it out again, or to the last sample if
+    the run ended mid-spike, and its reason is whichever rule fired at onset.
+    """
     spikes: list[Spike] = []
     current: Spike | None = None
     for sample in samples:
-        value = max(sample.get("phys_footprint", 0), sample.get("interval_max_phys_footprint", 0))
         when = sample.get("epoch", 0.0)
-        if value >= threshold_bytes:
-            if current is None:
-                current = Spike(onset=when, end=when, peak=value, peak_at=when)
-            else:
-                current.end = when
-                if value > current.peak:
-                    current.peak = value
-                    current.peak_at = when
+        footprint = int(sample.get("phys_footprint", 0))
+        interval_max = int(sample.get("interval_max_phys_footprint", 0))
+        value = max(footprint, interval_max)
+
+        was_in_spike = detector.in_spike
+        requests = detector.observe(when, footprint, interval_max)
+
+        if not was_in_spike and detector.in_spike:
+            reason = requests[0].reason if requests else "unknown"
+            current = Spike(onset=when, end=when, peak=value, peak_at=when, reason=reason)
         elif current is not None:
-            spikes.append(current)
-            current = None
+            current.end = when
+            if value > current.peak:
+                current.peak = value
+                current.peak_at = when
+            if not detector.in_spike:
+                spikes.append(current)
+                current = None
     if current is not None:
         spikes.append(current)
     return spikes
@@ -952,12 +1058,22 @@ def parse_log_epoch(line: str) -> float | None:
         return None
 
 
-def log_window(path: Path, start: float, end: float) -> tuple[Counter, list[tuple[float, str]]]:
-    """Category counts and `rpc in-flight high` lines inside [start, end]."""
-    counts: Counter = Counter()
-    inflight: list[tuple[float, str]] = []
-    if not path.exists():
-        return counts, inflight
+def log_windows(
+    path: Path, windows: list[tuple[str, float, float]]
+) -> dict[str, tuple[Counter, list[tuple[float, str]]]]:
+    """Category counts and `rpc in-flight high` lines for every window at once.
+
+    One pass over `daemon-log.txt`, bucketing each line into whichever of the
+    requested windows contain it. A `log stream` sidecar left running overnight
+    produces a large file, and the report wants two windows per spike: scanning
+    it once per window meant rereading gigabytes to answer questions that one
+    read already had the data for.
+    """
+    results: dict[str, tuple[Counter, list[tuple[float, str]]]] = {
+        key: (Counter(), []) for key, _, _ in windows
+    }
+    if not windows or not path.exists():
+        return results
     last_epoch: float | None = None
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line in handle:
@@ -968,14 +1084,23 @@ def log_window(path: Path, start: float, end: float) -> tuple[Counter, list[tupl
                 epoch = last_epoch
             else:
                 last_epoch = epoch
-            if epoch is None or not (start <= epoch <= end):
+            if epoch is None:
                 continue
-            match = LOG_CATEGORY_RE.search(line)
-            if match:
-                counts[f"{match.group(1)}:{match.group(2)}"] += 1
-            if RPC_INFLIGHT_RE.search(line):
-                inflight.append((epoch, line.rstrip()))
-    return counts, inflight
+            matched = [key for key, start, end in windows if start <= epoch <= end]
+            if not matched:
+                continue
+            # Both regexes run at most once per line, however many windows the
+            # line lands in.
+            found = LOG_CATEGORY_RE.search(line)
+            category = f"{found.group(1)}:{found.group(2)}" if found else None
+            inflight_line = line.rstrip() if RPC_INFLIGHT_RE.search(line) else None
+            for key in matched:
+                counts, inflight = results[key]
+                if category is not None:
+                    counts[category] += 1
+                if inflight_line is not None:
+                    inflight.append((epoch, inflight_line))
+    return results
 
 
 def median_interval(samples: list[dict], fallback: float = 1.0) -> float:
@@ -996,7 +1121,13 @@ def report(run_dir: Path, threshold_override_mb: float | None, out=sys.stdout) -
         print(f"no samples in {run_dir / 'samples.jsonl'}", file=out)
         return 1
 
-    configured = (config.get("args") or {}).get("threshold_mb")
+    run_args = config.get("args") or {}
+
+    def setting(name: str, fallback: float) -> float:
+        value = run_args.get(name)
+        return float(value) if value is not None else float(fallback)
+
+    configured = run_args.get("threshold_mb")
     threshold_mb = (
         threshold_override_mb
         if threshold_override_mb is not None
@@ -1005,7 +1136,9 @@ def report(run_dir: Path, threshold_override_mb: float | None, out=sys.stdout) -
     source = "override" if threshold_override_mb is not None else (
         "run.json" if configured is not None else "built-in default"
     )
-    threshold_bytes = int(threshold_mb * MB)
+    rise_mb = setting("rise_mb", DEFAULT_RISE_MB)
+    rearm_mb = setting("rearm_mb", DEFAULT_REARM_MB)
+    baseline_window = setting("baseline_window", DEFAULT_BASELINE_WINDOW)
 
     first, last = samples[0], samples[-1]
     span = last.get("epoch", 0.0) - first.get("epoch", 0.0)
@@ -1020,18 +1153,27 @@ def report(run_dir: Path, threshold_override_mb: float | None, out=sys.stdout) -
         f"span            {iso(first['epoch'])}  ->  {iso(last['epoch'])}  ({span:.1f} s)", file=out
     )
     print(f"threshold       {threshold_mb:g} MB (from {source})", file=out)
+    print(
+        f"rise rule       {rise_mb:g} MB above a {baseline_window:g} s rolling baseline "
+        f"(rearm {rearm_mb:g} MB)",
+        file=out,
+    )
     print(f"highest sample  {fmt_bytes(highest)}", file=out)
     print(f"lifetime peak   {fmt_bytes(lifetime)}", file=out)
     print(file=out)
 
-    markers = [e for e in events if e.get("event") in ("target_acquired", "target_lost")]
+    markers = [
+        e
+        for e in events
+        if e.get("event") in ("target_acquired", "target_lost", "interval_reset_failed")
+    ]
     if markers:
-        print(f"TARGET CHANGES ({len(markers)})", file=out)
+        print(f"MARKERS ({len(markers)})", file=out)
         for event in markers:
             detail = f"pid {event.get('pid')}"
             if event.get("start_time"):
                 detail += f"  started {event['start_time']}"
-            print(f"  {hhmmss(event.get('epoch', 0.0)):<14}{event['event']:<18}{detail}", file=out)
+            print(f"  {hhmmss(event.get('epoch', 0.0)):<14}{event['event']:<24}{detail}", file=out)
         print(file=out)
 
     failures = [e for e in events if str(e.get("event", "")).startswith("capture_")]
@@ -1045,19 +1187,37 @@ def report(run_dir: Path, threshold_override_mb: float | None, out=sys.stdout) -
             )
         print(file=out)
 
-    spikes = find_spikes(samples, threshold_bytes)
+    detector = SpikeDetector(
+        threshold_bytes=int(threshold_mb * MB),
+        rise_bytes=int(rise_mb * MB),
+        rearm_bytes=int(rearm_mb * MB),
+        baseline_window=baseline_window,
+    )
+    spikes = find_spikes(samples, detector)
     attach_captures(spikes, events, slack=max(median_interval(samples), 1.0) * 2)
+    rules = (
+        f"threshold {threshold_mb:g} MB, rise {rise_mb:g} MB over a "
+        f"{baseline_window:g} s baseline"
+    )
     if not spikes:
-        print(f"no spike at or above {threshold_mb:g} MB in this run.", file=out)
+        print(f"no spike in this run under the run's own rules ({rules}).", file=out)
         return 0
 
     log_path = run_dir / "daemon-log.txt"
-    print(f"SPIKES ({len(spikes)}), footprint or interval max at or above "
-          f"{threshold_mb:g} MB", file=out)
+    print(f"SPIKES ({len(spikes)}), detector replayed with {rules}", file=out)
+
+    # Every window the log is asked about, resolved in one pass over the file.
+    windows: list[tuple[str, float, float]] = []
+    for index, spike in enumerate(spikes, start=1):
+        windows.append((f"{index}:before", spike.onset - 60, spike.onset))
+        windows.append((f"{index}:during", spike.onset, spike.end))
+    scanned = log_windows(log_path, windows)
+
     for index, spike in enumerate(spikes, start=1):
         print(file=out)
         print(
-            f"spike {index}  onset {hhmmss(spike.onset)}  peak {fmt_bytes(spike.peak)} "
+            f"spike {index}  onset {hhmmss(spike.onset)}  reason {spike.reason}  "
+            f"peak {fmt_bytes(spike.peak)} "
             f"at {hhmmss(spike.peak_at)}  end {hhmmss(spike.end)}  "
             f"duration {spike.duration:.1f} s",
             file=out,
@@ -1070,11 +1230,11 @@ def report(run_dir: Path, threshold_override_mb: float | None, out=sys.stdout) -
 
         if not log_path.exists():
             continue
-        for label, start, end in (
-            ("60 s before onset", spike.onset - 60, spike.onset),
-            ("during spike", spike.onset, spike.end),
+        for label, key in (
+            ("60 s before onset", f"{index}:before"),
+            ("during spike", f"{index}:during"),
         ):
-            counts, inflight = log_window(log_path, start, end)
+            counts, inflight = scanned[key]
             print(f"    log, {label}:", file=out)
             if not counts:
                 print("        (no com.tbd rows in this window)", file=out)
@@ -1117,6 +1277,49 @@ def _drive(detector: SpikeDetector, series, start: float = 1000.0) -> list[Captu
 def _check(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def _write_synthetic_run(
+    run_dir: Path,
+    base: float,
+    series: list[float],
+    run_args: dict,
+    captures: list[tuple[float, str, str]],
+) -> None:
+    """Write a `samples.jsonl` and `run.json` shaped exactly like a real run."""
+    lines = []
+    for step, value in enumerate(series):
+        lines.append(
+            json.dumps(
+                {
+                    "epoch": base + step,
+                    "ts": iso(base + step),
+                    "pid": 4242,
+                    "phys_footprint": _mb(value),
+                    "interval_max_phys_footprint": _mb(value),
+                    "lifetime_max_phys_footprint": _mb(max(series)),
+                    "resident_size": _mb(60),
+                    "user_time_ns": 0,
+                    "system_time_ns": 0,
+                    "pageins": 0,
+                    "cpu_pct": 0.0,
+                }
+            )
+        )
+    for when, name, reason in captures:
+        lines.append(
+            json.dumps(
+                {
+                    "event": "capture",
+                    "epoch": when,
+                    "ts": iso(when),
+                    "dir": name,
+                    "reason": reason,
+                }
+            )
+        )
+    (run_dir / "samples.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (run_dir / "run.json").write_text(json.dumps({"args": run_args}), encoding="utf-8")
 
 
 def self_test() -> int:
@@ -1167,44 +1370,65 @@ def self_test() -> int:
         _check(events[0].baseline == _mb(100), "baseline should be the window minimum")
         _check(not detector.in_spike, "a rise spike should release once it falls back")
 
+    def high_trough_rearms() -> None:
+        # The incident shape: a daemon idling at 990 MB against a 1024 MB
+        # threshold. RELEASE_FRACTION alone can never fire here (0.75 * 1024 is
+        # 768, and the trough never goes there), so under that rule alone the
+        # detector would enter the first spike and stay in it for good, and the
+        # 6, 7 and 8 GB spikes that follow would capture nothing.
+        detector = _detector(threshold_mb=1024, rise_mb=512, rearm_mb=512)
+        events = _drive(
+            detector, [900, 900, 900, 5000, 900, 6000, 900, 7000, 900, 8000, 900]
+        )
+        reasons = [event.reason for event in events]
+        _check(
+            reasons == ["threshold"] * 4,
+            f"expected four re-armed onset captures, got {reasons}",
+        )
+        _check(not detector.in_spike, "the last spike should have released at the trough")
+
+    def sustained_plateau_does_not_refire() -> None:
+        # A plateau held for longer than the baseline window drags the rolling
+        # minimum up to meet it, so the rise-based release rule would fire on
+        # every tick if it were not guarded by the absolute threshold. The cap
+        # on captures per spike only helps while it is still the same spike.
+        detector = _detector(threshold_mb=1024, rise_mb=512, rearm_mb=512)
+        ticks = int(DEFAULT_BASELINE_WINDOW) + 100
+        events = _drive(detector, [100, 100, 100] + [5000] * ticks)
+        reasons = [event.reason for event in events]
+        _check(
+            len(events) <= MAX_CAPTURES_PER_SPIKE,
+            f"a plateau must not capture more than the per-spike cap; got {reasons}",
+        )
+        _check(
+            reasons == ["threshold"],
+            f"a flat plateau earns the onset capture and nothing else; got {reasons}",
+        )
+        _check(detector.in_spike, "a plateau above the threshold is still one spike")
+
+    def high_baseline_rise_releases() -> None:
+        # A rise-triggered spike whose baseline is more than three times the
+        # rise: 0.75 * (2000 + 512) is 1884, below the trough, so only the
+        # rise-based release rule can end it.
+        detector = _detector(threshold_mb=4096, rise_mb=512, rearm_mb=512)
+        events = _drive(detector, [2000, 2000, 2000, 2600, 2000, 2000])
+        _check(len(events) == 1, f"expected exactly one capture, got {len(events)}")
+        _check(events[0].reason == "rise", f"unexpected reason {events[0].reason}")
+        _check(not detector.in_spike, "the spike should release back at the trough")
+
     def report_replay() -> None:
         with tempfile.TemporaryDirectory() as raw:
             run_dir = Path(raw)
             base = 1_700_000_000.0
             series = [200, 200, 1500, 3000, 2000, 200, 200]
-            lines = []
-            for step, value in enumerate(series):
-                lines.append(
-                    json.dumps(
-                        {
-                            "epoch": base + step,
-                            "ts": iso(base + step),
-                            "pid": 4242,
-                            "phys_footprint": _mb(value),
-                            "interval_max_phys_footprint": _mb(value),
-                            "lifetime_max_phys_footprint": _mb(3000),
-                            "resident_size": _mb(60),
-                            "user_time_ns": 0,
-                            "system_time_ns": 0,
-                            "pageins": 0,
-                            "cpu_pct": 0.0,
-                        }
-                    )
-                )
-            lines.append(
-                json.dumps(
-                    {
-                        "event": "capture",
-                        "epoch": base + 2,
-                        "ts": iso(base + 2),
-                        "dir": "synthetic-threshold",
-                        "reason": "threshold",
-                    }
-                )
-            )
-            (run_dir / "samples.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
-            (run_dir / "run.json").write_text(
-                json.dumps({"args": {"threshold_mb": 1024}}), encoding="utf-8"
+            run_args = {
+                "threshold_mb": 1024,
+                "rise_mb": DEFAULT_RISE_MB,
+                "rearm_mb": DEFAULT_REARM_MB,
+                "baseline_window": DEFAULT_BASELINE_WINDOW,
+            }
+            _write_synthetic_run(
+                run_dir, base, series, run_args, [(base + 2, "synthetic-threshold", "threshold")]
             )
 
             samples, events, config = load_run(run_dir)
@@ -1215,16 +1439,19 @@ def self_test() -> int:
             _check(len(events) == 1, f"expected 1 event, got {len(events)}")
             _check(config["args"]["threshold_mb"] == 1024, "run.json threshold not read back")
 
-            spikes = find_spikes(samples, _mb(1024))
+            spikes = find_spikes(samples, _detector(threshold_mb=1024, rise_mb=DEFAULT_RISE_MB))
             _check(len(spikes) == 1, f"expected 1 spike, got {len(spikes)}")
             spike = spikes[0]
             _check(
                 spike.onset == base + 2,
-                f"onset should be the first crossing, got {spike.onset}",
+                f"onset should be the tick that entered the spike, got {spike.onset}",
             )
+            _check(spike.reason == "threshold", f"unexpected reason {spike.reason}")
             _check(spike.peak == _mb(3000), f"peak should be 3000 MB, got {spike.peak}")
             _check(spike.peak_at == base + 3, "peak time should be the sample that held it")
-            _check(spike.end == base + 4, f"end should be the last crossing, got {spike.end}")
+            # The releasing tick closes the interval, so the spike ends one tick
+            # later than a bare threshold test would have said.
+            _check(spike.end == base + 5, f"end should be the releasing tick, got {spike.end}")
 
             attach_captures(spikes, events, slack=2.0)
             _check(
@@ -1238,10 +1465,50 @@ def self_test() -> int:
             _check("spike 1" in text, "report should name the spike")
             _check("2.93 GB" in text, f"report should print the peak; got:\n{text}")
 
+    def report_sees_rise_spike() -> None:
+        # Nothing in this run comes near the absolute threshold, so a report
+        # that only re-tested the threshold reported a quiet run while the live
+        # detector had captured a rise spike. Replaying the detector is what
+        # makes the two agree.
+        with tempfile.TemporaryDirectory() as raw:
+            run_dir = Path(raw)
+            base = 1_700_000_000.0
+            series = [2000, 2000, 2000, 2600, 2000, 2000]
+            run_args = {
+                "threshold_mb": 4096,
+                "rise_mb": 512,
+                "rearm_mb": 512,
+                "baseline_window": DEFAULT_BASELINE_WINDOW,
+            }
+            _write_synthetic_run(
+                run_dir, base, series, run_args, [(base + 3, "synthetic-rise", "rise")]
+            )
+
+            buffer = io.StringIO()
+            _check(report(run_dir, None, out=buffer) == 0, "report should succeed")
+            text = buffer.getvalue()
+            _check(
+                "SPIKES (1)" in text,
+                f"report should find the rise spike below the threshold; got:\n{text}",
+            )
+            _check("reason rise" in text, f"report should name the rule that fired; got:\n{text}")
+            _check(
+                "synthetic-rise (rise)" in text,
+                f"report should attach the rise capture; got:\n{text}",
+            )
+            _check(
+                "rise 512 MB" in text,
+                f"report header should say which rules it applied; got:\n{text}",
+            )
+
     case("threshold balloon captures onset, high-water, then re-arms", balloon)
     case("sub-tick spike is caught by the interval max", subtick_spike)
     case("baseline rise fires when the threshold is out of reach", rise_trigger)
+    case("a trough above 75% of the threshold still re-arms", high_trough_rearms)
+    case("a plateau past the baseline window does not re-fire", sustained_plateau_does_not_refire)
+    case("a rise spike over a high baseline releases", high_baseline_rise_releases)
     case("report replays a synthetic run and finds its spike", report_replay)
+    case("report finds a rise spike below the threshold", report_sees_rise_spike)
 
     if failures:
         print(f"\n{len(failures)} self-test failure(s):")
@@ -1334,9 +1601,21 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     out_dir = Path(args.out).expanduser() if args.out else default_out_dir()
+    # Refuse to append to an earlier run rather than interleaving two runs in
+    # one samples.jsonl, where the seam between them reads as target behaviour.
+    for existing in ("samples.jsonl", "run.json"):
+        if (out_dir / existing).exists():
+            print(
+                f"{out_dir} already holds {existing} from an earlier run.\n"
+                "Pass a fresh --out directory: two runs in one samples.jsonl cannot be "
+                "told apart on replay.",
+                file=sys.stderr,
+            )
+            return 2
+
     watch = Watch(args, out_dir)
 
-    def handle(signum, _frame) -> None:
+    def handle(_signum, _frame) -> None:
         watch.stop_event.set()
 
     signal.signal(signal.SIGINT, handle)
