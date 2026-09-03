@@ -246,6 +246,23 @@ struct RemoteCommandsTests {
             state: .starting, workspaceDirty: false, force: false, address: address) != nil)
     }
 
+    /// The app's `RemoteDeleteConfirmation.decide` treats `.unknown` as live
+    /// (`live = state != .exited`) because a state TBD could not read is not a
+    /// statement the session is finished. The CLI must agree: `.unknown` is not
+    /// the frictionless path.
+    @Test func deleteRefusesASessionInUnknownState() {
+        let refusal = RemoteDeletePrecondition.refusal(
+            state: .unknown, workspaceDirty: false, force: false, address: address)
+        #expect(refusal != nil)
+        #expect(refusal?.contains(address) == true)
+        #expect(refusal?.contains("--force") == true)
+    }
+
+    @Test func forceOverridesAnUnknownStateRefusal() {
+        #expect(RemoteDeletePrecondition.refusal(
+            state: .unknown, workspaceDirty: false, force: true, address: address) == nil)
+    }
+
     @Test func deleteRefusesADirtyWorkspaceByName() {
         let refusal = RemoteDeletePrecondition.refusal(
             state: .exited, workspaceDirty: true, force: false, address: address)

@@ -451,9 +451,19 @@ enum RemoteDeletePrecondition {
         // Named separately rather than collapsed into one message, because the
         // two have different remedies: one waits or stops the session, the
         // other commits or pushes on the provider's machine.
+        //
+        // `.unknown` is refused alongside `.running` and `.starting`, matching
+        // the app's `RemoteDeleteConfirmation.decide` (`live = state != .exited`):
+        // a state TBD could not read is not a statement that the session is
+        // finished, and delete is irreversible, so it must not be the
+        // frictionless path.
         if let state, state == .running || state == .starting {
             return "Error: \(address) is still running. "
                 + "Stop it first, or re-run with --force to destroy it anyway."
+        }
+        if state == .unknown {
+            return "Error: \(address) is in a state the provider did not describe. "
+                + "Re-run with --force to destroy it anyway."
         }
         if workspaceDirty {
             return "Error: \(address) reports uncommitted work in its workspace "
