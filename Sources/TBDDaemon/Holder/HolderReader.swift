@@ -225,6 +225,16 @@ actor HolderReader {
         emulator.size
     }
 
+    /// The window size this session's own pty reports, or nil when the ioctl
+    /// cannot answer.
+    ///
+    /// Test-facing, and the honest instrument for "did anybody issue
+    /// `TIOCSWINSZ`": the emulator's grid cannot answer it, because a resize
+    /// that reshaped the grid and skipped the tty looks identical from there.
+    var ptyWindowSize: (columns: Int, rows: Int)? {
+        HolderReader.windowSize(ptyFD: descriptor.rawDescriptor)
+    }
+
     /// The window size the pty itself reports, or nil when the ioctl fails or
     /// answers a degenerate size.
     ///
@@ -493,11 +503,34 @@ actor HolderReader {
     /// matches, and the pty itself, so the child gets `SIGWINCH` and can lay
     /// itself out. Doing only the first leaves a child drawing at the old size
     /// into a differently-shaped grid.
+    ///
+    /// **Only for a session the daemon still owns.** While a viewer holds this
+    /// pty the viewer owns `TIOCSWINSZ` and drives it on its own descriptor;
+    /// `resizeGrid` is the half that is still the daemon's then.
     func resize(columns: Int, rows: Int) {
-        let cols = max(1, columns)
-        let lines = max(1, rows)
+        let (cols, lines) = Self.clamped(columns: columns, rows: rows)
         emulator.resize(columns: cols, rows: lines)
         descriptor.setWindowSize(columns: cols, rows: lines)
+    }
+
+    /// Reshapes the emulator's grid and leaves the tty alone.
+    ///
+    /// The half of a resize that stays the daemon's while a viewer owns the
+    /// pty. It is not an optimisation: the emulator is what a re-adoption or a
+    /// `terminal.output` renders, so a grid left at the size the viewer arrived
+    /// at wraps every later line at the wrong width. The other half is not
+    /// skipped — the viewer has already made it, on its own descriptor, which
+    /// is why issuing it here as well would signal the child twice for one
+    /// resize.
+    func resizeGrid(columns: Int, rows: Int) {
+        let (cols, lines) = Self.clamped(columns: columns, rows: rows)
+        emulator.resize(columns: cols, rows: lines)
+    }
+
+    /// A grid has to have at least one of each. SwiftTerm emits transient zero
+    /// sizes mid-layout and a caller may pass one straight through.
+    private static func clamped(columns: Int, rows: Int) -> (columns: Int, rows: Int) {
+        (max(1, columns), max(1, rows))
     }
 
     /// Forces a repaint from programs that redraw on `SIGWINCH`, by changing the

@@ -3401,11 +3401,22 @@ public struct PaneResizeParams: Codable, Sendable {
     public let windowID: String
     public let cols: Int
     public let rows: Int
-    public init(worktreeID: UUID, windowID: String, cols: Int, rows: Int) {
+    /// Present when the panel is holder-backed, and then it — not `windowID` —
+    /// is the key the daemon resolves.
+    ///
+    /// A holder row has no tmux coordinates at all: its `windowID` is the empty
+    /// string, so the window lookup this method was built around resolves
+    /// nothing and the resize is silently dropped. Optional and defaulted so an
+    /// older app's params, which carry no such field, still decode.
+    public let terminalID: UUID?
+    public init(
+        worktreeID: UUID, windowID: String, cols: Int, rows: Int, terminalID: UUID? = nil
+    ) {
         self.worktreeID = worktreeID
         self.windowID = windowID
         self.cols = cols
         self.rows = rows
+        self.terminalID = terminalID
     }
 }
 

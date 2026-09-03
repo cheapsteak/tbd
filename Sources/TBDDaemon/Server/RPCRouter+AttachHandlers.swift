@@ -423,6 +423,15 @@ extension RPCRouter {
     /// `resize-window` + echo fence (addendum §4).
     func handlePaneResize(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PaneResizeParams.self, from: paramsData)
+        // Branched before the window lookup, because a holder row has no window
+        // to look up: its `windowID` is the empty string, so the control-mode
+        // arm below resolves nothing and drops the resize without a word. The
+        // registry decides which half of the resize is still the daemon's.
+        if let terminalID = params.terminalID {
+            await holderRegistry?.applyViewerResize(
+                terminalID: terminalID, columns: params.cols, rows: params.rows)
+            return .ok()
+        }
         if let bridge = controlMode,
            let worktree = try? await db.worktrees.getLocal(id: params.worktreeID) {
             await bridge.resizeCoordinator.resize(

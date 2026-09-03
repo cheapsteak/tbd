@@ -3496,8 +3496,12 @@ extension RPCRouter {
             // this is a fan-out over every terminal on a resize-debounce tick,
             // and a session nothing has adopted has no grid to reshape.
             if terminal.transport == .holder {
-                await holderRegistry?.reader(for: terminal.id)?
-                    .resize(columns: params.cols, rows: params.rows)
+                // Through the same rule as `pane.resize`, not straight to the
+                // reader: a session whose descriptor has been vended to a viewer
+                // is the viewer's to size, and this fan-out reaches one in the
+                // state where the daemon still holds a suspended reader for it.
+                await holderRegistry?.applyViewerResize(
+                    terminalID: terminal.id, columns: params.cols, rows: params.rows)
                 continue
             }
             try? await tmux.resizeWindow(

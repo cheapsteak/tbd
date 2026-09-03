@@ -872,6 +872,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 }
                 return await self.outgoingQueue.enqueueInjection(bytes)
             }
+            // One resize at the view's real size, now that this panel owns the
+            // pty — the holder twin of the control-mode path's initial resize,
+            // and for the same reason. Nothing has told this session that its
+            // viewer moved: it is at whatever geometry it was spawned or last
+            // resized at, so a viewport that differs from it paints mis-wrapped
+            // until the user happens to drag the window. `sizeChanged` cannot
+            // be relied on to cover it — it fires when SwiftTerm's own size
+            // changes, and attaching to an already-correctly-sized view changes
+            // nothing.
+            let dimensions = terminalView.terminalDimensions
+            setHolderWindowSize(cols: dimensions.cols, rows: dimensions.rows)
+            scheduleDaemonResize(cols: dimensions.cols, rows: dimensions.rows)
             logger.info("holder attach live for terminal \(self.panelID, privacy: .public)")
         }
 
@@ -1526,7 +1538,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // drags, so fullscreen Claude would render at the wrong width.
                 // Same debounced path as live resizes.
                 let dims = terminalView.terminalDimensions
-                scheduleControlModeResize(cols: dims.cols, rows: dims.rows)
+                scheduleDaemonResize(cols: dims.cols, rows: dims.rows)
                 // Intercept ALL pastes at the view level while attached (the
                 // paste ruling v2) and ship them as a `.paste` sidecar frame.
                 // Interception happens BEFORE SwiftTerm brackets the content,
@@ -2126,14 +2138,51 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     _ = ioctl(fd, TIOCSWINSZ, &size)
                     debugLog("PANEL: resize -> \(newCols)x\(newRows)")
                 }
-                // Control-mode path (M3.2): the daemon is the sole size authority
-                // (addendum §4). Debounced so only the tail of a drag flurry lands.
-                scheduleControlModeResize(cols: newCols, rows: newRows)
+                // Holder path: **this panel owns `TIOCSWINSZ` for as long as it
+                // owns the pty**, and makes the same ioctl the arm above makes,
+                // on the write-only duplicate it took at attach. It is not left
+                // to the daemon because the daemon has no descriptor to make it
+                // on — it released its reader when it handed the pty over — so
+                // a resize routed only through the RPC below would reach the
+                // emulator and never the child.
+                setHolderWindowSize(cols: newCols, rows: newRows)
+                // The daemon is told either way, and for a different reason per
+                // transport: for a control-mode window it is the sole size
+                // authority (M3.2, addendum §4); for a holder session it is the
+                // emulator behind `terminal.output` and the next re-adoption,
+                // which must not be left at the size the viewer arrived at.
+                // Debounced so only the tail of a drag flurry lands.
+                scheduleDaemonResize(cols: newCols, rows: newRows)
             }
         }
 
-        /// Debounced `pane.resize` for the control-mode window. No-op unless this
-        /// panel is control-mode attached. Cancel-and-replace ~100ms debounce so a
+        /// Sets the size of the pty this panel owns, when it owns one.
+        ///
+        /// The holder transport's half of `sizeChanged`. A panel whose duplicate
+        /// could not be taken is read-only and silently makes no claim here, the
+        /// same degradation already accepted for its writes.
+        @MainActor
+        private func setHolderWindowSize(cols: Int, rows: Int) {
+            guard cols > 0, rows > 0, holderWriteFD >= 0 else { return }
+            var size = winsize(
+                ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+            guard ioctl(holderWriteFD, TIOCSWINSZ, &size) == 0 else {
+                // Reported rather than dropped: the child keeps laying itself
+                // out at a size nobody is painting, and nothing else in the app
+                // can see that it did.
+                logger.error("""
+                    could not set the window size of terminal \
+                    \(self.panelID, privacy: .public) to \(cols, privacy: .public)x\
+                    \(rows, privacy: .public) (errno \(errno, privacy: .public))
+                    """)
+                return
+            }
+            debugLog("PANEL: holder resize -> \(cols)x\(rows)")
+        }
+
+        /// Debounced `pane.resize` for whichever daemon-side size authority this
+        /// panel has — a control-mode window, or a holder session by name.
+        /// No-op unless it has one. Cancel-and-replace ~100ms debounce so a
         /// window-drag flurry collapses to one RPC. Errors are dropped: the resize
         /// is re-sent on the next tick and self-heals (the daemon is authoritative).
         ///
@@ -2144,8 +2193,20 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// fires meanwhile stashes its size, and the in-flight sender drains
         /// the stash on completion (looping until quiescent).
         @MainActor
-        private func scheduleControlModeResize(cols: Int, rows: Int) {
-            guard let attach = controlModeAttach,
+        private func scheduleDaemonResize(cols: Int, rows: Int) {
+            // The floor is the same for both transports and exists for the same
+            // reason: SwiftTerm emits transient 0/1-cell sizes mid-layout that
+            // must reach neither a daemon nor a child. `controlModeAttached` is
+            // passed as `true` because the question it stands for — is there a
+            // daemon-side authority at all — is what `resolve` has just
+            // answered.
+            guard let target = TerminalResizeTarget.resolve(
+                    holderPTYIsOwned: holderWriteFD >= 0,
+                    worktreeID: worktreeIDForDiagnostics(),
+                    terminalID: panelID,
+                    controlMode: controlModeAttach.map {
+                        (worktreeID: $0.worktreeID, windowID: $0.windowID)
+                    }),
                   ControlModeResizeGate.shouldSend(
                     controlModeAttached: true, cols: cols, rows: rows)
             else { return }
@@ -2170,9 +2231,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // dead view must stop draining (its stash is irrelevant; the
                 // next live view sends its own initial resize).
                 while ControlModeResizeSerializer.shouldContinueDraining(tornDown: self.isTornDown) {
-                    try? await daemonClient?.paneResize(
-                        worktreeID: attach.worktreeID, windowID: attach.windowID,
-                        cols: size.cols, rows: size.rows)
+                    switch target {
+                    case .controlModeWindow(let worktreeID, let windowID):
+                        try? await daemonClient?.paneResize(
+                            worktreeID: worktreeID, windowID: windowID,
+                            cols: size.cols, rows: size.rows)
+                    case .holderSession(let worktreeID, let terminalID):
+                        // `windowID` is the empty string a holder row carries;
+                        // `terminalID` is what the daemon resolves.
+                        try? await daemonClient?.paneResize(
+                            worktreeID: worktreeID, windowID: "",
+                            cols: size.cols, rows: size.rows, terminalID: terminalID)
+                    }
                     guard let next = self.resizeSerializer.completedInFlight() else { return }
                     size = next
                 }

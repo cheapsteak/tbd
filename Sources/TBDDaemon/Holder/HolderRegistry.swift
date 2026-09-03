@@ -361,6 +361,42 @@ actor HolderRegistry {
         statuses[terminalID]
     }
 
+    // MARK: - Sizing
+
+    /// Applies a viewer's desired size to one holder-backed session, and
+    /// decides which half of the resize is still the daemon's to make.
+    ///
+    /// **While a viewer holds the pty, the viewer owns `TIOCSWINSZ`.** It has a
+    /// writable duplicate of the master and sets the size on it as its own view
+    /// resizes — before it tells the daemon anything — so a daemon that issued
+    /// the ioctl as well would signal the child a second time for one resize,
+    /// and in the window where the two disagree would signal it to a geometry
+    /// nobody is painting at. `viewerAttachment` is the instrument for that,
+    /// deliberately: it reads true for a timed-out attach as well as a
+    /// confirmed one, and both mean the same thing here — the viewer may be
+    /// live on that descriptor.
+    ///
+    /// **The grid is not part of that trade.** The daemon's emulator is what a
+    /// re-adoption and `terminal.output` render, so it tracks the viewer either
+    /// way; a grid left at the size the viewer arrived at wraps everything the
+    /// session prints from then on at a width nobody is painting. That is the
+    /// defect the adoption path was fixed for once already, seen from the other
+    /// side.
+    ///
+    /// A session with no reader is skipped silently: there is no grid to
+    /// reshape and no descriptor to size. That is the ordinary state of a
+    /// *confirmed* attach — the daemon released its reader at the
+    /// acknowledgement — and there the viewer's own ioctl is the whole resize,
+    /// with the pty itself carrying the geometry into the next adoption.
+    func applyViewerResize(terminalID: UUID, columns: Int, rows: Int) async {
+        guard let reader = reader(for: terminalID) else { return }
+        if viewerAttachment(for: terminalID) != nil {
+            await reader.resizeGrid(columns: columns, rows: rows)
+        } else {
+            await reader.resize(columns: columns, rows: rows)
+        }
+    }
+
     // MARK: - Spawning
 
     /// Starts a holder for a brand-new session and begins draining it.

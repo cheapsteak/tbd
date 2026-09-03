@@ -1487,11 +1487,16 @@ actor DaemonClient {
     /// suppression (addendum §4). Fire-and-forget from the app's view: errors
     /// are dropped because the resize is re-fired repeatedly and the next tick
     /// self-heals.
-    func paneResize(worktreeID: UUID, windowID: String, cols: Int, rows: Int) async throws {
+    /// `terminalID` names a holder-backed session, which has no window to key
+    /// on; it is nil for the control-mode path, which does.
+    func paneResize(
+        worktreeID: UUID, windowID: String, cols: Int, rows: Int, terminalID: UUID? = nil
+    ) async throws {
         try await callVoidAsync(
             method: RPCMethod.paneResize,
             params: PaneResizeParams(
-                worktreeID: worktreeID, windowID: windowID, cols: cols, rows: rows)
+                worktreeID: worktreeID, windowID: windowID, cols: cols, rows: rows,
+                terminalID: terminalID)
         )
     }
 
