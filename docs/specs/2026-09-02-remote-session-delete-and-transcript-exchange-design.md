@@ -1,7 +1,7 @@
 # Deleting a remote session, and moving transcripts between machines
 
 **Date:** 2026-09-02
-**Status:** Approved, not yet built.
+**Status:** Approved, built.
 **Depends on:** [`docs/remote-provider-contract.md`](../remote-provider-contract.md)
 (the verb/capability model, the Session object, the error model, and the
 `transcript` format), and
