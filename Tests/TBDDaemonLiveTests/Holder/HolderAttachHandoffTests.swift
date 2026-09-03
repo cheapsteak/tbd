@@ -65,41 +65,43 @@ struct HolderAttachHandoffTests {
     /// serializes the screen, so a byte cannot be stranded in a buffer no
     /// reader will ever look at again.
     ///
-    /// Deterministic by construction rather than by timing. The first attach
-    /// takes the daemon off the pty and is then abandoned unacknowledged, which
-    /// leaves it off; the job's answer therefore sits in the tty queue with
-    /// provably nobody reading it. The second attach must pick it up on its way
-    /// past. Without the drain-the-remainder step, the emulator has never seen
-    /// those bytes and the preamble cannot contain them.
+    /// Driven against the reader rather than the registry, because the reader
+    /// is where the quiesce lives and because the registry — correctly —
+    /// refuses to open a second hand-over while a viewer may hold the pty. The
+    /// two suspensions here are the two halves of the same production call:
+    /// `beginAttach` quiesces and then snapshots, in that order.
+    ///
+    /// Deterministic by construction rather than by timing. The first
+    /// suspension takes the daemon off the pty and nothing puts it back, so the
+    /// job's answer sits in the kernel's terminal queue with provably nobody
+    /// reading it. The second must pick it up on its way past; without the
+    /// drain-the-remainder step the emulator has never seen those bytes and the
+    /// preamble cannot contain them.
     @Test func theQuiesceStrandsNoByteThatWasAlreadyQueued() async throws {
         let fixture = try await AttachFixture.start(command: Self.echoJob)
         defer { fixture.tearDown() }
 
-        let first = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
-        close(first.ptyFD)
-        await fixture.registry.cancelPendingAttach(
-            terminalID: fixture.terminalID, generation: first.generation, reason: .unacknowledged)
-
-        // Nobody is reading this pty now. The job's answer accumulates in the
-        // kernel's terminal queue and reaches no emulator at all.
+        let first = try await fixture.reader.suspendDraining()
+        close(first)
         #expect(await !fixture.reader.isDraining)
+
         try await fixture.reader.write(Data("STRANDED\n".utf8))
         // Given time to arrive rather than checked the instant after the write:
         // the round trip through the job takes milliseconds, and an assertion
         // made before it could have completed is one that cannot fail.
         #expect(
             await !daemonScreenShows("GOT:STRANDED", on: fixture.reader),
-            "the daemon read a pty it had already handed over")
+            "the daemon read a pty it had already stepped off")
 
-        let second = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
-        defer { close(second.ptyFD) }
+        let second = try await fixture.reader.suspendDraining()
+        close(second)
         let replay = HeadlessReplay(columns: 80, rows: 24)
-        replay.feed(second.snapshotPreamble)
+        replay.feed(await fixture.reader.snapshotPreamble())
         let painted = replay.screenText()
         #expect(
             painted.contains("GOT:STRANDED"),
             """
-            output that was queued on the pty before the attach never reached the emulator, so \
+            output that was queued on the pty before the hand-over never reached the emulator, so \
             the viewer will never see it; the replayed preamble painted: \(painted.debugDescription)
             """)
     }
@@ -364,6 +366,33 @@ struct HolderAttachHandoffTests {
         }
         try await acknowledging.value
         #expect(await registry.viewerAttachment(for: terminalID) == 1)
+    }
+
+    /// A session with an attach in flight cannot be adopted, because its reader
+    /// has already stepped off the pty.
+    ///
+    /// `.adopted` stops meaning "draining" the moment an attach quiesces the
+    /// reader, so handing that reader back would answer "adopted and reading"
+    /// about a session nobody is reading — and, once the attach completes,
+    /// about one a viewer owns.
+    @Test func adoptingASessionWithAnAttachInFlightIsRefused() async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob)
+        defer { fixture.tearDown() }
+
+        let barrier = ReentryBarrier()
+        await fixture.registry.setAttachBarrier { await barrier.arriveAndWait() }
+        let registry = fixture.registry
+        let terminalID = fixture.terminalID
+        let inFlight = Task { try await registry.beginAttach(terminalID: terminalID) }
+        #expect(await pollUntil("the attach to reach the barrier") { await barrier.hasParked })
+
+        await #expect(throws: HolderRegistry.Error.self) {
+            try await registry.adopt(terminal: fixture.terminalRow)
+        }
+
+        await barrier.release()
+        let vend = try await inFlight.value
+        close(vend.ptyFD)
     }
 
     /// After an acknowledgement, a further attach is refused rather than

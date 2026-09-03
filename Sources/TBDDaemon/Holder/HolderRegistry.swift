@@ -624,6 +624,15 @@ actor HolderRegistry {
             guard viewerAttachments[terminalID] == nil else {
                 throw Error.attachedToViewer(terminalID: terminalID)
             }
+            // An attach in flight has already quiesced this session's reader,
+            // so `.adopted` no longer implies "draining". Handing that reader
+            // back would answer "yes, adopted and reading" about a session
+            // nobody is reading — and, if the attach then completes, about one
+            // a viewer owns.
+            if let outstanding = pendingAttaches[terminalID] {
+                throw Error.attachAlreadyPending(
+                    terminalID: terminalID, generation: outstanding.generation)
+            }
             switch slots[terminalID] {
             case .adopted(let reader):
                 return reader
@@ -1112,8 +1121,8 @@ actor HolderRegistry {
         /// The viewer has the descriptor and has not acknowledged. A lost ack
         /// and a lost app are indistinguishable on the wire, and the viewer may
         /// already be live on its dup, so this does **not** license a resume:
-        /// the daemon stays off the pty until something establishes that the
-        /// viewer is gone.
+        /// the daemon stays off the pty, and hands out no further descriptor
+        /// for it, until something establishes that the viewer is gone.
         case unacknowledged
     }
 
@@ -1159,13 +1168,26 @@ actor HolderRegistry {
                     """)
             }
         case .unacknowledged:
+            // The claim is KEPT, not dropped, and that is the whole of this
+            // arm. The viewer has a descriptor for this pty and may be reading
+            // it; forgetting that would leave a session which passes every
+            // guard, so the next attach hands out a second live `dup` of a pty
+            // somebody is already on — reached by a plain sequence, with no
+            // race in it at all. The map already means exactly "a viewer may
+            // hold this pty", and both `beginAttach` and `adopt` refuse on it.
+            //
+            // Refusing to read the pty while cheerfully duplicating it for
+            // somebody else would be the same evidence answered two ways.
+            // Task 13's app-liveness verdict is what clears this, which is the
+            // gate the design spec names for app death.
+            viewerAttachments[terminalID] = generation
             Self.logger.error(
                 """
                 attach \(generation, privacy: .public) for session \
                 \(terminalID.uuidString, privacy: .public) was never acknowledged. Its viewer has \
-                the pty and may be reading it, so the daemon stays off that descriptor: nothing is \
-                draining this session, and a job that exits now cannot finish exiting until an \
-                app-liveness verdict releases it
+                the pty and may be reading it, so the daemon stays off that descriptor and hands \
+                out no other: nothing is draining this session, and a job that exits now cannot \
+                finish exiting until an app-liveness verdict releases it
                 """)
         }
     }
@@ -1181,9 +1203,14 @@ actor HolderRegistry {
         pendingAttaches[terminalID] = nil
     }
 
-    /// The attach generation a viewer currently owns for this session, if one
-    /// does. Test-facing, and the honest instrument for "who owns this pty":
-    /// the absence of a reader cannot tell a vended session from a released one.
+    /// The attach generation a viewer holds this session's pty under, if one
+    /// may. Test-facing, and the honest instrument for "who owns this pty": the
+    /// absence of a reader cannot tell a vended session from a released one.
+    ///
+    /// "May" rather than "does", deliberately. It is set by an acknowledgement,
+    /// which is proof, and also by an attach that timed out, which is not — but
+    /// the two are indistinguishable from here and both mean the same thing to
+    /// every caller: the daemon neither reads this pty nor duplicates it again.
     func viewerAttachment(for terminalID: UUID) -> UInt64? {
         viewerAttachments[terminalID]
     }

@@ -1,3 +1,4 @@
+import Clocks
 import Darwin
 import Foundation
 import TestSupport
@@ -17,7 +18,7 @@ import Testing
 ///
 /// **Tier 3.** A real `TBDHolder`, a real pty, a real `socketpair` standing in
 /// for the app's sidecar, and a real `SCM_RIGHTS` hand-over across it.
-@Suite(.serialized)
+@Suite(.clockDriven, .serialized)
 struct HolderAttachRPCTests {
 
     private static let echoJob = "while IFS= read -r line; do printf 'GOT:%s\\n' \"$line\"; done"
@@ -84,12 +85,13 @@ struct HolderAttachRPCTests {
             try await harness.attachAndAcknowledge()
         }
         let leaked = openDescriptorCount() - baseline
-        // The count is process-global and other suites run in parallel, so a
-        // small slack absorbs their noise. It is far below what the bug costs:
-        // a dropped close leaks one descriptor per attach, so six rounds put
-        // six over the line while a couple of unrelated sockets do not.
+        // The count is process-global and the sibling holder suites spawn
+        // holders holding several descriptors each, so the slack is wide. It is
+        // still strictly below what the bug costs: a dropped close leaks one
+        // descriptor per attach, so six rounds put six over a threshold of
+        // five, while a neighbour's whole holder passes unnoticed.
         #expect(
-            leaked <= 2,
+            leaked <= 5,
             """
             \(rounds) attach round trips left \(leaked) descriptors behind; a vended pty the \
             daemon forgets to close keeps that terminal alive for the life of the process
@@ -148,11 +150,59 @@ struct HolderAttachRPCTests {
         }
         let leaked = openDescriptorCount() - baseline
         #expect(
-            leaked <= 2,
+            leaked <= 5,
             """
             \(rounds) failed vends left \(leaked) descriptors behind; the copy that could not be \
             delivered is still this process's to close
             """)
+    }
+
+    /// An attach whose acknowledgement never arrives leaves the session marked
+    /// as the viewer's, so the next attach is refused rather than duplicating a
+    /// pty somebody is already reading.
+    ///
+    /// **No race in this one.** Vend, let the ready timeout fire, attach again:
+    /// the timeout used to drop the only record that a viewer held the pty, and
+    /// `suspendDraining` is idempotent — a second call on a suspended reader
+    /// hands back another `dup` — so the second attach succeeded and produced a
+    /// second live descriptor for one pty. An app that is merely slow past five
+    /// seconds still has its fd; App Nap coalesces a backgrounded app's work
+    /// for much longer than that.
+    ///
+    /// The timeout is driven on the injected clock, not waited for.
+    /// `advanceWhenSuspended` also proves the timer task actually armed.
+    @Test func anAttachThatTimedOutVendsNoSecondDescriptor() async throws {
+        let clock = TestClock<Duration>()
+        let readyTimeout: Duration = .seconds(5)
+        let harness = try await RPCHarness.start(
+            command: Self.echoJob, readyTimeout: readyTimeout, clock: clock)
+        defer { harness.tearDown() }
+
+        let first = try await harness.attach()
+        defer { Darwin.close(first.fd) }
+
+        // No acknowledgement is ever sent.
+        await clock.advanceWhenSuspended(by: readyTimeout)
+        #expect(await pollUntil("the ready timeout to take the attach back") {
+            await harness.registry.viewerAttachment(for: harness.terminalID) == first.generation
+        })
+
+        let response = await harness.router.handle(
+            try RPCRequest(
+                method: RPCMethod.attachRequest,
+                params: AttachRequestParams(
+                    worktreeID: harness.worktreeID, paneID: "", windowID: "",
+                    attachID: UUID(), terminalID: harness.terminalID)))
+        #expect(
+            !response.success,
+            "a session whose viewer still holds the pty was handed a second descriptor for it")
+        #expect(
+            !aVendArrives(on: harness.appSide),
+            "a second descriptor for the same pty crossed the sidecar")
+
+        // And the daemon has not put itself back on the pty either: the same
+        // evidence, answered the same way in both directions.
+        #expect(await !harness.fixture.reader.isDraining)
     }
 
     /// What a failed vend proves about where the descriptor is.
@@ -181,23 +231,30 @@ struct HolderAttachRPCTests {
 
     // MARK: - The branch
 
-    /// A request that names no terminal is a control-mode request, and must not
-    /// touch the holder path — the off-branch of the gate.
+    /// A request that names no terminal is answered by the control-mode path,
+    /// and leaves holder sessions in this worktree alone.
     ///
-    /// Asserted on the session rather than on the response: the tmux side of
-    /// this router is a dry run and its answer is uninteresting, while "did
-    /// anything quiesce this reader" is exactly what the branch decides.
+    /// **What this does and does not pin.** The holder branch is unreachable
+    /// without a terminal id under *any* mutation of the transport check, so
+    /// this cannot fail for the reason its sibling can — the discrimination
+    /// between the two paths lives there, in
+    /// `aRequestNamingATmuxRowTakesTheControlModePath`, and not here. What it
+    /// does pin is the nil case reaching the tmux path at all rather than
+    /// erroring, plus the session's reader surviving a request that named
+    /// something else.
     @Test func aRequestWithoutATerminalIDLeavesHolderSessionsAlone() async throws {
         let harness = try await RPCHarness.start(command: Self.echoJob)
         defer { harness.tearDown() }
 
-        _ = await harness.router.handle(
+        let response = await harness.router.handle(
             try RPCRequest(
                 method: RPCMethod.attachRequest,
                 params: AttachRequestParams(
                     worktreeID: harness.worktreeID, paneID: "%0", windowID: "@0",
                     attachID: UUID())))
 
+        #expect(response.success)
+        #expect(try response.decodeResult(AttachRequestResult.self).status == "unavailable")
         #expect(await harness.fixture.reader.isDraining)
         #expect(await harness.registry.viewerAttachment(for: harness.terminalID) == nil)
         try await harness.fixture.reader.write(Data("STILL-MINE\n".utf8))
@@ -330,7 +387,12 @@ private struct RPCHarness {
     var registry: HolderRegistry { fixture.registry }
     var terminalID: UUID { fixture.terminalID }
 
-    static func start(command: String, connectSidecar: Bool = true) async throws -> RPCHarness {
+    static func start(
+        command: String,
+        connectSidecar: Bool = true,
+        readyTimeout: Duration = .seconds(600),
+        clock: (any Clock<Duration>)? = nil
+    ) async throws -> RPCHarness {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
@@ -368,7 +430,7 @@ private struct RPCHarness {
         // off: a holder attach must not depend on tmux's version.
         router.controlMode = TmuxControlModeBridge(
             supervisor: TmuxControlSupervisor(), environment: [:], fdVending: vending,
-            readyTimeout: .seconds(600))
+            readyTimeout: readyTimeout, clock: clock ?? ContinuousClock())
         router.holderRegistry = fixture.registry
 
         return RPCHarness(
@@ -462,6 +524,15 @@ private struct AttachRPCFixture {
         }
         process.tearDown()
     }
+}
+
+/// Whether anything at all arrives on the app's end of the sidecar shortly.
+///
+/// Used to assert a vend did NOT happen, which `receiveVend` cannot say —
+/// it blocks until one does.
+private func aVendArrives(on socket: Int32, within milliseconds: Int32 = 250) -> Bool {
+    var watched = pollfd(fd: socket, events: Int16(POLLIN), revents: 0)
+    return poll(&watched, 1, milliseconds) > 0 && watched.revents != 0
 }
 
 /// How many descriptors this process currently has open.
