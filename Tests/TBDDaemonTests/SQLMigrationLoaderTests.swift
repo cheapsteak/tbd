@@ -501,6 +501,7 @@ import Testing
             "20260901180118_config_reap_holder_children",
             "20260902120000_retained_transcript",
             "20260902130000_config_remote_delete",
+            "20260902140000_config_gc_retained_transcripts",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)

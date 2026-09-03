@@ -123,6 +123,14 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// so `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.remoteDeleteEnabledDefault`, never through `?? false`.
     var remote_delete_enabled: Bool?
+    /// Gate for the orphan-GC leg that reclaims retained transcripts nobody
+    /// references. **Genuinely tri-state**, same shape as
+    /// `remote_delete_enabled`: the
+    /// `20260902140000_config_gc_retained_transcripts` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.gcRetainedTranscriptsEnabledDefault`, never through
+    /// `?? false`.
+    var gc_retained_transcripts_enabled: Bool?
     /// This installation's holder owner token, minted once by the first daemon
     /// that needs one and read forever after. **Not a flag**: NULL means "not
     /// yet minted", and the mint is the conditional UPDATE in
@@ -175,6 +183,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   `remote_delete_enabled` — the gate on destroying a provider-hosted
     ///   session, whose soak is the one that matters most, because what it
     ///   permits cannot be undone from this machine.
+    /// - Parameter gcRetainedTranscriptsDefault: and truly the last, for
+    ///   `gc_retained_transcripts_enabled` — the retained-transcript GC leg's
+    ///   soak gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -187,7 +198,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         gcHolderRendezvousDefault: Bool = Config.gcHolderRendezvousEnabledDefault,
         gcRowlessHoldersDefault: Bool = Config.gcRowlessHoldersEnabledDefault,
         reapHolderChildrenDefault: Bool = Config.reapHolderChildrenEnabledDefault,
-        remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault
+        remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault,
+        gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -259,6 +271,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // And truly the last of them, for the remote-delete gate —
             // NOT `?? false`.
             remoteDeleteEnabled: remote_delete_enabled ?? remoteDeleteDefault,
+            // And truly the last of them, for the retained-transcript GC leg's
+            // gate — NOT `?? false`.
+            gcRetainedTranscriptsEnabled:
+                gc_retained_transcripts_enabled ?? gcRetainedTranscriptsDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
             // Passed straight through, NULL included: "not yet minted" is a
             // real state and has no default to resolve to.
@@ -740,6 +756,22 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET remote_delete_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the retained-transcript GC leg's gate (default OFF, soaking) —
+    /// read on top of the GC master switch, so both must be on for the leg to
+    /// run. Separate from `setRemoteDeleteEnabled` on purpose: that gate
+    /// destroys a session on a provider, this one reclaims TBD's own local
+    /// residue, and opting into either must never opt into the other. The
+    /// column is written on every call, because writing either value is the
+    /// explicit gesture that lifts it out of NULL forever after.
+    public func setGCRetainedTranscriptsEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET gc_retained_transcripts_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

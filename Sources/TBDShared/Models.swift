@@ -1553,6 +1553,25 @@ public struct Config: Codable, Sendable, Equatable {
     /// "never chose" and follows the shipped default wherever it goes; `0`/`1`
     /// is an explicit gesture and is honored forever.
     public var remoteDeleteEnabled: Bool
+    /// Gate for the orphan-GC leg that reclaims retained transcripts nobody
+    /// references — the JSONL files under `~/tbd/transcripts/` that no
+    /// `retained_transcript` row points at, and the rows whose provider-stated
+    /// expiry has passed
+    /// (`docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`,
+    /// "Reclamation"). Read on top of `gcEnabled`: both must be on for the leg
+    /// to run. It ships OFF because it is a brand-new background sweep that
+    /// unlinks files and deletes rows, and because the exchange whose residue
+    /// it reclaims is itself only reachable on a provider that declares
+    /// `retain`, `import` or `recall` — so a machine with no such provider has
+    /// nothing here for this leg to be right or wrong about.
+    ///
+    /// **Resolved, not stored**, like `gcHolderRendezvousEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `gc_retained_transcripts_enabled ?? Config.gcRetainedTranscriptsEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var gcRetainedTranscriptsEnabled: Bool
     /// The single opt-in for remote peer messaging
     /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
     /// rollout"): publishing a shadow peer for each remote session and carrying
@@ -1681,6 +1700,13 @@ public struct Config: Codable, Sendable, Equatable {
     /// asked for a receipt got one — is a change to this constant, with no
     /// forcing `UPDATE` migration and every explicit opt-out left alone.
     public static let remoteDeleteEnabledDefault = false
+    /// The shipped default for `gcRetainedTranscriptsEnabled`, and the single
+    /// place it lives. The retained-transcript leg ships off; graduation —
+    /// after a soak in which it never unlinked a transcript a row still
+    /// referenced, and never dropped a row whose provider had made no expiry
+    /// claim — is a change to this constant, with no forcing `UPDATE` migration
+    /// and every explicit opt-out left alone.
+    public static let gcRetainedTranscriptsEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1719,6 +1745,8 @@ public struct Config: Codable, Sendable, Equatable {
                 gcRowlessHoldersEnabled: Bool = Config.gcRowlessHoldersEnabledDefault,
                 reapHolderChildrenEnabled: Bool = Config.reapHolderChildrenEnabledDefault,
                 remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
+                gcRetainedTranscriptsEnabled: Bool =
+                    Config.gcRetainedTranscriptsEnabledDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1758,6 +1786,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.gcRowlessHoldersEnabled = gcRowlessHoldersEnabled
         self.reapHolderChildrenEnabled = reapHolderChildrenEnabled
         self.remoteDeleteEnabled = remoteDeleteEnabled
+        self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -1869,6 +1898,12 @@ public struct Config: Codable, Sendable, Equatable {
         remoteDeleteEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .remoteDeleteEnabled)
             ?? Config.remoteDeleteEnabledDefault
+        // Same shape for the retained-transcript GC leg's gate: absent means
+        // the sender knew nothing about the flag, which is the NULL column's
+        // situation — follow the shipped default, never a hardcoded `false`.
+        gcRetainedTranscriptsEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .gcRetainedTranscriptsEnabled)
+            ?? Config.gcRetainedTranscriptsEnabledDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.

@@ -18,7 +18,7 @@ auto-removes one if it ended unchanged — the moment an agent commits, the work
 Code's own 30-day sweep permanently exempts anything with unpushed commits. Nothing
 else ever cleans these up.
 
-Three things get reaped:
+These get reaped:
 - **Agent worktrees** — `<repo>/.claude/worktrees/agent-*` and `wf_*` whose run has
   ended (see gates below).
 - **Attributable scratchpads** — `/private/tmp/claude-<uid>/<slug>` directories TBD can
@@ -27,6 +27,9 @@ Three things get reaped:
   `model_profiles` row is gone; `ProfileDirCollector` is the named reconciler for that
   resource class, alongside the agent-worktree and scratchpad collectors, and it
   quarantines rather than deletes (see below).
+- **Unreferenced retained transcripts** — JSONL files under `~/tbd/transcripts/` that no
+  `retained_transcript` row points at, and receipt rows whose provider-stated expiry has
+  passed (see below).
 
 ## Philosophy: orphaned, not idle
 
@@ -235,6 +238,74 @@ profile and moves the directory into the new UUID. The app's Reclaimed section d
 surface these records — it is per-repo, and a profile directory belongs to no repo — so
 the CLI is where a quarantine path is read.
 
+## Retained transcripts
+
+A provider that declares `retain`, `import` or `recall` can hold a conversation in its
+own durable store and hand back an opaque key; TBD records the receipt in
+`retained_transcript` and a `recall` writes the JSONL under
+`~/tbd/transcripts/<provider>/<key>.jsonl`. Both halves are durable resources with no
+owner once the thing that motivated them is gone, so `OrphanGC` is their named
+reconciler — see
+[`docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`](specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md),
+"Reclamation".
+
+**Why it is load-bearing rather than tidiness.** The teleport flow calls `import` and
+then `create`. A `create` that fails after a successful `import` leaves a retained blob
+on the provider and a row here that nothing will ever use, because the session it was
+going to seed was never made. No creation path can close that window — the provider
+commits its side before TBD learns whether the second call will succeed — so the standing
+guarantee is this sweep rather than any rollback.
+
+**Flag: `gc_retained_transcripts_enabled`, default off**, read on top of `gcEnabled`, so
+both must be on for the leg to run. It ships off because it is a background sweep that
+unlinks files and deletes rows, and because the exchange whose residue it reclaims exists
+only on a provider declaring those capabilities. The column carries no SQL default, so an
+install nobody has touched reads NULL and resolves through
+`Config.gcRetainedTranscriptsEnabledDefault` — graduation is a one-line change to that
+constant, reaching everyone who never flipped the switch while preserving every explicit
+opt-out. A dry run bypasses the flag exactly as it bypasses `gcEnabled`:
+`tbd gc sweep --dry-run` prints the `REAP retained-transcript` and
+`REAP retained-transcript-row` lines the leg *would* act on, so the decision to enable it
+can be made against real candidates. There is no Settings toggle and no RPC yet; enable
+it for a soak by writing the column directly, the way `gcGraceSeconds` is set:
+
+```sh
+sqlite3 ~/tbd/state.db \
+  "UPDATE config SET gc_retained_transcripts_enabled = 1;"
+```
+
+**What it reclaims**, in this order, from one reading of the clock through the date seam:
+
+1. **Expired rows.** A row whose `expires_at` has passed is deleted. Whether that
+   delete actually landed decides whether its file counts as referenced in step 2, so a
+   dry run or a failed delete keeps both halves together rather than splitting them.
+2. **Unreferenced files.** A file at `<base>/<provider>/<key>.jsonl` that no surviving
+   row names — neither by its canonical `(provider, key)` path nor by the `local_path`
+   the row recorded — is unlinked.
+
+**Gates**, each failing toward keeping and each reported in the sweep plan with its
+reason:
+
+- **No stated expiry is never expiry** — an absent `expires_at` means the provider made
+  no claim, not that a claim lapsed, and the key lives in that row and nowhere else,
+  because the contract gives no way to enumerate a provider's keys. Dropping such a row
+  strands the blob forever.
+- **Grace window** (`grace`) — a file whose newer of creation and modification is younger
+  than `gcGraceSeconds` (default 3600s / 1h) is kept. `recall` writes the file before it
+  records the path on the row, and this is the window that covers it. A file whose dates
+  cannot be read keeps as `unknown-age`.
+- **Unreadable rows skip the leg** (`rows-unreadable`) — never read as "no file is
+  referenced".
+- **Whitelist, not blacklist** — only `<base>/<provider>/<key>.jsonl` is a candidate. A
+  stray file at the top level, another extension, or a deeper nesting is left alone
+  rather than judged by a rule that never considered it. Emptied provider directories are
+  left in place too: there is one per provider ever used.
+
+**No reap record, and no restore.** The `ReapRecord` type is directory-shaped and keyed
+by the worktree a reap removed, and neither half here has one. Nothing is lost that a
+restore could return either: the transcript still lives on the provider until its own
+expiry, and `tbd remote recall <key>` fetches it again.
+
 ## Cadence and the `gcEnabled` gate
 
 `gcEnabled` (config-table boolean, **default on**) is the single master switch — it
@@ -284,6 +355,7 @@ than the preceding dry run predicted.
 |---|---|---|
 | `gcEnabled` | `true` | Settings toggle + `config.setGCEnabled` RPC |
 | `gcProfileDirsEnabled` | `false` | `tbd gc profile-dirs on\|off` + `config.setGCProfileDirsEnabled` RPC, no UI |
+| `gcRetainedTranscriptsEnabled` | `false` | config table only, no UI |
 | `gcGraceSeconds` | `3600` (1h) | config table only, no UI |
 | `gcSnapshotRetentionDays` | `30` | config table only, no UI |
 

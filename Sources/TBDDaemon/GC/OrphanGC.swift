@@ -292,6 +292,10 @@ public actor OrphanGC {
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
+        await reclaimRetainedTranscripts(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
         // Snapshot retention never runs in dryRun; the outer guard already
         // establishes gcEnabled for any non-dry run.
         if !dryRun {
@@ -750,6 +754,216 @@ public actor OrphanGC {
                 reaped += 1
             }
         }
+    }
+
+    // MARK: - Retained transcripts
+
+    /// Reclaims the local half of the retained-transcript exchange — the JSONL
+    /// files under `~/tbd/transcripts/` that no `retained_transcript` row
+    /// references, and the rows whose provider-stated expiry has passed. The
+    /// named reconciler for that resource class
+    /// (`docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`,
+    /// "Reclamation").
+    ///
+    /// **Load-bearing, not tidiness.** The teleport flow calls `import` and
+    /// then `create`: a `create` that fails after a successful `import` leaves
+    /// a retained blob on the provider and a row here that nothing will ever
+    /// use, because the session it was going to seed was never made. No
+    /// creation path can close that window — the provider commits its side
+    /// before TBD learns whether the second call will succeed — so the standing
+    /// guarantee is this sweep rather than any rollback, which is precisely
+    /// what the named-reconciler doctrine exists for.
+    ///
+    /// Gated by `gcRetainedTranscriptsEnabled` on top of `gcEnabled`, both
+    /// because every new background sweep that unlinks files and deletes rows
+    /// soaks behind its own switch, and because the exchange whose residue it
+    /// reclaims only exists on a provider declaring `retain`, `import` or
+    /// `recall` — a machine with no such provider has nothing here for this leg
+    /// to be right or wrong about.
+    ///
+    /// `dryRun` bypasses the flag exactly as `sweep` lets it bypass `gcEnabled`:
+    /// planning is read-only, and someone deciding whether to enable a
+    /// default-off flag needs to see what enabling it would reclaim before
+    /// flipping it. A NON-dry run still requires the flag.
+    ///
+    /// Three directions all fail toward keeping:
+    ///
+    ///   - **A row with no stated expiry is never dropped.** An absent
+    ///     `expires_at` means the provider made no claim, not that the claim
+    ///     lapsed, and the key lives in that row and nowhere else — the
+    ///     contract gives no way to enumerate a provider's keys, so a dropped
+    ///     row is a blob nobody can ever recall again.
+    ///   - **A file younger than `gcGraceSeconds` is kept**, and so is one
+    ///     whose age cannot be read. `recall` writes the file before it records
+    ///     the path on the row, so a sweep landing inside that window would
+    ///     otherwise unlink a transcript that was arriving as it looked.
+    ///   - **An unreadable row list skips the whole leg**, rather than reading
+    ///     an empty list as "no file is referenced" and unlinking the lot.
+    ///
+    /// Only `<base>/<provider>/<key>.jsonl` is a candidate — a whitelist, so
+    /// anything else a human or a future feature puts in that tree is left
+    /// alone rather than classified by a rule that never considered it. Emptied
+    /// provider directories are left behind too: there is one per provider ever
+    /// used, which is bounded by hand-registered providers, and removing a
+    /// directory a concurrent `recall` is writing into buys nothing.
+    ///
+    /// No `ReapRecord` is written. The record type is directory-shaped and
+    /// keyed by the worktree a reap removed, and neither half here has one;
+    /// there is nothing a `tbd gc restore` could put back, since the transcript
+    /// this file held still lives on the provider until its own expiry.
+    private func reclaimRetainedTranscripts(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        guard config.gcRetainedTranscriptsEnabled || dryRun else { return }
+
+        let rows: [RetainedTranscript]
+        do {
+            rows = try await db.retainedTranscripts.all()
+        } catch {
+            logger.error("""
+            gc: retained-transcript rows unreadable this sweep \
+            (\(error.localizedDescription, privacy: .public)) — skipping the phase
+            """)
+            planned.append("KEEP rows-unreadable retained-transcripts")
+            return
+        }
+
+        // One reading of now for both halves, through the date seam: expiry is
+        // a persisted timestamp compared against a time, which is data rather
+        // than behavior, so it never comes from a clock read inside here.
+        let asOf = now()
+        // `hasExpired(asOf:)` rather than an inline comparison, so this leg and
+        // `RetainedTranscriptStore.deleteExpired(asOf:)` cannot drift on what
+        // "expired" means — and so the no-claim reading above has one home.
+        let expired = rows.filter { $0.hasExpired(asOf: asOf) }
+        for row in expired {
+            planned.append("REAP retained-transcript-row \(row.provider)/\(row.key)")
+        }
+
+        // Whether those rows actually went is what decides if their files count
+        // as referenced below. A dry run deletes nothing and a failed delete
+        // leaves them in place; in both cases the files stay referenced, so a
+        // row and its file are never split apart by a half-completed pass.
+        var expiredRowsRemoved = false
+        if !dryRun && !expired.isEmpty {
+            do {
+                let removed = try await db.retainedTranscripts.deleteExpired(asOf: asOf)
+                expiredRowsRemoved = true
+                reaped += removed
+                logger.info("""
+                gc: dropped \(removed, privacy: .public) expired retained-transcript row(s)
+                """)
+            } catch {
+                planned.append("KEEP row-delete-failed retained-transcripts")
+                logger.warning("""
+                gc: could not drop expired retained-transcript rows \
+                (\(error.localizedDescription, privacy: .public)) — their files are kept too
+                """)
+            }
+        }
+
+        let expiredIdentities = Set(expired.map { Self.transcriptIdentity($0) })
+        let liveRows = expiredRowsRemoved
+            ? rows.filter { !expiredIdentities.contains(Self.transcriptIdentity($0)) }
+            : rows
+
+        // Both the canonical path a `recall` writes to AND whatever path the
+        // row actually records. They are the same today, and a row written by
+        // another build (or a file moved by hand and re-recorded) would make
+        // them differ — in which case both are referenced, never one.
+        var referenced = Set<String>()
+        for row in liveRows {
+            referenced.insert(deletionQueueCollector.resolvedPath(
+                TBDConstants.retainedTranscriptPath(provider: row.provider, key: row.key).path))
+            if let localPath = row.localPath {
+                referenced.insert(deletionQueueCollector.resolvedPath(localPath))
+            }
+        }
+
+        for file in Self.retainedTranscriptFiles(in: TBDConstants.retainedTranscriptsDir) {
+            guard !referenced.contains(deletionQueueCollector.resolvedPath(file.path)) else {
+                continue
+            }
+            if let reason = Self.youngTranscriptKeepReason(
+                path: file.path, asOf: asOf, graceSeconds: config.gcGraceSeconds
+            ) {
+                planned.append("KEEP \(reason) \(file.path)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) \(file.path, privacy: .public)
+                """)
+                continue
+            }
+            planned.append("REAP retained-transcript \(file.path)")
+            // This leg's guard is `gcRetainedTranscriptsEnabled || dryRun`, so
+            // every line below runs only with the flag actually on.
+            guard !dryRun else { continue }
+            do {
+                try FileManager.default.removeItem(at: file)
+                reaped += 1
+                logger.info("""
+                gc: unlinked unreferenced retained transcript \(file.path, privacy: .public)
+                """)
+            } catch {
+                planned.append("KEEP unlink-failed \(file.path)")
+                logger.warning("""
+                gc: could not unlink \(file.path, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            }
+        }
+    }
+
+    /// `(provider, key)` as one comparable value — the identity a receipt has,
+    /// with a separator no path component can contain.
+    private static func transcriptIdentity(_ row: RetainedTranscript) -> String {
+        "\(row.provider)\u{0}\(row.key)"
+    }
+
+    /// Every `<base>/<provider>/<key>.jsonl` file, and nothing else in the
+    /// tree: not a stray file at the top level, not a deeper nesting, not a
+    /// file with another extension. An unreadable (or absent) directory yields
+    /// nothing, which classifies nothing.
+    private static func retainedTranscriptFiles(in base: URL) -> [URL] {
+        let fm = FileManager.default
+        guard let providerDirectories = try? fm.contentsOfDirectory(
+            at: base, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+        else { return [] }
+
+        var files: [URL] = []
+        for directory in providerDirectories {
+            var isDirectory: ObjCBool = false
+            guard fm.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue,
+                  let entries = try? fm.contentsOfDirectory(
+                    at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+            else { continue }
+            for entry in entries where entry.pathExtension == "jsonl" {
+                var entryIsDirectory: ObjCBool = false
+                guard fm.fileExists(atPath: entry.path, isDirectory: &entryIsDirectory),
+                      !entryIsDirectory.boolValue
+                else { continue }
+                files.append(entry)
+            }
+        }
+        return files.sorted { $0.path < $1.path }
+    }
+
+    /// A keep reason when the file is too young to judge, `nil` when it is old
+    /// enough to reclaim. The newer of creation and modification is used, which
+    /// is the reading that keeps longest; a file whose dates cannot be read at
+    /// all keeps as `unknown-age` rather than being guessed at.
+    private static func youngTranscriptKeepReason(
+        path: String, asOf: Date, graceSeconds: Int
+    ) -> String? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path) else {
+            return "unknown-age"
+        }
+        let dates = [
+            attributes[.creationDate] as? Date,
+            attributes[.modificationDate] as? Date,
+        ].compactMap { $0 }
+        guard let newest = dates.max() else { return "unknown-age" }
+        return asOf.timeIntervalSince(newest) < Double(graceSeconds) ? "grace" : nil
     }
 
     // MARK: - Row-less holders
