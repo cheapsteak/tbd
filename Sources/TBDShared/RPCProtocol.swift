@@ -1542,9 +1542,32 @@ public struct RemoteCreateParams: Codable, Sendable {
     ///
     /// Optional and defaulted: params encoded by an older app still decode.
     public let parentWorktreeID: UUID?
-    public init(provider: String, paramsJSON: String, parentWorktreeID: UUID? = nil) {
+    /// The retained transcript the new session should begin with as its
+    /// history — the key from a `retain` or `import` receipt **this same
+    /// provider** issued (`docs/remote-provider-contract.md` § `create`,
+    /// § Keys).
+    ///
+    /// It rides as a bare key rather than as the contract's `{"retained_key":
+    /// ...}` object because the object exists to leave room for a future
+    /// inline source, and inventing that shape on this protocol before the
+    /// contract has one would be two guesses instead of one. The daemon builds
+    /// the object when it composes `create`'s stdin.
+    ///
+    /// **Nil is not "no opinion" — it is "do not send the field".** The daemon
+    /// refuses to send `seed` to a provider that has not declared the
+    /// capability rather than sending it and hoping: the contract requires
+    /// providers to ignore stdin fields they do not recognize, so an ungated
+    /// send would silently produce an unseeded session the caller believed
+    /// carried its conversation.
+    ///
+    /// Optional, so params encoded by a client that predates the field still
+    /// decode (Optional properties synthesize `decodeIfPresent`).
+    public let seedRetainedKey: String?
+    public init(provider: String, paramsJSON: String, parentWorktreeID: UUID? = nil,
+                seedRetainedKey: String? = nil) {
         self.provider = provider
         self.paramsJSON = paramsJSON
+        self.seedRetainedKey = seedRetainedKey
         self.parentWorktreeID = parentWorktreeID
     }
 }
