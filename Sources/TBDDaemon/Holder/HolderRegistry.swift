@@ -295,6 +295,14 @@ actor HolderRegistry {
     /// but racing it is not a test.
     private var attachBarrier: (@Sendable () async -> Void)?
 
+    /// Awaited inside `cancelPendingAttach`, immediately before a cancelled
+    /// attach's reader is put back on its pty — the mirror of `attachBarrier`,
+    /// and the window in which that reader's drain state is mid-transition.
+    ///
+    /// A seam for the same reason as the others: reproducing this by timing
+    /// would mean racing a single `await` on an actor. Nil in production.
+    private var cancelBarrier: (@Sendable () async -> Void)?
+
     init(
         owner: HolderOwnerToken,
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -328,6 +336,12 @@ actor HolderRegistry {
     /// never calls it.
     func setAttachBarrier(_ barrier: (@Sendable () async -> Void)?) {
         attachBarrier = barrier
+    }
+
+    /// Installs the cancel barrier described above. Test-facing; production
+    /// never calls it.
+    func setCancelBarrier(_ barrier: (@Sendable () async -> Void)?) {
+        cancelBarrier = barrier
     }
 
     // MARK: - Reading
@@ -1145,14 +1159,30 @@ actor HolderRegistry {
         guard let pending = pendingAttaches[terminalID], pending.generation == generation else {
             return
         }
-        clearPendingAttach(terminalID: terminalID, generation: generation)
         switch reason {
         case .descriptorNeverDelivered:
             guard case .adopted(let reader) = slots[terminalID], reader === pending.reader else {
+                clearPendingAttach(terminalID: terminalID, generation: generation)
                 return
             }
             do {
-                try await reader.resumeDraining()
+                // The claim is HELD ACROSS THE RESUME and cleared only after it
+                // has landed — the mirror image of `beginAttach` holding it
+                // across the suspend, and the same window seen from the other
+                // end. Clearing first would open an instant in which both maps
+                // say "nobody is attaching" while this reader is mid-transition:
+                // a concurrent `beginAttach` would pass every guard, quiesce a
+                // reader that is about to be resumed, and hand out a fresh
+                // `dup` — and then the resume lands and the daemon is draining
+                // a pty the app is also on. That the descriptor from the FAILED
+                // vend never left this process is what makes resuming safe; it
+                // says nothing about the descriptor a concurrent attach makes.
+                //
+                // The invariant, stated once for all three sites: no window may
+                // exist in which the maps say nobody is attaching while a
+                // suspend or a resume is still in flight.
+                try await resumeAfterCancellation(reader)
+                clearPendingAttach(terminalID: terminalID, generation: generation)
                 Self.logger.info(
                     """
                     attach \(generation, privacy: .public) for session \
@@ -1160,6 +1190,11 @@ actor HolderRegistry {
                     daemon resumed draining its pty
                     """)
             } catch {
+                // The resume failed, so nothing is reading this pty — but
+                // nothing else holds a descriptor for it either (the vend never
+                // delivered one), so an attach is a legitimate recovery and the
+                // claim must not outlive the attempt.
+                clearPendingAttach(terminalID: terminalID, generation: generation)
                 Self.logger.error(
                     """
                     could not resume draining session \(terminalID.uuidString, privacy: .public) \
@@ -1180,7 +1215,11 @@ actor HolderRegistry {
             // somebody else would be the same evidence answered two ways.
             // Task 13's app-liveness verdict is what clears this, which is the
             // gate the design spec names for app death.
+            // Recorded before the claim is dropped, so the two hand off with
+            // nothing between them — not even a synchronous instant in which
+            // both maps are empty.
             viewerAttachments[terminalID] = generation
+            clearPendingAttach(terminalID: terminalID, generation: generation)
             Self.logger.error(
                 """
                 attach \(generation, privacy: .public) for session \
@@ -1190,6 +1229,20 @@ actor HolderRegistry {
                 finish exiting until an app-liveness verdict releases it
                 """)
         }
+    }
+
+    /// Puts a cancelled attach's reader back on its pty, through the one
+    /// suspension a test can steer on this path.
+    ///
+    /// Wrapped rather than inlined so the barrier travels **with** the resume.
+    /// The ordering this method's caller has to get right is "clear the claim
+    /// after the resume, never before", and a seam sitting on its own line
+    /// above the resume would still be above the clear if somebody moved it —
+    /// so the window would close in the test while staying open in production.
+    /// Inside the call, it cannot be separated from what it stands for.
+    private func resumeAfterCancellation(_ reader: HolderReader) async throws {
+        await cancelBarrier?()
+        try await reader.resumeDraining()
     }
 
     /// Drops a pending attach, but only while it is still the one named.

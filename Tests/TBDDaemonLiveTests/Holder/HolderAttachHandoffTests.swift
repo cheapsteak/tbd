@@ -368,6 +368,60 @@ struct HolderAttachHandoffTests {
         #expect(await registry.viewerAttachment(for: terminalID) == 1)
     }
 
+    /// An attach is refused while a cancelled one is still being put back on
+    /// its pty — the resume-side half of the same window.
+    ///
+    /// The name of the cancellation reason is misleading here, and that is why
+    /// this is reachable: the descriptor from the *failed* vend never left the
+    /// process, which is what makes resuming safe. It says nothing about the
+    /// descriptor a concurrent attach would make. Let one through while the
+    /// resume is in flight and the daemon ends up draining a pty the app is
+    /// also on.
+    ///
+    /// Parked through the cancel barrier rather than raced: the window is a
+    /// single `await` on an actor.
+    @Test func anAttachIsRefusedWhileACancelledOneIsResuming() async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob)
+        defer { fixture.tearDown() }
+        let registry = fixture.registry
+        let terminalID = fixture.terminalID
+
+        let vend = try await registry.beginAttach(terminalID: terminalID)
+        // As if the vend had failed: this process still holds the only copy
+        // that was ever made, which is the evidence the resume rests on.
+        close(vend.ptyFD)
+
+        let barrier = ReentryBarrier()
+        await registry.setCancelBarrier { await barrier.arriveAndWait() }
+        let cancelling = Task {
+            await registry.cancelPendingAttach(
+                terminalID: terminalID, generation: vend.generation,
+                reason: .descriptorNeverDelivered)
+        }
+        #expect(await pollUntil("the cancellation to reach the barrier") {
+            await barrier.hasParked
+        })
+
+        // The reader is suspended and about to be put back. An attach here
+        // would quiesce it, hand out a fresh dup, and then the resume would
+        // land underneath: two readers on one pty.
+        await #expect(
+            throws: HolderRegistry.Error.attachAlreadyPending(
+                terminalID: terminalID, generation: vend.generation)
+        ) {
+            try await registry.beginAttach(terminalID: terminalID)
+        }
+
+        await barrier.release()
+        await cancelling.value
+        #expect(await fixture.reader.isDraining)
+        #expect(await registry.viewerAttachment(for: terminalID) == nil)
+
+        // And the refusal was for the duration of the transition, not for good.
+        let afterwards = try await registry.beginAttach(terminalID: terminalID)
+        close(afterwards.ptyFD)
+    }
+
     /// A session with an attach in flight cannot be adopted, because its reader
     /// has already stepped off the pty.
     ///
@@ -386,7 +440,12 @@ struct HolderAttachHandoffTests {
         let inFlight = Task { try await registry.beginAttach(terminalID: terminalID) }
         #expect(await pollUntil("the attach to reach the barrier") { await barrier.hasParked })
 
-        await #expect(throws: HolderRegistry.Error.self) {
+        // The specific case, not merely "some error": generations are minted
+        // from 1 for a fresh registry, so the attach parked above holds 1.
+        await #expect(
+            throws: HolderRegistry.Error.attachAlreadyPending(
+                terminalID: terminalID, generation: 1)
+        ) {
             try await registry.adopt(terminal: fixture.terminalRow)
         }
 

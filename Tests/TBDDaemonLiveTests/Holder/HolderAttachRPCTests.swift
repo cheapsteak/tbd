@@ -18,7 +18,7 @@ import Testing
 ///
 /// **Tier 3.** A real `TBDHolder`, a real pty, a real `socketpair` standing in
 /// for the app's sidecar, and a real `SCM_RIGHTS` hand-over across it.
-@Suite(.clockDriven, .serialized)
+@Suite(.serialized)
 struct HolderAttachRPCTests {
 
     private static let echoJob = "while IFS= read -r line; do printf 'GOT:%s\\n' \"$line\"; done"
@@ -171,7 +171,11 @@ struct HolderAttachRPCTests {
     ///
     /// The timeout is driven on the injected clock, not waited for.
     /// `advanceWhenSuspended` also proves the timer task actually armed.
-    @Test func anAttachThatTimedOutVendsNoSecondDescriptor() async throws {
+    /// `.clockDriven` is on this test alone rather than the suite: it is the
+    /// only one that drives a clock, and a four-minute limit over the other
+    /// eleven would let a genuine hang in any of them take four times as long
+    /// to surface — this family already hits time limits under load.
+    @Test(.clockDriven) func anAttachThatTimedOutVendsNoSecondDescriptor() async throws {
         let clock = TestClock<Duration>()
         let readyTimeout: Duration = .seconds(5)
         let harness = try await RPCHarness.start(
