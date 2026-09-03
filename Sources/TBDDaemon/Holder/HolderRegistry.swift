@@ -151,6 +151,37 @@ actor HolderRegistry {
     static let defaultBusyRetryBudget: Duration = .seconds(1)
     static let busyRetryInterval: Duration = .milliseconds(50)
 
+    /// How long one adoption waits for a holder to answer.
+    ///
+    /// Deliberately **not** `HolderClient.defaultReceiveTimeout`. That budget is
+    /// sized for a connection a session keeps for its whole life, where the
+    /// question is "has this holder died", and ten seconds of patience costs
+    /// nothing because nobody is waiting on the answer. An adoption is the
+    /// opposite: it is one handshake, on a local socket, on the daemon's
+    /// startup path, and every second of it is a second the daemon cannot
+    /// answer anyone. The GC collector reached the same number from the same
+    /// reasoning — a handshake is not a long operation.
+    ///
+    /// It bounds the *reachable but silent* holder specifically. A dead one
+    /// fails at `connect` with `ECONNREFUSED` and never reaches a receive.
+    static let adoptionReceiveTimeout: Duration = .seconds(2)
+
+    /// How long the whole startup adoption phase may take before it stops and
+    /// hands the rest back to its caller.
+    ///
+    /// Per-holder bounding alone is not enough: `adoptAll` is serial, so N
+    /// silent holders still cost N times the per-holder budget, and the phase
+    /// runs before the socket bind. The total budget makes the daemon's silence
+    /// independent of how many holders are wedged — worst case one budget plus
+    /// the row that was already in flight when it expired.
+    ///
+    /// Five seconds is sized against the healthy case rather than the broken
+    /// one: a reachable holder answers a local-socket handshake in
+    /// milliseconds, so a fleet of hundreds finishes far inside it and the
+    /// budget never bites. Only a holder that has stopped answering spends the
+    /// budget at all.
+    static let defaultAdoptAllBudget: Duration = .seconds(5)
+
     /// This installation's token, compared against every holder's before it is
     /// adopted.
     let owner: HolderOwnerToken
@@ -263,7 +294,17 @@ actor HolderRegistry {
     private(set) var attachRoundTripsStarted = 0
 
     private let busyRetryBudget: Duration
+    private let adoptAllBudget: Duration
     private let clock: any Clock<Duration>
+
+    /// Set by `adoptAll`'s budget timer, read by its loop between holders.
+    ///
+    /// Instance state rather than a local box because the timer has to reach it
+    /// across an actor hop, and the hop is what makes the write safe. It is
+    /// reset at the top of every pass, which is sound because `adoptAll` runs
+    /// once, at startup, from a single caller — two concurrent passes would
+    /// share one flag, and there are none.
+    private var adoptAllBudgetExpired = false
 
     /// Awaited inside `adopt` between the attach settling and the slot being
     /// published — the exact window a concurrent `release` interleaves in.
@@ -309,6 +350,7 @@ actor HolderRegistry {
         listTerminals: @escaping @Sendable () async throws -> [Terminal],
         spawner: HolderSpawner? = nil,
         busyRetryBudget: Duration = HolderRegistry.defaultBusyRetryBudget,
+        adoptAllBudget: Duration = HolderRegistry.defaultAdoptAllBudget,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.owner = owner
@@ -317,6 +359,7 @@ actor HolderRegistry {
         self.spawner = spawner
         self.canSpawn = spawner != nil
         self.busyRetryBudget = busyRetryBudget
+        self.adoptAllBudget = adoptAllBudget
         self.clock = clock
     }
 
@@ -747,6 +790,7 @@ actor HolderRegistry {
                 socketPath: socketPath,
                 expecting: expected,
                 busyRetryBudget: budget,
+                receiveTimeout: Self.adoptionReceiveTimeout,
                 clock: clock,
                 onEndOfOutput: notifyEndOfOutput)
         }
@@ -823,12 +867,34 @@ actor HolderRegistry {
         return current == task
     }
 
-    /// Adopts every holder-backed row, once, at startup.
+    /// Adopts every holder-backed row, once, at startup, within a total budget.
     ///
     /// Failures are per-session and never propagate: one unreachable holder
     /// must not stop the daemon adopting the rest, and a startup that threw
     /// here would leave every *other* live session undrained.
-    func adoptAll() async {
+    ///
+    /// **The budget is what keeps a wedged holder from looking like a dead
+    /// daemon.** This runs before the socket bind, so its duration is the
+    /// daemon's silence; a holder that accepts a connection and then says
+    /// nothing costs `adoptionReceiveTimeout` every time, and serially that is
+    /// the whole fleet's worth of silence. The budget is checked *between*
+    /// holders — never mid-hand-over, where abandoning a call would mean
+    /// walking away from a descriptor in flight — so the phase costs at most
+    /// one budget plus the row that was already running when it expired.
+    ///
+    /// **Rows the budget did not reach are returned, not dropped**, and the
+    /// caller is obliged to finish them: nothing else in the daemon ever calls
+    /// `adopt`, so a row abandoned here would stay undrained for the process's
+    /// whole life — and an undrained pty master does not merely cost a screen,
+    /// it stops the job on it from finishing its exit. `Daemon` resumes them
+    /// immediately after the socket is bound, which is where the wait is free.
+    ///
+    /// Nothing is recorded about a row that was not reached. A missing status
+    /// reads as `.running`, which is the honest answer for a holder nobody
+    /// asked; `exitedStatusUnknown` would be a claim about an answer that was
+    /// never sought.
+    @discardableResult
+    func adoptAll() async -> [Terminal] {
         let terminals: [Terminal]
         do {
             terminals = try await listTerminals()
@@ -838,43 +904,95 @@ actor HolderRegistry {
                 could not list terminals to re-adopt holder sessions: \
                 \(error.localizedDescription, privacy: .public)
                 """)
-            return
+            return []
         }
 
-        for terminal in terminals where terminal.transport == .holder {
+        let rows = terminals.filter { $0.transport == .holder }
+        guard !rows.isEmpty else { return [] }
+
+        adoptAllBudgetExpired = false
+        let budget = adoptAllBudget
+        let budgetTimer = Task { [clock] in
             do {
-                _ = try await adopt(terminal: terminal)
-            } catch let error as Error {
-                // A holder that named another installation answered correctly;
-                // it is simply not ours. Left running, and not recorded as
-                // exited — it is somebody else's live session.
-                Self.logger.info(
-                    """
-                    skipping session \(terminal.id.uuidString, privacy: .public): \
-                    \(error.localizedDescription, privacy: .public)
-                    """)
-            } catch HolderClient.Error.rejected {
-                // Somebody else holds the holder's one client slot. That is a
-                // legitimate answer from a live holder — "not ours to adopt
-                // right now" — not a failure to retry into the ground, and
-                // certainly not evidence the job ended.
-                Self.logger.info(
-                    """
-                    the holder for session \(terminal.id.uuidString, privacy: .public) already has a \
-                    client; leaving it alone
-                    """)
+                try await clock.sleep(for: budget)
             } catch {
-                // Nothing answered at the rendezvous. The session is over, and
-                // the only honest thing to say about how it ended is that
-                // nobody collected the status.
-                statuses[terminal.id] = .exitedStatusUnknown
-                Self.logger.info(
-                    """
-                    no holder answered for session \(terminal.id.uuidString, privacy: .public), so \
-                    its job ended with an unknown status: \
-                    \(error.localizedDescription, privacy: .public)
-                    """)
+                // Cancelled because the phase finished inside its budget.
+                return
             }
+            await self.expireAdoptAllBudget()
+        }
+        defer { budgetTimer.cancel() }
+
+        var deferredRows: [Terminal] = []
+        for (index, terminal) in rows.enumerated() {
+            if adoptAllBudgetExpired {
+                deferredRows = Array(rows[index...])
+                break
+            }
+            await adoptOne(terminal)
+        }
+
+        if !deferredRows.isEmpty {
+            Self.logger.error(
+                """
+                the startup adoption budget expired with \(deferredRows.count, privacy: .public) of \
+                \(rows.count, privacy: .public) holder sessions unreached; they will be adopted \
+                once the daemon is answering
+                """)
+        }
+        return deferredRows
+    }
+
+    /// Adopts rows a budgeted pass left behind, with no budget of its own.
+    ///
+    /// Called once the socket is bound, where a slow holder delays nobody. The
+    /// per-holder bound still applies, so this is finite for any finite list.
+    func adoptRemaining(_ terminals: [Terminal]) async {
+        for terminal in terminals where terminal.transport == .holder {
+            await adoptOne(terminal)
+        }
+    }
+
+    /// Marks the startup adoption budget spent. Actor-isolated so the timer's
+    /// write and the loop's read cannot race.
+    private func expireAdoptAllBudget() {
+        adoptAllBudgetExpired = true
+    }
+
+    /// One row's adoption, with every failure classified and none propagated.
+    private func adoptOne(_ terminal: Terminal) async {
+        do {
+            _ = try await adopt(terminal: terminal)
+        } catch let error as Error {
+            // A holder that named another installation answered correctly;
+            // it is simply not ours. Left running, and not recorded as
+            // exited — it is somebody else's live session.
+            Self.logger.info(
+                """
+                skipping session \(terminal.id.uuidString, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+        } catch HolderClient.Error.rejected {
+            // Somebody else holds the holder's one client slot. That is a
+            // legitimate answer from a live holder — "not ours to adopt
+            // right now" — not a failure to retry into the ground, and
+            // certainly not evidence the job ended.
+            Self.logger.info(
+                """
+                the holder for session \(terminal.id.uuidString, privacy: .public) already has a \
+                client; leaving it alone
+                """)
+        } catch {
+            // Nothing answered at the rendezvous. The session is over, and
+            // the only honest thing to say about how it ended is that
+            // nobody collected the status.
+            statuses[terminal.id] = .exitedStatusUnknown
+            Self.logger.info(
+                """
+                no holder answered for session \(terminal.id.uuidString, privacy: .public), so \
+                its job ended with an unknown status: \
+                \(error.localizedDescription, privacy: .public)
+                """)
         }
     }
 
@@ -908,6 +1026,7 @@ actor HolderRegistry {
         socketPath: String,
         expecting owner: HolderOwnerToken,
         busyRetryBudget: Duration,
+        receiveTimeout: Duration,
         clock: any Clock<Duration>,
         onEndOfOutput: (@Sendable () -> Void)?
     ) async throws -> Adoption {
@@ -918,6 +1037,7 @@ actor HolderRegistry {
                     terminalID: terminalID,
                     socketPath: socketPath,
                     expecting: owner,
+                    receiveTimeout: receiveTimeout,
                     onEndOfOutput: onEndOfOutput)
             } catch HolderClient.Error.rejected(let version) {
                 guard waited < busyRetryBudget else {
@@ -939,11 +1059,12 @@ actor HolderRegistry {
         terminalID: UUID,
         socketPath: String,
         expecting owner: HolderOwnerToken,
+        receiveTimeout: Duration,
         onEndOfOutput: (@Sendable () -> Void)?
     ) async throws -> Adoption {
         try await take(
             terminalID: terminalID,
-            over: HolderClient(socketPath: socketPath),
+            over: HolderClient(socketPath: socketPath, receiveTimeout: receiveTimeout),
             expecting: owner,
             onEndOfOutput: onEndOfOutput)
     }
