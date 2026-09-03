@@ -116,6 +116,13 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.reapHolderChildrenEnabledDefault`, never through
     /// `?? false`.
     var reap_holder_children_enabled: Bool?
+    /// Gate for `remote.delete`, the verb that destroys a provider-hosted agent
+    /// session. **Genuinely tri-state**, same shape as
+    /// `reap_holder_children_enabled`: the
+    /// `20260902130000_config_remote_delete` migration carries no SQL default,
+    /// so `nil` here means "never chose" rather than "off". Resolve it through
+    /// `Config.remoteDeleteEnabledDefault`, never through `?? false`.
+    var remote_delete_enabled: Bool?
     /// This installation's holder owner token, minted once by the first daemon
     /// that needs one and read forever after. **Not a flag**: NULL means "not
     /// yet minted", and the mint is the conditional UPDATE in
@@ -161,9 +168,13 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   `gc_rowless_holders_enabled` — the row-less holder sweep's soak gate,
     ///   which is a separate opt-in because it kills processes rather than
     ///   unlinking files.
-    /// - Parameter reapHolderChildrenDefault: and the last of them, for
+    /// - Parameter reapHolderChildrenDefault: same shape once more, for
     ///   `reap_holder_children_enabled` — the `AgentReaper` holder leg's soak
     ///   gate.
+    /// - Parameter remoteDeleteDefault: and the last of them, for
+    ///   `remote_delete_enabled` — the gate on destroying a provider-hosted
+    ///   session, whose soak is the one that matters most, because what it
+    ///   permits cannot be undone from this machine.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -175,7 +186,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         ptyHolderDefault: Bool = Config.ptyHolderDefault,
         gcHolderRendezvousDefault: Bool = Config.gcHolderRendezvousEnabledDefault,
         gcRowlessHoldersDefault: Bool = Config.gcRowlessHoldersEnabledDefault,
-        reapHolderChildrenDefault: Bool = Config.reapHolderChildrenEnabledDefault
+        reapHolderChildrenDefault: Bool = Config.reapHolderChildrenEnabledDefault,
+        remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -244,6 +256,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // And truly the last of them, for the `AgentReaper` holder leg's
             // gate — NOT `?? false`.
             reapHolderChildrenEnabled: reap_holder_children_enabled ?? reapHolderChildrenDefault,
+            // And truly the last of them, for the remote-delete gate —
+            // NOT `?? false`.
+            remoteDeleteEnabled: remote_delete_enabled ?? remoteDeleteDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
             // Passed straight through, NULL included: "not yet minted" is a
             // real state and has no default to resolve to.
@@ -712,6 +727,19 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET reap_holder_children_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the remote-delete gate (default OFF, soaking) — the single
+    /// opt-in for destroying a provider-hosted agent session. The column is
+    /// written on every call, because writing either value is the explicit
+    /// gesture that lifts it out of NULL forever after.
+    public func setRemoteDeleteEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET remote_delete_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

@@ -1534,6 +1534,25 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var reapHolderChildrenEnabled: Bool
+    /// The single opt-in for `remote.delete` — destroying a provider-hosted
+    /// agent session outright
+    /// (`docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`,
+    /// "Daemon"). It ships OFF because delete is irreversible on the far side:
+    /// a successful delete ends the session's compute and removes it from the
+    /// provider's inventory permanently, and no reconciler on this machine can
+    /// put back what another machine destroyed.
+    ///
+    /// It gates the destructive verb **only**. `retain`, `import` and `recall`
+    /// add records rather than removing them, so the provider's declared
+    /// capabilities are their whole gate and this flag says nothing about them.
+    ///
+    /// **Resolved, not stored**, like `reapHolderChildrenEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `remote_delete_enabled ?? Config.remoteDeleteEnabledDefault`. NULL means
+    /// "never chose" and follows the shipped default wherever it goes; `0`/`1`
+    /// is an explicit gesture and is honored forever.
+    public var remoteDeleteEnabled: Bool
     /// The single opt-in for remote peer messaging
     /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
     /// rollout"): publishing a shadow peer for each remote session and carrying
@@ -1656,6 +1675,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// dead holder — is a change to this constant, with no forcing `UPDATE`
     /// migration and every explicit opt-out left alone.
     public static let reapHolderChildrenEnabledDefault = false
+    /// The shipped default for `remoteDeleteEnabled`, and the single place it
+    /// lives. Delete ships off; graduation — after a soak in which no delete
+    /// destroyed a session its user had not confirmed, and every delete that
+    /// asked for a receipt got one — is a change to this constant, with no
+    /// forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let remoteDeleteEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1693,6 +1718,7 @@ public struct Config: Codable, Sendable, Equatable {
                 gcHolderRendezvousEnabled: Bool = Config.gcHolderRendezvousEnabledDefault,
                 gcRowlessHoldersEnabled: Bool = Config.gcRowlessHoldersEnabledDefault,
                 reapHolderChildrenEnabled: Bool = Config.reapHolderChildrenEnabledDefault,
+                remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1731,6 +1757,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.gcHolderRendezvousEnabled = gcHolderRendezvousEnabled
         self.gcRowlessHoldersEnabled = gcRowlessHoldersEnabled
         self.reapHolderChildrenEnabled = reapHolderChildrenEnabled
+        self.remoteDeleteEnabled = remoteDeleteEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -1836,6 +1863,12 @@ public struct Config: Codable, Sendable, Equatable {
         reapHolderChildrenEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .reapHolderChildrenEnabled)
             ?? Config.reapHolderChildrenEnabledDefault
+        // And the same shape for the remote-delete gate: absent means the sender
+        // knew nothing about the flag, which is the NULL column's situation —
+        // follow the shipped default, never a hardcoded `false`.
+        remoteDeleteEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteDeleteEnabled)
+            ?? Config.remoteDeleteEnabledDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.
