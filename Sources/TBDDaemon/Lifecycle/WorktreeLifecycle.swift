@@ -296,8 +296,12 @@ public struct WorktreeLifecycle: Sendable {
     /// construction, so `captureThenKillWindow` captures nothing, kills nothing,
     /// and reaps nothing for such a row — which makes it the leak rather than a
     /// harmless no-op, since the row about to be deleted is the only record of
-    /// the holder and child pids and no sweep covers them until Milestone B's
-    /// holder reconciler lands. Nothing is captured for Closed Terminals
+    /// the holder and child pids, and once it is gone no sweep covers them
+    /// unless the holder is still alive to answer a handshake
+    /// (`RowlessHolderCollector`). The holder inventory in
+    /// `WorktreeLifecycle+Reconcile` does not help here: it judges rows that
+    /// still exist, and `AgentReaper`'s holder leg reads the same rows.
+    /// Nothing is captured for Closed Terminals
     /// either: a holder's screen lives in the daemon's own emulator, not in a
     /// tmux pane, so there was never a capture to preserve.
     func disposeHolder(for terminal: Terminal) async -> String? {

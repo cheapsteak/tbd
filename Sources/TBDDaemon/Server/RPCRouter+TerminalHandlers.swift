@@ -1113,9 +1113,11 @@ extension RPCRouter {
     /// step talks to something that may already be gone — so the only failures
     /// nameable are the ones that stop it being *attempted*: no registry wired
     /// into this daemon, an unrepresentable rendezvous path, or a row that never
-    /// recorded the child pid. Each one leaks a live process, and until the
-    /// Milestone B holder reconciler lands nothing else will ever find it, so
-    /// each is reported rather than swallowed.
+    /// recorded the child pid. Each one leaks a live process that nothing else
+    /// will find once this row is gone — the holder inventory sweep and
+    /// `AgentReaper`'s holder leg both read session rows, and
+    /// `RowlessHolderCollector` reaches only a holder still alive enough to
+    /// handshake — so each is reported rather than swallowed.
     ///
     /// Not `private`: `closeScratchTerminals` tears down rows the same way and
     /// must reclaim the same holders. The teardown itself lives on the registry
