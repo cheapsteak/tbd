@@ -219,8 +219,9 @@ scripts/reclone-hardlinked-deps.py --base DIR         # another worktree root
 It defaults to `$TBD_HOME/worktrees/<repo>/<worktree>`, but takes explicit paths
 or `--base`, so it is useful outside TBD too. Beyond the bare `clonefile` loop it
 carries the parts this investigation showed were necessary rather than
-decorative: it refuses to run while an installer is writing, reports every tree
-including clean ones so a long scan cannot be mistaken for a hang, runs
+decorative: it declines to start when an installer is already running — a
+preflight, not a lock, so still run it when the fleet is idle — reports every
+tree including clean ones so a long scan cannot be mistaken for a hang, runs
 unbuffered for the same reason, treats a path that does not exist as an error
 instead of "nothing to do", verifies afterwards that no hardlinks remain and
 that each converted virtualenv's interpreter still starts, and reports an empty

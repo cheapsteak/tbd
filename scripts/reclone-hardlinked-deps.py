@@ -32,9 +32,16 @@ SAFETY
 Each file is swapped with an atomic os.replace(), so a tree never has a window
 where a path is missing: a concurrent importer sees either the old inode or the
 new one. Processes merely holding open file descriptors are unaffected, since
-POSIX keeps the inode alive across replace and unlink. The one case that can
-lose data is an installer writing into the tree concurrently, so this refuses to
-run while one is detected.
+POSIX keeps the inode alive across replace and unlink.
+
+The one case that can lose data is an installer writing into the tree while the
+conversion runs: the replace can discard that write, and nothing downstream will
+notice, because the replacement has nlink=1 exactly like a correct result. The
+preflight below declines to *start* when an installer is already visible in the
+process table, but that is a snapshot, not a lock -- an installer that starts
+afterwards races, and no lock exists that uv or pnpm would honour. So the
+preflight removes the common accident, not the hazard. Do not run this during a
+window when installs may begin; run it when the fleet is idle.
 
 clonefile(2) is called through ctypes rather than by spawning `cp -c` per file:
 the fork overhead, not the cloning, is what dominates (~120 files/sec spawning
@@ -91,7 +98,12 @@ def load_clonefile():
 
 
 def installer_running() -> str | None:
-    """An installer mid-write is the one thing that can genuinely lose data."""
+    """Best-effort preflight: is an installer visible right now?
+
+    A snapshot of the process table, not exclusion. One that starts after this
+    returns still races the conversion. It catches the common accident -- running
+    this while a sync is obviously in progress -- and nothing more.
+    """
     try:
         out = subprocess.run(
             ["ps", "-Ao", "command"], capture_output=True, text=True, timeout=10
