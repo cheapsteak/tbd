@@ -71,6 +71,21 @@ struct OrphanGCRetainedTranscriptTests {
             [.creationDate: stamp, .modificationDate: stamp], ofItemAtPath: path)
     }
 
+    /// Canonicalizes a path exactly as the retained-transcript leg's own
+    /// `REAP`/`KEEP` lines do, through the same `DeletionQueueCollector`
+    /// helper `OrphanGC` reports paths through. On macOS, `NSTemporaryDirectory()`
+    /// (and everything derived from it, including `TBD_HOME` here) reads
+    /// `/var/...`, but `/var` is itself a symlink to `/private/var` — so a
+    /// path built from raw string composition and the equivalent path as it
+    /// comes back out of a filesystem walk disagree on that prefix unless
+    /// both go through the same resolver. Comparing a hand-built expectation
+    /// against `result.planned` without this would either fail outright, or
+    /// — worse — silently never match and pass a negative assertion for the
+    /// wrong reason.
+    private func canonical(_ path: String) -> String {
+        DeletionQueueCollector(git: GitManager()).resolvedPath(path)
+    }
+
     private func receipt(
         key: String, expiresAt: Date? = nil, localPath: String? = nil
     ) -> RetainedTranscript {
@@ -94,7 +109,7 @@ struct OrphanGCRetainedTranscriptTests {
         let result = await makeGC(db: db, home: home).sweep()
 
         #expect(fm.fileExists(atPath: path) == false, "\(path) survived the sweep")
-        #expect(result.planned.contains("REAP retained-transcript \(path)"))
+        #expect(result.planned.contains("REAP retained-transcript \(canonical(path))"))
         #expect(result.reaped >= 1)
     }
 
@@ -162,7 +177,7 @@ struct OrphanGCRetainedTranscriptTests {
 
         let result = await makeGC(db: db, home: home).sweep(dryRun: true)
 
-        #expect(result.planned.contains("REAP retained-transcript \(path)"))
+        #expect(result.planned.contains("REAP retained-transcript \(canonical(path))"))
         #expect(result.planned.contains("REAP retained-transcript-row \(provider)/stale-key"))
         #expect(result.reaped == 0)
         #expect(fm.fileExists(atPath: path), "a dry run must never touch disk")
@@ -188,7 +203,7 @@ struct OrphanGCRetainedTranscriptTests {
         let result = await makeGC(db: db, home: home).sweep()
 
         #expect(fm.fileExists(atPath: kept), "a referenced transcript was unlinked")
-        #expect(result.planned.contains("REAP retained-transcript \(kept)") == false)
+        #expect(result.planned.contains("REAP retained-transcript \(canonical(kept))") == false)
         #expect(fm.fileExists(atPath: orphan) == false,
                 "the unreferenced sibling proves the sweep ran at all")
     }
@@ -249,7 +264,7 @@ struct OrphanGCRetainedTranscriptTests {
         let result = await makeGC(db: db, home: home).sweep()
 
         #expect(fm.fileExists(atPath: young))
-        #expect(result.planned.contains("KEEP grace \(young)"))
+        #expect(result.planned.contains("KEEP grace \(canonical(young))"))
     }
 
     /// Only `<base>/<provider>/<key>.jsonl` is a candidate. Anything else in the
@@ -297,7 +312,7 @@ struct OrphanGCRetainedTranscriptTests {
         #expect(try await db.retainedTranscripts.find(provider: provider, key: "stale-key") == nil)
         #expect(fm.fileExists(atPath: path) == false)
         #expect(result.planned.contains("REAP retained-transcript-row \(provider)/stale-key"))
-        #expect(result.planned.contains("REAP retained-transcript \(path)"))
+        #expect(result.planned.contains("REAP retained-transcript \(canonical(path))"))
         #expect(result.reaped >= 2, "the row and the file are both reclaimed")
     }
 
