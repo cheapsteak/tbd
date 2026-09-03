@@ -75,7 +75,11 @@ THREE LAYERS
    a call graph, into `captures/<timestamp>-<reason>/`. Both run in a background
    thread so the sampler keeps ticking, one capture at a time, rate limited so a
    two minute spike does not produce a hundred of them.
-3. A `log stream` sidecar, so there is something to correlate the spike against.
+3. A `log stream` sidecar, so there is something to correlate the spike
+   against. It is spawned behind a `/bin/sh` watchdog that polls this
+   script's pid and kills the stream when it is gone, because a plain child
+   survives a SIGKILLed parent and streams the system log into a file nobody
+   is reading until the machine reboots.
 
 HOW TO READ THE RESULTS
 -----------------------
@@ -116,11 +120,12 @@ OUTPUT, AND WHO CLEANS IT UP
 ----------------------------
 Everything lands under `--out`, which defaults to
 `$TBD_HOME/diag/daemon-footprint/<YYYYmmdd-HHMMSS>/` (TBD_HOME defaults to
-`~/tbd`). The run directory holds `run.json`, `samples.jsonl`, `daemon-log.txt`
-and `captures/`. These files outlive the run and no reconciler covers them: this
-is operator scratch, and the operator who started the watch deletes it. Nothing
-here writes to the database, signals the daemon, or restarts anything; the only
-state it changes in the target is the footprint interval counter it resets.
+`~/tbd`). The run directory holds `run.json`, `samples.jsonl`, `daemon-log.txt`,
+`sidecar.pid` and `captures/`. These files outlive the run and no reconciler
+covers them: this is operator scratch, and the operator who started the watch
+deletes it. Nothing here writes to the database, signals the daemon, or restarts
+anything; the only state it changes in the target is the footprint interval
+counter it resets.
 
 A run directory is written once and never reused. If `--out` already holds a
 `samples.jsonl` or a `run.json` the watch refuses to start and exits 2, because
@@ -180,6 +185,7 @@ test against a capture taken at a peak, not a finding.
 from __future__ import annotations
 
 import argparse
+import bisect
 import ctypes
 import io
 import json
@@ -302,8 +308,10 @@ class MachTimebaseInfo(ctypes.Structure):
     _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
 
 
-def read_mach_timebase() -> tuple[int, int]:
+def read_mach_timebase() -> tuple[int, int, bool]:
     """The machine's mach-time to nanosecond ratio, read once from libSystem.
+
+    Returns (numer, denom, read_ok).
 
     `ri_user_time` and `ri_system_time` are mach absolute time units, not
     nanoseconds, and on Apple silicon the two differ by a factor of about 41.7:
@@ -312,6 +320,13 @@ def read_mach_timebase() -> tuple[int, int]:
     understates CPU by that factor, which is how a busy process reports a
     fraction of a percent. Falls back to 1/1 (the Intel identity) if the call
     fails, so a bad read is a wrong scale rather than a dead sampler.
+
+    The third element is what makes that fallback legible afterwards. 1/1 is
+    also the genuine Apple-Intel timebase, so the numbers alone cannot say
+    whether a run scaled CPU correctly or gave up: on Apple silicon they would
+    understate every cpu_pct in the run by about 41.7 and nothing in the record
+    would say so. The caller records the ratio in `run.json` and writes a marker
+    when this flag is False.
     """
     try:
         lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
@@ -319,10 +334,10 @@ def read_mach_timebase() -> tuple[int, int]:
         lib.mach_timebase_info.restype = ctypes.c_int
         info = MachTimebaseInfo()
         if lib.mach_timebase_info(ctypes.byref(info)) == 0 and info.denom:
-            return int(info.numer), int(info.denom)
+            return int(info.numer), int(info.denom), True
     except Exception:  # noqa: BLE001 - a missing timebase must not stop the watch
         pass
-    return 1, 1
+    return 1, 1, False
 
 
 class LibProc:
@@ -334,7 +349,7 @@ class LibProc:
         self._lib.proc_pid_rusage.restype = ctypes.c_int
         self._lib.proc_reset_footprint_interval.argtypes = [ctypes.c_int]
         self._lib.proc_reset_footprint_interval.restype = ctypes.c_int
-        self.timebase_numer, self.timebase_denom = read_mach_timebase()
+        self.timebase_numer, self.timebase_denom, self.timebase_ok = read_mach_timebase()
 
     def rusage(self, pid: int) -> RusageInfoV4 | None:
         """Kernel counters for `pid`, or None if it is gone or not ours."""
@@ -507,16 +522,24 @@ class SpikeDetector:
         allowed only `max_captures_per_spike`, so on a two-capture budget one
         refusal can mean the peak of the spike is never sampled at all.
 
-        A refused high-water also has to give back `_last_capture_value`, or the
-        rearm bar stays raised to a level nothing was recorded at. A refused
-        onset does not clear `in_spike`: the spike is real, it was detected, and
-        re-entering it from scratch on the next tick would re-fire an onset
-        capture on every tick for as long as the runner stays busy.
+        `_last_capture_value` is given back unconditionally, for a refused onset
+        as much as for a refused high-water, because it is the rearm bar and
+        nothing was recorded at the level it was raised to. Restoring it only
+        for the high-water case left a refused onset's bar parked at the refused
+        peak, so a spike that opens at 1500 MB and holds there took zero
+        captures for as long as it lasted: the onset was refused, the bar said
+        1500 MB, and no tick could ever clear 1500 plus a rearm. An onset
+        restores to 0, which is what `_previous_capture_value` holds at onset,
+        so the next tick at the same peak re-issues the capture as a
+        `highwater` with the spike still open.
+
+        A refused onset does not clear `in_spike`: the spike is real, it was
+        detected, and re-entering it from scratch on the next tick would re-fire
+        an onset capture on every tick for as long as the runner stays busy.
         """
         if self._captures_this_spike > 0:
             self._captures_this_spike -= 1
-        if request.reason == "highwater":
-            self._last_capture_value = self._previous_capture_value
+        self._last_capture_value = self._previous_capture_value
 
     def _releases(self, peak: int, baseline: int) -> bool:
         """Whether this tick ends the spike. Either rule is enough.
@@ -711,6 +734,23 @@ class CaptureRunner:
         if done.stderr:
             journal.write(done.stderr)
         journal.flush()
+        if done.returncode != 0:
+            # A tool that ran and refused is as much a hole in the record as one
+            # that never started, and it used to leave no marker at all: the
+            # target exiting between the trigger and the fork wrote an empty
+            # `footprint.txt` and the run read as if the capture had worked.
+            # The stderr head is kept short, and folded onto one line, because
+            # it lands in samples.jsonl and in a one-line-per-problem report.
+            self.emit(
+                {
+                    "event": "capture_tool_failed",
+                    "dir": target.name,
+                    "tool": label,
+                    "rc": done.returncode,
+                    "error": " ".join((done.stderr or "").split())[:200],
+                }
+            )
+            return
         if label == "footprint":
             (target / "footprint.txt").write_text(done.stdout, encoding="utf-8")
         elif label == "vmmap":
@@ -722,49 +762,140 @@ class CaptureRunner:
 # ----------------------------------------------------------------------------
 
 
-class LogSidecar:
-    """A `log stream` child whose output is the only correlatable record.
+# The watchdog the sidecar actually runs. It takes the watcher's pid, a file to
+# write the stream's pid into, and then the command to run as "$@" - never
+# interpolated into this text, so a path with a space or a quote in it cannot
+# become shell syntax.
+#
+# `sleep 5 & wait` rather than a bare `sleep 5`: a POSIX shell runs a trap only
+# when the current command finishes, and `wait` is the one command a signal
+# interrupts, so this is what makes the TERM path prompt instead of taking up to
+# five seconds.
+SIDECAR_WATCHDOG = r"""
+parent=$1
+pidfile=$2
+shift 2
+"$@" &
+child=$!
+printf '%s\n' "$child" > "$pidfile" 2>/dev/null || :
+finish() {
+  kill "$child" 2>/dev/null || :
+  exit 0
+}
+trap finish TERM INT
+while kill -0 "$parent" 2>/dev/null; do
+  kill -0 "$child" 2>/dev/null || exit 0
+  sleep 5 &
+  wait $!
+done
+kill "$child" 2>/dev/null || :
+"""
 
-    Held by pid and terminated by pid on every exit path. Nothing here ever
-    signals a process it did not spawn.
+
+class LogSidecar:
+    """A `log stream` child, kept alive by a watchdog that outlives no one.
+
+    The stream is not spawned directly. `/bin/sh` runs it in the background and
+    then does two things forever: it polls the watcher's pid with `kill -0`
+    every five seconds and kills the stream the moment the watcher is gone, and
+    it traps TERM and INT and kills the stream on the way out. The pair is
+    spawned in a session of its own, so `stop()` can signal the whole process
+    group and reach both halves at once.
+
+    That indirection exists because a `log stream` child does not die with its
+    parent. SIGKILL the watcher - `kill -9`, an OOM kill, a crash - and the
+    ordinary Popen child is re-parented to launchd and streams the whole system
+    log into a file nobody is reading for as long as the machine is up. There is
+    no reconciler for it, and the only trace it leaves is a file that grows. The
+    poll is what bounds that to five seconds; the trap is what keeps the normal
+    path prompt.
+
+    Nothing here ever signals a process it did not spawn: the group it kills is
+    the one it created with `start_new_session`, and the killpg is guarded on
+    that group still being led by the sh it started.
     """
 
-    def __init__(self, path: Path) -> None:
+    LOG_ARGV = [
+        "/usr/bin/log",
+        "stream",
+        "--level",
+        "debug",
+        "--style",
+        "compact",
+        "--predicate",
+        'subsystem BEGINSWITH "com.tbd"',
+    ]
+
+    def __init__(self, path: Path, pid_path: Path) -> None:
         self.path = path
+        self.pid_path = pid_path
         self.process: subprocess.Popen | None = None
+        self.stream_pid: int | None = None
         self._handle = None
 
     def start(self) -> int | None:
+        """Spawn the watchdog. Returns the sh pid; `stream_pid` gets the log's."""
         self._handle = self.path.open("a", encoding="utf-8")
         self.process = subprocess.Popen(
             [
-                "/usr/bin/log",
-                "stream",
-                "--level",
-                "debug",
-                "--style",
-                "compact",
-                "--predicate",
-                'subsystem BEGINSWITH "com.tbd"',
-            ],
+                "/bin/sh",
+                "-c",
+                SIDECAR_WATCHDOG,
+                "sidecar-watchdog",  # $0
+                str(os.getpid()),  # $1, the pid the watchdog polls
+                str(self.pid_path),  # $2, where it writes the stream pid
+            ]
+            + self.LOG_ARGV,  # "$@", never spliced into the script text
             stdout=self._handle,
             stderr=subprocess.STDOUT,
+            start_new_session=True,
         )
+        self.stream_pid = self._read_stream_pid()
         return self.process.pid
+
+    def _read_stream_pid(self, budget: float = 2.0) -> int | None:
+        """The `log` pid the watchdog wrote, if it has got round to it yet.
+
+        Best effort and time boxed: the pid is for the record and for a human
+        checking afterwards that nothing was left behind, and `stop()` does not
+        depend on it. Waiting on it forever would trade a diagnostic for a hang.
+        """
+        deadline = time.time() + budget
+        while time.time() < deadline:
+            try:
+                return int(self.pid_path.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                time.sleep(0.05)
+        return None
+
+    def _signal_group(self, sig: int) -> None:
+        """Signal the sidecar's own process group, or the sh alone if it moved.
+
+        `start_new_session` makes the sh a group leader, so its group id equals
+        its pid. If that is somehow not what the kernel reports, the group is
+        not ours to signal and only the child we spawned is.
+        """
+        if self.process is None:
+            return
+        try:
+            pgid = os.getpgid(self.process.pid)
+        except OSError:
+            pgid = None
+        try:
+            if pgid == self.process.pid:
+                os.killpg(pgid, sig)
+            else:
+                os.kill(self.process.pid, sig)
+        except OSError:
+            pass
 
     def stop(self) -> None:
         if self.process is not None and self.process.poll() is None:
-            try:
-                os.kill(self.process.pid, signal.SIGTERM)
-            except OSError:
-                pass
+            self._signal_group(signal.SIGTERM)
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                try:
-                    os.kill(self.process.pid, signal.SIGKILL)
-                except OSError:
-                    pass
+                self._signal_group(signal.SIGKILL)
                 try:
                     self.process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
@@ -887,10 +1018,11 @@ class Watch:
         self.pid: int | None = None
         self._prev_cpu: tuple[float, int, int] | None = None
         self._reset_failure_noted = False
-        # `ps` results, and the markers already written about them, kept per pid
-        # so a pid file pointing at the wrong process does not fork a `ps` per
-        # tick and does not write the same marker forever.
-        self._comm_cache: dict[int, str | None] = {}
+        # Which pids a comm marker has already been written about, so a pid file
+        # pointing at the wrong process does not write the same marker forever.
+        # An acquired pid is dropped from this set when the target is lost, so a
+        # pid that comes back (a reused pid, or a pid file rewritten with the
+        # same number) is described again rather than silently reused.
         self._comm_noted: set[int] = set()
 
     def make_detector(self) -> SpikeDetector:
@@ -957,14 +1089,25 @@ class Watch:
     def lose(self) -> None:
         if self.pid is not None:
             self.emit({"event": "target_lost", "pid": self.pid})
+            # Forget what was noted about this pid. The number is free for
+            # reuse the moment the process is gone, so a remembered marker
+            # would suppress the description of a different process.
+            self._comm_noted.discard(self.pid)
         self.pid = None
         self._prev_cpu = None
 
     def comm_for(self, pid: int) -> str | None:
-        """`ps -o comm=` for a pid, asked once. Only ever called on acquire."""
-        if pid not in self._comm_cache:
-            self._comm_cache[pid] = process_comm(pid)
-        return self._comm_cache[pid]
+        """`ps -o comm=` for a pid, read fresh on every acquire attempt.
+
+        This used to be memoised per pid for the lifetime of the run. That was
+        wrong twice over: the map only ever grew, one entry per pid the file
+        ever named, and a pid that had been rejected once was rejected from the
+        cache forever, so a daemon that started on a pid some earlier process
+        had held could never be acquired. `resolve_pid` runs only while no
+        target is held, so the cost of reading it fresh is one `ps` per tick
+        while the watch is idle and none at all once it has a target.
+        """
+        return process_comm(pid)
 
     def resolve_pid(self) -> int | None:
         """The pid to sample, or None to keep looking on the next tick.
@@ -1004,7 +1147,42 @@ class Watch:
         self.captures_dir.mkdir(parents=True, exist_ok=True)
         self._samples = self.samples_path.open("a", encoding="utf-8")
 
+        if not self.libproc.timebase_ok:
+            # 1/1 is also the real Apple-Intel ratio, so without this marker a
+            # run that gave up on the timebase is indistinguishable from one
+            # that read it, and every cpu_pct in it would be wrong by ~41.7 on
+            # Apple silicon with nothing in the record to say so.
+            self.emit(
+                {
+                    "event": "timebase_fallback",
+                    "note": "mach_timebase_info unavailable; CPU scaled 1:1",
+                }
+            )
+
         initial_pid = self.resolve_pid()
+        if initial_pid is None and self.args.pid is not None:
+            # An explicit --pid names one process. If it cannot be read it is
+            # gone, or it belongs to another user, and no amount of waiting will
+            # change that: keeping the pid-file path's "keep looking" behaviour
+            # here would silently sample nothing all night.
+            print(
+                f"--pid {self.args.pid} cannot be read: no such process, or it is not "
+                "owned by this user.",
+                file=sys.stderr,
+            )
+            with self._emit_lock:
+                if self._samples is not None:
+                    self._samples.close()
+                    self._samples = None
+            # Nothing was sampled, so leave no `samples.jsonl` behind: an empty
+            # one would make the same --out refuse the corrected retry as a
+            # second run appended to a first.
+            try:
+                if self.samples_path.stat().st_size == 0:
+                    self.samples_path.unlink()
+            except OSError:
+                pass
+            return 2
         sidecar_pid = None
         # Everything from the sidecar's first breath onwards is inside the try,
         # so nothing between spawning it and entering the loop can leave a `log
@@ -1013,7 +1191,7 @@ class Watch:
         # is unwritable raises after the child exists.
         try:
             if not self.args.no_log_stream:
-                self.sidecar = LogSidecar(self.log_path)
+                self.sidecar = LogSidecar(self.log_path, self.out_dir / "sidecar.pid")
                 sidecar_pid = self.sidecar.start()
             self.write_run_json(initial_pid, sidecar_pid)
 
@@ -1023,7 +1201,12 @@ class Watch:
             else:
                 print(f"target pid {initial_pid}")
             if sidecar_pid is not None:
-                print(f"log sidecar pid {sidecar_pid} -> {self.log_path.name}")
+                stream_pid = self.sidecar.stream_pid if self.sidecar else None
+                stream_note = f", log stream pid {stream_pid}" if stream_pid else ""
+                print(
+                    f"log sidecar watchdog pid {sidecar_pid}{stream_note} "
+                    f"-> {self.log_path.name}"
+                )
             print("Ctrl-C to stop")
 
             if initial_pid is not None:
@@ -1049,6 +1232,15 @@ class Watch:
                     "target_pid": initial_pid,
                     "target_start_time": process_start_time(initial_pid) if initial_pid else None,
                     "log_stream_pid": sidecar_pid,
+                    "log_stream_watchdog_pid": sidecar_pid,
+                    "log_stream_child_pid": self.sidecar.stream_pid if self.sidecar else None,
+                    # The ratio every cpu_pct in samples.jsonl was scaled by,
+                    # and whether it was read or fallen back to. 1/1 with
+                    # timebase_ok false is a run whose CPU numbers are wrong by
+                    # the machine's real ratio.
+                    "timebase_numer": self.libproc.timebase_numer,
+                    "timebase_denom": self.libproc.timebase_denom,
+                    "timebase_ok": self.libproc.timebase_ok,
                     "args": {
                         "interval": self.args.interval,
                         "threshold_mb": self.args.threshold_mb,
@@ -1289,12 +1481,26 @@ def log_windows(
     produces a large file, and the report wants two windows per spike: scanning
     it once per window meant rereading gigabytes to answer questions that one
     read already had the data for.
+
+    Within that pass the windows are searched rather than swept. Testing every
+    window against every line is lines times windows, and a night that produced
+    forty spikes asks eighty questions of every one of millions of lines while
+    almost all of them fall outside every window. So the windows are sorted by
+    start, a line outside `[earliest start, latest end]` is dropped on two
+    comparisons, and `bisect` narrows the rest to the windows that started at or
+    before the line. Bucketing is unchanged, so the report reads identically:
+    the per-window lists are appended in file order whatever order the windows
+    are considered in.
     """
     results: dict[str, tuple[Counter, list[tuple[float, str]]]] = {
         key: (Counter(), []) for key, _, _ in windows
     }
     if not windows or not path.exists():
         return results
+    ordered = sorted(windows, key=lambda item: item[1])
+    starts = [start for _, start, _ in ordered]
+    first_start = starts[0]
+    last_end = max(end for _, _, end in ordered)
     last_epoch: float | None = None
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line in handle:
@@ -1307,7 +1513,12 @@ def log_windows(
                 last_epoch = epoch
             if epoch is None:
                 continue
-            matched = [key for key, start, end in windows if start <= epoch <= end]
+            if epoch < first_start or epoch > last_end:
+                continue
+            # Windows starting after this line cannot contain it; of the rest,
+            # only those still open at `epoch` do.
+            reachable = bisect.bisect_right(starts, epoch)
+            matched = [key for key, _, end in ordered[:reachable] if epoch <= end]
             if not matched:
                 continue
             # Both regexes run at most once per line, however many windows the
@@ -1403,16 +1614,24 @@ def report(
             "interval_reset_failed",
             "target_comm",
             "pid_file_mismatch",
+            "timebase_fallback",
         )
     ]
     if markers:
         print(f"MARKERS ({len(markers)})", file=out)
         for event in markers:
-            detail = f"pid {event.get('pid')}"
+            # Assembled from whichever fields the marker carries, because not
+            # every marker is about a pid: timebase_fallback is about the run.
+            bits = []
+            if event.get("pid") is not None:
+                bits.append(f"pid {event['pid']}")
             if event.get("comm"):
-                detail += f"  comm {event['comm']}"
+                bits.append(f"comm {event['comm']}")
             if event.get("start_time"):
-                detail += f"  started {event['start_time']}"
+                bits.append(f"started {event['start_time']}")
+            if event.get("note"):
+                bits.append(str(event["note"]))
+            detail = "  ".join(bits)
             print(f"  {hhmmss(event.get('epoch', 0.0)):<14}{event['event']:<24}{detail}", file=out)
         print(file=out)
 
@@ -1420,9 +1639,17 @@ def report(
     if failures:
         print(f"CAPTURE PROBLEMS ({len(failures)})", file=out)
         for event in failures:
+            bits = []
+            if event.get("tool"):
+                bits.append(str(event["tool"]))
+            if event.get("rc") is not None:
+                bits.append(f"rc={event['rc']}")
+            detail = event.get("error") or event.get("why") or ""
+            if detail:
+                bits.append(str(detail))
             print(
                 f"  {hhmmss(event.get('epoch', 0.0)):<14}{event['event']:<22}"
-                f"{event.get('error') or event.get('why') or ''}",
+                f"{'  '.join(bits)}",
                 file=out,
             )
         print(file=out)
@@ -1756,6 +1983,26 @@ def self_test() -> int:
         _check(again[0].peak == _mb(1700), "the re-issued capture should carry the same peak")
         _check(detector.in_spike, "withdrawing a capture must not end the spike")
 
+    def withdrawn_onset_is_reissued() -> None:
+        # A refused onset used to leave the rearm bar parked at the peak it was
+        # refused at, because only a high-water gave `_last_capture_value` back.
+        # A spike that opens at 1500 MB and holds there then took no captures at
+        # all: the onset was refused, the bar said 1500 MB, and no tick could
+        # clear 1500 plus a rearm for as long as the spike lasted.
+        detector = _detector(threshold_mb=1024, rise_mb=0, rearm_mb=512)
+        onset = _drive(detector, [100, 100, 1500])
+        _check([event.reason for event in onset] == ["threshold"], "expected the onset capture")
+        detector.withdraw(onset[0])
+        _check(detector.in_spike, "withdrawing an onset must not end the spike")
+
+        again = detector.observe(1003.0, _mb(1500), _mb(1500))
+        _check(
+            [event.reason for event in again] == ["highwater"],
+            f"a refused onset should re-issue on the next tick at the same peak; got {again}",
+        )
+        _check(again[0].peak == _mb(1500), "the re-issued capture should carry the same peak")
+        _check(detector.in_spike, "the spike is still open after the re-issued capture")
+
     def report_replay() -> None:
         with tempfile.TemporaryDirectory() as raw:
             run_dir = Path(raw)
@@ -1850,6 +2097,7 @@ def self_test() -> int:
     case("an idle plateau above the threshold does not latch", steady_state_above_threshold)
     case("a climb off a released plateau is still caught", plateau_then_further_climb)
     case("a capture the runner refused is re-issued", withdrawn_capture_is_reissued)
+    case("an onset the runner refused is re-issued on the next tick", withdrawn_onset_is_reissued)
     case("report replays a synthetic run and finds its spike", report_replay)
     case("report finds a rise spike below the threshold", report_sees_rise_spike)
 
