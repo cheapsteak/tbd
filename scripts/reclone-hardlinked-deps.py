@@ -130,10 +130,16 @@ def expand(targets: list[Path]) -> list[Path]:
     return trees
 
 
-def convert(root: Path, clonefile, dry: bool) -> tuple[int, int, int]:
-    """Returns (converted, peak_nlink_seen, failed)."""
+def convert(root: Path, clonefile, dry: bool, walk_errors: list[OSError]) -> tuple[int, int, int]:
+    """Returns (converted, peak_nlink_seen, failed).
+
+    os.walk swallows OSError by default, so an unreadable subtree is skipped in
+    silence -- and a scan that never saw a directory reports the same "clean" as
+    one that saw it and found nothing. Collect those failures so the caller can
+    refuse to claim success.
+    """
     done = failed = peak = 0
-    for dirpath, _dirs, files in os.walk(root):
+    for dirpath, _dirs, files in os.walk(root, onerror=walk_errors.append):
         for name in files:
             p = os.path.join(dirpath, name)
             try:
@@ -168,12 +174,18 @@ def verify(trees: list[Path]) -> bool:
     """A silent partial conversion otherwise looks exactly like success."""
     ok = True
     for t in trees:
+        errs: list[OSError] = []
         remaining = sum(
             1
-            for dirpath, _d, files in os.walk(t)
+            for dirpath, _d, files in os.walk(t, onerror=errs.append)
             for f in files
             if _nlink_gt1(os.path.join(dirpath, f))
         )
+        if errs:
+            # Unverifiable is not the same as verified. Say so.
+            print(f"  could not read {len(errs)} director(ies) under {t}; "
+                  f"cannot confirm it is clean (first: {errs[0]})", file=sys.stderr)
+            ok = False
         if remaining:
             print(f"  {remaining:,} file(s) still hardlinked in {t}", file=sys.stderr)
             ok = False
@@ -252,9 +264,12 @@ def main() -> int:
               f"{' (dry run)' if args.dry_run else ''}...")
 
     total = failed_total = peak_overall = 0
+    walk_errors: list[OSError] = []
     t0 = time.time()
     for i, tree in enumerate(trees, 1):
-        d, peak, f = convert(tree, clonefile, args.dry_run)
+        tree_errors: list[OSError] = []
+        d, peak, f = convert(tree, clonefile, args.dry_run, tree_errors)
+        walk_errors.extend(tree_errors)
         total += d
         failed_total += f
         peak_overall = max(peak_overall, peak)
@@ -264,15 +279,24 @@ def main() -> int:
                 extra = f", {f} FAILED" if f else ""
                 print(f"  [{i}/{len(trees)}] {verb} {d:>7,} files "
                       f"(peak nlink {peak:>6,}){extra}  {tree}")
+            elif tree_errors:
+                # Never label a tree clean when part of it could not be read.
+                print(f"  [{i}/{len(trees)}] UNREADABLE in part "
+                      f"({len(tree_errors)} dir(s))  {tree}")
             else:
                 print(f"  [{i}/{len(trees)}] already clean  {tree}")
 
     elapsed = time.time() - t0
+    if walk_errors:
+        print(f"\nWARNING: {len(walk_errors)} director(ies) could not be read and were "
+              f"skipped; counts below are a lower bound.", file=sys.stderr)
+        print(f"  first: {walk_errors[0]}", file=sys.stderr)
+
     if args.dry_run:
         print(f"\nDry run: {total:,} hardlinked file(s) across {len(trees)} tree(s) "
               f"(peak link count {peak_overall:,}).")
         print("Re-run without --dry-run to convert them.")
-        return 0
+        return 1 if walk_errors else 0
 
     rate = f", {total / elapsed:,.0f} files/sec" if elapsed > 0 and total else ""
     print(f"\nConverted {total:,} file(s) in {elapsed:.1f}s{rate}.")
@@ -282,7 +306,7 @@ def main() -> int:
     print("\nVerifying...")
     ok = verify(trees)
     print("All trees clean (nlink=1)." if ok else "Verification reported problems.")
-    return 0 if ok and not failed_total else 1
+    return 0 if ok and not failed_total and not walk_errors else 1
 
 
 if __name__ == "__main__":
