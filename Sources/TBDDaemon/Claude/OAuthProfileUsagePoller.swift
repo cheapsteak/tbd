@@ -43,9 +43,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "oauthUsagePo
 ///   instead HELD: no automatic retry at all, because every retry is a billed
 ///   request that cannot succeed until the user replaces the token. The hold
 ///   is released only by a credential change or the profile row's manual
-///   refresh. A signed-in `.oauth` profile is never held — its `.needsLogin`
-///   clears when the user re-runs `/login`, an act that emits no event, so the
-///   free cadence sweep re-reading the login identity IS its recovery path.
+///   refresh, so it is armed only for a rejection of the token the profile
+///   still has — one that describes a token already replaced takes the timed
+///   schedule instead (`credentialGeneration`). A signed-in `.oauth` profile is
+///   never held — its `.needsLogin` clears when the user re-runs `/login`, an
+///   act that emits no event, so the free cadence sweep re-reading the login
+///   identity IS its recovery path.
 /// - `broadcast` fires (once per sweep) only when snapshot data actually
 ///   changed — `lastAttemptAt` alone doesn't count, so a persistently failing
 ///   profile doesn't emit a delta every 90 s.
@@ -138,7 +141,9 @@ public actor OAuthProfileUsagePoller {
     ///   `.oauthToken` profile whose token was rejected, where a retry is a
     ///   billed request that cannot succeed until the token is replaced.
     ///   Released by a credential change (which clears the whole state) or by
-    ///   the profile row's manual refresh.
+    ///   the profile row's manual refresh. Because nothing else can release it,
+    ///   it is armed only when the rejection describes the credential the
+    ///   profile currently has — see `credentialGeneration`.
     private struct BackoffState {
         var consecutiveFailures: Int = 0
         var nextEligibleAt: Date?
@@ -146,6 +151,22 @@ public actor OAuthProfileUsagePoller {
         var awaitingUserAction: Bool = false
     }
     private var backoff: [UUID: BackoffState] = [:]
+
+    /// Monotonic per-profile counter of how many times the profile's
+    /// credential has been replaced. Absent means zero. In-memory only, like
+    /// `backoff`; a daemon restart resets it, which is harmless because it
+    /// resets the retry state it guards along with it.
+    ///
+    /// It exists to answer one question at the moment an outcome is recorded:
+    /// *does this outcome still describe the credential the profile has?*
+    /// `sweep` suspends at the fetch and the actor admits `noteCredentialChanged`
+    /// there, so a probe of the OLD token can land after the rotation that
+    /// replaced it. Arming a user-action hold on that outcome would pin the
+    /// NEW token behind a gesture the user has already made — indefinitely,
+    /// because a hold cannot expire. Comparing the generation captured before
+    /// the fetch against the current one distinguishes the two cases, and only
+    /// the retry regime keys off it (see `record`).
+    private var credentialGeneration: [UUID: Int] = [:]
 
     /// Profiles with a fetch currently in flight.
     ///
@@ -407,8 +428,18 @@ public actor OAuthProfileUsagePoller {
     /// cannot rotate in a loop, and every timer- and activity-driven caller
     /// still goes through `freshnessWindow(requested:kind:)` and the retry
     /// state.
+    ///
+    /// Bumping `credentialGeneration` is the other half of the release, and it
+    /// covers the case clearing `backoff` cannot: a probe of the OLD token that
+    /// is already in flight. Its sweep is dropped by the in-flight reservation,
+    /// so this clear happens BEFORE that probe's failure is recorded, and
+    /// without the generation bump the old token's rejection would arm a hold
+    /// after the release — pinning the new credential behind a gesture the user
+    /// has already made. `record` reads the bump and schedules that outcome
+    /// instead, so the next turn end re-probes with the new token.
     public func noteCredentialChanged(profileID: UUID) async {
         backoff[profileID] = nil
+        credentialGeneration[profileID, default: 0] += 1
         await sweep(only: profileID, skipFresherThan: nil, ignoringFreshness: true)
     }
 
@@ -499,6 +530,7 @@ public actor OAuthProfileUsagePoller {
         if only == nil {
             snapshots = snapshots.filter { supportedIDs.contains($0.key) }
             backoff = backoff.filter { supportedIDs.contains($0.key) }
+            credentialGeneration = credentialGeneration.filter { supportedIDs.contains($0.key) }
             if let prunePersisted {
                 await prunePersisted(supportedIDs)
             }
@@ -551,7 +583,10 @@ public actor OAuthProfileUsagePoller {
             // token is not verified until the next turn end or a manual
             // refresh. The window is the length of a single HTTP request, and
             // the alternative — exempting that path — is the double bill this
-            // guard exists to prevent.
+            // guard exists to prevent. The "next turn end" half of that promise
+            // is what `credentialGeneration` keeps true: the dropped rotation
+            // still bumps it, so the old credential's rejection cannot arm a
+            // hold that no turn end could ever lift.
             guard inFlight.insert(profile.id).inserted else {
                 logger.debug("usage probe already in flight for profile \(profile.id, privacy: .public); dropping duplicate")
                 continue
@@ -565,8 +600,13 @@ public actor OAuthProfileUsagePoller {
             // headers. Neither fetcher knows the other exists.
             let usageFetcher: any ProfileUsageFetching =
                 profile.kind == .oauthToken ? tokenFetcher : fetcher
+            // Captured on THIS side of the fetch's suspension, where it still
+            // describes the credential about to be sent. `noteCredentialChanged`
+            // can interleave during the await and bump it; `record` compares
+            // the two and refuses to hold an outcome about a replaced token.
+            let generation = credentialGeneration[profile.id] ?? 0
             let status = await usageFetcher.fetchUsage(credential: usageCredential)
-            await record(status, for: profile.id, kind: profile.kind)
+            await record(status, for: profile.id, kind: profile.kind, generation: generation)
         }
 
         if hasMeaningfulChange(from: before, to: snapshots) {
@@ -594,9 +634,18 @@ public actor OAuthProfileUsagePoller {
     /// else: the recorded snapshot (status text, `statusKind`, retained
     /// buckets and organization id) is identical either way, so the row goes
     /// on reading `Token rejected — Replace token…` off `statusKind`.
+    ///
+    /// `generation` is the profile's `credentialGeneration` as it stood when
+    /// the fetch was issued. It gates the retry REGIME and nothing else — a
+    /// stale outcome is still recorded as the snapshot, deliberately. Writing
+    /// an outcome the credential has outrun is pre-existing accepted behavior
+    /// (the fetch really did happen, and the next probe overwrites it moments
+    /// later); suppressing the write here would leave the row with no status
+    /// at all in the very window this is about, and is a separate change.
     private func record(_ status: ProfileUsageFetchStatus,
                         for profileID: UUID,
-                        kind: CredentialKind) async {
+                        kind: CredentialKind,
+                        generation: Int) async {
         let timestamp = now()
         switch status {
         case .ok(let buckets, let organizationID):
@@ -623,7 +672,15 @@ public actor OAuthProfileUsagePoller {
             } else {
                 statusText = "fetch failed: \(reason)"
             }
-            if kind == .oauthToken, case .needsLogin = status {
+            // A hold is only ever right about the credential the profile still
+            // has. If the token was replaced while this fetch was in flight,
+            // the rejection describes a token that no longer exists, and
+            // holding on it would pin the replacement behind a gesture the
+            // user already made. Such an outcome falls through to the timed
+            // schedule, which is bounded, self-releasing, and settled by the
+            // rotation's own probe at the next turn end.
+            let credentialIsCurrent = (credentialGeneration[profileID] ?? 0) == generation
+            if kind == .oauthToken, credentialIsCurrent, case .needsLogin = status {
                 holdForUserAction(profileID)
             } else {
                 scheduleBackoff(for: profileID, status: status, at: timestamp)
@@ -660,6 +717,13 @@ public actor OAuthProfileUsagePoller {
     /// probe whose own outcome re-arms whichever regime that outcome belongs
     /// to. A transient failure after the release is a new problem and starts
     /// at rung one, which is also what a credential change gives it.
+    ///
+    /// Only an outcome describing the credential the profile CURRENTLY has may
+    /// reach here — `record` checks `credentialGeneration` first. A rejection
+    /// of a token that was replaced while its probe was in flight says nothing
+    /// anyone can act on, and a hold armed on it would be unreleasable in
+    /// practice: the gesture that releases a hold has already happened. That
+    /// case takes the timed schedule instead.
     private func holdForUserAction(_ profileID: UUID) {
         backoff[profileID] = BackoffState(awaitingUserAction: true)
     }

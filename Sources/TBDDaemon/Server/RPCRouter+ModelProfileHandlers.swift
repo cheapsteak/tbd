@@ -440,9 +440,12 @@ extension RPCRouter {
         //
         // Rotation is where it matters most. The user is looking at a row that
         // says "Token rejected" and has just pasted the fix; without this the
-        // row would keep saying it until the next `working -> idle` transition
-        // — which is the very confusion the creation probe removes, reproduced
-        // at the moment the user is most certainly watching.
+        // row would never correct itself at all. A rejected token puts the
+        // profile in a hold rather than on a timed schedule, so no turn end and
+        // no cadence tick re-probes it — only this call, or the row's own
+        // `⋯ ▸ Refresh usage`, can. That is the very confusion the creation
+        // probe removes, reproduced at the moment the user is most certainly
+        // watching.
         if let poller = oauthUsagePoller {
             let rotatedProfileID = params.id
             Task { await poller.noteCredentialChanged(profileID: rotatedProfileID) }

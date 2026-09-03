@@ -1679,4 +1679,55 @@ private func makeGatedTokenPoller(
         await poller.noteSessionBecameIdle(profileID: token.id)
         #expect(fetcher.tokenProbeCount == 2)
     }
+
+    /// A rotation that lands while a probe of the OLD token is in flight must
+    /// leave the profile self-healing, not held.
+    ///
+    /// The rotation's own sweep is dropped by the in-flight reservation — the
+    /// residual the guard documents and accepts — so the release it performed
+    /// happens BEFORE the old token's rejection is recorded. A hold armed on
+    /// that rejection would be armed after its only release, and no timer,
+    /// turn end, or cadence tick can lift one: the freshly pasted token, which
+    /// may be perfectly good, would sit on "Token rejected" until the user
+    /// found `⋯ ▸ Refresh usage`. The credential generation is what stops it —
+    /// the outcome describes a token that no longer exists, so it takes the
+    /// timed schedule, and the next turn end settles the question with the new
+    /// token.
+    @Test func aRotationDuringAnInFlightProbeLeavesTheProfileSelfHealing() async {
+        let profile = tokenProfile(named: "Acme (token)")
+        // Never auto-opens. Exactly one probe reaches the fetcher (the second
+        // caller is dropped, which is the race under test), so a threshold of
+        // two would park the first one forever.
+        let gate = ProbeGate(autoOpenAt: Int.max)
+        let fetcher = GatedProfileUsageFetcher(
+            gate: gate, status: .needsLogin("token rejected (HTTP 401)"))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeGatedTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-DEAD"],
+            fetcher: fetcher, clock: clock)
+
+        let activity = Task { await poller.noteSessionBecameIdle(profileID: profile.id) }
+        // Parked inside the fetcher with the OLD token: nothing recorded yet.
+        await gate.waitForArrivals(1)
+
+        // The user pastes a replacement. This runs its own sweep to
+        // completion, and that sweep issues no request.
+        await poller.noteCredentialChanged(profileID: profile.id)
+        // Still one probe: the rotation's sweep was DROPPED by the in-flight
+        // reservation. Without this the test would be exercising an ordinary
+        // sequential rotation and would pass either way.
+        #expect(fetcher.probeCount == 1)
+
+        // Now the old token's rejection lands, after the release.
+        await gate.open()
+        await activity.value
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .needsLogin)
+
+        // Nothing ever succeeded, so there is no `fetchedAt` and the 300s floor
+        // is not in play; +301s also clears the 30s first rung of the timed
+        // schedule the stale outcome armed. A hold would survive both.
+        clock.advance(301)
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.probeCount == 2)
+    }
 }
