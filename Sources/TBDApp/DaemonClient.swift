@@ -1359,15 +1359,22 @@ actor DaemonClient {
         )
     }
 
-    /// Request a control-mode attach for one pane; the fd arrives separately
-    /// on the sidecar (see `openAttach`).
+    /// Request an attach for one pane or one holder-backed session; the fd
+    /// arrives separately on the sidecar (see `openAttach`).
+    ///
+    /// `terminalID` is what names a HOLDER session: its `paneID`, `windowID`
+    /// and server are the empty string by construction, so nothing else in
+    /// these params can identify the row the daemon must branch on. Nil (the
+    /// default) is the control-mode caller, which names its pane.
     func attachRequest(
-        worktreeID: UUID, paneID: String, windowID: String, attachID: UUID
+        worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
+        terminalID: UUID? = nil
     ) async throws -> AttachRequestResult {
         try await callAsync(
             method: RPCMethod.attachRequest,
             params: AttachRequestParams(
-                worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID),
+                worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID,
+                terminalID: terminalID),
             resultType: AttachRequestResult.self
         )
     }
@@ -1421,11 +1428,19 @@ actor DaemonClient {
     /// pane — a stale ready (superseded by a faster re-attach) must not
     /// pause/unpause the pane out from under the successor's sequence; nil
     /// (unknown generation) acks unchecked, as before.
-    func attachReady(worktreeID: UUID, paneID: String, generation: UInt64? = nil) async throws {
+    ///
+    /// `terminalID` names a holder-backed session the way it does on
+    /// `attachRequest`, and a holder ack is REFUSED without a generation —
+    /// there would be nothing to check the ack against, and confirming the
+    /// wrong attach would release a reader a live attach depends on.
+    func attachReady(
+        worktreeID: UUID, paneID: String, generation: UInt64? = nil, terminalID: UUID? = nil
+    ) async throws {
         try await callVoidAsync(
             method: RPCMethod.attachReady,
             params: AttachReadyParams(
-                worktreeID: worktreeID, paneID: paneID, generation: generation)
+                worktreeID: worktreeID, paneID: paneID, generation: generation,
+                terminalID: terminalID)
         )
     }
 

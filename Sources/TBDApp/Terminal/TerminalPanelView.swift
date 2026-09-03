@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftTerm
 import AppKit
+import Darwin
 import TBDShared
 import os
 
@@ -446,6 +447,28 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// `terminalView` weak var. Written before `startProcess`, cleared by
         /// `cleanup()` before the `LocalProcess` is released.
         private let viewHolder = TerminalViewHolder()
+        /// Drains the vended pty for a holder-backed panel. Held here rather
+        /// than in the app-scoped `ControlModeReaderRegistry` because a holder
+        /// reader has nothing to outlive the view for: it feeds THIS view, and
+        /// there is no EOF to end it, so `cleanup()` stopping it is the only
+        /// thing that ever releases the descriptor.
+        private var holderReader: HolderStreamReader?
+        /// Seam for the holder attach RPCs. Nil means "build the real client
+        /// from the daemon client", which is what production always does; a
+        /// test injects a stub so the panel path can be driven without a
+        /// daemon.
+        var holderAttachClient: (any HolderAttaching)?
+        /// Called on the main actor immediately before the holder reader is
+        /// started, so the attach's one ordering invariant — the reader is
+        /// wired only after the snapshot ingest window has closed — can be
+        /// observed. Unset in production.
+        ///
+        /// A seam rather than something a test could see from outside, because
+        /// this window is closed by a block on the main queue: every probe
+        /// reachable through the attach RPCs sits behind an actor hop that has
+        /// already run that block, so it reads `false` whether the ordering is
+        /// right or wrong. Without this the invariant has no failing test.
+        var onHolderReaderWillStart: (@MainActor () -> Void)?
         private var groupedViewerProcessRunning = false
         private var groupedViewerProcessGeneration: UInt64 = 0
         private var groupedViewerConfirmationStarted = false
@@ -637,6 +660,141 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             )
             feedPreparationMessage(notice, into: terminalView)
             return true
+        }
+
+        /// The holder arm of the transport branch both attach entry points
+        /// share. Returns `true` when it took over — the caller must then
+        /// prepare and attach nothing.
+        ///
+        /// The tmux and control-mode paths are the other two arms; each keeps
+        /// its own body. Only the "is this even a tmux session" question is
+        /// common, and it is answered here.
+        @MainActor
+        private func handleHolderTransport(into terminalView: TerminalView) async -> Bool {
+            guard panelTransport() == .holder else { return false }
+            await startHolderClient(terminalView: terminalView)
+            return true
+        }
+
+        /// Render a holder-backed session: take a `dup` of its pty and the
+        /// screen that was already on it, paint the screen, then start reading.
+        ///
+        /// The order below is the whole point of the function, and two steps of
+        /// it are not interchangeable with anything:
+        ///
+        /// - **The preamble is fed before live output is wired.** That is a
+        ///   documented precondition on `feedSnapshot`, whose mute is a
+        ///   property of the window rather than of the bytes: while the ingest
+        ///   flag is up, every delegate callback is dropped *regardless of
+        ///   origin*. A live DA1/DSR the agent is waiting on, answered by
+        ///   nobody, is an agent that waits forever. The window is the preamble
+        ///   parse plus one main-queue turn, so this function does not merely
+        ///   feed first — it waits out that turn before starting the reader.
+        /// - **The reader is wired before the ack.** `attach.ready` is what
+        ///   releases the daemon's own drain and jiggles the tty, so acking
+        ///   before a reader exists leaves the session with nobody on it and a
+        ///   repaint landing in a pty buffer.
+        ///
+        /// A failure anywhere falls back to the placard, unlike the
+        /// control-mode path's fallback to grouped sessions: there is no second
+        /// way to render a holder-backed session, so an attach that could not
+        /// happen has to say so.
+        @MainActor
+        func startHolderClient(terminalView: TerminalView) async {
+            guard !isTornDown else { return }
+            guard let appState, let worktreeID = worktreeIDForDiagnostics() else {
+                _ = handleUnsupportedTransport(into: terminalView)
+                return
+            }
+            // Empty by construction on a holder row, and passed anyway: it is
+            // half of the sidecar's routing key, and the daemon echoes it in
+            // the vend header. `terminalID` is what actually names the session.
+            let paneID = ""
+            let client = holderAttachClient ?? HolderAttachClient(daemonClient: appState.daemonClient)
+            let attachment: HolderAttachment
+            do {
+                attachment = try await client.attach(
+                    worktreeID: worktreeID, paneID: paneID, terminalID: panelID)
+            } catch {
+                logger.warning("""
+                    holder attach failed for terminal \(self.panelID, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                _ = handleUnsupportedTransport(into: terminalView)
+                return
+            }
+            // Teardown can land across any await. Nothing owns the descriptor
+            // yet, so this is the one place it is closed from outside a reader.
+            guard !isTornDown else {
+                Darwin.close(attachment.ptyFD)
+                return
+            }
+            if !attachment.snapshotPreamble.isEmpty {
+                feedSnapshot(attachment.snapshotPreamble, into: terminalView)
+            }
+            // `feedSnapshot` lowers its flag one main-queue turn later, not on
+            // return. Hop through the same queue so this resumes strictly after
+            // that restore block: a serial FIFO queue runs what was enqueued
+            // first, first. Without this the reader could feed live bytes into
+            // a still-muted window and their replies would be swallowed.
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+            guard !isTornDown else {
+                Darwin.close(attachment.ptyFD)
+                return
+            }
+            // Feed OFF-MAIN, through the view holder, exactly as the local-PTY
+            // path does — deliberately NOT the control-mode path's
+            // `DispatchQueue.main.async` per chunk. That hop is the shape the
+            // terminal-lag investigation implicates in paint starvation; do not
+            // "tidy" this into looking like its neighbour.
+            viewHolder.set(terminalView)
+            let holder = viewHolder
+            let reader = HolderStreamReader(
+                label: panelID.uuidString, fd: attachment.ptyFD
+            ) { chunk in
+                let bytes = [UInt8](chunk)
+                holder.withView { $0.feed(byteArray: bytes[...]) }
+            }
+            holderReader = reader
+            onHolderReaderWillStart?()
+            reader.start()
+            do {
+                try await client.ready(
+                    worktreeID: worktreeID, paneID: paneID, terminalID: panelID,
+                    generation: attachment.generation)
+            } catch {
+                logger.error("""
+                    holder attach.ready refused for terminal \(self.panelID, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                // A refused ack means the daemon has not accounted for this
+                // descriptor — stop reading it and say so on the panel.
+                stopHolderReader()
+                _ = handleUnsupportedTransport(into: terminalView)
+                return
+            }
+            guard !isTornDown else {
+                stopHolderReader()
+                return
+            }
+            logger.info("holder attach live for terminal \(self.panelID, privacy: .public)")
+        }
+
+        /// Stop the holder reader and drop the view reference it feeds. The
+        /// reader thread closes the descriptor on its way out — closing it here
+        /// would race fd-number reuse against a thread still polling it.
+        ///
+        /// There is no `pane.detach` counterpart yet: the daemon has no holder
+        /// branch on it, so within one daemon lifetime a viewer that goes away
+        /// leaves the session with nobody draining it. That is the next change.
+        @MainActor
+        private func stopHolderReader() {
+            guard let reader = holderReader else { return }
+            holderReader = nil
+            viewHolder.clear()
+            reader.stop()
         }
 
         nonisolated static func preparationAction(
@@ -848,10 +1006,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // already ran; only deinit would remove the monitors, nothing
             // would terminate the process).
             guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else { return }
-            // A session this app cannot carry through tmux is settled here,
-            // before any tmux subprocess runs and before any classification —
-            // see `transportPreparationNotice(for:)`.
-            if handleUnsupportedTransport(into: terminalView) { return }
+            // A session that is not carried by tmux is settled here, before any
+            // tmux subprocess runs and before any classification — see
+            // `transportPreparationNotice(for:)`.
+            if await handleHolderTransport(into: terminalView) { return }
             // `prepareSession` is non-isolated and awaits tmux subprocesses
             // off the main actor — Swift releases main while we suspend here,
             // so SwiftUI's render loop is no longer blocked while tmux runs.
@@ -1125,6 +1283,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
             resizeDebounceTask?.cancel()
             resizeDebounceTask = nil
+            // Release the vended pty. No daemon-side detach goes with it yet
+            // (`pane.detach` has no holder branch), so the session is left with
+            // nobody draining it until the next attach — the reason `stop()`
+            // alone has to be enough here.
+            stopHolderReader()
             (terminalView as? TBDTerminalView)?.onControlModePaste = nil
             if let attach = controlModeAttach, let appState {
                 controlModeAttach = nil
@@ -1193,11 +1356,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             windowID: String,
             panelID: UUID
         ) async {
-            // Same gate as the grouped-sessions path: a holder-backed session
-            // has no pane for control mode to attach to either, and falling
-            // through to the fallback would only reach the tmux classifier by a
-            // longer route.
-            if handleUnsupportedTransport(into: terminalView) { return }
+            // Same branch as the grouped-sessions path: a holder-backed session
+            // has no pane for control mode to attach to, and falling through to
+            // the fallback would only reach the tmux classifier by a longer
+            // route. It attaches to its own pty instead.
+            if await handleHolderTransport(into: terminalView) { return }
             // Reader-registry key: one reader per PANE (worktree/pane), not per
             // attach — a re-attach replaces the pane's reader. Distinct from
             // the sidecar's per-request demux key, which also carries the
