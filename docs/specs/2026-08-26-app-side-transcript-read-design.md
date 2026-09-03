@@ -74,8 +74,8 @@ A new actor under `Sources/TBDApp/TranscriptSource/` owns, per session id:
 
 The source publishes into `AppState.sessionTranscripts`, which all three
 consumers — the live pane, the history pane, and the transcript overlay — already
-read. The view layer is therefore unchanged, and the flag-off path keeps working
-untouched. What changes is that the source writes only when it knows something
+read. The view layer is therefore unchanged, and the daemon-poll fallback keeps
+working untouched. What changes is that the source writes only when it knows something
 changed, because the incremental step tells it so. Today's per-tick deep compare
 of the whole array exists only to answer that question and goes away with it.
 
@@ -217,23 +217,22 @@ parse and render. Constraining `terminal.transcriptPath` to the projects store
 at the point it is stored would close it for both processes at once, and is the
 right shape for that fix — it belongs to the hook bridge, not to this change.
 
-## Feature flag
+## Transport selection
 
-The change wholesale-replaces a load-bearing render path, so it ships behind
-`appSideTranscriptRead`: a UserDefaults key, default off, read as
-`object(forKey:) as? Bool ?? appSideTranscriptReadDefault`. That is the shape
-`enableTranscriptKey` uses, and it keeps "never chose" distinct from "chose
-false", so graduation reaches everyone who never touched the toggle while
-preserving explicit opt-outs.
+The transport is a pure function of the terminal's `transcriptPath`, decided in
+one place (`TranscriptPaneTransport.resolve`) so it can be asserted directly
+rather than only through the behaviour of a SwiftUI `.task`. A terminal with a
+usable path is read in-process; a pane whose terminal has none falls back to the
+daemon's `terminal.transcript` poll, which resolves the session file server-side
+from the terminal id and so can render a transcript the app-side reader has no
+path for. There is no user-facing choice: the app reads the file whenever it can
+name one.
 
-Off is today's three RPCs verbatim. Both paths compile and are tested for the
-duration of the soak. Enable it in Settings to soak; graduate by changing the
-one default constant; delete the three RPCs and the daemon-side parse cache in
-a follow-up once the flag is gone.
+The three daemon-side RPCs and the daemon's parse cache remain for that
+fallback. They are slated for removal in a follow-up, once a pane with no
+transcript path is served another way.
 
 ## Testing
-
-Both flag branches are covered, per the repository rule on gated behavior.
 
 1. **Chunk-split equivalence.** Feed a real captured JSONL to the source in
    randomized chunk splits and assert the result equals
@@ -242,8 +241,13 @@ Both flag branches are covered, per the repository rule on gated behavior.
    append-only reader fails; without it the test passes against the bug.
 2. Truncate or replace the file mid-stream and assert a correct full re-parse.
 3. A read failure retains prior items and does not blank the pane.
-4. With the flag off the file-reader seam is never called; with it on the RPC
-   client is never called.
+4. The transport choice is two pure functions, `TranscriptPaneTransport.resolve`
+   and `TranscriptDetailReader.shouldReadAppSide`, and every call site consults
+   one of them. Both are asserted for a usable path, a nil path, and an empty
+   path, together with the scheduler registration and deregistration those
+   choices drive. No test spies on the RPC client or the file reader for a zero
+   call count on the branch not taken; the guarantee is that the decision lives
+   in one place.
 5. A pending-question delta renders a synthetic item, which is replaced rather
    than duplicated once the real JSONL line lands.
 6. Cadence tiers, against an injected clock: 100 ms foreground, 2 s background,

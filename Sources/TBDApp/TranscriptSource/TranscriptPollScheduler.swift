@@ -179,7 +179,7 @@ actor TranscriptPollScheduler {
     /// without this the retained set is bounded only by "distinct Claude
     /// sessions ever viewed", which grows for the life of the process. Every
     /// production deregistration funnels here (`TranscriptPaneRegistration.apply`
-    /// on the flag-off / no-path branch, and the live pane's `.task` teardown),
+    /// on the no-path branch, and the live pane's `.task` teardown),
     /// which is what makes registration lifetime a real bound rather than an
     /// asserted one.
     ///

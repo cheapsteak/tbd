@@ -75,7 +75,7 @@ struct TranscriptPaneVisibilityTests {
         let worktree = UUID()
         let pane = TranscriptPaneToken()
         await TranscriptPaneRegistration.apply(
-            enabled: true, sessionID: "s1", path: "/tmp/tbd-tier-test-s1.jsonl",
+            sessionID: "s1", path: "/tmp/tbd-tier-test-s1.jsonl",
             tier: TranscriptPaneVisibility.tier(
                 worktreeID: worktree, selectedWorktreeIDs: [UUID()]),
             token: pane, scheduler: scheduler)
@@ -96,7 +96,7 @@ struct TranscriptPaneVisibilityTests {
         let pane = TranscriptPaneToken()
 
         await TranscriptPaneRegistration.apply(
-            enabled: true, sessionID: "s2", path: path,
+            sessionID: "s2", path: path,
             tier: TranscriptPaneVisibility.tier(
                 worktreeID: worktree, selectedWorktreeIDs: [worktree]),
             token: pane, scheduler: scheduler)
@@ -104,7 +104,7 @@ struct TranscriptPaneVisibilityTests {
 
         // Selection moves to another worktree; this pane stays mounted.
         await TranscriptPaneRegistration.apply(
-            enabled: true, sessionID: "s2", path: path,
+            sessionID: "s2", path: path,
             tier: TranscriptPaneVisibility.tier(
                 worktreeID: worktree, selectedWorktreeIDs: [UUID()]),
             token: pane, scheduler: scheduler)
@@ -116,7 +116,7 @@ struct TranscriptPaneVisibilityTests {
 
         // And back again when the pane returns to screen.
         await TranscriptPaneRegistration.apply(
-            enabled: true, sessionID: "s2", path: path,
+            sessionID: "s2", path: path,
             tier: TranscriptPaneVisibility.tier(
                 worktreeID: worktree, selectedWorktreeIDs: [worktree]),
             token: pane, scheduler: scheduler)

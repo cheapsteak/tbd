@@ -26,11 +26,6 @@ struct TableTranscriptPaneView: View {
     /// unchanged bottom via the existing `.rebuild` path.
     private let tailLimit = 60
 
-    /// Gates the app-side read path. Default spelled with the AppState
-    /// constant so this and every other read site cannot disagree.
-    @AppStorage(AppState.appSideTranscriptReadKey)
-    private var appSideTranscriptRead: Bool = AppState.appSideTranscriptReadDefault
-
     @State private var loadError: String?
     @State private var hasShownInitialMessages = false
     /// False until the full transcript has been fetched for the current session.
@@ -132,7 +127,7 @@ struct TableTranscriptPaneView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: TaskKey(
             terminalID: terminalID, sessionID: currentSessionID, retryToken: retryToken,
-            appSideTranscriptRead: appSideTranscriptRead
+            hasTranscriptPath: !(terminal?.transcriptPath ?? "").isEmpty
         )) {
             await pollLoop()
         }
@@ -312,8 +307,7 @@ struct TableTranscriptPaneView: View {
     // MARK: - Polling
 
     private func pollLoop() async {
-        let transport = TranscriptPaneTransport.resolve(
-            appSideEnabled: appSideTranscriptRead, path: terminal?.transcriptPath)
+        let transport = TranscriptPaneTransport.resolve(path: terminal?.transcriptPath)
         if case .appSide(let path) = transport {
             await appSideLoop(path: path)
             return
@@ -366,7 +360,7 @@ struct TableTranscriptPaneView: View {
         let token = TranscriptPaneToken()
         var tier = currentPollTier()
         await TranscriptPaneRegistration.apply(
-            enabled: true, sessionID: sid, path: path,
+            sessionID: sid, path: path,
             tier: tier, token: token, scheduler: scheduler)
 
         // Publish once immediately so the pane is not blank until the first tick.
@@ -545,15 +539,24 @@ struct TableTranscriptPaneView: View {
     }
 }
 
-/// Identity of the poll task. Includes `appSideTranscriptRead` so flipping the
-/// setting while a pane is open cancels the running transport and starts the
-/// other one, rather than leaving the pane on whichever loop it happened to
-/// begin with until something else rebuilds it.
+/// Identity of the poll task: the terminal, its current Claude session, the
+/// retry token, and whether the terminal has a transcript path yet. A change to
+/// any of them cancels the running loop and starts a fresh one, rather than
+/// leaving the pane on whichever loop it happened to begin with until something
+/// else rebuilds it.
+///
+/// Path availability belongs in the identity because `pollLoop` picks its
+/// transport once, at task start: a pane that mounted before its session
+/// reported a transcript path would otherwise stay on the daemon poll until the
+/// session changed. With it here, the task restarts on the in-process reader the
+/// moment the path lands. Only *whether* a path exists is part of the key, never
+/// the path string, so a session's path value can churn without restarting the
+/// loop.
 private struct TaskKey: Equatable {
     let terminalID: UUID
     let sessionID: String?
     let retryToken: Int
-    let appSideTranscriptRead: Bool
+    let hasTranscriptPath: Bool
 }
 
 /// SwiftUI identity for the table transcript representable. Composes the terminal

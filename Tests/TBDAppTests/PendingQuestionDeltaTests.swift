@@ -276,11 +276,10 @@ struct PendingQuestionDeltaOrderingTests {
     }
 }
 
-/// The app-side read path's other half: with `appSideTranscriptRead` on the
-/// daemon's `terminal.transcript` handler never runs, so the app is the only
-/// party that can see a capture's `tool_use` line land — and it owes the
-/// daemon a report, or the answered card lingers until
-/// `PendingQuestionExpirySweep` reaps it up to fifteen minutes later.
+/// The app-side read path's other half: the app parses the JSONL, so it is the
+/// party that sees a capture's `tool_use` line land — and it owes the daemon a
+/// report, or the answered card lingers until `PendingQuestionExpirySweep`
+/// reaps it up to fifteen minutes later.
 ///
 /// Every case drives a real `AskUserQuestionMerger.merge` result rather than a
 /// hand-built id list, so a change to what the merger considers satisfied

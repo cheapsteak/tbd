@@ -112,7 +112,7 @@ struct TranscriptPollSchedulerTests {
         let before = TranscriptPaneToken()
         let after = TranscriptPaneToken()
         await TranscriptPaneRegistration.apply(
-            enabled: true, sessionID: "old", path: oldPath,
+            sessionID: "old", path: oldPath,
             tier: .foreground, token: before, scheduler: scheduler)
         await source.refresh(sessionID: "old", path: oldPath)
         #expect(await source.trackedSessionCount == 1)
@@ -121,7 +121,7 @@ struct TranscriptPollSchedulerTests {
         // rebuilt one holds its registration under a token of its own.
         await scheduler.deregister(sessionID: "old", token: before)
         await TranscriptPaneRegistration.apply(
-            enabled: true, sessionID: "new", path: newPath,
+            sessionID: "new", path: newPath,
             tier: .foreground, token: after, scheduler: scheduler)
         await source.refresh(sessionID: "new", path: newPath)
 

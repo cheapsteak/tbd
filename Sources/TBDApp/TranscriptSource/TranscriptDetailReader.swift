@@ -37,8 +37,8 @@ enum TranscriptDetailReader {
     /// terminal row has not loaded, or whose session has no JSONL yet, has
     /// nothing to read and must not be handed an empty-file result that the
     /// daemon would have answered properly.
-    static func shouldReadAppSide(enabled: Bool, path: String?) -> Bool {
-        guard enabled, let path, !path.isEmpty else { return false }
+    static func shouldReadAppSide(path: String?) -> Bool {
+        guard let path, !path.isEmpty else { return false }
         return true
     }
 
