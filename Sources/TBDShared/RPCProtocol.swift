@@ -3217,7 +3217,7 @@ public struct ConfigSetReapHolderChildrenEnabledParams: Codable, Sendable {
 /// that gate destroys a session on a provider, this one reclaims TBD's own
 /// local residue, and opting into either must never opt into the other. Design:
 /// `docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`.
-public struct ConfigSetGCRetainedTranscriptsEnabledParams: Codable, Sendable {
+public struct ConfigSetGCRetainedTranscriptsParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

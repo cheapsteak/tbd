@@ -174,7 +174,7 @@ struct GCRetainedTranscripts: AsyncParsableCommand {
         }
         try SocketClient().callVoid(
             method: RPCMethod.configSetGCRetainedTranscriptsEnabled,
-            params: ConfigSetGCRetainedTranscriptsEnabledParams(enabled: enabled))
+            params: ConfigSetGCRetainedTranscriptsParams(enabled: enabled))
         print("Retained-transcript GC \(enabled ? "enabled" : "disabled").")
     }
 }

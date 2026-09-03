@@ -267,7 +267,7 @@ extension RPCRouter {
     /// `OrphanGC.sweep` re-reads the flag on its next pass.
     func handleConfigSetGCRetainedTranscriptsEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(
-            ConfigSetGCRetainedTranscriptsEnabledParams.self, from: paramsData)
+            ConfigSetGCRetainedTranscriptsParams.self, from: paramsData)
         try await db.config.setGCRetainedTranscriptsEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)

@@ -36,7 +36,7 @@ struct GCRetainedTranscriptsRPCTests {
     private func setFlag(_ router: RPCRouter, enabled: Bool) async throws {
         let request = try RPCRequest(
             method: RPCMethod.configSetGCRetainedTranscriptsEnabled,
-            params: ConfigSetGCRetainedTranscriptsEnabledParams(enabled: enabled))
+            params: ConfigSetGCRetainedTranscriptsParams(enabled: enabled))
         let response = await router.handle(request)
         #expect(response.success, "\(String(describing: response.error))")
     }
@@ -139,9 +139,9 @@ struct GCRetainedTranscriptsRPCTests {
     func paramsRoundTrip() throws {
         for enabled in [true, false] {
             let decoded = try JSONDecoder().decode(
-                ConfigSetGCRetainedTranscriptsEnabledParams.self,
+                ConfigSetGCRetainedTranscriptsParams.self,
                 from: try JSONEncoder().encode(
-                    ConfigSetGCRetainedTranscriptsEnabledParams(enabled: enabled)))
+                    ConfigSetGCRetainedTranscriptsParams(enabled: enabled)))
             #expect(decoded.enabled == enabled)
         }
     }
