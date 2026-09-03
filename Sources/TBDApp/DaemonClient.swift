@@ -251,6 +251,22 @@ actor DaemonClient {
         // `signal(SIGPIPE, SIG_IGN)`: see `SocketSIGPIPE` for why the app in
         // particular must not set that disposition (SwiftTerm's `forkpty`
         // children would inherit it).
+        //
+        // **Deliberately untested, unlike the sidecar leg.** Deleting this
+        // line reddens nothing — the sidecar's equivalent is covered by
+        // `SocketSIGPIPETests.adoptedSidecarSocketIsProtected` because
+        // `FDSidecarClient.adopt` takes an fd a test can hand it, whereas this
+        // fd never escapes this private function and only exists once a peer
+        // is accepting on the real socket path. A test would therefore have to
+        // be either an integration fixture out of all proportion to one line,
+        // or an assertion about this file's source text, which is worse than
+        // no test at all. The accepted mitigation is the one-shot `.fault` in
+        // `SocketSIGPIPE.suppress`: it catches the option being *refused*, not
+        // this call being *removed*.
+        //
+        // So if you are refactoring this function: the symptom of losing this
+        // line is TBDApp vanishing on every `scripts/restart.sh`, which will
+        // read as an unrelated crash. Keep it.
         SocketSIGPIPE.suppress(on: fd)
 
         return fd

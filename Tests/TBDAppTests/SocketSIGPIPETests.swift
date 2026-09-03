@@ -62,19 +62,31 @@ struct SocketSIGPIPETests {
     /// notice. With the option set this raises `EPIPE`, which the sidecar's
     /// `catch` logs and drops.
     ///
-    /// This test cannot die by signal *as written*, because it applies the
-    /// production suppression before writing — but a regression that removed
-    /// `SocketSIGPIPE.suppress` from the production path would make this write
-    /// fatal, which is precisely the exposure being fixed. It is written
-    /// against a raw `socketpair` rather than a live `FDSidecarClient` so the
-    /// close and the write are strictly ordered on one thread: routing it
-    /// through the client's `sendQueue` would race the receive loop's teardown
-    /// and could not assert the throw at all.
+    /// **What this covers is the helper, not the production path.** It applies
+    /// `SocketSIGPIPE.suppress` itself and never goes through
+    /// `FDSidecarClient.adopt` or `DaemonClient.makeConnectedSocket`, so
+    /// deleting the production call sites would not redden it. What it does
+    /// prove is that a suppressed socket really does convert the peer-closed
+    /// write into a catchable `EPIPE` — i.e. that the mechanism the production
+    /// path relies on works, and that `sendData`'s error path is what runs.
+    /// `adoptedSidecarSocketIsProtected` above is the test that detects a
+    /// regression in the production path.
+    ///
+    /// The `#require` on `suppress` is load-bearing: a broken helper would
+    /// otherwise leave the socket unprotected and this write would kill the
+    /// whole test process by signal 13, discarding the run's summary line for
+    /// every other suite — instead of failing here by name with the write
+    /// never attempted.
+    ///
+    /// It is written against a raw `socketpair` rather than a live
+    /// `FDSidecarClient` so the close and the write are strictly ordered on
+    /// one thread: routing it through the client's `sendQueue` would race the
+    /// receive loop's teardown and could not assert the throw at all.
     @Test("a write to a peer-closed protected socket throws EPIPE instead of killing the process")
     func writeToClosedPeerThrowsEPIPE() throws {
         let (daemonSide, appSide) = try makeSocketPair()
         defer { Darwin.close(appSide) }
-        SocketSIGPIPE.suppress(on: appSide)
+        try #require(SocketSIGPIPE.suppress(on: appSide))
 
         Darwin.close(daemonSide)   // the daemon goes away with a frame still to write
 
