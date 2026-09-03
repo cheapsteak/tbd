@@ -12,15 +12,23 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "markdown")
 /// preference to emitting a `<base href="file:///…">`, which would change
 /// subresource resolution for the WHOLE document rather than just its links.
 ///
-/// Resolution and containment mirror `MarkdownImageInliner` exactly: a
-/// relative href resolves against the document's own directory, the result
-/// must live under the symlink-resolved worktree root, and symlinks are
-/// resolved on both sides. What the two do with the result differs — an image
-/// is read and inlined, a link is only rewritten — but the trust boundary is
-/// the same one, for the same reason.
+/// Containment matches `MarkdownImageInliner`: the result must live under the
+/// symlink-resolved worktree root, symlinks are resolved on both sides, and
+/// the target must be a regular file. What the two do with the result differs
+/// — an image is read and inlined, a link is only rewritten — but the trust
+/// boundary is the same one, for the same reason.
+///
+/// Resolution differs in one place: a root-relative `/docs/setup.md` resolves
+/// against the worktree root rather than the document's directory, which is
+/// what a leading slash means to every forge that renders a repo's markdown.
+/// The image pass does not yet do this.
 struct MarkdownLinkResolver {
 
     private let documentDirectory: URL
+    /// What a ROOT-relative href (`/docs/setup.md`) resolves against. Kept
+    /// unresolved so a rewritten href names the path the user navigated
+    /// rather than its realpath — see the return of `rewritten(href:)`.
+    private let worktreeRoot: URL
     /// Symlink-resolved path the candidate must live under.
     private let containmentRoot: String
     private let fileManager: FileManager
@@ -29,14 +37,16 @@ struct MarkdownLinkResolver {
     ///   - documentDirectory: what a relative `href` is *resolved against* —
     ///     the markdown file's own directory.
     ///   - worktreeRoot: the trust boundary the resolved candidate must stay
-    ///     inside. Deliberately NOT the document directory: `docs/guide.md`
-    ///     linking `../README.md` is a mainstream repo layout.
+    ///     inside, and what a ROOT-relative `href` resolves against.
+    ///     Deliberately NOT the document directory for containment either:
+    ///     `docs/guide.md` linking `../README.md` is a mainstream repo layout.
     init(documentDirectory: URL, worktreeRoot: URL, fileManager: FileManager = .default) {
         self.documentDirectory = documentDirectory.standardizedFileURL
-        // Resolve symlinks on BOTH sides. Resolving only the candidate breaks
-        // every repo that lives under a symlinked path; resolving neither lets
-        // a symlink inside the repo point anywhere on disk.
-        self.containmentRoot = worktreeRoot.standardizedFileURL.resolvingSymlinksInPath().path
+        self.worktreeRoot = worktreeRoot.standardizedFileURL
+        // Symlinks are resolved on BOTH sides — see
+        // `MarkdownWorktreeContainment`, which is also what the pane applies
+        // to the URL this resolver hands it.
+        self.containmentRoot = MarkdownWorktreeContainment.resolvedRoot(worktreeRoot)
         self.fileManager = fileManager
     }
 
@@ -76,32 +86,56 @@ struct MarkdownLinkResolver {
         // contents depends on them reaching the webview untouched.
         if href.hasPrefix("#") { return nil }
 
-        // comrak percent-encodes and entity-escapes destinations, so decode
-        // before doing anything else. This MUST precede the containment check:
-        // otherwise `%2e%2e%2fsecret.md` is a traversal vector that the
-        // lexical check never sees.
-        var decoded = (href.removingPercentEncoding ?? href)
+        // Undo comrak's `escape_href`, the ONLY escaping a destination gets:
+        // it emits `&#x27;` for `'` and `&amp;` for `&`, and percent-encodes
+        // every other byte outside its HREF_SAFE set. `&#x27;` is undone
+        // BEFORE `&amp;`, or a filename holding the literal text `&#x27;` —
+        // which comrak wrote as `&amp;#x27;` — comes back as an apostrophe.
+        let unescaped = href
+            .replacingOccurrences(of: "&#x27;", with: "'")
             .replacingOccurrences(of: "&amp;", with: "&")
-        // `./doc.md#section` navigates to the file. The fragment is dropped:
-        // the pane re-renders the linked document from the top and has no
+
+        // `./doc.md#section` navigates to the file, dropping the fragment: the
+        // pane re-renders the linked document from the top and has no
         // scroll-to-anchor plumbing across a document switch.
-        if let hash = decoded.firstIndex(of: "#") { decoded = String(decoded[..<hash]) }
+        //
+        // The split sits between the two decodes, and neither side is
+        // arbitrary. AFTER unescaping, because `&#x27;` carries a literal `#`
+        // and splitting first would cut `user&#x27;s guide.md` down to
+        // `user&`. BEFORE percent-decoding, because `#` is in HREF_SAFE — a
+        // real fragment arrives literal while a `#` in a filename arrives as
+        // `%23`, so splitting afterwards would cut `a%23b.md`, a link to the
+        // real file `a#b.md`, down to `a`.
+        let beforeFragment = unescaped.firstIndex(of: "#")
+            .map { String(unescaped[..<$0]) } ?? unescaped
+
+        // Decoding MUST precede the containment check: otherwise
+        // `%2e%2e%2fsecret.md` is a traversal vector the lexical check never
+        // sees.
+        let decoded = beforeFragment.removingPercentEncoding ?? beforeFragment
+
         // Re-check the decoded form: percent-encoding can hide both of the
         // shapes rejected above.
         guard !decoded.isEmpty, !decoded.hasPrefix("//"), !hasScheme(decoded) else { return nil }
 
-        // Resolved against the DOCUMENT directory (that is what `href` is
-        // relative to), contained against the WORKTREE ROOT.
-        let candidate = documentDirectory.appendingPathComponent(decoded).standardizedFileURL
+        guard let candidate = resolvedCandidate(for: decoded) else { return nil }
         let resolved = candidate.resolvingSymlinksInPath()
-        guard resolved.path.hasPrefix(containmentRoot + "/") else {
+        guard MarkdownWorktreeContainment.containsResolved(
+            resolved.path, inResolvedRoot: containmentRoot
+        ) else {
             logger.debug("rejected link outside worktree root: \(href, privacy: .public)")
             return nil
         }
         // A link to something that is not there stays unrewritten, so a broken
         // link keeps doing what it does today — nothing — rather than opening a
-        // Finder window on a path that does not exist.
-        guard fileManager.fileExists(atPath: resolved.path) else { return nil }
+        // Finder window on a path that does not exist. A regular file, not
+        // merely an existing one: a directory named `notes.md` is not a
+        // document, and neither is a device node. Same check the image pass
+        // makes, for the same reason.
+        guard fileManager.fileExists(atPath: resolved.path),
+              let values = try? resolved.resourceValues(forKeys: [.isRegularFileKey]),
+              values.isRegularFile == true
+        else { return nil }
 
         // The UNRESOLVED path is what the href becomes: it is the path the
         // sidebar shows and the pane selects, and containment has already been
@@ -109,10 +143,64 @@ struct MarkdownLinkResolver {
         return Self.escapeAttribute(candidate.absoluteString)
     }
 
+    /// Where a decoded destination points, before containment is judged.
+    ///
+    /// A leading `/` addresses the WORKTREE ROOT — what a root-relative href
+    /// means to every forge that renders a repo's markdown — and everything
+    /// else the DOCUMENT directory, which is what an href is relative to.
+    ///
+    /// An absolute filesystem path is therefore reinterpreted as root-relative:
+    /// `/etc/passwd` becomes `<root>/etc/passwd`, which does not exist, so the
+    /// link is left alone. That is the intended outcome — there is no shape of
+    /// href that names a file outside the repo.
+    private func resolvedCandidate(for decoded: String) -> URL? {
+        guard decoded.hasPrefix("/") else {
+            return documentDirectory.appendingPathComponent(decoded).standardizedFileURL
+        }
+        let relative = String(decoded.drop(while: { $0 == "/" }))
+        guard !relative.isEmpty else { return nil }
+        return worktreeRoot.appendingPathComponent(relative).standardizedFileURL
+    }
+
+    /// Schemes that count even without an authority: they carry no path to
+    /// resolve, so a destination naming one is never a repo-relative file.
+    private static let opaqueSchemes: Set<String> = [
+        "about", "blob", "data", "file", "javascript", "mailto",
+        "sms", "tel", "urn", "vbscript",
+    ]
+
+    /// The non-alphanumeric half of RFC 3986's scheme grammar.
+    private static let schemePunctuation: Set<Character> = ["+", "-", "."]
+
     /// Does this destination name a URL scheme?
+    ///
+    /// Deliberately NOT `URL(string:)?.scheme != nil`. That reports `v1` for
+    /// `v1:changelog.md`, and `:` is in comrak's HREF_SAFE set, so an ordinary
+    /// repo-relative filename containing a colon reaches this function
+    /// unencoded and would be abandoned as remote — the exact dead link this
+    /// resolver exists to fix. A destination counts as scheme-bearing only
+    /// when it opens an authority (`scheme://…`) or names one of the opaque
+    /// schemes above.
+    ///
+    /// Erring permissive is safe: whatever gets through still has to resolve
+    /// inside the worktree root and name a regular file that exists. A remote
+    /// destination that slips past satisfies neither, so it comes out
+    /// unrewritten exactly as if it had been recognised here.
     private func hasScheme(_ value: String) -> Bool {
-        if let url = URL(string: value), url.scheme != nil { return true }
-        return false
+        guard let colon = value.firstIndex(of: ":") else { return false }
+        let scheme = value[value.startIndex..<colon].lowercased()
+        // RFC 3986 scheme grammar. A colon inside a path segment
+        // (`notes/rev:2.md`) fails it and is correctly read as a path.
+        let isSchemeCharacter: (Character) -> Bool = { character in
+            guard character.isASCII else { return false }
+            return character.isLetter || character.isNumber
+                || Self.schemePunctuation.contains(character)
+        }
+        guard let first = scheme.first, first.isASCII, first.isLetter,
+              scheme.allSatisfy(isSchemeCharacter)
+        else { return false }
+        if Self.opaqueSchemes.contains(scheme) { return true }
+        return value[value.index(after: colon)...].hasPrefix("//")
     }
 
     private static func escapeAttribute(_ value: String) -> String {

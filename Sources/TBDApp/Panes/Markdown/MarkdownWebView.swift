@@ -98,9 +98,29 @@ enum MarkdownWebViewConfiguration {
         case "http", "https", "mailto":
             return .openExternally(url)
         case "file":
-            // A relative link that `MarkdownLinkResolver` rewrote, or an
-            // explicit file: URL in the source. Markdown navigates the pane —
-            // in-app, so no launch decision is involved at all.
+            // A relative link that `MarkdownLinkResolver` rewrote — the only
+            // way a file: URL reaches here. An explicit `file:` destination in
+            // the markdown source cannot: comrak's safe mode empties the href
+            // for `file:`, `data:`, `javascript:` and `vbscript:`, so the
+            // anchor arrives with nothing to navigate to. Markdown navigates
+            // the pane — in-app, so no launch decision is involved at all.
+            //
+            // This function is pure and knows no worktree, so it cannot judge
+            // WHICH file. Containment is re-judged on the consuming side, by
+            // `MarkdownLinkNavigation.target(for:worktreeRoot:)`, against the
+            // same rule the resolver applied — that check, not comrak's safe
+            // mode, is what keeps a file outside the worktree from rendering
+            // in the pane.
+            //
+            // `isLinkActivation` means "a real gesture" only while JavaScript
+            // is off on this path, which it unconditionally is today. Enabling
+            // it for `renderMermaidDiagrams` (see
+            // `docs/specs/2026-07-28-markdown-display-options-design.md`)
+            // ends that: `document.querySelector('a').click()` produces
+            // navigationType `.linkActivated`, so a script in the rendered
+            // document could drive this route — and `.openExternally` —
+            // without the user touching anything. Whoever lands mermaid needs
+            // a gesture signal that a script cannot forge.
             if isRenderableMarkdown(url) { return .openInPane(url) }
             // NEVER `NSWorkspace.open` a file: URL. `git clone` sets only
             // com.apple.provenance, not com.apple.quarantine (verified), so a

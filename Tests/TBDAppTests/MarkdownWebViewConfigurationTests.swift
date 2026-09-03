@@ -155,12 +155,19 @@ struct MarkdownWebViewConfigurationTests {
         }
     }
 
-    @Test("extension sets agree between the policy and the pane")
-    func renderableExtensionsAreLowercased() {
-        // `isRenderableMarkdown` lowercases the candidate, so the set itself
-        // must hold lowercase entries or the comparison silently never matches.
-        for ext in MarkdownWebViewConfiguration.renderableExtensions {
-            #expect(ext == ext.lowercased())
+    @Test("the pane renders in place exactly what the policy routes to it")
+    func paneRendersWhatThePolicyRoutes() {
+        // The two read one set, and the pane collapses to zero height if it is
+        // handed something it will not render as a full-pane webview. Asserting
+        // the set against itself — every entry equals its own lowercasing —
+        // could not fail; comparing the two consumers can.
+        for ext in ["md", "markdown", "MD", "MarkDown", "txt", "png", "swift", ""] {
+            let url = URL(fileURLWithPath: "/repo/file.\(ext)")
+            let routesToPane = MarkdownWebViewConfiguration.policy(
+                for: url, isOwnLoad: false, isLinkActivation: true) == .openInPane(url)
+            let paneRendersIt = MarkdownPaneLayout.usesFullPaneWebView(
+                showSourceCode: false, selectedFiles: [url.path], useWebView: true)
+            #expect(routesToPane == paneRendersIt, "disagreement on .\(ext)")
         }
     }
 

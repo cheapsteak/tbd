@@ -10,7 +10,9 @@ enum MarkdownDocumentBuilder {
     /// - Parameters:
     ///   - documentDirectory: what relative image `src` and link `href` values
     ///     resolve against.
-    ///   - worktreeRoot: the containment boundary for those resolved paths.
+    ///   - worktreeRoot: the containment boundary for those resolved paths,
+    ///     and what a root-relative `href` (`/docs/setup.md`) resolves
+    ///     against.
     static func build(
         markdown: String, documentDirectory: URL, worktreeRoot: URL, css: String
     ) -> String? {

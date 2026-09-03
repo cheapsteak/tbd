@@ -157,10 +157,20 @@ struct MarkdownLinkResolverTests {
         let secret = try write("secret.md", in: sandbox)
         #expect(FileManager.default.fileExists(atPath: secret.path))
 
+        // Positive control, in the same test: without it this passes green
+        // even with `removingPercentEncoding` deleted from the resolver, since
+        // the literal name `%2e%2e%2f%2e%2e%2fsecret.md` does not exist either
+        // and an unrewritten href is the same observation as a rejected one.
+        // This href decodes to a file that DOES exist inside the root, so the
+        // decode has to be happening for the test to pass at all.
+        let inside = try write("release notes.md", in: docs)
+
         let resolver = MarkdownLinkResolver(documentDirectory: docs, worktreeRoot: root)
         let out = resolver.resolve(html: #"<a href="%2e%2e%2f%2e%2e%2fsecret.md">oops</a>"#)
+        let control = resolver.resolve(html: #"<a href="release%20notes.md">notes</a>"#)
 
         #expect(!out.contains("file://"))
+        #expect(control.contains(inside.standardizedFileURL.absoluteString))
     }
 
     @Test("a symlink that escapes the worktree root is rejected")
@@ -229,7 +239,7 @@ struct MarkdownLinkResolverTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let resolver = MarkdownLinkResolver(documentDirectory: dir, worktreeRoot: dir)
-        let html = #"<a href="#installation">Installation</a>"#
+        let html = ##"<a href="#installation">Installation</a>"##
         #expect(resolver.resolve(html: html) == html)
     }
 
@@ -253,15 +263,24 @@ struct MarkdownLinkResolverTests {
         #expect(resolver.resolve(html: html) == html)
     }
 
-    @Test("image tags are not touched by the link pass")
-    func leavesImagesAlone() throws {
+    @Test("the link pass rewrites the anchor and leaves the image src alone")
+    func leavesImageSourcesAlone() throws {
+        // Feeding it an `<img>` alone proves nothing: the regex is anchored on
+        // `<a`, so a lone image could never have matched however broken the
+        // pass was. Both tags in one document is the discriminating shape —
+        // loosen the regex to `src=` and the image assertion fails, break the
+        // anchor half and the link assertion fails.
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         try write("pic.png", in: dir)
+        let target = try write("log.md", in: dir)
 
         let resolver = MarkdownLinkResolver(documentDirectory: dir, worktreeRoot: dir)
-        let html = #"<img src="pic.png" alt="x" />"#
-        #expect(resolver.resolve(html: html) == html)
+        let out = resolver.resolve(
+            html: #"<p><img src="pic.png" alt="x" /><a href="log.md">log</a></p>"#)
+
+        #expect(out.contains(#"<img src="pic.png" alt="x" />"#))
+        #expect(out.contains(target.standardizedFileURL.absoluteString))
     }
 
     @Test("a tag whose name merely starts with 'a' is not matched")
@@ -272,6 +291,174 @@ struct MarkdownLinkResolverTests {
 
         let resolver = MarkdownLinkResolver(documentDirectory: dir, worktreeRoot: dir)
         let html = #"<abbr href="log.md">x</abbr>"#
+        #expect(resolver.resolve(html: html) == html)
+    }
+
+    // MARK: - Root-relative hrefs
+
+    @Test("a root-relative href resolves against the worktree root, not the document")
+    func resolvesRootRelativeAgainstRoot() throws {
+        // GitHub semantics: a leading `/` addresses the repository root.
+        // Resolved against the document directory instead, this lands on the
+        // dead `<root>/docs/docs/setup.md`.
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let docs = root.appendingPathComponent("docs")
+        try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+        let target = try write("docs/setup.md", in: root)
+
+        let resolver = MarkdownLinkResolver(documentDirectory: docs, worktreeRoot: root)
+        let out = resolver.resolve(html: #"<a href="/docs/setup.md">setup</a>"#)
+
+        #expect(out.contains(target.standardizedFileURL.absoluteString))
+    }
+
+    @Test("a root-relative href does not silently pick the same-named sibling")
+    func rootRelativePrefersRootOverDocumentDirectory() throws {
+        // Both files exist. Resolving `/README.md` against the document
+        // directory finds `docs/README.md` and looks like it worked — the
+        // silent-wrong-file half of the defect, which the dead-link test
+        // above cannot see.
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let docs = root.appendingPathComponent("docs")
+        try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+        let atRoot = try write("README.md", in: root)
+        let decoy = try write("README.md", in: docs)
+
+        let resolver = MarkdownLinkResolver(documentDirectory: docs, worktreeRoot: root)
+        let out = resolver.resolve(html: #"<a href="/README.md">readme</a>"#)
+
+        #expect(out.contains(atRoot.standardizedFileURL.absoluteString))
+        #expect(!out.contains(decoy.standardizedFileURL.absoluteString))
+    }
+
+    @Test("an absolute system path is reinterpreted under the root, never escaping it")
+    func absoluteSystemPathStaysInsideRoot() throws {
+        // `/etc/passwd` becomes `<root>/etc/passwd`. The file is created here
+        // so the test discriminates: without the reinterpretation the href
+        // would have to name the real `/etc/passwd`, and with it the href
+        // names the in-root file. A missing target would have made both
+        // outcomes look identical.
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let inRoot = try write("etc/passwd", in: root)
+
+        let resolver = MarkdownLinkResolver(documentDirectory: root, worktreeRoot: root)
+        let out = resolver.resolve(html: #"<a href="/etc/passwd">creds</a>"#)
+
+        #expect(out.contains(inRoot.standardizedFileURL.absoluteString))
+        #expect(!out.contains(#"file:///etc/passwd""#))
+    }
+
+    @Test("a bare / href is left alone")
+    func leavesBareRootHrefAlone() throws {
+        let root = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let resolver = MarkdownLinkResolver(documentDirectory: root, worktreeRoot: root)
+        let html = #"<a href="/">home</a>"#
+        #expect(resolver.resolve(html: html) == html)
+    }
+
+    // MARK: - Undoing comrak's escaping
+
+    @Test("an apostrophe entity is decoded")
+    func decodesApostropheEntity() throws {
+        // comrak's `escape_href` writes `'` as `&#x27;` — verified in its
+        // source, alongside `&amp;` for `&`. Leaving it undecoded makes every
+        // link to a file with an apostrophe in its name dead.
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = try write("user's guide.md", in: dir)
+
+        let resolver = MarkdownLinkResolver(documentDirectory: dir, worktreeRoot: dir)
+        let out = resolver.resolve(html: ##"<a href="user&#x27;s%20guide.md">guide</a>"##)
+
+        #expect(out.contains(target.standardizedFileURL.absoluteString))
+    }
+
+    @Test("an escaped ampersand entity is still decoded")
+    func decodesAmpersandEntity() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = try write("this & that.md", in: dir)
+
+        let resolver = MarkdownLinkResolver(documentDirectory: dir, worktreeRoot: dir)
+        let out = resolver.resolve(html: #"<a href="this%20&amp;%20that.md">both</a>"#)
+
+        #expect(out.contains(target.standardizedFileURL.absoluteString))
+    }
+
+    @Test("an encoded # in a filename is not mistaken for a fragment")
+    func doesNotTruncateAtAnEncodedHash() throws {
+        // `#` is in comrak's HREF_SAFE set, so a real fragment arrives
+        // literal and a `#` in a filename arrives as `%23`. Splitting after
+        // the percent-decode cuts this href down to `a`.
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = try write("a#b.md", in: dir)
+
+        let resolver = MarkdownLinkResolver(documentDirectory: dir, worktreeRoot: dir)
+        let out = resolver.resolve(html: #"<a href="a%23b.md">a</a>"#)
+
+        #expect(out.contains(target.standardizedFileURL.absoluteString))
+    }
+
+    // MARK: - Scheme detection
+
+    @Test("a colon inside a filename is not read as a scheme")
+    func colonInFilenameIsNotAScheme() throws {
+        // `:` is in comrak's HREF_SAFE set, so `[notes](v1:changelog.md)`
+        // reaches the resolver unencoded. `URL(string:)?.scheme` reports
+        // `v1` for it, which abandoned the link as if it were remote.
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = try write("v1:changelog.md", in: dir)
+
+        let resolver = MarkdownLinkResolver(documentDirectory: dir, worktreeRoot: dir)
+        let out = resolver.resolve(html: #"<a href="v1:changelog.md">notes</a>"#)
+
+        #expect(out.contains(target.standardizedFileURL.absoluteString))
+    }
+
+    @Test("authority-bearing and opaque schemes are still refused")
+    func stillRefusesRealSchemes() throws {
+        // The permissive half of the scheme check must not reach these.
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // The opaque ones are the discriminating half: each names a file that
+        // really is sitting in the root, so a resolver that read them as
+        // relative paths would rewrite the href and redden this test.
+        let opaque = ["mailto:a@b.com", "data:text", "file:x.md", "javascript:x.md"]
+        for name in opaque {
+            try write(name, in: dir)
+        }
+
+        let resolver = MarkdownLinkResolver(documentDirectory: dir, worktreeRoot: dir)
+        let raws = opaque + [
+            "https://evil.com", "http://evil.com", "smb://evil.com", "tbd://evil.com",
+        ]
+        for raw in raws {
+            let html = #"<a href="\#(raw)">x</a>"#
+            #expect(resolver.resolve(html: html) == html, "\(raw) must be left alone")
+        }
+    }
+
+    // MARK: - What the target has to be
+
+    @Test("a directory named like a document is not a link target")
+    func rejectsDirectoryTarget() throws {
+        // Parity with `MarkdownImageInliner`, which requires a regular file.
+        // `fileExists` alone says yes to a directory named `notes.md`.
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let asDirectory = dir.appendingPathComponent("notes.md")
+        try FileManager.default.createDirectory(at: asDirectory, withIntermediateDirectories: true)
+        #expect(FileManager.default.fileExists(atPath: asDirectory.path))
+
+        let resolver = MarkdownLinkResolver(documentDirectory: dir, worktreeRoot: dir)
+        let html = #"<a href="notes.md">notes</a>"#
         #expect(resolver.resolve(html: html) == html)
     }
 

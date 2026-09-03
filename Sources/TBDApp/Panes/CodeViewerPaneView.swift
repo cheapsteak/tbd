@@ -241,6 +241,12 @@ struct CodeViewerPaneView: View {
     let path: String
     let worktreePath: String
     let showSourceCode: Bool
+    /// Points the ENCLOSING pane at another file. The pane's identity is its
+    /// `PaneContent.codeViewer(id:path:)`, so a navigation that only touched
+    /// this view's `selectedFiles` would leave the header title, the header
+    /// context menu, the slot's history and the persisted layout on the
+    /// previous document. Raised by `openLinkedFile`.
+    let onNavigate: (String) -> Void
 
     @State private var selectedFiles: [String] = []
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
@@ -341,14 +347,17 @@ struct CodeViewerPaneView: View {
     /// markdown file navigates this pane, the way picking the file in the
     /// sidebar would.
     ///
-    /// `onChange(of: path)` fires only when the OUTER path changes, so a
-    /// locally navigated selection survives until the pane is pointed
-    /// somewhere else. The existence check is the guard against selecting a
-    /// path that vanished between render and click.
+    /// The navigation goes UP rather than into `selectedFiles`: the enclosing
+    /// pane owns the path, and `onChange(of: path)` brings the selection along
+    /// once the new content arrives.
+    ///
+    /// `MarkdownLinkNavigation` re-judges worktree containment here, where the
+    /// root is known — the navigation policy is pure and cannot — and rejects
+    /// a path that vanished between render and click.
     private func openLinkedFile(_ url: URL) {
-        let target = url.standardizedFileURL.path
-        guard FileManager.default.fileExists(atPath: target) else { return }
-        selectedFiles = [target]
+        guard let target = MarkdownLinkNavigation.target(
+            for: url, worktreeRoot: worktreePath) else { return }
+        onNavigate(target)
     }
 
     private var emptyState: some View {
