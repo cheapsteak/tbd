@@ -722,6 +722,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteImport(request.paramsData)
             case RPCMethod.remoteRecall:
                 return try await handleRemoteRecall(request.paramsData)
+            case RPCMethod.remoteTranscript:
+                return try await handleRemoteTranscript(request.paramsData)
             case RPCMethod.remoteRetainedList:
                 return try await handleRemoteRetainedList(request.paramsData)
             case RPCMethod.remoteDelete:

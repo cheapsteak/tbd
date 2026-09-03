@@ -764,6 +764,56 @@ extension RPCRouter {
         return try RPCResponse(result: RemoteRecallResult(jsonl: jsonl, localPath: localPath))
     }
 
+    /// The conversation of a session the provider still has
+    /// (`docs/remote-provider-contract.md` § `transcript <id>`). See
+    /// `handleRemoteRetain` for the shared shape and for why the capability is
+    /// checked before anything is invoked.
+    ///
+    /// **stderr is dropped on the floor, deliberately.** `transcript` is the
+    /// contract's one stderr exception: it may write a continuation-cursor
+    /// envelope there. This RPC reads the whole transcript in one call and has
+    /// nowhere to keep a cursor between calls, so carrying it across the RPC
+    /// boundary would hand every caller a token none of them could use. A
+    /// caller that wants what accumulated since refetches.
+    ///
+    /// It is emphatically not `log`. The contract states the two are different
+    /// data rather than two encodings of one — structured conversation records
+    /// against raw ANSI scrollback — and that a caller MUST NOT substitute one
+    /// for the other, so this verb exists rather than `remote.log` being reused.
+    func handleRemoteTranscript(_ paramsData: Data) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteTranscriptParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
+        guard await declaredCapabilities(manager, provider: params.provider).contains("transcript") else {
+            return Self.missingCapabilityResponse(
+                provider: params.provider, capability: "transcript",
+                section: "transcript <id> [--since <cursor>]")
+        }
+        let result: ProviderResult
+        do {
+            result = try await manager.invoke(
+                providerName: params.provider, verb: ["transcript", params.sessionID],
+                stdin: nil, timeout: Self.exchangeTimeout)
+        } catch let error as ProviderRunError {
+            remoteHandlerLogger.error(
+                "remote.transcript provider=\(params.provider, privacy: .public) timed out")
+            return RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+        }
+        if result.failureClass != nil {
+            let message = result.decodedError?.message ?? "transcript failed (exit \(result.exitCode))"
+            remoteHandlerLogger.error(
+                "remote.transcript provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            return RPCResponse(error: message)
+        }
+        // JSONL records by contract — lossy UTF-8 decode, never sanitized or
+        // re-encoded, on the same terms as `remote.recall`'s bytes.
+        // swiftlint:disable:next optional_data_string_conversion
+        let jsonl = String(decoding: result.stdout, as: UTF8.self)
+        return try RPCResponse(result: RemoteTranscriptResult(jsonl: jsonl))
+    }
+
     /// Lists the receipts TBD holds, optionally filtered to one provider.
     ///
     /// Local-only — it reads TBD's own rows and never invokes a provider verb,

@@ -20,7 +20,9 @@ struct RemoteCommand: ParsableCommand {
             provider has not declared.
             """,
         subcommands: [
-            RemoteCreate.self,
+            RemoteList.self, RemoteCreate.self,
+            RemoteStop.self, RemoteArchive.self, RemoteUnarchive.self,
+            RemoteTranscript.self,
             RemoteRetain.self, RemoteImport.self, RemoteRecall.self, RemoteRetained.self,
             RemoteDelete.self, RemoteDismiss.self, RemoteAllowDelete.self,
         ]
@@ -1010,3 +1012,297 @@ func remoteCreateConfirmation(
         : "created \(provider)/\(name)"
 }
 
+// MARK: - remote list
+
+/// The rows `tbd remote list` shows, decided as a pure function so the display
+/// policy can be read next to the sidebar's.
+///
+/// **Archived sessions are hidden by default, and that is a caller decision
+/// rather than a provider one.** The contract requires a provider to keep
+/// archived sessions in `list` and assigns the caller the policy about which a
+/// human sees; the sidebar drops them, and this drops them too, so the two
+/// surfaces cannot disagree about what "the working set" means. `--archived`
+/// asks for the complete inventory.
+///
+/// Dismissed rows are always hidden: dismiss is TBD's own local tombstone, and
+/// a row a user removed from their lists reappearing here would make the
+/// gesture look broken.
+func remoteListRows(
+    _ sessions: [RemoteSessionInfo], provider: String?, includeArchived: Bool
+) -> [RemoteSessionInfo] {
+    sessions
+        .filter { !$0.dismissed }
+        .filter { includeArchived || !$0.payload.isArchived }
+        .filter { provider == nil || $0.provider == provider }
+        .sorted {
+            $0.provider == $1.provider ? $0.payload.id < $1.payload.id : $0.provider < $1.provider
+        }
+}
+
+/// The plain-text table `tbd remote list` prints. Separated from the call so
+/// the rendering is readable without a daemon.
+func renderRemoteListing(_ sessions: [RemoteSessionInfo]) -> String {
+    guard !sessions.isEmpty else {
+        return "No remote sessions."
+    }
+    var lines = [tableRow([
+        (value: "PROVIDER", width: 16), (value: "SESSION", width: 30),
+        (value: "STATE", width: 12), (value: "AGENT", width: 14),
+        (value: "TITLE", width: 0),
+    ])]
+    for session in sessions {
+        // `gone` is a TBD-side drift conclusion rather than a provider state,
+        // so it is shown in the STATE column instead of being folded into it:
+        // a session TBD has stopped seeing is a different fact from one the
+        // provider reports as exited.
+        let state = session.gone ? "gone" : session.payload.state.rawValue
+        lines.append(tableRow([
+            (value: session.provider, width: 16),
+            (value: session.payload.id, width: 30),
+            (value: state, width: 12),
+            (value: session.payload.agentState.rawValue, width: 14),
+            (value: session.payload.title ?? "", width: 0),
+        ]))
+    }
+    return lines.joined(separator: "\n")
+}
+
+struct RemoteList: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list",
+        abstract: "List the provider-hosted sessions TBD is mirroring",
+        discussion: """
+            Archived sessions are hidden unless --archived is passed, matching \
+            what the sidebar shows: the provider keeps them in its inventory by \
+            contract, and which of them a human sees is TBD's decision.
+
+            Sessions you have dismissed are always hidden — dismiss is a local \
+            tombstone, and this is one of the lists it removes them from.
+
+            The SESSION column is the provider's own id: `<provider>/<session>` \
+            is what every other subcommand here takes as an address.
+            """
+    )
+
+    @Option(name: .long, help: "Only this provider's sessions")
+    var provider: String?
+
+    @Flag(name: .long, help: "Include sessions the provider reports as archived")
+    var archived = false
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        let sessions = try SocketClient().call(
+            method: RPCMethod.remoteSessions, resultType: RemoteSessionsResult.self).sessions
+        let rows = remoteListRows(sessions, provider: provider, includeArchived: archived)
+        if json {
+            guard let output = jsonString(rows) else {
+                remoteNote("Error: could not encode the remote session list as JSON")
+                throw ExitCode.failure
+            }
+            print(output)
+            return
+        }
+        print(renderRemoteListing(rows))
+    }
+}
+
+// MARK: - remote stop / archive / unarchive
+
+/// The three session-addressed verbs whose whole body is "resolve, check the
+/// capability, call the RPC, say what happened".
+///
+/// One enum and one runner rather than three near-identical command bodies:
+/// they differ only in the verb, the RPC and the past-tense word they print,
+/// and three copies of the resolution and refusal logic would be three places
+/// for it to drift.
+///
+/// The raw value is the capability string, which is not a coincidence to be
+/// tidied away later — the contract states that every capability except
+/// `profile` and `seed` names the verb of the same name.
+enum RemoteSessionVerb: String {
+    case stop, archive, unarchive
+
+    /// The past-tense word the success line uses.
+    var pastTense: String {
+        switch self {
+        case .stop: return "stopped"
+        case .archive: return "archived"
+        case .unarchive: return "unarchived"
+        }
+    }
+}
+
+/// Runs one session-addressed verb. The capability is refused here, by name,
+/// before the daemon is asked to invoke anything — the contract forbids a
+/// caller from invoking a verb the provider has not declared, and a refusal
+/// that arrived as a raw provider error would tell a reader nothing about what
+/// to do next.
+///
+/// The three params types are structurally identical today, so one would encode
+/// perfectly well as another. They are still named individually, because "it
+/// happens to encode the same" is exactly the coincidence a later field on one
+/// of them breaks silently.
+func runRemoteSessionVerb(
+    _ verb: RemoteSessionVerb, session: String, json: Bool
+) throws {
+    let client = SocketClient()
+    let fleet = try readRemoteFleet(client: client)
+    guard let target = RemoteSessionRef.resolve(
+        session, sessions: fleet.sessions, worktrees: fleet.worktrees) else {
+        remoteNote("Error: could not resolve '\(session)' to a remote session")
+        throw ExitCode.failure
+    }
+    guard fleet.capabilities(of: target.provider).contains(verb.rawValue) else {
+        remoteNote(remoteMissingCapability(verb.rawValue, provider: target.provider))
+        throw ExitCode.failure
+    }
+    switch verb {
+    case .stop:
+        try client.callVoid(
+            method: RPCMethod.remoteStop,
+            params: RemoteStopParams(provider: target.provider, sessionID: target.sessionID))
+    case .archive:
+        try client.callVoid(
+            method: RPCMethod.remoteArchive,
+            params: RemoteArchiveParams(provider: target.provider, sessionID: target.sessionID))
+    case .unarchive:
+        try client.callVoid(
+            method: RPCMethod.remoteUnarchive,
+            params: RemoteUnarchiveParams(provider: target.provider, sessionID: target.sessionID))
+    }
+    let address = "\(target.provider)/\(target.sessionID)"
+    if json {
+        printJSON([
+            "provider": target.provider, "session": target.sessionID, "verb": verb.rawValue,
+        ])
+        return
+    }
+    print("\(verb.pastTense) \(address)")
+}
+
+struct RemoteStop: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "stop",
+        abstract: "End a session's compute, leaving its record in the provider's inventory",
+        discussion: """
+            Stop is not archive and not delete. It ends the compute and leaves \
+            the session listed; `tbd remote archive` retires the record without \
+            ending compute; `tbd remote delete` does both and removes it for good.
+
+            <session> accepts a worktree name, a TBD UUID, or <provider>/<session-id>.
+            """
+    )
+
+    @Argument(help: "Worktree name, TBD UUID, or <provider>/<session-id>")
+    var session: String
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        try runRemoteSessionVerb(.stop, session: session, json: json)
+    }
+}
+
+struct RemoteArchive: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "archive",
+        abstract: "Retire a session from the provider's working set, leaving its compute alone",
+        discussion: """
+            Archiving does not stop anything. A session still running keeps \
+            running; it simply stops appearing in `tbd remote list` and in the \
+            sidebar. Stop it first if that is what you meant.
+
+            <session> accepts a worktree name, a TBD UUID, or <provider>/<session-id>.
+            """
+    )
+
+    @Argument(help: "Worktree name, TBD UUID, or <provider>/<session-id>")
+    var session: String
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        try runRemoteSessionVerb(.archive, session: session, json: json)
+    }
+}
+
+struct RemoteUnarchive: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "unarchive",
+        abstract: "Return a retired session to the provider's working set",
+        discussion: """
+            The reverse of `tbd remote archive`. Address a retired session by \
+            `<provider>/<session-id>` — `tbd remote list --archived` prints it.
+            """
+    )
+
+    @Argument(help: "Worktree name, TBD UUID, or <provider>/<session-id>")
+    var session: String
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        try runRemoteSessionVerb(.unarchive, session: session, json: json)
+    }
+}
+
+// MARK: - remote transcript
+
+struct RemoteTranscript: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "transcript",
+        abstract: "Read a live session's conversation as Claude Code transcript JSONL",
+        discussion: """
+            Writes JSONL to stdout, or to <path> with -o. There is no --json \
+            flag: the output is already machine format.
+
+            This is the conversation, not the terminal. `transcript` returns \
+            structured records — user turns, agent responses, tool activity — \
+            while a scrollback recording is different data entirely, and the \
+            contract forbids substituting one for the other.
+
+            For a session that no longer exists, use `tbd remote recall` with \
+            the key its retention produced.
+
+            <session> accepts a worktree name, a TBD UUID, or <provider>/<session-id>.
+            """
+    )
+
+    @Argument(help: "Worktree name, TBD UUID, or <provider>/<session-id>")
+    var session: String
+
+    @Option(name: .shortAndLong, help: "Write the JSONL to this file instead of stdout")
+    var output: String?
+
+    mutating func run() async throws {
+        let client = SocketClient()
+        let fleet = try readRemoteFleet(client: client)
+        guard let target = RemoteSessionRef.resolve(
+            session, sessions: fleet.sessions, worktrees: fleet.worktrees) else {
+            remoteNote("Error: could not resolve '\(session)' to a remote session")
+            throw ExitCode.failure
+        }
+        guard fleet.capabilities(of: target.provider).contains("transcript") else {
+            remoteNote(remoteMissingCapability("transcript", provider: target.provider))
+            throw ExitCode.failure
+        }
+        let result = try client.call(
+            method: RPCMethod.remoteTranscript,
+            params: RemoteTranscriptParams(
+                provider: target.provider, sessionID: target.sessionID),
+            resultType: RemoteTranscriptResult.self)
+        guard let output else {
+            print(result.jsonl, terminator: "")
+            return
+        }
+        let resolved = resolvePath(output)
+        try result.jsonl.write(toFile: resolved, atomically: true, encoding: .utf8)
+        remoteNote("wrote \(result.jsonl.utf8.count) bytes to \(resolved)")
+    }
+}

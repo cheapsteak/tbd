@@ -314,6 +314,14 @@ public enum RPCMethod {
     public static let remoteRetain = "remote.retain"
     public static let remoteImport = "remote.import"
     public static let remoteRecall = "remote.recall"
+    /// The live transcript of a session the provider still has
+    /// (`docs/remote-provider-contract.md` § `transcript <id>`). A sibling of
+    /// the exchange verbs rather than one of them: `recall` reads an immutable
+    /// blob out of the provider's store by key, this reads a growing
+    /// conversation out of a live session by id, and the contract keeps the two
+    /// capabilities separate so `transcript` never becomes ambiguous about
+    /// which of the two a provider implements.
+    public static let remoteTranscript = "remote.transcript"
     /// Lists the receipts TBD holds. Deliberately absent from
     /// `providerNamedRemoteMethods` below: it invokes no provider verb, and its
     /// `provider` field is an optional *filter* rather than an address, so
@@ -348,7 +356,7 @@ public enum RPCMethod {
     public static let providerNamedRemoteMethods: [String] = [
         remoteCreate, remoteStop, remoteArchive, remoteUnarchive,
         remoteSend, remoteLog, remoteRename, remoteDismiss,
-        remoteRetain, remoteImport, remoteRecall, remoteDelete,
+        remoteRetain, remoteImport, remoteRecall, remoteTranscript, remoteDelete,
         remoteSetPin, remoteReportAttachExit,
     ]
 
@@ -1705,6 +1713,29 @@ public struct RemoteRecallResult: Codable, Sendable {
     public init(jsonl: String?, localPath: String?) {
         self.jsonl = jsonl; self.localPath = localPath
     }
+}
+
+/// Params for `remote.transcript` — the conversation of a session the provider
+/// still has (`docs/remote-provider-contract.md` § `transcript <id>`).
+///
+/// No cursor. The verb's `--since` exists so a *live* view can fetch a growing
+/// transcript incrementally, and this RPC serves a one-shot read of the whole
+/// thing; adding a cursor would mean carrying the contract's one stderr
+/// exception — the continuation envelope — across the RPC boundary for a caller
+/// that has nowhere to keep it. A caller that wants the tail refetches.
+public struct RemoteTranscriptParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Result of `remote.transcript` — Claude Code transcript JSONL, one record per
+/// line, exactly as the provider wrote it.
+public struct RemoteTranscriptResult: Codable, Sendable {
+    public let jsonl: String
+    public init(jsonl: String) { self.jsonl = jsonl }
 }
 
 /// Params for `remote.delete` — destroy a provider-hosted session
