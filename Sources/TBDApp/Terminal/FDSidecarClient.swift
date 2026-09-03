@@ -79,6 +79,17 @@ final class FDSidecarClient: @unchecked Sendable {
             Darwin.close(fd)
             return
         }
+        // Every `FDChannel.sendData` in this file writes to this fd, and the
+        // daemon can hang up while a frame is still queued on `sendQueue` —
+        // the `fd >= 0` guard passes because the receive loop has not torn
+        // down yet, and the write lands on a closed peer. `SO_NOSIGPIPE` is
+        // what turns that into the `EPIPE` those `catch` blocks log instead of
+        // a signal that kills the app. Set here rather than in `connect(path:)`
+        // because `adopt` is the one funnel every socket passes through
+        // (`connect` calls it, and so do the tests' `socketpair` ends), and
+        // per-socket rather than process-wide for the fork-inheritance reason
+        // spelled out on `SocketSIGPIPE`.
+        SocketSIGPIPE.suppress(on: fd)
         socketFD = fd
         lock.unlock()
 

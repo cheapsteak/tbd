@@ -243,6 +243,16 @@ actor DaemonClient {
         var recvTimeout = timeval(tv_sec: 1, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, socklen_t(MemoryLayout<timeval>.size))
 
+        // A daemon that dies (or is restarted) between this `connect` and the
+        // `Darwin.send` every caller does next leaves the write landing on a
+        // closed peer, which raises a process-killing SIGPIPE instead of the
+        // `EPIPE`/short-send that `sendRaw` and `subscribe` already report as
+        // `sendFailed`. Per-socket, not the daemon's process-wide
+        // `signal(SIGPIPE, SIG_IGN)`: see `SocketSIGPIPE` for why the app in
+        // particular must not set that disposition (SwiftTerm's `forkpty`
+        // children would inherit it).
+        SocketSIGPIPE.suppress(on: fd)
+
         return fd
     }
 
