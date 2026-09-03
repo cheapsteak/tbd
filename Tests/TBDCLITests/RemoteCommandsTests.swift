@@ -219,4 +219,113 @@ struct RemoteCommandsTests {
         #expect(text.contains("recall"))
         #expect(text.contains("agentbox"))
     }
+
+    // MARK: - delete: the caller-side policy
+
+    private let address = "agentbox/acme-app/probe"
+
+    /// Exited and clean: nothing to refuse.
+    @Test func deleteProceedsForAnExitedCleanSession() {
+        #expect(RemoteDeletePrecondition.refusal(
+            state: .exited, workspaceDirty: false, force: false, address: address) == nil)
+    }
+
+    /// The two refusals are named separately because they have different
+    /// remedies: one waits or stops the session, the other commits or pushes on
+    /// the provider's machine.
+    @Test func deleteRefusesARunningSessionByName() {
+        let refusal = RemoteDeletePrecondition.refusal(
+            state: .running, workspaceDirty: false, force: false, address: address)
+        #expect(refusal?.contains("still running") == true)
+        #expect(refusal?.contains(address) == true)
+        #expect(refusal?.contains("--force") == true)
+    }
+
+    @Test func deleteRefusesAStartingSession() {
+        #expect(RemoteDeletePrecondition.refusal(
+            state: .starting, workspaceDirty: false, force: false, address: address) != nil)
+    }
+
+    @Test func deleteRefusesADirtyWorkspaceByName() {
+        let refusal = RemoteDeletePrecondition.refusal(
+            state: .exited, workspaceDirty: true, force: false, address: address)
+        #expect(refusal?.contains("workspace_dirty") == true)
+        #expect(refusal?.contains("--force") == true)
+    }
+
+    /// `--force` overrides both, which is the whole reason the contract leaves
+    /// this policy to the caller.
+    @Test func forceOverridesBothRefusals() {
+        #expect(RemoteDeletePrecondition.refusal(
+            state: .running, workspaceDirty: true, force: true, address: address) == nil)
+    }
+
+    /// A session TBD has never mirrored has no state and no meta to read, and
+    /// `<provider>/<session-id>` must keep working against exactly that. The
+    /// provider is still the last word on whether the delete happens.
+    @Test func anUnmirroredSessionIsNotRefusedOnAbsentInformation() {
+        #expect(RemoteDeletePrecondition.refusal(
+            state: nil, workspaceDirty: false, force: false, address: address) == nil)
+    }
+
+    // MARK: - delete: the two outcomes
+
+    /// `deleted: false` is a success — there was nothing to destroy — and is
+    /// worded so nobody reads it as a deletion that happened.
+    @Test func anAlreadyGoneSessionIsNotReportedAsDeleted() {
+        let text = remoteDeleteConfirmation(
+            address: address, result: RemoteDeleteResult(id: "probe", deleted: false))
+        #expect(text.contains("already gone"))
+        #expect(!text.contains("deleted \(address)"))
+    }
+
+    @Test func aDeleteWithNoReceiptSaysOnlyThat() {
+        let text = remoteDeleteConfirmation(
+            address: address, result: RemoteDeleteResult(id: "probe", deleted: true))
+        #expect(text.contains("deleted \(address)"))
+        #expect(!text.contains("retained"))
+    }
+
+    @Test func aRetainingDeletePrintsTheKeyAndTheStatedExpiry() {
+        let expiry = ISO8601DateFormatter().date(from: "2026-10-01T00:00:00Z")!
+        let text = remoteDeleteConfirmation(
+            address: address,
+            result: RemoteDeleteResult(
+                id: "probe", deleted: true,
+                retained: RetainReceipt(key: "opaque", expiresAt: expiry, bytes: 12)))
+        #expect(text.contains("retained: opaque"))
+        #expect(text.contains("2026-10-01T00:00:00Z"))
+    }
+
+    /// An absent expiry is never rendered as permanence.
+    @Test func aRetainingDeleteWithNoStatedExpirySaysSo() {
+        let text = remoteDeleteConfirmation(
+            address: address,
+            result: RemoteDeleteResult(
+                id: "probe", deleted: true,
+                retained: RetainReceipt(key: "opaque", bytes: 12)))
+        #expect(text.contains("no expiry stated"))
+        #expect(!text.lowercased().contains("never"))
+        #expect(!text.lowercased().contains("forever"))
+    }
+
+    // MARK: - dismiss contrasts itself with delete
+
+    /// Without the contrast users reach for whichever they find first, and the
+    /// two are not interchangeable in either direction: one is a local tidy-up,
+    /// the other is irreversible.
+    @Test func dismissHelpSaysWhatItDoesNotDo() {
+        let discussion = RemoteDismiss.configuration.discussion
+        #expect(discussion.contains("delete"))
+        #expect(discussion.contains("local"))
+        #expect(RemoteDismiss.configuration.abstract.contains("changing nothing on the provider"))
+    }
+
+    /// And delete's own help points at the gate, since a refusal naming a flag
+    /// the user cannot find is not much of a refusal.
+    @Test func deleteHelpNamesTheFlagAndHowToLiftIt() {
+        let discussion = RemoteDelete.configuration.discussion
+        #expect(discussion.contains("remote_delete_enabled"))
+        #expect(discussion.contains("tbd remote allow-delete on"))
+    }
 }

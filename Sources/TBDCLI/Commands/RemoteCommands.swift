@@ -21,6 +21,7 @@ struct RemoteCommand: ParsableCommand {
             """,
         subcommands: [
             RemoteRetain.self, RemoteImport.self, RemoteRecall.self, RemoteRetained.self,
+            RemoteDelete.self, RemoteDismiss.self, RemoteAllowDelete.self,
         ]
     )
 }
@@ -420,4 +421,257 @@ func renderRetainedListing(_ transcripts: [RetainedTranscript]) -> String {
         ]))
     }
     return lines.joined(separator: "\n")
+}
+
+// MARK: - remote delete
+
+/// The caller-side policy in front of `delete`, as a pure function.
+///
+/// The contract has no `--force` and deliberately so: "refusing to destroy live
+/// or dirty work is caller policy", and a provider that second-guessed an
+/// explicit delete would leave the caller no way through. This is that policy,
+/// and it lives here rather than in the daemon for the same reason — the daemon
+/// serves the app too, and the app asks its own question with a dialog.
+///
+/// Returns the refusal to print, or nil to proceed.
+///
+/// **An unmirrored session is not refused.** `<provider>/<session-id>` is an
+/// address that must keep working against a session TBD has never listed, and
+/// there is then no `state` and no `meta` to read: refusing on absent
+/// information would make the address form useless exactly when it is most
+/// needed. The provider is still the last word on whether the delete happens.
+enum RemoteDeletePrecondition {
+    static func refusal(
+        state: RemoteProcessState?, workspaceDirty: Bool, force: Bool, address: String
+    ) -> String? {
+        guard !force else { return nil }
+        // Named separately rather than collapsed into one message, because the
+        // two have different remedies: one waits or stops the session, the
+        // other commits or pushes on the provider's machine.
+        if let state, state == .running || state == .starting {
+            return "Error: \(address) is still running. "
+                + "Stop it first, or re-run with --force to destroy it anyway."
+        }
+        if workspaceDirty {
+            return "Error: \(address) reports uncommitted work in its workspace "
+                + "(meta.workspace_dirty), which lives on the provider's machine. "
+                + "Re-run with --force to destroy it anyway."
+        }
+        return nil
+    }
+}
+
+/// What `--json` prints for a delete: the provider's own response shape with
+/// the provider name added, rather than a second shape a reader has to learn.
+///
+/// `retained` is present exactly when a receipt came back, and carries no
+/// `provider` of its own — the enclosing object already names it once, and a
+/// key repeated at two nesting levels invites a reader to wonder whether they
+/// can differ.
+struct RemoteDeleteOutput: Encodable {
+    struct Receipt: Encodable {
+        let key: String
+        let expiresAt: Date?
+        let bytes: Int
+
+        enum CodingKeys: String, CodingKey {
+            case key, bytes
+            case expiresAt = "expires_at"
+        }
+    }
+
+    let provider: String
+    let id: String
+    let deleted: Bool
+    let retained: Receipt?
+
+    init(provider: String, result: RemoteDeleteResult) {
+        self.provider = provider
+        self.id = result.id
+        self.deleted = result.deleted
+        self.retained = result.retained.map {
+            Receipt(key: $0.key, expiresAt: $0.expiresAt, bytes: $0.bytes)
+        }
+    }
+}
+
+/// The human sentence a delete prints, pure so the two outcomes can be read
+/// side by side.
+///
+/// They are worded differently on purpose. `deleted: false` means there was
+/// nothing to destroy — a success per the contract, and the same answer `rm -f`
+/// gives — and reporting it as a deletion would tell the user something
+/// happened that did not.
+func remoteDeleteConfirmation(address: String, result: RemoteDeleteResult) -> String {
+    guard result.deleted else {
+        return "\(address) was already gone"
+    }
+    guard let receipt = result.retained else {
+        return "deleted \(address)"
+    }
+    // An absent expiry is never rendered as permanence — the contract makes
+    // that a MUST NOT for callers.
+    let expiry = receipt.expiresAt.map { ", expires \(RetainReceipt.formatTimestamp($0))" }
+        ?? ", no expiry stated"
+    return "deleted \(address) (retained: \(receipt.key)\(expiry))"
+}
+
+struct RemoteDelete: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete",
+        abstract: "Destroy a provider-hosted session: end its compute and remove it permanently",
+        discussion: """
+            Unlike `dismiss`, this acts on the provider. The session's compute \
+            ends and its record is removed from the provider's inventory for \
+            good; nothing on this machine can put it back.
+
+            Gated by the daemon's `remote_delete_enabled` flag, which ships off. \
+            Turn it on with `tbd remote allow-delete on`.
+
+            With --retain the provider stores the transcript first and the key is \
+            printed, so the conversation survives the session. Without it, \
+            nothing survives. --retain needs the provider to declare `retain` as \
+            well as `delete`.
+
+            Refuses without --force when the session is running or reports \
+            uncommitted work, naming which.
+
+            <session> accepts a worktree name, a TBD UUID, or <provider>/<session-id>.
+            """
+    )
+
+    @Argument(help: "Worktree name, TBD UUID, or <provider>/<session-id>")
+    var session: String
+
+    @Flag(name: .long, help: "Retain the transcript before destroying the session")
+    var retain = false
+
+    @Flag(name: .long, help: "Destroy a running session, or one with uncommitted work")
+    var force = false
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        let client = SocketClient()
+        let fleet = try readRemoteFleet(client: client)
+        guard let target = RemoteSessionRef.resolve(
+            session, sessions: fleet.sessions, worktrees: fleet.worktrees) else {
+            remoteNote("Error: could not resolve '\(session)' to a remote session")
+            throw ExitCode.failure
+        }
+        let address = "\(target.provider)/\(target.sessionID)"
+        let capabilities = fleet.capabilities(of: target.provider)
+        guard capabilities.contains("delete") else {
+            remoteNote(remoteMissingCapability("delete", provider: target.provider))
+            throw ExitCode.failure
+        }
+        // The contract makes --retain valid only where `retain` is declared, so
+        // this is refused here rather than sent and hoped for: a provider that
+        // ignored the flag would destroy a session the caller believed was
+        // being preserved.
+        if retain, !capabilities.contains("retain") {
+            remoteNote(remoteMissingCapability("retain", provider: target.provider))
+            throw ExitCode.failure
+        }
+        let mirrored = fleet.sessions.first {
+            $0.provider == target.provider && $0.payload.id == target.sessionID
+        }
+        if let refusal = RemoteDeletePrecondition.refusal(
+            state: mirrored?.payload.state,
+            workspaceDirty: mirrored?.payload.reportsDirtyWorkspace ?? false,
+            force: force, address: address) {
+            remoteNote(refusal)
+            throw ExitCode.failure
+        }
+        let result = try client.call(
+            method: RPCMethod.remoteDelete,
+            params: RemoteDeleteParams(
+                provider: target.provider, sessionID: target.sessionID, retain: retain),
+            resultType: RemoteDeleteResult.self)
+        if json {
+            printJSON(RemoteDeleteOutput(provider: target.provider, result: result))
+            return
+        }
+        // The key goes to stdout on its own, as it does for `retain`, so
+        // `KEY=$(tbd remote delete my-lane --retain)` composes; everything else
+        // is stderr.
+        remoteNote(remoteDeleteConfirmation(address: address, result: result))
+        if let key = result.retained?.key { print(key) }
+    }
+}
+
+// MARK: - remote dismiss
+
+struct RemoteDismiss: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "dismiss",
+        abstract: "Hide a session from TBD's own lists, changing nothing on the provider",
+        discussion: """
+            Dismiss is local. It marks TBD's mirror row so the session stops \
+            appearing in the sidebar and in `tbd remote list`, and that is all \
+            it does: the session, its compute and its record are untouched on \
+            the provider, and another machine running TBD still sees it.
+
+            **This is not `delete`.** `tbd remote delete` ends the session's \
+            compute and removes it from the provider permanently. Reach for \
+            dismiss when a finished session is in your way; reach for delete \
+            when you want it gone.
+
+            <session> accepts a worktree name, a TBD UUID, or <provider>/<session-id>.
+            """
+    )
+
+    @Argument(help: "Worktree name, TBD UUID, or <provider>/<session-id>")
+    var session: String
+
+    mutating func run() async throws {
+        let client = SocketClient()
+        let fleet = try readRemoteFleet(client: client)
+        guard let target = RemoteSessionRef.resolve(
+            session, sessions: fleet.sessions, worktrees: fleet.worktrees) else {
+            remoteNote("Error: could not resolve '\(session)' to a remote session")
+            throw ExitCode.failure
+        }
+        // No capability check: dismiss invokes no provider verb. It is the one
+        // removal gesture that works on every provider, which is exactly why
+        // its help has to say what it does not do.
+        try client.callVoid(
+            method: RPCMethod.remoteDismiss,
+            params: RemoteDismissParams(provider: target.provider, sessionID: target.sessionID))
+        print("Dismissed \(target.provider)/\(target.sessionID) from TBD's lists.")
+    }
+}
+
+// MARK: - the delete gate
+
+struct RemoteAllowDelete: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "allow-delete",
+        abstract: "Enable or disable `tbd remote delete` (default off)",
+        discussion: """
+            The soak switch for the one verb whose effect nothing on this \
+            machine can undo. Off — the shipped default — every delete is \
+            refused, on both the CLI and the app's menus.
+
+            Turning it off refuses the next delete. It cannot recall one already \
+            made.
+            """
+    )
+
+    @Argument(help: "on | off")
+    var state: String
+
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetRemoteDeleteEnabled,
+            params: ConfigSetRemoteDeleteEnabledParams(enabled: enabled))
+        print("Remote session delete \(enabled ? "enabled" : "disabled").")
+    }
 }
