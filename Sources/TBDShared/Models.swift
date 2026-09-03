@@ -2566,3 +2566,78 @@ public struct TabState: Codable, Sendable, Equatable, Identifiable {
         self.createdAt = createdAt
     }
 }
+
+// MARK: - Retained transcripts
+
+/// TBD's own record of one transcript a provider has retained in its own
+/// durable store (`docs/remote-provider-contract.md` § `retain <id>` /
+/// `import`).
+///
+/// A key is opaque and provider-scoped, so `(provider, key)` is the identity.
+/// Everything else on the row exists to make a key findable again by a human:
+/// a key printed once and written down nowhere is a retained transcript nobody
+/// can ever recall.
+///
+/// Written by every path that obtains a key — `retain`, `import`, and
+/// `delete --retain`.
+public struct RetainedTranscript: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    /// The provider that issued `key`. A key means nothing to any other
+    /// provider and MUST NOT be presented to one.
+    public let provider: String
+    /// The opaque handle `recall` and `create`'s `seed` field take. Never
+    /// parsed, ordered, compared, or constructed.
+    public let key: String
+    /// When the provider said it intends to drop the record, or nil when it
+    /// stated nothing. **Nil is not permanence** — no surface may render it
+    /// as such.
+    public let expiresAt: Date?
+    /// The byte count the receipt carried. The only way a short `recall` is
+    /// detectable.
+    public let bytes: Int
+    /// The provider session the transcript came from, or nil for an `import`
+    /// of a conversation that never ran on this provider.
+    public let sourceSessionID: String?
+    /// The session's display title at retention time, kept because a title is
+    /// what a human recognises a conversation by and the session it names may
+    /// no longer exist.
+    public let sourceTitle: String?
+    public let resolvedRepoID: UUID?
+    /// The lane this transcript belongs to, when one was adopted — what lets a
+    /// deleted lane's Archived row offer Revive-as-reseed.
+    public let originWorktreeID: UUID?
+    /// Where a `recall` wrote the JSONL on this machine, or nil when nothing
+    /// has been recalled locally yet.
+    public let localPath: String?
+    public let createdAt: Date
+
+    public init(
+        id: UUID = UUID(), provider: String, key: String, expiresAt: Date? = nil,
+        bytes: Int, sourceSessionID: String? = nil, sourceTitle: String? = nil,
+        resolvedRepoID: UUID? = nil, originWorktreeID: UUID? = nil,
+        localPath: String? = nil, createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.provider = provider
+        self.key = key
+        self.expiresAt = expiresAt
+        self.bytes = bytes
+        self.sourceSessionID = sourceSessionID
+        self.sourceTitle = sourceTitle
+        self.resolvedRepoID = resolvedRepoID
+        self.originWorktreeID = originWorktreeID
+        self.localPath = localPath
+        self.createdAt = createdAt
+    }
+
+    /// Whether the provider's stated expiry has passed as of `date`.
+    ///
+    /// A row with no stated expiry is never expired here — absence is "no
+    /// claim", and treating it as expired would discard records the provider
+    /// may still hold. Takes the instant rather than reading a clock, so
+    /// expiry stays data (`Date`) rather than behavior (`Duration`).
+    public func hasExpired(asOf date: Date) -> Bool {
+        guard let expiresAt else { return false }
+        return expiresAt <= date
+    }
+}

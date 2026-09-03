@@ -715,3 +715,121 @@ public enum RemoteProviderRegistry {
         }
     }
 }
+
+// MARK: - The transcript exchange (docs/remote-provider-contract.md § retain / import / recall)
+
+/// The receipt `retain` and `import` both return, and the object `delete
+/// --retain` nests under `retained`.
+///
+/// One shape for all three paths, because the contract defines one: a key the
+/// provider issued, the byte count it stored, and — optionally — when it
+/// intends to drop the record.
+///
+/// **An absent `expiresAt` means the provider makes no claim, never "kept
+/// forever".** The contract states that as a MUST NOT for callers, so nothing
+/// downstream of this type may render `nil` as permanence; it renders as
+/// "no expiry stated".
+///
+/// `bytes` is REQUIRED and deliberately non-optional: it is the only way a
+/// caller detects a truncated `recall`, and a receipt without it cannot do the
+/// one job the field exists for. A payload missing it fails to decode rather
+/// than defaulting to zero, which would read as "nothing was stored" and make
+/// every later short-read check pass vacuously.
+public struct RetainReceipt: Codable, Sendable, Equatable {
+    public let key: String
+    /// Decoded from `expires_at`. Nil means the provider stated nothing.
+    public let expiresAt: Date?
+    public let bytes: Int
+
+    public init(key: String, expiresAt: Date? = nil, bytes: Int) {
+        self.key = key
+        self.expiresAt = expiresAt
+        self.bytes = bytes
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case key, bytes
+        case expiresAt = "expires_at"
+    }
+
+    /// Hand-written because `expires_at` arrives as an RFC 3339 string on the
+    /// wire while `JSONDecoder`'s default date strategy reads a number of
+    /// seconds. Every other contract type sidesteps this by keeping its
+    /// timestamps as `String` (`RemoteSessionPayload.createdAt`); this one
+    /// cannot, because expiry is compared against now rather than displayed.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        key = try c.decode(String.self, forKey: .key)
+        bytes = try c.decode(Int.self, forKey: .bytes)
+        if let raw = try c.decodeIfPresent(String.self, forKey: .expiresAt) {
+            // A value that is present but unparseable reads as no claim — the
+            // same degradation rule the Session object applies to a wrong-typed
+            // field, and strictly safer than inventing an instant: a bogus
+            // expiry in the past would disable Revive on a live record.
+            expiresAt = Self.parseTimestamp(raw)
+        } else {
+            expiresAt = nil
+        }
+    }
+
+    /// Re-emits `expires_at` as RFC 3339, so a receipt survives a round trip
+    /// through this type unchanged in meaning.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(key, forKey: .key)
+        try c.encode(bytes, forKey: .bytes)
+        if let expiresAt {
+            try c.encode(Self.formatTimestamp(expiresAt), forKey: .expiresAt)
+        }
+    }
+
+    /// Fractional seconds first, then plain: `ISO8601DateFormatter` accepts one
+    /// or the other, never both, and providers emit both spellings.
+    /// `nonisolated(unsafe)` on read-only formatters follows
+    /// `TranscriptParser`'s precedent — the class is documented thread-safe
+    /// once configured.
+    nonisolated(unsafe) private static let fractionalFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    nonisolated(unsafe) private static let plainFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    public static func parseTimestamp(_ raw: String) -> Date? {
+        fractionalFormatter.date(from: raw) ?? plainFormatter.date(from: raw)
+    }
+
+    public static func formatTimestamp(_ date: Date) -> String {
+        plainFormatter.string(from: date)
+    }
+}
+
+/// The response `delete` returns (`docs/remote-provider-contract.md` §
+/// `delete <id> [--retain]`).
+///
+/// **Deliberately not a Session object.** Every other verb that changes a
+/// session returns one; this one must not, because the adoption path reads a
+/// session object as a session to track and would re-adopt the very session
+/// this response declares gone.
+///
+/// `deleted: false` is a success, not a failure: deleting an unknown or
+/// already-deleted id is idempotent and exits 0.
+public struct RemoteDeleteResult: Codable, Sendable, Equatable {
+    public let id: String
+    public let deleted: Bool
+    /// Present exactly when `--retain` was passed. Retention is never implied
+    /// by capability presence, so a caller that did not ask for storage must
+    /// never find a receipt here.
+    public let retained: RetainReceipt?
+
+    public init(id: String, deleted: Bool, retained: RetainReceipt? = nil) {
+        self.id = id
+        self.deleted = deleted
+        self.retained = retained
+    }
+}

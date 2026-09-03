@@ -195,3 +195,68 @@ import Foundation
     let path = TBDConstants.notesPath(worktreeID: wtID, environment: ["TBD_HOME": "/tmp/tbd-notes"])
     #expect(path == "/tmp/tbd-notes/worktrees/AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE/notes.md")
 }
+
+/// `~/tbd/transcripts/<provider>/<key>.jsonl` — where a `recall` lands.
+///
+/// Env dictionaries throughout, for the reason `ConfigDirEnvOverrideTests`
+/// gives: an unserialized `setenv` in this target races every concurrently
+/// running suite in the same process.
+@Suite struct RetainedTranscriptPathTests {
+    private let env = ["TBD_HOME": "/tmp/tbd-transcripts"]
+
+    @Test func transcriptsDirFollowsTBDHome() {
+        #expect(TBDConstants.retainedTranscriptsDir(environment: env).path
+            == "/tmp/tbd-transcripts/transcripts")
+    }
+
+    @Test func transcriptsDirFallsBackToHomeTbdWhenKeyAbsent() {
+        let path = TBDConstants.retainedTranscriptsDir(environment: [:]).path
+        #expect(path.contains(FileManager.default.homeDirectoryForCurrentUser.path))
+        #expect(path.hasSuffix("/tbd/transcripts"))
+    }
+
+    @Test func ordinaryKeyLandsUnderItsProvider() {
+        let url = TBDConstants.retainedTranscriptPath(
+            provider: "agentbox", key: "abc-123", environment: env)
+        #expect(url.path == "/tmp/tbd-transcripts/transcripts/agentbox/abc-123.jsonl")
+    }
+
+    /// A key is opaque and may contain anything, including a path separator.
+    /// It must stay one filename rather than becoming a directory tree.
+    @Test func aKeyWithSeparatorsStaysOneComponent() {
+        let url = TBDConstants.retainedTranscriptPath(
+            provider: "agentbox", key: "a/b/c", environment: env)
+        #expect(url.path == "/tmp/tbd-transcripts/transcripts/agentbox/a%2Fb%2Fc.jsonl")
+        #expect(url.deletingLastPathComponent().path == "/tmp/tbd-transcripts/transcripts/agentbox")
+        #expect(url.pathComponents.count
+            == TBDConstants.retainedTranscriptsDir(environment: env).pathComponents.count + 2)
+    }
+
+    /// The traversal case the escaping exists for: neither `.` nor `..` may
+    /// survive as a relative path component.
+    @Test func dotAndDotDotAreEscapedRatherThanTraversing() {
+        let dotdot = TBDConstants.retainedTranscriptPath(
+            provider: "..", key: "..", environment: env)
+        #expect(dotdot.path == "/tmp/tbd-transcripts/transcripts/%2E%2E/%2E%2E.jsonl")
+        let dot = TBDConstants.retainedTranscriptPath(
+            provider: "agentbox", key: ".", environment: env)
+        #expect(dot.path == "/tmp/tbd-transcripts/transcripts/agentbox/%2E.jsonl")
+    }
+
+    /// Injective: two distinct keys can never name one file. `%` is itself
+    /// escaped, which is what rules out the collision a naive escaper has.
+    @Test func escapingIsInjectiveAcrossPercentSequences() {
+        let literal = TBDConstants.retainedTranscriptPath(
+            provider: "p", key: "a%2Fb", environment: env)
+        let separator = TBDConstants.retainedTranscriptPath(
+            provider: "p", key: "a/b", environment: env)
+        #expect(literal.path != separator.path)
+        #expect(literal.path == "/tmp/tbd-transcripts/transcripts/p/a%252Fb.jsonl")
+    }
+
+    @Test func spacesAndUnicodeAreEncoded() {
+        let url = TBDConstants.retainedTranscriptPath(
+            provider: "agentbox", key: "fix flaky CI", environment: env)
+        #expect(url.path == "/tmp/tbd-transcripts/transcripts/agentbox/fix%20flaky%20CI.jsonl")
+    }
+}
