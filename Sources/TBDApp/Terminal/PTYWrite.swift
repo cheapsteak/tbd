@@ -31,11 +31,28 @@ enum PTYWrite {
         /// `false`, the daemon rewrites the payload itself, and the session
         /// sees it exactly once.
         case nothingWritten
-        /// A prefix went and the rest did not. Reported as a failure, so the
-        /// daemon rewrites the whole payload on top of the prefix — which is
-        /// visibly wrong rather than quietly truncated, and that is the
-        /// deliberate side of the fork this design takes everywhere: a visible
-        /// duplicate beats an invisible loss.
+        /// A prefix went and the rest did not. The caller reports it as a
+        /// failure — and what that buys today is less than it looks.
+        ///
+        /// The intent is that the daemon rewrites the whole payload on top of
+        /// the prefix: visibly doubled rather than quietly truncated, the
+        /// deliberate side of the fork this design takes everywhere. **The
+        /// daemon usually cannot do that**, and least of all in the state this
+        /// case arises in. A short write happens while a viewer is attached
+        /// and its child is not draining; an acknowledged attach has already
+        /// released the daemon's reader and closed its descriptor, so
+        /// `HolderInjectionCourier`'s fallback finds nothing to write to and
+        /// answers `.notDelivered`. What is actually left behind is a
+        /// truncated fragment on the session and a transport error at the
+        /// caller — the duplicate-versus-loss fork resolved, here, on the loss
+        /// side.
+        ///
+        /// The behavior stands rather than being patched because whether the
+        /// daemon can rewrite is the descriptor question — whether it keeps a
+        /// **write-only** dup across an attach — and that is a human decision
+        /// already filed. Decided one way, the paragraph above becomes true as
+        /// written and nothing here changes; decided the other, this is where
+        /// the honest resolution goes.
         case partial(written: Int)
         /// The descriptor rejected the write outright (`EIO` on a pty whose
         /// child is gone, `EBADF`, …). Nothing was written.

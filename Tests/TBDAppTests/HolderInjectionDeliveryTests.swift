@@ -1,5 +1,7 @@
+import AppKit
 import Darwin
 import Foundation
+import SwiftTerm
 import TBDShared
 import Testing
 
@@ -38,6 +40,40 @@ struct HolderInjectionDeliveryTests {
             deadline -= 1
         }
         return frames
+    }
+
+    /// Whatever `fd` has for us right now, after a short bounded poll. Used
+    /// both to read what a panel wrote and to establish that it wrote nothing.
+    private func readAvailable(from fd: Int32, within milliseconds: Int32 = 100) -> Data {
+        var out = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        var remaining = milliseconds
+        while remaining > 0 {
+            var watched = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            guard poll(&watched, 1, 10) > 0 else { remaining -= 10; continue }
+            let read = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+            if read <= 0 { break }
+            out.append(contentsOf: buffer[0..<read])
+            break
+        }
+        return out
+    }
+
+    /// An outer frame carrying a type byte no `SidecarFrameType` case claims.
+    ///
+    /// Hand-built because `SidecarFrameCodec.encode` takes the enum, and the
+    /// enum is precisely what a forward-compatible peer does not have: the
+    /// case under test is a byte from a newer daemon, not one of ours.
+    private func rawFrame(type: UInt8, payload: Data) -> Data {
+        var out = Data(capacity: 5 + payload.count)
+        let length = UInt32(1 + payload.count)
+        out.append(UInt8(length & 0xff))
+        out.append(UInt8((length >> 8) & 0xff))
+        out.append(UInt8((length >> 16) & 0xff))
+        out.append(UInt8((length >> 24) & 0xff))
+        out.append(type)
+        out.append(payload)
+        return out
     }
 
     // MARK: - The frame in, the ack out
@@ -95,6 +131,38 @@ struct HolderInjectionDeliveryTests {
         #expect(ack == SidecarInjectionAck(injectionID: injectionID, written: false))
     }
 
+    /// The forward-compat seam the injection frames rely on, exercised where
+    /// it actually lives: the **receive loop's** `SidecarFrameType(rawValue:)`
+    /// guard. The scanner never reads the type byte, so a scanner-level test
+    /// of this property asserts nothing — it is type-agnostic by construction
+    /// and no mutation can redden it.
+    ///
+    /// The unknown frame and the injection go out in one write, so a loop that
+    /// treated an unrecognized type as corruption (breaking, or tearing the
+    /// connection down) would drop the injection sitting behind it and this
+    /// test would time out by name.
+    @Test("an unknown frame type is skipped by the receive loop, which keeps reading")
+    func unknownFrameTypeIsSkippedByTheReceiveLoop() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let injectionID = UUID()
+        let received = LockedBox<UUID?>(nil)
+        client.setOnInjection { header, _ in received.value = header.injectionID }
+
+        var wire = rawFrame(type: 99, payload: Data([0xde, 0xad, 0xbe, 0xef]))
+        wire += try SidecarFrameCodec.encodeInjection(
+            header: SidecarInjectionHeader(terminalID: UUID(), injectionID: injectionID),
+            bytes: Data("hi\r".utf8))
+        try FDChannel.sendData(wire, over: daemonSide)
+
+        try await waitFor("the injection queued behind an unknown frame to reach the handler") {
+            received.value == injectionID
+        }
+    }
+
     // MARK: - Routing to the panel that owns the session
 
     @MainActor
@@ -137,6 +205,182 @@ struct HolderInjectionDeliveryTests {
     func unclaimedSessionReportsNobody() async {
         let router = TerminalInjectionRouter()
         #expect(await router.deliver(terminalID: UUID(), bytes: Data("hi".utf8)) == nil)
+    }
+
+    /// The **production** guard, reached on the closure a real panel
+    /// registered.
+    ///
+    /// `mismatchedTargetIsRefusedByThePanel` above builds its own closure and
+    /// therefore asserts on itself: delete
+    /// `guard let self, target == self.panelID` from `startHolderClient` and it
+    /// stays green. Nothing in production can call a panel's closure with a
+    /// foreign target either — `TerminalInjectionRouter.deliver` looks an entry
+    /// up by id and passes that same id — so the guard is reachable only
+    /// through `registeredHandlerForTesting`, which hands back the closure the
+    /// panel actually installed.
+    ///
+    /// The positive control on the same closure is what makes the refusal
+    /// evidence: the panel's `dup` here is a live socket, so an injection
+    /// addressed to it really is written and really is read back off the other
+    /// end. Without that, "returned false and wrote nothing" would also be the
+    /// reading for a panel with no write destination at all.
+    @MainActor
+    @Test("the panel's own registered handler refuses an injection addressed elsewhere")
+    func registeredPanelHandlerRefusesAForeignTarget() async throws {
+        let panel = try await makeHolderPanel()
+        defer { panel.tearDown() }
+        let handler = try #require(
+            panel.state.terminalInjections.registeredHandlerForTesting(
+                terminalID: panel.terminalID),
+            "the panel must claim its session once the attach is live")
+
+        let refused = await handler(UUID(), Data("stranger\r".utf8))
+
+        #expect(refused == false, "a frame addressed to another session must be refused")
+        #expect(readAvailable(from: panel.sessionEnd).isEmpty,
+                "the refused bytes must not reach this session's pty")
+
+        // Positive control, same closure: what IS addressed here goes out.
+        let accepted = await handler(panel.terminalID, Data("mine\r".utf8))
+
+        #expect(accepted == true)
+        #expect(readAvailable(from: panel.sessionEnd) == Data("mine\r".utf8))
+    }
+
+    /// R20's rule, applied to the other direction: **one line per failing
+    /// episode, not one per keystroke.**
+    ///
+    /// Reached by the route a user actually reaches it by — after the
+    /// session's child exits, every write to the master returns `EIO` and
+    /// nothing lowers `holderWriteFD`, because the reader closes its own
+    /// descriptor on EOF and never calls `stopHolderReader`. A read-only
+    /// descriptor stands in for that: every write fails, forever, for a panel
+    /// that is otherwise live.
+    ///
+    /// The assertion is on the *count of transitions*, not on a state bit: an
+    /// unconditional log leaves the bit identical while the count climbs once
+    /// per write, so only the count can tell the two apart.
+    @MainActor
+    @Test("a permanently failing pty logs once per episode, not once per write")
+    func failingHolderWritesAreLoggedOncePerEpisode() async throws {
+        let readOnly = Darwin.open("/dev/null", O_RDONLY)
+        try #require(readOnly >= 0)
+        let panel = try await makeHolderPanel(vending: readOnly)
+        defer { panel.tearDown() }
+        let handler = try #require(
+            panel.state.terminalInjections.registeredHandlerForTesting(
+                terminalID: panel.terminalID))
+
+        for _ in 0..<3 {
+            #expect(await handler(panel.terminalID, Data("x".utf8)) == false,
+                    "a write to an unwritable descriptor must be reported unwritten")
+        }
+
+        #expect(panel.coordinator.holderWriteFailureLogsForTesting == 1, """
+            every failing write logged; on a session whose child has exited that is one \
+            `.error` per keystroke for as long as somebody keeps typing
+            """)
+    }
+
+    /// The positive control for the latch: a panel whose writes succeed logs
+    /// nothing at all, so "1" above is a transition rather than a constant.
+    @MainActor
+    @Test("a working pty logs no write failures")
+    func workingHolderWritesLogNothing() async throws {
+        let panel = try await makeHolderPanel()
+        defer { panel.tearDown() }
+        let handler = try #require(
+            panel.state.terminalInjections.registeredHandlerForTesting(
+                terminalID: panel.terminalID))
+
+        #expect(await handler(panel.terminalID, Data("x".utf8)) == true)
+
+        #expect(panel.coordinator.holderWriteFailureLogsForTesting == 0)
+    }
+
+    /// A holder-backed panel wired the way production wires one, attached to a
+    /// socket pair standing in for the vended pty: the panel gets one end (and
+    /// `dup`s it to write through), the test holds the other and plays the
+    /// session.
+    @MainActor
+    private struct HolderPanel {
+        let state: AppState
+        let coordinator: TerminalPanelRepresentable.Coordinator
+        let view: TBDTerminalView
+        let terminalID: UUID
+        /// The session's end of the pair. The panel's end belongs to the
+        /// reader, which closes it on its way out.
+        let sessionEnd: Int32
+        let defaults: UserDefaults
+        let suiteName: String
+
+        func tearDown() {
+            coordinator.cleanup()
+            Darwin.close(sessionEnd)
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+    }
+
+    /// Stands in for the daemon's two attach RPCs, handing over a descriptor
+    /// the test can read.
+    private struct StubAttach: HolderAttaching {
+        let attachment: HolderAttachment
+
+        func attach(
+            worktreeID: UUID, paneID: String, terminalID: UUID
+        ) async throws -> HolderAttachment { attachment }
+
+        func ready(
+            worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64
+        ) async throws {}
+    }
+
+    @MainActor
+    private func makeHolderPanel(vending: Int32? = nil) async throws -> HolderPanel {
+        // `vending` overrides the socket pair for a panel whose writes must
+        // fail; `sessionEnd` is then a descriptor nothing ever writes to.
+        let (sessionEnd, paired) = try makeSocketPair()
+        let vended = vending ?? paired
+        if vending != nil { Darwin.close(paired) }
+        // The real vend is a `dup` of a pty the daemon opened `O_NONBLOCK`, and
+        // the flag rides the dup; a reader that blocks here would spin.
+        _ = fcntl(vended, F_SETFL, fcntl(vended, F_GETFL, 0) | O_NONBLOCK)
+
+        let worktreeID = UUID()
+        let terminalID = UUID()
+        let state = AppState()
+        // A holder row carries empty tmux coordinates by construction.
+        state.terminals[worktreeID] = [Terminal(
+            id: terminalID,
+            worktreeID: worktreeID,
+            tmuxWindowID: "",
+            tmuxPaneID: "",
+            label: "Shell",
+            kind: .shell,
+            transport: .holder
+        )]
+
+        // Isolated defaults: `AppearanceSettings` must never read or write the
+        // developer's real TBDApp.plist.
+        let suiteName = "TBDAppTests.HolderInjectionDelivery.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        let view = TBDTerminalView(
+            frame: CGRect(x: 0, y: 0, width: 600, height: 300),
+            font: TBDTerminalView.defaultMonospaceFont,
+            appearance: AppearanceSettings(defaults: defaults))
+
+        let coordinator = TerminalPanelRepresentable.Coordinator()
+        coordinator.appState = state
+        coordinator.panelID = terminalID
+        coordinator.holderAttachClient = StubAttach(
+            attachment: HolderAttachment(
+                ptyFD: vended, generation: 7, snapshotPreamble: Data()))
+
+        await coordinator.startHolderClient(terminalView: view)
+
+        return HolderPanel(
+            state: state, coordinator: coordinator, view: view, terminalID: terminalID,
+            sessionEnd: sessionEnd, defaults: defaults, suiteName: suiteName)
     }
 
     /// A torn-down panel must not withdraw a successor's claim: rebuilding a
@@ -185,25 +429,54 @@ struct HolderInjectionDeliveryTests {
         let outcome = PTYWrite.all(payload, to: writeEnd, budgetMilliseconds: 5)
 
         guard case .partial(let written) = outcome else {
-            Issue.record("expected a partial write, got \(outcome)")
+            // Recorded as an Error, not a String: only `Issue.record(some
+            // Error)` puts the text on the primary failure line, and here the
+            // text — what the write actually reported — is the whole finding.
+            Issue.record(UnexpectedWriteOutcome(expected: "partial", actual: outcome))
             return
         }
         #expect(written > 0)
         #expect(written < payload.count)
     }
 
-    @Test("a closed descriptor is a failure, and an absent one writes nothing")
+    /// The unwritable descriptor is a **live, read-only** fd this test owns,
+    /// never a number it just closed — and that is not fussiness.
+    ///
+    /// All test targets compile into one process and Swift Testing runs suites
+    /// in parallel, so a number closed here can be handed straight to a
+    /// concurrent test's socket, file or pipe before the write below runs. The
+    /// earlier version of this test wrote `"x"` into that stranger's
+    /// descriptor and read back `.complete` — a flake and a cross-test
+    /// corruption source in one. An fd held open for the duration cannot be
+    /// reissued, and `write(2)` against `O_RDONLY` is `EBADF` just the same.
+    @Test("an unwritable descriptor is a failure, and an absent one writes nothing")
     func deadDescriptorsAreReported() throws {
-        let (readEnd, writeEnd) = try makeSocketPair()
-        Darwin.close(readEnd)
-        Darwin.close(writeEnd)
+        let readOnly = Darwin.open("/dev/null", O_RDONLY)
+        try #require(readOnly >= 0)
+        defer { Darwin.close(readOnly) }
 
-        guard case .failed = PTYWrite.all(Data("x".utf8), to: writeEnd) else {
-            Issue.record("a closed descriptor must report a failure")
+        let outcome = PTYWrite.all(Data("x".utf8), to: readOnly)
+        guard case .failed = outcome else {
+            Issue.record(UnexpectedWriteOutcome(expected: "failed", actual: outcome))
             return
         }
         #expect(PTYWrite.all(Data("x".utf8), to: -1) == .nothingWritten)
         #expect(PTYWrite.all(Data(), to: -1) == .complete, "an empty write asks nothing of the fd")
+    }
+}
+
+/// What `PTYWrite.all` was supposed to report, and what it did.
+///
+/// An `Error` rather than a string so `Issue.record` puts it on the primary
+/// failure line: `#expect(_, "…")` and `Issue.record(String)` both demote the
+/// message to a trailing line CI summaries drop, and here the outcome IS the
+/// finding.
+private struct UnexpectedWriteOutcome: Error, CustomStringConvertible {
+    let expected: String
+    let actual: PTYWrite.Outcome
+
+    var description: String {
+        "PTYWrite.all must report \(expected), reported \(actual)"
     }
 }
 

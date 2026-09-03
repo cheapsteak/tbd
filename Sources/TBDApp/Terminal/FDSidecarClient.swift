@@ -253,7 +253,8 @@ final class FDSidecarClient: @unchecked Sendable {
                 SidecarInjectionAck(injectionID: injectionID, written: written))
         } catch {
             logger.error("""
-                sidecar: failed to encode injection ack for                 \(injectionID.uuidString, privacy: .public), dropping
+                sidecar: failed to encode injection ack for \
+                \(injectionID.uuidString, privacy: .public), dropping
                 """)
             return false
         }
@@ -262,7 +263,8 @@ final class FDSidecarClient: @unchecked Sendable {
             self.lock.lock(); let fd = self.socketFD; self.lock.unlock()
             guard fd >= 0 else {
                 self.logger.error("""
-                    sidecar: injection ack for \(injectionID.uuidString, privacy: .public)                     while disconnected, dropping
+                    sidecar: injection ack for \
+                    \(injectionID.uuidString, privacy: .public) while disconnected, dropping
                     """)
                 return
             }
@@ -353,7 +355,9 @@ final class FDSidecarClient: @unchecked Sendable {
         lock.lock(); let handler = injectionHandler; lock.unlock()
         guard let handler else {
             logger.error("""
-                sidecar: injection for terminal \(header.terminalID.uuidString, privacy: .public)                 arrived with no handler installed; answering it unwritten
+                sidecar: injection for terminal \
+                \(header.terminalID.uuidString, privacy: .public) arrived with no handler \
+                installed; answering it unwritten
                 """)
             sendInjectionAck(injectionID: header.injectionID, written: false)
             return

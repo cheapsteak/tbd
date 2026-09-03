@@ -49,6 +49,20 @@ final class TerminalInjectionRouter {
     /// Test-facing: how many sessions currently have a panel claiming them.
     var registrationCount: Int { entries.count }
 
+    /// Test-facing: the closure a panel actually registered for `terminalID`.
+    ///
+    /// Exists so a test can call the **production** delivery closure with a
+    /// target the panel does not own. Nothing in production can produce that
+    /// call — `deliver` looks an entry up by id and passes that same id as the
+    /// target — so without this seam the panel's own `target == panelID` check
+    /// is unreachable from a test, and a test that builds its own closure
+    /// instead only ever asserts on itself.
+    func registeredHandlerForTesting(
+        terminalID: UUID
+    ) -> (@MainActor (UUID, Data) async -> Bool)? {
+        entries[terminalID]?.deliver
+    }
+
     func register(
         terminalID: UUID, deliver: @escaping @MainActor (UUID, Data) async -> Bool
     ) -> Registration {

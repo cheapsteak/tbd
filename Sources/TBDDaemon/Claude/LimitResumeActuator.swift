@@ -75,8 +75,9 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// "Auto-resume failed — \(reason). Claude may still be parked at the
     /// limit screen."
     static let holderTransportRefusal =
-        "this session runs on the pty-holder transport, which has no key-send "
-        + "path yet, so nothing was typed"
+        "this session runs on the pty-holder transport, whose input path carries raw "
+        + "bytes and has no named-key table yet, so the Escape and Enter this rail "
+        + "sends cannot be expressed and nothing was typed"
     static let verifyPollInterval: Duration = .seconds(1)
     static let verifyPolls = 20   // ~20s window
 

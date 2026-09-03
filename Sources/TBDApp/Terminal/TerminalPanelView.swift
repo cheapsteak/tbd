@@ -473,6 +473,31 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// write halves are independent queues, and multiple writers to one
         /// master are ordinary.
         private var holderWriteFD: Int32 = -1
+
+        /// Whether the last write to `holderWriteFD` failed outright, so
+        /// `writeToHolderPTY`'s `.failed` diagnostic can be edge-triggered.
+        ///
+        /// The same shape, and for the same reason, as
+        /// `OutgoingInputQueue`'s `lastUserWriteReachedTransport` (R20): after
+        /// the session's child exits, every write returns `EIO` and nothing
+        /// lowers `holderWriteFD`, so an unconditional line is one `.error`
+        /// per keystroke. Starts `false` rather than optimistic-true because
+        /// the first failure on a fresh panel is genuinely news.
+        private var holderWriteIsFailing = false
+
+        /// Test-only: how many times `writeToHolderPTY` has *logged* a
+        /// `.failed` write.
+        ///
+        /// The count, not the bit, for the reason R20 established for
+        /// `userWriteOutcomeTransitionsForTesting`: an unconditional log
+        /// leaves `holderWriteIsFailing` looking identical while this climbs
+        /// once per keystroke, so the bit cannot discriminate the mutation
+        /// that matters. It is incremented inside the same guarded
+        /// straight-line region as the log, with no early return between them
+        /// — that co-location is what makes "logs" and "counts" the same
+        /// number, and moving either out of it silently stops this
+        /// discriminating.
+        private(set) var holderWriteFailureLogsForTesting = 0
         /// This panel's claim on its session's daemon injections, held for as
         /// long as it owns the pty.
         private var injectionRegistration: TerminalInjectionRouter.Registration?
@@ -781,7 +806,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             holderWriteFD = Darwin.dup(attachment.ptyFD)
             if holderWriteFD < 0 {
                 logger.error("""
-                    could not duplicate the pty for terminal \(self.panelID, privacy: .public)                     to write to (errno \(errno, privacy: .public)); this panel is read-only
+                    could not duplicate the pty for terminal \
+                    \(self.panelID, privacy: .public) to write to \
+                    (errno \(errno, privacy: .public)); this panel is read-only
                     """)
             }
             let holder = viewHolder
@@ -828,7 +855,21 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             injectionRegistration = appState.terminalInjections.register(
                 terminalID: panelID
             ) { [weak self] target, bytes in
-                guard let self, target == self.panelID else { return false }
+                guard let self else { return false }
+                guard target == self.panelID else {
+                    // `.fault`, and the level is the finding: a mismatch is an
+                    // INVARIANT violation — the daemon addressed a frame to a
+                    // session this panel does not own — while every other
+                    // refusal on this path ("written but nothing took it") is
+                    // an environment fact. At `.error` the two are one
+                    // undifferentiated stream in the log.
+                    logger.fault("""
+                        terminal \(self.panelID, privacy: .public) was handed an injection \
+                        addressed to \(target.uuidString, privacy: .public); refusing it — a \
+                        panel's registration and the session it attached to have diverged
+                        """)
+                    return false
+                }
                 return await self.outgoingQueue.enqueueInjection(bytes)
             }
             logger.info("holder attach live for terminal \(self.panelID, privacy: .public)")
@@ -1967,39 +2008,81 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// Write one chunk to this holder session's pty, and report whether
         /// all of it went.
         ///
-        /// **What a short write means here, decided rather than inherited.**
+        /// **What a short write means here, and what it costs today.**
         /// A pty master's input queue is small, so a multi-KiB injected prompt
         /// can legitimately take only a prefix; `PTYWrite.all` waits a few
         /// milliseconds for room and then gives up rather than parking the
-        /// main actor. A partial write is reported as a **failure**, which
-        /// makes the daemon rewrite the whole payload on top of the prefix
-        /// that already landed. That is deliberate and it is the ugly-but-right
-        /// side of this design's standing fork: a visibly duplicated (here,
-        /// visibly doubled) prompt is recoverable, a silently truncated one is
-        /// not. Reporting `true` for a prefix would be exactly the invisible
-        /// loss the injection path exists to prevent.
+        /// main actor. A partial write is reported as a **failure**, on the
+        /// reasoning that the daemon then rewrites the whole payload on top of
+        /// the prefix — visibly doubled rather than quietly truncated.
         ///
-        /// Only the partial case logs. "Nothing was written" needs no line of
-        /// its own — for user bytes `OutgoingInputQueue` already emits one
-        /// edge-triggered line per episode, and for an injection the return
-        /// value reaches the daemon, which is a stronger channel than a log.
-        /// A partial write is rare enough to be worth a line every time,
-        /// because it is what explains the duplicate that follows it.
+        /// **The daemon cannot rewrite in this state.** This panel is
+        /// attached, so the acknowledgement has already released the daemon's
+        /// reader and closed its descriptor, and `HolderInjectionCourier`'s
+        /// fail-open fallback answers `.notDelivered` instead of writing. So a
+        /// 6 KB prompt into a panel whose agent is momentarily not draining
+        /// leaves a **truncated fragment** in the composer while the caller is
+        /// told the send failed. Not silent — the caller is told and the
+        /// actuation row records it — but a loss, and the fork this design
+        /// takes everywhere resolved on the wrong side of itself.
+        ///
+        /// It is left this way on purpose. Whether the daemon can rewrite is
+        /// the descriptor question — whether it keeps a **write-only** dup
+        /// across an attach — which is a human decision already filed;
+        /// answered one way the reasoning above becomes true as written, and
+        /// changing the retry semantics here now would pre-empt it. Reporting
+        /// `true` for a prefix is not the alternative: that is the invisible
+        /// loss this path exists to prevent, with no error anywhere.
+        ///
+        /// Only the partial case logs every time. "Nothing was written"
+        /// needs no line of its own — for user bytes `OutgoingInputQueue`
+        /// already emits one edge-triggered line per episode, and for an
+        /// injection the return value reaches the daemon, which is a stronger
+        /// channel than a log. A partial write is rare enough to be worth a
+        /// line each time, because it is what explains the truncation that
+        /// follows it, and it is per-payload rather than per-keystroke anyway.
+        ///
+        /// **`.failed` is edge-triggered, and it has to be.** Once the child
+        /// exits, every write to the master returns `EIO` — and nothing lowers
+        /// `holderWriteFD`, because `HolderStreamReader.readLoop` closes its
+        /// own descriptor on EOF and never calls `stopHolderReader`. An
+        /// unconditional line there is one `.error` per keystroke for as long
+        /// as somebody keeps typing at a dead session, which is exactly the
+        /// per-keystroke logging this file warns against above and R20 built
+        /// the queue's own latch to avoid.
         private func writeToHolderPTY(_ data: Data) -> Bool {
             switch PTYWrite.all(data, to: holderWriteFD) {
             case .complete:
+                holderWriteIsFailing = false
                 return true
             case .nothingWritten:
+                // A full input queue, not a dead descriptor: the write path is
+                // alive, so the next `.failed` starts a new episode and logs.
+                holderWriteIsFailing = false
                 return false
             case .partial(let written):
+                holderWriteIsFailing = false
                 logger.error("""
-                    terminal \(self.panelID, privacy: .public): only \(written, privacy: .public)                     of \(data.count, privacy: .public) bytes reached the session's pty; reporting                     the write unwritten, so a daemon injection will be re-sent whole and may                     appear twice
+                    terminal \(self.panelID, privacy: .public): only \
+                    \(written, privacy: .public) of \(data.count, privacy: .public) bytes \
+                    reached the session's pty; reporting the write unwritten — the daemon \
+                    re-sends the payload whole if it still holds a descriptor for this pty, \
+                    and otherwise the session keeps the prefix
                     """)
                 return false
             case .failed(let code):
-                logger.error("""
-                    terminal \(self.panelID, privacy: .public): writing to the session's pty                     failed (errno \(code, privacy: .public))
-                    """)
+                // One line per episode, keyed on the transition rather than on
+                // the errno: a descriptor that has started failing keeps
+                // failing, and the interesting fact is when it began.
+                if !holderWriteIsFailing {
+                    holderWriteIsFailing = true
+                    holderWriteFailureLogsForTesting += 1
+                    logger.error("""
+                        terminal \(self.panelID, privacy: .public): writing to the session's \
+                        pty failed (errno \(code, privacy: .public)); further failures on this \
+                        descriptor are not logged until a write succeeds again
+                        """)
+                }
                 return false
             }
         }

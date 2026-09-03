@@ -75,6 +75,21 @@ struct HolderInjectionRoutingTests {
     private struct NoDescriptor: Error {}
     private struct SidecarGone: Error {}
 
+    /// What the courier was supposed to answer, and what it answered.
+    ///
+    /// An `Error` rather than a string so `Issue.record` puts it on the
+    /// primary failure line — `Issue.record(String)` demotes the message to a
+    /// trailing line CI summaries drop, and the delivery it actually returned
+    /// is the whole finding.
+    private struct UnexpectedDelivery: Error, CustomStringConvertible {
+        let expected: String
+        let actual: HolderInjectionCourier.Delivery
+
+        var description: String {
+            "the courier must report \(expected), reported \(actual)"
+        }
+    }
+
     // MARK: - The four the plan names, plus the one it conflates away
 
     @Test("A detached holder session is written directly")
@@ -204,13 +219,25 @@ struct HolderInjectionRoutingTests {
         #expect(harness.directWrites == [Data("prompt".utf8)])
     }
 
-    /// The honest statement of a gap this task does not close: while a viewer
-    /// owns the pty the daemon has released its reader and closed its
-    /// descriptor, so there is nothing for the fail-open branch to write to.
-    /// Nothing is lost *silently* — the caller is told, and
-    /// `performHolderSend` records a transport failure — but the fallback is
-    /// not yet a write. This test is what will fail, loudly and by name, when
-    /// the daemon keeps a write-only dup across an attach.
+    /// What this pins is narrower than the gap it describes: **a
+    /// `writeDirectly` failure is propagated as `.notDelivered`, with a reason
+    /// the caller can read, rather than swallowed**. The harness injects its
+    /// own throwing `writeDirectly`, so the daemon's real descriptor ownership
+    /// is not under test here and this test stays green whatever that
+    /// ownership becomes — it is not a tripwire for the gap.
+    ///
+    /// The gap itself: once a viewer has acknowledged an attach the daemon has
+    /// released its reader and closed its descriptor, so the fail-open branch
+    /// has nothing to write to. Nothing is lost *silently* — the caller is
+    /// told and `performHolderSend` records a transport failure — but the
+    /// fallback is not yet a write.
+    ///
+    /// **`Daemon.swift`'s `writeDirectly` closure is covered by no test.** The
+    /// registry-level fact it rests on — an acknowledged attach leaves the
+    /// daemon with no reader for that session — is pinned live, in
+    /// `HolderAttachHandoffTests` ("the daemon kept a reader for a session it
+    /// no longer reads"). That is the assertion a write-only dup across an
+    /// attach would have to be reconciled with; it is not this one.
     @Test("With no descriptor and no viewer answer, nothing is written and the caller is told")
     func fallbackWithNoDaemonDescriptorReportsFailure() async throws {
         let harness = Harness()
@@ -224,7 +251,10 @@ struct HolderInjectionRoutingTests {
         await clock.advanceWhenSuspended(by: .seconds(5))
 
         guard case .notDelivered(let reason) = await delivery.value else {
-            Issue.record("expected a reported failure, not a silent drop")
+            Issue.record(
+                UnexpectedDelivery(
+                    expected: "a reported failure, not a silent drop",
+                    actual: await delivery.value))
             return
         }
         #expect(reason.contains("nothing was typed"))
@@ -254,16 +284,70 @@ struct HolderInjectionRoutingTests {
         #expect(ack == SidecarInjectionAck(injectionID: header.injectionID, written: true))
     }
 
-    /// The forward-compat seam the new cases rely on: a peer that has never
-    /// heard of type 4 or 5 must skip the frame and keep reading, not desync.
-    @Test("An unknown frame type does not desync the scanner")
-    func unknownFrameTypeIsSkippedNotDesynced() {
+    /// The framing half of the forward-compat seam: an unknown type byte is
+    /// **returned to the caller**, not swallowed and not read as corruption,
+    /// so the receive loop is what gets to decide about it.
+    ///
+    /// A hand-built raw byte, because the enum is exactly what a peer from the
+    /// future does not have — and because encoding two *known* types asserts
+    /// nothing here at all: `append` never reads the type byte, so the scanner
+    /// is type-agnostic by construction. The other half, the loop that skips
+    /// the frame and keeps reading, is pinned in
+    /// `HolderInjectionDeliveryTests.unknownFrameTypeIsSkippedByTheReceiveLoop`
+    /// — it lives in `FDSidecarClient.receiveLoop` and
+    /// `FDVendingServer.startReceiveThread`, and no scanner-level test can
+    /// reach it.
+    @Test("An unknown frame type is handed back by the scanner rather than desyncing it")
+    func unknownFrameTypeIsReturnedNotDesynced() {
         let scanner = SidecarFrameScanner()
-        let frames = scanner.append(
-            SidecarFrameCodec.encode(type: .injection, payload: Data([0x01, 0x02]))
-                + SidecarFrameCodec.encode(type: .fdVend, payload: Data([0x03])))
+        // [UInt32 LE length = 1 + payload][type 99][payload]
+        var wire = Data([0x03, 0x00, 0x00, 0x00, 99, 0x01, 0x02])
+        wire += SidecarFrameCodec.encode(type: .injection, payload: Data([0x03]))
+
+        let frames = scanner.append(wire)
 
         #expect(frames.count == 2)
+        #expect(frames.first?.type == 99,
+                "an unknown type must reach the caller, which is what decides to skip it")
+        #expect(frames.first?.payload == Data([0x01, 0x02]))
         #expect(!scanner.isDesynced)
+    }
+
+    /// The cap the injection path had none of. Over it, nothing is framed and
+    /// nothing is written: a frame past the app scanner's 4 MiB hard cap is
+    /// read there as corruption and closes the sidecar, which takes every
+    /// pane's control-mode input with it.
+    ///
+    /// The at-cap control on the same path is what makes the refusal evidence
+    /// rather than a panel that refuses everything.
+    @Test("An injection past the frame cap is refused, and one at the cap is not")
+    func oversizeInjectionIsRefusedAtTheCap() async throws {
+        let harness = Harness()
+        harness.attachment = 7
+        let courier = harness.makeCourier(clock: TestClock())
+        let overCap = Data(
+            repeating: 0x61, count: HolderInjectionCourier.maxInjectionBytes + 1)
+
+        let outcome = await courier.deliver(terminalID: UUID(), bytes: overCap)
+
+        guard case .notDelivered(let reason) = outcome else {
+            Issue.record(
+                UnexpectedDelivery(expected: "a refusal naming the cap", actual: outcome))
+            return
+        }
+        #expect(reason.contains("nothing was typed"))
+        #expect(harness.frames.isEmpty, "an over-cap payload must never reach the sidecar")
+        #expect(harness.directWrites.isEmpty)
+
+        // At the cap, the same call frames and sends as usual.
+        let atCap = Data(repeating: 0x61, count: HolderInjectionCourier.maxInjectionBytes)
+        let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: atCap) }
+        try await waitFor("the at-cap injection to reach the sidecar") {
+            harness.frames.count == 1
+        }
+        let injection = try harness.decodeOnlyInjection()
+        courier.acknowledge(
+            SidecarInjectionAck(injectionID: injection.header.injectionID, written: true))
+        #expect(await delivery.value == .viewerWrote)
     }
 }

@@ -115,6 +115,24 @@ actor HolderInjectionCourier {
     private let ackDeadline: Duration
     private let clock: any Clock<Duration>
 
+    /// The largest injection this courier will put on the sidecar — the
+    /// same cap `sendInput` and `sendPaste` enforce, for two reasons that are
+    /// both worse than the send being refused.
+    ///
+    /// The app's frame scanner reads a declared length past its 4 MiB hard cap
+    /// as corruption: it sets `isDesynced` and the receive loop closes the
+    /// sidecar, which takes control-mode input down **app-wide** until the app
+    /// reconnects — and a sidecar-only death with the RPC socket intact has no
+    /// recovery at all. Separately, `FDVendingServer.sendFrame` is a
+    /// synchronous blocking send *on the actor*, so a multi-MiB payload to a
+    /// slow app parks the whole fd-vending actor for every session.
+    ///
+    /// Nothing composes a send this large today — reachability from the RPC
+    /// front end is unconfirmed — which is the reason to have the cap rather
+    /// than a reason to skip it: an unreachable refusal costs nothing, and the
+    /// failure it prevents is not local to the send that caused it.
+    static let maxInjectionBytes = SidecarFrameCodec.maxPasteBytes
+
     /// Injections whose ack has not arrived and whose deadline has not fired.
     /// Keyed by the injection's own id, so an ack can be matched to exactly
     /// the injection it answers and a late one can be recognized as late.
@@ -150,20 +168,52 @@ actor HolderInjectionCourier {
     /// per-terminal send serializer upstream is what keeps two callers'
     /// messages apart.
     ///
-    /// **Known gap, and the honest statement of it.** While a viewer is
-    /// attached the daemon has released its reader *and closed its descriptor*
-    /// (`HolderRegistry.confirmAttach` → `HolderReader.stop`), so
-    /// `writeDirectly` has nothing to write to and the fail-open fallback
+    /// **Known gap, and the honest statement of it.** Once a viewer has
+    /// *acknowledged* an attach the daemon has released its reader and closed
+    /// its descriptor (`HolderRegistry.confirmAttach` → `HolderReader.stop`),
+    /// so `writeDirectly` has nothing to write to and the fail-open fallback
     /// reports `.notDelivered` instead of writing. Nothing is lost silently —
     /// the caller is told, and the actuation row records a transport failure —
-    /// but the fallback is not yet the fail-open the spec describes. Closing it
-    /// means the daemon keeping a **write-only** dup across an attach (the
-    /// one-reader invariant is about readers; multiple writers to a pty master
-    /// are fine), which is an ownership change belonging to the detach and
-    /// app-death work, not here.
+    /// but in that state the fallback is not yet the fail-open the spec
+    /// describes. Closing it means the daemon keeping a **write-only** dup
+    /// across an attach (the one-reader invariant is about readers; multiple
+    /// writers to a pty master are fine), which is an ownership change
+    /// belonging to the detach and app-death work, not here.
+    ///
+    /// **The gap is not every attached state, and the exceptions matter.**
+    /// `viewerAttachment` means "a viewer *may* hold this pty", and two states
+    /// leave the daemon's descriptor open underneath it:
+    ///
+    /// - **A timed-out attach.** `HolderRegistry.cancelPendingAttach`'s
+    ///   `.unacknowledged` arm records the claim and deliberately leaves the
+    ///   slot `.adopted` with its reader merely `.suspended` — the descriptor
+    ///   is still open, and `HolderReader.write` guards only on `.stopped`. So
+    ///   `viewerAttachment != nil` **and** `reader(for:) != nil`, and the
+    ///   fallback really fires and really writes. That is the case fail-open
+    ///   exists for above all others: the app is presumed hung or dead.
+    /// - **The vended-but-not-yet-acked window.** `beginAttach` records a
+    ///   pending attach but no `viewerAttachment`, so this method takes the
+    ///   *detached* branch and writes through that same suspended reader —
+    ///   while the app already holds its `dup` of the descriptor
+    ///   (`TerminalPanelView.startHolderClient` takes it before
+    ///   `attach.ready`) and may already be writing keystrokes. Two writers,
+    ///   for one RPC round trip. Narrow, not zero.
     func deliver(terminalID: UUID, bytes: Data) async -> Delivery {
         guard await viewerAttachment(terminalID) != nil else {
             return await writeFromDaemon(terminalID: terminalID, bytes: bytes, because: .detached)
+        }
+        guard bytes.count <= Self.maxInjectionBytes else {
+            // Refused, not fallen back on: the app is attached, and there is
+            // no route for a payload this size that does not cost more than
+            // the send is worth. The caller is told, by size, at once.
+            let message = """
+                terminal \(terminalID.uuidString) is open in the app and this send is \
+                \(bytes.count) bytes, past the \(Self.maxInjectionBytes)-byte injection cap — \
+                nothing was typed. A frame that large is read as corruption by the app's \
+                sidecar, which closes it and takes every pane's input with it.
+                """
+            Self.logger.error("\(message, privacy: .public)")
+            return .notDelivered(message)
         }
         let injectionID = UUID()
         do {
