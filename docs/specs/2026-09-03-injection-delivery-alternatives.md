@@ -867,3 +867,36 @@ and it presents as "unknown" — never as "twice".
   supervision cadence. It is one small frame per injection, so almost
   certainly yes, but `FDVendingServer.sendFrame` is a synchronous send on
   the actor and the courier's cap comment warns about parking it.
+
+## Measured addendum: the input-queue ceiling applies to agents, not to shells
+
+The body reads `TTYHOG` from XNU source and reasons that any injection above
+about a kilobyte short-writes routinely. That is right, and it is narrower and
+sharper than stated: **the ceiling binds in raw mode and effectively does not
+exist in canonical mode.**
+
+Measured on this machine (macOS 26.1, arm64) by opening a pty pair, leaving the
+slave unread, setting the master non-blocking, and writing until the kernel
+refused more:
+
+- **Canonical mode** (the default; a shell sitting at its prompt) — 1,048,576 of
+  1,048,576 bytes accepted. No short write at any size tried, whether written in
+  one call or in 64 KiB chunks.
+- **Raw mode** (`ICANON` off — what a full-screen TUI sets) — **1,022 bytes**
+  accepted, then `EAGAIN`, with the short write occurring on the very first
+  call. 1,022 is `TTYHOG - 2`, matching the mechanism the body cites.
+
+The probe is eight lines of Python and needs no build; it is worth re-running
+on any host where this behaviour is load-bearing.
+
+**Why this makes the truncation defect worse rather than milder.** A coding
+agent's TUI runs in raw mode, so the ~1 KiB ceiling is precisely the regime
+TBD's own injections land in — and a queued prompt or a supervision nudge is
+exactly the kind of payload that exceeds it. A plain shell at a prompt, which
+is the case where a partial write would be least consequential, is the one case
+that never sees it. The failure is concentrated on the sessions the product
+exists to drive.
+
+It also means "finish the write" is not an optimisation for a rare edge: for
+agent sessions above a kilobyte it is the *ordinary* path, and any writer that
+gives up after one attempt truncates by default rather than by accident.
