@@ -134,7 +134,7 @@ struct HolderAttachHandoffTests {
         // ownership rather than about a session that printed nothing: the bytes
         // were there the whole time, waiting for the reader that owns them.
         #expect(
-            readUntil(fd: vend.ptyFD, contains: "GOT:AFTER-VEND") != nil,
+            readPTYUntil(fd: vend.ptyFD, contains: "GOT:AFTER-VEND") != nil,
             "the viewer's descriptor never carried the job's answer")
     }
 
@@ -161,7 +161,7 @@ struct HolderAttachHandoffTests {
         try await fixture.reader.write(Data("NO-ACK\n".utf8))
         #expect(await !daemonScreenShows("GOT:NO-ACK", on: fixture.reader))
         #expect(
-            readUntil(fd: vend.ptyFD, contains: "GOT:NO-ACK") != nil,
+            readPTYUntil(fd: vend.ptyFD, contains: "GOT:NO-ACK") != nil,
             "the viewer's descriptor never carried the job's answer")
     }
 
@@ -223,9 +223,9 @@ struct HolderAttachHandoffTests {
 
         // The viewer's descriptor is a working pty in both directions: writing
         // to the master is what typing into the session is.
-        try writeAll(fd: vend.ptyFD, "AFTER-ACK\n")
+        try writePTY(fd: vend.ptyFD, "AFTER-ACK\n")
         #expect(
-            readUntil(fd: vend.ptyFD, contains: "GOT:AFTER-ACK") != nil,
+            readPTYUntil(fd: vend.ptyFD, contains: "GOT:AFTER-ACK") != nil,
             "the session the viewer was handed does not answer it")
     }
 
@@ -275,6 +275,143 @@ struct HolderAttachHandoffTests {
             """
             the terminal's own answers were written to the pty and the job read them as input; \
             its screen was: \(screen.debugDescription)
+            """)
+    }
+
+    // MARK: - One descriptor at a time
+
+    /// A second attach is refused while one is still in flight, because a
+    /// vended descriptor cannot be taken back.
+    ///
+    /// The interleave is forced through the registry's attach barrier rather
+    /// than raced: the real window is a suspension inside `beginAttach`, and a
+    /// test that reproduced it by timing would pass by luck and stop
+    /// reproducing it the day the scheduler changed.
+    @Test func aSecondAttachIsRefusedWhileTheFirstIsStillInFlight() async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob)
+        defer { fixture.tearDown() }
+
+        let barrier = ReentryBarrier()
+        await fixture.registry.setAttachBarrier { await barrier.arriveAndWait() }
+
+        // Only Sendable values cross into the task: the fixture itself is a
+        // plain struct around a class, and the registry is an actor.
+        let registry = fixture.registry
+        let terminalID = fixture.terminalID
+        let inFlight = Task { try await registry.beginAttach(terminalID: terminalID) }
+        #expect(await pollUntil("the first attach to reach the barrier") { await barrier.hasParked })
+
+        // The first call is holding a fresh dup of the pty and has published
+        // nothing. A second attach here is the double vend: it would quiesce an
+        // already-quiesced reader, dup the same descriptor again, and hand a
+        // second live pty to a second viewer.
+        await #expect(throws: HolderRegistry.Error.self) {
+            try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
+        }
+
+        await barrier.release()
+        let vend = try await inFlight.value
+        defer { close(vend.ptyFD) }
+        #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == nil)
+        // And the one descriptor that WAS vended is the working one.
+        try writePTY(fd: vend.ptyFD, "ONLY-ONE\n")
+        #expect(readPTYUntil(fd: vend.ptyFD, contains: "GOT:ONLY-ONE") != nil)
+    }
+
+    /// An attach whose session is acknowledged out from under it while it is in
+    /// flight vends nothing at all.
+    ///
+    /// `confirmAttach` records the viewer's ownership and then suspends — the
+    /// jiggle is a deliberate 10 ms sleep — so a `beginAttach` parked between
+    /// its quiesce and its guard resumes into a session that now belongs to
+    /// somebody else. Handing over its descriptor there would put a second
+    /// reader on a pty a confirmed viewer already owns, which is the one
+    /// unrecoverable outcome on this path. Forced through the barrier for the
+    /// same reason as above; the acknowledgement names the generation the
+    /// in-flight call claimed before it suspended.
+    @Test func anAttachAcknowledgedWhileInFlightVendsNothing() async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob)
+        defer { fixture.tearDown() }
+
+        let barrier = ReentryBarrier()
+        await fixture.registry.setAttachBarrier { await barrier.arriveAndWait() }
+
+        let registry = fixture.registry
+        let terminalID = fixture.terminalID
+        let inFlight = Task { try await registry.beginAttach(terminalID: terminalID) }
+        #expect(await pollUntil("the attach to reach the barrier") { await barrier.hasParked })
+
+        // Generations are minted from 1 for a fresh registry, and this call
+        // claimed one before it suspended — which is exactly what lets an
+        // acknowledgement land in this window at all.
+        let acknowledging = Task { try await registry.confirmAttach(terminalID: terminalID, generation: 1) }
+
+        // Released while the acknowledgement is still *inside* itself, not
+        // after it: it records the viewer's ownership and then suspends in the
+        // jiggle, so the in-flight attach resumes to find the session already
+        // given away while its slot still reads `.adopted`. That is the state
+        // only the ownership half of the guard can see — wait until the
+        // acknowledgement completes instead and the slot check would cover for
+        // it. Missing the window can only weaken what this discriminates; it
+        // cannot redden a correct implementation, which refuses either way.
+        #expect(await pollUntil("the acknowledgement to record the viewer's ownership") {
+            await registry.viewerAttachment(for: terminalID) != nil
+        })
+        await barrier.release()
+
+        await #expect(throws: HolderRegistry.Error.self) {
+            _ = try await inFlight.value
+        }
+        try await acknowledging.value
+        #expect(await registry.viewerAttachment(for: terminalID) == 1)
+    }
+
+    /// After an acknowledgement, a further attach is refused rather than
+    /// vending a second descriptor for a pty the viewer owns.
+    @Test func attachingAnAlreadyAttachedSessionIsRefused() async throws {
+        let fixture = try await AttachFixture.start(command: Self.echoJob)
+        defer { fixture.tearDown() }
+
+        let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
+        defer { close(vend.ptyFD) }
+        try await fixture.registry.confirmAttach(
+            terminalID: fixture.terminalID, generation: vend.generation)
+
+        await #expect(
+            throws: HolderRegistry.Error.attachedToViewer(terminalID: fixture.terminalID)
+        ) {
+            try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
+        }
+    }
+
+    // MARK: - Mode state survives the hand-over
+
+    /// The preamble carries mode state the daemon can only learn by *asking*
+    /// its terminal, which is the half of the snapshot that a broken `DECRQM`
+    /// round trip would silently drop.
+    ///
+    /// Mouse tracking rather than, say, cursor visibility: its default is off,
+    /// so a capture that answered nothing at all would emit nothing, while the
+    /// default-on modes would coincidentally emit the right escape for the
+    /// wrong reason.
+    @Test func theSnapshotCarriesModeStateItHadToAskTheTerminalFor() async throws {
+        let fixture = try await AttachFixture.start(
+            command: "printf '\\033[?1000hMOUSE-ON\\n'; " + Self.echoJob)
+        defer { fixture.tearDown() }
+
+        #expect(await pollUntil("the job to turn mouse tracking on") {
+            await fixture.reader.renderScreen().contains("MOUSE-ON")
+        })
+
+        let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
+        defer { close(vend.ptyFD) }
+        let preamble = String(decoding: vend.snapshotPreamble, as: UTF8.self)
+        #expect(
+            preamble.contains("\u{1b}[?1000h"),
+            """
+            the preamble did not set mouse tracking, so the terminal's answer to the DECRQM query \
+            was never read and every mode the daemon cannot see through a public property is being \
+            reported as off
             """)
     }
 
@@ -347,11 +484,26 @@ private struct AttachFixture {
     }
 
     /// Releases the registry's readers and kills the holder AND its job, by
-    /// pid. Holder death is not child death, so both need naming; a reader left
-    /// running leaks a thread and a pty descriptor for the rest of the suite.
+    /// pid. Holder death is not child death, so both need naming.
+    ///
+    /// The release is **waited for**, not fired and forgotten. A `defer` cannot
+    /// `await`, so the hop is a detached task and a bounded semaphore — bounded
+    /// so a wedged release fails the suite slowly rather than hanging it
+    /// forever. Waiting matters because the thing being released is a drain
+    /// thread and a pty descriptor, and this repo's expensive lessons about
+    /// leaked test resources (7,100 dead tmux sockets, 18k orphan profile
+    /// directories) were all of the same shape: per-test cleanup that was
+    /// started but never observed to finish.
     func tearDown() {
         let registry = self.registry
-        Task.detached { await registry.releaseAll() }
+        let released = DispatchSemaphore(value: 0)
+        Task.detached {
+            await registry.releaseAll()
+            released.signal()
+        }
+        if released.wait(timeout: .now() + 10) == .timedOut {
+            Issue.record("the registry's readers were still releasing 10s after the test ended")
+        }
         process.tearDown()
     }
 }
@@ -376,56 +528,35 @@ private func daemonScreenShows(
     return false
 }
 
-// MARK: - Reading a vended descriptor
+// MARK: - Forcing an interleave
 
-/// Reads a vended pty until `needle` appears, or gives up.
+/// Holds the **first** caller that reaches the seam it is installed on, and
+/// waves through every one after it.
 ///
-/// The descriptor is non-blocking — the flag lives on the open file description
-/// the `dup` shares with the daemon's own copy — so this polls rather than
-/// blocking, which is also what any real viewer of one of these has to do.
-private func readUntil(
-    fd: Int32,
-    contains needle: String,
-    timeout: TimeInterval = 10.0
-) -> String? {
-    var seen = ""
-    var buffer = [UInt8](repeating: 0, count: 4096)
-    let deadline = Date().addingTimeInterval(timeout)
-    while Date() < deadline {
-        var watched = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-        guard poll(&watched, 1, 100) > 0, watched.revents != 0 else { continue }
-        let count = buffer.withUnsafeMutableBytes { raw in
-            Darwin.read(fd, raw.baseAddress, raw.count)
-        }
-        if count > 0 {
-            seen += String(decoding: buffer[0..<count], as: UTF8.self)
-            if seen.contains(needle) { return seen }
-        } else if count == 0 {
-            return nil
-        } else if errno != EAGAIN && errno != EINTR {
-            return nil
-        }
-    }
-    return nil
-}
+/// The same shape `HolderAdoptionTests` uses for the adoption interleavings,
+/// and it is here for the same reason: each of these races is a
+/// continuation-ordering accident inside an actor, so reproducing one by timing
+/// would pass by luck and prove nothing on the day it went green. Nothing here
+/// sleeps to *create* the interleave — the polling is only how each side
+/// observes a state the other has definitely reached, and it is bounded through
+/// `pollUntil`, so a barrier nobody releases fails its test with a named
+/// diagnostic instead of hanging the suite.
+private actor ReentryBarrier {
+    private var parked = false
+    private var released = false
 
-/// Writes to a vended pty, which is what typing into that session is.
-private func writeAll(fd: Int32, _ text: String) throws {
-    let bytes = Array(text.utf8)
-    var offset = 0
-    while offset < bytes.count {
-        let written = bytes.withUnsafeBytes { raw in
-            Darwin.write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+    var hasParked: Bool { parked }
+
+    func release() { released = true }
+
+    private var isReleased: Bool { released }
+
+    func arriveAndWait() async {
+        guard !parked else { return }
+        parked = true
+        while !released {
+            try? await Task.sleep(for: .milliseconds(5))
         }
-        if written > 0 {
-            offset += written
-            continue
-        }
-        guard errno == EAGAIN || errno == EINTR else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        var watched = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-        _ = poll(&watched, 1, 100)
     }
 }
 

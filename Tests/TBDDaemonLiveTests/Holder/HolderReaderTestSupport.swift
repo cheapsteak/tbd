@@ -225,3 +225,56 @@ func pollUntil(
     Issue.record("timed out after \(timeout)s waiting for \(description)", sourceLocation: sourceLocation)
     return false
 }
+
+// MARK: - Reading and writing a vended pty
+
+/// Reads a vended pty until `needle` appears, or gives up.
+///
+/// The descriptor is non-blocking — the flag lives on the open file description
+/// the `dup` shares with the daemon's own copy — so this polls rather than
+/// blocking, which is also what any real viewer of one of these has to do.
+func readPTYUntil(
+    fd: Int32,
+    contains needle: String,
+    timeout: TimeInterval = 10.0
+) -> String? {
+    var seen = ""
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        var watched = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&watched, 1, 100) > 0, watched.revents != 0 else { continue }
+        let count = buffer.withUnsafeMutableBytes { raw in
+            Darwin.read(fd, raw.baseAddress, raw.count)
+        }
+        if count > 0 {
+            seen += String(decoding: buffer[0..<count], as: UTF8.self)
+            if seen.contains(needle) { return seen }
+        } else if count == 0 {
+            return nil
+        } else if errno != EAGAIN && errno != EINTR {
+            return nil
+        }
+    }
+    return nil
+}
+
+/// Writes to a vended pty, which is what typing into that session is.
+func writePTY(fd: Int32, _ text: String) throws {
+    let bytes = Array(text.utf8)
+    var offset = 0
+    while offset < bytes.count {
+        let written = bytes.withUnsafeBytes { raw in
+            Darwin.write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+        }
+        if written > 0 {
+            offset += written
+            continue
+        }
+        guard errno == EAGAIN || errno == EINTR else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        var watched = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        _ = poll(&watched, 1, 100)
+    }
+}

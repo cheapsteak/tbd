@@ -66,6 +66,16 @@ actor HolderRegistry {
         /// waiting on. A stale viewer's ack arriving after a successor's
         /// attach, or an ack for one already confirmed or cancelled.
         case attachSuperseded(terminalID: UUID, generation: UInt64)
+        /// An attach for this session is already outstanding, so a second one
+        /// is refused rather than superseding it.
+        ///
+        /// **Supersession is not available on this path, and that is the whole
+        /// reason for the case.** A superseded adoption can be undone because
+        /// everything it obtained is still inside this process; a superseded
+        /// attach cannot, because its descriptor has been handed to another
+        /// process and nothing can take it back. So the only safe posture is
+        /// not to hand out the second one.
+        case attachAlreadyPending(terminalID: UUID, generation: UInt64)
 
         var errorDescription: String? {
             switch self {
@@ -90,6 +100,10 @@ actor HolderRegistry {
             case .attachSuperseded(let terminalID, let generation):
                 return "attach \(generation) for session \(terminalID.uuidString) is no longer "
                     + "the one this session is waiting on"
+            case .attachAlreadyPending(let terminalID, let generation):
+                return "attach \(generation) for session \(terminalID.uuidString) has already "
+                    + "been vended and not yet acknowledged; its descriptor cannot be taken back, "
+                    + "so a second attach is refused"
             }
         }
     }
@@ -270,6 +284,17 @@ actor HolderRegistry {
     /// would pass by luck. Nil in production.
     private var releaseBarrier: (@Sendable () async -> Void)?
 
+    /// Awaited inside `beginAttach`, immediately after the drain has quiesced
+    /// and before anything is published — the window in which that call is
+    /// holding a fresh `dup` of a pty and has decided nothing about it yet.
+    ///
+    /// A seam for the same reason as the two above, and it guards the worst of
+    /// the three interleavings: a second attach, or an acknowledgement of the
+    /// first, landing while a descriptor is in flight. The real window is a
+    /// suspension inside `jiggle`, which is a deliberate 10 ms sleep — wide,
+    /// but racing it is not a test.
+    private var attachBarrier: (@Sendable () async -> Void)?
+
     init(
         owner: HolderOwnerToken,
         environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -297,6 +322,12 @@ actor HolderRegistry {
     /// never calls it.
     func setReleaseBarrier(_ barrier: (@Sendable () async -> Void)?) {
         releaseBarrier = barrier
+    }
+
+    /// Installs the attach barrier described above. Test-facing; production
+    /// never calls it.
+    func setAttachBarrier(_ barrier: (@Sendable () async -> Void)?) {
+        attachBarrier = barrier
     }
 
     // MARK: - Reading
@@ -956,24 +987,64 @@ actor HolderRegistry {
         guard viewerAttachments[terminalID] == nil else {
             throw Error.attachedToViewer(terminalID: terminalID)
         }
+        // Refused, not superseded. Every other contested state in this type is
+        // resolved by letting the newer caller win, because everything the
+        // loser obtained is still inside this process and can be released. A
+        // vended descriptor is not: it is in another process's table and
+        // nothing here can take it back. So while one is outstanding, the only
+        // safe answer to "hand me that pty as well" is no.
+        if let outstanding = pendingAttaches[terminalID] {
+            throw Error.attachAlreadyPending(
+                terminalID: terminalID, generation: outstanding.generation)
+        }
         guard case .adopted(let reader) = slots[terminalID] else {
             throw Error.noLiveReader(terminalID: terminalID)
         }
 
-        let ptyFD = try await reader.suspendDraining()
-        // Re-read after the suspension: a release could have taken this slot
-        // while the drain was quiescing, in which case the reader it stopped is
-        // this one and the descriptor just duplicated is a dup of a closed fd's
-        // number. Nothing is published; the dup is released.
-        guard case .adopted(let current) = slots[terminalID], current === reader else {
-            Darwin.close(ptyFD)
-            throw Error.superseded(terminalID: terminalID)
-        }
-
-        let preamble = await reader.snapshotPreamble(maxScrollbackLines: maxScrollbackLines)
+        // Claimed BEFORE the first suspension, and that ordering is the guard
+        // above doing its job. An actor's methods are not atomic across
+        // `await`, so a claim recorded at the END would leave every concurrent
+        // caller looking at an empty slot and each one vending its own live
+        // `dup` — two readers on one pty, arrived at by two callers who each
+        // checked correctly.
         lastAttachGeneration += 1
         let generation = lastAttachGeneration
         pendingAttaches[terminalID] = PendingAttach(generation: generation, reader: reader)
+
+        let ptyFD: Int32
+        do {
+            ptyFD = try await reader.suspendDraining()
+        } catch {
+            clearPendingAttach(terminalID: terminalID, generation: generation)
+            throw error
+        }
+        // The one suspension a test can steer. In production this is a nil
+        // check; see `attachBarrier`.
+        await attachBarrier?()
+
+        let preamble = await reader.snapshotPreamble(maxScrollbackLines: maxScrollbackLines)
+        // Re-read EVERYTHING this call decided on, after the last await and
+        // with no await before the return. Three things can have changed while
+        // it was parked, and each one makes this descriptor unfit to hand out:
+        // this attach was cancelled; a release took the slot (the reader was
+        // stopped, so this is a `dup` of a number the kernel may have
+        // reissued); or an acknowledgement landed and a viewer now owns the pty.
+        //
+        // The ownership clause is layered, not load-bearing today: while the
+        // claim above stands, an acknowledgement can only have cleared this
+        // call's own pending entry, so the middle clause catches that case
+        // first. It is kept because it is the one clause that still holds if
+        // the claim is ever relaxed — `confirmAttach` records ownership
+        // *before* it suspends in `jiggle` precisely so this can see it — and
+        // because the failure it guards against is the unrecoverable one.
+        guard viewerAttachments[terminalID] == nil,
+              pendingAttaches[terminalID]?.generation == generation,
+              case .adopted(let current) = slots[terminalID], current === reader
+        else {
+            Darwin.close(ptyFD)
+            clearPendingAttach(terminalID: terminalID, generation: generation)
+            throw Error.superseded(terminalID: terminalID)
+        }
         Self.logger.info(
             """
             vended the pty for session \(terminalID.uuidString, privacy: .public) to a viewer as \
@@ -1001,13 +1072,17 @@ actor HolderRegistry {
             throw Error.attachSuperseded(terminalID: terminalID, generation: generation)
         }
         guard case .adopted(let reader) = slots[terminalID], reader === pending.reader else {
-            pendingAttaches[terminalID] = nil
+            clearPendingAttach(terminalID: terminalID, generation: generation)
             throw Error.attachSuperseded(terminalID: terminalID, generation: generation)
         }
-        pendingAttaches[terminalID] = nil
-        // Recorded BEFORE the stop, which suspends this method: an `adopt`
-        // waiting on the release below resumes as soon as it completes, and
-        // must find the session already marked as the viewer's.
+        clearPendingAttach(terminalID: terminalID, generation: generation)
+        // Recorded BEFORE anything that suspends — the jiggle below is a
+        // deliberate 10 ms sleep, and the stop after it is longer again. Two
+        // callers resume inside that window and both must find the session
+        // already marked as the viewer's: an `adopt` waiting on the release,
+        // and a `beginAttach` parked between its quiesce and its guard, which
+        // would otherwise hand out a second live descriptor for a pty this
+        // acknowledgement has just given away.
         viewerAttachments[terminalID] = generation
 
         await reader.jiggle()
@@ -1061,7 +1136,7 @@ actor HolderRegistry {
         guard let pending = pendingAttaches[terminalID], pending.generation == generation else {
             return
         }
-        pendingAttaches[terminalID] = nil
+        clearPendingAttach(terminalID: terminalID, generation: generation)
         switch reason {
         case .descriptorNeverDelivered:
             guard case .adopted(let reader) = slots[terminalID], reader === pending.reader else {
@@ -1093,6 +1168,17 @@ actor HolderRegistry {
                 app-liveness verdict releases it
                 """)
         }
+    }
+
+    /// Drops a pending attach, but only while it is still the one named.
+    ///
+    /// Synchronous and generation-checked, like every other "still mine?" here:
+    /// a cancellation resuming after a suspension must not discard the claim a
+    /// later attach has since recorded, which would let a third one in beside
+    /// it.
+    private func clearPendingAttach(terminalID: UUID, generation: UInt64) {
+        guard pendingAttaches[terminalID]?.generation == generation else { return }
+        pendingAttaches[terminalID] = nil
     }
 
     /// The attach generation a viewer currently owns for this session, if one

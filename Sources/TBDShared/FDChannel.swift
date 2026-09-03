@@ -7,6 +7,19 @@ public enum FDChannelError: LocalizedError, Equatable {
     case receiveFailed(Int32)       // errno from recvmsg
     case peerClosed                 // clean EOF from the peer
     case emptyPayload               // sendFDMinimal with nothing to carry the fd
+    /// The `sendmsg` carrying `SCM_RIGHTS` succeeded but the rest of the frame
+    /// did not, so **the descriptor is already in the peer's table** while the
+    /// frame that describes it is truncated.
+    ///
+    /// Distinguished from `sendFailed` because the two license opposite
+    /// recoveries. A send that never got the descriptor out leaves this process
+    /// holding the only copy, and whatever it names may be reclaimed. This one
+    /// does not: the peer has a working descriptor it was never told the
+    /// meaning of, and a caller that treats it as "not delivered" may put a
+    /// second reader on whatever the descriptor points at. The peer's own
+    /// desync handling closes the orphan, but that is the peer's behaviour, not
+    /// this side's evidence.
+    case descriptorSentFrameIncomplete(Int32)
 
     public var errorDescription: String? {
         switch self {
@@ -18,6 +31,9 @@ public enum FDChannelError: LocalizedError, Equatable {
             return "fd channel peer closed the connection (clean EOF)"
         case .emptyPayload:
             return "fd channel send needs at least one payload byte to carry the descriptor"
+        case .descriptorSentFrameIncomplete(let code):
+            return "fd channel handed the descriptor over but could not finish its frame: "
+                + "errno \(code) (\(Self.errnoText(code)))"
         }
     }
 
@@ -131,7 +147,22 @@ public enum FDChannel {
                 // — otherwise the peer's scanner sees a truncated frame and
                 // desyncs, the exact bug class sendData already closes.
                 if sent < frameBytes.count {
-                    try sendData(Data(frame.dropFirst(sent)), over: socket)
+                    do {
+                        try sendData(Data(frame.dropFirst(sent)), over: socket)
+                    } catch {
+                        // Re-labelled rather than propagated, because by here
+                        // the descriptor HAS been handed over — the ancillary
+                        // block rode the prefix that landed — and a caller
+                        // undoing a failed send must be able to tell that from
+                        // a send that never left. See the case's doc comment.
+                        let code: Int32
+                        if case FDChannelError.sendFailed(let sendErrno) = error {
+                            code = sendErrno
+                        } else {
+                            code = errno
+                        }
+                        throw FDChannelError.descriptorSentFrameIncomplete(code)
+                    }
                 }
             }
         }

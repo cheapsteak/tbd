@@ -1269,10 +1269,11 @@ private struct DelegateModeReader: ModeReplyReader {
         let reply = delegate.takeCollected(
             after: { $0.feed(text: "\u{1b}[\(prefix)\(mode)$p") }, from: terminal)
         // `CSI ? Pd ; Ps $y`, where `Ps` is 1 set, 2 reset, 4 permanently reset
-        // and 0 unknown. Parsed by locating the mode number rather than by
-        // exact match, because a terminal may legitimately answer a query the
-        // caller did not ask for on the same wire.
-        guard let head = reply.range(of: "\(prefix)\(mode);"),
+        // and 0 unknown. Located rather than matched whole, because a terminal
+        // may answer a query the caller did not ask for on the same wire — but
+        // anchored on the CSI introducer, so that "mode 7" cannot be found
+        // inside the answer for mode 1007.
+        guard let head = reply.range(of: "\u{1b}[\(prefix)\(mode);"),
               let tail = reply[head.upperBound...].range(of: "$y")
         else { return nil }
         return Int(reply[head.upperBound..<tail.lowerBound])

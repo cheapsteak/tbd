@@ -212,14 +212,9 @@ extension RPCRouter {
             try await vending.send(fd: vend.ptyFD, header: header)
         } catch {
             Darwin.close(vend.ptyFD)
-            // The descriptor provably never reached the app, so this process
-            // still holds the only copy that was made and resuming the drain
-            // cannot produce a second reader. It is the one cancellation on
-            // this path that licenses a resume, and leaving it out would strand
-            // the session unread for a failure that says nothing about the app.
             await registry.cancelPendingAttach(
                 terminalID: terminal.id, generation: vend.generation,
-                reason: .descriptorNeverDelivered)
+                reason: Self.cancelReason(forVendFailure: error))
             logger.error("""
                 could not vend the pty for terminal \(terminal.id.uuidString, privacy: .public): \
                 \(error.localizedDescription, privacy: .public)
@@ -325,6 +320,34 @@ extension RPCRouter {
                 """)
             return RPCResponse(error: "attach replay failed: \(error)")
         }
+    }
+
+    /// What a failed vend proves about where the descriptor is, which is the
+    /// only question that decides whether the daemon may read the pty again.
+    ///
+    /// **A thrown send is not by itself evidence that nothing was delivered.**
+    /// `FDChannel.sendFD` sends the frame and the `SCM_RIGHTS` block in one
+    /// `sendmsg`, and a short send is POSIX-legal: the descriptor rides the
+    /// prefix that landed and the remainder goes out separately, so a failure
+    /// there leaves the app holding a live `dup` of the pty. That case is named
+    /// on the wire type (`descriptorSentFrameIncomplete`) precisely so this
+    /// decision can rest on daemon-side evidence rather than on the app's
+    /// closing of orphaned descriptors when its scanner desyncs — which is real
+    /// mitigation, but it is the peer's behaviour, not proof available here.
+    ///
+    /// Everything else means the `sendmsg` itself never succeeded — no
+    /// connection at all (`FDVendingServerError.notConnected`, the common
+    /// case), or an errno from the syscall — so this process still holds the
+    /// only copy of the descriptor that was ever made, and resuming the drain
+    /// cannot produce a second reader. Leaving that out would strand a session
+    /// unread for a failure that says nothing whatever about the app.
+    static func cancelReason(
+        forVendFailure error: any Swift.Error
+    ) -> HolderRegistry.AttachCancelReason {
+        if case FDChannelError.descriptorSentFrameIncomplete = error {
+            return .unacknowledged
+        }
+        return .descriptorNeverDelivered
     }
 
     /// The holder half of `attach.ready`: the viewer is on the pty, so the
