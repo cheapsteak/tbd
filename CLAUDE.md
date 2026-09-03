@@ -221,6 +221,7 @@ Enforced mechanically by two SwiftLint custom rules in `.swiftlint.yml` (`no_tui
 - **Restart**: `scripts/restart.sh`
 - **Send a starving test run to CI instead of waiting**: `export TBD_REMOTE_VERIFY=1` (default off; needs a clean tree). See the remote verification valve under "Workflow" above.
 - **Install git hooks** (one-time setup after cloning): `scripts/install-hooks.sh`
+- **Run the real `claude` with zero tokens** (fake model API): `scripts/claude-stub.py -- -p "hi"` — see [`docs/fake-model-api.md`](docs/fake-model-api.md); every test double the repo has: [`docs/test-doubles.md`](docs/test-doubles.md)
 - **Diagnostics**: see [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md). Quick recipes:
   - Stream one feature area live: `log stream --level debug --predicate 'subsystem BEGINSWITH "com.tbd" AND category == "markdown"'`
   - Replay the last 5 minutes after reproducing a bug: `log show --last 5m --level debug --predicate 'subsystem BEGINSWITH "com.tbd"'` (requires `sudo log config --subsystem com.tbd.app --mode "level:debug,persist:debug"` once per subsystem to capture `.debug` rows)

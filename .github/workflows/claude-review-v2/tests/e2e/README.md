@@ -59,6 +59,14 @@ role's first response to simulate a straggling specialist.
 - The CLI sends one `/api/hello` connectivity preflight per invocation and
   tolerates the stub's 404 (`harness.tolerated_unexpected_paths`).
 
+## General use outside the review gate
+
+`stub_server.py` is not review-gate-specific — anything that needs a real
+`claude` session without spending tokens can use it. `scripts/claude-stub.py`
+is the general-purpose front door: it builds the sandbox, starts the server
+with turns you script, and runs `claude` (headless or the interactive TUI) in
+your current directory. See [`docs/fake-model-api.md`](../../../../../docs/fake-model-api.md).
+
 ## Running locally
 
 ```sh

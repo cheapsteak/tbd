@@ -32,3 +32,7 @@ running `scripts/mock.sh up <name>`. Use only placeholder repo names
 Tier 1: sidebar, transcript pane, dialogs, toolbars, PR badges. Terminal
 *scrollback* panes are not populated (no live tmux) — that is a deferred Tier 2
 follow-up. No live `claude`/`codex` process is spawned.
+
+This harness fakes TBD's own state, not the model; to run a real `claude`
+against a fake model API for zero tokens, see
+[`fake-model-api.md`](fake-model-api.md).

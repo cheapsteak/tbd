@@ -121,5 +121,6 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 Swift Testing framework. `TBDDaemonTests/` (database, git, lifecycle, tmux, hooks, RPC routing, model profiles, sessions, transcripts, suspend/resume, ...), `TBDSharedTests/` (models, emoji), `TBDAppTests/` (layout, pane content).
 
 ## Scripts & Docs
-- `scripts/restart.sh` — rebuild + restart; `install-hooks.sh` — git hooks; `import-conductor.sh` / `import-claude-code-desktop.sh` — one-script migrations into TBD; `move-home-dir.sh`; `recipe-check.sh`; `git-hooks/`
-- `docs/` — `tmux-integration.md`, `diagnostics-strategy.md`, `worktree-hooks.md`, `worktree-location-design.md`, `transcript-context-usage.md`, `env-overrides.md`, `tcc-signing.md`, plus `specs/`, `plans/` & `perf/`
+- `scripts/restart.sh` — rebuild + restart; `install-hooks.sh` — git hooks; `import-conductor.sh` / `import-claude-code-desktop.sh` — one-script migrations into TBD; `move-home-dir.sh`; `recipe-check.sh`; `git-hooks/`; `mock.sh` — isolated seeded daemon+app for UI work; `claude-stub.py` — runs the real `claude` against the fake model API (zero tokens); `dev/dummy-remote-provider.sh` — file-backed fake remote provider
+- `.github/workflows/claude-review-v2/tests/e2e/stub_server.py` — the fake model API itself (stdlib `POST /v1/messages`, SSE, canned turns); shared by the review-gate e2e tests and `scripts/claude-stub.py`
+- `docs/` — `tmux-integration.md`, `diagnostics-strategy.md`, `worktree-hooks.md`, `worktree-location-design.md`, `transcript-context-usage.md`, `env-overrides.md`, `tcc-signing.md`, `test-doubles.md` (index of the fakes), `fake-model-api.md`, `mock-harness.md`, plus `specs/`, `plans/` & `perf/`
