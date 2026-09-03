@@ -4,15 +4,21 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// The tmux liveness sweep, and the rows it must not judge.
+/// The tmux liveness sweep, and the rows it must not judge on tmux's evidence.
 ///
 /// `reconcileTerminalsWhileLocked` probes `windowExists` for every unparked
-/// terminal row and then parks the resumable Claude ones and deletes the rest.
-/// A holder-backed session has no tmux coordinate at all — its `tmuxWindowID`
-/// is `""`, and the repo's tmux server may never have been started — so that
-/// probe can only ever answer "gone". Without an exemption the sweep destroys a
+/// tmux row and then parks the resumable Claude ones and deletes the rest. A
+/// holder-backed session has no tmux coordinate at all — its `tmuxWindowID` is
+/// `""`, and the repo's tmux server may never have been started — so that probe
+/// can only ever answer "gone". Without the transport fork the sweep destroys a
 /// live holder session on the next daemon start, which is precisely the event
 /// the holder transport exists to survive.
+///
+/// A holder row now has an arm of its own, judged on the holder inventory
+/// (`HolderReconcileInventoryTests`). This suite pins the half that arm must
+/// never reach: a daemon with **no `HolderRegistry`** — mock mode, and every
+/// test that does not wire one — knows nothing about holders, and "I cannot
+/// ask" must stay distinct from "nobody answered".
 ///
 /// The fork the exemption has to sit ahead of is park-versus-delete: a
 /// resumable Claude row is parked and everything else is deleted outright. Both
@@ -51,7 +57,9 @@ struct HolderReconcileExemptionTests {
         return (repo, main)
     }
 
-    @Test("a holder-backed row survives the sweep, unparked")
+    /// No registry is wired here, deliberately: this is the daemon that cannot
+    /// ask, and it must leave both rows exactly as it found them.
+    @Test("a holder-backed row survives a sweep that cannot judge it, unparked")
     func holderRowSurvivesTmuxReconcile() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }

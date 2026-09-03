@@ -4,6 +4,24 @@ import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 
+/// What one reconcile pass established about a holder-backed session row.
+///
+/// Three-way in spirit rather than two, for the same reason
+/// `HolderRegistry.ExitProbeOutcome` is: "the round trip failed" and "the
+/// holder is gone" are different facts and only the second is evidence. The two
+/// failure shapes collapse into one `keep` here — this sweep asks once, and the
+/// next reconcile is the retry — but they keep their reasons apart in the log.
+enum HolderRowVerdict: Sendable, Equatable {
+    /// Nothing can reach this session any more, and the status is the last
+    /// thing anybody knew about how its job ended. `exitedStatusUnknown` is the
+    /// honest answer for an exit nobody collected and must never be rounded to
+    /// `.exited(code: 0)` — downstream could not tell a fabricated code from a
+    /// real one.
+    case sessionOver(HolderChildStatus)
+    /// Nothing here says the session ended; `reason` names what kept it.
+    case keep(reason: String)
+}
+
 extension WorktreeLifecycle {
     // MARK: - Git Status
 
@@ -536,9 +554,14 @@ extension WorktreeLifecycle {
         }
     }
 
-    /// Reconcile terminals whose tmux window is gone or no longer belongs to
-    /// their database row. Both cases use the same established outcomes: park
-    /// resumable Claude sessions and delete non-resumable Codex/shell rows.
+    /// Reconcile terminals nothing can reach any more: a tmux row whose window
+    /// is gone or no longer belongs to it, and a holder row whose holder is
+    /// gone. All of them use the same established outcomes: park resumable
+    /// Claude sessions and delete non-resumable Codex/shell rows.
+    ///
+    /// The two transports differ only in what "unreachable" is read off. tmux
+    /// rows are judged by their window and pane; holder rows by the holder
+    /// inventory, via `holderRowVerdict(for:)`.
     ///
     /// We deliberately do NOT eagerly recreate terminals on reboot: on a
     /// machine with many worktrees that spawned N simultaneous `claude
@@ -564,6 +587,10 @@ extension WorktreeLifecycle {
     }
 
     /// Ownership probing while the caller holds the server resource lock.
+    ///
+    /// The lock is a *tmux server* lock, which is why the holder arm does not
+    /// depend on it: a holder row's ground truth is its own rendezvous, and
+    /// holding this lock neither protects nor delays it.
     private func reconcileTerminalsWhileLocked(
         in worktrees: [LocalWorktree], actuationLog: ActuationLog
     ) async throws {
@@ -585,73 +612,82 @@ extension WorktreeLifecycle {
             // is expected, and the row is already exactly what this pass would
             // produce.
             for terminal in terminals where !terminal.isParked {
-                // Holder-backed sessions carry no tmux coordinate: their
-                // `tmuxWindowID` is "" and the repo's tmux server may never
-                // have been created. `windowExists` can therefore only ever
-                // answer "gone" for them, and both outcomes below — the park
-                // and the delete — would then destroy a live session on the
-                // very daemon restart the transport exists to survive. This
-                // loop is about tmux, and has to say so before it reaches
-                // either arm of the fork.
+                // **Two transports, one fork.** Each arm establishes the
+                // same fact in its own vocabulary — nothing can reach this
+                // session any more — and then hands it to the shared
+                // park-or-delete outcome below.
                 //
-                // **Nothing reconciles holder rows yet.** Their ground truth
-                // is the holder inventory, and the sweep that would consult it
-                // is Milestone B's work — see `HolderSpawner`'s doc comment and
-                // the spec's Reconciliation section. So this guard is not
-                // "handled elsewhere"; it is "not handled at all, and wrongly
-                // destroying them is worse than leaving them alone". That gap
-                // is what keeps `pty_holder_enabled` off outside a development
-                // machine, and it should stay visible here until a real sweep
-                // closes it.
-                guard terminal.transport == .tmux else { continue }
+                // A holder-backed row carries no tmux coordinate at all: its
+                // `tmuxWindowID` is "" and the repo's tmux server may never
+                // have been created, so `windowExists` could only ever answer
+                // "gone" for it, and the tmux arm would destroy a live session
+                // on the very daemon restart the transport exists to survive.
+                // Its ground truth is the holder inventory instead
+                // (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+                // "Reconciliation"), which is what `holderRowVerdict(for:)`
+                // reads.
+                let disposal: String
+                switch terminal.transport {
+                case .holder:
+                    switch await holderRowVerdict(for: terminal) {
+                    case .keep(let reason):
+                        logger.debug("reconcile: keeping holder-backed terminal \(terminal.id, privacy: .public) — \(reason, privacy: .public)")
+                        continue
+                    case .sessionOver(let status):
+                        disposal = "its holder is gone and its job "
+                            + Self.jobEndingDescription(status)
+                    }
 
-                var windowAlive = false
-                if serverAlive {
-                    windowAlive = await tmux.windowExists(
-                        server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
-                }
+                case .tmux:
+                    var windowAlive = false
+                    if serverAlive {
+                        windowAlive = await tmux.windowExists(
+                            server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
+                    }
 
-                if windowAlive {
-                    do {
-                        switch try await tmux.paneSendTarget(
-                            server: wt.tmuxServer, paneID: terminal.tmuxPaneID)
-                        {
-                        case .live(let paneTerminalID), .dead(let paneTerminalID):
-                            if let paneTerminalID {
-                                let paneBelongsToDifferentTerminal =
-                                    paneTerminalID.caseInsensitiveCompare(
-                                        terminal.id.uuidString) != .orderedSame
-                                if !paneBelongsToDifferentTerminal { continue }
-                            } else {
-                                // Panes predating the identity stamp remain
-                                // attributed for backward compatibility.
-                                continue
+                    if windowAlive {
+                        do {
+                            switch try await tmux.paneSendTarget(
+                                server: wt.tmuxServer, paneID: terminal.tmuxPaneID)
+                            {
+                            case .live(let paneTerminalID), .dead(let paneTerminalID):
+                                if let paneTerminalID {
+                                    let paneBelongsToDifferentTerminal =
+                                        paneTerminalID.caseInsensitiveCompare(
+                                            terminal.id.uuidString) != .orderedSame
+                                    if !paneBelongsToDifferentTerminal { continue }
+                                } else {
+                                    // Panes predating the identity stamp remain
+                                    // attributed for backward compatibility.
+                                    continue
+                                }
+                            case .missing:
+                                break
                             }
-                        case .missing:
-                            break
+                        } catch {
+                            // An unreadable identity is not evidence of staleness.
+                            // Keep the row and let a later sweep retry the probe.
+                            logger.warning("reconcile: failed to inspect pane ownership for terminal \(terminal.id, privacy: .public): \(error, privacy: .public)")
+                            continue
                         }
-                    } catch {
-                        // An unreadable identity is not evidence of staleness.
-                        // Keep the row and let a later sweep retry the probe.
-                        logger.warning("reconcile: failed to inspect pane ownership for terminal \(terminal.id, privacy: .public): \(error, privacy: .public)")
-                        continue
                     }
-                }
 
-                // Preserve the existing extra safety when the window probe
-                // itself says a Claude window is gone: if Claude is still
-                // running, retain the row. A pane that answered `.missing` or
-                // with another terminal's identity is already definitive, so
-                // never inspect its current command. An owned dead pane
-                // continued above because remain-on-exit makes it an intended
-                // readable gravestone.
-                if terminal.isClaudeResumable && !windowAlive {
-                    if let cmd = try? await tmux.paneCurrentCommand(
-                        server: wt.tmuxServer, paneID: terminal.tmuxPaneID),
-                       ClaudeStateDetector.isClaudeProcess(cmd) {
-                        logger.warning("reconcile: terminal \(terminal.id, privacy: .public) window marked dead but claude process still running — skipping park")
-                        continue
+                    // Preserve the existing extra safety when the window probe
+                    // itself says a Claude window is gone: if Claude is still
+                    // running, retain the row. A pane that answered `.missing` or
+                    // with another terminal's identity is already definitive, so
+                    // never inspect its current command. An owned dead pane
+                    // continued above because remain-on-exit makes it an intended
+                    // readable gravestone.
+                    if terminal.isClaudeResumable && !windowAlive {
+                        if let cmd = try? await tmux.paneCurrentCommand(
+                            server: wt.tmuxServer, paneID: terminal.tmuxPaneID),
+                           ClaudeStateDetector.isClaudeProcess(cmd) {
+                            logger.warning("reconcile: terminal \(terminal.id, privacy: .public) window marked dead but claude process still running — skipping park")
+                            continue
+                        }
                     }
+                    disposal = "window \(terminal.tmuxWindowID) gone or reassigned"
                 }
 
                 if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
@@ -674,16 +710,177 @@ extension WorktreeLifecycle {
                         await actuationLog.appendOutcome(
                             confirms: actuationID, result: .transportFailed, error: "\(error)")
                     }
-                    logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone or reassigned, session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
+                    logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
                 } else {
                     try? await db.deleteTerminalAndTab(id: terminal.id)
-                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone or reassigned, no session to preserve")
+                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), no session to preserve")
                 }
                 await pendingQuestions.clear(terminalID: terminal.id)
                 await subscriptions?.broadcastPendingQuestions(
                     terminalID: terminal.id, from: pendingQuestions)
             }
         }
+    }
+
+    // MARK: - The holder inventory
+
+    /// How long one holder gets to answer the reconcile probe.
+    ///
+    /// The same two seconds `HolderRendezvousCollector.probeTimeout` and
+    /// `RowlessHolderCollector.handshakeTimeout` allow, for the same reason: a
+    /// stranger that connects and then says nothing must not stall a sweep that
+    /// may have hundreds of rows behind it.
+    static let holderProbeTimeout: Duration = .seconds(2)
+
+    /// How a finished session's job ended, in words, for the one log line that
+    /// records the sweep's judgement.
+    ///
+    /// `exitedStatusUnknown` says so in as many words rather than borrowing
+    /// `0`: an exit nobody observed is not a clean exit, and a fabricated code
+    /// would be indistinguishable from a real one to everything that reads it.
+    static func jobEndingDescription(_ status: HolderChildStatus) -> String {
+        switch status {
+        case .alive: return "was still running when it was last seen"
+        case .exited(let code): return "exited with status \(code)"
+        case .exitedStatusUnknown: return "ended with a status nobody collected"
+        }
+    }
+
+    /// What one handshake against a holder's rendezvous says about its row.
+    ///
+    /// Separate from the probe around it so the classification can be pinned
+    /// answer by answer without standing up a holder — and, more importantly,
+    /// so the error half is `HolderRegistry.exitProbeOutcome(for:)` itself
+    /// rather than a **fifth** copy of the same errno rules. Those rules are
+    /// already read in three places (`exitProbeOutcome`,
+    /// `RowlessHolderCollector.productionHandshake`,
+    /// `HolderRendezvousCollector.probeForListener`), all of which must agree
+    /// that only `ENOENT` and `ECONNREFUSED` are evidence of absence; a copy
+    /// here is how they would drift.
+    ///
+    /// `retry` and `keep` collapse to the same answer, and that is not a lost
+    /// distinction. They differ only in whether asking again could help, and
+    /// this sweep asks once — the next reconcile *is* the retry. Neither
+    /// establishes anything, so neither may move a row.
+    ///
+    /// **A rejected connection is terminal in both directions.** It classifies
+    /// as `keep`, so the row is not marked exited; and nothing here signals or
+    /// unlinks anything, so it is not reclaimed either. A live holder serving
+    /// somebody else — a stale daemon from another checkout is the known hazard
+    /// on a development machine — is left alone and logged.
+    static func holderRowVerdict(
+        expecting owner: HolderOwnerToken,
+        describing describe: () async throws -> HolderChildDescription
+    ) async -> HolderRowVerdict {
+        do {
+            let description = try await describe()
+            // A completed handshake is proof of liveness, not of ownership.
+            // The default `TBD_HOME` is shared by every checkout on a machine,
+            // so a holder that answers may be another installation's perfectly
+            // healthy session, and nothing about it may decide one of our rows.
+            guard description.owner == owner else { return .keep(reason: "foreign-owner") }
+            switch description.status {
+            case .alive:
+                return .keep(reason: "alive")
+            case .exited, .exitedStatusUnknown:
+                // Carried through exactly as reported. A holder that answers
+                // with a real code gives a real code; one that could not
+                // observe its child gives `exitedStatusUnknown`, and the two
+                // must stay distinguishable downstream.
+                return .sessionOver(description.status)
+            }
+        } catch {
+            switch HolderRegistry.exitProbeOutcome(for: error) {
+            case .established(let status):
+                return .sessionOver(status)
+            case .retry, .keep:
+                return .keep(reason: keepReason(for: error))
+            }
+        }
+    }
+
+    /// The *label* a kept row carries into the log, and only the label — the
+    /// decision was `exitProbeOutcome`'s.
+    ///
+    /// Distinguishing a busy holder from an unreadable one is what makes a soak
+    /// legible, the same reason `RowlessHolderHandshake` keeps `rejected` and
+    /// `unreachable` apart although both mean "leave it alone".
+    private static func keepReason(for error: Swift.Error) -> String {
+        if case HolderClient.Error.rejected = error { return "rejected" }
+        return "unestablished"
+    }
+
+    /// Whether this daemon can establish that a holder-backed row's session is
+    /// over — the inventory direction of the holder reconciler, and the sweep
+    /// the tmux arm's exemption was holding a place for.
+    ///
+    /// Every gate fails toward keeping, and the order is the argument:
+    ///
+    ///   1. **No registry, no opinion.** A daemon with no `HolderRegistry`
+    ///      (mock mode, a test that does not exercise the transport) knows
+    ///      nothing about holders and may not judge their rows.
+    ///   2. **A viewer owning the pty ends it.** After `confirmAttach` the app
+    ///      holds the descriptor and the daemon has no reader at all, so the
+    ///      probes below would be asking about a session somebody is looking
+    ///      at.
+    ///   3. **A live reader ends it.** The daemon is draining this pty right
+    ///      now. That stays true after the job exits, deliberately: a drained
+    ///      screen is a readable gravestone, exactly as an owned dead tmux pane
+    ///      is on the other arm, and it is released by
+    ///      `reclaimIfSessionEnded` rather than by this sweep.
+    ///   4. **A terminal status already recorded ends the questioning.** A
+    ///      holder winds itself down the moment an answer carrying the status
+    ///      reaches a client, so once one has there is nobody left to ask.
+    ///   5. **Otherwise, ask the rendezvous.**
+    ///
+    /// The last gate is the one that is not about the holder at all. **A row
+    /// whose job is still running is kept even when its holder is provably
+    /// gone**, because that row is the only record of the child pid, and
+    /// `AgentReaper.sweepHolderChildren` — the named reconciler for a job whose
+    /// holder died — reads exactly that record. Deleting the row here would
+    /// reclaim an inventory entry and strand the process it named, which is the
+    /// hazard `HolderRegistry.killJob`'s doc comment describes. So this sweep
+    /// signals nothing, ever: it waits for the reaper to do its half and clears
+    /// the row on a later pass. A pid the row names that has been reused by a
+    /// stranger keeps the row forever instead of killing that stranger, which
+    /// is the direction to fail in.
+    func holderRowVerdict(for terminal: Terminal) async -> HolderRowVerdict {
+        guard let holderRegistry else { return .keep(reason: "no-holder-registry") }
+        if await holderRegistry.viewerAttachment(for: terminal.id) != nil {
+            return .keep(reason: "viewer-attached")
+        }
+        if await holderRegistry.reader(for: terminal.id) != nil {
+            return .keep(reason: "reader-live")
+        }
+
+        let verdict: HolderRowVerdict
+        switch await holderRegistry.lastKnownStatus(for: terminal.id) {
+        // Established without a round trip, and by the same rule the probe
+        // uses: this is what a holder said, or what its absence said, and
+        // neither becomes less true for being remembered.
+        case .exited(let code):
+            verdict = .sessionOver(.exited(code: code))
+        case .exitedStatusUnknown:
+            verdict = .sessionOver(.exitedStatusUnknown)
+        case .alive, nil:
+            guard
+                let socketPath = try? HolderRendezvous.socketPath(
+                    sessionID: terminal.id, environment: holderRegistry.environment)
+            else { return .keep(reason: "unrepresentable-rendezvous") }
+            let client = HolderClient(
+                socketPath: socketPath, receiveTimeout: Self.holderProbeTimeout)
+            verdict = await Self.holderRowVerdict(expecting: holderRegistry.owner) {
+                try await client.describe()
+            }
+            await client.close()
+        }
+
+        guard case .sessionOver = verdict else { return verdict }
+        if let childPID = terminal.childPID, childPID > 1,
+           processSignaller.isAlive(childPID) {
+            return .keep(reason: "job-still-running")
+        }
+        return verdict
     }
 
     /// Reclaim the external-attach sessions on one tmux server.
