@@ -734,6 +734,27 @@ extension RPCRouter {
         return try RPCResponse(result: RemoteRecallResult(jsonl: jsonl, localPath: localPath))
     }
 
+    /// Lists the receipts TBD holds, optionally filtered to one provider.
+    ///
+    /// Local-only — it reads TBD's own rows and never invokes a provider verb,
+    /// so unlike the three verbs above it needs no `RemoteProviderManager`, no
+    /// cloud gate, and no capability. It still passes through `remoteGate()`
+    /// because the whole feature hides behind `config.remoteBackendsEnabled`,
+    /// which is the same reason `handleRemoteSetPin` does.
+    func handleRemoteRetainedList(_ paramsData: Data) async throws -> RPCResponse {
+        guard try await remoteGate() != nil else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteRetainedListParams.self, from: paramsData)
+        let transcripts: [RetainedTranscript]
+        if let provider = params.provider {
+            transcripts = try await db.retainedTranscripts.all(provider: provider)
+        } else {
+            transcripts = try await db.retainedTranscripts.all()
+        }
+        return try RPCResponse(result: RemoteRetainedListResult(transcripts: transcripts))
+    }
+
     /// Writes one receipt into `retained_transcript`, filling in whatever TBD
     /// already knows about the session it came from.
     ///

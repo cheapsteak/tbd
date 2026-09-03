@@ -310,6 +310,12 @@ public enum RPCMethod {
     public static let remoteRetain = "remote.retain"
     public static let remoteImport = "remote.import"
     public static let remoteRecall = "remote.recall"
+    /// Lists the receipts TBD holds. Deliberately absent from
+    /// `providerNamedRemoteMethods` below: it invokes no provider verb, and its
+    /// `provider` field is an optional *filter* rather than an address, so
+    /// there is nothing for the cloud gate to refuse and no provider name to
+    /// refuse it by.
+    public static let remoteRetainedList = "remote.retainedList"
     public static let remoteSetPin = "remote.setPin"
     public static let remoteReportAttachExit = "remote.reportAttachExit"
 
@@ -1666,6 +1672,21 @@ public struct RemoteRecallResult: Codable, Sendable {
     public init(jsonl: String?, localPath: String?) {
         self.jsonl = jsonl; self.localPath = localPath
     }
+}
+
+/// Params for `remote.retainedList` — the receipts TBD holds.
+///
+/// `provider` is an optional filter, not an address: nil lists every provider's
+/// receipts. Nothing here reaches a provider, which is why this verb needs no
+/// capability and appears in no capability check.
+public struct RemoteRetainedListParams: Codable, Sendable {
+    public let provider: String?
+    public init(provider: String? = nil) { self.provider = provider }
+}
+
+public struct RemoteRetainedListResult: Codable, Sendable {
+    public let transcripts: [RetainedTranscript]
+    public init(transcripts: [RetainedTranscript]) { self.transcripts = transcripts }
 }
 
 /// Pin or unpin a remote session for the sidebar dock. Purely local — no
