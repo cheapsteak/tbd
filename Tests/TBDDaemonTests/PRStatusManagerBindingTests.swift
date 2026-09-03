@@ -7,10 +7,10 @@ import TestSupport
 
 // MARK: - Injected `gh`
 
-/// A stand-in for the `gh` CLI answering the three query shapes the binding
+/// A stand-in for the `gh` CLI answering the four query shapes the binding
 /// refresh and the branch-match emitter issue: `repo view` (owner/name), the
 /// aliased by-number lookup (one per repo group), the per-PR check-signal
-/// query, and the viewer batch.
+/// query, and the repo-scoped branch query.
 ///
 /// It records every aliased query with the repo it was scoped to, so a test can
 /// assert not just the resulting statuses but how many round trips — and to
@@ -20,20 +20,20 @@ private actor BindingGH {
     private let nodes: [String: String]
     /// Check-detail JSON keyed by PR number.
     private let checks: [Int: String]
-    private let viewerNodes: [String]
+    private let branchNodes: [String]
     private let aliasedSucceeds: Bool
 
     private(set) var aliasedQueries: [(owner: String, name: String, numbers: [Int])] = []
     private(set) var checkQueries: [Int] = []
-    private(set) var viewerQueries = 0
+    private(set) var branchQueries = 0
 
     init(nodes: [String: String] = [:],
          checks: [Int: String] = [:],
-         viewerNodes: [String] = [],
+         branchNodes: [String] = [],
          aliasedSucceeds: Bool = true) {
         self.nodes = nodes
         self.checks = checks
-        self.viewerNodes = viewerNodes
+        self.branchNodes = branchNodes
         self.aliasedSucceeds = aliasedSucceeds
     }
 
@@ -55,10 +55,9 @@ private actor BindingGH {
             return GHCommandResult(stdout: detail)
         }
 
-        if query.contains("viewer {") {
-            viewerQueries += 1
-            return GHCommandResult(
-                stdout: #"{"data":{"viewer":{"pullRequests":{"nodes":[\#(viewerNodes.joined(separator: ","))]}}}}"#)
+        if BranchQueryStub.isBranchQuery(query) {
+            branchQueries += 1
+            return BranchQueryStub.response(args: args, nodes: branchNodes)
         }
 
         if query.contains("pullRequest(number:") {
@@ -231,11 +230,11 @@ private actor GitLabFake {
 
 /// A `gh` that can answer nothing, only count what it was asked.
 private actor GHCallLog {
-    private(set) var viewerQueries = 0
+    private(set) var branchQueries = 0
 
     func record(_ args: [String]) -> GHCommandResult? {
-        if args.contains(where: { $0.hasPrefix("query=") && $0.contains("viewer {") }) {
-            viewerQueries += 1
+        if args.contains(where: { $0.hasPrefix("query=") && BranchQueryStub.isBranchQuery($0) }) {
+            branchQueries += 1
         }
         return nil
     }
@@ -647,7 +646,7 @@ struct PRStatusManagerBindingTests {
     @Test("fetchAll emits a branch-matched PR as a ParsedPRURL for the coordinator")
     func emitsBranchMatches() async {
         let wt = UUID()
-        let gh = BindingGH(viewerNodes: [Self.nodeJSON(number: 89, head: "tbd/my-branch")])
+        let gh = BindingGH(branchNodes: [Self.nodeJSON(number: 89, head: "tbd/my-branch")])
         let manager = Self.manager(gh)
 
         let emitted = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)]).discovered
@@ -662,19 +661,43 @@ struct PRStatusManagerBindingTests {
         #expect(await manager.allStatuses()[wt]?.number == 89)
     }
 
-    @Test("a head-ref-mismatched match is healed away and never emitted")
+    @Test("a healed match is dropped while a legitimate one is still emitted")
     func healedMatchIsNotEmitted() async {
-        // The PR's head is the branch this worktree merely tracks, and that
-        // branch is the repo default — the heal clears it, so binding it would
-        // durably attach the base branch's PR.
-        let wt = UUID()
-        let gh = BindingGH(viewerNodes: [Self.nodeJSON(number: 90, head: "main")])
+        // Two worktrees in one repo, so the emitter has to DISCRIMINATE rather
+        // than come back empty by construction.
+        //
+        // `healed` carries a cached #90, and the branch query answers with
+        // nothing on its own branch, so `cachedNumberFallback` re-resolves that
+        // number — the only producer whose match can be head-ref mismatched,
+        // since a branch match is matched BY candidate and so always names one.
+        // #90's head is `main`: the branch this worktree merely tracks, and the
+        // repo default. The heal clears it before the apply loop, so nothing is
+        // applied and nothing is bound.
+        //
+        // `found` matches its own branch in the same pass, so the emitter is
+        // shown carrying exactly one of the two.
+        let healed = UUID(); let found = UUID()
+        let gh = BindingGH(
+            nodes: [BindingGH.key(owner: "acme", repo: "acme-prod", number: 90):
+                        Self.nodeJSON(number: 90, head: "main")],
+            branchNodes: [Self.nodeJSON(number: 91, head: "tbd/other-branch")])
         let manager = Self.manager(gh)
+        await manager.seedForTesting(
+            worktreeID: healed,
+            status: PRStatus(number: 90, url: "https://github.com/acme/acme-prod/pull/90",
+                             state: .pending))
 
-        let outcome = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
+        let outcome = await manager.fetchAll(worktrees: [
+            Self.pollWorktree(healed),
+            Self.pollWorktree(found, branch: "tbd/other-branch")
+        ])
 
-        #expect(outcome.discovered.isEmpty)
-        #expect(await manager.allStatuses()[wt] == nil)
+        #expect(outcome.discovered.map(\.worktreeID) == [found])
+        #expect(outcome.discovered.map(\.parsed.number) == [91])
+        // Without the heal the freshly-resolved #90 would land in the cache
+        // here, so this is the assertion that fails if the heal stops working.
+        #expect(await manager.allStatuses()[healed] == nil)
+        #expect(await manager.allStatuses()[found]?.number == 91)
     }
 
     // MARK: - Heal emitter
@@ -733,7 +756,7 @@ struct PRStatusManagerBindingTests {
     @Test("a poll that heals nothing disproves nothing")
     func healthyPollDisprovesNothing() async {
         let wt = UUID()
-        let gh = BindingGH(viewerNodes: [Self.nodeJSON(number: 89, head: "tbd/my-branch")])
+        let gh = BindingGH(branchNodes: [Self.nodeJSON(number: 89, head: "tbd/my-branch")])
         let manager = Self.manager(gh)
 
         let outcome = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
@@ -1136,8 +1159,9 @@ struct PRStatusManagerBindingTests {
     @Test("branch matching finds a GitLab merge request opened by someone else")
     func gitLabBranchMatch() async {
         // `sourceBranches` has no author filter, so this is the route that finds
-        // a merge request opened through the web UI or by another account —
-        // GitHub's viewer batch structurally cannot.
+        // a merge request opened through the web UI or by another account. Its
+        // GitHub sibling asks the same author-blind question one alias per
+        // branch.
         let gl = GitLabFake()
         let wt = UUID()
         let manager = PRStatusManager(
@@ -1162,11 +1186,11 @@ struct PRStatusManagerBindingTests {
         #expect(await manager.observation(for: wt)?.outcome == .observed)
     }
 
-    @Test("a GitLab-only fleet never asks gh for the viewer batch")
-    func gitLabOnlyFleetSkipsViewerBatch() async {
+    @Test("a GitLab-only fleet never asks gh a branch query")
+    func gitLabOnlyFleetSkipsGitHubBranchQuery() async {
         // `gh` cannot name this checkout — it is not a host it speaks to — so
         // identity comes from the remote, and nothing on this fleet is GitHub.
-        // The viewer batch is then not merely fruitless but never issued.
+        // The GitHub branch query is then not merely fruitless but never issued.
         let gl = GitLabFake()
         let gh = GHCallLog()
         let manager = PRStatusManager(
@@ -1180,7 +1204,7 @@ struct PRStatusManagerBindingTests {
         let wt = UUID()
         _ = await manager.fetchAll(worktrees: [Self.pollWorktree(wt)])
 
-        #expect(await gh.viewerQueries == 0)
+        #expect(await gh.branchQueries == 0)
         // And the GitLab side still answered, so this is not a vacuous pass.
         #expect(await manager.allStatuses()[wt]?.number == 412)
     }

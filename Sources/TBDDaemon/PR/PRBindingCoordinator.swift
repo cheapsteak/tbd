@@ -77,9 +77,10 @@ public actor PRBindingCoordinator {
     ///
     /// Without this such a worktree owns a number and no binding, so its PR is
     /// invisible to `tbd pr list`, to the toolbar dropdown and to the status-bar
-    /// chips. Fork PRs are the sharpest case: a fork head never appears in the
-    /// viewer-authored batch, so branch matching is structurally unable to find
-    /// them and the stored number is the only handle that exists.
+    /// chips. Fork PRs are the sharpest case: a fork PR's head ref lives in the
+    /// fork, so no query against this repo's head refs can reach it, branch
+    /// matching is structurally unable to find them, and the stored number is
+    /// the only handle that exists.
     ///
     /// The source is `.manual` — naming a PR row at creation is as explicit as
     /// an attach — but seeding is **reconciled on every poll**, and `.manual` is

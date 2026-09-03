@@ -964,8 +964,9 @@ public final class TBDDatabase: Sendable {
 
         // Number of the GitHub PR a worktree was created from, if any. Nullable —
         // NULL means "not created from a PR". Lets PRStatusManager resolve status
-        // by direct number lookup instead of viewer-authored/branch-name matching,
-        // which is the only way fork PRs (no matching local branch) get tracked.
+        // by direct number lookup instead of head-branch matching, which is the
+        // only way fork PRs (whose head ref lives in the fork, so no query
+        // against this repo's head refs reaches it) get tracked.
         migrator.registerMigration("v54_worktree_pr_number") { db in
             try db.addColumnIfMissing(table: "worktree", column: "pr_number", type: .integer)
         }

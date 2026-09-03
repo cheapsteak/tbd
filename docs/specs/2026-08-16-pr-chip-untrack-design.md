@@ -319,12 +319,13 @@ is one click away.
 
 Titles are fetched by adding `title` to `prNodeFieldSelection`, the by-number
 selection the binding refresh already issues. That selection is shared with the
-viewer-authored batch, which pulls up to a hundred PRs, so this is a real
-addition to the poll's payload rather than a free one — one short string per PR
-per pass, and the batch's copies are discarded, because only the by-number path
-has a binding row to persist them onto. It is a rounding error beside the check
-rollup the same node already carries, and forking the selection in two to avoid
-it would give up the guarantee that the two queries cannot drift.
+poll's repo-scoped branch query, which pulls up to ten PRs per candidate head
+ref, so this is a real addition to the poll's payload rather than a free one —
+one short string per PR per pass, and the branch query's copies are discarded,
+because only the by-number path has a binding row to persist them onto. It is a
+rounding error beside the check rollup the same node already carries, and
+forking the selection in two to avoid it would give up the guarantee that the
+two queries cannot drift.
 
 The title is persisted on the binding row, in a new nullable `title` column
 (the migration follows the shared-model rule: column, GRDB record, and Codable

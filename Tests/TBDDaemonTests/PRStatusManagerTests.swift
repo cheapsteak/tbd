@@ -264,157 +264,139 @@ struct PRStatusManagerTests {
 
     // MARK: - JSON parsing
 
-    @Test("parseGraphQLResponse keeps all branch names")
-    func parsesResponse() throws {
-        let json = """
-        {
-          "data": {
-            "viewer": {
-              "pullRequests": {
-                "nodes": [
-                  {
-                    "number": 42,
-                    "url": "https://github.com/owner/repo/pull/42",
-                    "state": "OPEN",
-                    "mergeStateStatus": "CLEAN",
-                    "isDraft": true,
-                    "statusCheckRollup": { "state": "FAILURE" },
-                    "reviewDecision": null,
-                    "headRefName": "tbd/cool-feature",
-                    "createdAt": "2026-03-24T10:00:00Z"
-                  },
-                  {
-                    "number": 7,
-                    "url": "https://github.com/owner/repo/pull/7",
-                    "state": "MERGED",
-                    "mergeStateStatus": "UNKNOWN",
-                    "reviewDecision": null,
-                    "headRefName": "tbd/old-feature",
-                    "createdAt": "2026-03-20T10:00:00Z"
-                  },
-                  {
-                    "number": 99,
-                    "url": "https://github.com/owner/repo/pull/99",
-                    "state": "OPEN",
-                    "mergeStateStatus": "CLEAN",
-                    "reviewDecision": null,
-                    "headRefName": "feature/not-tbd",
-                    "createdAt": "2026-03-24T12:00:00Z"
-                  }
-                ]
-              }
-            }
-          }
-        }
-        """.data(using: .utf8)!
+    /// One branch-query alias, as `gh api graphql` returns it: the alias GitHub
+    /// was asked for, carrying whatever pull requests sit on that head ref.
+    private func aliasJSON(_ alias: String, _ nodes: String...) -> String {
+        "\"\(alias)\": {\"nodes\": [\(nodes.joined(separator: ","))]}"
+    }
 
-        let nodes = try PRStatusManager.parsePRNodes(from: json)
+    /// The branch query's envelope around a set of aliases.
+    private func branchResponse(_ aliases: String...) -> Data {
+        "{\"data\": {\"repository\": {\(aliases.joined(separator: ","))}}}".data(using: .utf8)!
+    }
+
+    /// A PR node fixture. `extra` appends raw JSON so a test can add or omit an
+    /// optional field without writing a second whole literal.
+    private func branchNodeJSON(number: Int, head: String, state: String = "OPEN",
+                                repo: String = "owner/repo", extra: String = "") -> String {
+        """
+        {"number": \(number), "url": "https://github.com/\(repo)/pull/\(number)",
+         "state": "\(state)", "mergeStateStatus": "CLEAN", "reviewDecision": null,
+         "headRefName": "\(head)", "createdAt": "2026-03-24T10:00:00Z"\(extra)}
+        """
+    }
+
+    @Test("branchPRsQuery declares one String! variable per alias and carries no branch text")
+    func branchPRsQueryBindsEachBranchAsAVariable() {
+        // A git ref may legally contain `"`, and interpolating one into
+        // `headRefName: "…"` produced a malformed query. A declared variable per
+        // alias is the fix; this is what pins it.
+        let query = PRStatusManager.branchPRsQuery(aliasCount: 2)
+        let opens = query.filter { $0 == "{" }.count
+        let closes = query.filter { $0 == "}" }.count
+        #expect(opens == closes, "unbalanced braces (\(opens) open vs \(closes) close) in: \(query)")
+        #expect(query.contains("$b0: String!"))
+        #expect(query.contains("$b1: String!"))
+        #expect(query.contains("b0: pullRequests(headRefName: $b0,"))
+        #expect(query.contains("b1: pullRequests(headRefName: $b1,"))
+        #expect(query.contains("repository(owner: $owner, name: $name)"))
+        // The selection is shared with the by-number query: a title nothing asks
+        // for is a title no response can carry.
+        #expect(query.contains("title"))
+
+        let quoted = #"feature/say-"hi""#
+        let args = PRStatusManager.branchPRsArgs(owner: "acme", name: "acme-prod",
+                                                 branches: [quoted, "main"])
+        let queryArg = args.first { $0.hasPrefix("query=") }
+        #expect(queryArg?.contains(quoted) == false, "the branch text must never reach the query")
+        #expect(queryArg?.contains("say-") == false)
+        // It survives intact as its own field value (an execve arg), quote and all.
+        #expect(args.contains("b0=\(quoted)"))
+        #expect(args.contains("b1=main"))
+        // `-f` (raw string), never `-F`: `-F` would coerce a branch named `123`
+        // or `true` into the wrong JSON type against a `String!` variable.
+        #expect(!args.contains("-F"))
+        #expect(args.filter { $0 == "-f" }.count == 5)   // query, owner, name, b0, b1
+    }
+
+    @Test("parseBranchPRNodes keeps every alias's nodes and decodes their fields")
+    func parseBranchPRNodesKeepsEveryAlias() throws {
+        let json = branchResponse(
+            aliasJSON("b0",
+                      branchNodeJSON(number: 42, head: "tbd/cool-feature",
+                                     extra: #", "isDraft": true, "statusCheckRollup": {"state": "FAILURE"}"#),
+                      branchNodeJSON(number: 7, head: "tbd/cool-feature", state: "MERGED")),
+            aliasJSON("b1", branchNodeJSON(number: 99, head: "feature/not-tbd")))
+
+        let nodes = try #require(PRStatusManager.parseBranchPRNodes(from: json, aliasCount: 2))
+
         #expect(nodes.count == 3)
-        #expect(nodes[0].headRefName == "tbd/cool-feature")
+        #expect(nodes.map(\.number) == [42, 7, 99])
+        #expect(nodes.map(\.headRefName) == ["tbd/cool-feature", "tbd/cool-feature", "feature/not-tbd"])
         #expect(nodes[0].state == "OPEN")
         #expect(nodes[0].mergeVerdictRaw == "CLEAN")
         #expect(nodes[0].isDraft == true)
         #expect(nodes[0].statusCheckRollupState == "FAILURE")
-        #expect(nodes[1].headRefName == "tbd/old-feature")
-        #expect(nodes[2].headRefName == "feature/not-tbd")
+        #expect(nodes[1].state == "MERGED")
     }
 
-    @Test("parseGraphQLResponse ignores null nodes in partial results")
-    func parsesResponseWithNullNodes() throws {
-        let json = """
-        {
-          "data": {
-            "viewer": {
-              "pullRequests": {
-                "nodes": [
-                  null,
-                  {
-                    "number": 42,
-                    "url": "https://github.com/owner/repo/pull/42",
-                    "state": "OPEN",
-                    "mergeStateStatus": "CLEAN",
-                    "reviewDecision": null,
-                    "headRefName": "tbd/cool-feature",
-                    "createdAt": "2026-03-24T10:00:00Z"
-                  },
-                  null,
-                  {
-                    "number": 7,
-                    "url": "https://github.com/owner/repo/pull/7",
-                    "state": "MERGED",
-                    "mergeStateStatus": "UNKNOWN",
-                    "reviewDecision": null,
-                    "headRefName": "tbd/old-feature",
-                    "createdAt": "2026-03-20T10:00:00Z"
-                  },
-                  {
-                    "number": 99,
-                    "url": "https://github.com/owner/repo/pull/99",
-                    "state": "OPEN",
-                    "mergeStateStatus": "CLEAN",
-                    "reviewDecision": null,
-                    "headRefName": "feature/not-tbd",
-                    "createdAt": "2026-03-24T12:00:00Z"
-                  }
-                ]
-              }
-            }
-          }
-        }
-        """.data(using: .utf8)!
+    @Test("parseBranchPRNodes ignores null entries inside an alias's node list")
+    func parseBranchPRNodesIgnoresNullNodes() throws {
+        let json = branchResponse(
+            "\"b0\": {\"nodes\": [null, \(branchNodeJSON(number: 42, head: "tbd/cool-feature")), null]}",
+            aliasJSON("b1", branchNodeJSON(number: 99, head: "feature/not-tbd")))
 
-        let nodes = try PRStatusManager.parsePRNodes(from: json)
-        #expect(nodes.count == 3)
-        #expect(nodes[0].headRefName == "tbd/cool-feature")
-        #expect(nodes[1].headRefName == "tbd/old-feature")
-        #expect(nodes[2].headRefName == "feature/not-tbd")
+        let nodes = try #require(PRStatusManager.parseBranchPRNodes(from: json, aliasCount: 2))
+
+        #expect(nodes.map(\.number) == [42, 99])
     }
 
-    @Test("parsePRNodes decodes mergeQueueEntry.position and tolerates a null entry")
-    func parsesMergeQueuePosition() throws {
-        let json = """
-        {
-          "data": {
-            "viewer": {
-              "pullRequests": {
-                "nodes": [
-                  {
-                    "number": 12,
-                    "url": "https://github.com/acme/acme-prod/pull/12",
-                    "state": "OPEN",
-                    "mergeStateStatus": "UNKNOWN",
-                    "reviewDecision": null,
-                    "headRefName": "acme/queued-feature",
-                    "createdAt": "2026-03-24T10:00:00Z",
-                    "mergeQueueEntry": { "position": 3 }
-                  },
-                  {
-                    "number": 34,
-                    "url": "https://github.com/acme/acme-prod/pull/34",
-                    "state": "OPEN",
-                    "mergeStateStatus": "CLEAN",
-                    "reviewDecision": null,
-                    "headRefName": "acme/not-queued",
-                    "createdAt": "2026-03-24T11:00:00Z",
-                    "mergeQueueEntry": null
-                  },
-                  {
-                    "number": 56,
-                    "url": "https://github.com/acme/acme-prod/pull/56",
-                    "state": "OPEN",
-                    "mergeStateStatus": "CLEAN",
-                    "reviewDecision": null,
-                    "headRefName": "acme/no-entry-key",
-                    "createdAt": "2026-03-24T12:00:00Z"
-                  }
-                ]
-              }
-            }
-          }
-        }
-        """.data(using: .utf8)!
+    @Test("parseBranchPRNodes skips a null alias without discarding the others")
+    func parseBranchPRNodesSkipsNullAlias() throws {
+        // `gh api graphql` emits partial `data` alongside per-node errors, so one
+        // branch nobody could read must not cost the answer for every other.
+        let json = branchResponse(
+            "\"b0\": null",
+            aliasJSON("b1", branchNodeJSON(number: 99, head: "feature/not-tbd")))
 
-        let nodes = try PRStatusManager.parsePRNodes(from: json)
+        let nodes = try #require(PRStatusManager.parseBranchPRNodes(from: json, aliasCount: 2))
+
+        #expect(nodes.map(\.number) == [99])
+    }
+
+    @Test("parseBranchPRNodes answers [] for a branch with no PR and nil when the forge did not answer")
+    func parseBranchPRNodesSeparatesEmptyFromUnanswered() {
+        // The distinction the whole `PRObservation` vocabulary rests on:
+        // "answered, nothing here" is settled knowledge a program can act on;
+        // "no answer" is not, and folding one into the other is the bug.
+        let answered = PRStatusManager.parseBranchPRNodes(
+            from: branchResponse(aliasJSON("b0")), aliasCount: 1)
+        #expect(answered != nil, "an empty node list is an answer, not a failure")
+        #expect(answered?.isEmpty == true)
+
+        let repositoryNull = "{\"data\": {\"repository\": null}}".data(using: .utf8)!
+        #expect(PRStatusManager.parseBranchPRNodes(from: repositoryNull, aliasCount: 1) == nil,
+                "a repository the token cannot reach settles nothing")
+
+        let noData = "{\"nope\": true}".data(using: .utf8)!
+        #expect(PRStatusManager.parseBranchPRNodes(from: noData, aliasCount: 1) == nil)
+
+        let notJSON = "gh: could not resolve host".data(using: .utf8)!
+        #expect(PRStatusManager.parseBranchPRNodes(from: notJSON, aliasCount: 1) == nil)
+    }
+
+    @Test("parseBranchPRNodes decodes mergeQueueEntry.position and tolerates a null entry")
+    func parseBranchPRNodesDecodesMergeQueuePosition() throws {
+        let json = branchResponse(aliasJSON(
+            "b0",
+            branchNodeJSON(number: 12, head: "acme/queued-feature", repo: "acme/acme-prod",
+                           extra: #", "mergeQueueEntry": {"position": 3}"#),
+            branchNodeJSON(number: 34, head: "acme/queued-feature", repo: "acme/acme-prod",
+                           extra: #", "mergeQueueEntry": null"#),
+            branchNodeJSON(number: 56, head: "acme/queued-feature", repo: "acme/acme-prod")))
+
+        let nodes = try #require(PRStatusManager.parseBranchPRNodes(from: json, aliasCount: 1))
+
         #expect(nodes.count == 3)
         #expect(nodes[0].mergeQueuePosition == 3)      // front-of-queue is 1-indexed; this PR is 3rd
         #expect(nodes[1].mergeQueuePosition == nil)    // explicit null entry
@@ -582,7 +564,7 @@ struct PRStatusManagerTests {
     @Test("graphQLOutputData keeps non-empty stdout")
     func graphQLOutputDataUsesNonEmptyStdout() {
         let stdout = """
-        {"data":{"viewer":{"pullRequests":{"nodes":[]}}}}
+        {"data":{"repository":{"b0":{"nodes":[]}}}}
         """
 
         let data = PRStatusManager.graphQLOutputData(stdout: stdout)
@@ -1452,7 +1434,7 @@ struct PRStatusManagerTests {
         let a = UUID(); let b = UUID(); let c = UUID()
         let items: [(id: UUID, prNumber: Int?)] = [
             (a, 454),   // numbered → by-number path
-            (b, nil),   // unnumbered → legacy branch-name path
+            (b, nil),   // unnumbered → by-branch path
             (c, 12)     // numbered → by-number path
         ]
         let (numbered, unnumbered) = PRStatusManager.partitionByPRNumber(items) { $0.prNumber }
@@ -1462,8 +1444,9 @@ struct PRStatusManagerTests {
 
     @Test("parseNumberedPRNodes resolves a numbered (fork) worktree from the by-number response")
     func parseNumberedPRNodesResolvesForkPR() {
-        // The fork PR's head branch never appears in the viewer-authored batch;
-        // the stored number resolves it directly under its alias.
+        // The fork PR's head ref lives in the fork, so it appears under none of
+        // the base repo's head refs; the stored number resolves it directly
+        // under its alias.
         let wt = UUID()
         let json = """
         {
@@ -1553,16 +1536,16 @@ struct PRStatusManagerTests {
         #expect(matches.isEmpty)
     }
 
-    @Test("unnumbered worktree still resolves via the viewer-authored branch match when the repo matches (regression)")
+    @Test("unnumbered worktree still resolves via the branch match when the repo matches (regression)")
     func unnumberedResolvesViaLegacyBranchMatch() throws {
-        // The viewer batch carries a node for the worktree's branch; a worktree
+        // The branch query carries a node for the worktree's branch; a worktree
         // with no stored number must still match it when its own repo agrees
         // with the node's URL repo.
         let json = """
         {
           "data": {
-            "viewer": {
-              "pullRequests": {
+            "repository": {
+              "b0": {
                 "nodes": [
                   {
                     "number": 7,
@@ -1582,7 +1565,7 @@ struct PRStatusManagerTests {
         }
         """.data(using: .utf8)!
 
-        let nodes = try PRStatusManager.parsePRNodes(from: json)
+        let nodes = try #require(PRStatusManager.parseBranchPRNodes(from: json, aliasCount: 1))
         let wt = UUID()
         let matches = PRStatusManager.matchUnnumbered(
             [(id: wt, branch: "feature-x", upstreamBranch: nil, defaultBranch: "main", pushBranch: .noPushDestination,
@@ -1594,7 +1577,7 @@ struct PRStatusManagerTests {
         #expect(matches.first?.node.number == 7)
     }
 
-    // MARK: - Repo-scoped viewer-batch branch matching (cross-repo collision regression)
+    // MARK: - Repo-scoped branch matching (cross-repo collision regression)
 
     /// Convenience PRNode factory for the matching tests.
     private func prNode(number: Int, url: String, branch: String, state: String = "OPEN",
@@ -1877,7 +1860,7 @@ struct PRStatusManagerTests {
             [(id: wt, branch: "tbd/my-branch", upstreamBranch: "main", defaultBranch: "main", pushBranch: .noPushDestination,
               worktreePath: "/wt/acme-prod", prNumber: nil)]
         let out = PRStatusManager.headRefVerificationTargets(
-            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, verifiedIDs: [],
+            unnumbered: unnumbered, matchedIDs: [], answeredIDs: [wt], verifiedIDs: [],
             cachedStatus: { _ in PRStatus(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
                                           state: .closed) })
         #expect(out.count == 1)
@@ -1892,7 +1875,7 @@ struct PRStatusManagerTests {
             [(id: wt, branch: "tbd/my-branch", upstreamBranch: "main", defaultBranch: "main", pushBranch: .noPushDestination,
               worktreePath: "/wt/acme-prod", prNumber: nil)]
         let out = PRStatusManager.headRefVerificationTargets(
-            unnumbered: unnumbered, matchedIDs: [wt], batchSucceeded: true, verifiedIDs: [],
+            unnumbered: unnumbered, matchedIDs: [wt], answeredIDs: [wt], verifiedIDs: [],
             cachedStatus: { _ in PRStatus(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
                                           state: .closed) })
         #expect(out.isEmpty)
@@ -1907,7 +1890,7 @@ struct PRStatusManagerTests {
             [(id: wt, branch: "tbd/my-branch", upstreamBranch: "main", defaultBranch: "main", pushBranch: .noPushDestination,
               worktreePath: "/wt/acme-prod", prNumber: nil)]
         let out = PRStatusManager.headRefVerificationTargets(
-            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, verifiedIDs: [wt],
+            unnumbered: unnumbered, matchedIDs: [], answeredIDs: [wt], verifiedIDs: [wt],
             cachedStatus: { _ in PRStatus(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
                                           state: .closed) })
         #expect(out.isEmpty)
@@ -1921,7 +1904,8 @@ struct PRStatusManagerTests {
             [(id: UUID(), branch: "local-x", upstreamBranch: "renamed-on-remote", defaultBranch: "main", pushBranch: .lookupFailed,
               worktreePath: "/wt/acme-prod", prNumber: nil)]
         let out = PRStatusManager.headRefVerificationTargets(
-            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, verifiedIDs: [],
+            unnumbered: unnumbered, matchedIDs: [], answeredIDs: Set(unnumbered.map(\.id)),
+            verifiedIDs: [],
             cachedStatus: { _ in PRStatus(number: 9, url: "https://github.com/acme/acme-prod/pull/9",
                                           state: .closed) })
         #expect(out.isEmpty)
@@ -1933,7 +1917,8 @@ struct PRStatusManagerTests {
             [(id: UUID(), branch: "tbd/my-branch", upstreamBranch: "main", defaultBranch: nil,
               pushBranch: .noPushDestination, worktreePath: "/wt/acme-prod", prNumber: nil)]
         let out = PRStatusManager.headRefVerificationTargets(
-            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, verifiedIDs: [],
+            unnumbered: unnumbered, matchedIDs: [], answeredIDs: Set(unnumbered.map(\.id)),
+            verifiedIDs: [],
             cachedStatus: { _ in PRStatus(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
                                           state: .closed) })
         #expect(out.isEmpty)
@@ -1945,7 +1930,8 @@ struct PRStatusManagerTests {
             [(id: UUID(), branch: "tbd/my-branch", upstreamBranch: nil, defaultBranch: "main", pushBranch: .noPushDestination,
               worktreePath: "/wt/acme-prod", prNumber: nil)]
         let out = PRStatusManager.headRefVerificationTargets(
-            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, verifiedIDs: [],
+            unnumbered: unnumbered, matchedIDs: [], answeredIDs: Set(unnumbered.map(\.id)),
+            verifiedIDs: [],
             cachedStatus: { _ in PRStatus(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
                                           state: .closed) })
         #expect(out.isEmpty)
@@ -1957,23 +1943,31 @@ struct PRStatusManagerTests {
             [(id: UUID(), branch: "tbd/my-branch", upstreamBranch: "main", defaultBranch: "main", pushBranch: .noPushDestination,
               worktreePath: "/wt/acme-prod", prNumber: nil)]
         let out = PRStatusManager.headRefVerificationTargets(
-            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, verifiedIDs: [],
+            unnumbered: unnumbered, matchedIDs: [], answeredIDs: Set(unnumbered.map(\.id)),
+            verifiedIDs: [],
             cachedStatus: { _ in nil })
         #expect(out.isEmpty)
     }
 
-    @Test("headRefVerificationTargets yields nothing when the viewer batch failed")
-    func headRefVerificationTargetsSkippedOnBatchFailure() {
-        // Absence of evidence is not proof of mis-attachment: on a fetch/parse
-        // failure every worktree is "unmatched" and the word means nothing.
-        let unnumbered: [PRStatusManager.PollWorktree] =
-            [(id: UUID(), branch: "tbd/my-branch", upstreamBranch: "main", defaultBranch: "main", pushBranch: .noPushDestination,
-              worktreePath: "/wt/acme-prod", prNumber: nil)]
+    @Test("headRefVerificationTargets yields nothing for a worktree nobody answered for")
+    func headRefVerificationTargetsSkipsUnansweredWorktree() {
+        // Absence of evidence is not proof of mis-attachment: where this
+        // worktree's own repo query did not parse it is "unmatched" only
+        // because nobody asked, and the word means nothing. The gate is per
+        // worktree — a sibling in an answered repo must not carry it in.
+        let unanswered = UUID(); let answered = UUID()
+        let unnumbered: [PRStatusManager.PollWorktree] = [
+            (id: unanswered, branch: "tbd/dark-repo", upstreamBranch: "main", defaultBranch: "main",
+             pushBranch: .noPushDestination, worktreePath: "/wt/dark", prNumber: nil),
+            (id: answered, branch: "tbd/lit-repo", upstreamBranch: "main", defaultBranch: "main",
+             pushBranch: .noPushDestination, worktreePath: "/wt/lit", prNumber: nil)
+        ]
         let out = PRStatusManager.headRefVerificationTargets(
-            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: false, verifiedIDs: [],
+            unnumbered: unnumbered, matchedIDs: [], answeredIDs: [answered], verifiedIDs: [],
             cachedStatus: { _ in PRStatus(number: 88, url: "https://github.com/acme/acme-prod/pull/88",
                                           state: .closed) })
-        #expect(out.isEmpty)
+        #expect(out.map(\.id) == [answered],
+                "only the worktree whose own repo answered is eligible for verification")
     }
 
     @Test("bestNodeByRepoBranch keeps the tie-break within one repo: OPEN beats MERGED, newest wins within a state")
@@ -2090,21 +2084,22 @@ struct PRStatusManagerTests {
             [(id: wt, branch: "feature-x", upstreamBranch: nil, defaultBranch: "main", pushBranch: .noPushDestination,
               worktreePath: "/tmp/repo", prNumber: nil)]
         let out = PRStatusManager.cachedNumberFallback(
-            unnumbered: unnumbered, matchedIDs: [wt], batchSucceeded: true,
+            unnumbered: unnumbered, matchedIDs: [wt], answeredIDs: [wt],
             cachedStatus: { _ in PRStatus(number: 42, url: "https://example.com/pr/42", state: .pending) })
         #expect(out.isEmpty)
     }
 
     @Test("cachedNumberFallback includes an unmatched worktree, carrying its cached PR number")
     func cachedNumberFallbackIncludesUnmatchedWithCachedNumber() {
-        // The stale PR fell out of the 100-PR viewer batch; the cached number is
-        // the only remaining handle to observe the merged transition.
+        // The pull request sits on a head ref no candidate names — a fork head,
+        // a rename-push — so the branch query cannot see it and the cached
+        // number is the only remaining handle to observe the merged transition.
         let wt = UUID()
         let unnumbered: [PRStatusManager.PollWorktree] =
             [(id: wt, branch: "old-branch", upstreamBranch: "origin/old-branch", defaultBranch: "main", pushBranch: .noPushDestination,
               worktreePath: "/tmp/repo", prNumber: nil)]
         let out = PRStatusManager.cachedNumberFallback(
-            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true,
+            unnumbered: unnumbered, matchedIDs: [], answeredIDs: [wt],
             cachedStatus: { _ in PRStatus(number: 457, url: "https://example.com/pr/457", state: .mergeable) })
         #expect(out.count == 1)
         #expect(out.first?.id == wt)
@@ -2114,25 +2109,34 @@ struct PRStatusManagerTests {
 
     @Test("cachedNumberFallback excludes an unmatched worktree with no cached entry")
     func cachedNumberFallbackExcludesNoCachedEntry() {
+        let wt = UUID()
         let unnumbered: [PRStatusManager.PollWorktree] =
-            [(id: UUID(), branch: "feature-y", upstreamBranch: nil, defaultBranch: "main", pushBranch: .noPushDestination,
+            [(id: wt, branch: "feature-y", upstreamBranch: nil, defaultBranch: "main", pushBranch: .noPushDestination,
               worktreePath: "/tmp/repo", prNumber: nil)]
         let out = PRStatusManager.cachedNumberFallback(
-            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true, cachedStatus: { _ in nil })
+            unnumbered: unnumbered, matchedIDs: [], answeredIDs: [wt], cachedStatus: { _ in nil })
         #expect(out.isEmpty)
     }
 
-    @Test("cachedNumberFallback yields nothing when the viewer batch failed, even with unmatched cached numbers")
-    func cachedNumberFallbackSkippedOnBatchFailure() {
-        // On a fetch/parse failure "unmatched" means nothing — falling back could
-        // resolve a stale MERGED number and auto-archive off an unrelated PR.
-        let unnumbered: [PRStatusManager.PollWorktree] =
-            [(id: UUID(), branch: "old-branch", upstreamBranch: nil, defaultBranch: "main", pushBranch: .noPushDestination,
-              worktreePath: "/tmp/repo", prNumber: nil)]
+    @Test("cachedNumberFallback yields nothing for a worktree nobody answered for, even with a cached number")
+    func cachedNumberFallbackSkipsUnansweredWorktree() {
+        // Where this worktree's own repo query did not parse, "unmatched" means
+        // nothing — falling back could resolve a stale MERGED number and
+        // auto-archive off an unrelated PR. And the gate is per worktree: a
+        // sibling in a repo that DID answer is eligible in the same call, which
+        // is what one repo going dark must not take away.
+        let dark = UUID(); let lit = UUID()
+        let unnumbered: [PRStatusManager.PollWorktree] = [
+            (id: dark, branch: "old-branch", upstreamBranch: nil, defaultBranch: "main", pushBranch: .noPushDestination,
+             worktreePath: "/tmp/dark", prNumber: nil),
+            (id: lit, branch: "other-branch", upstreamBranch: nil, defaultBranch: "main", pushBranch: .noPushDestination,
+             worktreePath: "/tmp/lit", prNumber: nil)
+        ]
         let out = PRStatusManager.cachedNumberFallback(
-            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: false,
+            unnumbered: unnumbered, matchedIDs: [], answeredIDs: [lit],
             cachedStatus: { _ in PRStatus(number: 457, url: "https://example.com/pr/457", state: .mergeable) })
-        #expect(out.isEmpty)
+        #expect(out.map(\.id) == [lit],
+                "only the worktree whose own repo answered may fall back to its cached number")
     }
 
     @Test("cachedNumberFallback excludes worktrees whose cached state is terminal (.merged / .closed)")
@@ -2151,7 +2155,7 @@ struct PRStatusManagerTests {
             closedWT: PRStatus(number: 12, url: "https://example.com/pr/12", state: .closed)
         ]
         let out = PRStatusManager.cachedNumberFallback(
-            unnumbered: unnumbered, matchedIDs: [], batchSucceeded: true,
+            unnumbered: unnumbered, matchedIDs: [], answeredIDs: Set(unnumbered.map(\.id)),
             cachedStatus: { statuses[$0] })
         #expect(out.isEmpty)
     }
@@ -2302,38 +2306,90 @@ struct PRStatusManagerTests {
     }
 }
 
+// MARK: - The poll's branch query, as every `gh` stub in this target sees it
+
+/// Shared decoding of the repo-scoped branch query for the `gh` stubs in this
+/// target, so all of them answer it the same way.
+///
+/// The response is built by filtering the offered nodes on each node's OWN
+/// `headRefName`: a stub that returned every node under every alias would let a
+/// matcher that ignores head refs pass. The head ref is read out of the node
+/// JSON rather than matched as text, so this does not depend on how each suite
+/// formats its fixtures.
+enum BranchQueryStub {
+
+    /// Whether this query text is the aliased branch query rather than the
+    /// single-branch refresh query, whose one variable is `$branch`. Matching
+    /// `$b0` and not `$b` is what keeps the two apart.
+    static func isBranchQuery(_ query: String) -> Bool { query.contains("headRefName: $b0") }
+
+    /// The `-f b<N>=<branch>` bindings the branch query carries, in alias order.
+    /// Read out of the argument vector because the branch text appears nowhere
+    /// in the query itself — that is the point of binding it as a variable.
+    static func boundBranches(in args: [String]) -> [(alias: String, branch: String)] {
+        args.compactMap { arg -> (alias: String, branch: String)? in
+            guard let eq = arg.firstIndex(of: "=") else { return nil }
+            let key = String(arg[arg.startIndex..<eq])
+            guard key.hasPrefix("b"), Int(key.dropFirst()) != nil else { return nil }
+            return (key, String(arg[arg.index(after: eq)...]))
+        }
+    }
+
+    /// The aliased response `gh api graphql` returns for that query: one alias
+    /// per bound branch, carrying only the nodes whose own head ref is that
+    /// branch.
+    static func response(args: [String], nodes: [String]) -> GHCommandResult {
+        let fields = boundBranches(in: args).map { alias, branch in
+            let onBranch = nodes.filter { headRef(of: $0) == branch }
+            return "\"\(alias)\":{\"nodes\":[\(onBranch.joined(separator: ","))]}"
+        }
+        return GHCommandResult(stdout: "{\"data\":{\"repository\":{\(fields.joined(separator: ","))}}}")
+    }
+
+    /// A node fixture's own head ref.
+    static func headRef(of nodeJSON: String) -> String? {
+        guard let data = nodeJSON.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return obj["headRefName"] as? String
+    }
+}
+
 // MARK: - fetchAll end-to-end (injected gh)
 
 /// A stand-in for the `gh` CLI. Answers the three query shapes `fetchAll`
-/// issues — `repo view` (owner/name), the viewer batch, and the aliased
-/// by-number lookup — and counts them, so tests can assert not just the
+/// issues — `repo view` (owner/name), the repo-scoped branch query, and the
+/// aliased by-number lookup — and counts them, so tests can assert not just the
 /// resulting cache but how many round trips it took to get there.
 private actor FakeGH {
-    private let viewerNodes: [String]
+    private let branchNodes: [String]
     private let prsByNumber: [Int: String]
-    private let viewerSucceeds: Bool
+    private let branchQuerySucceeds: Bool
     private let byNumberSucceeds: Bool
-    private(set) var viewerQueries = 0
+    private(set) var branchQueries = 0
     private(set) var numberedQueries = 0
+    /// Every query text this stub was handed. Author-blindness is a negative
+    /// claim — "no query ever named the viewer" — so it needs the whole record,
+    /// not a count.
+    private(set) var queryTexts: [String] = []
 
-    init(viewerNodes: [String] = [],
+    init(branchNodes: [String] = [],
          prsByNumber: [Int: String] = [:],
-         viewerSucceeds: Bool = true,
+         branchQuerySucceeds: Bool = true,
          byNumberSucceeds: Bool = true) {
-        self.viewerNodes = viewerNodes
+        self.branchNodes = branchNodes
         self.prsByNumber = prsByNumber
-        self.viewerSucceeds = viewerSucceeds
+        self.branchQuerySucceeds = branchQuerySucceeds
         self.byNumberSucceeds = byNumberSucceeds
     }
 
     func run(args: [String], repoPath: String) -> GHCommandResult? {
         if args.first == "repo" { return GHCommandResult(stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#) }
         guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
-        if query.contains("viewer {") {
-            viewerQueries += 1
-            guard viewerSucceeds else { return nil }
-            return GHCommandResult(
-                stdout: #"{"data":{"viewer":{"pullRequests":{"nodes":[\#(viewerNodes.joined(separator: ","))]}}}}"#)
+        queryTexts.append(query)
+        if BranchQueryStub.isBranchQuery(query) {
+            branchQueries += 1
+            guard branchQuerySucceeds else { return nil }
+            return BranchQueryStub.response(args: args, nodes: branchNodes)
         }
         if query.contains("pullRequest(number:") {
             numberedQueries += 1
@@ -2439,7 +2495,7 @@ struct PRStatusManagerFetchAllTests {
         // The heal's OFF branch: nothing is flagged, nothing is verified, and the
         // status lands in the cache as usual.
         let wt = UUID()
-        let gh = FakeGH(viewerNodes: [Self.nodeJSON(number: 89, head: "tbd/my-branch")])
+        let gh = FakeGH(branchNodes: [Self.nodeJSON(number: 89, head: "tbd/my-branch")])
         let manager = PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
         let recorder = CallbackRecorder()
         await Self.attach(recorder, to: manager)
@@ -2543,7 +2599,7 @@ struct PRStatusManagerFetchAllTests {
         // Drives the real path twice, including the fallback → by-number route
         // that produced the match in the first place.
         let wt = UUID()
-        let gh = FakeGH(viewerNodes: [Self.nodeJSON(number: 88, head: "main", state: "CLOSED")],
+        let gh = FakeGH(branchNodes: [Self.nodeJSON(number: 88, head: "main", state: "CLOSED")],
                         prsByNumber: [88: Self.nodeJSON(number: 88, head: "main", state: "CLOSED")])
         let manager = PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
         await manager.seedForTesting(
@@ -2570,8 +2626,8 @@ struct PRStatusManagerFetchAllTests {
         let gh = FakeGH(prsByNumber: [88: Self.nodeJSON(number: 88, head: "main", state: "CLOSED")])
         let holder = ManagerHolder()
         let manager = PRStatusManager(ghRunner: { args, path in
-            // The user hits Refresh while the viewer batch is still in flight.
-            if args.contains(where: { $0.contains("viewer {") }) {
+            // The user hits Refresh while the branch query is still in flight.
+            if args.contains(where: { BranchQueryStub.isBranchQuery($0) }) {
                 await holder.refreshDuringBatch(worktreeID: wt, number: 88)
             }
             return await gh.run(args: args, repoPath: path)
@@ -2587,6 +2643,455 @@ struct PRStatusManagerFetchAllTests {
 
         #expect(await manager.allStatuses()[wt]?.number == 88)
         #expect(await recorder.clearedIDs.isEmpty)
+    }
+
+    @Test("a branch carrying a closed and an open PR resolves to the open one")
+    func picksTheOpenPRWhenABranchCarriesBoth() async {
+        // The shape seen in the field: a closed pull request and a newer open
+        // one on one head ref. The branch query returns both under that alias,
+        // and the OPEN > MERGED > CLOSED precedence in `bestNodeByRepoBranch`
+        // decides — the same rule `parsePRByBranch` applies on the single-PR
+        // refresh.
+        let wt = UUID()
+        let gh = FakeGH(branchNodes: [
+            Self.nodeJSON(number: 101, head: "tbd/my-branch", state: "CLOSED"),
+            Self.nodeJSON(number: 104, head: "tbd/my-branch")
+        ])
+        let manager = PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
+
+        await manager.fetchAll(worktrees: [Self.worktree(wt)])
+
+        #expect(await manager.allStatuses()[wt]?.number == 104)
+        #expect(await manager.allStatuses()[wt]?.state != .closed)
+    }
+
+    @Test("a pull request this account did not author is discovered, and no query names the viewer")
+    func discoversAPullRequestNobodyHereAuthored() async {
+        // The point of asking the repo rather than the account: the stub exposes
+        // #77 only through the repo-scoped branch query. Both halves are
+        // load-bearing — resolving it while still issuing a `viewer` query would
+        // be the author-scoped behaviour wearing a new stub.
+        let wt = UUID()
+        let gh = FakeGH(branchNodes: [Self.nodeJSON(number: 77, head: "tbd/my-branch")])
+        let manager = PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
+
+        await manager.fetchAll(worktrees: [Self.worktree(wt)])
+
+        #expect(await manager.allStatuses()[wt]?.number == 77)
+        #expect(await manager.observation(for: wt)?.outcome == .observed)
+        #expect(await gh.branchQueries == 1)
+        let asked = await gh.queryTexts
+        #expect(!asked.isEmpty, "no query at all would make the claim below vacuous")
+        #expect(asked.allSatisfy { !$0.contains("viewer") },
+                "a query scoped to the viewer can only ever see what this account authored")
+    }
+}
+
+/// A `gh` whose `repo view` answer depends on the checkout, and whose branch
+/// query can be made to fail for one repo while answering for another — the
+/// shape a per-repo degradation claim needs. A path absent from `reposByPath`
+/// is a checkout `gh` cannot name at all.
+private actor MultiRepoGH {
+    private let reposByPath: [String: String]
+    private let nodesByRepo: [String: [String]]
+    private let failingRepos: Set<String>
+    /// Which repos a branch query and a by-number query were scoped to, in order.
+    private(set) var branchQueriedRepos: [String] = []
+    private(set) var numberedQueriedRepos: [String] = []
+
+    init(reposByPath: [String: String],
+         nodesByRepo: [String: [String]] = [:],
+         failingRepos: Set<String> = []) {
+        self.reposByPath = reposByPath
+        self.nodesByRepo = nodesByRepo
+        self.failingRepos = failingRepos
+    }
+
+    func run(args: [String], repoPath: String) -> GHCommandResult? {
+        if args.first == "repo" {
+            guard let nameWithOwner = reposByPath[repoPath] else { return nil }
+            return GHCommandResult(
+                stdout: #"{"nameWithOwner":"\#(nameWithOwner)","url":"https://github.com/\#(nameWithOwner)"}"#)
+        }
+        guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
+        let repo = "\(Self.value(of: "owner", in: args) ?? "")/\(Self.value(of: "name", in: args) ?? "")"
+        if BranchQueryStub.isBranchQuery(query) {
+            branchQueriedRepos.append(repo)
+            guard !failingRepos.contains(repo) else { return nil }
+            return BranchQueryStub.response(args: args, nodes: nodesByRepo[repo] ?? [])
+        }
+        if query.contains("pullRequest(number:") {
+            numberedQueriedRepos.append(repo)
+            return GHCommandResult(stdout: #"{"data":{"repository":{}}}"#)
+        }
+        return nil
+    }
+
+    /// Read a `-f key=value` argument back out of the vector.
+    private static func value(of key: String, in args: [String]) -> String? {
+        args.first { $0.hasPrefix("\(key)=") }.map { String($0.dropFirst(key.count + 1)) }
+    }
+}
+
+/// The branch query is asked per repo, so one repo going dark is one repo's
+/// problem. These drive that claim through `fetchAll` end to end: the old
+/// fleet-wide predicate would have suspended the whole pass on either failure
+/// here, and read a worktree nobody could ask about as "there is no pull
+/// request".
+@Suite("PRStatusManager author-blind branch discovery")
+struct PRStatusManagerBranchDiscoveryTests {
+
+    private static func nodeJSON(number: Int, repo: String, head: String,
+                                 state: String = "OPEN") -> String {
+        """
+        {"number": \(number), "url": "https://github.com/\(repo)/pull/\(number)",
+         "state": "\(state)", "mergeStateStatus": "CLEAN", "reviewDecision": "APPROVED",
+         "headRefName": "\(head)", "createdAt": "2026-07-01T00:00:00Z", "isDraft": false,
+         "statusCheckRollup": {"state": "SUCCESS"}}
+        """
+    }
+
+    private static func worktree(_ id: UUID, branch: String, path: String) -> PRStatusManager.PollWorktree {
+        (id: id, branch: branch, upstreamBranch: "main", defaultBranch: "main",
+         pushBranch: .noPushDestination, worktreePath: path, prNumber: nil)
+    }
+
+    private static func manager(_ gh: MultiRepoGH) -> PRStatusManager {
+        PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
+    }
+
+    @Test("one repo's branch query failing leaves the other repo's worktree resolved")
+    func perRepoDegradation() async {
+        let dark = UUID(); let lit = UUID()
+        let gh = MultiRepoGH(
+            reposByPath: ["/wt/dark": "acme/dark-repo", "/wt/lit": "acme/lit-repo"],
+            nodesByRepo: ["acme/lit-repo": [Self.nodeJSON(number: 55, repo: "acme/lit-repo",
+                                                          head: "tbd/lit")]],
+            failingRepos: ["acme/dark-repo"])
+        let manager = Self.manager(gh)
+        let seeded = PRStatus(number: 11, url: "https://github.com/acme/dark-repo/pull/11",
+                              state: .mergeable, reason: "Ready to merge")
+        await manager.seedForTesting(worktreeID: dark, status: seeded)
+
+        await manager.fetchAll(worktrees: [
+            Self.worktree(dark, branch: "tbd/dark", path: "/wt/dark"),
+            Self.worktree(lit, branch: "tbd/lit", path: "/wt/lit")
+        ])
+
+        // The dark repo keeps the newest value anyone has and admits it was not
+        // reconfirmed. Both halves, together, are the point.
+        #expect(await manager.allStatuses()[dark] == seeded)
+        let darkOutcome = await manager.observation(for: dark)?.outcome
+        #expect(darkOutcome != PRObservation.Outcome.none,
+                "a repo that could not answer must never read as 'no pull request'")
+        if case .undetermined = darkOutcome {} else {
+            Issue.record("expected .undetermined for the dark repo, observed \(String(describing: darkOutcome))")
+        }
+
+        // And the repo that answered is untouched by its neighbour going dark.
+        #expect(await manager.allStatuses()[lit]?.number == 55)
+        #expect(await manager.observation(for: lit)?.outcome == .observed)
+    }
+
+    @Test("a worktree whose repo went dark is not handed to the by-number fallback")
+    func unansweredWorktreeIsNeverResolvedByNumber() async {
+        // The mirror of the degradation claim. Where nobody answered,
+        // "unmatched" means nothing, so re-resolving the cached number there
+        // could reattach a stale MERGED pull request and fire auto-archive on a
+        // worktree that has nothing to do with it. The lit repo's own unmatched
+        // worktree IS handed over in the same pass, so this is a discrimination
+        // rather than "the fallback never runs".
+        let dark = UUID(); let lit = UUID()
+        let gh = MultiRepoGH(
+            reposByPath: ["/wt/dark": "acme/dark-repo", "/wt/lit": "acme/lit-repo"],
+            nodesByRepo: [:],
+            failingRepos: ["acme/dark-repo"])
+        let manager = Self.manager(gh)
+        await manager.seedForTesting(
+            worktreeID: dark,
+            status: PRStatus(number: 11, url: "https://github.com/acme/dark-repo/pull/11", state: .mergeable))
+        await manager.seedForTesting(
+            worktreeID: lit,
+            status: PRStatus(number: 22, url: "https://github.com/acme/lit-repo/pull/22", state: .mergeable))
+
+        await manager.fetchAll(worktrees: [
+            Self.worktree(dark, branch: "tbd/dark", path: "/wt/dark"),
+            Self.worktree(lit, branch: "tbd/lit", path: "/wt/lit")
+        ])
+
+        #expect(await gh.branchQueriedRepos.contains("acme/dark-repo"),
+                "the dark repo was asked; it simply could not answer")
+        #expect(await gh.numberedQueriedRepos.contains("acme/dark-repo") == false,
+                "a worktree nobody answered for must not have its cached number re-resolved")
+        #expect(await gh.numberedQueriedRepos.contains("acme/lit-repo"),
+                "the answered repo's unmatched worktree still falls back to its cached number")
+    }
+
+    @Test("a worktree whose repo cannot be named records .undetermined, not .none")
+    func unnameableRepoRecordsUndetermined() async {
+        // It lands in no repo group, so no query ever covers it. Silence from a
+        // question nobody asked is not the forge saying "there is no pull
+        // request here" — and the named worktree beside it, which really was
+        // answered with nothing, is what makes the two readings distinguishable.
+        let nameless = UUID(); let named = UUID()
+        let gh = MultiRepoGH(reposByPath: ["/wt/named": "acme/lit-repo"])
+        let manager = Self.manager(gh)
+
+        await manager.fetchAll(worktrees: [
+            Self.worktree(nameless, branch: "tbd/nameless", path: "/wt/nameless"),
+            Self.worktree(named, branch: "tbd/named", path: "/wt/named")
+        ])
+
+        let namelessOutcome = await manager.observation(for: nameless)?.outcome
+        #expect(namelessOutcome != PRObservation.Outcome.none,
+                "nobody asked about this worktree; that is not 'no pull request'")
+        if case .undetermined = namelessOutcome {} else {
+            Issue.record("expected .undetermined, observed \(String(describing: namelessOutcome))")
+        }
+        #expect(await manager.observation(for: named)?.outcome == PRObservation.Outcome.none,
+                "a repo that answered with no nodes really has no pull request on that branch")
+    }
+}
+
+/// A `gh` observed one branch query at a time: it records the head refs each
+/// query was bound to (so a test can count chunks and see what each carried),
+/// can fail exactly the query carrying a named branch, and reports the most
+/// branch queries it ever had open at once.
+///
+/// The in-flight count is taken around a plain `Task.yield()` window rather than
+/// a barrier: yielding waits on nothing, so a serial caller returns to one in
+/// flight and a concurrent one does not — and neither can hang.
+private actor ChunkedBranchGH {
+    private let reposByPath: [String: String]
+    private let nodes: [String]
+    private let failingBranch: String?
+    private let yields: Int
+
+    /// The `b<N>` bindings of every branch query, one entry per query, in
+    /// arrival order.
+    private(set) var branchQueryBranches: [[String]] = []
+    /// The most branch queries open at the same time. 1 means they ran one
+    /// after another.
+    private(set) var maxInFlight = 0
+    private var inFlight = 0
+
+    init(reposByPath: [String: String] = ["/wt/acme-prod": "acme/acme-prod"],
+         nodes: [String] = [],
+         failingBranch: String? = nil,
+         yields: Int = 0) {
+        self.reposByPath = reposByPath
+        self.nodes = nodes
+        self.failingBranch = failingBranch
+        self.yields = yields
+    }
+
+    func run(args: [String], repoPath: String) async -> GHCommandResult? {
+        if args.first == "repo" {
+            guard let nameWithOwner = reposByPath[repoPath] else { return nil }
+            return GHCommandResult(
+                stdout: #"{"nameWithOwner":"\#(nameWithOwner)","url":"https://github.com/\#(nameWithOwner)"}"#)
+        }
+        guard let query = args.first(where: { $0.hasPrefix("query=") }),
+              BranchQueryStub.isBranchQuery(query) else { return nil }
+        let branches = BranchQueryStub.boundBranches(in: args).map(\.branch)
+        branchQueryBranches.append(branches)
+        inFlight += 1
+        maxInFlight = max(maxInFlight, inFlight)
+        for _ in 0..<yields { await Task.yield() }
+        inFlight -= 1
+        if let failingBranch, branches.contains(failingBranch) { return nil }
+        return BranchQueryStub.response(args: args, nodes: nodes)
+    }
+}
+
+/// One repo's branch question is asked in chunks, and every chunk is asked at
+/// once. Both halves have teeth: a chunk is the unit a bad head ref can poison,
+/// and the poll that runs these has a 30-second interval to fit inside.
+@Suite("PRStatusManager branch query chunking")
+struct PRStatusManagerBranchChunkingTests {
+
+    private static let cap = PRStatusManager.branchQueryAliasCap
+
+    private static func nodeJSON(number: Int, repo: String = "acme/acme-prod",
+                                 head: String) -> String {
+        """
+        {"number": \(number), "url": "https://github.com/\(repo)/pull/\(number)",
+         "state": "OPEN", "mergeStateStatus": "CLEAN", "reviewDecision": "APPROVED",
+         "headRefName": "\(head)", "createdAt": "2026-07-01T00:00:00Z", "isDraft": false,
+         "statusCheckRollup": {"state": "SUCCESS"}}
+        """
+    }
+
+    private static func worktree(_ id: UUID, branch: String, upstream: String? = "main",
+                                 path: String = "/wt/acme-prod") -> PRStatusManager.PollWorktree {
+        (id: id, branch: branch, upstreamBranch: upstream, defaultBranch: "main",
+         pushBranch: .noPushDestination, worktreePath: path, prNumber: nil)
+    }
+
+    private static func manager(_ gh: ChunkedBranchGH) -> PRStatusManager {
+        PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
+    }
+
+    private static func isUndetermined(_ outcome: PRObservation.Outcome?) -> Bool {
+        if case .undetermined = outcome { return true }
+        return false
+    }
+
+    // MARK: - The chunker itself (pure)
+
+    @Test("chunking splits at the alias cap and never splits one worktree's candidates")
+    func chunkingKeepsAWorktreesCandidatesTogether() {
+        // Two candidates each (its own branch and a tracked branch that is not
+        // the repo default), so `cap / 2` worktrees fill a chunk exactly and the
+        // next one cannot fit without splitting a pair. Splitting a pair is the
+        // failure this shape exists to rule out: `matchUnnumbered` takes a
+        // worktree's FIRST hit, so a candidate answered from a surviving chunk
+        // while its own branch's chunk failed is a mis-attachment, not a partial
+        // answer.
+        let perChunk = Self.cap / 2
+        let entries = (0..<(perChunk + 1)).map {
+            Self.worktree(UUID(), branch: "tbd/w\($0)", upstream: "up/w\($0)")
+        }
+
+        let chunks = PRStatusManager.branchQueryChunks(entries)
+
+        #expect(chunks.count == 2)
+        #expect(chunks[0].entries.count == perChunk)
+        #expect(chunks[0].branches.count == Self.cap)
+        #expect(chunks[1].entries.count == 1)
+        #expect(chunks.allSatisfy { $0.branches.count <= Self.cap })
+        // The invariant, stated over every chunk rather than inferred from the
+        // counts: whatever chunk a worktree landed in asks about ALL of its
+        // candidates.
+        for chunk in chunks {
+            for entry in chunk.entries {
+                let candidates = PRStatusManager.candidatesFor(entry)
+                #expect(candidates.allSatisfy { chunk.branches.contains($0) },
+                        "worktree \(entry.branch) had candidates \(candidates) split out of its own chunk")
+            }
+        }
+        // Every worktree is in exactly one chunk — no entry dropped, none asked twice.
+        #expect(chunks.flatMap { $0.entries.map(\.id) }.count == entries.count)
+        #expect(Set(chunks.flatMap { $0.entries.map(\.id) }) == Set(entries.map(\.id)))
+    }
+
+    @Test("a branch list that fits stays one chunk")
+    func smallRepoIsOneChunk() {
+        let entries = (0..<3).map { Self.worktree(UUID(), branch: "tbd/w\($0)") }
+        let chunks = PRStatusManager.branchQueryChunks(entries)
+        #expect(chunks.count == 1)
+        #expect(chunks[0].branches == ["tbd/w0", "tbd/w1", "tbd/w2"])
+    }
+
+    // MARK: - The argument vector
+
+    @Test("an empty branch list yields no argument vector at all")
+    func emptyBranchesYieldNoArguments() {
+        // A zero-alias document is `repository(…) { }` — an invalid GraphQL
+        // document — so the vector that would run it must not exist.
+        #expect(PRStatusManager.branchPRsArgs(owner: "acme", name: "acme-prod",
+                                              branches: []).isEmpty)
+        // And the ordinary case is untouched, so the guard is not just a
+        // blanket refusal.
+        let args = PRStatusManager.branchPRsArgs(owner: "acme", name: "acme-prod",
+                                                 branches: ["tbd/x"])
+        #expect(args.contains("b0=tbd/x"))
+        #expect(args.contains("owner=acme"))
+    }
+
+    // MARK: - End to end through `fetchAll`
+
+    @Test("a repo with more head refs than one query may carry is split, and every worktree resolves")
+    func oversizedRepoIsChunkedAndFullyResolved() async {
+        let count = Self.cap + 10
+        let ids = (0..<count).map { _ in UUID() }
+        let gh = ChunkedBranchGH(
+            nodes: (0..<count).map { Self.nodeJSON(number: 200 + $0, head: "tbd/wt-\($0)") })
+        let manager = Self.manager(gh)
+
+        await manager.fetchAll(
+            worktrees: ids.enumerated().map { index, id in
+                Self.worktree(id, branch: "tbd/wt-\(index)")
+            })
+
+        let queries = await gh.branchQueryBranches
+        #expect(queries.count == 2, "\(count) head refs cannot ride one \(Self.cap)-alias query")
+        #expect(queries.allSatisfy { $0.count <= Self.cap },
+                "a chunk over the cap defeats the point of having one: \(queries.map(\.count))")
+        #expect(queries.flatMap { $0 }.count == count, "every head ref must still be asked about")
+        let statuses = await manager.allStatuses()
+        for (index, id) in ids.enumerated() {
+            #expect(statuses[id]?.number == 200 + index,
+                    "worktree \(index) lost its pull request to the split")
+        }
+    }
+
+    @Test("one failed chunk leaves the other chunk's worktrees resolved")
+    func chunkFailureIsScopedToItsOwnWorktrees() async {
+        // The blast radius the cap buys. One head ref's field erroring
+        // null-propagates to `repository`, so the whole response reads as "the
+        // forge did not answer" — for that chunk, and for nothing else.
+        let count = Self.cap + 10
+        let ids = (0..<count).map { _ in UUID() }
+        let gh = ChunkedBranchGH(
+            nodes: (0..<count).map { Self.nodeJSON(number: 200 + $0, head: "tbd/wt-\($0)") },
+            failingBranch: "tbd/wt-0")
+        let manager = Self.manager(gh)
+
+        await manager.fetchAll(
+            worktrees: ids.enumerated().map { index, id in
+                Self.worktree(id, branch: "tbd/wt-\(index)")
+            })
+
+        let statuses = await manager.allStatuses()
+        for index in 0..<Self.cap {
+            #expect(statuses[ids[index]] == nil, "the failed chunk must contribute no matches")
+            let outcome = await manager.observation(for: ids[index])?.outcome
+            #expect(Self.isUndetermined(outcome),
+                    "a chunk that could not answer must never read as 'no pull request', observed \(String(describing: outcome))")
+        }
+        for index in Self.cap..<count {
+            #expect(statuses[ids[index]]?.number == 200 + index,
+                    "worktree \(index) is in the healthy chunk and must still resolve")
+            #expect(await manager.observation(for: ids[index])?.outcome == .observed)
+        }
+    }
+
+    @Test("every repo's chunk queries are in flight together, and every repo's matches come back")
+    func chunkQueriesRunConcurrently() async {
+        // Two repos, each needing two chunks: four queries that a serial walk
+        // would run one at a time. `maxInFlight` is the discriminator — it is
+        // exactly 1 for a sequential loop.
+        let count = Self.cap + 1
+        let alpha = (0..<count).map { _ in UUID() }
+        let beta = (0..<count).map { _ in UUID() }
+        let gh = ChunkedBranchGH(
+            reposByPath: ["/wt/alpha": "acme/alpha", "/wt/beta": "acme/beta"],
+            nodes: [Self.nodeJSON(number: 301, repo: "acme/alpha", head: "a-wt-0"),
+                    Self.nodeJSON(number: 302, repo: "acme/beta", head: "b-wt-0")],
+            yields: 4)
+        let manager = Self.manager(gh)
+
+        let alphaWorktrees = alpha.enumerated().map { index, id in
+            Self.worktree(id, branch: "a-wt-\(index)", path: "/wt/alpha")
+        }
+        let betaWorktrees = beta.enumerated().map { index, id in
+            Self.worktree(id, branch: "b-wt-\(index)", path: "/wt/beta")
+        }
+        await manager.fetchAll(worktrees: alphaWorktrees + betaWorktrees)
+
+        let queryCount = await gh.branchQueryBranches.count
+        #expect(queryCount == 4, "two repos over the cap is four chunks, observed \(queryCount)")
+        let maxInFlight = await gh.maxInFlight
+        #expect(maxInFlight > 1,
+                "the chunk queries ran one at a time (max in flight \(maxInFlight))")
+        // Concurrency changed nothing about the answers: each repo's own match
+        // landed on its own worktree, and neither reached the other's.
+        let statuses = await manager.allStatuses()
+        #expect(statuses[alpha[0]]?.number == 301)
+        #expect(statuses[beta[0]]?.number == 302)
+        #expect(statuses[alpha[1]] == nil)
+        #expect(statuses[beta[1]] == nil)
     }
 }
 

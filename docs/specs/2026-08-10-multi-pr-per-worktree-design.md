@@ -8,10 +8,10 @@ starts the next piece of work on a fresh branch, and opens another. TBD shows
 exactly one of them.
 
 The single-PR assumption is not merely a display limit. TBD discovers a
-worktree's PR by matching the worktree's **head branch** against the viewer's
-authored PRs. A subagent's PR is typically on a branch the worktree never had
-checked out, so no amount of polling will find it: it is invisible by
-construction, not by omission.
+worktree's PR by asking the repo about the worktree's **candidate head
+branches**. A subagent's PR is typically on a branch the worktree never had
+checked out, so it is named by no candidate and no amount of polling will find
+it: it is invisible by construction, not by omission.
 
 ## What exists today
 
@@ -21,8 +21,9 @@ construction, not by omission.
   (migrations `v34`, `v54`).
 - `PRStatusManager` keys its cache `[UUID: PRStatus]` — one status per worktree.
   It resolves a stored number directly via an aliased `pullRequest(number:)`
-  query, and otherwise matches the viewer-authored batch by head branch, scoped
-  to the worktree's own repo.
+  query, and otherwise asks each repo about its worktrees' candidate head refs
+  — one aliased `pullRequests(headRefName:)` field per branch, author-blind —
+  and matches the answer back, scoped to the worktree's own repo.
 - `PRStatusManager.apply` fires `onMergedTransition` when a worktree's status
   moves from non-merged to `.merged`. That drives auto-archive
   (`AutoArchiveOnMergeCoordinator`) and auto-hibernate
@@ -78,11 +79,12 @@ defaulted so existing rows and JSON still decode.
 `Worktree.prNumber` keeps its present meaning — provenance for a worktree
 created from a PR row — and additionally seeds a `manual`-source binding, so
 that PR appears in the list like any other. Fork PRs make this load-bearing
-rather than tidy: their head branch never appears in the viewer-authored batch,
-so branch matching can never find them and the stored number is the only handle
-that exists. Seeding runs as a poll reconciliation rather than at creation,
-which covers worktrees that predate bindings and avoids the moment during
-creation when the checkout does not yet exist and its repo cannot be resolved.
+rather than tidy: a fork PR's head ref lives in the fork, so no query against
+this repo's head refs reaches it, branch matching can never find them, and the
+stored number is the only handle that exists. Seeding runs as a poll
+reconciliation rather than at creation, which covers worktrees that predate
+bindings and avoids the moment during creation when the checkout does not yet
+exist and its repo cannot be resolved.
 Because it re-runs every poll, the seed is explicitly barred from reviving a
 tombstone, which a `manual` source would otherwise do.
 

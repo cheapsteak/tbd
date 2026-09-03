@@ -15,7 +15,7 @@ import TestSupport
 // is producible: an implementation that recorded `.none` for both would satisfy
 // "records an observation" and still be the bug.
 
-/// A `gh` stand-in whose viewer batch and by-number lookups can each be told to
+/// A `gh` stand-in whose branch query and by-number lookups can each be told to
 /// succeed with given nodes, return no output at all, or return garbage.
 /// `acme/acme-prod` is a placeholder, as everywhere in this suite.
 private actor ScriptedGH {
@@ -28,33 +28,32 @@ private actor ScriptedGH {
         case garbage
     }
 
-    private var viewer: Answer
+    private var branch: Answer
     private let byNumber: [Int: String]
     private let byNumberAnswer: Answer
     private let checkSignals: Answer
 
-    init(viewer: Answer = .nodes([]),
+    init(branch: Answer = .nodes([]),
          byNumber: [Int: String] = [:],
          byNumberAnswer: Answer = .nodes([]),
          checkSignals: Answer = .nodes([])) {
-        self.viewer = viewer
+        self.branch = branch
         self.byNumber = byNumber
         self.byNumberAnswer = byNumberAnswer
         self.checkSignals = checkSignals
     }
 
-    /// Change what the viewer batch answers, so one manager can see a pull
+    /// Change what the branch query answers, so one manager can see a pull
     /// request change between two polls.
-    func replaceViewer(_ answer: Answer) { viewer = answer }
+    func replaceBranchAnswer(_ answer: Answer) { branch = answer }
 
     func run(args: [String], repoPath: String) -> GHCommandResult? {
         if args.first == "repo" { return GHCommandResult(stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#) }
         guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
-        if query.contains("viewer {") {
-            switch viewer {
+        if BranchQueryStub.isBranchQuery(query) {
+            switch branch {
             case .nodes(let nodes):
-                return GHCommandResult(
-                    stdout: #"{"data":{"viewer":{"pullRequests":{"nodes":[\#(nodes.joined(separator: ","))]}}}}"#)
+                return BranchQueryStub.response(args: args, nodes: nodes)
             case .noOutput: return nil
             case .garbage: return GHCommandResult(stdout: "{\"nope\":true}")
             }
@@ -127,7 +126,7 @@ struct PRObservationRecordingTests {
         // An empty node list from a query that PARSED is the forge saying "no
         // pull request here" — settled knowledge a program can act on.
         let wt = UUID()
-        let manager = Self.makeManager(ScriptedGH(viewer: .nodes([])))
+        let manager = Self.makeManager(ScriptedGH(branch: .nodes([])))
 
         await manager.fetchAll(worktrees: [Self.worktree(wt)])
 
@@ -140,7 +139,7 @@ struct PRObservationRecordingTests {
     @Test("a failed batch records .undetermined with a cause, never .none")
     func failedBatchRecordsUndetermined() async {
         let wt = UUID()
-        let manager = Self.makeManager(ScriptedGH(viewer: .noOutput))
+        let manager = Self.makeManager(ScriptedGH(branch: .noOutput))
 
         await manager.fetchAll(worktrees: [Self.worktree(wt)])
 
@@ -156,7 +155,7 @@ struct PRObservationRecordingTests {
     @Test("an unparseable response is undetermined and names the parse failure")
     func unparseableResponseNamesItsCause() async {
         let wt = UUID()
-        let manager = Self.makeManager(ScriptedGH(viewer: .garbage))
+        let manager = Self.makeManager(ScriptedGH(branch: .garbage))
 
         await manager.fetchAll(worktrees: [Self.worktree(wt)])
 
@@ -170,8 +169,8 @@ struct PRObservationRecordingTests {
         // side so the assertion is about the pair, not about either alone.
         let answered = UUID()
         let unreachable = UUID()
-        let answeredManager = Self.makeManager(ScriptedGH(viewer: .nodes([])))
-        let unreachableManager = Self.makeManager(ScriptedGH(viewer: .noOutput))
+        let answeredManager = Self.makeManager(ScriptedGH(branch: .nodes([])))
+        let unreachableManager = Self.makeManager(ScriptedGH(branch: .noOutput))
 
         await answeredManager.fetchAll(worktrees: [Self.worktree(answered)])
         await unreachableManager.fetchAll(worktrees: [Self.worktree(unreachable)])
@@ -197,7 +196,7 @@ struct PRObservationRecordingTests {
         // implementation that dropped the other.
         let wt = UUID()
         let gh = ScriptedGH(
-            viewer: .nodes([Self.nodeJSON(number: 12, head: "tbd/w", rollup: "FAILURE")]),
+            branch: .nodes([Self.nodeJSON(number: 12, head: "tbd/w", rollup: "FAILURE")]),
             checkSignals: .noOutput)
         let manager = Self.makeManager(gh)
         let cached = PRStatus(number: 12, url: "https://github.com/acme/acme-prod/pull/12",
@@ -214,7 +213,7 @@ struct PRObservationRecordingTests {
     @Test("a failed fetch with no prior status does not invent .none")
     func failedFetchWithNoCacheDoesNotInventNone() async {
         let wt = UUID()
-        let manager = Self.makeManager(ScriptedGH(viewer: .noOutput))
+        let manager = Self.makeManager(ScriptedGH(branch: .noOutput))
 
         await manager.fetchAll(worktrees: [Self.worktree(wt)])
 
@@ -247,7 +246,7 @@ struct PRObservationRecordingTests {
     func resolvedPRStampsObservedAt() async {
         let wt = UUID()
         let manager = Self.makeManager(
-            ScriptedGH(viewer: .nodes([Self.nodeJSON(number: 12, head: "tbd/w")])))
+            ScriptedGH(branch: .nodes([Self.nodeJSON(number: 12, head: "tbd/w")])))
 
         await manager.fetchAll(worktrees: [Self.worktree(wt)])
 
@@ -269,7 +268,7 @@ struct PRObservationRecordingTests {
         // SQLite transaction per worktree per cadence, forever, on a fleet
         // whose steady state was zero. Change detection is `sameValue(as:)`.
         let wt = UUID()
-        let gh = ScriptedGH(viewer: .nodes([Self.nodeJSON(number: 12, head: "tbd/w")]))
+        let gh = ScriptedGH(branch: .nodes([Self.nodeJSON(number: 12, head: "tbd/w")]))
         let later = Self.stamp.addingTimeInterval(600)
         let clock = MutableStamp(Self.stamp)
         let manager = PRStatusManager(
@@ -313,9 +312,9 @@ struct PRObservationRecordingTests {
             ghRunner: { args, _ in
                 if args.first == "repo" { return GHCommandResult(stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#) }
                 guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
-                // Everything except the viewer batch fails: that outage is what
+                // Everything except the branch query fails: that outage is what
                 // the user's refresh runs into.
-                guard query.contains("viewer {") else { return nil }
+                guard BranchQueryStub.isBranchQuery(query) else { return nil }
                 if interrupt.claim() {
                     clock.value = refreshedAt
                     _ = await box.value?.refresh(
@@ -323,8 +322,7 @@ struct PRObservationRecordingTests {
                         defaultBranch: "main", pushBranch: .noPushDestination,
                         repoPath: "/wt/acme-prod")
                 }
-                return GHCommandResult(
-                    stdout: #"{"data":{"viewer":{"pullRequests":{"nodes":[]}}}}"#)
+                return BranchQueryStub.response(args: args, nodes: [])
             },
             now: { clock.value })
         box.set(manager)
@@ -345,7 +343,7 @@ struct PRObservationRecordingTests {
     @Test("retain drops the outcomes of worktrees that left the fleet, and keeps the values")
     func retainBoundsTheOutcomeMapToTheActiveFleet() async {
         let alive = UUID(), archived = UUID()
-        let manager = Self.makeManager(ScriptedGH(viewer: .nodes([])))
+        let manager = Self.makeManager(ScriptedGH(branch: .nodes([])))
         await manager.seedForTesting(
             worktreeID: archived,
             status: PRStatus(number: 5, url: "https://github.com/acme/acme-prod/pull/5",
@@ -368,7 +366,7 @@ struct PRObservationRecordingTests {
     @Test("a pull request whose value changed is persisted")
     func aChangedValueStillPersists() async {
         let wt = UUID()
-        let gh = ScriptedGH(viewer: .nodes([Self.nodeJSON(number: 12, head: "tbd/w")]))
+        let gh = ScriptedGH(branch: .nodes([Self.nodeJSON(number: 12, head: "tbd/w")]))
         let clock = MutableStamp(Self.stamp)
         let manager = PRStatusManager(
             ghRunner: { args, path in await gh.run(args: args, repoPath: path) },
@@ -377,7 +375,7 @@ struct PRObservationRecordingTests {
         await manager.setOnStatusPersist { id, status in await persisted.record(id, status) }
 
         await manager.fetchAll(worktrees: [Self.worktree(wt)])
-        await gh.replaceViewer(.nodes([Self.nodeJSON(number: 12, head: "tbd/w", state: "CLOSED")]))
+        await gh.replaceBranchAnswer(.nodes([Self.nodeJSON(number: 12, head: "tbd/w", state: "CLOSED")]))
         clock.value = Self.stamp.addingTimeInterval(600)
         await manager.fetchAll(worktrees: [Self.worktree(wt)])
 

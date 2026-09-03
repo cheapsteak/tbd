@@ -23,11 +23,11 @@ import TestSupport
 // (auto-archive, auto-hibernate-on-merge) would silently stop firing. `pr.list`
 // is that second driver's obvious hiding place, so it gets its own test.
 
-/// A `gh` stand-in that counts viewer-batch queries and answers with a fixed
-/// node list. `acme/acme-prod` is a placeholder, as everywhere in this suite.
+/// A `gh` stand-in that counts branch queries and answers with a fixed node
+/// list. `acme/acme-prod` is a placeholder, as everywhere in this suite.
 private actor CountingGH {
     private let nodes: [String]
-    private(set) var viewerQueries = 0
+    private(set) var branchQueries = 0
 
     init(nodes: [String] = []) {
         self.nodes = nodes
@@ -36,10 +36,9 @@ private actor CountingGH {
     func run(args: [String], repoPath: String) -> GHCommandResult? {
         if args.first == "repo" { return GHCommandResult(stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#) }
         guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
-        guard query.contains("viewer {") else { return nil }
-        viewerQueries += 1
-        return GHCommandResult(
-            stdout: #"{"data":{"viewer":{"pullRequests":{"nodes":[\#(nodes.joined(separator: ","))]}}}}"#)
+        guard BranchQueryStub.isBranchQuery(query) else { return nil }
+        branchQueries += 1
+        return BranchQueryStub.response(args: args, nodes: nodes)
     }
 }
 
@@ -131,7 +130,7 @@ struct PRPollerTests {
         await clock.advanceWhenSuspended(by: Self.tick)
         await clock.waitForSuspension()
 
-        let queries = await gh.viewerQueries
+        let queries = await gh.branchQueries
         #expect(queries == 1, "expected 1 daemon-driven fetch with no app connected, observed \(queries)")
         #expect(await manager.allStatuses()[wtID]?.number == 41)
         await poller.stop()
@@ -153,7 +152,7 @@ struct PRPollerTests {
         await clock.advanceWhenSuspended(by: Self.tick)
         await clock.waitForSuspension()
 
-        let queries = await gh.viewerQueries
+        let queries = await gh.branchQueries
         #expect(queries == 1, "expected the 30s foreground cadence to be due after one 150s tick, observed \(queries) fetches")
         await poller.stop()
     }
@@ -175,12 +174,12 @@ struct PRPollerTests {
         await clock.advanceWhenSuspended(by: Self.tick)
         await clock.waitForSuspension()
 
-        let early = await gh.viewerQueries
+        let early = await gh.branchQueries
         #expect(early == 0, "150s waited against the 300s background cadence should not have fetched; observed \(early)")
 
         await clock.advanceWhenSuspended(by: Self.tick)
         await clock.waitForSuspension()
-        let after = await gh.viewerQueries
+        let after = await gh.branchQueries
         #expect(after == 1, "the 300s background cadence should be due after two 150s ticks, observed \(after)")
         await poller.stop()
     }
@@ -235,7 +234,7 @@ struct PRPollerTests {
         #expect(beforeResponse.success)
         let before = try beforeResponse.decodeResult(PRListResult.self)
         #expect(before.statuses.isEmpty)
-        #expect(await gh.viewerQueries == 0, "pr.list must not fetch while the daemon clock owns the poll")
+        #expect(await gh.branchQueries == 0, "pr.list must not fetch while the daemon clock owns the poll")
 
         // Now the poller's tick supplies the fact — and the edge.
         await router.prPoller.tick()
@@ -244,7 +243,7 @@ struct PRPollerTests {
 
         #expect(after.statuses[wtID]?.state == .merged)
         #expect(await recorder.count == 1)
-        #expect(await gh.viewerQueries == 1, "exactly one driver should have fetched")
+        #expect(await gh.branchQueries == 1, "exactly one driver should have fetched")
     }
 
     @Test("repeated pr.list calls neither fetch nor re-fire the edge")
@@ -269,7 +268,7 @@ struct PRPollerTests {
         for _ in 0..<3 {
             _ = await router.handle(RPCRequest(method: RPCMethod.prList))
         }
-        let beforeFetches = await gh.viewerQueries
+        let beforeFetches = await gh.branchQueries
         #expect(beforeFetches == 0, "pr.list must never fetch; observed \(beforeFetches) fetches over 3 calls")
         #expect(await recorder.count == 0)
 
@@ -282,7 +281,7 @@ struct PRPollerTests {
         let result = try response.decodeResult(PRListResult.self)
 
         #expect(result.statuses[wtID]?.state == .merged)
-        let fetches = await gh.viewerQueries
+        let fetches = await gh.branchQueries
         #expect(fetches == 1, "only the poller's single tick should have fetched, observed \(fetches)")
         let count = await recorder.count
         #expect(count == 1, "expected exactly 1 merged transition, observed \(count)")

@@ -4,7 +4,7 @@ import Foundation
 /// and so a manual attach can be told apart from an inferred one.
 public enum PRBindingSource: String, Codable, Sendable, CaseIterable {
     case hook       // scraped from a `gh pr create` tool result
-    case branch     // matched by head branch against the viewer's PRs
+    case branch     // matched by head branch against the repo's PRs, whoever opened them
     case manual     // `tbd pr attach`, or seeded from Worktree.prNumber
 }
 

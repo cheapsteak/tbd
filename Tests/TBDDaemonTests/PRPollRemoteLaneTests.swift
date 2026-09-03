@@ -316,6 +316,14 @@ private actor RecordingGH {
         recordedPaths.append(repoPath)
         if args.first == "repo" { return GHCommandResult(stdout: #"{"nameWithOwner":"acme/acme-prod","url":"https://github.com/acme/acme-prod"}"#) }
         guard let query = args.first(where: { $0.hasPrefix("query=") }) else { return nil }
+        // The aliased branch query the poll issues, checked before the
+        // single-branch refresh query below: both select `pullRequests(headRefName:)`,
+        // and only the poll's binds `$b0`.
+        if BranchQueryStub.isBranchQuery(query) {
+            let nodes = prsByBranch.sorted { $0.value < $1.value }
+                .map { Self.node(number: $0.value, head: $0.key) }
+            return BranchQueryStub.response(args: args, nodes: nodes)
+        }
         if query.contains("pullRequests(headRefName:") {
             guard let branch = args.first(where: { $0.hasPrefix("branch=") })?
                 .dropFirst("branch=".count) else { return nil }
@@ -323,12 +331,6 @@ private actor RecordingGH {
             let node = prsByBranch[String(branch)].map { Self.node(number: $0, head: String(branch)) }
             return GHCommandResult(
                 stdout: #"{"data":{"repository":{"pullRequests":{"nodes":[\#(node ?? "")]}}}}"#)
-        }
-        if query.contains("viewer {") {
-            let nodes = prsByBranch.sorted { $0.value < $1.value }
-                .map { Self.node(number: $0.value, head: $0.key) }
-            return GHCommandResult(
-                stdout: #"{"data":{"viewer":{"pullRequests":{"nodes":[\#(nodes.joined(separator: ","))]}}}}"#)
         }
         if query.contains("pullRequest(number:") {
             let fields = Self.aliasedNumbers(inQuery: query).map { alias, number in
