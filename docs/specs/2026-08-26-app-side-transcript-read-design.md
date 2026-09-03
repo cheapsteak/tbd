@@ -241,8 +241,13 @@ transcript path is served another way.
    append-only reader fails; without it the test passes against the bug.
 2. Truncate or replace the file mid-stream and assert a correct full re-parse.
 3. A read failure retains prior items and does not blank the pane.
-4. With a usable path the RPC client is never called; without one the
-   file-reader seam is never called.
+4. The transport choice is two pure functions, `TranscriptPaneTransport.resolve`
+   and `TranscriptDetailReader.shouldReadAppSide`, and every call site consults
+   one of them. Both are asserted for a usable path, a nil path, and an empty
+   path, together with the scheduler registration and deregistration those
+   choices drive. No test spies on the RPC client or the file reader for a zero
+   call count on the branch not taken; the guarantee is that the decision lives
+   in one place.
 5. A pending-question delta renders a synthetic item, which is replaced rather
    than duplicated once the real JSONL line lands.
 6. Cadence tiers, against an injected clock: 100 ms foreground, 2 s background,
