@@ -256,6 +256,7 @@ struct PRButtonLabelTests {
         #expect(open != otherURL)
 
         // reason IS keyed: `PRBindingPresentation.menuRows` renders
+        // `PRStatusPresentation.stateDescription`, which carries
         // `status.reason ?? state.displayReason` into every menu row title, so
         // a reason-only change ("1 check failing" → "3 checks failing") under an
         // unchanged state would leave the materialized NSMenu showing stale text.

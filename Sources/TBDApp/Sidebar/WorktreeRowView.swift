@@ -419,10 +419,21 @@ struct WorktreeRowView: View {
             // this cannot select a different request.
             if let presentation = prPresentation, let binding = indicatorBinding,
                let status = binding.status {
-                // A queued PR describes itself by its queue position, not its
-                // underlying (UNKNOWN→pending) check reason.
-                let detail = presentation.badge.map { "in merge queue, position \($0)" }
-                    ?? (status.reason ?? status.state.displayReason)
+                // Composed where the bus glyph is, not spelled out here, so the
+                // row's words cannot drift from the status-bar chip's or the
+                // dropdown row's for the same request — the three had already
+                // started to. A queued PR leads with its position and drops
+                // only the `.pending` reason it decayed from UNKNOWN into; a
+                // queued PR that is also failing keeps "Checks failing", which
+                // is the fact that says it is about to be evicted.
+                let detail = PRStatusPresentation.stateDescription(for: status)
+                // The same words, joined the way the spoken label joins
+                // everything else. A queued-and-failing PR's sentence carries a
+                // separator of its own, so taking `detail` verbatim would
+                // announce "…position 2 · Checks failing, checked just now" —
+                // two punctuation styles in one utterance.
+                let spokenDetail = PRStatusPresentation.stateDescription(
+                    for: status, separator: ", ")
                 // The cache never speaks without saying how old it is, and
                 // never hides that its last re-read failed.
                 let freshness = PRFreshness.clauses(
@@ -437,7 +448,7 @@ struct WorktreeRowView: View {
                 .buttonStyle(.plain)
                 .onHover { isPRIconHovered = $0 }
                 .accessibilityLabel(
-                    "\(binding.refLabel): \(([detail] + freshness).joined(separator: ", "))")
+                    "\(binding.refLabel): \(([spokenDetail] + freshness).joined(separator: ", "))")
                 .anchorPreference(key: RowTooltipPreferenceKey.self, value: .bounds) { anchor in
                     isPRIconHovered ? RowTooltipPreference(text: tooltip, anchor: anchor) : nil
                 }
@@ -494,7 +505,8 @@ struct WorktreeRowView: View {
                     .foregroundStyle(presentation.color)
             }
         case .emoji:
-            Image(nsImage: PRStatusPresentation.busImage(position: presentation.badge, side: 12))
+            Image(nsImage: PRStatusPresentation.busImage(
+                position: presentation.badge, side: PRStatusPresentation.busSide))
                 .renderingMode(.original)
                 .resizable()
                 .scaledToFit()

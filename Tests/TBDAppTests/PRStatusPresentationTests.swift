@@ -162,4 +162,105 @@ struct PRStatusPresentationTests {
         #expect(ten != ninetyNine)
         #expect(one != ninetyNine)
     }
+
+    // MARK: - The shared state sentence
+
+    /// The rule in one place: a queue position ADDS a leading clause, and
+    /// replaces `reason` for exactly one state. `.pending` on a queued PR is
+    /// decay, not observation — the forge reports a queued PR's merge state as
+    /// UNKNOWN and `PRStatusManager.mapGitHubStateAndReason` maps that to
+    /// `(.pending, "Checks pending")` — so it is the one reason worth dropping.
+    @Test("a queued PR's pending reason is dropped, because it is the UNKNOWN decay artifact")
+    func queuedPendingReasonIsSuperseded() {
+        #expect(PRStatusPresentation.stateDescription(
+            state: .pending, reason: "Checks pending", mergeQueuePosition: 2)
+            == "In merge queue, position 2")
+    }
+
+    /// Every other state is computed independently of queue membership, so it
+    /// is live news and must survive. A PR at position 2 whose required check
+    /// just went red is about to be evicted from that queue; an unconditional
+    /// supersession hid exactly that.
+    @Test("a queued PR keeps every reason but the pending one", arguments: [
+        (PRMergeableState.checksFailed, "Checks failing"),
+        (.blocked, "Blocked"),
+        (.changesRequested, "Changes requested"),
+        (.mergeable, "Ready to merge"),
+        (.draft, "Draft")
+    ])
+    func queuedNonPendingReasonSurvives(state: PRMergeableState, reason: String) {
+        let sentence = PRStatusPresentation.stateDescription(
+            state: state, reason: reason, mergeQueuePosition: 2)
+        #expect(sentence == "In merge queue, position 2 · \(reason)")
+    }
+
+    /// Not queued: the sentence is the reason, untouched. The queue clause is a
+    /// qualification on one PR, not a change to how every PR describes itself.
+    @Test("an unqueued PR's sentence is its reason and nothing else")
+    func unqueuedSentenceIsJustTheReason() {
+        #expect(PRStatusPresentation.stateDescription(
+            state: .checksFailed, reason: "Checks failing", mergeQueuePosition: nil)
+            == "Checks failing")
+        #expect(PRStatusPresentation.stateDescription(
+            state: .pending, reason: "Checks pending", mergeQueuePosition: nil)
+            == "Checks pending")
+    }
+
+    /// The `PRStatus` overload falls back to the state's generic words exactly
+    /// as each render site did before the sentence was shared, so nothing
+    /// changes for a status the forge gave no reason for.
+    @Test("a status with no reason of its own falls back to the state's generic words")
+    func statusOverloadFallsBackToDisplayReason() {
+        let url = "https://github.com/acme/acme-prod/pull/412"
+        #expect(PRStatusPresentation.stateDescription(
+            for: PRStatus(number: 412, url: url, state: .checksFailed))
+            == PRMergeableState.checksFailed.displayReason)
+        #expect(PRStatusPresentation.stateDescription(
+            for: PRStatus(number: 412, url: url, state: .checksFailed, mergeQueuePosition: 2))
+            == "In merge queue, position 2 · \(PRMergeableState.checksFailed.displayReason)")
+        // A status's own words win over the generic ones, queued or not.
+        #expect(PRStatusPresentation.stateDescription(
+            for: PRStatus(number: 412, url: url, state: .blocked,
+                          reason: "Changes requested by reviewer", mergeQueuePosition: 4))
+            == "In merge queue, position 4 · Changes requested by reviewer")
+    }
+
+    /// The separator is a parameter so a spoken label can join with commas —
+    /// the sidebar row splices this sentence into a `", "`-joined list, and an
+    /// interpunct inside it makes VoiceOver announce two punctuation styles in
+    /// one breath. Only the joint moves; the words are the shared ones.
+    @Test("the shared sentence joins with the caller's separator")
+    func sentenceHonorsTheCallersSeparator() {
+        let url = "https://github.com/acme/acme-prod/pull/412"
+        let queuedAndFailing = PRStatus(number: 412, url: url, state: .checksFailed,
+                                        reason: "Checks failing", mergeQueuePosition: 2)
+        #expect(PRStatusPresentation.stateDescription(for: queuedAndFailing)
+            == "In merge queue, position 2 · Checks failing")
+        #expect(PRStatusPresentation.stateDescription(for: queuedAndFailing, separator: ", ")
+            == "In merge queue, position 2, Checks failing")
+        // The separator only ever joins two clauses — it cannot leak into a
+        // sentence that has just one, queued or not.
+        #expect(PRStatusPresentation.stateDescription(
+            for: PRStatus(number: 412, url: url, state: .pending,
+                          reason: "Checks pending", mergeQueuePosition: 2),
+            separator: ", ")
+            == "In merge queue, position 2")
+        #expect(PRStatusPresentation.stateDescription(
+            for: PRStatus(number: 412, url: url, state: .checksFailed, reason: "Checks failing"),
+            separator: ", ")
+            == "Checks failing")
+    }
+
+    /// The glyph clamps at `maxQueueBadgeValue` and the sentence does not, and
+    /// the divergence is deliberate: the bus is a dozen points wide and must
+    /// fit its number in three glyphs, while a tooltip has room to be exact.
+    @MainActor
+    @Test("the sentence prints a position the badge would have clamped to 99+")
+    func sentenceKeepsThePrecisePositionTheBadgeClamps() {
+        let iconRect = NSRect(x: 0, y: 0, width: 12, height: 12)
+        #expect(PRStatusPresentation.queueBadgeLayout(position: 150, in: iconRect).text == "99+")
+        #expect(PRStatusPresentation.stateDescription(
+            state: .pending, reason: "Checks pending", mergeQueuePosition: 150)
+            == "In merge queue, position 150")
+    }
 }

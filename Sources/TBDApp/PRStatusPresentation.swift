@@ -200,6 +200,18 @@ struct PRStatusPresentation: Equatable {
         return image
     }
 
+    /// The side, in points, every surface draws the bus glyph at.
+    ///
+    /// It lives here rather than at either call site because `busImage` caches
+    /// per `(position, side)`: two surfaces passing two literals would mint two
+    /// bitmaps, and the sidebar row and the status-bar chip would then draw
+    /// visibly different busses for one queued PR with every test still green.
+    /// One constant is what makes "the same image at the same size" a fact
+    /// rather than a comment. (The toolbar split button is the deliberate
+    /// exception — it composites the bus into a larger flattened label image
+    /// and passes its own `iconSide`.)
+    static let busSide: CGFloat = 12
+
     /// The full-color merge-queue bus glyph with its 1-indexed `position` baked
     /// into a small rounded-rect corner chip. Shared by BOTH render sites (the
     /// sidebar row and the flattened toolbar split-button label, which can only
@@ -218,6 +230,78 @@ struct PRStatusPresentation: Equatable {
         image.isTemplate = false
         busImageCache[cacheKey] = image
         return image
+    }
+
+    /// The one sentence every surface uses to describe a single request's
+    /// state: the status-bar chip's headline, tooltip and VoiceOver hint, the
+    /// sidebar row's tooltip, and the rows of both the toolbar dropdown and the
+    /// `+N` overflow menu. It lives beside `busImage` for exactly the reason
+    /// that image is shared — a bar and a sidebar drawing one queued PR must
+    /// not describe it differently, and on a multi-PR worktree the chip and the
+    /// menu row for the *same* PR can be on screen at once.
+    ///
+    /// A queue position **adds** a leading clause. It replaces `reason` for
+    /// exactly one state, `.pending`, and that exception is mechanical rather
+    /// than stylistic: a queued PR reports its merge state as UNKNOWN, which
+    /// `PRStatusManager.mapGitHubStateAndReason` maps to
+    /// `(.pending, "Checks pending")` — a decay artifact claiming the PR waits
+    /// on its author when it plainly does not. Every other state is computed
+    /// independently of queue membership and is live news: a PR at position 2
+    /// whose required check just went red is `(.checksFailed, "Checks failing")`
+    /// *and* queued, and it is about to be evicted from that queue. Dropping
+    /// those words would hide the one fact worth acting on.
+    ///
+    /// Note the rule whitelists the *state*, not that one artifact: the same
+    /// mapper also returns `(.pending, "Checks pending")` from an earlier
+    /// `requiredChecksPending` branch, where the words are a real observation
+    /// rather than decay. Nothing user-visible turns on the difference today
+    /// because both branches compose the identical string — but a second
+    /// `.pending` reason added later would be swallowed on queued PRs too, and
+    /// whoever adds one has to narrow this guard rather than assume it only
+    /// catches the UNKNOWN case.
+    ///
+    /// The position is printed in full even though the bus glyph beside it
+    /// clamps at `maxQueueBadgeValue` — a chip reading `99+` can sit next to a
+    /// tooltip saying "position 150". The divergence is deliberate: the glyph
+    /// is a dozen points wide and must fit its number in three glyphs, the
+    /// sentence has a whole tooltip and no such budget.
+    ///
+    /// Capitalized, and the one casing serves every caller. The chip renders it
+    /// in a parenthetical (`PR#412 (In merge queue…)`) and the sidebar splices
+    /// it between interpuncts — but there it sits beside `reason`, which is
+    /// capitalized too ("Checks failing"), so a lowercase queue clause was the
+    /// odd one out rather than the sidebar's house style.
+    ///
+    /// `separator` defaults to the interpunct `PRFreshness` joins its own
+    /// clauses with, so a tooltip carrying both reads as one list rather than
+    /// two punctuations. It is a parameter because the sidebar row builds its
+    /// **spoken** label by joining with `", "` — VoiceOver reads an interpunct
+    /// as "middle dot" or as nothing at all, depending on the user's
+    /// punctuation setting, and either way a sentence that mixed `·` here with
+    /// `, ` around it announces as two styles in one breath. The words are
+    /// still the shared ones; only the joint differs.
+    static func stateDescription(
+        state: PRMergeableState,
+        reason: String,
+        mergeQueuePosition: Int?,
+        separator: String = " · "
+    ) -> String {
+        guard let mergeQueuePosition else { return reason }
+        let queued = "In merge queue, position \(mergeQueuePosition)"
+        guard state != .pending else { return queued }
+        return "\(queued)\(separator)\(reason)"
+    }
+
+    /// The same sentence for a caller holding a whole `PRStatus`. `reason`
+    /// falls back to the state's generic words exactly as each render site did
+    /// before this was shared, so nothing changes for an unqueued PR.
+    static func stateDescription(for status: PRStatus, separator: String = " · ") -> String {
+        stateDescription(
+            state: status.state,
+            reason: status.reason ?? status.state.displayReason,
+            mergeQueuePosition: status.mergeQueuePosition,
+            separator: separator
+        )
     }
 
     /// Draws `emoji` centered within `rect` at a font size matching the square.

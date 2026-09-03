@@ -119,8 +119,9 @@ struct PRSplitButtonIDTests {
     @Test("the id changes when only a status REASON changes")
     func idCoversReason() {
         let wt = UUID()
-        // `menuRows` renders `status.reason ?? state.displayReason` into every
-        // row title, so "1 check failing" → "3 checks failing" under an
+        // `menuRows` renders `PRStatusPresentation.stateDescription`, whose
+        // `status.reason ?? state.displayReason` reaches every row title, so
+        // "1 check failing" → "3 checks failing" under an
         // unchanged `.checksFailed` must still recreate the materialized menu.
         // Two bindings, because that is when rows are rendered at all.
         let other = Self.binding(413, .mergeable, worktreeID: wt)

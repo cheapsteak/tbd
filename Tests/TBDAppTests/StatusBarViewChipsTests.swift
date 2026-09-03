@@ -19,7 +19,8 @@ struct StatusBarViewChipsTests {
         _ state: PRMergeableState?,
         worktreeID: UUID = UUID(),
         title: String? = nil,
-        observedAt: Date? = nil
+        observedAt: Date? = nil,
+        mergeQueuePosition: Int? = nil
     ) -> PRBinding {
         let url = "https://github.com/acme/acme-prod/pull/\(number)"
         return PRBinding(
@@ -27,7 +28,8 @@ struct StatusBarViewChipsTests {
             number: number, url: url,
             title: title,
             status: state.map {
-                PRStatus(number: number, url: url, state: $0, observedAt: observedAt)
+                PRStatus(number: number, url: url, state: $0,
+                         mergeQueuePosition: mergeQueuePosition, observedAt: observedAt)
             },
             source: .hook
         )
@@ -127,10 +129,12 @@ struct StatusBarViewChipsTests {
         number: Int = 412,
         state: PRMergeableState? = .mergeable,
         title: String? = nil,
-        observedAt: Date? = nil
+        observedAt: Date? = nil,
+        mergeQueuePosition: Int? = nil
     ) -> StatusBarView.PRChip {
         StatusBarView.prChips([
-            binding(number, state, title: title, observedAt: observedAt)
+            binding(number, state, title: title, observedAt: observedAt,
+                    mergeQueuePosition: mergeQueuePosition)
         ]).chips[0]
     }
 
@@ -400,6 +404,173 @@ struct StatusBarViewChipsTests {
         #expect(unobserved.rows.last?.value == StatusBarView.chipOpenActionValue(.github))
         #expect(unobserved.rows.last?.alternateValue
                 == StatusBarView.chipUntrackActionValue(.github))
+    }
+
+    // MARK: - The merge queue
+
+    /// The chip cannot derive the queue from `state`: a queued PR reports
+    /// UNKNOWN, which decays to the ordinary pending state. So the position has
+    /// to ride on the chip, which is what the leading slot swaps its dot for a
+    /// bus on.
+    @Test("a chip carries the merge-queue position, and nil when the PR is not queued")
+    func chipCarriesTheQueuePosition() {
+        #expect(StatusBarView.prChips([binding(412, .pending, mergeQueuePosition: 3)])
+            .chips[0].mergeQueuePosition == 3)
+        #expect(StatusBarView.prChips([binding(412, .pending)])
+            .chips[0].mergeQueuePosition == nil)
+        // A binding nothing has polled has no status to read a position from.
+        #expect(StatusBarView.prChips([binding(412, nil)]).chips[0].mergeQueuePosition == nil)
+    }
+
+    /// The queue clause supersedes the state's words for EXACTLY ONE state.
+    /// `.pending` on a queued PR is not an observation, it is decay: the forge
+    /// reports a queued PR's merge state as UNKNOWN and the daemon maps that to
+    /// `(.pending, "Checks pending")`, so a headline carrying both would say
+    /// the PR is waiting on its author and sitting in the queue at once.
+    @Test("a queued chip's headline drops the pending reason the UNKNOWN state decayed into")
+    func headlineSupersedesOnlyThePendingReasonWhenQueued() {
+        let queued = chip(state: .pending, mergeQueuePosition: 3)
+        #expect(StatusBarView.chipHeadline(queued) == "PR#412 (In merge queue, position 3)")
+        // Not appended: neither the generic pending label nor a second clause
+        // survives beside the queue sentence.
+        #expect(StatusBarView.chipHeadline(queued)
+            .contains(PRMergeableState.pending.displayReason) == false)
+        // The title still follows the clause, so the queue does not cost the
+        // headline its third fact.
+        #expect(StatusBarView.chipHeadline(
+            chip(state: .pending, title: "Fix the login timeout", mergeQueuePosition: 3))
+            == "PR#412 (In merge queue, position 3) - Fix the login timeout")
+    }
+
+    /// Every state other than `.pending` is computed independently of queue
+    /// membership, so it is live news and rides along. A PR at position 2 whose
+    /// required check just went red is about to be evicted from that queue —
+    /// the one fact worth acting on, and the one an unconditional supersession
+    /// swallowed on every chip surface at once.
+    @Test("a queued chip that is also failing keeps the failure beside its position")
+    func queuedChipKeepsANonPendingReason() {
+        let failing = chip(state: .checksFailed, mergeQueuePosition: 2)
+        #expect(StatusBarView.chipHeadline(failing)
+            == "PR#412 (In merge queue, position 2 · Checks failing)")
+        #expect(StatusBarView.openLabel(failing)
+            == "Open PR #412 — In merge queue, position 2 · Checks failing")
+        // The queue clause leads, because it is the mode the PR is in; the
+        // reason qualifies it rather than replacing it.
+        #expect(failing.stateDescription?.hasPrefix("In merge queue, position 2") == true)
+        #expect(failing.stateDescription?.contains(PRMergeableState.checksFailed.displayReason)
+            == true)
+        // A queued PR the forge still calls ready keeps that reading too — the
+        // exception is `.pending`, not "any state a queued PR might report".
+        #expect(StatusBarView.chipHeadline(chip(state: .mergeable, mergeQueuePosition: 1))
+            == "PR#412 (In merge queue, position 1 · Ready to merge)")
+        // A status's own words, not just the generic state label, survive.
+        let url = "https://github.com/acme/acme-prod/pull/412"
+        let reviewed = StatusBarView.prChips([PRBinding(
+            worktreeID: UUID(), owner: "acme", repo: "acme-prod", number: 412, url: url,
+            status: PRStatus(number: 412, url: url, state: .blocked,
+                             reason: "Changes requested by reviewer",
+                             mergeQueuePosition: 4),
+            source: .hook)]).chips[0]
+        #expect(StatusBarView.chipHeadline(reviewed)
+            == "PR#412 (In merge queue, position 4 · Changes requested by reviewer)")
+    }
+
+    /// The tooltip and the VoiceOver hint read the same sentence the card does.
+    /// A chip whose glyph is a bus and whose hint says "Checks pending" would
+    /// have the words under the pointer contradict the glyph the pointer is on.
+    @Test("the open target says the queue position too")
+    func openLabelSpeaksTheQueue() {
+        let queued = chip(state: .pending, mergeQueuePosition: 3)
+        #expect(StatusBarView.openLabel(queued) == "Open PR #412 — In merge queue, position 3")
+        #expect(StatusBarView.openLabel(queued)
+            .contains(PRMergeableState.pending.displayReason) == false)
+        // The icon slot's resting meaning is that same sentence, since a click
+        // on the drawn bus opens the PR exactly as a click on a dot does.
+        #expect(StatusBarView.iconSlotLabel(queued, isHovering: false)
+            == StatusBarView.openLabel(queued))
+    }
+
+    /// The anti-drift claim made in three doc comments, asserted rather than
+    /// asserted-about: the chip does not compose its own sentence, it calls the
+    /// same `PRStatusPresentation.stateDescription` the sidebar row's tooltip
+    /// and the dropdown's menu rows call.
+    ///
+    /// It is worth being precise about what this can and cannot catch. Both
+    /// sides route through the shared helper, so a change to the *wording*
+    /// moves both and this stays green — that is the point, not a gap. What it
+    /// does catch is a surface that stops calling the helper and starts
+    /// composing its own words, and — because the chip carries `reason` while
+    /// the `for:` overload derives `reason ?? state.displayReason` — a chip
+    /// whose fallback drifts from the overload's. The custom-`reason` case
+    /// below exercises exactly that seam: with `reason: nil` on every status,
+    /// both paths would agree through `displayReason` alone and a divergence in
+    /// how the chip picks its words would never show.
+    @Test("the chip's sentence is the one shared with the sidebar and the menu rows")
+    func chipSentenceComesFromTheSharedHelper() {
+        let states: [PRMergeableState] = [.pending, .checksFailed, .mergeable, .blocked,
+                                          .changesRequested, .draft, .merged, .closed]
+        let positions: [Int?] = [nil, 1, 150]
+        // nil = the state's generic words; the custom string = a status that
+        // brought its own, which is the only case where the chip's `reason` and
+        // the overload's `reason ?? displayReason` can disagree.
+        let reasons: [String?] = [nil, "Changes requested by reviewer"]
+        for state in states {
+            for position in positions {
+                for reason in reasons {
+                    let url = "https://github.com/acme/acme-prod/pull/412"
+                    let status = PRStatus(number: 412, url: url, state: state,
+                                          reason: reason, mergeQueuePosition: position)
+                    let binding = PRBinding(
+                        worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+                        number: 412, url: url, status: status, source: .hook)
+                    let shared = PRStatusPresentation.stateDescription(for: status)
+                    // The chip surface…
+                    #expect(StatusBarView.prChips([binding]).chips[0].stateDescription == shared)
+                    // …and the menu-row surface, which the `+N` overflow menu and
+                    // the toolbar dropdown both render.
+                    #expect(PRBindingPresentation.menuRows([binding])[0].title.contains(shared))
+                }
+            }
+        }
+    }
+
+    // MARK: - The icon slot's width
+
+    /// The invariant the hover geometry rests on: the slot's side is a function
+    /// of WHICH CHIP it is, never of hover state. A slot that grew under the
+    /// pointer would shove every chip to its right and slide the xmark out from
+    /// under the cursor that summoned it. It lives on `StatusBarView` rather
+    /// than inside `PRChipView` precisely so this can be asserted at all.
+    @Test("a queued chip's icon slot is bus-sized, and every other chip's is dot-sized")
+    func iconSlotSideDependsOnTheChipNotTheHover() {
+        // The slot is sized by the ONE constant both surfaces draw the bus at,
+        // so a chip cannot be sized for a bus the sidebar renders at some other
+        // side — and `busImage` cannot be asked for a second cached bitmap.
+        #expect(StatusBarView.iconSlotSide(for: chip(state: .pending, mergeQueuePosition: 3))
+            == PRStatusPresentation.busSide)
+        #expect(StatusBarView.iconSlotSide(for: chip(state: .pending)) == 9)
+        #expect(StatusBarView.iconSlotSide(for: chip(state: .checksFailed)) == 9)
+        // A never-polled binding has no position, so it draws a dot.
+        #expect(StatusBarView.iconSlotSide(for: chip(state: nil)) == 9)
+        // Pinned as a value too: the bus slot has to stay bigger than the 9pt
+        // dot slot, or a queued chip would clip its own glyph.
+        #expect(PRStatusPresentation.busSide == 12)
+    }
+
+    /// The queue clause is a replacement for one chip's state sentence, not a
+    /// change to how every chip describes itself.
+    @Test("an unqueued chip's headline and open label are untouched")
+    func unqueuedChipIsUnchanged() {
+        let plain = chip(state: .checksFailed, title: "Fix the login timeout")
+        #expect(StatusBarView.chipHeadline(plain)
+            == "PR#412 (\(PRMergeableState.checksFailed.displayReason)) - Fix the login timeout")
+        #expect(StatusBarView.openLabel(plain)
+            == "Open PR #412 — \(PRMergeableState.checksFailed.displayReason)")
+        #expect(StatusBarView.chipHeadline(plain).contains("merge queue") == false)
+        #expect(StatusBarView.openLabel(plain).contains("merge queue") == false)
+        // A chip with no status at all still says only what it observed.
+        #expect(StatusBarView.chipHeadline(chip(state: nil)) == "PR#412")
+        #expect(StatusBarView.openLabel(chip(state: nil)) == "Open PR #412")
     }
 
     // MARK: - Forge vocabulary
