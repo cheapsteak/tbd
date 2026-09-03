@@ -11,9 +11,9 @@ import TBDShared
 /// satisfy it.
 ///
 /// The sweep owns only the timer; the reap itself is
-/// `PendingQuestionStore.gcExpired`, which is also still driven by the RPC
-/// handler on the flag-off path. Running both is harmless — the second pass
-/// finds nothing left to reap.
+/// `PendingQuestionStore.gcExpired`, which the `terminal.transcript` RPC
+/// handler also runs for a pane with no transcript path. Running both is
+/// harmless — the second pass finds nothing left to reap.
 actor PendingQuestionExpirySweep {
 
     private static let log = Logger(subsystem: "com.tbd.daemon", category: "askUserQuestion")

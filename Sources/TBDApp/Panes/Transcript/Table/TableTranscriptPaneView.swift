@@ -126,7 +126,8 @@ struct TableTranscriptPaneView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: TaskKey(
-            terminalID: terminalID, sessionID: currentSessionID, retryToken: retryToken
+            terminalID: terminalID, sessionID: currentSessionID, retryToken: retryToken,
+            hasTranscriptPath: !(terminal?.transcriptPath ?? "").isEmpty
         )) {
             await pollLoop()
         }
@@ -538,14 +539,24 @@ struct TableTranscriptPaneView: View {
     }
 }
 
-/// Identity of the poll task: the terminal, its current Claude session, and the
-/// retry token. A change to any of them cancels the running loop and starts a
-/// fresh one, rather than leaving the pane on whichever loop it happened to
-/// begin with until something else rebuilds it.
+/// Identity of the poll task: the terminal, its current Claude session, the
+/// retry token, and whether the terminal has a transcript path yet. A change to
+/// any of them cancels the running loop and starts a fresh one, rather than
+/// leaving the pane on whichever loop it happened to begin with until something
+/// else rebuilds it.
+///
+/// Path availability belongs in the identity because `pollLoop` picks its
+/// transport once, at task start: a pane that mounted before its session
+/// reported a transcript path would otherwise stay on the daemon poll until the
+/// session changed. With it here, the task restarts on the in-process reader the
+/// moment the path lands. Only *whether* a path exists is part of the key, never
+/// the path string, so a session's path value can churn without restarting the
+/// loop.
 private struct TaskKey: Equatable {
     let terminalID: UUID
     let sessionID: String?
     let retryToken: Int
+    let hasTranscriptPath: Bool
 }
 
 /// SwiftUI identity for the table transcript representable. Composes the terminal

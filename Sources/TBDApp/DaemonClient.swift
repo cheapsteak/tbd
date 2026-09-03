@@ -1969,9 +1969,15 @@ actor DaemonClient {
     /// The app reads the JSONL here instead of asking the daemon to parse it
     /// and ship the result back over the socket. The RPC body below is the
     /// fallback for a caller with no usable path.
+    ///
+    /// That read runs detached for the same reason `sendRawAsync` detaches its
+    /// blocking recv: a multi-megabyte parse must not hold this actor, or every
+    /// other RPC call serializes behind it.
     func sessionMessages(filePath: String) async throws -> [TranscriptItem] {
         if TranscriptDetailReader.shouldReadAppSide(path: filePath) {
-            return TranscriptDetailReader.messages(path: filePath)
+            return await Task.detached(priority: .userInitiated) {
+                TranscriptDetailReader.messages(path: filePath)
+            }.value
         }
         perfTranscriptLog.debug("client.rpc.start method=sessionMessages")
         let start = ContinuousClock.now
@@ -2033,13 +2039,19 @@ actor DaemonClient {
     /// app-side read skip the socket entirely. It defaults to nil so no call
     /// site is forced to change; a site that does not pass one keeps using the
     /// RPC.
+    ///
+    /// That read runs detached for the same reason `sendRawAsync` detaches its
+    /// blocking recv: a multi-megabyte parse must not hold this actor, or every
+    /// other RPC call serializes behind it.
     func terminalTranscriptItemFullBody(
         terminalID: UUID, itemID: String, includeBody: Bool = true,
         path: String? = nil
     ) async throws -> TerminalTranscriptItemFullBodyResult {
         if let path, TranscriptDetailReader.shouldReadAppSide(path: path) {
-            return TranscriptDetailReader.fullBody(
-                path: path, itemID: itemID, includeBody: includeBody)
+            return await Task.detached(priority: .userInitiated) {
+                TranscriptDetailReader.fullBody(
+                    path: path, itemID: itemID, includeBody: includeBody)
+            }.value
         }
         return try await callAsync(
             method: RPCMethod.terminalTranscriptItemFullBody,
