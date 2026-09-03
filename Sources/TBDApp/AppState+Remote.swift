@@ -308,9 +308,14 @@ extension AppState {
     }
 
     /// Present the destructive confirm. Modal, mirroring
-    /// `confirmDefaultAccountFallback`; the destructive verb is the first
-    /// button and Cancel is the second, so Return does not destroy anything by
-    /// itself.
+    /// `confirmDefaultAccountFallback` for structure. "Delete" is still the
+    /// first button added — on macOS that's the rightmost, conventional
+    /// position for the confirming action, and `.alertFirstButtonReturn`
+    /// keeps meaning "the user chose to delete." But AppKit also makes the
+    /// first button the Return-key default, and this action is irreversible,
+    /// so the key equivalents are reassigned explicitly: Delete loses Return,
+    /// Cancel gets it (Escape already cancels). No keystroke by itself
+    /// destroys a session.
     @MainActor
     func confirmRemoteDelete(message: String) -> Bool {
         let alert = NSAlert()
@@ -319,6 +324,11 @@ extension AppState {
         alert.informativeText = message
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
+        // HIG: destructive action shouldn't be the Return-key default (same
+        // pattern as AppState.noteCloseConfirmer / LegacyHooksCoordinator's
+        // migrate dialog).
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
         return alert.runModal() == .alertFirstButtonReturn
     }
 
