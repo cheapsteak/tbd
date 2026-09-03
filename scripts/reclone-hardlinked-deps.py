@@ -209,6 +209,14 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true", help="summary only")
     args = ap.parse_args()
 
+    # stdout is block-buffered when redirected, so a long scan would print
+    # nothing until it finished -- indistinguishable from a hang. The shell
+    # version of this tool passed `python3 -u`; a standalone script has to ask.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass  # not a real stream (pytest capture, a pipe replaced by a StringIO)
+
     clonefile = load_clonefile()
     if clonefile is None:
         print("Not macOS/APFS — hardlink imports are correct here; nothing to do.")
