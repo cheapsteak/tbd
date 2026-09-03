@@ -440,9 +440,12 @@ extension RPCRouter {
         //
         // Rotation is where it matters most. The user is looking at a row that
         // says "Token rejected" and has just pasted the fix; without this the
-        // row would keep saying it until the next `working -> idle` transition
-        // — which is the very confusion the creation probe removes, reproduced
-        // at the moment the user is most certainly watching.
+        // row would never correct itself at all. A rejected token puts the
+        // profile in a hold rather than on a timed schedule, so no turn end and
+        // no cadence tick re-probes it — only this call, or the row's own
+        // `⋯ ▸ Refresh usage`, can. That is the very confusion the creation
+        // probe removes, reproduced at the moment the user is most certainly
+        // watching.
         if let poller = oauthUsagePoller {
             let rotatedProfileID = params.id
             Task { await poller.noteCredentialChanged(profileID: rotatedProfileID) }
@@ -600,10 +603,16 @@ extension RPCRouter {
     /// `modelProfile.usageRefresh` — sweep stale, eligible profiles (all
     /// logged-in OAuth profiles when params.id == nil, else one) and return
     /// the post-sweep snapshots. Profiles with a snapshot fresher than
-    /// `OAuthProfileUsagePoller.refreshFreshness` or inside a backoff window
-    /// are skipped (cached snapshot returned) — the picker calls this on
-    /// every open, and that must never re-hammer a rate-limited endpoint.
+    /// `OAuthProfileUsagePoller.refreshFreshness` or inside a timed backoff
+    /// window are skipped (cached snapshot returned) — the picker calls this
+    /// on every open, and that must never re-hammer a rate-limited endpoint.
     /// The poller broadcasts `.modelProfilesChanged` itself when data changes.
+    ///
+    /// A non-nil `params.id` additionally releases the poller's user-action
+    /// hold for that one profile, so a token profile parked on "Token
+    /// rejected" is re-probed. That is sound because a named id arrives from
+    /// exactly one gesture — the profile row's `⋯ ▸ Refresh usage` — while the
+    /// picker and `tbd profile list --refresh` pass nil.
     func handleModelProfileUsageRefresh(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ModelProfileUsageRefreshParams.self, from: paramsData)
         guard let poller = oauthUsagePoller else {

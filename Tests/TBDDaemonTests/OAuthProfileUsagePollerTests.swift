@@ -960,25 +960,26 @@ private func makeTokenPoller(
     }
 
     /// The other released gate, isolated: nothing here ever succeeded, so there
-    /// is no `fetchedAt` for the floor to act on and the backoff window is the
-    /// only thing that could hold the probe back. It is also the realistic
-    /// case — the repair for a rejected token is pasting a good one seconds
-    /// later, well inside the 30s window that rejection just armed.
+    /// is no `fetchedAt` for the floor to act on and the timed backoff window
+    /// is the only thing that could hold the probe back.
+    ///
+    /// A transient failure rather than a rejection, deliberately — a rejected
+    /// token is held rather than scheduled, and this is the timed regime's leg.
+    /// `credentialChangeReleasesTheUserActionHold` is the hold's.
     @Test func credentialChangeProbesInsideTheBackoffWindow() async {
         let profile = tokenProfile(named: "Acme (token)")
-        let fetcher = ScriptedProfileUsageFetcher(
-            default: .needsLogin("token rejected (HTTP 401)"))
+        let fetcher = ScriptedProfileUsageFetcher(default: .rateLimited(retryAfter: nil))
         let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
         let poller = makeTokenPoller(
-            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-DEAD"],
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-A"],
             fetcher: fetcher, clock: clock)
 
         await poller.noteSessionBecameIdle(profileID: profile.id)
         #expect(fetcher.tokenProbeCount == 1)
-        #expect(await poller.snapshot(for: profile.id)?.statusKind == .needsLogin)
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .rateLimited)
 
-        // 10s in: `rejectedTokenRecordsNeedsLoginAndBacksOff` pins that an
-        // activity probe is still held here.
+        // 10s in: `transientTokenFailuresStayOnTheTimedSchedule` pins that an
+        // activity probe is still held here, by the 30s first rung.
         clock.advance(10)
         await poller.noteCredentialChanged(profileID: profile.id)
         #expect(fetcher.tokenProbeCount == 2)
@@ -987,8 +988,13 @@ private func makeTokenPoller(
     /// A rejected token records `.needsLogin` — the existing case, deliberately
     /// not a new `ProfileUsageStatusKind` (widening it would break snapshot
     /// decode on older apps, where `decodeIfPresent` THROWS on an unknown raw
-    /// value). Backoff then applies, so activity does not hammer a dead token.
-    @Test func rejectedTokenRecordsNeedsLoginAndBacksOff() async {
+    /// value) — and is then never re-probed on its own.
+    ///
+    /// This is the cost property the hold exists for. Every token probe is a
+    /// real billed request, and one against a rejected token cannot succeed
+    /// until the user replaces it, so no elapsed time and no amount of session
+    /// activity may buy another. A timed backoff would bill forever at its cap.
+    @Test func rejectedTokenIsNeverReprobedByActivity() async {
         let profile = tokenProfile(named: "Acme (token)")
         let fetcher = ScriptedProfileUsageFetcher(
             default: .needsLogin("token rejected (HTTP 401)"))
@@ -1001,16 +1007,189 @@ private func makeTokenPoller(
         #expect(await poller.snapshot(for: profile.id)?.statusKind == .needsLogin)
         #expect(fetcher.tokenProbeCount == 1)
 
-        // Nothing ever succeeded, so there is no `fetchedAt` for the floor to
-        // gate against — the backoff window is what holds the second probe
-        // back, which is the point: the two gates are independent.
+        // Nothing ever succeeded, so there is no `fetchedAt` for the freshness
+        // floor to gate against: the hold is the only thing that can hold these
+        // back, and the times chosen leave a timed schedule no excuse.
         clock.advance(10)
         await poller.noteSessionBecameIdle(profileID: profile.id)
         #expect(fetcher.tokenProbeCount == 1)
 
-        clock.advance(21)  // +31s: past the 30s window armed by failure 1
+        clock.advance(21)  // +31s: past the 30s first rung of the old schedule
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        clock.advance(3600)  // well past `maxBackoff` (15 min)
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        clock.advance(86_400)  // a day later, still held
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        // The internal targeted path the activity and cadence callers share,
+        // asking for no freshness window at all, is held too.
+        await poller.sweepForTest(only: profile.id, skipFresherThan: nil)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .needsLogin)
+    }
+
+    /// Rotation is one of the two gestures that release the hold, and the
+    /// primary one: replacing the token is what can actually make a probe
+    /// succeed again.
+    @Test func credentialChangeReleasesTheUserActionHold() async {
+        let profile = tokenProfile(named: "Acme (token)")
+        let fetcher = ScriptedProfileUsageFetcher(
+            default: .needsLogin("token rejected (HTTP 401)"))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-DEAD"],
+            fetcher: fetcher, clock: clock)
+
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        // An hour of activity buys nothing. This leg is what makes the
+        // assertion below discriminate: without it, a probe at this point
+        // could be the hold expiring rather than the gesture releasing it.
+        clock.advance(3600)
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        await poller.noteCredentialChanged(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 2)
+        // Both probes carried the stored credential, not an empty one.
+        #expect(fetcher.calls == ["token:sk-ant-oat01-DEAD", "token:sk-ant-oat01-DEAD"])
+    }
+
+    /// The row's `⋯ ▸ Refresh usage` is the other release. A non-nil id
+    /// reaches `sweepNow` from that gesture alone — picker-open and
+    /// `tbd profile list --refresh` pass nil — so naming a profile is the
+    /// daemon's evidence that a user is asking.
+    @Test func manualRefreshReleasesTheUserActionHold() async {
+        let profile = tokenProfile(named: "Acme (token)")
+        let fetcher = ScriptedProfileUsageFetcher(
+            default: .needsLogin("token rejected (HTTP 401)"))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-DEAD"],
+            fetcher: fetcher, clock: clock)
+
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        // 10s in — inside every window the old schedule could have armed.
+        clock.advance(10)
+        _ = await poller.sweepNow(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 2)
+
+        // The unnamed sweep — picker-open, `tbd profile list --refresh` —
+        // never reaches a token profile at all: it visits the cadence set,
+        // which excludes them. That is all this leg can show, and it is the
+        // property that matters, since a caller who cannot see the profile
+        // cannot release its hold either.
+        _ = await poller.sweepNow()
+        #expect(fetcher.tokenProbeCount == 2)
+    }
+
+    /// Releasing the hold must not become "ignore the retry state". A 429's
+    /// `Retry-After` is a timed window that a wait genuinely does resolve, and
+    /// clicking Refresh usage inside it must not re-hammer the endpoint.
+    @Test func manualRefreshStillHonorsATimedBackoff() async {
+        let profile = tokenProfile(named: "Acme (token)")
+        let fetcher = ScriptedProfileUsageFetcher(default: .rateLimited(retryAfter: 120))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-A"],
+            fetcher: fetcher, clock: clock)
+
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .rateLimited)
+
+        clock.advance(10)
+        _ = await poller.sweepNow(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+    }
+
+    /// Transient token failures stay on the timed schedule: held at +10s, and
+    /// admitted at +31s once the 30s first rung has elapsed. Each of these can
+    /// still come good on an identical retry — a 400 because the repair ships
+    /// as a TBD change and the profile must recover on its own once it lands —
+    /// so none of them may be held for a user gesture.
+    ///
+    /// Cannot fail against the current design; it exists to fail against an
+    /// over-broad one that holds every non-transient-looking status, or holds
+    /// on kind alone. Verified by temporarily widening the hold to all token
+    /// failures, which reddens every case here.
+    @Test(arguments: [
+        ProfileUsageFetchStatus.rateLimited(retryAfter: nil),
+        ProfileUsageFetchStatus.networkError("connection reset"),
+        ProfileUsageFetchStatus.httpError(400, detail: "anthropic-version: header is required"),
+    ])
+    func transientTokenFailuresStayOnTheTimedSchedule(status: ProfileUsageFetchStatus) async {
+        let profile = tokenProfile(named: "Acme (token)")
+        let fetcher = ScriptedProfileUsageFetcher(default: status)
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-A"],
+            fetcher: fetcher, clock: clock)
+
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        clock.advance(10)
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.tokenProbeCount == 1)
+
+        clock.advance(21)  // +31s: past rung 1 (jitter is injected as 0)
         await poller.noteSessionBecameIdle(profileID: profile.id)
         #expect(fetcher.tokenProbeCount == 2)
+    }
+
+    /// THE regression guard. A signed-in profile's `.needsLogin` must keep
+    /// retrying on the cadence sweep: re-running `/login` emits no event the
+    /// daemon can observe, so the free sweep re-reading `loginIdentity` is the
+    /// only recovery path there is. Holding it would strand a re-logged-in
+    /// profile on "needs re-login" forever, and its sweep costs nothing.
+    ///
+    /// Cannot fail against the current design — the hold is scoped to
+    /// `.oauthToken`. It exists to fail against the over-broad fix of holding
+    /// every `.needsLogin`, which was checked by temporarily dropping the kind
+    /// condition and watching the +31s and recovery legs go red.
+    @Test func signedInProfileNeedsLoginStillRetriesOnTheCadenceSweep() async {
+        let profile = oauthProfile(named: "Acme")
+        let fetcher = ScriptedProfileUsageFetcher(
+            default: .needsLogin("refresh token rejected (invalid_grant)"))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeTokenPoller(
+            profiles: [profile], tokens: [:], fetcher: fetcher, clock: clock,
+            loggedIn: [profile.id])
+        let configDir = "/profiles/\(profile.id.uuidString.lowercased())/claude"
+
+        await poller.sweepForTest()
+        #expect(fetcher.calls == [configDir])
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .needsLogin)
+
+        // Inside rung 1: the timed window holds it, as it does any failure.
+        clock.advance(10)
+        await poller.sweepForTest()
+        #expect(fetcher.calls.count == 1)
+
+        // +31s: the window elapsed, so the sweep tries again — on its own,
+        // with no user gesture anywhere.
+        clock.advance(21)
+        await poller.sweepForTest()
+        #expect(fetcher.calls.count == 2)
+
+        // And that is how a re-login is noticed: the next sweep past the
+        // window reads a working identity and the profile recovers.
+        fetcher.enqueue(configDirPath: configDir, .ok(okBuckets, organizationID: "org_acme"))
+        clock.advance(61)  // past rung 2 (60s)
+        await poller.sweepForTest()
+        #expect(fetcher.calls.count == 3)
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .ok)
+        #expect(await poller.snapshot(for: profile.id)?.buckets == okBuckets)
     }
 
     /// A token profile whose secret file was removed must report
@@ -1086,13 +1265,17 @@ private func makeTokenPoller(
     /// re-arms rung 1 (30s). With it merely waived, the same failure is the
     /// third in a row and arms rung 3 (120s) — so the probe asserted below
     /// would be held for another minute and a half.
+    ///
+    /// The scripted failure is transient, because only the timed regime has an
+    /// exponent to inherit: a rejected token is held instead of scheduled, so
+    /// repeated rejections climb no rungs and could not tell the two readings
+    /// apart.
     @Test func credentialChangeRestartsTheBackoffScheduleRatherThanWaivingIt() async {
         let profile = tokenProfile(named: "Acme (token)")
-        let fetcher = ScriptedProfileUsageFetcher(
-            default: .needsLogin("token rejected (HTTP 401)"))
+        let fetcher = ScriptedProfileUsageFetcher(default: .rateLimited(retryAfter: nil))
         let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
         let poller = makeTokenPoller(
-            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-DEAD"],
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-A"],
             fetcher: fetcher, clock: clock)
 
         // Failure 1 arms rung 1: 30s. (`jitter` is injected as 0 by
@@ -1495,5 +1678,56 @@ private func makeGatedTokenPoller(
         clock.advance(301)
         await poller.noteSessionBecameIdle(profileID: token.id)
         #expect(fetcher.tokenProbeCount == 2)
+    }
+
+    /// A rotation that lands while a probe of the OLD token is in flight must
+    /// leave the profile self-healing, not held.
+    ///
+    /// The rotation's own sweep is dropped by the in-flight reservation — the
+    /// residual the guard documents and accepts — so the release it performed
+    /// happens BEFORE the old token's rejection is recorded. A hold armed on
+    /// that rejection would be armed after its only release, and no timer,
+    /// turn end, or cadence tick can lift one: the freshly pasted token, which
+    /// may be perfectly good, would sit on "Token rejected" until the user
+    /// found `⋯ ▸ Refresh usage`. The credential generation is what stops it —
+    /// the outcome describes a token that no longer exists, so it takes the
+    /// timed schedule, and the next turn end settles the question with the new
+    /// token.
+    @Test func aRotationDuringAnInFlightProbeLeavesTheProfileSelfHealing() async {
+        let profile = tokenProfile(named: "Acme (token)")
+        // Never auto-opens. Exactly one probe reaches the fetcher (the second
+        // caller is dropped, which is the race under test), so a threshold of
+        // two would park the first one forever.
+        let gate = ProbeGate(autoOpenAt: Int.max)
+        let fetcher = GatedProfileUsageFetcher(
+            gate: gate, status: .needsLogin("token rejected (HTTP 401)"))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = makeGatedTokenPoller(
+            profiles: [profile], tokens: [profile.id: "sk-ant-oat01-DEAD"],
+            fetcher: fetcher, clock: clock)
+
+        let activity = Task { await poller.noteSessionBecameIdle(profileID: profile.id) }
+        // Parked inside the fetcher with the OLD token: nothing recorded yet.
+        await gate.waitForArrivals(1)
+
+        // The user pastes a replacement. This runs its own sweep to
+        // completion, and that sweep issues no request.
+        await poller.noteCredentialChanged(profileID: profile.id)
+        // Still one probe: the rotation's sweep was DROPPED by the in-flight
+        // reservation. Without this the test would be exercising an ordinary
+        // sequential rotation and would pass either way.
+        #expect(fetcher.probeCount == 1)
+
+        // Now the old token's rejection lands, after the release.
+        await gate.open()
+        await activity.value
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .needsLogin)
+
+        // Nothing ever succeeded, so there is no `fetchedAt` and the 300s floor
+        // is not in play; +301s also clears the 30s first rung of the timed
+        // schedule the stale outcome armed. A hold would survive both.
+        clock.advance(301)
+        await poller.noteSessionBecameIdle(profileID: profile.id)
+        #expect(fetcher.probeCount == 2)
     }
 }
