@@ -1,6 +1,9 @@
 import AppKit
+import os
 import SwiftUI
 import WebKit
+
+private let logger = Logger(subsystem: "com.tbd.app", category: "markdown")
 
 /// What to do with a navigation the webview is about to perform.
 enum MarkdownNavigationPolicy: Equatable {
@@ -8,6 +11,9 @@ enum MarkdownNavigationPolicy: Equatable {
     case allowInPlace
     /// Hand to `NSWorkspace.open` and cancel in place.
     case openExternally(URL)
+    /// Render this local markdown file in the code-viewer pane itself, the way
+    /// selecting it in the sidebar would. Never leaves the app.
+    case openInPane(URL)
     /// Reveal in Finder WITHOUT launching. `file:` URLs never get `open`.
     case revealInFinder(URL)
     /// Drop silently.
@@ -26,6 +32,18 @@ enum MarkdownWebViewConfiguration {
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.websiteDataStore = .nonPersistent()
         return config
+    }
+
+    /// Extensions the code-viewer pane can render in place.
+    ///
+    /// Single source of truth: `isRenderableFile` in `CodeViewerPaneView`
+    /// reads the same set, so the pane can always render whatever a link
+    /// routed to it.
+    static let renderableExtensions: Set<String> = ["md", "markdown"]
+
+    /// Is this a local file the pane itself renders?
+    static func isRenderableMarkdown(_ url: URL) -> Bool {
+        renderableExtensions.contains(url.pathExtension.lowercased())
     }
 
     /// Does this URL have the shape of a document we loaded ourselves?
@@ -80,6 +98,10 @@ enum MarkdownWebViewConfiguration {
         case "http", "https", "mailto":
             return .openExternally(url)
         case "file":
+            // A relative link that `MarkdownLinkResolver` rewrote, or an
+            // explicit file: URL in the source. Markdown navigates the pane —
+            // in-app, so no launch decision is involved at all.
+            if isRenderableMarkdown(url) { return .openInPane(url) }
             // NEVER `NSWorkspace.open` a file: URL. `git clone` sets only
             // com.apple.provenance, not com.apple.quarantine (verified), so a
             // .app/.command/.terminal inside a freshly cloned repo would
@@ -98,17 +120,22 @@ enum MarkdownWebViewConfiguration {
 ///
 /// JavaScript is disabled, no script message handlers are installed, the data
 /// store is non-persistent, and there is no URL scheme handler. Navigation is
-/// three-way: our own load and same-document anchors render in place, allowed
-/// schemes leave via `NSWorkspace` on a real click, everything else is
-/// dropped. See `MarkdownNavigationPolicy`.
+/// four-way: our own load and same-document anchors render in place, a link to
+/// a repo-local markdown file navigates the enclosing pane, allowed schemes
+/// leave via `NSWorkspace` on a real click, everything else is dropped. See
+/// `MarkdownNavigationPolicy`.
 struct MarkdownWebView: NSViewRepresentable {
     let html: String
+    /// Invoked when a link resolves to a repo-local markdown file. The pane
+    /// owns the selection, so it decides what "navigate" means.
+    let onOpenFile: (URL) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> WKWebView {
         let webView = WKWebView(frame: .zero, configuration: MarkdownWebViewConfiguration.make())
         webView.navigationDelegate = context.coordinator
+        context.coordinator.onOpenFile = onOpenFile
         // Supported API. `setValue(false, forKey: "drawsBackground")` is
         // private KVC; if the key ever disappears it raises an ObjC exception
         // that Swift cannot catch, crashing on the render path.
@@ -128,6 +155,9 @@ struct MarkdownWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        // Refreshed BEFORE the equality guard: an unchanged document still
+        // needs the latest closure, which captures the current pane state.
+        context.coordinator.onOpenFile = onOpenFile
         guard context.coordinator.loadedHTML != html else { return }
         context.coordinator.load(html, into: webView)
     }
@@ -148,6 +178,10 @@ struct MarkdownWebView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate {
         private(set) var loadedHTML: String?
+
+        /// Set by `makeNSView`/`updateNSView`. Optional so a `Coordinator` can
+        /// still be constructed bare in tests.
+        var onOpenFile: ((URL) -> Void)?
 
         /// Counter, not a Bool. WebKit delivers one policy callback per
         /// `loadHTMLString`, so two loads dispatched before the first callback
@@ -212,6 +246,14 @@ struct MarkdownWebView: NSViewRepresentable {
                 decisionHandler(.allow)
             case .openExternally(let target):
                 NSWorkspace.shared.open(target)
+                decisionHandler(.cancel)
+            case .openInPane(let target):
+                if let onOpenFile {
+                    onOpenFile(target)
+                } else {
+                    logger.debug(
+                        "no in-pane handler for \(target.path, privacy: .public)")
+                }
                 decisionHandler(.cancel)
             case .revealInFinder(let target):
                 NSWorkspace.shared.activateFileViewerSelecting([target])
