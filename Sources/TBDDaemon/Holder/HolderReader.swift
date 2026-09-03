@@ -341,6 +341,47 @@ actor HolderReader {
         emulator.resize(columns: cols, rows: lines)
         descriptor.setWindowSize(columns: cols, rows: lines)
     }
+
+    /// Forces a repaint from programs that redraw on `SIGWINCH`, by changing the
+    /// tty size and changing it back.
+    ///
+    /// Applied at every reader-handoff edge — attach, detach, app death, daemon
+    /// re-adoption — which is a deliberate divergence from iTerm2, whose jiggle
+    /// fires on orphan adoption but not ordinary reattach and is suppressed when
+    /// the requested geometry already matches. A same-geometry reattach there
+    /// issues no ioctl and heals nothing.
+    ///
+    /// Scope, measured rather than assumed: a full-screen program repaints its
+    /// viewport exactly, a plain shell repaints essentially nothing, and no
+    /// program repaints its scrollback. **This heals screen state; it cannot
+    /// recover history.** The snapshot preamble covers what this cannot.
+    ///
+    /// Only the tty changes size. The emulator's grid is deliberately left
+    /// alone: resizing it too would reflow its contents and reflow them back for
+    /// nothing, and the repaint would arrive at a size the grid was never at.
+    /// `resize(columns:rows:)` drives both because a real resize must; this
+    /// drives one because a jiggle must not.
+    func jiggle() async {
+        guard state != .stopped else { return }
+        let size = gridSize
+        descriptor.setWindowSize(columns: size.columns + 1, rows: size.rows)
+        // Let the child be scheduled so it handles the first `SIGWINCH` before
+        // the second arrives. Signals do not queue: two `TIOCSWINSZ` calls in
+        // the same instant can be observed as a single coalesced size change,
+        // and a program that sees only the final, unchanged size repaints
+        // nothing. The gap is why this is `async` at all.
+        try? await clock.sleep(for: Self.jiggleGap)
+        // Re-read rather than restoring the size captured above: `resize` may
+        // have run during the suspension, and restoring a stale size would put
+        // the tty back to a geometry the emulator has already left.
+        let restored = gridSize
+        descriptor.setWindowSize(columns: restored.columns, rows: restored.rows)
+    }
+
+    /// How long the tty stays one column wider. Long enough that the child is
+    /// scheduled between the two signals on a loaded machine, short enough that
+    /// nothing perceives a handoff as slow.
+    private static let jiggleGap: Duration = .milliseconds(10)
 }
 
 // MARK: - The drain loop
