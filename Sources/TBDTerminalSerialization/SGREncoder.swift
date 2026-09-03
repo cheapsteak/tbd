@@ -26,6 +26,7 @@ public enum SGREncoder {
         if style.contains(.bold) { parts.append("1") }
         if style.contains(.dim) { parts.append("2") }
         if style.contains(.italic) { parts.append("3") }
+        if style.contains(.blink) { parts.append("5") }
         if style.contains(.inverse) { parts.append("7") }
         if style.contains(.invisible) { parts.append("8") }
         if style.contains(.crossedOut) { parts.append("9") }

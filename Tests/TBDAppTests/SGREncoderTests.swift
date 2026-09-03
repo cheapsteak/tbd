@@ -29,7 +29,9 @@ struct SGREncoderTests {
         #expect(SGREncoder.parameters(for: attribute(after: "\u{1b}[1m")) == "0;1")
         #expect(SGREncoder.parameters(for: attribute(after: "\u{1b}[2m")) == "0;2")
         #expect(SGREncoder.parameters(for: attribute(after: "\u{1b}[3m")) == "0;3")
+        #expect(SGREncoder.parameters(for: attribute(after: "\u{1b}[5m")) == "0;5")
         #expect(SGREncoder.parameters(for: attribute(after: "\u{1b}[7m")) == "0;7")
+        #expect(SGREncoder.parameters(for: attribute(after: "\u{1b}[8m")) == "0;8")
         #expect(SGREncoder.parameters(for: attribute(after: "\u{1b}[9m")) == "0;9")
     }
 
@@ -67,6 +69,7 @@ struct SGREncoderTests {
             "\u{1b}[1;4;38;5;200;48;2;9;8;7m",
             "\u{1b}[2;3;9;38;2;1;2;3m",
             "\u{1b}[7;31;42m",
+            "\u{1b}[5;1;38;5;200m",
         ] {
             let original = attribute(after: sgr)
             let reproduced = attribute(after: SGREncoder.sequence(for: original))
