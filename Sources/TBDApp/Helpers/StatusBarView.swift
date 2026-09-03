@@ -117,21 +117,27 @@ struct StatusBarView: View {
         let mergeQueuePosition: Int?
         /// The status's own words for that state, when it has any — the same
         /// `reason ?? state.displayReason` the overflow menu and the toolbar
-        /// dropdown render. Carried rather than derived so the three surfaces
-        /// cannot describe one observation differently.
+        /// dropdown start from. Carried rather than re-derived because it is
+        /// half the input to `PRStatusPresentation.stateDescription`, which is
+        /// where the shared sentence is actually composed: a chip that recovered
+        /// these words some other way could hand that one function a different
+        /// reason than the menu row beside it hands it.
         let reason: String?
         /// The one sentence every chip surface uses to describe this PR's
-        /// state. The queue clause **supersedes** `reason` rather than
-        /// appending to it, for the same reason `PRStatusPresentation.make(for:)`
-        /// short-circuits before reading `state`: a queued PR's reason is the
-        /// pending wording its UNKNOWN check status decayed into, and a
-        /// sentence that said both would have the chip claim the PR is waiting
-        /// on its author *and* sitting in the queue. Reading it from one place
-        /// is what stops the words under the pointer from disagreeing with the
-        /// glyph the pointer is on.
+        /// state, composed by `PRStatusPresentation.stateDescription` — the
+        /// same function behind the sidebar row's tooltip and the dropdown menu
+        /// rows, so no two surfaces can word one observation differently.
+        /// See it for why a queue clause supersedes a `.pending` reason and
+        /// joins every other one.
+        ///
+        /// nil only when nothing has been observed. `state` and `reason` both
+        /// come from `binding.status`, so they are absent together — and a chip
+        /// with no status carries no `mergeQueuePosition` either, so nothing is
+        /// left unsaid by returning nil on that branch.
         var stateDescription: String? {
-            if let mergeQueuePosition { return "In merge queue, position \(mergeQueuePosition)" }
-            return reason
+            guard let state, let reason else { return nil }
+            return PRStatusPresentation.stateDescription(
+                state: state, reason: reason, mergeQueuePosition: mergeQueuePosition)
         }
         /// The PR's title, or nil when it was never observed (a chip lifted
         /// from a cached `Worktree.prStatus` has none). The hover overlay
@@ -279,9 +285,10 @@ struct StatusBarView: View {
     /// only for a caution the reader must not miss.
     nonisolated static func chipHeadline(_ chip: PRChip) -> String {
         var headline = "\(chip.forge.refNoun)\(chip.label)"
-        // The status's own words when it has any, exactly as the overflow menu
-        // and the toolbar dropdown render them — except for a queued PR, whose
-        // sentence `stateDescription` replaces outright. See it for why.
+        // The status's own words when it has any, composed by the very function
+        // the overflow menu and the toolbar dropdown compose their rows with —
+        // including the queue clause a queued PR leads with. See
+        // `PRStatusPresentation.stateDescription`.
         if let state = chip.stateDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
            !state.isEmpty {
             headline += " (\(state))"
@@ -351,6 +358,32 @@ struct StatusBarView: View {
     /// open.
     nonisolated static func iconSlotLabel(_ chip: PRChip, isHovering: Bool) -> String {
         isHovering ? untrackLabel(chip) : openLabel(chip)
+    }
+
+    /// The bus glyph's drawn side on a status-bar chip, kept identical to the
+    /// 12 `WorktreeRowView.prGlyph` draws at so the bar's bus and the sidebar's
+    /// are the same image at the same size.
+    nonisolated static let prChipBusSide: CGFloat = 12
+
+    /// The side of one chip's leading icon slot — the square its resting glyph
+    /// and the untrack xmark share.
+    ///
+    /// Sized for the LARGER of the two glyphs, with both centred in it, so the
+    /// chip is exactly as wide hovered as at rest. A slot that grew on hover
+    /// would shove every chip to its right and slide the xmark out from under
+    /// the cursor that summoned it.
+    ///
+    /// A queued chip draws the bus rather than a 6pt dot, which needs the same
+    /// 12 the sidebar row gives it, so the side depends on WHICH CHIP THIS IS —
+    /// never on hover state. That is the whole invariant: two chips in the same
+    /// bar may differ in width, but neither changes width under the pointer, so
+    /// hovering still cannot shove a neighbour or slide the xmark away. It is a
+    /// `static func` here rather than a computed property inside `PRChipView`
+    /// so that invariant is assertable at all — a `private var` on a `View` is
+    /// reachable from no test, which is how the rule the whole hover geometry
+    /// rests on went unpinned.
+    nonisolated static func iconSlotSide(for chip: PRChip) -> CGFloat {
+        chip.mergeQueuePosition == nil ? 9 : prChipBusSide
     }
 
     /// What the bar says when the selected worktree is armed to archive itself
@@ -588,21 +621,11 @@ private struct PRChipView: View {
     @State private var isSlotHovered = false
 
     /// The fixed square this chip's resting glyph and the untrack xmark share.
-    ///
-    /// Sized for the LARGER of the two glyphs, with both centred in it, so the
-    /// chip is exactly as wide hovered as at rest. A slot that grew on hover
-    /// would shove every chip to its right and slide the xmark out from under
-    /// the cursor that summoned it.
-    ///
-    /// A queued chip draws the bus rather than a 6pt dot, which needs the same
-    /// 12 the sidebar row gives it, so the side depends on WHICH CHIP THIS IS —
-    /// never on hover state. That is the whole invariant: two chips in the same
-    /// bar may differ in width, but neither changes width under the pointer, so
-    /// hovering still cannot shove a neighbour or slide the xmark away.
-    private var iconSlotSide: CGFloat { chip.mergeQueuePosition == nil ? 9 : Self.busSide }
-    /// The bus glyph's drawn side, kept identical to `WorktreeRowView.prGlyph`'s
-    /// so the status bar's bus and the sidebar's are the same image.
-    private static let busSide: CGFloat = 12
+    /// Decided by `StatusBarView.iconSlotSide(for:)` rather than here — the
+    /// rule it encodes (width depends on which chip, never on hover state) is
+    /// the one this whole control rests on, and a `private var` on a `View`
+    /// cannot be asserted by a test.
+    private var iconSlotSide: CGFloat { StatusBarView.iconSlotSide(for: chip) }
     /// The drawn xmark's point size — under `iconSlotSide` in both axes.
     private static let xmarkPointSize: CGFloat = 8
     /// The untrack click region, contributed as a transparent **overlay** on
@@ -726,7 +749,8 @@ private struct PRChipView: View {
                 // color and NOT tinted: `busImage` is non-template, so
                 // `.renderingMode(.original)` is what keeps the chip's
                 // `.foregroundStyle(.secondary)` off it.
-                Image(nsImage: PRStatusPresentation.busImage(position: position, side: Self.busSide))
+                Image(nsImage: PRStatusPresentation.busImage(
+                    position: position, side: StatusBarView.prChipBusSide))
                     .renderingMode(.original)
                     .resizable()
                     .scaledToFit()
@@ -919,7 +943,7 @@ private struct AutoArchiveChipView: View {
     @State private var isHovering = false
 
     /// The fixed square `archivebox` and `xmark` share, named to match
-    /// `PRChipView.iconSlotSide` because it holds the same invariant: sized for
+    /// `StatusBarView.iconSlotSide(for:)` because it holds the same invariant: sized for
     /// the larger of the two glyphs, both centred, so the capsule cannot change
     /// width when the pointer crosses it.
     ///

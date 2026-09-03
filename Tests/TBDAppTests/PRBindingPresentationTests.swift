@@ -225,4 +225,34 @@ struct PRBindingPresentationTests {
         #expect(row.title.contains("Checks failing"))
         #expect(row.title.contains("fix-login-timeout"))
     }
+
+    /// These rows share a screen with the status-bar chips: the `+N` menu is
+    /// opened from beside them, and on a multi-PR worktree the chip and the row
+    /// for one PR can be visible at once. So a row for a queued PR has to say
+    /// the same thing the bus glyph beside it does — it used to render the
+    /// literal "Checks pending" for the very PR whose chip read "In merge
+    /// queue".
+    @Test("a menu row for a queued PR leads with its queue position")
+    func menuRowSpeaksTheQueue() {
+        let url = "https://github.com/acme/acme-prod/pull/412"
+        func queued(_ state: PRMergeableState, position: Int?) -> PRBinding {
+            PRBinding(worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+                      number: 412, url: url,
+                      status: PRStatus(number: 412, url: url, state: state,
+                                       mergeQueuePosition: position),
+                      source: .hook)
+        }
+        // The pending reason is the UNKNOWN decay artifact, so it goes.
+        #expect(PRBindingPresentation.menuRows([queued(.pending, position: 3)])[0].title
+            == "PR #412  In merge queue, position 3")
+        // A failing check on a queued PR is live news — it says the PR is about
+        // to be evicted — so it rides along.
+        #expect(PRBindingPresentation.menuRows([queued(.checksFailed, position: 2)])[0].title
+            == "PR #412  In merge queue, position 2 · Checks failing")
+        // Unqueued rows are untouched by any of it.
+        #expect(PRBindingPresentation.menuRows([queued(.checksFailed, position: nil)])[0].title
+            == "PR #412  Checks failing")
+        #expect(PRBindingPresentation.menuRows([queued(.pending, position: nil)])[0].title
+            == "PR #412  Checks pending")
+    }
 }

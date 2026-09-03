@@ -118,10 +118,17 @@ enum PRBindingPresentation {
 
     /// Dropdown menu rows, in bind order — the same "don't move under the
     /// cursor" reasoning as `statusBarChips`. Each row's title carries the
-    /// request named in its own forge's vocabulary, its human-readable reason
-    /// (falling back to the state's default when `PRStatus.reason` is nil), and
-    /// the head branch, e.g. `"PR #412  Checks failing  fix-login-timeout"` or
+    /// request named in its own forge's vocabulary, the one shared sentence
+    /// describing its state, and the head branch, e.g.
+    /// `"PR #412  Checks failing  fix-login-timeout"` or
     /// `"MR !412  Checks failing  fix-login-timeout"`.
+    ///
+    /// That sentence comes from `PRStatusPresentation.stateDescription` rather
+    /// than being composed here, because these rows share a screen with the
+    /// surfaces that use it: the status bar's `+N` menu is opened from beside
+    /// the chips themselves, and a multi-PR worktree can show a chip reading
+    /// "In merge queue" next to a row that used to say only "Checks pending"
+    /// for the very same PR.
     ///
     /// A row describes ONE binding, so it takes the per-binding wording rule
     /// rather than the neutral aggregate one: `refLabel` reads the forge from
@@ -133,7 +140,7 @@ enum PRBindingPresentation {
         bindings.map { binding in
             var parts = [binding.refLabel]
             if let status = binding.status {
-                parts.append(status.reason ?? status.state.displayReason)
+                parts.append(PRStatusPresentation.stateDescription(for: status))
             }
             if let branch = binding.headBranch {
                 parts.append(branch)

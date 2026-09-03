@@ -220,6 +220,60 @@ struct PRStatusPresentation: Equatable {
         return image
     }
 
+    /// The one sentence every surface uses to describe a single request's
+    /// state: the status-bar chip's headline, tooltip and VoiceOver hint, the
+    /// sidebar row's tooltip, and the rows of both the toolbar dropdown and the
+    /// `+N` overflow menu. It lives beside `busImage` for exactly the reason
+    /// that image is shared — a bar and a sidebar drawing one queued PR must
+    /// not describe it differently, and on a multi-PR worktree the chip and the
+    /// menu row for the *same* PR can be on screen at once.
+    ///
+    /// A queue position **adds** a leading clause. It replaces `reason` for
+    /// exactly one state, `.pending`, and that exception is mechanical rather
+    /// than stylistic: a queued PR reports its merge state as UNKNOWN, which
+    /// `PRStatusManager.mapGitHubStateAndReason` maps to
+    /// `(.pending, "Checks pending")` — a decay artifact claiming the PR waits
+    /// on its author when it plainly does not. Every other state is computed
+    /// independently of queue membership and is live news: a PR at position 2
+    /// whose required check just went red is `(.checksFailed, "Checks failing")`
+    /// *and* queued, and it is about to be evicted from that queue. Dropping
+    /// those words would hide the one fact worth acting on.
+    ///
+    /// The position is printed in full even though the bus glyph beside it
+    /// clamps at `maxQueueBadgeValue` — a chip reading `99+` can sit next to a
+    /// tooltip saying "position 150". The divergence is deliberate: the glyph
+    /// is a dozen points wide and must fit its number in three glyphs, the
+    /// sentence has a whole tooltip and no such budget.
+    ///
+    /// Capitalized, and the one casing serves every caller. The chip renders it
+    /// in a parenthetical (`PR#412 (In merge queue…)`) and the sidebar splices
+    /// it between interpuncts — but there it sits beside `reason`, which is
+    /// capitalized too ("Checks failing"), so a lowercase queue clause was the
+    /// odd one out rather than the sidebar's house style.
+    static func stateDescription(
+        state: PRMergeableState,
+        reason: String,
+        mergeQueuePosition: Int?
+    ) -> String {
+        guard let mergeQueuePosition else { return reason }
+        let queued = "In merge queue, position \(mergeQueuePosition)"
+        guard state != .pending else { return queued }
+        // Same separator `PRFreshness` joins its clauses with, so a tooltip
+        // that carries both reads as one list rather than two punctuations.
+        return "\(queued) · \(reason)"
+    }
+
+    /// The same sentence for a caller holding a whole `PRStatus`. `reason`
+    /// falls back to the state's generic words exactly as each render site did
+    /// before this was shared, so nothing changes for an unqueued PR.
+    static func stateDescription(for status: PRStatus) -> String {
+        stateDescription(
+            state: status.state,
+            reason: status.reason ?? status.state.displayReason,
+            mergeQueuePosition: status.mergeQueuePosition
+        )
+    }
+
     /// Draws `emoji` centered within `rect` at a font size matching the square.
     private static func drawEmoji(_ emoji: String, in rect: NSRect) {
         let font = NSFont.systemFont(ofSize: rect.height)
