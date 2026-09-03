@@ -69,16 +69,13 @@ struct TranscriptDetailReaderTests {
         #expect(!result.text.isEmpty)
     }
 
-    @Test("the gate is on only with the flag on and a usable path")
+    @Test("the gate is on only with a usable path")
     func gateMatrix() {
-        #expect(TranscriptDetailReader.shouldReadAppSide(enabled: true, path: "/a.jsonl"))
-        #expect(!TranscriptDetailReader.shouldReadAppSide(enabled: false, path: "/a.jsonl"),
-                "flag off must leave every caller on the RPC")
-        #expect(!TranscriptDetailReader.shouldReadAppSide(enabled: true, path: nil),
+        #expect(TranscriptDetailReader.shouldReadAppSide(path: "/a.jsonl"))
+        #expect(!TranscriptDetailReader.shouldReadAppSide(path: nil),
                 "no path means nothing to read app-side")
-        #expect(!TranscriptDetailReader.shouldReadAppSide(enabled: true, path: ""),
+        #expect(!TranscriptDetailReader.shouldReadAppSide(path: ""),
                 "an empty path must not read as a usable file")
-        #expect(!TranscriptDetailReader.shouldReadAppSide(enabled: false, path: nil))
     }
 
     @Test("an unknown item id falls back to the placeholder")

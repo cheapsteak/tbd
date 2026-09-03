@@ -1966,12 +1966,11 @@ actor DaemonClient {
 
     /// Load full chat messages for a session file.
     ///
-    /// With `appSideTranscriptRead` on this reads the JSONL here instead of
-    /// asking the daemon to parse it and ship the result back over the socket.
-    /// The RPC body below is the untouched off-path.
+    /// The app reads the JSONL here instead of asking the daemon to parse it
+    /// and ship the result back over the socket. The RPC body below is the
+    /// fallback for a caller with no usable path.
     func sessionMessages(filePath: String) async throws -> [TranscriptItem] {
-        if TranscriptDetailReader.shouldReadAppSide(
-            enabled: await AppState.appSideTranscriptReadEnabled(), path: filePath) {
+        if TranscriptDetailReader.shouldReadAppSide(path: filePath) {
             return TranscriptDetailReader.messages(path: filePath)
         }
         perfTranscriptLog.debug("client.rpc.start method=sessionMessages")
@@ -2033,13 +2032,12 @@ actor DaemonClient {
     /// `path` is the terminal's own `transcriptPath`, and is what lets the
     /// app-side read skip the socket entirely. It defaults to nil so no call
     /// site is forced to change; a site that does not pass one keeps using the
-    /// RPC even with `appSideTranscriptRead` on.
+    /// RPC.
     func terminalTranscriptItemFullBody(
         terminalID: UUID, itemID: String, includeBody: Bool = true,
         path: String? = nil
     ) async throws -> TerminalTranscriptItemFullBodyResult {
-        if let path, TranscriptDetailReader.shouldReadAppSide(
-            enabled: await AppState.appSideTranscriptReadEnabled(), path: path) {
+        if let path, TranscriptDetailReader.shouldReadAppSide(path: path) {
             return TranscriptDetailReader.fullBody(
                 path: path, itemID: itemID, includeBody: includeBody)
         }
@@ -2055,9 +2053,10 @@ actor DaemonClient {
     /// matching `tool_use` line in the JSONL, so it can drop them from
     /// `PendingQuestionStore` and retract them from every subscriber.
     ///
-    /// Only the `appSideTranscriptRead` path calls this. With the flag off the
-    /// daemon's own `terminal.transcript` handler still does the clearing off
-    /// its own parse, exactly as before.
+    /// The app's own transcript reader calls this, because it is the party that
+    /// parses the file and so the only one that sees the match. For a pane with
+    /// no transcript path the daemon's `terminal.transcript` handler still does
+    /// the clearing off its own parse.
     func terminalAskUserQuestionSatisfied(terminalID: UUID, toolUseIDs: [String]) async throws {
         try await callVoidAsync(
             method: RPCMethod.terminalAskUserQuestionSatisfied,

@@ -5,12 +5,12 @@ import Testing
 @testable import TBDShared
 
 /// `terminal.transcript` runs `PendingQuestionStore.gcExpired`, which reaps
-/// across EVERY terminal — not just the polled one. During the
-/// `appSideTranscriptRead` soak the two paths run side by side, so a flag-off
-/// terminal's poll can reap a flag-on terminal's stranded capture. Without a
+/// across EVERY terminal — not just the polled one. A pane whose terminal has
+/// no transcript path still polls that handler, so its poll can reap the
+/// stranded capture of a terminal the app is reading in-process. Without a
 /// broadcast for that terminal the app never hears about it:
 /// `PendingQuestionExpirySweep` then finds nothing left to reap and stays
-/// silent, so the flag-on pane renders "waiting for your answer" forever.
+/// silent, so the app-side pane renders "waiting for your answer" forever.
 @Suite("terminal.transcript broadcasts every terminal its gc reaped")
 struct TranscriptPollReapBroadcastTests {
 

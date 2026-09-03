@@ -109,10 +109,10 @@ extension RPCRouter {
     /// Clears captures the app has seen satisfied in the JSONL.
     ///
     /// `handleTerminalTranscript` does this for itself off its own parse, but
-    /// with `appSideTranscriptRead` on that handler never runs and the app is
-    /// the only party parsing the file. Without this call the entry would sit
-    /// in the store until `PendingQuestionExpirySweep` reaped it — up to
-    /// fifteen minutes of the card rendering a question already answered.
+    /// the app reads transcripts itself, so that handler runs only for a pane
+    /// with no transcript path. Without this call the entry would sit in the
+    /// store until `PendingQuestionExpirySweep` reaped it — up to fifteen
+    /// minutes of the card rendering a question already answered.
     ///
     /// One broadcast for the whole batch, and none at all for an empty list:
     /// the app calls this only when its merge reported something, but a

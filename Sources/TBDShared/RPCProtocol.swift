@@ -4028,9 +4028,8 @@ public struct TerminalAskUserQuestionClearedParams: Codable, Sendable {
 /// JSONL, so the daemon can drop it from `PendingQuestionStore`.
 ///
 /// This is the lazy clean-up `terminal.transcript` performs for itself, made
-/// callable by the reader that replaces it: with `appSideTranscriptRead` on,
-/// the app is the only party that parses the JSONL, so it is the only party
-/// that can see a capture become satisfied.
+/// callable by the reader that replaces it: the app is the party that parses
+/// the JSONL, so it is the party that can see a capture become satisfied.
 ///
 /// Distinct from `terminal.askUserQuestionCleared`, which is the
 /// `PostToolUse` hook bridge and deliberately does *not* touch the store —

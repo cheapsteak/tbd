@@ -5,10 +5,10 @@ import TBDShared
 /// own transcript reader back to the daemon, at most once per capture.
 ///
 /// `AskUserQuestionMerger.merge` reports satisfied ids on *every* publish, and
-/// with `appSideTranscriptRead` on that is roughly once per poll tick for as
-/// long as the pane is open. The daemon's clear is idempotent, but the RPC and
-/// the `terminalPendingQuestionsChanged` delta it broadcasts are not free, so
-/// an id already reported is dropped here rather than re-sent.
+/// that is roughly once per poll tick for as long as the pane is open. The
+/// daemon's clear is idempotent, but the RPC and the
+/// `terminalPendingQuestionsChanged` delta it broadcasts are not free, so an id
+/// already reported is dropped here rather than re-sent.
 ///
 /// The `send` closure is the seam: production wires it to
 /// `DaemonClient.terminalAskUserQuestionSatisfied`, tests substitute a
