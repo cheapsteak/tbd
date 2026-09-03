@@ -692,6 +692,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetGCRowlessHoldersEnabled(request.paramsData)
             case RPCMethod.configSetReapHolderChildrenEnabled:
                 return try await handleConfigSetReapHolderChildrenEnabled(request.paramsData)
+            case RPCMethod.configSetGCRetainedTranscriptsEnabled:
+                return try await handleConfigSetGCRetainedTranscriptsEnabled(request.paramsData)
             case RPCMethod.configSetRemoteDeleteEnabled:
                 return try await handleConfigSetRemoteDeleteEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:

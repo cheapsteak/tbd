@@ -266,13 +266,16 @@ constant, reaching everyone who never flipped the switch while preserving every 
 opt-out. A dry run bypasses the flag exactly as it bypasses `gcEnabled`:
 `tbd gc sweep --dry-run` prints the `REAP retained-transcript` and
 `REAP retained-transcript-row` lines the leg *would* act on, so the decision to enable it
-can be made against real candidates. There is no Settings toggle and no RPC yet; enable
-it for a soak by writing the column directly, the way `gcGraceSeconds` is set:
+can be made against real candidates. There is no Settings toggle; enable it for a soak
+from the CLI, which is the supported path:
 
 ```sh
-sqlite3 ~/tbd/state.db \
-  "UPDATE config SET gc_retained_transcripts_enabled = 1;"
+tbd gc retained-transcripts on
 ```
+
+That calls `config.setGCRetainedTranscriptsEnabled`, which writes the column and
+broadcasts the config change so a running app reloads. `off` writes an explicit `0`,
+which is honored through graduation rather than following the shipped default.
 
 **What it reclaims**, in this order, from one reading of the clock through the date seam:
 
@@ -355,7 +358,7 @@ than the preceding dry run predicted.
 |---|---|---|
 | `gcEnabled` | `true` | Settings toggle + `config.setGCEnabled` RPC |
 | `gcProfileDirsEnabled` | `false` | `tbd gc profile-dirs on\|off` + `config.setGCProfileDirsEnabled` RPC, no UI |
-| `gcRetainedTranscriptsEnabled` | `false` | config table only, no UI |
+| `gcRetainedTranscriptsEnabled` | `false` | `tbd gc retained-transcripts on\|off` + `config.setGCRetainedTranscriptsEnabled` RPC, no UI |
 | `gcGraceSeconds` | `3600` (1h) | config table only, no UI |
 | `gcSnapshotRetentionDays` | `30` | config table only, no UI |
 

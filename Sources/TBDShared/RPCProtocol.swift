@@ -293,6 +293,13 @@ public enum RPCMethod {
     public static let configSetGCHolderRendezvousEnabled = "config.setGCHolderRendezvousEnabled"
     public static let configSetGCRowlessHoldersEnabled = "config.setGCRowlessHoldersEnabled"
     public static let configSetReapHolderChildrenEnabled = "config.setReapHolderChildrenEnabled"
+    /// The retained-transcript GC gate (`gc_retained_transcripts_enabled`) —
+    /// the soak switch on the `OrphanGC` leg that unlinks retained transcripts
+    /// nobody references and drops receipts whose expiry has passed. Reading
+    /// needs no method of its own: `config.get` already carries the resolved
+    /// value.
+    public static let configSetGCRetainedTranscriptsEnabled =
+        "config.setGCRetainedTranscriptsEnabled"
     /// The remote-delete gate (`remote_delete_enabled`) — the feature's only
     /// opt-in, and the supported way to turn the soak on. Reading needs no
     /// method of its own: `config.get` already carries the resolved value.
@@ -3198,6 +3205,19 @@ public struct ConfigSetGCRowlessHoldersEnabledParams: Codable, Sendable {
 /// the database by hand would make it un-soakable. Design:
 /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
 public struct ConfigSetReapHolderChildrenEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setGCRetainedTranscriptsEnabled` — the gate on the
+/// `OrphanGC` leg that reclaims retained-transcript residue: files under
+/// `~/tbd/transcripts/` that no row references, and rows whose `expires_at` has
+/// passed (default OFF during soak, on top of the GC master switch). This is
+/// how the soak is turned on. A separate opt-in from `remote_delete_enabled`:
+/// that gate destroys a session on a provider, this one reclaims TBD's own
+/// local residue, and opting into either must never opt into the other. Design:
+/// `docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`.
+public struct ConfigSetGCRetainedTranscriptsEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

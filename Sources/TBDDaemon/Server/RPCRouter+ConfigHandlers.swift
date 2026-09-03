@@ -255,6 +255,25 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the retained-transcript GC gate — the default-off soak switch
+    /// for the `OrphanGC` leg that unlinks retained transcripts nobody
+    /// references and drops receipts whose expiry has passed, read on top of
+    /// the GC master switch.
+    ///
+    /// This is how the soak is turned on. Deliberately a different verb from
+    /// the remote-delete gate below: enabling a local reclaimer must never
+    /// enable the one verb that destroys a session on a provider. Like the
+    /// master switch, flipping it off does not cancel an in-progress sweep:
+    /// `OrphanGC.sweep` re-reads the flag on its next pass.
+    func handleConfigSetGCRetainedTranscriptsEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetGCRetainedTranscriptsEnabledParams.self, from: paramsData)
+        try await db.config.setGCRetainedTranscriptsEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the remote-delete gate — the default-off soak switch for
     /// `remote.delete`, the verb that destroys a provider-hosted session.
     ///
