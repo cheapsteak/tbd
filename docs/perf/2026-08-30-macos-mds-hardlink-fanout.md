@@ -165,8 +165,12 @@ a link count equal to the checkout count.
 **Stop pinning hardlink; let the tool choose, or pin clone explicitly on APFS.**
 For `uv`, remove the `UV_LINK_MODE=hardlink` export, or set
 `UV_LINK_MODE=clone`. Existing environments keep their old link counts until
-rebuilt, so converting them requires a reinstall (`uv sync --reinstall`, or
-deleting and re-provisioning the environment).
+something rewrites them, so the setting alone changes nothing on a machine that
+already has them. Convert them in place with the script under "Converting
+existing environments" below — no network, no lockfile, and safe against
+checkouts with live sessions. Reinstalling (`uv sync --reinstall`, or deleting
+and re-provisioning) also works and is the right choice if you wanted a fresh
+resolve anyway, but it is an alternative, not a requirement.
 
 Two things to fix alongside it, or the change will be undone by its own guardrails:
 
