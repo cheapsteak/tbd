@@ -509,6 +509,15 @@ final class AppState {
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
     var remoteSessions: [RemoteSessionInfo] = []
+    /// Every retain/import receipt the daemon holds, fetched by
+    /// `refreshRemote()`.
+    ///
+    /// Read by the archived list, where a lane whose remote session was
+    /// destroyed is revived by reseeding from its receipt rather than by
+    /// unarchiving a session that no longer exists — so the Revive button has
+    /// to know whether the transcript behind it is still good. Small by
+    /// construction: one row per key a human deliberately created.
+    var retainedTranscripts: [RetainedTranscript] = []
     /// TBD-owned display-name overrides for remote sessions, keyed by
     /// `AppState.remoteSessionKey(provider:sessionID:)`. Mirrors the
     /// worktree pattern (`Worktree.displayName` living in TBD's own DB
@@ -1570,6 +1579,10 @@ final class AppState {
     /// same reason as `remoteProvidersFetcher`.
     @ObservationIgnored lazy var remoteSessionsFetcher: @MainActor () async throws -> RemoteSessionsResult =
         { [daemonClient] in try await daemonClient.remoteSessions() }
+    /// How `refreshRemote()` fetches the retained-transcript receipts —
+    /// injectable for the same reason as `remoteProvidersFetcher`.
+    @ObservationIgnored lazy var retainedTranscriptsFetcher: @MainActor () async throws -> [RetainedTranscript] =
+        { [daemonClient] in try await daemonClient.remoteRetainedList() }
     /// How `pushRemoteRenameIfSupported` pushes a rename to the provider —
     /// injectable for the same reason as `remoteProvidersFetcher` (`DaemonClient`
     /// is concrete, no protocol), so tests can assert whether it fires per

@@ -50,6 +50,16 @@ extension AppState {
                 self.selectedRemoteProvider = nil
             }
             pruneRemoteSessionState(toKnownSessions: sessions.sessions)
+            // Best-effort and last, deliberately. The receipts only decide
+            // whether an archived lane's Revive means reseeding, so a failure
+            // here must not clear the roster and the mirror that did arrive —
+            // and the previous answer is a better one to keep than none.
+            do {
+                retainedTranscripts = try await retainedTranscriptsFetcher()
+            } catch {
+                remoteLogger.error(
+                    "Failed to refresh retained transcripts: \(error, privacy: .public)")
+            }
         } catch {
             switch AppState.classifyRemoteRefreshFailure(error) {
             case .unavailable:
@@ -60,6 +70,10 @@ extension AppState {
                 // rename overrides or unread bookkeeping.
                 remoteProviders = []
                 remoteSessions = []
+                // Safe to clear outright, unlike the two maps above: this is a
+                // cache of daemon rows, not user state, and the same refusal
+                // covers the verb that reads it.
+                retainedTranscripts = []
             case .error:
                 remoteLogger.error("Failed to refresh remote backends: \(error, privacy: .public)")
             }

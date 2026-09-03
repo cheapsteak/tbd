@@ -136,31 +136,6 @@ extension RPCRouter {
         return trimmed
     }
 
-    /// A JSON string literal — quotes and escaping included — for a value TBD
-    /// must splice into a hand-composed request body.
-    ///
-    /// `create`'s body is assembled as text rather than encoded, because
-    /// `paramsJSON` is a caller-supplied JSON object spliced through verbatim
-    /// and re-encoding it would rewrite the caller's own formatting. Everything
-    /// else in that body has so far been a value TBD minted itself. A retained
-    /// key is not: it is an opaque provider-issued string that MUST NOT be
-    /// parsed or pattern-matched, so it may contain a quote, a backslash, or a
-    /// newline, and interpolating one raw would produce a malformed request the
-    /// provider rejects with no indication of why.
-    ///
-    /// `JSONSerialization` needs a top-level container, so the value is encoded
-    /// as a one-element array and the brackets are dropped. The fallback is an
-    /// empty literal, which the provider will reject as an unknown key —
-    /// the failure a caller can act on, rather than a broken body.
-    private static func jsonStringLiteral(_ value: String) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: [value]),
-              let text = String(bytes: data, encoding: .utf8),
-              text.count >= 2 else {
-            return "\"\""
-        }
-        return String(text.dropFirst().dropLast())
-    }
-
     /// Turns a provider timeout into a message the app can show, instead of
     /// letting `ProviderRunError.timeout`'s raw enum description
     /// (`timeout(verb: "stop")`) leak through the router's catch-all.
@@ -227,17 +202,12 @@ extension RPCRouter {
         // the capability gate exists to prevent. That is also why the check
         // sits here and not at a caller: nothing upstream is trusted to have
         // made it (the same rule `handleRemoteRetain` follows).
-        var seedField = ""
-        if let seedKey = params.seedRetainedKey {
-            guard await declaredCapabilities(manager, provider: params.provider).contains("seed") else {
+        if params.seedRetainedKey != nil {
+            let capabilities = await declaredCapabilities(manager, provider: params.provider)
+            guard capabilities.contains("seed") else {
                 return Self.missingCapabilityResponse(
                     provider: params.provider, capability: "seed", section: "create")
             }
-            // A top-level sibling of `params` and `idempotency_key`, never a
-            // member of `params` — `params` is the provider's own free-form
-            // set, and burying a contract field inside it would make `seed`
-            // indistinguishable from a provider-defined one.
-            seedField = #", "seed": {"retained_key": \#(Self.jsonStringLiteral(seedKey))}"#
         }
         // The session ID is the provider's return value, so the request row
         // carries the provider alone; the resolved ID lands with the observed
@@ -251,7 +221,9 @@ extension RPCRouter {
         // the retry surfaces via the next snapshot poll's adoption anyway,
         // so there's nothing a persisted key would add.
         let key = "tbd-\(UUID().uuidString.lowercased())"
-        let body = #"{"params": \#(paramsJSON)\#(seedField), "idempotency_key": "\#(key)"}"#
+        let body = ProviderCreateBody.compose(
+            paramsJSON: paramsJSON, seedRetainedKey: params.seedRetainedKey,
+            idempotencyKey: key)
         let stdin = Data(body.utf8)
         let result: ProviderResult
         do {

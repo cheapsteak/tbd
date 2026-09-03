@@ -142,6 +142,25 @@ public struct RetainedTranscriptStore: Sendable {
         }
     }
 
+    /// The newest receipt taken from a session that belonged to this lane, or
+    /// nil when the lane has none.
+    ///
+    /// This is what makes Revive-as-reseed possible: an archived lane whose
+    /// remote session was destroyed has no session left to unarchive, and the
+    /// receipt is the only thing that says its conversation survived somewhere.
+    /// Newest first, because a lane retained more than once — say a manual
+    /// `tbd remote retain` and then a `delete --retain` — wants the last word
+    /// on the conversation rather than the first.
+    public func latest(originWorktreeID: UUID) async throws -> RetainedTranscript? {
+        try await writer.read { db in
+            try RetainedTranscriptRecord
+                .filter(Column("origin_worktree_id") == originWorktreeID.uuidString)
+                .order(Column("created_at").desc)
+                .fetchOne(db)?
+                .toModel()
+        }
+    }
+
     /// Record where a `recall` wrote this receipt's JSONL on this machine.
     ///
     /// Returns whether a row actually changed, mirroring

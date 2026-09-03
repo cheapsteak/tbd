@@ -1281,6 +1281,22 @@ actor DaemonClient {
         )
     }
 
+    /// The retain and import receipts TBD holds, newest first, optionally
+    /// filtered to one provider.
+    ///
+    /// Local-only: it reads the daemon's own rows and invokes no provider verb,
+    /// so it needs no capability and works for a provider that has gone
+    /// unhealthy. Nothing in the contract lets a caller enumerate the keys a
+    /// provider issued, which is why TBD's record is the only enumeration
+    /// there is.
+    func remoteRetainedList(provider: String? = nil) async throws -> [RetainedTranscript] {
+        try await callAsync(
+            method: RPCMethod.remoteRetainedList,
+            params: RemoteRetainedListParams(provider: provider),
+            resultType: RemoteRetainedListResult.self
+        ).transcripts
+    }
+
     /// Destroy a provider-hosted session
     /// (`docs/remote-provider-contract.md` § `delete <id> [--retain]`).
     ///
