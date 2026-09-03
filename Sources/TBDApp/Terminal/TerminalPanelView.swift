@@ -1772,6 +1772,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // the marker with the payload, no paste would be detected at all,
             // which is harmless because one `enqueueUserBytes` call is one
             // atomic write that an injection lands wholly before or after.
+            // That second shape is deliberately not covered by a test: it
+            // cannot arise on this fork, and no assertion could tell a
+            // coalescing fork from a chunking one, since the classifier
+            // behaves identically either way. This comment is the record.
             //
             // The order of these three calls is what makes the span airtight:
             // the paste is opened BEFORE its own first byte goes out and
@@ -1827,7 +1831,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// (`DispatchIO` for the pty, the sidecar client's own send queue for
         /// the frame), so a write that fails after this returns cannot be
         /// reported here. The daemon's fail-open deadline is what covers that
-        /// residue.
+        /// residue. Both arms report every refusal that *is* knowable at call
+        /// time, which is the whole obligation this seam can carry: a missing
+        /// or dead `localProcess`, and for the sidecar a missing attach, a
+        /// disconnected client, an over-cap payload or an encode failure.
         private func performOutgoingWrite(_ data: Data) -> Bool {
             switch OutgoingInputRoute.decide(
                 controlModeAttached: controlModeAttach != nil, byteCount: data.count) {
@@ -1840,10 +1847,26 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 localProcess.send(data: [UInt8](data)[...])
                 return true
             case .sidecarInput:
-                guard let attach = controlModeAttach, let appState else { return false }
-                appState.daemonClient.fdSidecar.sendInput(
+                // `isConnected` belongs in the guard for the same reason
+                // `running` does above: the sidecar client drops an `.input`
+                // frame whose socket is gone, and there is no Phase A
+                // reconnect, so once that connection dies it stays dead for
+                // the app's lifetime and a `true` here would be a
+                // *systematic* fabricated ack, not a rare one.
+                //
+                // It narrows the window without closing it: the socket is
+                // read again on the client's own send queue, so a
+                // disconnection between this check and that read is a TOCTOU
+                // this arm cannot see. Acceptable for exactly the reason the
+                // `.localPTY` arm's residue is — `true` means handed off, and
+                // the daemon's fail-open deadline is the cover — and a
+                // synchronous answer that waited for the queue would put a
+                // socket write in a keystroke's main-actor turn.
+                guard let attach = controlModeAttach, let appState,
+                    appState.daemonClient.fdSidecar.isConnected
+                else { return false }
+                return appState.daemonClient.fdSidecar.sendInput(
                     worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: data)
-                return true
             }
         }
 

@@ -218,6 +218,49 @@ struct FDSidecarClientTests {
         #expect(!scanner.isDesynced)
     }
 
+    @Test("sendInput reports its synchronous refusals instead of fabricating an ack (R19)")
+    func sendInputReturnsWhetherTheFrameWasHandedOff() throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let worktreeID = UUID()
+        // The return value is the ack `TerminalPanelView.performOutgoingWrite`
+        // hands to `OutgoingInputQueue`, and from there to the daemon's
+        // injection path. A `sendInput` that returned nothing (or always
+        // `true`) made the `.sidecarInput` arm fabricate "written" for a
+        // payload it had just dropped, so the daemon would not fall back and
+        // the prompt would be lost invisibly.
+        let oversize = Data(repeating: 0x41, count: SidecarFrameCodec.maxPasteBytes + 1)
+        #expect(client.sendInput(worktreeID: worktreeID, paneID: "%big", bytes: oversize) == false)
+
+        // And a payload that IS handed to the send queue says so — otherwise
+        // a mutation returning a constant `false` would satisfy the line
+        // above and silently route every keystroke through the daemon's
+        // fallback.
+        #expect(client.sendInput(worktreeID: worktreeID, paneID: "%ok", bytes: Data("k".utf8)) == true)
+
+        // Draining the frame is not decoration: `sendInput` returns as soon
+        // as the write is QUEUED, so without this read the `defer` above
+        // closes the peer first and the queued `Darwin.write` takes SIGPIPE,
+        // which kills the whole test process rather than failing this test.
+        // Reading blocks until the write has landed, which is also the proof
+        // that `true` meant what it says.
+        let scanner = SidecarFrameScanner()
+        var decoded: (header: SidecarInputHeader, bytes: Data)?
+        let deadline = ContinuousClock.now + .seconds(2)
+        while decoded == nil && ContinuousClock.now < deadline {
+            let message = try FDChannel.receiveMessage(from: daemonSide, capacity: 4096)
+            for frame in scanner.append(message.data) where frame.type == SidecarFrameType.input.rawValue {
+                decoded = try SidecarFrameCodec.decodeInput(payload: frame.payload)
+                break
+            }
+        }
+        let result = try #require(decoded)
+        #expect(result.header.paneID == "%ok")
+    }
+
     @Test("sendInput while disconnected is dropped without crashing")
     func sendInputWhileDisconnectedDrops() async throws {
         let client = FDSidecarClient()   // never connected

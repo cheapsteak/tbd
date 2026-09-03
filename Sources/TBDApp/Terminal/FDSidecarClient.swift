@@ -114,7 +114,21 @@ final class FDSidecarClient: @unchecked Sendable {
     /// write on `sendQueue`. Errors — including a disconnected socket — are
     /// logged and dropped; the receive loop's EOF path handles daemon death and
     /// Phase B owns reconnect.
-    func sendInput(worktreeID: UUID, paneID: String, bytes: Data) {
+    ///
+    /// Returns whether the frame was **handed to `sendQueue`** — `false` for
+    /// either refusal that is knowable at call time (over-cap payload, encode
+    /// failure). It is deliberately not a delivery receipt: the socket write
+    /// happens later on `sendQueue`, so a disconnected socket or a
+    /// `FDChannel.sendData` throw is logged there and cannot be reported to
+    /// this caller. `TerminalPanelView.performOutgoingWrite` narrows that
+    /// residue by checking `isConnected` before calling, and the daemon's
+    /// fail-open injection deadline is what covers the rest — see the
+    /// `.sidecarInput` arm's comment for the whole argument.
+    ///
+    /// `@discardableResult` because the keystroke path is fire-and-forget by
+    /// design and the tests that exercise the side effect ignore the value.
+    @discardableResult
+    func sendInput(worktreeID: UUID, paneID: String, bytes: Data) -> Bool {
         // Defense-in-depth cap (R6-H3), mirroring `sendPaste`'s guard: a
         // single `.input` frame that couldn't fit the daemon scanner's 4 MiB
         // hard cap would desync the ONE app-wide sidecar connection and kill
@@ -127,7 +141,7 @@ final class FDSidecarClient: @unchecked Sendable {
                 sidecar: sendInput payload \(bytes.count, privacy: .public) bytes exceeds cap \
                 \(SidecarFrameCodec.maxPasteBytes, privacy: .public), dropping (input this large is a routing bug)
                 """)
-            return
+            return false
         }
         let frame: Data
         do {
@@ -135,7 +149,7 @@ final class FDSidecarClient: @unchecked Sendable {
                 header: SidecarInputHeader(worktreeID: worktreeID, paneID: paneID), bytes: bytes)
         } catch {
             logger.error("sidecar: failed to encode input frame, dropping \(bytes.count, privacy: .public) bytes")
-            return
+            return false
         }
         sendQueue.async { [weak self] in
             guard let self else { return }
@@ -150,6 +164,7 @@ final class FDSidecarClient: @unchecked Sendable {
                 self.logger.error("sidecar: input send failed: \(String(describing: error), privacy: .public)")
             }
         }
+        return true
     }
 
     /// Send bulk paste `bytes` for a pane to the daemon as a `.paste` frame (the
