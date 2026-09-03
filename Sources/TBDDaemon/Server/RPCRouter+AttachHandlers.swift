@@ -15,6 +15,19 @@ extension RPCRouter {
     /// land in a pipe nobody reads.
     func handleAttachRequest(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(AttachRequestParams.self, from: paramsData)
+        // The holder branch comes first, and before the control-mode gate as
+        // well as before the tmux server resolution. A holder-backed row has no
+        // tmux coordinates to resolve — `tmuxServer` and `tmuxWindowID` are the
+        // empty string — and the control-mode gate asks a question about tmux's
+        // version that has nothing to say about this transport. The row's
+        // transport is the whole gate: a row can only be `.holder` because the
+        // holder flag was on when it was created, and flipping that flag off
+        // afterwards must never strand a live session.
+        if let terminalID = params.terminalID,
+           let terminal = try? await db.terminals.get(id: terminalID),
+           terminal.transport == .holder {
+            return try await handleHolderAttachRequest(params: params, terminal: terminal)
+        }
         // Gate evaluated per attach (env || persisted flag): a Settings
         // toggle affects the next attach without a daemon restart.
         guard let bridge = controlMode, await bridge.gateEnabled() else {
@@ -148,6 +161,96 @@ extension RPCRouter {
         }
     }
 
+    /// The holder half of `attach.request`: quiesce, snapshot, vend a `dup` of
+    /// the session's pty master.
+    ///
+    /// The choreography is the control-mode path's, deliberately — request, an
+    /// fd over `SCM_RIGHTS`, then `attach.ready` carrying the generation back —
+    /// because it is proven and because a second handshake would be a second
+    /// set of races to get right. What differs is what is vended (the pty
+    /// itself, not the read end of a fanout pipe) and what ownership means: the
+    /// daemon stops reading here, at the vend, and `HolderRegistry.beginAttach`
+    /// records why.
+    ///
+    /// Failure is reported to the caller rather than degraded into a fallback:
+    /// there is no second way to render a holder-backed session, so an attach
+    /// that could not happen must say so.
+    private func handleHolderAttachRequest(
+        params: AttachRequestParams, terminal: Terminal
+    ) async throws -> RPCResponse {
+        guard let registry = holderRegistry else {
+            return try RPCResponse(result: AttachRequestResult(status: "unavailable"))
+        }
+        // The fd sidecar is the vend channel for both transports; it is the one
+        // thing the holder path borrows from the control-mode bridge, and it is
+        // listening whenever the daemon is, independent of that gate.
+        guard let vending = controlMode?.fdVending else {
+            return RPCResponse(error: "the fd sidecar is not configured in this daemon")
+        }
+
+        let vend: HolderAttachVend
+        let header: Data
+        do {
+            // Encoded before the attach, so a throw from it cannot leave a
+            // vended descriptor and a suspended drain behind — the same
+            // hoisting, for the same reason, as the control-mode path above.
+            header = try JSONEncoder().encode(
+                FDVendHeader(
+                    worktreeID: params.worktreeID, paneID: params.paneID,
+                    attachID: params.attachID))
+            vend = try await registry.beginAttach(terminalID: terminal.id)
+        } catch {
+            logger.error("""
+                holder attach.request failed for terminal \
+                \(terminal.id.uuidString, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            return RPCResponse(error: "attach failed: \(error.localizedDescription)")
+        }
+
+        do {
+            try await vending.send(fd: vend.ptyFD, header: header)
+        } catch {
+            Darwin.close(vend.ptyFD)
+            // The descriptor provably never reached the app, so this process
+            // still holds the only copy that was made and resuming the drain
+            // cannot produce a second reader. It is the one cancellation on
+            // this path that licenses a resume, and leaving it out would strand
+            // the session unread for a failure that says nothing about the app.
+            await registry.cancelPendingAttach(
+                terminalID: terminal.id, generation: vend.generation,
+                reason: .descriptorNeverDelivered)
+            logger.error("""
+                could not vend the pty for terminal \(terminal.id.uuidString, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            return RPCResponse(error: "attach failed: \(error.localizedDescription)")
+        }
+        // The kernel duplicated the fd into the app's table; drop ours.
+        Darwin.close(vend.ptyFD)
+
+        // Same ready-timeout as control mode, pointed at this registry's own
+        // cancel. It is generation-scoped, so a timer outliving the attach it
+        // was started for is a no-op — and note what it does NOT do: an attach
+        // that timed out is not resumed, because the app has the descriptor and
+        // a lost ack cannot be told from a lost app.
+        let timeout = controlMode?.readyTimeout ?? .seconds(5)
+        let clock = controlMode?.clock ?? ContinuousClock()
+        let terminalID = terminal.id
+        let generation = vend.generation
+        Task {
+            try? await clock.sleep(for: timeout)
+            await registry.cancelPendingAttach(
+                terminalID: terminalID, generation: generation, reason: .unacknowledged)
+        }
+
+        return try RPCResponse(
+            result: AttachRequestResult(
+                status: "pending",
+                generation: vend.generation,
+                snapshotPreamble: vend.snapshotPreamble))
+    }
+
     /// Handle `attach.ready`: the app's reader is draining the vended fd —
     /// run the replay sequence (M4.3, addendum §3): pause → capture → replay
     /// → gate → unpause. The write gate opens only AFTER the replay bytes are
@@ -166,6 +269,13 @@ extension RPCRouter {
     ///   EOF the healthy successor's pipe (and drop its input route).
     func handleAttachReady(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(AttachReadyParams.self, from: paramsData)
+        // The holder branch, first and for the same reasons as on the request:
+        // no tmux coordinates to resolve, and no tmux gate to consult.
+        if let terminalID = params.terminalID,
+           let terminal = try? await db.terminals.get(id: terminalID),
+           terminal.transport == .holder {
+            return await handleHolderAttachReady(params: params, terminal: terminal)
+        }
         guard let bridge = controlMode else {
             return RPCResponse(error: "control mode not configured")
         }
@@ -214,6 +324,45 @@ extension RPCRouter {
                 \(String(describing: error), privacy: .public)
                 """)
             return RPCResponse(error: "attach replay failed: \(error)")
+        }
+    }
+
+    /// The holder half of `attach.ready`: the viewer is on the pty, so the
+    /// daemon's reader is released for good and the session becomes the
+    /// viewer's.
+    ///
+    /// There is no replay sequence to run here — the screen went out with the
+    /// request, as the snapshot preamble — so this is only the ownership edge,
+    /// plus the jiggle `confirmAttach` performs while it still holds the
+    /// descriptor.
+    ///
+    /// A refused ack is an RPC error rather than a silent success, and the app
+    /// is expected to detach on it: a viewer whose ack was refused is reading a
+    /// descriptor the daemon has not accounted for, which is the state this
+    /// whole path exists to keep bounded.
+    private func handleHolderAttachReady(
+        params: AttachReadyParams, terminal: Terminal
+    ) async -> RPCResponse {
+        guard let registry = holderRegistry else {
+            return RPCResponse(error: "holder transport is not wired in this daemon")
+        }
+        guard let generation = params.generation else {
+            // Older app, or a caller that dropped the generation. There is
+            // nothing to check the ack against, and confirming the wrong attach
+            // would release a reader a live attach depends on.
+            return RPCResponse(error: "a holder attach.ready must carry its attach generation")
+        }
+        do {
+            try await registry.confirmAttach(terminalID: terminal.id, generation: generation)
+            return .ok()
+        } catch {
+            logger.error("""
+                holder attach.ready refused for terminal \
+                \(terminal.id.uuidString, privacy: .public) generation \
+                \(generation, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            return RPCResponse(error: "attach.ready refused: \(error.localizedDescription)")
         }
     }
 

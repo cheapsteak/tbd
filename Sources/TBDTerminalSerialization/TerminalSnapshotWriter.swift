@@ -8,6 +8,12 @@ import SwiftTerm
 /// Two orderings inside are counter-intuitive and are called out where they
 /// happen: SGR reset precedes the erase, and the scroll region follows the alt
 /// content.
+///
+/// **The caller must hold `terminal.terminalLock` across `snapshot`**, which
+/// both reads the terminal and feeds it — the alt-screen toggle, and whatever
+/// the supplied `ModeReplyReader` does to obtain a `DECRQM` answer. The lock is
+/// not re-entrant, so it is taken by the caller and never here; see
+/// `TerminalCellWalk` for why the rule exists at all.
 public enum TerminalSnapshotWriter {
     private static let esc = "\u{1b}"
 

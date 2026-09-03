@@ -3,6 +3,18 @@ import SwiftTerm
 
 /// Renders a terminal's retained scrollback and current screen as styled lines.
 ///
+/// **Every function here reads `Terminal` state, so the caller must hold
+/// `terminal.terminalLock` for the whole call.** `Terminal` is not `Sendable`,
+/// does not lock itself, and is fed from a different thread than the one
+/// rendering it in both processes that use this — the daemon's drain thread
+/// against its emulator, the app's IO thread against its view. Reading a buffer
+/// mid-parse garbles the output rather than crashing, which is why the rule is
+/// stated rather than left to be noticed. The lock is not taken here because
+/// it is not re-entrant and every real caller is already inside it: the whole
+/// snapshot — mode capture, this walk, and the alt-screen toggle around it —
+/// has to be one critical section or the pieces disagree about which screen
+/// they describe.
+///
 /// Each returned line is self-contained: it opens with an SGR run and carries
 /// its own attribute changes, so a reader can begin at any line. Lines carry no
 /// terminator — the caller joins them with `\r\n` and must not add a trailing

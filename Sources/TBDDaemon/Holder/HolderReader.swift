@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import SwiftTerm
+import TBDTerminalSerialization
 import os
 
 /// The daemon's drain loop and headless emulator for one holder-backed session.
@@ -57,6 +58,13 @@ actor HolderReader {
         /// budget. Carries what is left so a caller can decide, rather than
         /// pretending a partial write succeeded.
         case writeTimedOut(unwritten: Int)
+        /// The drain thread did not leave the descriptor within the budget, so
+        /// nothing may touch it: reading a descriptor another thread might
+        /// still be reading is the byte theft this whole design prevents. The
+        /// reader keeps draining rather than handing anything over.
+        case drainDidNotQuiesce
+        /// The pty master could not be duplicated for a viewer.
+        case cannotDuplicate(errno: Int32)
 
         var errorDescription: String? {
             switch self {
@@ -70,6 +78,12 @@ actor HolderReader {
                     + "\(String(cString: strerror(code))) (errno \(code))"
             case .writeTimedOut(let unwritten):
                 return "the session's pty did not accept \(unwritten) more bytes within the budget"
+            case .drainDidNotQuiesce:
+                return "the drain thread did not leave the session's pty within the budget, so "
+                    + "nothing else may read it"
+            case .cannotDuplicate(let code):
+                return "could not duplicate the session's pty for a viewer: "
+                    + "\(String(cString: strerror(code))) (errno \(code))"
             }
         }
     }
@@ -77,6 +91,17 @@ actor HolderReader {
     private enum State {
         case idle
         case draining
+        /// The drain thread has left the descriptor and exited, but the
+        /// descriptor is still open and still this reader's to close. Reached
+        /// only through `suspendDraining()`, and left through
+        /// `resumeDraining()` or `stop()`.
+        ///
+        /// **This state holds jobs open.** Nothing is reading the pty, so a job
+        /// that exits while the reader is suspended stops half-exited in
+        /// `ttywait` until somebody drains again. It is entered only to hand
+        /// the descriptor to a viewer that will read it instead, and every path
+        /// out of it is either that hand-over completing or the drain resuming.
+        case suspended
         case stopped
     }
 
@@ -151,7 +176,10 @@ actor HolderReader {
         // safe to clean up.
         if wake >= 0 { Darwin.close(wake) }
         switch finalState {
-        case .idle:
+        case .idle, .suspended:
+            // Both are states in which no thread can be inside a read: an idle
+            // reader never started one, and a suspended reader's thread has
+            // provably finished. So the descriptor is this actor's to close.
             pty.close()
         case .draining:
             Self.logger.error(
@@ -220,14 +248,36 @@ actor HolderReader {
 
     // MARK: - Lifecycle
 
-    /// Starts draining. Idempotent; a stopped reader stays stopped.
+    /// Starts draining. Idempotent; a stopped reader stays stopped, and a
+    /// suspended one resumes.
     func start() throws {
         switch state {
         case .draining: return
         case .stopped: throw Error.stopped
-        case .idle: break
+        case .idle, .suspended: break
         }
+        try startDrainThread()
+    }
 
+    /// Puts a suspended reader back on its descriptor.
+    ///
+    /// The other half of `suspendDraining()`, and the only path out of the
+    /// suspended state that keeps the session drainable. **Every caller that
+    /// suspends owes this or a `stop()`**: a reader left suspended reads
+    /// nothing, and a job that exits with unread output cannot finish exiting.
+    func resumeDraining() throws {
+        guard state == .suspended else { return }
+        try startDrainThread()
+    }
+
+    /// Mints a wake pipe, builds a drain loop and puts a thread on it.
+    ///
+    /// Shared by `start()` and `resumeDraining()` because a resume is a genuine
+    /// restart: the wake pipe is consumed by the wake that ended the previous
+    /// loop, and the loop itself has exited. What is *not* rebuilt is the
+    /// descriptor or the emulator — the session's screen and its pty survive
+    /// the pause, which is the whole point of pausing rather than stopping.
+    private func startDrainThread() throws {
         var pipeFDs: [Int32] = [-1, -1]
         guard pipe(&pipeFDs) == 0 else {
             throw Error.cannotCreateWakePipe(errno: errno)
@@ -264,30 +314,123 @@ actor HolderReader {
     func stop() async {
         guard state == .draining else {
             // A reader that never started has no thread to hand the close to,
-            // and nothing can be mid-read on the descriptor, so this is the one
-            // place the actor may close it itself. Stopping such a reader must
-            // still release the pty: it is a `dup` the holder handed over, and
+            // and a suspended one's thread has provably finished, so neither
+            // can be mid-read on the descriptor: this is the one place the
+            // actor may close it itself. Stopping such a reader must still
+            // release the pty: it is a `dup` the holder handed over, and
             // leaking it keeps a reference to that terminal alive for the life
             // of the daemon.
-            if state == .idle { descriptor.close() }
+            if state == .idle || state == .suspended { descriptor.close() }
             state = .stopped
             return
         }
         state = .stopped
-
-        if wakeWriteFD >= 0 {
-            var byte: UInt8 = 1
-            // One byte, and the result is deliberately ignored: a full pipe
-            // means a wake is already queued, which is exactly the outcome
-            // wanted. SIGPIPE cannot arrive — the read end is closed only by
-            // the thread on its way out, after which the wait below ends.
-            _ = Darwin.write(wakeWriteFD, &byte, 1)
-            Darwin.close(wakeWriteFD)
-            wakeWriteFD = -1
-        }
-
+        wakeDrainThread(closingDescriptor: true)
         await awaitDrainExit()
     }
+
+    /// Wakes the drain thread off the descriptor and tells it whether to close
+    /// the descriptor on its way out.
+    ///
+    /// Closing the write end is itself a wake — the thread's `poll` reports
+    /// `POLLHUP` on the read end — so a byte that lands in a full pipe costs
+    /// nothing and a wake can never be missed.
+    private func wakeDrainThread(closingDescriptor: Bool) {
+        drain?.requestExit(closingDescriptor: closingDescriptor)
+        guard wakeWriteFD >= 0 else { return }
+        var byte: UInt8 = 1
+        // One byte, and the result is deliberately ignored: a full pipe means a
+        // wake is already queued, which is exactly the outcome wanted. SIGPIPE
+        // cannot arrive — the read end is closed only by the thread on its way
+        // out, after which the wait below ends.
+        _ = Darwin.write(wakeWriteFD, &byte, 1)
+        Darwin.close(wakeWriteFD)
+        wakeWriteFD = -1
+    }
+
+    /// Quiesces the drain and hands back a `dup` of the session's pty master.
+    ///
+    /// **This is the hand-over edge, and its order is the whole of it.** The
+    /// drain thread is woken off the descriptor and waited for; everything
+    /// still readable is then read on *this* thread and fed to the emulator, so
+    /// no byte is stranded in a buffer nobody will ever look at again; and only
+    /// then is the descriptor duplicated. A caller that snapshots the screen
+    /// after this call therefore sees every byte the session had produced up to
+    /// the moment it stopped reading, and everything after that moment is still
+    /// queued on the tty for whoever reads next. Nothing falls between the two.
+    ///
+    /// The descriptor is deliberately **not** closed: this reader still owns it
+    /// and can be put back on it with `resumeDraining()`. The returned `dup` is
+    /// the caller's, and the caller closes it.
+    ///
+    /// Idempotent — a second call on a suspended reader drains whatever has
+    /// arrived since and hands back another `dup`.
+    ///
+    /// **It leaves the session unread.** That is the fail-closed direction (at
+    /// most one reader, ever) and it is not free: see `State.suspended`.
+    func suspendDraining() async throws -> Int32 {
+        guard state != .stopped else { throw Error.stopped }
+        if state == .draining {
+            wakeDrainThread(closingDescriptor: false)
+            await awaitDrainExit()
+            guard drain?.isFinished ?? true else {
+                // The thread is still in there somewhere, so nothing may read
+                // this descriptor and nothing may be handed a `dup` of it: two
+                // readers on one pty is the one unrecoverable outcome. The
+                // hand-over is refused and the reader is left exactly as it is.
+                //
+                // Deliberately NOT restarted here, however much a "put it back"
+                // reads like the safe half of a rollback. The loop that is
+                // still running owns the descriptor; starting a second one
+                // beside it would BE the double read this refusal exists to
+                // prevent. It exits on its own — the wake pipe's write end is
+                // closed, which its `poll` reports as a hang-up — and `stop()`
+                // still works afterwards, because the exit request it makes is
+                // read on the way out.
+                Self.logger.error(
+                    """
+                    the drain thread for session \(self.sessionID.uuidString, privacy: .public) did \
+                    not leave the pty within the budget, so the session was not handed over
+                    """)
+                throw Error.drainDidNotQuiesce
+            }
+            state = .suspended
+        }
+        drainRemainder()
+        let duplicate = descriptor.duplicate()
+        guard duplicate >= 0 else {
+            let code = errno
+            // Nothing was handed over, so nobody else can be on this pty and
+            // resuming is unambiguously safe — the one failure on this path
+            // where that is true.
+            try? resumeDraining()
+            throw Error.cannotDuplicate(errno: code)
+        }
+        return duplicate
+    }
+
+    /// Reads everything the descriptor will yield right now into the emulator.
+    ///
+    /// Only ever called with the drain thread provably gone, so this is the
+    /// single reader for its duration. Bounded rather than "until it would
+    /// block": a job flooding its terminal could otherwise feed this loop for
+    /// as long as it kept writing, with the actor parked. Stopping early costs
+    /// nothing — the bytes stay queued for whoever reads next, which is exactly
+    /// where every byte written after this call already is.
+    private func drainRemainder() {
+        var buffer = [UInt8](repeating: 0, count: Self.quiesceBufferSize)
+        for _ in 0..<Self.quiesceMaxReads {
+            guard case .bytes(let count) = descriptor.read(into: &buffer) else { return }
+            emulator.feed(buffer[0..<count])
+        }
+    }
+
+    /// The read buffer the quiesce uses, matching the drain loop's own.
+    private static let quiesceBufferSize = 64 * 1024
+    /// How many bufferfuls the quiesce will take before it stops trying. Four
+    /// megabytes is far past any plausible tty queue and finite against a job
+    /// that never stops writing.
+    private static let quiesceMaxReads = 64
 
     /// Polls for the drain thread to finish, accumulating elapsed time from the
     /// interval rather than measuring against a deadline: `any Clock<Duration>`
@@ -320,6 +463,21 @@ actor HolderReader {
     /// The tail of the scrollback plus the viewport, at most `maxLines` lines.
     func renderScreenWithScrollback(maxLines: Int) -> String {
         emulator.renderScreenWithScrollback(maxLines: maxLines)
+    }
+
+    /// The session's whole screen — modes, scrollback, viewport, cursor — as a
+    /// byte stream that reconstructs it in a fresh terminal.
+    ///
+    /// What an attaching viewer is sent so it paints the session as it already
+    /// is, rather than a blank grid waiting for the program to print something
+    /// next. Only bytes leave: the emulator's `Terminal` never does, because it
+    /// is not `Sendable` and its lock is what makes the drain thread and this
+    /// call safe to run at once.
+    ///
+    /// Meaningful at any time, and only *complete* when the drain is quiesced —
+    /// which is why `suspendDraining()` runs first on the attach path.
+    func snapshotPreamble(maxScrollbackLines: Int = HolderReader.scrollbackLines) -> Data {
+        emulator.snapshotPreamble(maxScrollbackLines: maxScrollbackLines)
     }
 
     // MARK: - Input and size
@@ -443,6 +601,15 @@ private final class DrainLoop: @unchecked Sendable {
     private let stateLock = NSLock()
     private var finished = false
     private var endOfOutput = false
+    /// Whether this loop closes the descriptor when it leaves.
+    ///
+    /// Set by the actor immediately before it writes the wake byte, and read
+    /// only on the way out. `true` is the default and the ordinary case — a
+    /// stop hands the close to this thread precisely because it is the only one
+    /// that knows it has left the fd. `false` is a **pause**: the actor keeps
+    /// the descriptor to hand a `dup` of it to a viewer, and closing it here
+    /// would revoke the very thing being handed over.
+    private var closeDescriptorOnExit = true
 
     init(
         sessionID: UUID,
@@ -470,6 +637,14 @@ private final class DrainLoop: @unchecked Sendable {
         return endOfOutput
     }
 
+    /// Says what this loop should do with the descriptor when it leaves.
+    /// Called before the wake that ends it; see `closeDescriptorOnExit`.
+    func requestExit(closingDescriptor: Bool) {
+        stateLock.lock()
+        closeDescriptorOnExit = closingDescriptor
+        stateLock.unlock()
+    }
+
     /// Records the exhausted edge and announces it exactly once.
     ///
     /// Once, because the announcement is a *transition* — a second one for the
@@ -487,9 +662,16 @@ private final class DrainLoop: @unchecked Sendable {
 
     func run() {
         defer {
-            // The descriptor is closed here and nowhere else: this thread is
-            // the only one that can know it has left the fd alone.
-            descriptor.close()
+            // The descriptor is closed here and nowhere else *while a thread
+            // could be inside it*: this thread is the only one that can know it
+            // has left the fd alone. A pause is the exception, and only because
+            // it is the same fact read the other way round — `finished` below
+            // is what tells the actor this thread is out, after which the actor
+            // may touch the descriptor itself.
+            stateLock.lock()
+            let closesDescriptor = closeDescriptorOnExit
+            stateLock.unlock()
+            if closesDescriptor { descriptor.close() }
             Darwin.close(wakeReadFD)
             stateLock.lock()
             finished = true
@@ -780,6 +962,20 @@ private final class PTYDescriptor: @unchecked Sendable {
         return fd
     }
 
+    /// A `dup` of the pty master for somebody else to read, or -1 with `errno`
+    /// set. Taken under the lock so it cannot race the close: a `dup` of a
+    /// number the kernel has already handed to something else is how a viewer
+    /// ends up reading an unrelated descriptor.
+    func duplicate() -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard fd >= 0 else {
+            errno = EBADF
+            return -1
+        }
+        return Darwin.dup(fd)
+    }
+
     func read(into buffer: inout [UInt8]) -> ReadOutcome {
         lock.lock()
         defer { lock.unlock() }
@@ -952,6 +1148,34 @@ private final class HolderEmulator: @unchecked Sendable {
         }
     }
 
+    /// Serializes the whole terminal — modes, scrollback, viewport, cursor —
+    /// into bytes that reconstruct it elsewhere.
+    ///
+    /// Everything happens inside one `terminalLock`, and only `Data` comes out.
+    /// That is not tidiness: `TerminalSnapshotWriter` reads the buffer, *feeds*
+    /// the terminal (the alt-screen toggle, and a DECRQM query per mode it
+    /// cannot read from a public property) and feeds it again to put the alt
+    /// screen back, so a drain-thread feed interleaved with any of that would
+    /// garble both. It also means the lock is held across the whole walk, which
+    /// is the longest this lock is ever held — bounded by the retained
+    /// scrollback, and paid once per attach.
+    ///
+    /// **The replies those queries provoke must not reach the child.** They are
+    /// answers to questions nobody asked: a program reading its stdin would
+    /// receive `\u{1b}[?7;1$y` as if somebody had typed it. So the delegate is
+    /// switched from forwarding to collecting for the duration, which is also
+    /// how `DelegateModeReader` reads the answers at all. This is the
+    /// daemon-side twin of the app's quiet ingest, in the opposite direction.
+    func snapshotPreamble(maxScrollbackLines: Int) -> Data {
+        terminal.terminalLock.withLock {
+            let reader = DelegateModeReader(terminal: terminal, delegate: delegate)
+            delegate.beginCollectingReplies()
+            defer { delegate.endCollectingReplies() }
+            return TerminalSnapshotWriter.snapshot(
+                of: terminal, reply: reader, maxScrollbackLines: maxScrollbackLines)
+        }
+    }
+
     func resize(columns: Int, rows: Int) {
         terminal.terminalLock.withLock {
             terminal.resize(cols: columns, rows: rows)
@@ -979,12 +1203,78 @@ private final class HolderEmulator: @unchecked Sendable {
 /// anywhere but the child would turn every terminal query into a hang.
 private final class ReplyForwardingDelegate: TerminalDelegate {
     private let reply: @Sendable (ArraySlice<UInt8>) -> Void
+    /// While true, replies are kept here instead of being written to the pty.
+    ///
+    /// Raised only for the duration of a snapshot, and only from a caller
+    /// already holding `terminalLock` — which is also the lock every `send`
+    /// arrives under, since the terminal calls its delegate from inside a parse.
+    /// So the flag needs no lock of its own; the terminal's is doing the work.
+    private var collecting = false
+    private var collected: [UInt8] = []
 
     init(reply: @escaping @Sendable (ArraySlice<UInt8>) -> Void) {
         self.reply = reply
     }
 
     func send(source: Terminal, data: ArraySlice<UInt8>) {
-        reply(data)
+        guard collecting else {
+            reply(data)
+            return
+        }
+        collected.append(contentsOf: data)
+    }
+
+    func beginCollectingReplies() {
+        collecting = true
+        collected.removeAll(keepingCapacity: true)
+    }
+
+    func endCollectingReplies() {
+        collecting = false
+        collected.removeAll(keepingCapacity: false)
+    }
+
+    /// Drops whatever has been collected and hands back what arrives next.
+    /// Used to read one query's answer without the previous one's bytes in it.
+    ///
+    /// Bytes that are not valid UTF-8 are no answer at all rather than a
+    /// mangled one: every reply this reads is a `CSI` sequence of digits and
+    /// punctuation, so anything undecodable is not the reply that was asked
+    /// for, and an empty string is what the caller reads as "the terminal did
+    /// not answer".
+    func takeCollected(after query: (Terminal) -> Void, from terminal: Terminal) -> String {
+        collected.removeAll(keepingCapacity: true)
+        query(terminal)
+        return String(bytes: collected, encoding: .utf8) ?? ""
+    }
+}
+
+/// Reads a terminal's mode state by asking the terminal itself.
+///
+/// `TerminalModeCapture` needs `DECRQM` answers for every mode SwiftTerm keeps
+/// private, and the only way to get one is to feed the query and catch what the
+/// terminal tries to send back. That is what makes this a *collecting* delegate
+/// rather than a suppressing one: the same switch that keeps the answers away
+/// from the child is what makes them readable here.
+///
+/// The caller must hold `terminal.terminalLock` and must have put the delegate
+/// in collecting mode; `HolderEmulator.snapshotPreamble` is the only construction
+/// site and does both.
+private struct DelegateModeReader: ModeReplyReader {
+    let terminal: Terminal
+    let delegate: ReplyForwardingDelegate
+
+    func requestMode(_ mode: Int, decPrivate: Bool) -> Int? {
+        let prefix = decPrivate ? "?" : ""
+        let reply = delegate.takeCollected(
+            after: { $0.feed(text: "\u{1b}[\(prefix)\(mode)$p") }, from: terminal)
+        // `CSI ? Pd ; Ps $y`, where `Ps` is 1 set, 2 reset, 4 permanently reset
+        // and 0 unknown. Parsed by locating the mode number rather than by
+        // exact match, because a terminal may legitimately answer a query the
+        // caller did not ask for on the same wire.
+        guard let head = reply.range(of: "\(prefix)\(mode);"),
+              let tail = reply[head.upperBound...].range(of: "$y")
+        else { return nil }
+        return Int(reply[head.upperBound..<tail.lowerBound])
     }
 }

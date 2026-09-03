@@ -286,6 +286,11 @@ let package = Package(
                 // the product has to be built and sit in the same products
                 // directory as the test bundle. Nothing here imports it.
                 "TBDHolder",
+                // The attach-handoff suite replays a snapshot preamble into a
+                // fresh headless `Terminal` and compares screens, which is the
+                // only honest test of a preamble: it asserts on what a viewer
+                // would paint rather than on the bytes.
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),
             ]

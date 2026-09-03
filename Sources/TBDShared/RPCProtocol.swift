@@ -3298,11 +3298,25 @@ public struct AttachRequestParams: Codable, Sendable {
     /// without the nonce, the superseded attach's dead fd could be delivered
     /// to the fresh attach's waiter if it arrived first).
     public let attachID: UUID
-    public init(worktreeID: UUID, paneID: String, windowID: String, attachID: UUID) {
+    /// The terminal being attached, when the caller knows it.
+    ///
+    /// Load-bearing only for the holder transport, and the reason it exists:
+    /// a holder-backed row has no tmux coordinates at all — its `tmuxServer`,
+    /// `tmuxWindowID` and `tmuxPaneID` are the empty string by construction —
+    /// so `paneID` cannot name the session the way it does on the control-mode
+    /// path. The daemon resolves the row from this and branches on its
+    /// transport. Optional so an older app, which only ever attaches panes,
+    /// still encodes and decodes.
+    public let terminalID: UUID?
+    public init(
+        worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
+        terminalID: UUID? = nil
+    ) {
         self.worktreeID = worktreeID
         self.paneID = paneID
         self.windowID = windowID
         self.attachID = attachID
+        self.terminalID = terminalID
     }
 }
 
@@ -3316,9 +3330,20 @@ public struct AttachRequestResult: Codable, Sendable {
     /// view racing a fresh attach for the same pane — cannot kill the newer
     /// attach's sink. Optional for wire back-compat with older daemons.
     public let generation: UInt64?
-    public init(status: String, generation: UInt64? = nil) {
+    /// The screen that was already on the session, as the escape-sequence
+    /// stream that reconstructs it ("pending" holder attaches only).
+    ///
+    /// It rides the RPC result rather than the vended descriptor because it
+    /// must be fed to the terminal *before* the viewer goes live on that
+    /// descriptor: a preamble interleaved with live output would paint the
+    /// session's past over its present. Nil on every control-mode attach,
+    /// which replays through tmux instead, and defaulted so those callers
+    /// decode a daemon that has never heard of it.
+    public let snapshotPreamble: Data?
+    public init(status: String, generation: UInt64? = nil, snapshotPreamble: Data? = nil) {
         self.status = status
         self.generation = generation
+        self.snapshotPreamble = snapshotPreamble
     }
 }
 
@@ -3336,10 +3361,17 @@ public struct AttachReadyParams: Codable, Sendable {
     /// freeze the pane or resume output into the successor's closed gate.
     /// Optional for wire back-compat; absent → behave as before.
     public let generation: UInt64?
-    public init(worktreeID: UUID, paneID: String, generation: UInt64? = nil) {
+    /// The terminal being acknowledged, when the caller knows it. Present for
+    /// the same reason as on `AttachRequestParams`: a holder row carries no
+    /// pane coordinates, so nothing else in these params names the session.
+    public let terminalID: UUID?
+    public init(
+        worktreeID: UUID, paneID: String, generation: UInt64? = nil, terminalID: UUID? = nil
+    ) {
         self.worktreeID = worktreeID
         self.paneID = paneID
         self.generation = generation
+        self.terminalID = terminalID
     }
 }
 

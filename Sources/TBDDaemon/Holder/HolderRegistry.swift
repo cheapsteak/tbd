@@ -54,6 +54,18 @@ actor HolderRegistry {
         /// minted a terminal ID that is already live — never a race to be
         /// waited out.
         case sessionAlreadyRegistered(terminalID: UUID)
+        /// A viewer owns this session's pty, so the daemon must not put a
+        /// reader on it. The fail-closed answer to every request that would
+        /// otherwise make a second reader.
+        case attachedToViewer(terminalID: UUID)
+        /// There is no reader to hand over — the session was never adopted, or
+        /// its reader has been released. An attach cannot be built out of
+        /// nothing: the pty this would vend is one only a reader holds.
+        case noLiveReader(terminalID: UUID)
+        /// The attach being acknowledged is not the one this session is
+        /// waiting on. A stale viewer's ack arriving after a successor's
+        /// attach, or an ack for one already confirmed or cancelled.
+        case attachSuperseded(terminalID: UUID, generation: UInt64)
 
         var errorDescription: String? {
             switch self {
@@ -70,6 +82,14 @@ actor HolderRegistry {
                     + "can be spawned onto the holder transport"
             case .sessionAlreadyRegistered(let terminalID):
                 return "session \(terminalID.uuidString) already has a live holder reader"
+            case .attachedToViewer(let terminalID):
+                return "a viewer owns the pty for session \(terminalID.uuidString); the daemon "
+                    + "must not read it while that is true"
+            case .noLiveReader(let terminalID):
+                return "session \(terminalID.uuidString) has no live holder reader to hand over"
+            case .attachSuperseded(let terminalID, let generation):
+                return "attach \(generation) for session \(terminalID.uuidString) is no longer "
+                    + "the one this session is waiting on"
             }
         }
     }
@@ -150,6 +170,29 @@ actor HolderRegistry {
     /// `nonisolated` and immutable so the gate can read it without hopping onto
     /// the actor — `spawner` is a `let`, so this is decided once, in `init`.
     nonisolated let canSpawn: Bool
+
+    /// An attach whose descriptor has been vended and whose acknowledgement has
+    /// not arrived. The reader is held rather than released because this attach
+    /// may still be cancelled, and only the reader that suspended itself can be
+    /// put back on the pty.
+    private struct PendingAttach {
+        let generation: UInt64
+        let reader: HolderReader
+    }
+
+    /// Attaches vended and not yet acknowledged, by session. At most one per
+    /// session: a second `beginAttach` supersedes the first, whose ack is then
+    /// refused by generation.
+    private var pendingAttaches: [UUID: PendingAttach] = [:]
+    /// Sessions whose pty a viewer owns, and the attach generation that owns
+    /// it. **The daemon reads none of these**, and `adopt` refuses them, which
+    /// is what keeps "one reader per pty" true across the app boundary rather
+    /// than only inside this process.
+    private var viewerAttachments: [UUID: UInt64] = [:]
+    /// Mints attach generations. Monotonic for the daemon's life, so an ack or
+    /// a cancel naming an older attach can always be told from one naming the
+    /// current attach.
+    private var lastAttachGeneration: UInt64 = 0
 
     private var slots: [UUID: Slot] = [:]
     /// The last status a holder reported for a session, and the only home it
@@ -541,6 +584,15 @@ actor HolderRegistry {
         adoptionCallsEntered += 1
 
         while true {
+            // Re-read on every pass, not once at the top: an actor's methods
+            // are not atomic across suspension, and every branch below awaits.
+            // An attach that completed while this call was parked must be seen
+            // here rather than adopted over — putting a second reader on a pty
+            // a viewer is already reading is the one failure this type exists
+            // to prevent, and it is silent.
+            guard viewerAttachments[terminalID] == nil else {
+                throw Error.attachedToViewer(terminalID: terminalID)
+            }
             switch slots[terminalID] {
             case .adopted(let reader):
                 return reader
@@ -875,6 +927,181 @@ actor HolderRegistry {
         return Adoption(reader: reader, description: description)
     }
 
+    // MARK: - Handing a session to a viewer
+
+    /// Quiesces the session's drain, serializes its screen, and hands back a
+    /// `dup` of its pty for a viewer to read.
+    ///
+    /// **The daemon stops reading here, at the vend, and not at the
+    /// acknowledgement.** From the moment the descriptor leaves this process
+    /// the app may be reading it, and two readers on one pty is silent byte
+    /// theft that nothing reports; a window in which *nobody* reads costs
+    /// queued output and delays the exit of a job that finishes inside it, and
+    /// is recoverable. The design spec's rule — "the failure direction is
+    /// always toward reading nothing until liveness says otherwise" — is this
+    /// choice, and it is why the preamble has no hole in it either: everything
+    /// up to the quiesce is in the snapshot, everything after it is still
+    /// queued on the tty for the viewer, and nothing falls between.
+    ///
+    /// What the acknowledgement decides is *ownership*, not who reads: until
+    /// `confirmAttach`, this reader is still held and can be put back on the
+    /// pty by `cancelPendingAttach` — but only for a reason that establishes
+    /// the viewer never got the descriptor.
+    ///
+    /// The returned descriptor belongs to the caller, which closes it once it
+    /// has been passed on.
+    func beginAttach(
+        terminalID: UUID, maxScrollbackLines: Int = HolderReader.scrollbackLines
+    ) async throws -> HolderAttachVend {
+        guard viewerAttachments[terminalID] == nil else {
+            throw Error.attachedToViewer(terminalID: terminalID)
+        }
+        guard case .adopted(let reader) = slots[terminalID] else {
+            throw Error.noLiveReader(terminalID: terminalID)
+        }
+
+        let ptyFD = try await reader.suspendDraining()
+        // Re-read after the suspension: a release could have taken this slot
+        // while the drain was quiescing, in which case the reader it stopped is
+        // this one and the descriptor just duplicated is a dup of a closed fd's
+        // number. Nothing is published; the dup is released.
+        guard case .adopted(let current) = slots[terminalID], current === reader else {
+            Darwin.close(ptyFD)
+            throw Error.superseded(terminalID: terminalID)
+        }
+
+        let preamble = await reader.snapshotPreamble(maxScrollbackLines: maxScrollbackLines)
+        lastAttachGeneration += 1
+        let generation = lastAttachGeneration
+        pendingAttaches[terminalID] = PendingAttach(generation: generation, reader: reader)
+        Self.logger.info(
+            """
+            vended the pty for session \(terminalID.uuidString, privacy: .public) to a viewer as \
+            attach \(generation, privacy: .public); the daemon has stopped reading it and will not \
+            resume without an answer about that viewer
+            """)
+        return HolderAttachVend(
+            ptyFD: ptyFD, generation: generation, snapshotPreamble: preamble)
+    }
+
+    /// The viewer's acknowledgement: it is reading the descriptor, so this
+    /// session is now its to read and the daemon's reader is released for good.
+    ///
+    /// The jiggle goes here rather than at the vend, and that ordering is the
+    /// point of it: a program repaints on `SIGWINCH` into the tty, and the ack
+    /// is the first moment anybody is certainly there to receive the repaint.
+    /// It happens before the reader is stopped because the reader owns the
+    /// descriptor the ioctl rides on.
+    ///
+    /// Generation-checked. A stale ack — a superseded viewer's, or a duplicate
+    /// — is refused rather than allowed to release a reader a live attach is
+    /// relying on.
+    func confirmAttach(terminalID: UUID, generation: UInt64) async throws {
+        guard let pending = pendingAttaches[terminalID], pending.generation == generation else {
+            throw Error.attachSuperseded(terminalID: terminalID, generation: generation)
+        }
+        guard case .adopted(let reader) = slots[terminalID], reader === pending.reader else {
+            pendingAttaches[terminalID] = nil
+            throw Error.attachSuperseded(terminalID: terminalID, generation: generation)
+        }
+        pendingAttaches[terminalID] = nil
+        // Recorded BEFORE the stop, which suspends this method: an `adopt`
+        // waiting on the release below resumes as soon as it completes, and
+        // must find the session already marked as the viewer's.
+        viewerAttachments[terminalID] = generation
+
+        await reader.jiggle()
+
+        let task = Task<Void, Never> { await self.stopPublished(reader) }
+        slots[terminalID] = .releasing(task)
+        await task.value
+        clearIfStillReleasing(task, for: terminalID)
+        Self.logger.info(
+            """
+            attach \(generation, privacy: .public) for session \
+            \(terminalID.uuidString, privacy: .public) was acknowledged; the daemon's reader is \
+            released and the viewer owns the pty
+            """)
+    }
+
+    /// Why an attach that was vended is being taken back.
+    ///
+    /// The two arms differ in exactly one respect, and it decides whether the
+    /// daemon may read the pty again: whether the viewer can possibly have the
+    /// descriptor. Nothing else about the failure matters.
+    enum AttachCancelReason: Sendable, Equatable {
+        /// The descriptor never reached the viewer — the vend itself failed, so
+        /// this process still holds the only copy that was ever made. Nobody
+        /// else can be reading, and the drain resumes.
+        case descriptorNeverDelivered
+        /// The viewer has the descriptor and has not acknowledged. A lost ack
+        /// and a lost app are indistinguishable on the wire, and the viewer may
+        /// already be live on its dup, so this does **not** license a resume:
+        /// the daemon stays off the pty until something establishes that the
+        /// viewer is gone.
+        case unacknowledged
+    }
+
+    /// Takes back an attach that was vended and never acknowledged.
+    ///
+    /// Generation-checked, and a no-op for an attach that has already been
+    /// confirmed or superseded — the ready-timeout that calls this can fire
+    /// long after either.
+    ///
+    /// **Only one reason resumes the drain**, and the enum above says why. The
+    /// other arm deliberately leaves the session unread: that is the fail-closed
+    /// direction, and it is not free, because a job that exits with unread
+    /// output cannot finish exiting. Resuming is licensed by evidence that the
+    /// viewer is gone — an app-liveness verdict this registry does not yet
+    /// take — so for now an unacknowledged attach is logged loudly and left for
+    /// that arbitration.
+    func cancelPendingAttach(
+        terminalID: UUID, generation: UInt64, reason: AttachCancelReason
+    ) async {
+        guard let pending = pendingAttaches[terminalID], pending.generation == generation else {
+            return
+        }
+        pendingAttaches[terminalID] = nil
+        switch reason {
+        case .descriptorNeverDelivered:
+            guard case .adopted(let reader) = slots[terminalID], reader === pending.reader else {
+                return
+            }
+            do {
+                try await reader.resumeDraining()
+                Self.logger.info(
+                    """
+                    attach \(generation, privacy: .public) for session \
+                    \(terminalID.uuidString, privacy: .public) never reached a viewer, so the \
+                    daemon resumed draining its pty
+                    """)
+            } catch {
+                Self.logger.error(
+                    """
+                    could not resume draining session \(terminalID.uuidString, privacy: .public) \
+                    after a failed vend, so its job cannot finish exiting: \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+            }
+        case .unacknowledged:
+            Self.logger.error(
+                """
+                attach \(generation, privacy: .public) for session \
+                \(terminalID.uuidString, privacy: .public) was never acknowledged. Its viewer has \
+                the pty and may be reading it, so the daemon stays off that descriptor: nothing is \
+                draining this session, and a job that exits now cannot finish exiting until an \
+                app-liveness verdict releases it
+                """)
+        }
+    }
+
+    /// The attach generation a viewer currently owns for this session, if one
+    /// does. Test-facing, and the honest instrument for "who owns this pty":
+    /// the absence of a reader cannot tell a vended session from a released one.
+    func viewerAttachment(for terminalID: UUID) -> UInt64? {
+        viewerAttachments[terminalID]
+    }
+
     // MARK: - Reclaiming a finished session
 
     /// How long the reclaimer keeps asking a holder whose pty has gone quiet
@@ -1163,6 +1390,12 @@ actor HolderRegistry {
     /// still on the pty — is a state a concurrent `adopt` can see and wait for,
     /// rather than an absence it would read as "nobody is on this master".
     func release(terminalID: UUID) async {
+        // A viewer's claim does not outlive the session it was made against.
+        // Every caller here is tearing the session down or handing it back, and
+        // a claim left behind would refuse every later adoption of a terminal
+        // ID that no longer means anything.
+        pendingAttaches[terminalID] = nil
+        viewerAttachments[terminalID] = nil
         switch slots[terminalID] {
         case nil:
             return
@@ -1226,10 +1459,30 @@ actor HolderRegistry {
     /// Releases every reader. The holders and their jobs are untouched — that
     /// is the whole design: a session outlives the daemon that was reading it.
     func releaseAll() async {
-        for terminalID in slots.keys {
+        for terminalID in Set(slots.keys).union(viewerAttachments.keys) {
             await release(terminalID: terminalID)
         }
     }
+}
+
+// MARK: - The hand-over
+
+/// What a viewer is given when it attaches: the session's pty, the screen that
+/// was already on it, and the generation that names this attach.
+///
+/// A value type carrying a descriptor, which is the one thing in it that has to
+/// be *closed*: `ptyFD` is a fresh `dup`, and the caller owns it from the moment
+/// this is returned — through the vend, and on every failure path around it.
+struct HolderAttachVend: Sendable {
+    /// A `dup` of the session's pty master. The caller closes it once the
+    /// kernel has copied it into the viewer's descriptor table.
+    let ptyFD: Int32
+    /// Names this attach, so an acknowledgement or a cancellation arriving
+    /// late cannot act on the attach that replaced it.
+    let generation: UInt64
+    /// The escape-sequence stream that reconstructs the session's screen —
+    /// scrollback, modes, cursor — in the viewer's own terminal.
+    let snapshotPreamble: Data
 }
 
 // MARK: - Installation identity
