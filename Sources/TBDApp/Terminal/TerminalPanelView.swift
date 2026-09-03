@@ -1849,10 +1849,28 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             case .sidecarInput:
                 // `isConnected` belongs in the guard for the same reason
                 // `running` does above: the sidecar client drops an `.input`
-                // frame whose socket is gone, and there is no Phase A
-                // reconnect, so once that connection dies it stays dead for
-                // the app's lifetime and a `true` here would be a
-                // *systematic* fabricated ack, not a rare one.
+                // frame whose socket is gone, so a `true` here would be a
+                // *systematic* fabricated ack for as long as the drop lasts,
+                // not a rare one.
+                //
+                // How long that is depends on which socket died. For the
+                // common failure — the daemon dying or being restarted — the
+                // sidecar does come back on its own, within about a poll:
+                // the next RPC throws `.daemonNotRunning`/`.connectionFailed`,
+                // `AppState.handleConnectionError` clears `isConnected`
+                // (`AppState+Notifications.swift:87`), the 2-second poll calls
+                // `daemonClient.connect()` (`AppState.swift:2779`), that calls
+                // `connectSidecar()` (`DaemonClient.swift:105`/`121`), and
+                // `FDSidecarClient.connect` proceeds rather than no-opping
+                // because the receive loop already set `socketFD = -1` on EOF
+                // (`FDSidecarClient.swift:264`). What has no recovery is a
+                // *sidecar-only* death with the RPC socket intact — the frame
+                // scanner desyncing, or the protocol-violation `break` — since
+                // nothing clears `isConnected` for those. So the drop is an
+                // episode of a few seconds in the common case and permanent
+                // only in the narrow one; either way it is an episode the app
+                // cannot see the end of from in here, which is why the ack
+                // must not be fabricated.
                 //
                 // It narrows the window without closing it: the socket is
                 // read again on the client's own send queue, so a
@@ -1862,6 +1880,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // the daemon's fail-open deadline is the cover — and a
                 // synchronous answer that waited for the queue would put a
                 // socket write in a keystroke's main-actor turn.
+                //
+                // Corollary for whoever reads the queue's diagnostic:
+                // `isConnected` is a *socket* fact, not an *attach* fact. A
+                // reconnected sidecar satisfies it even when this panel's
+                // `controlModeAttach` names a pane the daemon no longer vends
+                // for, so `OutgoingInputQueue.noteUserWriteOutcome`'s recovery
+                // line ("user input is reaching a transport again") can fire
+                // on a transport that will not deliver. It carries exactly the
+                // strength this `true` does — handed off — and no more.
                 guard let attach = controlModeAttach, let appState,
                     appState.daemonClient.fdSidecar.isConnected
                 else { return false }

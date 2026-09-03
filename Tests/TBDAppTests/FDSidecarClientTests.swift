@@ -242,11 +242,20 @@ struct FDSidecarClientTests {
         #expect(client.sendInput(worktreeID: worktreeID, paneID: "%ok", bytes: Data("k".utf8)) == true)
 
         // Draining the frame is not decoration: `sendInput` returns as soon
-        // as the write is QUEUED, so without this read the `defer` above
-        // closes the peer first and the queued `Darwin.write` takes SIGPIPE,
-        // which kills the whole test process rather than failing this test.
-        // Reading blocks until the write has landed, which is also the proof
-        // that `true` meant what it says.
+        // as the write is QUEUED, so on its own the `true` above only says
+        // "accepted for writing" — it does not say the bytes reached the
+        // wire. Reading blocks until the write has landed and decodes what
+        // arrived, which is what turns that `true` into an assertion about
+        // the frame rather than about the queue. Deleting the drain would
+        // leave the `#expect(... == true)` above satisfiable by a `sendInput`
+        // that queued a block which then failed.
+        //
+        // It is *not* what keeps the process alive, so do not propagate the
+        // pattern to a test that only needs to survive an un-drained write:
+        // `adopt` sets `SO_NOSIGPIPE` on this fd (see
+        // `SocketSIGPIPETests.adoptedSidecarSocketIsProtected`), so a write
+        // racing the `defer`'s close returns `EPIPE` to the send queue's
+        // `catch`, which logs and drops it.
         let scanner = SidecarFrameScanner()
         var decoded: (header: SidecarInputHeader, bytes: Data)?
         let deadline = ContinuousClock.now + .seconds(2)
