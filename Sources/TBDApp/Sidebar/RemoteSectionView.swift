@@ -635,7 +635,8 @@ struct RemoteSessionRowView: View {
                 // `session`, so a dock copy and a section copy of the same
                 // session always offer the same verb.
                 isPinned: appState.remoteSessionIsPinned(
-                    provider: session.provider, sessionID: session.payload.id)
+                    provider: session.provider, sessionID: session.payload.id),
+                exited: session.payload.state == .exited
             )
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 switch item {

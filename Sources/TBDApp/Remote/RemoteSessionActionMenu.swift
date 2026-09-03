@@ -97,8 +97,22 @@ enum RemoteSessionActionMenu {
     /// provider mutations are omitted. A pinned
     /// session that goes `gone` must stay unpinnable without the user having
     /// to dismiss it, which is why the collapsed branch carries it too.
+    ///
+    /// Dismiss is offered for an `exited` row as well as a `gone` one, and
+    /// that is the whole of `exited`'s job here. The contract asks providers
+    /// to keep exited sessions listable for at least 24 hours so a
+    /// disappearance can be told apart from transport drift, and a provider
+    /// may keep one indefinitely — so an exited row is not `gone`, and on a
+    /// provider that never implements `delete` there would otherwise be no
+    /// gesture at all that removes a session the agent has finished with.
+    /// Dismiss stays exactly what it already is: a LOCAL tombstone on TBD's
+    /// mirror row that changes nothing on the provider, which is why it is
+    /// safe to offer on a row the provider still reports. It is composed
+    /// immediately after the pin toggle and before the divider, so Stop
+    /// remains the last, destructive item.
     static func items(
-        capabilities: [String], gone: Bool, snapshotFresh: Bool = true, isPinned: Bool
+        capabilities: [String], gone: Bool, snapshotFresh: Bool = true,
+        isPinned: Bool, exited: Bool = false
     ) -> [Item] {
         let pinAction = isPinned
             ? Action(kind: .unpin, title: unpinLabel)
@@ -127,6 +141,9 @@ enum RemoteSessionActionMenu {
         }
         actions.append(Action(kind: .copySessionID, title: copySessionIDLabel))
         actions.append(pinAction)
+        if exited {
+            actions.append(Action(kind: .dismiss, title: dismissLabel))
+        }
 
         var items = actions.map(Item.action)
         if snapshotFresh {

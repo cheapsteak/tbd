@@ -109,6 +109,54 @@ struct RemoteSessionActionMenuTests {
         #expect(RemoteSessionActionMenu.items(capabilities: ["attach", "log", "send"], gone: false, isPinned: false).count == 8)
     }
 
+    // MARK: - Dismiss: offered for gone OR exited, never for a live running row
+
+    /// The gate this parameter opens. A provider may keep an exited session
+    /// listed indefinitely, so the row is not `gone`; on a provider that
+    /// never implements `delete`, Dismiss is the only thing that removes it.
+    @Test func dismissOfferedForExitedSession() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: [], gone: false, isPinned: false, exited: true)
+        #expect(kinds(items).contains(.dismiss))
+        // Immediately after the pin toggle and before the divider, so Stop
+        // stays the last destructive item.
+        #expect(kinds(items) == [.rename, .copySessionID, .pin, .dismiss, nil, .stop])
+    }
+
+    /// The pre-existing branch is untouched: a `gone` row still collapses to
+    /// Copy + pin + Dismiss, whatever `exited` says.
+    @Test func dismissOfferedForGoneSession() {
+        for exited in [true, false] {
+            let items = RemoteSessionActionMenu.items(
+                capabilities: [], gone: true, isPinned: false, exited: exited)
+            #expect(kinds(items) == [.copySessionID, .pin, .dismiss])
+        }
+    }
+
+    /// The discriminating arm: a live, running row must NOT offer Dismiss —
+    /// tombstoning a session the agent is still working in would hide live
+    /// work behind a local-only gesture with no undo in the menu.
+    @Test func dismissNotOfferedForLiveRunningSession() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["attach", "log", "send"], gone: false, isPinned: false, exited: false)
+        #expect(!kinds(items).contains(.dismiss))
+        // And the default keeps every existing call site on that branch.
+        #expect(!kinds(RemoteSessionActionMenu.items(
+            capabilities: [], gone: false, isPinned: false)).contains(.dismiss))
+    }
+
+    /// An exited row takes the LIVE branch, not the collapsed `gone` one: it
+    /// keeps every inspection action plus Stop, and merely gains Dismiss.
+    @Test func exitedSessionKeepsInspectionActions() {
+        let items = RemoteSessionActionMenu.items(
+            capabilities: ["attach", "log", "send"], gone: false, isPinned: false, exited: true)
+        #expect(kinds(items) == [
+            .rename, .attach, .viewLog, .sendText, .copySessionID, .pin, .dismiss, nil, .stop,
+        ])
+        #expect(items.last == .action(RemoteSessionActionMenu.Action(
+            kind: .stop, title: RemoteSessionActionMenu.stopLabel, role: .destructive)))
+    }
+
     // MARK: - unrecognized capability strings are ignored, not erroring
 
     @Test func unrecognizedCapabilityStringsAreIgnored() {
