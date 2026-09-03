@@ -97,6 +97,14 @@ let package = Package(
             name: "TBDAppIcon",
             path: "Sources/TBDAppIcon"
         ),
+        // Pure encode/decode of a terminal screen to and from a wire
+        // representation — no daemon or app state, only a SwiftTerm
+        // `Attribute` in and a `String` out (SGREncoder). The pty-holder
+        // design's snapshot preamble.
+        .target(
+            name: "TBDTerminalSerialization",
+            dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")]
+        ),
         // One-shot CLI that renders the default (no-ribbon) icon and writes
         // a multi-rep .icns file. Run `swift run IconBaker Resources/AppIcon.icns`
         // after changing TBDAppIcon/AppIcon.swift, then commit the result.
@@ -123,6 +131,7 @@ let package = Package(
                 // is no headless-only product to depend on instead; the daemon
                 // simply never touches the view types.
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
+                "TBDTerminalSerialization",
             ],
             path: "Sources/TBDDaemon",
             exclude: ["main.swift"],
@@ -208,6 +217,7 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "Markdown", package: "swift-markdown"),
+                "TBDTerminalSerialization",
             ],
             path: "Sources/TBDApp",
             resources: [
@@ -250,6 +260,7 @@ let package = Package(
                 "TBDDaemonLib",
                 "TBDShared",
                 "TestSupport",
+                "TBDTerminalSerialization",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),
             ]
@@ -288,6 +299,7 @@ let package = Package(
                 // and only this test target links the SwiftTerm product.
                 "TBDDaemonLib",
                 "TestSupport",
+                "TBDTerminalSerialization",
                 .product(name: "Clocks", package: "swift-clocks"),
             ],
             resources: [
