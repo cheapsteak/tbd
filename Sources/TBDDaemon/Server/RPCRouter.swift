@@ -228,6 +228,13 @@ public final class RPCRouter: Sendable {
     /// reader rather than crashing.
     nonisolated(unsafe) var holderRegistry: HolderRegistry?
 
+    /// Delivers `terminal.send` to a holder-backed session, routed by who is
+    /// reading its pty. Set by `Daemon` after construction, beside the registry
+    /// and the sidecar it is built from. `nil` in mock mode and in tests that
+    /// never exercise the transport, where a holder row is told there is no
+    /// input path in this daemon rather than being silently dropped.
+    nonisolated(unsafe) var holderInjectionCourier: HolderInjectionCourier?
+
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
 

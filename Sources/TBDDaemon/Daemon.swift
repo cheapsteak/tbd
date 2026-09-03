@@ -828,6 +828,31 @@ public final class Daemon: Sendable {
             : nil
         self.holderRegistry = holderRegistry
 
+        // Input for a holder-backed session, routed by who is reading its pty.
+        // Built from the registry (which knows who owns each pty and holds the
+        // daemon's own reader) and the fd sidecar (the one channel to the app),
+        // so it exists exactly when a holder session can exist. Its ack sink is
+        // installed at step 9a, before the sidecar listens, for the same reason
+        // `onInput`'s is: a connection captures its sinks at adopt time.
+        let holderInjectionCourier: HolderInjectionCourier? = holderRegistry.map { registry in
+            HolderInjectionCourier(
+                sendFrame: { [fdVendingServer] frame in
+                    try await fdVendingServer.sendFrame(frame)
+                },
+                viewerAttachment: { terminalID in
+                    await registry.viewerAttachment(for: terminalID)
+                },
+                writeDirectly: { terminalID, bytes in
+                    // The daemon's own reader is the only descriptor it has,
+                    // and it has one only while nobody else owns the pty.
+                    guard let reader = await registry.reader(for: terminalID) else {
+                        throw HolderInjectionCourier.Error.noDaemonDescriptor(
+                            terminalID: terminalID)
+                    }
+                    try await reader.write(bytes)
+                })
+        }
+
         var lifecycle = WorktreeLifecycle(
             db: database, git: git, tmux: tmux, hooks: hooks,
             subscriptions: subs,
@@ -967,6 +992,7 @@ public final class Daemon: Sendable {
         // must hold ONE registry — two would each drain their own dup of the
         // pty master and quietly steal bytes from each other.
         rpcRouter.holderRegistry = holderRegistry
+        rpcRouter.holderInjectionCourier = holderInjectionCourier
         // The wake path recreates a terminal's tmux server/window when the
         // window is gone (e.g. post-reboot); give the recreated server the
         // same gated control-mode connection as every other ensureServer
@@ -1139,6 +1165,14 @@ public final class Daemon: Sendable {
         // a keystroke after a paste stays FIFO-behind it (the M2 paste ruling).
         await fdVendingServer.setOnPaste { [inputRouter = controlModeBridge.inputRouter] header, bytes in
             inputRouter.enqueuePaste(header: header, bytes: bytes)
+        }
+        // The app's answer to a daemon injection into a holder-backed session
+        // it has attached. Nil-safe by construction: with no courier there is
+        // no holder transport in this daemon, so no ack can arrive for it.
+        if let holderInjectionCourier {
+            await fdVendingServer.setOnInjectionAck { ack in
+                holderInjectionCourier.acknowledge(ack)
+            }
         }
 
         // 9b. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the

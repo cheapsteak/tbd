@@ -453,6 +453,29 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// there is no EOF to end it, so `cleanup()` stopping it is the only
         /// thing that ever releases the descriptor.
         private var holderReader: HolderStreamReader?
+        /// A write-only `dup` of this holder session's pty master, and the
+        /// app's write destination for one (`performOutgoingWrite`'s
+        /// `.localPTY` arm). Without it a holder-backed panel has nowhere to
+        /// put a byte: it has no `LocalProcess` and no control-mode attach, so
+        /// every keystroke and every daemon injection would report unwritten
+        /// and the daemon's fallback would become the only delivery path —
+        /// which is the opposite of the property this transport is for, that
+        /// the app is the attached session's ONLY writer.
+        ///
+        /// A separate descriptor rather than the reader's own, because the
+        /// reader closes its descriptor **on its own thread** on the way out
+        /// (`HolderStreamReader.stop`); writing to that number from the main
+        /// actor would be a use-after-close the moment the kernel reissues it.
+        /// This one is closed here, and `-1` from then on.
+        ///
+        /// Writing while the reader reads the same pty is not a second reader
+        /// and does not touch the one-reader invariant: a pty master's read and
+        /// write halves are independent queues, and multiple writers to one
+        /// master are ordinary.
+        private var holderWriteFD: Int32 = -1
+        /// This panel's claim on its session's daemon injections, held for as
+        /// long as it owns the pty.
+        private var injectionRegistration: TerminalInjectionRouter.Registration?
         /// Seam for the holder attach RPCs. Nil means "build the real client
         /// from the daemon client", which is what production always does; a
         /// test injects a stub so the panel path can be driven without a
@@ -750,6 +773,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // terminal-lag investigation implicates in paint starvation; do not
             // "tidy" this into looking like its neighbour.
             viewHolder.set(terminalView)
+            // Taken BEFORE the reader owns the descriptor, because the reader
+            // is the only thing allowed to close it afterwards. `dup` failing
+            // is not fatal to rendering — the session still paints — so it is
+            // logged and the panel runs read-only, reporting every write
+            // unwritten so the daemon keeps delivering.
+            holderWriteFD = Darwin.dup(attachment.ptyFD)
+            if holderWriteFD < 0 {
+                logger.error("""
+                    could not duplicate the pty for terminal \(self.panelID, privacy: .public)                     to write to (errno \(errno, privacy: .public)); this panel is read-only
+                    """)
+            }
             let holder = viewHolder
             let reader = HolderStreamReader(
                 label: panelID.uuidString, fd: attachment.ptyFD
@@ -779,6 +813,24 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 stopHolderReader()
                 return
             }
+            // Claimed only once the attach is live: before the ack the daemon
+            // is still the session's writer, and an injection routed here in
+            // that window would be written to a pty the daemon has not yet
+            // handed over.
+            //
+            // The frame's own target is passed to the closure and checked
+            // against `panelID` rather than assumed. Nothing enforces that a
+            // coordinator's routing state matches the session it was built
+            // for — `panelID` is assigned once in `makeNSView` and every
+            // attach is derived from it, an invariant held by construction and
+            // by nothing else — so an injection, which carries its own
+            // address, verifies it instead of inheriting that coupling.
+            injectionRegistration = appState.terminalInjections.register(
+                terminalID: panelID
+            ) { [weak self] target, bytes in
+                guard let self, target == self.panelID else { return false }
+                return await self.outgoingQueue.enqueueInjection(bytes)
+            }
             logger.info("holder attach live for terminal \(self.panelID, privacy: .public)")
         }
 
@@ -791,6 +843,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// leaves the session with nobody draining it. That is the next change.
         @MainActor
         private func stopHolderReader() {
+            if let registration = injectionRegistration {
+                injectionRegistration = nil
+                appState?.terminalInjections.unregister(registration)
+            }
+            // Closed here, unlike the reader's descriptor: this one is only
+            // ever touched from the main actor, so there is no thread to hand
+            // the close to and no window in which somebody could be mid-write
+            // on it.
+            if holderWriteFD >= 0 {
+                Darwin.close(holderWriteFD)
+                holderWriteFD = -1
+            }
             guard let reader = holderReader else { return }
             holderReader = nil
             viewHolder.clear()
@@ -1818,13 +1882,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// nil `controlModeAttach` between the decision and the write.
         ///
         /// A holder-backed panel has neither `localProcess` nor
-        /// `controlModeAttach`, so it falls into `.localPTY` with a nil
-        /// `localProcess` and nothing is written — unchanged from before this
-        /// queue existed, but now *reported*, because acking `written: true`
-        /// for bytes that reached nothing would stop the daemon falling back
-        /// and lose an injected prompt invisibly. Wiring an actual write
-        /// destination for a holder session's own fd is the injection task's
-        /// job, not this one's.
+        /// `controlModeAttach`, so it falls into `.localPTY` — and there it
+        /// writes to its own `dup` of the session's pty master
+        /// (`holderWriteFD`), which is what makes the app the attached
+        /// session's only writer and the daemon's injection path worth having.
         ///
         /// `true` means *handed off*, which is the strongest claim available
         /// synchronously: both destinations complete asynchronously
@@ -1839,6 +1900,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             switch OutgoingInputRoute.decide(
                 controlModeAttached: controlModeAttach != nil, byteCount: data.count) {
             case .localPTY:
+                // The holder arm first, and it is exclusive by construction: a
+                // holder-backed panel never builds a `LocalProcess`, and a
+                // local-PTY panel never attaches a holder. Reading it first
+                // keeps the shape "one destination per panel" rather than a
+                // fallthrough whose order matters.
+                if holderWriteFD >= 0 { return writeToHolderPTY(data) }
                 // `running` counts as much as non-nil: `LocalProcess.send`
                 // silently drops everything once the child has exited, so
                 // reporting `true` for a dead child would be the same
@@ -1894,6 +1961,46 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 else { return false }
                 return appState.daemonClient.fdSidecar.sendInput(
                     worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: data)
+            }
+        }
+
+        /// Write one chunk to this holder session's pty, and report whether
+        /// all of it went.
+        ///
+        /// **What a short write means here, decided rather than inherited.**
+        /// A pty master's input queue is small, so a multi-KiB injected prompt
+        /// can legitimately take only a prefix; `PTYWrite.all` waits a few
+        /// milliseconds for room and then gives up rather than parking the
+        /// main actor. A partial write is reported as a **failure**, which
+        /// makes the daemon rewrite the whole payload on top of the prefix
+        /// that already landed. That is deliberate and it is the ugly-but-right
+        /// side of this design's standing fork: a visibly duplicated (here,
+        /// visibly doubled) prompt is recoverable, a silently truncated one is
+        /// not. Reporting `true` for a prefix would be exactly the invisible
+        /// loss the injection path exists to prevent.
+        ///
+        /// Only the partial case logs. "Nothing was written" needs no line of
+        /// its own — for user bytes `OutgoingInputQueue` already emits one
+        /// edge-triggered line per episode, and for an injection the return
+        /// value reaches the daemon, which is a stronger channel than a log.
+        /// A partial write is rare enough to be worth a line every time,
+        /// because it is what explains the duplicate that follows it.
+        private func writeToHolderPTY(_ data: Data) -> Bool {
+            switch PTYWrite.all(data, to: holderWriteFD) {
+            case .complete:
+                return true
+            case .nothingWritten:
+                return false
+            case .partial(let written):
+                logger.error("""
+                    terminal \(self.panelID, privacy: .public): only \(written, privacy: .public)                     of \(data.count, privacy: .public) bytes reached the session's pty; reporting                     the write unwritten, so a daemon injection will be re-sent whole and may                     appear twice
+                    """)
+                return false
+            case .failed(let code):
+                logger.error("""
+                    terminal \(self.panelID, privacy: .public): writing to the session's pty                     failed (errno \(code, privacy: .public))
+                    """)
+                return false
             }
         }
 

@@ -99,3 +99,44 @@ extension AppState {
         }
     }
 }
+
+extension AppState {
+    /// Install the app's answer to a daemon injection, once, for the app's
+    /// life.
+    ///
+    /// The daemon sends an `.injection` frame for a holder-backed session a
+    /// viewer has attached, rather than writing the pty itself, so the app is
+    /// that session's only writer and a daemon write can never shear a
+    /// keystroke or land inside a bracketed paste. This is where that frame
+    /// becomes a write, and where the answer the daemon is waiting on is sent.
+    ///
+    /// **The main-actor hop is required, not incidental.** The handler runs on
+    /// the sidecar's receive thread, and everything it needs — the injection
+    /// router, the panel's outgoing queue — is main-actor-isolated, so the
+    /// work is moved rather than reached for.
+    ///
+    /// **The ack is always sent, on every path.** No panel, a dead `AppState`,
+    /// a panel whose write destination is gone: each answers `written: false`,
+    /// which is what turns the daemon's five-second deadline into an immediate
+    /// direct write. Silence would be the one answer that costs the session
+    /// five seconds for no reason.
+    ///
+    /// Installed in `init` and never replaced, so it survives every sidecar
+    /// reconnect — `FDSidecarClient` reads the handler per frame rather than
+    /// capturing it per connection.
+    func installInjectionHandler() {
+        let sidecar = daemonClient.fdSidecar
+        sidecar.setOnInjection { [weak self] header, bytes in
+            Task { @MainActor in
+                let written: Bool
+                if let self {
+                    written = await self.terminalInjections.deliver(
+                        terminalID: header.terminalID, bytes: bytes) ?? false
+                } else {
+                    written = false
+                }
+                sidecar.sendInjectionAck(injectionID: header.injectionID, written: written)
+            }
+        }
+    }
+}

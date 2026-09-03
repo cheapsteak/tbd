@@ -9,10 +9,26 @@ import Foundation
 /// ordered channel: a paste and a following keystroke are FIFO-ordered
 /// end-to-end (the M2 paste ruling — the daemon runs the paste through the
 /// correlator so a keystroke enqueued after it lands strictly after).
+///
+/// `.injection` (daemon → app) and `.injectionAck` (app → daemon) carry a
+/// daemon-originated write for a holder-backed session whose pty a viewer
+/// owns, and the app's answer about whether it wrote it. They ride the same
+/// ordered channel and reuse the same tagged sub-format, with their own
+/// header type.
+///
+/// **Adding a case here is cheap in both directions.** Both receive loops
+/// return an unrecognized type byte rather than desyncing (see
+/// `SidecarFrameScanner.append` and the `SidecarFrameType(rawValue:)` guards
+/// in `FDSidecarClient.receiveLoop` / `FDVendingServer.startReceiveThread`),
+/// so a peer built before a case existed skips the frame and logs it. That
+/// forward-compat seam is why the injection path could be a new frame type
+/// rather than a new socket.
 public enum SidecarFrameType: UInt8, Sendable {
     case fdVend = 1
     case input = 2
     case paste = 3
+    case injection = 4
+    case injectionAck = 5
 }
 
 /// Header prefixing every app → daemon input frame: identifies which pane the
@@ -24,6 +40,39 @@ public struct SidecarInputHeader: Codable, Sendable, Equatable {
     public init(worktreeID: UUID, paneID: String) {
         self.worktreeID = worktreeID
         self.paneID = paneID
+    }
+}
+
+/// Header prefixing every daemon → app injection frame.
+///
+/// `terminalID` names the session the bytes belong to, and it is the frame's
+/// own address: the app verifies it against the panel it is about to write
+/// to rather than inferring the destination from panel state. `injectionID`
+/// is the correlation token the answering `SidecarInjectionAck` carries back,
+/// so an ack that arrives after its injection's deadline can be recognized as
+/// late instead of mistaken for another injection's.
+public struct SidecarInjectionHeader: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    public let injectionID: UUID
+    public init(terminalID: UUID, injectionID: UUID) {
+        self.terminalID = terminalID
+        self.injectionID = injectionID
+    }
+}
+
+/// The app's answer to one injection.
+///
+/// `written` is a report, not a receipt: `false` means the app knows nothing
+/// took the bytes and the daemon must write them itself, while `true` means
+/// the app handed them to a transport. Neither value proves the child read
+/// them, and the daemon's fail-open deadline — not this flag — is what covers
+/// an ack that never comes.
+public struct SidecarInjectionAck: Codable, Sendable, Equatable {
+    public let injectionID: UUID
+    public let written: Bool
+    public init(injectionID: UUID, written: Bool) {
+        self.injectionID = injectionID
+        self.written = written
     }
 }
 
@@ -95,7 +144,7 @@ public enum SidecarFrameCodec {
     /// Build the shared sub-payload: JSON-encode `header`, prefix it with its
     /// length, append `bytes`. The single sub-format implementation behind both
     /// `.input` and `.paste`.
-    private static func encodeSubPayload(header: SidecarInputHeader, bytes: Data) throws -> Data {
+    private static func encodeSubPayload<Header: Encodable>(header: Header, bytes: Data) throws -> Data {
         let headerJSON = try JSONEncoder().encode(header)
         var payload = Data(capacity: 4 + headerJSON.count + bytes.count)
         appendUInt32LE(&payload, UInt32(headerJSON.count))
@@ -120,10 +169,13 @@ public enum SidecarFrameCodec {
         try encodeTagged(type: .paste, header: header, bytes: bytes)
     }
 
-    /// Decode a tagged (`.input`/`.paste`) frame's payload back into its header
-    /// and raw bytes. Throws `SidecarFramingError` on a truncated or undecodable
-    /// payload. The sub-format is type-agnostic — one decoder serves both.
-    public static func decodeTagged(payload: Data) throws -> (header: SidecarInputHeader, bytes: Data) {
+    /// Decode a tagged frame's payload back into its header and raw bytes.
+    /// Throws `SidecarFramingError` on a truncated or undecodable payload. The
+    /// sub-format is header-type-agnostic — one decoder serves `.input`,
+    /// `.paste` and `.injection`.
+    private static func decodeSubPayload<Header: Decodable>(
+        _ headerType: Header.Type, payload: Data
+    ) throws -> (header: Header, bytes: Data) {
         guard payload.count >= 4 else { throw SidecarFramingError.truncatedPayload }
         let headerLength = Int(readUInt32LE(payload, at: 0))
         guard payload.count >= 4 + headerLength else { throw SidecarFramingError.truncatedPayload }
@@ -132,16 +184,50 @@ public enum SidecarFrameCodec {
         // Copy the slices so JSON decoding and the returned bytes are rebased
         // to zero, independent of the parent buffer's offsets.
         let headerData = Data(payload[headerStart..<headerEnd])
-        guard let header = try? JSONDecoder().decode(SidecarInputHeader.self, from: headerData) else {
+        guard let header = try? JSONDecoder().decode(headerType, from: headerData) else {
             throw SidecarFramingError.undecodableHeader
         }
         let bytes = Data(payload[headerEnd..<payload.endIndex])
         return (header, bytes)
     }
 
+    /// Decode an `.input`/`.paste` frame's payload back into its header and raw
+    /// bytes.
+    public static func decodeTagged(payload: Data) throws -> (header: SidecarInputHeader, bytes: Data) {
+        try decodeSubPayload(SidecarInputHeader.self, payload: payload)
+    }
+
     /// Decode an `.input` frame's payload (alias of `decodeTagged`).
     public static func decodeInput(payload: Data) throws -> (header: SidecarInputHeader, bytes: Data) {
         try decodeTagged(payload: payload)
+    }
+
+    /// Encode a daemon → app `.injection` frame: the same tagged sub-format as
+    /// `.input`, over an injection header.
+    public static func encodeInjection(
+        header: SidecarInjectionHeader, bytes: Data) throws -> Data {
+        encode(type: .injection, payload: try encodeSubPayload(header: header, bytes: bytes))
+    }
+
+    /// Decode an `.injection` frame's payload.
+    public static func decodeInjection(
+        payload: Data) throws -> (header: SidecarInjectionHeader, bytes: Data) {
+        try decodeSubPayload(SidecarInjectionHeader.self, payload: payload)
+    }
+
+    /// Encode an app → daemon `.injectionAck` frame. The payload is the JSON ack
+    /// alone — there are no raw bytes to carry, so it does not use the tagged
+    /// sub-format.
+    public static func encodeInjectionAck(_ ack: SidecarInjectionAck) throws -> Data {
+        encode(type: .injectionAck, payload: try JSONEncoder().encode(ack))
+    }
+
+    /// Decode an `.injectionAck` frame's payload.
+    public static func decodeInjectionAck(payload: Data) throws -> SidecarInjectionAck {
+        guard let ack = try? JSONDecoder().decode(SidecarInjectionAck.self, from: payload) else {
+            throw SidecarFramingError.undecodableHeader
+        }
+        return ack
     }
 }
 

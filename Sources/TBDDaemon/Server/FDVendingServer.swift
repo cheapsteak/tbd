@@ -115,6 +115,15 @@ actor FDVendingServer {
     /// thread as `onInput`, so wire order is preserved into the sinks.
     var onPaste: (@Sendable (SidecarInputHeader, Data) -> Void)?
 
+    /// Sink for app → daemon `.injectionAck` frames: the app's answer to one
+    /// daemon injection for a holder-backed session whose pty it owns. Same
+    /// contract as `onInput` — set once by the daemon wiring BEFORE
+    /// `listen`/`adoptConnection`, captured per connection at adopt time. When
+    /// nil, acks are logged and dropped, which is survivable rather than fatal:
+    /// an unanswered injection reaches the courier's deadline and is written
+    /// directly (see `HolderInjectionCourier`).
+    var onInjectionAck: (@Sendable (SidecarInjectionAck) -> Void)?
+
     /// Test seam: invoked from `receiveLoopExited` (on the actor) AFTER `clientFD`
     /// is cleared and the fd closed, so once it fires the stale fd is fully gone —
     /// tests can await deterministic post-cleanup state instead of sleeping.
@@ -130,6 +139,13 @@ actor FDVendingServer {
     /// — each connection captures the current sink at adopt time.
     func setOnPaste(_ handler: (@Sendable (SidecarInputHeader, Data) -> Void)?) {
         onPaste = handler
+    }
+
+    /// Install the injection-ack sink. Must be called BEFORE
+    /// `listen`/`adoptConnection` — each connection captures the current sink
+    /// at adopt time.
+    func setOnInjectionAck(_ handler: (@Sendable (SidecarInjectionAck) -> Void)?) {
+        onInjectionAck = handler
     }
 
     /// Install the receive-loop-exit test hook (see `onReceiveLoopExit`).
@@ -209,7 +225,9 @@ actor FDVendingServer {
         // even if it is past its read() with frames still buffered, its next
         // per-frame epoch check fails and it drops out (R5-M2).
         let epoch = epochBox.advance()
-        startReceiveThread(fd: fd, epoch: epoch, inputSink: onInput, pasteSink: onPaste)
+        startReceiveThread(
+            fd: fd, epoch: epoch, inputSink: onInput, pasteSink: onPaste,
+            injectionAckSink: onInjectionAck)
         logger.info("FD vending client connected (fd \(fd, privacy: .public))")
     }
 
@@ -273,6 +291,20 @@ actor FDVendingServer {
         throw FDVendingServerError.notConnected
     }
 
+    /// Send one already-encoded frame to the connected app client, with no
+    /// descriptor attached and no retry.
+    ///
+    /// No retry, unlike `send(fd:header:)`, and the difference is deliberate:
+    /// that one papers over a connect-vs-accept race at app startup, while this
+    /// one is only ever called for a session a viewer is already attached to —
+    /// which means the app connected long ago. A throw here says the sidecar is
+    /// gone, and the caller (`HolderInjectionCourier`) answers it by writing
+    /// the bytes itself rather than by waiting.
+    func sendFrame(_ frame: Data) throws {
+        guard clientFD >= 0 else { throw FDVendingServerError.notConnected }
+        try FDChannel.sendData(frame, over: clientFD)
+    }
+
     /// Spawn the receive thread for one connection. The thread reads framed
     /// bytes, decodes `.input` frames to `inputSink` and `.paste` frames to
     /// `pasteSink`, and on exit (EOF, read error, scanner desync, or a stale
@@ -286,7 +318,8 @@ actor FDVendingServer {
         fd: Int32,
         epoch: UInt64,
         inputSink: (@Sendable (SidecarInputHeader, Data) -> Void)?,
-        pasteSink: (@Sendable (SidecarInputHeader, Data) -> Void)?
+        pasteSink: (@Sendable (SidecarInputHeader, Data) -> Void)?,
+        injectionAckSink: (@Sendable (SidecarInjectionAck) -> Void)?
     ) {
         let logger = self.logger
         let epochBox = self.epochBox
@@ -334,10 +367,21 @@ actor FDVendingServer {
                         } else {
                             logger.debug("sidecar: paste frame with no onPaste handler, dropping \(bytes.count, privacy: .public) bytes")
                         }
-                    case .fdVend:
-                        // The app must never send fd vends — that direction is
-                        // daemon → app only.
-                        logger.error("sidecar: received fdVend frame from app (protocol violation), dropping")
+                    case .injectionAck:
+                        guard let ack = try? SidecarFrameCodec.decodeInjectionAck(
+                            payload: frame.payload) else {
+                            logger.error("sidecar: undecodable injection ack, dropping")
+                            continue
+                        }
+                        if let injectionAckSink {
+                            injectionAckSink(ack)
+                        } else {
+                            logger.debug("sidecar: injection ack with no handler, dropping")
+                        }
+                    case .fdVend, .injection:
+                        // The app must never send fd vends or injections —
+                        // both directions are daemon → app only.
+                        logger.error("sidecar: received \(frame.type, privacy: .public) frame from app (protocol violation), dropping")
                     }
                 }
                 if scanner.isDesynced {

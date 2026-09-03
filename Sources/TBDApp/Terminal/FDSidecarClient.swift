@@ -41,8 +41,25 @@ final class FDSidecarClient: @unchecked Sendable {
     /// caller's thread (SwiftTerm calls it on the main thread) and serializes
     /// writes so two frames never interleave on the socket.
     private let sendQueue = DispatchQueue(label: "fd-sidecar-send")
+    /// Sink for daemon → app `.injection` frames: a daemon-originated write
+    /// for a holder-backed session whose pty this app owns. Guarded by `lock`
+    /// because the receive thread reads it per frame while the main actor
+    /// installs it.
+    ///
+    /// When nil, an injection is answered `written: false` rather than
+    /// dropped — an app with no handler is one that will never write those
+    /// bytes, and saying so immediately is what lets the daemon write them
+    /// itself instead of waiting out its deadline.
+    private var injectionHandler: (@Sendable (SidecarInjectionHeader, Data) -> Void)?
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return socketFD >= 0 }
+
+    /// Install the daemon → app injection handler. The handler is read per
+    /// frame rather than captured per connection, so installing it once at
+    /// startup survives every sidecar reconnect.
+    func setOnInjection(_ handler: (@Sendable (SidecarInjectionHeader, Data) -> Void)?) {
+        lock.lock(); injectionHandler = handler; lock.unlock()
+    }
 
     /// Connect to `path` and start the receive thread. Idempotent.
     func connect(path: String) throws {
@@ -215,6 +232,50 @@ final class FDSidecarClient: @unchecked Sendable {
         }
     }
 
+    /// Answer one daemon injection: whether this app wrote its bytes.
+    ///
+    /// Same inline-encode + `sendQueue` shape as `sendInput`, so an ack and a
+    /// keystroke stay FIFO-ordered on the wire. Deliberately **not** gated on
+    /// `isConnected`: an ack is a report the daemon is already waiting on with
+    /// a deadline, so the cheapest correct thing to do with a dead socket is
+    /// try and let the write block log its own failure — refusing early would
+    /// only reach the same outcome (the daemon's fallback) one main-actor
+    /// frame sooner, and there is no caller here to act on the difference.
+    ///
+    /// Returns whether the frame was handed to `sendQueue`; `false` only for an
+    /// encode failure, which cannot happen for two UUIDs and a Bool and is
+    /// reported rather than swallowed on principle.
+    @discardableResult
+    func sendInjectionAck(injectionID: UUID, written: Bool) -> Bool {
+        let frame: Data
+        do {
+            frame = try SidecarFrameCodec.encodeInjectionAck(
+                SidecarInjectionAck(injectionID: injectionID, written: written))
+        } catch {
+            logger.error("""
+                sidecar: failed to encode injection ack for                 \(injectionID.uuidString, privacy: .public), dropping
+                """)
+            return false
+        }
+        sendQueue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let fd = self.socketFD; self.lock.unlock()
+            guard fd >= 0 else {
+                self.logger.error("""
+                    sidecar: injection ack for \(injectionID.uuidString, privacy: .public)                     while disconnected, dropping
+                    """)
+                return
+            }
+            do {
+                try FDChannel.sendData(frame, over: fd)
+            } catch {
+                self.logger.error(
+                    "sidecar: injection ack send failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+        return true
+    }
+
     private func receiveLoop(_ fd: Int32) {
         let scanner = SidecarFrameScanner()
         // FDs arrive in frame order (SCM_RIGHTS ancillary is delivered with the
@@ -246,9 +307,11 @@ final class FDSidecarClient: @unchecked Sendable {
                 case .fdVend:
                     let rxFD: Int32? = pendingFDs.isEmpty ? nil : pendingFDs.removeFirst()
                     handleFDVend(headerPayload: frame.payload, fd: rxFD)
-                case .input, .paste:
-                    // The daemon must never send input/paste frames — those
-                    // directions are app → daemon only.
+                case .injection:
+                    handleInjection(payload: frame.payload)
+                case .input, .paste, .injectionAck:
+                    // The daemon must never send input, paste or ack frames —
+                    // those directions are app → daemon only.
                     logger.error("sidecar: received \(frame.type, privacy: .public) frame from daemon (protocol violation), dropping")
                 }
             }
@@ -273,6 +336,29 @@ final class FDSidecarClient: @unchecked Sendable {
         for leftover in pendingFDs { Darwin.close(leftover) }   // fds with no completed frame
         for (_, waiter) in pending { waiter(nil, FDSidecarError.disconnected) }
         logger.info("sidecar receive loop exited")
+    }
+
+    /// Hand a completed `.injection` frame to the installed handler, or answer
+    /// it `written: false` when there is none.
+    ///
+    /// The answer for a missing handler is sent from here rather than left to
+    /// the deadline on purpose: "no handler" is a *knowable, synchronous*
+    /// refusal, and reporting those truthfully is what makes `false`
+    /// trustworthy enough for the daemon to act on immediately.
+    private func handleInjection(payload: Data) {
+        guard let (header, bytes) = try? SidecarFrameCodec.decodeInjection(payload: payload) else {
+            logger.error("sidecar: undecodable injection frame, dropping")
+            return
+        }
+        lock.lock(); let handler = injectionHandler; lock.unlock()
+        guard let handler else {
+            logger.error("""
+                sidecar: injection for terminal \(header.terminalID.uuidString, privacy: .public)                 arrived with no handler installed; answering it unwritten
+                """)
+            sendInjectionAck(injectionID: header.injectionID, written: false)
+            return
+        }
+        handler(header, bytes)
     }
 
     /// Route a completed `.fdVend` frame's paired fd to its waiter, or close it.

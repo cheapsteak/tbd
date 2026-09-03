@@ -797,6 +797,12 @@ final class AppState {
     /// Weak terminal views keyed by terminal UUID, used to restore AppKit first
     /// responder after worktree navigation.
     @ObservationIgnored var terminalFocusTargets: [UUID: TerminalFocusTarget] = [:]
+    /// Where a daemon injection for a holder-backed session goes: the panel
+    /// that currently owns that session's pty. Registered by
+    /// `TerminalPanelView.Coordinator` for as long as its holder attach is
+    /// live, and consulted by the sidecar's injection handler
+    /// (`installInjectionHandler`).
+    @ObservationIgnored let terminalInjections = TerminalInjectionRouter()
     /// Tab-close ownership keyed by terminal UUID for views that belong to a
     /// visible tab, used to resolve the currently focused closable tab.
     @ObservationIgnored var terminalTabCloseContexts: [UUID: TabCloseContext] = [:]
@@ -1712,6 +1718,7 @@ final class AppState {
         skipAccountPicker = userDefaults.bool(forKey: Self.skipAccountPickerKey)
         startMemoryPressureMonitor()
         registerFocusObservers()
+        installInjectionHandler()
         // Give the notification manager a back-reference so banner clicks
         // can call navigateToWorktree. All stored properties are now
         // initialized, so `self` is fully usable here.
