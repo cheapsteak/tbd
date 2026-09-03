@@ -225,6 +225,32 @@ struct PRStatusPresentationTests {
             == "In merge queue, position 4 · Changes requested by reviewer")
     }
 
+    /// The separator is a parameter so a spoken label can join with commas —
+    /// the sidebar row splices this sentence into a `", "`-joined list, and an
+    /// interpunct inside it makes VoiceOver announce two punctuation styles in
+    /// one breath. Only the joint moves; the words are the shared ones.
+    @Test("the shared sentence joins with the caller's separator")
+    func sentenceHonorsTheCallersSeparator() {
+        let url = "https://github.com/acme/acme-prod/pull/412"
+        let queuedAndFailing = PRStatus(number: 412, url: url, state: .checksFailed,
+                                        reason: "Checks failing", mergeQueuePosition: 2)
+        #expect(PRStatusPresentation.stateDescription(for: queuedAndFailing)
+            == "In merge queue, position 2 · Checks failing")
+        #expect(PRStatusPresentation.stateDescription(for: queuedAndFailing, separator: ", ")
+            == "In merge queue, position 2, Checks failing")
+        // The separator only ever joins two clauses — it cannot leak into a
+        // sentence that has just one, queued or not.
+        #expect(PRStatusPresentation.stateDescription(
+            for: PRStatus(number: 412, url: url, state: .pending,
+                          reason: "Checks pending", mergeQueuePosition: 2),
+            separator: ", ")
+            == "In merge queue, position 2")
+        #expect(PRStatusPresentation.stateDescription(
+            for: PRStatus(number: 412, url: url, state: .checksFailed, reason: "Checks failing"),
+            separator: ", ")
+            == "Checks failing")
+    }
+
     /// The glyph clamps at `maxQueueBadgeValue` and the sentence does not, and
     /// the divergence is deliberate: the bus is a dozen points wide and must
     /// fit its number in three glyphs, while a tooltip has room to be exact.

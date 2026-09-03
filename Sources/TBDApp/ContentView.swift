@@ -1025,7 +1025,14 @@ struct PRButtonLabel: View {
     /// distinct. `nil` maps to `\0`, which escaping can never produce (its only
     /// outputs are `\\`, `\-` and `\|`), so a literal `"nil"` reason no longer
     /// reads as an absent one either.
-    static func escapedIDField(_ value: String?) -> String {
+    ///
+    /// `nonisolated` because it is a pure string transform and the other
+    /// once-materialized menu in the app — the status bar's `+N` overflow —
+    /// keys itself the same way from nonisolated
+    /// `PRBindingPresentation.menuRowsID`. `PRButtonLabel`'s `View` conformance
+    /// infers whole-type `@MainActor` isolation, which would otherwise put this
+    /// out of reach there and invite a second, subtly different copy.
+    nonisolated static func escapedIDField(_ value: String?) -> String {
         guard let value else { return #"\0"# }
         return value
             .replacingOccurrences(of: #"\"#, with: #"\\"#)

@@ -493,29 +493,43 @@ struct StatusBarViewChipsTests {
     /// The anti-drift claim made in three doc comments, asserted rather than
     /// asserted-about: the chip does not compose its own sentence, it calls the
     /// same `PRStatusPresentation.stateDescription` the sidebar row's tooltip
-    /// and the dropdown's menu rows call. So the test names the shared function
-    /// instead of repeating its literals — a change to the wording that reached
-    /// only some surfaces would break this even though every literal here still
-    /// matched.
+    /// and the dropdown's menu rows call.
+    ///
+    /// It is worth being precise about what this can and cannot catch. Both
+    /// sides route through the shared helper, so a change to the *wording*
+    /// moves both and this stays green — that is the point, not a gap. What it
+    /// does catch is a surface that stops calling the helper and starts
+    /// composing its own words, and — because the chip carries `reason` while
+    /// the `for:` overload derives `reason ?? state.displayReason` — a chip
+    /// whose fallback drifts from the overload's. The custom-`reason` case
+    /// below exercises exactly that seam: with `reason: nil` on every status,
+    /// both paths would agree through `displayReason` alone and a divergence in
+    /// how the chip picks its words would never show.
     @Test("the chip's sentence is the one shared with the sidebar and the menu rows")
     func chipSentenceComesFromTheSharedHelper() {
         let states: [PRMergeableState] = [.pending, .checksFailed, .mergeable, .blocked,
                                           .changesRequested, .draft, .merged, .closed]
         let positions: [Int?] = [nil, 1, 150]
+        // nil = the state's generic words; the custom string = a status that
+        // brought its own, which is the only case where the chip's `reason` and
+        // the overload's `reason ?? displayReason` can disagree.
+        let reasons: [String?] = [nil, "Changes requested by reviewer"]
         for state in states {
             for position in positions {
-                let url = "https://github.com/acme/acme-prod/pull/412"
-                let status = PRStatus(number: 412, url: url, state: state,
-                                      mergeQueuePosition: position)
-                let binding = PRBinding(
-                    worktreeID: UUID(), owner: "acme", repo: "acme-prod",
-                    number: 412, url: url, status: status, source: .hook)
-                let shared = PRStatusPresentation.stateDescription(for: status)
-                // The chip surface…
-                #expect(StatusBarView.prChips([binding]).chips[0].stateDescription == shared)
-                // …and the menu-row surface, which the `+N` overflow menu and
-                // the toolbar dropdown both render.
-                #expect(PRBindingPresentation.menuRows([binding])[0].title.contains(shared))
+                for reason in reasons {
+                    let url = "https://github.com/acme/acme-prod/pull/412"
+                    let status = PRStatus(number: 412, url: url, state: state,
+                                          reason: reason, mergeQueuePosition: position)
+                    let binding = PRBinding(
+                        worktreeID: UUID(), owner: "acme", repo: "acme-prod",
+                        number: 412, url: url, status: status, source: .hook)
+                    let shared = PRStatusPresentation.stateDescription(for: status)
+                    // The chip surface…
+                    #expect(StatusBarView.prChips([binding]).chips[0].stateDescription == shared)
+                    // …and the menu-row surface, which the `+N` overflow menu and
+                    // the toolbar dropdown both render.
+                    #expect(PRBindingPresentation.menuRows([binding])[0].title.contains(shared))
+                }
             }
         }
     }
@@ -529,15 +543,18 @@ struct StatusBarViewChipsTests {
     /// than inside `PRChipView` precisely so this can be asserted at all.
     @Test("a queued chip's icon slot is bus-sized, and every other chip's is dot-sized")
     func iconSlotSideDependsOnTheChipNotTheHover() {
+        // The slot is sized by the ONE constant both surfaces draw the bus at,
+        // so a chip cannot be sized for a bus the sidebar renders at some other
+        // side — and `busImage` cannot be asked for a second cached bitmap.
         #expect(StatusBarView.iconSlotSide(for: chip(state: .pending, mergeQueuePosition: 3))
-            == StatusBarView.prChipBusSide)
+            == PRStatusPresentation.busSide)
         #expect(StatusBarView.iconSlotSide(for: chip(state: .pending)) == 9)
         #expect(StatusBarView.iconSlotSide(for: chip(state: .checksFailed)) == 9)
         // A never-polled binding has no position, so it draws a dot.
         #expect(StatusBarView.iconSlotSide(for: chip(state: nil)) == 9)
-        // The bus is drawn at the size the sidebar row draws it at, so the two
-        // surfaces render one image rather than two.
-        #expect(StatusBarView.prChipBusSide == 12)
+        // Pinned as a value too: the bus slot has to stay bigger than the 9pt
+        // dot slot, or a queued chip would clip its own glyph.
+        #expect(PRStatusPresentation.busSide == 12)
     }
 
     /// The queue clause is a replacement for one chip's state sentence, not a

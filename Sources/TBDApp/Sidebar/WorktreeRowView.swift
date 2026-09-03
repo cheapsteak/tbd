@@ -427,6 +427,13 @@ struct WorktreeRowView: View {
                 // queued PR that is also failing keeps "Checks failing", which
                 // is the fact that says it is about to be evicted.
                 let detail = PRStatusPresentation.stateDescription(for: status)
+                // The same words, joined the way the spoken label joins
+                // everything else. A queued-and-failing PR's sentence carries a
+                // separator of its own, so taking `detail` verbatim would
+                // announce "…position 2 · Checks failing, checked just now" —
+                // two punctuation styles in one utterance.
+                let spokenDetail = PRStatusPresentation.stateDescription(
+                    for: status, separator: ", ")
                 // The cache never speaks without saying how old it is, and
                 // never hides that its last re-read failed.
                 let freshness = PRFreshness.clauses(
@@ -441,7 +448,7 @@ struct WorktreeRowView: View {
                 .buttonStyle(.plain)
                 .onHover { isPRIconHovered = $0 }
                 .accessibilityLabel(
-                    "\(binding.refLabel): \(([detail] + freshness).joined(separator: ", "))")
+                    "\(binding.refLabel): \(([spokenDetail] + freshness).joined(separator: ", "))")
                 .anchorPreference(key: RowTooltipPreferenceKey.self, value: .bounds) { anchor in
                     isPRIconHovered ? RowTooltipPreference(text: tooltip, anchor: anchor) : nil
                 }
@@ -498,7 +505,8 @@ struct WorktreeRowView: View {
                     .foregroundStyle(presentation.color)
             }
         case .emoji:
-            Image(nsImage: PRStatusPresentation.busImage(position: presentation.badge, side: 12))
+            Image(nsImage: PRStatusPresentation.busImage(
+                position: presentation.badge, side: PRStatusPresentation.busSide))
                 .renderingMode(.original)
                 .resizable()
                 .scaledToFit()

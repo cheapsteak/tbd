@@ -155,6 +155,34 @@ enum PRBindingPresentation {
         }
     }
 
+    /// The `.id` key for a `Menu` rendering `menuRows`, keyed on what those
+    /// rows actually draw. AppKit materializes an `NSMenu` ONCE and later
+    /// SwiftUI state changes do not reach it, so without a key that moves when
+    /// the rows do, a row reads stale for as long as the menu lives — the
+    /// constraint `PRButtonLabel.prSplitButtonID` exists for, in the smaller
+    /// shape a plain menu needs.
+    ///
+    /// Keyed on the composed `title` rather than on any one field, because the
+    /// title is the whole of what a row renders and it folds in every input
+    /// that can move underneath it: the queue position (3 → 2 → 1 on every
+    /// merge ahead of the PR, and the reason a stale row could contradict the
+    /// chip two pixels away), the status `reason`, and the head branch. `url`
+    /// joins it because the row's action captures it and `disabled` reads it, so
+    /// a re-pointed PR must rebuild the item even with identical text. `id`
+    /// pins which binding each row IS, so a reorder or a swap that happens to
+    /// preserve the titles still counts as a change.
+    ///
+    /// Fields go through `PRButtonLabel.escapedIDField` for the same reason
+    /// they do there: a title is free text that can contain the key's own
+    /// separators, and an unescaped collision does not merely look wrong — it
+    /// freezes the menu on the previous set.
+    static func menuRowsID(_ rows: [MenuRow]) -> String {
+        rows.map { row in
+            "\(row.id)-\(PRButtonLabel.escapedIDField(row.title))"
+                + "-\(PRButtonLabel.escapedIDField(row.url?.absoluteString))"
+        }.joined(separator: "|")
+    }
+
     /// Tooltip for the status bar's `+N` overflow chip.
     ///
     /// The chip is labelled by how many PRs did NOT fit, but its menu lists

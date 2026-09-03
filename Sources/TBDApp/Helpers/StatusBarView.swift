@@ -134,6 +134,18 @@ struct StatusBarView: View {
         /// come from `binding.status`, so they are absent together — and a chip
         /// with no status carries no `mergeQueuePosition` either, so nothing is
         /// left unsaid by returning nil on that branch.
+        ///
+        /// It keeps the default interpunct even on the path that ends up spoken
+        /// (`openLabel`, which is this chip's `.help` AND its
+        /// `.accessibilityLabel`), where the sidebar row splits into two
+        /// joinings. The difference is that the sidebar's spoken label is a
+        /// comma-joined list this sentence is spliced INTO, so an interpunct
+        /// inside it collides with the commas around it; the chip's label is
+        /// `"Open PR #412 — <sentence>"`, already punctuated with an em-dash
+        /// and carrying no list. One string per chip is also what lets the
+        /// headline, the tooltip and the label be the same words by
+        /// construction — a spoken variant would be a second stored field and a
+        /// second thing to keep in step.
         var stateDescription: String? {
             guard let state, let reason else { return nil }
             return PRStatusPresentation.stateDescription(
@@ -360,11 +372,6 @@ struct StatusBarView: View {
         isHovering ? untrackLabel(chip) : openLabel(chip)
     }
 
-    /// The bus glyph's drawn side on a status-bar chip, kept identical to the
-    /// 12 `WorktreeRowView.prGlyph` draws at so the bar's bus and the sidebar's
-    /// are the same image at the same size.
-    nonisolated static let prChipBusSide: CGFloat = 12
-
     /// The side of one chip's leading icon slot — the square its resting glyph
     /// and the untrack xmark share.
     ///
@@ -374,16 +381,17 @@ struct StatusBarView: View {
     /// the cursor that summoned it.
     ///
     /// A queued chip draws the bus rather than a 6pt dot, which needs the same
-    /// 12 the sidebar row gives it, so the side depends on WHICH CHIP THIS IS —
-    /// never on hover state. That is the whole invariant: two chips in the same
-    /// bar may differ in width, but neither changes width under the pointer, so
-    /// hovering still cannot shove a neighbour or slide the xmark away. It is a
-    /// `static func` here rather than a computed property inside `PRChipView`
-    /// so that invariant is assertable at all — a `private var` on a `View` is
-    /// reachable from no test, which is how the rule the whole hover geometry
-    /// rests on went unpinned.
+    /// `PRStatusPresentation.busSide` the sidebar row gives it, so the side
+    /// depends on WHICH CHIP THIS IS — never on hover state. That is the whole
+    /// invariant: two chips in the same bar may differ in width, but neither
+    /// changes width under the pointer, so hovering still cannot shove a
+    /// neighbour or slide the xmark away. It is a `static func` here rather
+    /// than a computed property inside `PRChipView` so that invariant is
+    /// assertable at all — a `private var` on a `View` is reachable from no
+    /// test, which is how the rule the whole hover geometry rests on went
+    /// unpinned.
     nonisolated static func iconSlotSide(for chip: PRChip) -> CGFloat {
-        chip.mergeQueuePosition == nil ? 9 : prChipBusSide
+        chip.mergeQueuePosition == nil ? 9 : PRStatusPresentation.busSide
     }
 
     /// What the bar says when the selected worktree is armed to archive itself
@@ -750,7 +758,7 @@ private struct PRChipView: View {
                 // `.renderingMode(.original)` is what keeps the chip's
                 // `.foregroundStyle(.secondary)` off it.
                 Image(nsImage: PRStatusPresentation.busImage(
-                    position: position, side: StatusBarView.prChipBusSide))
+                    position: position, side: PRStatusPresentation.busSide))
                     .renderingMode(.original)
                     .resizable()
                     .scaledToFit()
@@ -818,16 +826,22 @@ private struct PRChipView: View {
 /// dropdown shows — `PRBindingPresentation.menuRows`, in bind order — so the
 /// two surfaces cannot describe the same worktree differently.
 ///
-/// It renders **no PR title**, and that is a decision rather than an omission.
-/// Titles reach the chips through the hover overlay, which is an ordinary
-/// SwiftUI view re-evaluated on every change. A title in these rows would have
-/// to survive AppKit's once-only `NSMenu` materialization — the constraint
-/// `PRButtonLabel.prSplitButtonID` exists for and `PRSplitButtonIDTests`
-/// tripwires — and this `Menu` has no `.id` key to fold it into, so a retitled
-/// PR would read stale here for as long as the menu lived. Sharing `menuRows`
-/// with the toolbar is also what keeps the two surfaces from disagreeing;
-/// forking it for one field would give that up to duplicate what the overlay
-/// already says better.
+/// AppKit materializes an `NSMenu` ONCE, and later SwiftUI state changes never
+/// reach the materialized copy — the constraint `PRButtonLabel.prSplitButtonID`
+/// exists for and `PRSplitButtonIDTests` tripwires. These rows carry two fields
+/// that move on their own: the queue position, which counts down on every merge
+/// ahead of the PR, and the status `reason`. A menu built at position 3 and left
+/// open would sit two pixels from a chip whose baked bus badge already read 1 —
+/// exactly the disagreement the shared sentence exists to remove. So the `Menu`
+/// takes an `.id` keyed on the rendered rows (`PRBindingPresentation.menuRowsID`)
+/// and is recreated whenever their text or targets change.
+///
+/// It still renders **no PR title**, and that is a decision rather than an
+/// omission: titles reach the chips through the hover overlay, an ordinary
+/// SwiftUI view re-evaluated on every change, which has room to show one
+/// properly. Sharing `menuRows` with the toolbar is what keeps the two surfaces
+/// from disagreeing; forking it for one field would give that up to duplicate
+/// what the overlay already says better.
 private struct PRChipOverflowMenu: View {
     let bindings: [PRBinding]
     let overflow: Int
@@ -835,8 +849,9 @@ private struct PRChipOverflowMenu: View {
     @State private var isHovering = false
 
     var body: some View {
+        let rows = PRBindingPresentation.menuRows(bindings)
         Menu {
-            ForEach(PRBindingPresentation.menuRows(bindings)) { row in
+            ForEach(rows) { row in
                 // The default browser, matching the chips beside it — see
                 // `PRChipView`'s tap handler for why the status bar differs
                 // from the toolbar here.
@@ -852,6 +867,10 @@ private struct PRChipOverflowMenu: View {
                 .underline(isHovering)
                 .foregroundStyle(.secondary)
         }
+        // Forces AppKit to re-materialize the NSMenu when the rows' text or
+        // targets move — see this view's doc comment for why a queued PR makes
+        // that mandatory rather than tidy.
+        .id(PRBindingPresentation.menuRowsID(rows))
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
