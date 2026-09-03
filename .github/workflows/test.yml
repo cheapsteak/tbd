@@ -710,11 +710,44 @@ jobs:
             # at all, and even when the helper dies its parents (`script`,
             # `swift-test`, `scripts/test.sh`) can outlive it. SIGTERM goes
             # first so `scripts/test.sh`'s EXIT trap still runs its tmux and
-            # fence cleanup, and the list is walked deepest-first (descendants
-            # were recorded parents-before-children) so `tee` and `script` —
-            # the direct children that carry the log — are the last to go.
-            kids_reversed=$(printf '%s\n' "$kids" | tail -r)
-            for pid in $kids_reversed; do
+            # fence cleanup, and that trap's output has to have somewhere to go:
+            # `tee` is a direct child of the subshell and owns the far end of
+            # the log pipe, so anything still writing when `tee` dies writes to
+            # a closed pipe. The order is therefore built explicitly rather than
+            # by reversing the walk. The walk is preorder — `script`, then all
+            # of script's subtree, then the sibling `tee` — so a plain reversal
+            # would signal `tee` first, precisely backwards. Instead: everything
+            # below the direct children goes first (that subset reversed, so
+            # deepest-first), then the direct children other than `tee`, then
+            # `tee`.
+            direct_children=$(pgrep -P "$pipeline" || true)
+            is_direct_child() {
+              local needle="$1" child
+              for child in $direct_children; do
+                if [ "$child" = "$needle" ]; then
+                  return 0
+                fi
+              done
+              return 1
+            }
+            deeper_first=""
+            for pid in $kids; do
+              if is_direct_child "$pid"; then
+                continue
+              fi
+              deeper_first="$pid $deeper_first"
+            done
+            direct_others=""
+            tee_pids=""
+            for pid in $direct_children; do
+              comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+              case "${comm##*/}" in
+                tee) tee_pids="$tee_pids $pid" ;;
+                *) direct_others="$direct_others $pid" ;;
+              esac
+            done
+            kill_order="$deeper_first $direct_others $tee_pids"
+            for pid in $kill_order; do
               kill -TERM "$pid" 2>/dev/null || true
             done
             teardown_waited=0
@@ -723,7 +756,7 @@ jobs:
               teardown_waited=$((teardown_waited + 1))
             done
             if kill -0 "$pipeline" 2>/dev/null; then
-              for pid in $kids_reversed; do
+              for pid in $kill_order; do
                 kill -KILL "$pid" 2>/dev/null || true
               done
               kill -KILL "$pipeline" 2>/dev/null || true
