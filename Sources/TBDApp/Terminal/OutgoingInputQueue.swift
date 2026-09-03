@@ -18,53 +18,88 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "outgoingInputQu
 /// see `docs/specs/2026-08-30-pty-holder-session-transport-design.md`
 /// "Input is not arbitrated, but it is serialized".
 ///
-/// ## Ordering, and why the producer side is `nonisolated`
+/// ## Why `@MainActor`, and not an actor
 ///
-/// `enqueueUserBytes`, `beginUserPaste` and `endUserPaste` are `nonisolated`
-/// and synchronous: they `yield` into an internal `AsyncStream` rather than
-/// `await`-hopping onto the actor. That is deliberate, not a shortcut. A
-/// bracketed paste reaches `TerminalPanelView.Coordinator.send(source:data:)`
-/// as THREE separate, synchronous SwiftTerm delegate calls in the same stack
-/// frame — start marker, payload, end marker — and Swift gives no ordering
-/// guarantee between two `Task { await … }` blocks created back-to-back on
-/// the same thread: an actor processes jobs in the order they actually reach
-/// its mailbox, not the order the `Task`s were created. A plain synchronous
-/// `yield`, by contrast, IS ordered by the call itself — three yields made
-/// one after another from a single thread land in the stream in that order,
-/// full stop — and exactly one consumer (`pump()`) ever touches `isPasteOpen`
-/// or `pendingInjections`, so there is nowhere for those three calls to
-/// reorder relative to each other or to a concurrently-arriving injection.
+/// Every producer is already main-actor-confined, and enforceably so:
+/// `TerminalPanelView.Coordinator` gets `@MainActor` by inference through its
+/// `TerminalViewDelegate` conformance, which SwiftTerm declares `@MainActor`.
+/// So an `actor` here would buy no exclusion that the compiler does not
+/// already guarantee, and would cost two scheduling transitions per keystroke
+/// — off the main actor into the actor's executor, and straight back onto the
+/// main actor to reach the write. The output direction of this same file
+/// carries an explicit warning against acquiring exactly that hop
+/// (`TerminalPanelView.swift:750`, on the paint-starvation investigation);
+/// the input direction must not acquire one either. `enqueueUserBytes`,
+/// `beginUserPaste` and `endUserPaste` are therefore plain synchronous
+/// main-actor methods that act inline, and a keystroke reaches the pty in the
+/// same turn it arrived in.
 ///
-/// `enqueueInjection` does not get to be synchronous — it has to report
-/// whether the byte actually reached the wire — so it stays genuinely
-/// `async`, but it is likewise routed through the same event stream rather
-/// than touching actor state directly, so it can never observe `isPasteOpen`
-/// out of order relative to a `beginUserPaste`/`endUserPaste` pair that raced
-/// it in.
-actor OutgoingInputQueue {
-    private enum Event: Sendable {
-        case userBytes(Data)
-        case beginPaste
-        case endPaste
-        case injection(Data, CheckedContinuation<Bool, Never>)
-    }
-
+/// One serial executor also makes ordering free rather than argued: the three
+/// synchronous SwiftTerm delegate calls that make up a bracketed paste — start
+/// marker, payload, end marker — run to completion in the order they are
+/// called, and nothing can interleave between them, because there is no
+/// suspension point for anything to interleave at.
+///
+/// ## What is guaranteed, and what is not
+///
+/// The guarantee is a **safety** guarantee, not an ordering one: **an
+/// injection is never written between a paste's markers.** Whether an
+/// injection that genuinely races the start marker is held or written first is
+/// **unspecified**, and both outcomes are correct — an injection reaches this
+/// queue through an `await` (`enqueueInjection` is `async`, because it must
+/// report whether the byte reached the wire), while the paste markers arrive
+/// synchronously, so the relative order of a true race is not determined and
+/// no caller may depend on it. What matters is that whichever order the two
+/// land in, the injection is written wholly outside the marker span.
+///
+/// That span is airtight because of the call order in
+/// `Coordinator.send(source:data:)`: `beginUserPaste()` runs **before** the
+/// start marker is enqueued, and `endUserPaste()` **after** the end marker is
+/// enqueued. The paste is thus already open when its own first byte goes out,
+/// and still open when its last byte goes out.
+@MainActor
+final class OutgoingInputQueue {
     /// Performs the actual write once the queue has decided a chunk may go
-    /// out now. This queue only decides ORDER; a transport failure inside
-    /// `write` is the caller's problem, exactly as it was before this queue
-    /// existed (`localProcess?.send` / `fdSidecar.sendInput` were already
-    /// fire-and-forget).
-    private let write: @Sendable (Data) async -> Void
+    /// out now, and reports whether anything took the bytes: `false` means
+    /// the panel had no live transport to hand them to (no `localProcess`, or
+    /// a control-mode panel with no attach), so nothing was written and
+    /// nothing ever will be for this chunk.
+    ///
+    /// **That return value is the ack.** A holder-backed panel takes the
+    /// `.localPTY` arm with a nil `localProcess` today, so a seam that could
+    /// not say "not written" would have this queue ack `written: true` for a
+    /// byte that reached nothing — the daemon would then not fall back and the
+    /// prompt would be lost invisibly, which the plan's Global Constraints
+    /// forbid. The injection path must treat `false` as "fall back and write
+    /// directly", not as an ack to log.
+    private let write: @MainActor (Data) -> Bool
     private let clock: any Clock<Duration>
     /// How long a held injection waits for `endUserPaste()` before the queue
     /// stops trusting the paste to ever close and writes it anyway. An
     /// unclosed paste is a bug somewhere else in the stack; losing the
     /// injection on top of it would compound the failure instead of
     /// surfacing it, so this bound exists to fail SAFE, not to be tuned for
-    /// latency. Two seconds is far longer than any real paste takes to
-    /// complete (SwiftTerm sends all three chunks back-to-back, synchronously)
-    /// and far shorter than a person would wait before assuming an agent is
-    /// stuck.
+    /// latency.
+    ///
+    /// **The invariant that actually binds this value: `pasteHoldBound` must
+    /// be strictly SHORTER than the daemon's `injectionAck` deadline.** The
+    /// daemon's injection path fails open — if the app does not acknowledge
+    /// an injection within its deadline, the daemon writes to its own pty dup
+    /// directly. If that deadline were the shorter of the two, then every
+    /// injection this queue holds would be written directly by the daemon
+    /// **while the paste is still open**, landing between the markers: the
+    /// precise harm this queue exists to prevent, and made systematic rather
+    /// than rare. The daemon's deadline is therefore **5 seconds** (matching
+    /// the `readyTimeout` precedent elsewhere in this subsystem) against this
+    /// 2-second hold.
+    ///
+    /// Shortening the hold bound is not an alternative way to satisfy the
+    /// invariant: `forceDeliver` writing on expiry is itself a controlled
+    /// instance of the between-markers write, chosen over stranding the
+    /// injection forever, so a shorter bound only commits that harm sooner on
+    /// a merely-slow paste. Two seconds is already an enormous margin — a
+    /// legitimate paste closes within one or a few main-actor turns, because
+    /// SwiftTerm emits all three chunks back-to-back.
     private let pasteHoldBound: Duration
 
     private var isPasteOpen = false
@@ -74,125 +109,114 @@ actor OutgoingInputQueue {
         let continuation: CheckedContinuation<Bool, Never>
         let timeoutTask: Task<Void, Never>
     }
+    /// Injections parked behind an open paste.
+    ///
+    /// No `deinit` resolves these, and none is needed: a parked continuation
+    /// belongs to a suspended `enqueueInjection` frame, and that frame holds a
+    /// strong reference to `self`, so this object cannot be deallocated while
+    /// any entry remains. It reads like a leaked-continuation hazard and is
+    /// not one — do not "fix" it by adding a `deinit` that resumes them, which
+    /// would be unreachable code.
     private var pendingInjections: [PendingInjection] = []
-
-    /// `nonisolated`: `AsyncStream.Continuation.yield` is thread-safe by
-    /// design (it is meant to be called from any producer), and the
-    /// producer-side methods below rely on reaching it WITHOUT an actor hop —
-    /// see the type doc's "Ordering" section for why that matters.
-    private nonisolated let continuation: AsyncStream<Event>.Continuation
 
     init(
         pasteHoldBound: Duration = .seconds(2),
         clock: any Clock<Duration> = ContinuousClock(),
-        write: @escaping @Sendable (Data) async -> Void
+        write: @escaping @MainActor (Data) -> Bool
     ) {
         self.write = write
         self.clock = clock
         self.pasteHoldBound = pasteHoldBound
-        var escapedContinuation: AsyncStream<Event>.Continuation!
-        let stream = AsyncStream<Event>(bufferingPolicy: .unbounded) { escapedContinuation = $0 }
-        self.continuation = escapedContinuation
-        // Started last, after every other stored property is set: its
-        // closure captures `self` weakly, which is only well-formed once
-        // `self` is fully formed. Not retained anywhere — an unstructured
-        // `Task` keeps running once started regardless of whether its handle
-        // is kept, and `deinit` ending the stream is what stops this loop, so
-        // there is nothing a stored handle would let us do that `deinit`
-        // doesn't already do.
-        Task { [weak self] in
-            for await event in stream {
-                await self?.handle(event)
-            }
-        }
     }
 
-    deinit {
-        continuation.finish()
-    }
-
-    /// Ends the stream and releases any injection still waiting on a paste
-    /// that never closed — each resolves `false`, since nothing was ever
-    /// written for it. Idempotent. Call from teardown (`Coordinator.cleanup`)
-    /// so a torn-down panel doesn't leave its timeout tasks running.
+    /// Releases any injection still waiting on a paste that never closed —
+    /// each resolves `false`, since nothing was ever written for it.
+    /// Idempotent. Call from teardown (`Coordinator.cleanup`) so a torn-down
+    /// panel doesn't leave its timeout tasks running.
+    ///
+    /// The paste is closed as part of this, so the queue is left inert rather
+    /// than half-torn-down: an injection arriving after teardown resolves
+    /// promptly on whatever `write` reports (`false`, for a panel whose
+    /// transport is gone) instead of being parked behind a paste nobody will
+    /// ever close.
     func shutdown() {
         for pending in pendingInjections {
             pending.timeoutTask.cancel()
             pending.continuation.resume(returning: false)
         }
         pendingInjections.removeAll()
-        continuation.finish()
+        isPasteOpen = false
     }
 
     /// Test-only: how many injections are currently held behind an open
     /// paste. A test uses this to wait (bounded, polling) for an
-    /// `enqueueInjection` call's `yield` to have actually reached the single
-    /// consumer and been recognized as held, before it proceeds to close the
-    /// paste — without this, "close the paste" and "the injection's event
-    /// landed in the stream" would race, since creating the `Task` that calls
-    /// `enqueueInjection` only schedules its body; it does not run it.
+    /// `enqueueInjection` call to have actually reached the queue and been
+    /// recognized as held, before it proceeds. The wait is unavoidable for
+    /// injections specifically: `enqueueInjection` is `async`, so a test that
+    /// wants to park one without blocking has to start a `Task`, and creating
+    /// that `Task` only schedules its body — it does not run it.
     var pendingInjectionCountForTesting: Int {
         pendingInjections.count
     }
 
-    // MARK: - Producer side (nonisolated, synchronous — see type docs)
+    /// Test-only: whether a user paste is currently open. Lets a test drive
+    /// the *production* marker-detection path (`Coordinator.send`) and observe
+    /// what it decided, instead of calling `beginUserPaste()` directly and
+    /// bypassing the classification entirely.
+    var isPasteOpenForTesting: Bool {
+        isPasteOpen
+    }
 
-    /// Enqueue a chunk of user-originated bytes (a keystroke, or one of the
-    /// three chunks of a bracketed paste). Fire-and-forget by design: the
-    /// caller is a synchronous SwiftTerm delegate callback with nothing
-    /// meaningful to await.
-    nonisolated func enqueueUserBytes(_ data: Data) {
-        continuation.yield(.userBytes(data))
+    // MARK: - User input
+
+    /// Write a chunk of user-originated bytes (a keystroke, or one of the
+    /// three chunks of a bracketed paste). Goes out immediately, in this same
+    /// main-actor turn. Fire-and-forget by design: the caller is a
+    /// synchronous SwiftTerm delegate callback with nobody to report a
+    /// transport failure to, exactly as it was before this queue existed
+    /// (`localProcess?.send` / `fdSidecar.sendInput` were already
+    /// fire-and-forget).
+    func enqueueUserBytes(_ data: Data) {
+        _ = write(data)
     }
 
     /// Marks a user paste as open. Any injection enqueued before the matching
     /// `endUserPaste()` (or before `pasteHoldBound` elapses) is held rather
     /// than written.
-    nonisolated func beginUserPaste() {
-        continuation.yield(.beginPaste)
+    func beginUserPaste() {
+        isPasteOpen = true
     }
 
     /// Closes the open paste and releases every injection that was held for
     /// it, in the order they were enqueued.
-    nonisolated func endUserPaste() {
-        continuation.yield(.endPaste)
+    func endUserPaste() {
+        isPasteOpen = false
+        flushPending()
     }
+
+    // MARK: - Daemon injection
 
     /// Enqueues a daemon-originated injection. Returns whether it was
     /// actually written — the caller (the injection-ack path) reports this
     /// truthfully to the daemon, so ownership transfers on the write, not on
-    /// the call: the continuation resumes only AFTER `write` returns, never
-    /// before.
+    /// the call: the value is whatever `write` reported, and it is produced
+    /// only after `write` has run.
+    ///
+    /// `async` because it may have to wait for a paste to close. When no
+    /// paste is open it returns without ever suspending.
     func enqueueInjection(_ data: Data) async -> Bool {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            self.continuation.yield(.injection(data, continuation))
-        }
-    }
-
-    // MARK: - Single consumer
-
-    private func handle(_ event: Event) async {
-        switch event {
-        case .userBytes(let data):
-            await write(data)
-        case .beginPaste:
-            isPasteOpen = true
-        case .endPaste:
-            isPasteOpen = false
-            await flushPending()
-        case .injection(let data, let continuation):
-            if isPasteOpen {
-                hold(data: data, continuation: continuation)
-            } else {
-                await write(data)
-                continuation.resume(returning: true)
-            }
+        guard isPasteOpen else { return write(data) }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            hold(data: data, continuation: continuation)
         }
     }
 
     private func hold(data: Data, continuation: CheckedContinuation<Bool, Never>) {
         let id = UUID()
         let timeoutTask = Task { [weak self, pasteHoldBound, clock] in
+            // Inherits this main-actor context, so the wake-up lands back on
+            // the same serial executor every other mutation here runs on.
+            //
             // Non-throwing on cancellation: `try?` swallows the
             // `CancellationError` `endUserPaste`'s flush produces by
             // cancelling this task, and the guard below then no-ops because
@@ -200,7 +224,7 @@ actor OutgoingInputQueue {
             // already removed and resolved it.
             try? await clock.sleep(for: pasteHoldBound)
             guard !Task.isCancelled else { return }
-            await self?.forceDeliver(id: id)
+            self?.forceDeliver(id: id)
         }
         pendingInjections.append(
             PendingInjection(id: id, data: data, continuation: continuation, timeoutTask: timeoutTask))
@@ -210,23 +234,21 @@ actor OutgoingInputQueue {
     /// (or `shutdown()`) already resolved this injection — `id` looked up by
     /// value, so whichever side gets there first wins and the other finds
     /// nothing.
-    private func forceDeliver(id: UUID) async {
+    private func forceDeliver(id: UUID) {
         guard let index = pendingInjections.firstIndex(where: { $0.id == id }) else { return }
         let pending = pendingInjections.remove(at: index)
         logger.info(
             "outgoingInputQueue: injection held past the paste-hold bound with the paste still open; writing it anyway")
-        await write(pending.data)
-        pending.continuation.resume(returning: true)
+        pending.continuation.resume(returning: write(pending.data))
     }
 
-    private func flushPending() async {
+    private func flushPending() {
         guard !pendingInjections.isEmpty else { return }
         let toFlush = pendingInjections
         pendingInjections.removeAll()
         for pending in toFlush {
             pending.timeoutTask.cancel()
-            await write(pending.data)
-            pending.continuation.resume(returning: true)
+            pending.continuation.resume(returning: write(pending.data))
         }
     }
 }

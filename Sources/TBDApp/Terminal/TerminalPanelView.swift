@@ -1283,12 +1283,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
             resizeDebounceTask?.cancel()
             resizeDebounceTask = nil
-            // Ends the pump task and releases any injection still parked
-            // behind an open paste (Task 10). `shutdown()` is safe to call
-            // even if `send(source:data:)` never ran — the lazy queue is
-            // simply constructed here for the first time and immediately
-            // torn down.
-            Task { await outgoingQueue.shutdown() }
+            // Releases any injection still parked behind an open paste
+            // (Task 10). Safe to call even if `send(source:data:)` never ran —
+            // the lazy queue is simply constructed here for the first time and
+            // immediately torn down.
+            outgoingQueue.shutdown()
             // Release the vended pty. No daemon-side detach goes with it yet
             // (`pane.detach` has no holder branch), so the session is left with
             // nobody draining it until the next attach — the reason `stop()`
@@ -1452,6 +1451,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                         // nothing to paste and zero-byte `.paste` frames are
                         // never sent — but SwiftTerm must not run either.
                         if !data.isEmpty {
+                            // The one write that does NOT go through
+                            // `outgoingQueue` (Task 10). Defensible: in
+                            // control mode the daemon injects into tmux
+                            // rather than through the app, so the two writers
+                            // this queue serializes never coexist on this
+                            // path — but it is a second writer on paper, and
+                            // worth naming as one.
                             self.appState?.daemonClient.fdSidecar.sendPaste(
                                 worktreeID: worktreeID, paneID: paneID, bytes: data)
                         }
@@ -1753,6 +1759,23 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // holder passthrough path, which is exactly the path where the
             // app itself can write an injection to the same fd — the case
             // this queue exists for.
+            //
+            // Whole-payload equality, not a prefix or a search: a chunk IS a
+            // marker or it is not. SwiftTerm hands the marker to
+            // `send(source:data:)` as its own chunk (`MacTerminalView`'s paste
+            // path makes three separate calls and the main-actor delivery
+            // buffer preserves each boundary), so the exact match is the right
+            // test. Two consequences worth knowing: a payload whose bytes are
+            // exactly `ESC[201~` is misread as the end marker — absurdly
+            // narrow, and the only cost is that a concurrent injection stops
+            // being held one chunk early; and if a fork bump ever coalesced
+            // the marker with the payload, no paste would be detected at all,
+            // which is harmless because one `enqueueUserBytes` call is one
+            // atomic write that an injection lands wholly before or after.
+            //
+            // The order of these three calls is what makes the span airtight:
+            // the paste is opened BEFORE its own first byte goes out and
+            // closed AFTER its last one.
             let payload = Data(data)
             if payload.elementsEqual(EscapeSequences.bracketedPasteStart) {
                 outgoingQueue.beginUserPaste()
@@ -1766,35 +1789,69 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// The single serialization point for everything this panel writes to
         /// its session (Task 10). Lazy because its write closure captures
         /// `self` weakly and this class has no designated initializer of its
-        /// own to do that capture in — first access happens on `send`'s first
-        /// call, always on the main thread.
+        /// own to do that capture in.
+        ///
+        /// Reaching it needs no synchronization of its own: this Coordinator
+        /// is `@MainActor` by inference through its `TerminalViewDelegate`
+        /// conformance (see the `LocalProcessDelegate` note above), so every
+        /// access — including the first, which may come from `cleanup()` on a
+        /// panel that never typed rather than from `send` — is
+        /// compiler-checked main-actor, and so is the queue itself.
+        ///
+        /// `false` from the write closure means the bytes reached nothing;
+        /// `enqueueInjection` reports that to the daemon so it can fall back
+        /// to writing directly. A dead `self` reports `false` for the same
+        /// reason.
         private lazy var outgoingQueue = OutgoingInputQueue { [weak self] data in
-            await self?.performOutgoingWrite(data)
+            self?.performOutgoingWrite(data) ?? false
         }
 
-        /// Delivers one chunk `outgoingQueue` has decided may go out now.
-        /// Same two destinations `send(source:data:)` used before the queue
-        /// existed — `OutgoingInputRoute.decide` is unchanged, only WHEN a
-        /// chunk is allowed to reach either of them moved into the queue.
+        /// Delivers one chunk `outgoingQueue` has decided may go out now, and
+        /// reports whether anything actually took it. Same two destinations
+        /// `send(source:data:)` used before the queue existed —
+        /// `OutgoingInputRoute.decide` is unchanged, and it still runs in the
+        /// same main-actor turn the bytes arrived in, so a tab switch cannot
+        /// nil `controlModeAttach` between the decision and the write.
         ///
         /// A holder-backed panel has neither `localProcess` nor
         /// `controlModeAttach`, so it falls into `.localPTY` with a nil
-        /// `localProcess` and this is a no-op for it — unchanged from before
-        /// this queue existed. Wiring an actual write destination for a
-        /// holder session's own fd is the injection task's job, not this
-        /// one's.
-        @MainActor
-        private func performOutgoingWrite(_ data: Data) {
+        /// `localProcess` and nothing is written — unchanged from before this
+        /// queue existed, but now *reported*, because acking `written: true`
+        /// for bytes that reached nothing would stop the daemon falling back
+        /// and lose an injected prompt invisibly. Wiring an actual write
+        /// destination for a holder session's own fd is the injection task's
+        /// job, not this one's.
+        ///
+        /// `true` means *handed off*, which is the strongest claim available
+        /// synchronously: both destinations complete asynchronously
+        /// (`DispatchIO` for the pty, the sidecar client's own send queue for
+        /// the frame), so a write that fails after this returns cannot be
+        /// reported here. The daemon's fail-open deadline is what covers that
+        /// residue.
+        private func performOutgoingWrite(_ data: Data) -> Bool {
             switch OutgoingInputRoute.decide(
                 controlModeAttached: controlModeAttach != nil, byteCount: data.count) {
             case .localPTY:
-                localProcess?.send(data: [UInt8](data)[...])
+                // `running` counts as much as non-nil: `LocalProcess.send`
+                // silently drops everything once the child has exited, so
+                // reporting `true` for a dead child would be the same
+                // fabricated ack in a different shape.
+                guard let localProcess, localProcess.running else { return false }
+                localProcess.send(data: [UInt8](data)[...])
+                return true
             case .sidecarInput:
-                guard let attach = controlModeAttach else { return }
-                appState?.daemonClient.fdSidecar.sendInput(
+                guard let attach = controlModeAttach, let appState else { return false }
+                appState.daemonClient.fdSidecar.sendInput(
                     worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: data)
+                return true
             }
         }
+
+        /// Test-only: lets a test drive the production marker-detection path
+        /// in `send(source:data:)` and then observe what the queue decided,
+        /// rather than calling `beginUserPaste()`/`endUserPaste()` directly
+        /// and bypassing the classification the detection actually performs.
+        var outgoingQueueForTesting: OutgoingInputQueue { outgoingQueue }
 
         func handleOutgoingInput(_ data: ArraySlice<UInt8>) {
             let isCtrlC = data.contains(0x03)
