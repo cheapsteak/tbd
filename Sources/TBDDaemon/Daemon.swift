@@ -1141,8 +1141,20 @@ public final class Daemon: Sendable {
         // With `pty_holder_enabled` off there are no such rows and this is a
         // single query — it cannot delay the socket bind for anyone who has not
         // opted in.
+        //
+        // **The ordering was reconsidered and stands, because the phase is now
+        // bounded.** Adopting first costs everyone the phase's duration; that
+        // duration is `adoptAllBudget` plus the row in flight when it expired,
+        // independent of how many holders are wedged. Binding first would
+        // instead open a window in which the socket answers while holder
+        // sessions have no readers — `terminal.output` renders an empty screen
+        // for a live session and `terminal.attach` refuses one — and it would
+        // not even make the daemon answerable, because steps 8b-8d ahead of it
+        // are pre-bind too. The overflow, and only the overflow, is what moves
+        // past the bind: see step 9c.
+        var deferredHolderAdoptions: [Terminal] = []
         if let holderRegistry {
-            await holderRegistry.adoptAll()
+            deferredHolderAdoptions = await holderRegistry.adoptAll()
         }
 
         // 9. Start socket server
@@ -1152,6 +1164,21 @@ public final class Daemon: Sendable {
         // is built above, before the server exists, so it can't be an init dep).
         rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
         try await sock.start()
+
+        // 9c. Finish the holder sessions the startup budget did not reach.
+        //
+        // `adoptAll` is the ONLY caller of `adopt` in the daemon, so a row it
+        // walked away from would never be adopted again: its pty master would
+        // go undrained for the process's whole life, and a job cannot finish
+        // exiting while anything it wrote is still queued on its terminal. The
+        // budget therefore bounds when the *socket* is bound, not whether these
+        // sessions are rescued. Detached because nobody is waiting on it — the
+        // socket is up, so the cost of a slow holder is now paid by that
+        // session alone.
+        if let holderRegistry, !deferredHolderAdoptions.isEmpty {
+            let remaining = deferredHolderAdoptions
+            Task { await holderRegistry.adoptRemaining(remaining) }
+        }
 
         // 9a. Install the app → daemon input sink BEFORE the sidecar listens:
         // each adopted connection captures `onInput` at adopt time (M2.1
