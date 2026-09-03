@@ -581,7 +581,7 @@ private struct ImagePreviewView: View {
             if let image {
                 Image(nsImage: image)
                     .resizable()
-                    .aspectRatio(contentMode: .fit)
+                    .scaledToFit()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(12)
             } else {

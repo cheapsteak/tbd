@@ -101,7 +101,7 @@ struct TranscriptImageAttachmentView: View {
             if let image {
                 Image(nsImage: image)
                     .resizable()
-                    .aspectRatio(contentMode: .fit)
+                    .scaledToFit()
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .opacity(hovering ? 0.85 : 1)
             } else {
