@@ -20,6 +20,7 @@ struct RemoteCommand: ParsableCommand {
             provider has not declared.
             """,
         subcommands: [
+            RemoteCreate.self,
             RemoteRetain.self, RemoteImport.self, RemoteRecall.self, RemoteRetained.self,
             RemoteDelete.self, RemoteDismiss.self, RemoteAllowDelete.self,
         ]
@@ -675,3 +676,337 @@ struct RemoteAllowDelete: AsyncParsableCommand {
         print("Remote session delete \(enabled ? "enabled" : "disabled").")
     }
 }
+
+// MARK: - remote create
+
+/// A worktree's git state, reduced to the three facts teleport cares about.
+///
+/// A struct rather than three loose arguments because the precondition below is
+/// pure and this is the whole of its input: reading git is I/O, deciding what
+/// to refuse is not, and the split is what makes the decision testable without
+/// a repository.
+struct TeleportWorkspaceSummary: Equatable {
+    /// Paths `git status --porcelain` reports as changed — staged, unstaged or
+    /// untracked, deliberately not distinguished. All three stay on this
+    /// machine, which is the only thing the refusal is about.
+    let uncommittedFiles: Int
+    /// Commits on this branch the upstream does not have. Meaningless when
+    /// `hasUpstream` is false, where the answer is "all of them".
+    let unpushedCommits: Int
+    /// Whether the branch tracks anything at all. A branch with no upstream has
+    /// nothing on a remote for the new session to check out, which is a
+    /// different sentence from "you are two commits ahead".
+    let hasUpstream: Bool
+
+    init(uncommittedFiles: Int, unpushedCommits: Int, hasUpstream: Bool) {
+        self.uncommittedFiles = uncommittedFiles
+        self.unpushedCommits = unpushedCommits
+        self.hasUpstream = hasUpstream
+    }
+}
+
+/// The gate in front of `create --continue`.
+///
+/// **Teleport moves a branch, never files.** The new session is a checkout on
+/// another machine, made from what the remote has; nothing in this repository's
+/// working tree travels with the conversation. Carrying the files instead would
+/// mean shipping the untracked and ignored ones that make a checkout work —
+/// `.env`, local databases, credentials — which is a per-repo policy question
+/// and not a transport one, and shipping them by default exfiltrates secrets.
+///
+/// So the refusal's job is to name what would be left behind, in counts a user
+/// can check, rather than to say "the worktree is dirty". `--force` carries the
+/// conversation anyway, which is a perfectly reasonable thing to want.
+///
+/// Pure, mirroring `RemoteDeletePrecondition.refusal`: returns the message to
+/// print, or nil to proceed.
+enum TeleportPrecondition {
+    static func refusal(_ summary: TeleportWorkspaceSummary, force: Bool) -> String? {
+        guard !force else { return nil }
+        var leftBehind: [String] = []
+        if summary.uncommittedFiles > 0 {
+            leftBehind.append(
+                "\(summary.uncommittedFiles) uncommitted "
+                + (summary.uncommittedFiles == 1 ? "file" : "files"))
+        }
+        if !summary.hasUpstream {
+            leftBehind.append("every commit on this branch, which has no upstream")
+        } else if summary.unpushedCommits > 0 {
+            leftBehind.append(
+                "\(summary.unpushedCommits) unpushed "
+                + (summary.unpushedCommits == 1 ? "commit" : "commits"))
+        }
+        guard !leftBehind.isEmpty else { return nil }
+        let subject = leftBehind.joined(separator: " and ")
+        var message = "Error: \(subject) will stay on this machine. "
+            + "A remote session checks the branch out from the remote, so only what is "
+            + "pushed travels with the conversation.\n"
+        // Named separately because the two have different remedies, and the
+        // push one is an offer rather than an instruction to go and read git's
+        // manual.
+        if summary.uncommittedFiles > 0 {
+            message += "Commit or stash the changes first.\n"
+        }
+        if !summary.hasUpstream || summary.unpushedCommits > 0 {
+            message += "Push the branch first (`git push -u origin HEAD`).\n"
+        }
+        message += "Or re-run with --force to move the conversation and leave them behind."
+        return message
+    }
+}
+
+/// Reads the three facts `TeleportPrecondition` decides on out of a real
+/// checkout.
+///
+/// Every failure degrades toward *refusing*, never toward proceeding: a
+/// `git status` that will not run leaves `uncommittedFiles` unknown, and
+/// guessing zero there would carry a conversation away from work the user
+/// thought was coming with it. `hasUpstream` is false when `@{u}` does not
+/// resolve, which is exactly the "never pushed" case.
+func readTeleportSummary(worktreePath: String) -> TeleportWorkspaceSummary? {
+    guard let status = runGit(["status", "--porcelain"], at: worktreePath) else { return nil }
+    let changed = status
+        .split(separator: "\n")
+        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        .count
+    guard runGit(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+                 at: worktreePath) != nil else {
+        return TeleportWorkspaceSummary(
+            uncommittedFiles: changed, unpushedCommits: 0, hasUpstream: false)
+    }
+    let ahead = runGit(["rev-list", "--count", "@{u}..HEAD"], at: worktreePath)
+        .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
+    return TeleportWorkspaceSummary(
+        uncommittedFiles: changed, unpushedCommits: ahead, hasUpstream: true)
+}
+
+/// Runs one git command in `path` and returns its stdout, or nil when git
+/// exited nonzero. Callers read a nonzero exit as a fact ("no upstream"), never
+/// as a reason to carry on regardless.
+private func runGit(_ arguments: [String], at path: String) -> String? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["git", "-C", path] + arguments
+    let out = Pipe()
+    let err = Pipe()
+    process.standardOutput = out
+    process.standardError = err
+    do {
+        try process.run()
+    } catch {
+        return nil
+    }
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    _ = err.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { return nil }
+    return String(bytes: data, encoding: .utf8) ?? ""
+}
+
+/// Turns repeated `--param key=value` into the JSON object `create` sends.
+///
+/// The values are the provider's own `create_params` fields and TBD does not
+/// interpret them, so everything is carried as a string: the contract's field
+/// types are the provider's business, and a CLI that guessed a number from
+/// `--param count=3` would be inventing a type the user never wrote.
+func remoteCreateParamsJSON(_ pairs: [String]) throws -> String {
+    var values: [String: String] = [:]
+    for pair in pairs {
+        guard let separator = pair.firstIndex(of: "=") else {
+            throw CLIError.invalidArgument(
+                "--param expects key=value, got: \(pair)")
+        }
+        let key = String(pair[pair.startIndex..<separator])
+        guard !key.isEmpty else {
+            throw CLIError.invalidArgument("--param expects key=value, got: \(pair)")
+        }
+        values[key] = String(pair[pair.index(after: separator)...])
+    }
+    guard let data = try? JSONSerialization.data(withJSONObject: values, options: [.sortedKeys]),
+          let json = String(bytes: data, encoding: .utf8) else {
+        throw CLIError.invalidArgument("could not encode --param values as JSON")
+    }
+    return json
+}
+
+struct RemoteCreate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "create",
+        abstract: "Start a provider-hosted agent session, optionally carrying a conversation",
+        discussion: """
+            --param takes the provider's own create fields, repeated once per \
+            field; `tbd remote list` names the provider, and the provider's \
+            `describe` names the fields.
+
+            Three ways to give the new session a conversation to begin from, \
+            and they are mutually exclusive:
+
+              --continue <terminal-id>  carry a conversation running on THIS \
+            machine to the provider. TBD reads that terminal's Claude \
+            transcript, stores it on the provider, and creates a session \
+            seeded from it.
+              --from-key <key>          seed from a transcript already stored \
+            on this provider (see `tbd remote retain` and `tbd remote import`).
+              --from-file <path|->      seed from a transcript JSONL file.
+
+            **--continue moves the branch, never the files.** The new session \
+            checks the branch out from the remote, so anything uncommitted or \
+            unpushed stays here. TBD refuses and says what would be left \
+            behind; --force moves the conversation anyway.
+
+            Seeding needs the provider to declare `seed`, and the two \
+            file-bearing sources need `import` as well. Both are refused here, \
+            by name, before anything is created.
+            """
+    )
+
+    @Option(name: .long, help: "Provider name")
+    var provider: String
+
+    @Option(name: .long, parsing: .unconditionalSingleValue,
+            help: "A provider create field, as key=value. Repeat for more.")
+    var param: [String] = []
+
+    @Option(name: .customLong("continue"),
+            help: "Carry this terminal's conversation to the provider (terminal UUID)")
+    var continueTerminal: String?
+
+    @Option(name: .customLong("from-key"),
+            help: "Seed from a transcript this provider already holds")
+    var fromKey: String?
+
+    @Option(name: .customLong("from-file"),
+            help: "Seed from a transcript JSONL file, or - for stdin")
+    var fromFile: String?
+
+    @Flag(name: .long, help: "Move the conversation even though work would be left behind")
+    var force = false
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        let sources = [continueTerminal, fromKey, fromFile].compactMap { $0 }
+        guard sources.count <= 1 else {
+            throw ValidationError(
+                "--continue, --from-key and --from-file are mutually exclusive: "
+                + "a session begins from one conversation or from none.")
+        }
+        let paramsJSON = try remoteCreateParamsJSON(param)
+
+        let client = SocketClient()
+        let fleet = try readRemoteFleet(client: client)
+        guard fleet.isKnown(provider: provider) else {
+            remoteNote("Error: no provider named '\(provider)' is registered")
+            throw ExitCode.failure
+        }
+        let capabilities = fleet.capabilities(of: provider)
+        // Both capability checks happen before anything is read, imported or
+        // created. A `seed` a provider never declared is silently ignored by
+        // the contract's own ignore-unknown-fields rule, which would leave the
+        // user with an empty session they believed carried their conversation.
+        if !sources.isEmpty, !capabilities.contains("seed") {
+            remoteNote(remoteMissingCapability("seed", provider: provider))
+            throw ExitCode.failure
+        }
+        if continueTerminal != nil || fromFile != nil, !capabilities.contains("import") {
+            remoteNote(remoteMissingCapability("import", provider: provider))
+            throw ExitCode.failure
+        }
+
+        var seedKey: String?
+        if let fromKey {
+            seedKey = fromKey
+        } else if let fromFile {
+            seedKey = try importTranscript(readTranscriptOperand(fromFile), client: client)
+        } else if let continueTerminal {
+            seedKey = try carryLocalConversation(
+                terminalRef: continueTerminal, client: client, fleet: fleet)
+        }
+
+        let session = try client.call(
+            method: RPCMethod.remoteCreate,
+            params: RemoteCreateParams(
+                provider: provider, paramsJSON: paramsJSON, seedRetainedKey: seedKey),
+            resultType: RemoteSessionPayload.self)
+        if json {
+            printJSON(session)
+            return
+        }
+        remoteNote(remoteCreateConfirmation(
+            provider: provider, session: session, seeded: seedKey != nil))
+        print(session.id)
+    }
+
+    /// Stores a transcript on the provider and returns its key, noting the
+    /// receipt on stderr so a `create` that later fails still leaves the user
+    /// holding the key their conversation is under.
+    private func importTranscript(_ jsonl: String, client: SocketClient) throws -> String {
+        let receipt = try client.call(
+            method: RPCMethod.remoteImport,
+            params: RemoteImportParams(provider: provider, jsonl: jsonl),
+            resultType: RetainReceipt.self)
+        remoteNote(retainConfirmation(provider: provider, receipt: receipt))
+        remoteNote("seed key: \(receipt.key)")
+        return receipt.key
+    }
+
+    /// The teleport: read a local terminal's Claude transcript, check what
+    /// would be left behind, and store the conversation on the provider.
+    private func carryLocalConversation(
+        terminalRef: String, client: SocketClient, fleet: RemoteFleetSnapshot
+    ) throws -> String {
+        guard let terminalID = UUID(uuidString: terminalRef) else {
+            throw CLIError.invalidArgument(
+                "--continue takes a terminal UUID; `tbd terminal list <worktree>` prints them.")
+        }
+        let terminals: [Terminal] = try client.call(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(),
+            resultType: [Terminal].self)
+        guard let terminal = terminals.first(where: { $0.id == terminalID }) else {
+            throw CLIError.invalidArgument("No terminal found with ID: \(terminalRef)")
+        }
+        guard let transcriptPath = terminal.transcriptPath else {
+            throw CLIError.invalidArgument(
+                "Terminal \(terminalRef) has no Claude transcript on record yet — "
+                + "nothing has been said in it, or it is not a Claude session.")
+        }
+        // The precondition runs before the import, so a refusal costs nothing
+        // on the provider. An import that succeeded and was then abandoned
+        // would leave a retained blob nobody will ever use.
+        if let worktree = fleet.worktrees.first(where: { $0.id == terminal.worktreeID }),
+           worktree.location.isLocal, !worktree.localPath.isEmpty {
+            guard let summary = readTeleportSummary(worktreePath: worktree.localPath) else {
+                throw CLIError.invalidArgument(
+                    "Could not read the git state of \(worktree.localPath), so what would be "
+                    + "left behind is unknown. Re-run with --force to move the conversation anyway.")
+            }
+            if let refusal = TeleportPrecondition.refusal(summary, force: force) {
+                remoteNote(refusal)
+                throw ExitCode.failure
+            }
+        }
+        guard let jsonl = try? String(contentsOfFile: transcriptPath, encoding: .utf8) else {
+            throw CLIError.invalidArgument(
+                "Could not read the transcript at \(transcriptPath)")
+        }
+        return try importTranscript(jsonl, client: client)
+    }
+}
+
+/// The human sentence a create prints to stderr, pure so the seeded and
+/// unseeded wordings can be read side by side.
+///
+/// The seeded one says so explicitly: a session that silently began with
+/// somebody's whole conversation, and one that began empty, look identical from
+/// the outside, and the whole point of the flag is which of those happened.
+func remoteCreateConfirmation(
+    provider: String, session: RemoteSessionPayload, seeded: Bool
+) -> String {
+    let name = session.title.map { "\($0) (\(session.id))" } ?? session.id
+    return seeded
+        ? "created \(provider)/\(name), seeded from the retained conversation"
+        : "created \(provider)/\(name)"
+}
+
