@@ -52,7 +52,10 @@ After each read the script calls `proc_reset_footprint_interval(pid)`, so the
 next tick's interval max is the peak reached *since this tick*. That is the part
 that makes a spike shorter than the sampling interval impossible to miss: the
 current footprint can be back down by the time we look, but the interval max
-cannot hide. Both calls are declared in <libproc.h>.
+cannot hide. Both calls are declared in <libproc.h>. The counter belongs to the
+process, not to the watcher, so any other tool that resets the same process's
+footprint interval shortens this watch's windows, which is why a watch takes a
+lock file per target pid.
 
 The interval is reset once more, at acquire, before the very first sample is
 read. Until somebody resets it the kernel reports the peak since process start,
@@ -62,6 +65,18 @@ process that is merely old and would then dominate `--report`. If that reset
 ever fails the run records one `interval_reset_failed` marker for the target, so
 an interval max that only ever climbs is diagnosable from the record instead of
 being read as a real spike.
+
+A target younger than one baseline window has its rise rule held off for the
+remainder of that window. A daemon that has just restarted climbs from nothing
+to its working set in the first seconds, and a rise measured against a floor of
+20 MB fires on that climb every time, then holds the detector in the resulting
+spike for a whole baseline window and folds any real spike into it. The age
+comes from `ri_proc_start_abstime` read against `mach_absolute_time`, and the
+run records a `rise_suppressed` marker saying how old the target was and until
+when the rule is held off. The absolute threshold is deliberately not held off:
+a young daemon crossing a gigabyte is a real event whatever its age. A daemon
+that has been up for hours is older than the window, so nothing is suppressed
+for it and a rise in the first minutes of the watch is still caught.
 
 One JSON line per tick lands in `samples.jsonl`, flushed on every write, because
 the person reading this file at 3am is not the process writing it.
@@ -131,6 +146,15 @@ A run directory is written once and never reused. If `--out` already holds a
 `samples.jsonl` or a `run.json` the watch refuses to start and exits 2, because
 appending a second run to the first one's sample stream produces a file whose
 gaps and pid changes read as the target's behaviour rather than as two runs.
+
+One file lives outside the run directory. While a watch holds a target it owns
+`$TBD_HOME/diag/daemon-footprint/.watch-<target pid>.lock`, containing the
+watcher's own pid, because `proc_reset_footprint_interval` is per-process and a
+second watch on the same target silently steals half of both watches' interval
+windows. The lock is removed when the target is lost and again at shutdown. A
+watcher killed with SIGKILL cannot remove it and no sweep covers it: a stale
+lock is reclaimed by the next watcher that finds its holder dead, which is the
+whole of this resource's reconciliation story.
 
 REJECTED ALTERNATIVES
 ---------------------
@@ -340,6 +364,32 @@ def read_mach_timebase() -> tuple[int, int, bool]:
     return 1, 1, False
 
 
+def process_age_seconds(start_abstime: int, numer: int, denom: int) -> float | None:
+    """Seconds since the target launched, or None if that cannot be established.
+
+    `ri_proc_start_abstime` is a mach absolute time stamp on the same clock
+    `mach_absolute_time` reads, so the difference scaled by the machine's
+    timebase is the process's age. The libSystem call is made here rather than
+    bound at import, so nothing at module scope touches a macOS symbol and the
+    self-test keeps running on a machine that has none.
+
+    None means "unknown age", and every caller reads that as "suppress nothing":
+    a missing age must never be able to silence a real spike.
+    """
+    if start_abstime <= 0 or denom <= 0 or numer <= 0:
+        return None
+    try:
+        lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        lib.mach_absolute_time.argtypes = []
+        lib.mach_absolute_time.restype = ctypes.c_uint64
+        now_abs = int(lib.mach_absolute_time())
+    except Exception:  # noqa: BLE001 - an unreadable clock is not fatal
+        return None
+    if now_abs <= start_abstime:
+        return None
+    return (now_abs - start_abstime) * numer / denom / 1e9
+
+
 class LibProc:
     """The two libproc entry points this script needs, bound once."""
 
@@ -433,6 +483,7 @@ class SpikeDetector:
         release_fraction: float = RELEASE_FRACTION,
         release_rise_fraction: float = RELEASE_RISE_FRACTION,
         max_captures_per_spike: int = MAX_CAPTURES_PER_SPIKE,
+        rise_suppressed_until: float | None = None,
     ) -> None:
         self.threshold_bytes = threshold_bytes
         self.rise_bytes = rise_bytes
@@ -441,6 +492,10 @@ class SpikeDetector:
         self.release_fraction = release_fraction
         self.release_rise_fraction = release_rise_fraction
         self.max_captures_per_spike = max_captures_per_spike
+        # Until this instant the rise rule does not fire. Set when the target
+        # was acquired younger than one baseline window, so its climb to a
+        # working set is not reported as a spike. None means never suppressed.
+        self.rise_suppressed_until = rise_suppressed_until
         self._window: deque[tuple[float, int]] = deque()
         self._in_spike = False
         self._trigger_level = 0
@@ -479,7 +534,7 @@ class SpikeDetector:
         actions: list[CaptureRequest] = []
 
         if not self._in_spike:
-            reason, level = self._trigger_for(peak, baseline, previous_peak)
+            reason, level = self._trigger_for(now, peak, baseline, previous_peak)
             if reason is not None:
                 self._in_spike = True
                 self._trigger_level = level
@@ -566,7 +621,7 @@ class SpikeDetector:
         return peak - baseline < self.rise_bytes * self.release_rise_fraction
 
     def _trigger_for(
-        self, peak: int, baseline: int, previous_peak: int | None
+        self, now: float, peak: int, baseline: int, previous_peak: int | None
     ) -> tuple[str | None, int]:
         """Which rule fires on this peak, and the level to release against.
 
@@ -574,11 +629,21 @@ class SpikeDetector:
         previous tick, or a previous tick below the threshold. A target already
         over the threshold when the watch starts therefore gets exactly one
         capture, and a plateau parked above it gets nothing after that.
+
+        The rise rule is held off entirely until `rise_suppressed_until`, which
+        the caller sets when it acquires a target younger than one baseline
+        window. Such a target is still climbing to its working set, and a rise
+        measured against its near-zero floor fires on the climb every time. The
+        threshold rule is not held off with it: a young daemon crossing an
+        absolute gigabyte is real whatever its age, and suppressing that too
+        would blind the watch to the case it exists for.
         """
         if self.threshold_bytes > 0 and peak >= self.threshold_bytes:
             crossed = previous_peak is None or previous_peak < self.threshold_bytes
             if crossed:
                 return "threshold", self.threshold_bytes
+        if self.rise_suppressed_until is not None and now < self.rise_suppressed_until:
+            return None, 0
         if self.rise_bytes > 0 and peak - baseline >= self.rise_bytes:
             return "rise", baseline + self.rise_bytes
         return None, 0
@@ -925,6 +990,30 @@ def read_pid_file(path: Path) -> int | None:
         return None
 
 
+def watch_lock_path(target_pid: int) -> Path:
+    """The rendezvous file that says a watch already holds this target."""
+    return tbd_home() / "diag" / "daemon-footprint" / f".watch-{target_pid}.lock"
+
+
+def holder_is_alive(pid: int) -> bool:
+    """Whether a lock holder is still running. Uncertainty counts as alive.
+
+    A signal of 0 tests for the process without disturbing it. EPERM means it
+    exists and belongs to somebody else, which is still a live holder. Anything
+    non-positive is not a pid at all and is treated as dead, because signal 0 to
+    pid 0 addresses this process group rather than one process.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 # The daemon executable is named TBDDaemon. `tbdd` is accepted too, so a future
 # rename to match the pid file does not silently stop the watch from acquiring.
 DAEMON_COMM_NAMES = ("TBDDaemon", "tbdd")
@@ -1016,6 +1105,15 @@ class Watch:
         )
         self.sidecar: LogSidecar | None = None
         self.pid: int | None = None
+        # What `run` hands back. 0 unless a bail wants to say something more
+        # specific than "the operator stopped it".
+        self.exit_code = 0
+        # The per-target lock this watch currently owns, if any.
+        self._lock_path: Path | None = None
+        # Which other watchers have already been named in the record, so a pid
+        # file pointing at a target somebody else holds does not write the same
+        # marker on every tick for as long as they hold it.
+        self._conflict_noted: set[int] = set()
         self._prev_cpu: tuple[float, int, int] | None = None
         self._reset_failure_noted = False
         # Which pids a comm marker has already been written about, so a pid file
@@ -1025,13 +1123,14 @@ class Watch:
         # same number) is described again rather than silently reused.
         self._comm_noted: set[int] = set()
 
-    def make_detector(self) -> SpikeDetector:
+    def make_detector(self, rise_suppressed_until: float | None = None) -> SpikeDetector:
         """A detector carrying no history, built from this run's thresholds."""
         return SpikeDetector(
             threshold_bytes=int(self.args.threshold_mb * MB),
             rise_bytes=int(self.args.rise_mb * MB),
             rearm_bytes=int(self.args.rearm_mb * MB),
             baseline_window=self.args.baseline_window,
+            rise_suppressed_until=rise_suppressed_until,
         )
 
     # -- record ------------------------------------------------------------
@@ -1049,15 +1148,108 @@ class Watch:
 
     # -- target ------------------------------------------------------------
 
-    def acquire(self, pid: int) -> None:
+    def take_lock(self, target_pid: int) -> int | None:
+        """Claim this target's watch lock. Returns a live holder's pid on refusal.
+
+        Created with O_EXCL, so two watchers starting at the same instant cannot
+        both believe they took it. A lock whose holder is dead is stale and is
+        removed and retaken here, which is the only thing that ever reclaims one:
+        a SIGKILLed watcher cannot unlink its own.
+
+        A lock that cannot be created at all (an unwritable directory) returns
+        None and the watch proceeds unlocked. The lock is a guard against a
+        second watcher, not a precondition for measuring anything.
+        """
+        path = watch_lock_path(target_pid)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        for _ in range(2):
+            try:
+                handle = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                holder = read_pid_file(path)
+                if holder is not None and holder != os.getpid() and holder_is_alive(holder):
+                    return holder
+                try:
+                    path.unlink()
+                except OSError:
+                    return None
+                continue
+            except OSError:
+                return None
+            with os.fdopen(handle, "w", encoding="utf-8") as lock:
+                lock.write(f"{os.getpid()}\n")
+            self._lock_path = path
+            return None
+        return None
+
+    def release_lock(self) -> None:
+        """Give the lock back, and only ever our own."""
+        path = self._lock_path
+        self._lock_path = None
+        if path is None:
+            return
+        try:
+            if read_pid_file(path) == os.getpid():
+                path.unlink()
+        except OSError:
+            pass
+
+    def note_conflict(self, target_pid: int, holder: int) -> None:
+        """Record, and for an explicit --pid refuse outright, a second watcher.
+
+        Two watches on one target both call `proc_reset_footprint_interval` on
+        it, and the counter is per-process: each reset shortens the other
+        watch's window, so the sub-tick guarantee both of them are written
+        around quietly stops holding. An explicit --pid names one process and
+        has nowhere else to go, so it says so and stops; the pid-file path keeps
+        looking, because the daemon it is waiting for may yet be restarted onto
+        a pid nobody holds.
+        """
+        if holder not in self._conflict_noted:
+            self._conflict_noted.add(holder)
+            self.emit(
+                {
+                    "event": "watch_conflict",
+                    "pid": target_pid,
+                    "holder_pid": holder,
+                    "lock": str(watch_lock_path(target_pid)),
+                }
+            )
+        if self.args.pid is not None:
+            print(
+                f"pid {target_pid} is already being watched by pid {holder} "
+                f"({watch_lock_path(target_pid)}); two watches steal each other's "
+                "footprint interval resets. Stop that watch first.",
+                file=sys.stderr,
+            )
+            self.exit_code = 4
+            self.stop_event.set()
+
+    def acquire(self, pid: int, now: float | None = None) -> bool:
+        """Take the target, or refuse because another watch already holds it."""
+        holder = self.take_lock(pid)
+        if holder is not None:
+            self.note_conflict(pid, holder)
+            return False
+        now = time.time() if now is None else now
         self.pid = pid
         self._prev_cpu = None
         self._reset_failure_noted = False
-        # A fresh detector per target. A restarted daemon climbs from nothing to
-        # its working set in the first seconds, and measuring that climb against
-        # the dead process's baseline, or inheriting its in-spike state, would
-        # report the new process's startup as a spike of the old one.
-        self.detector = self.make_detector()
+        # How far into its own startup the target is. Read before the interval
+        # reset, from the same struct the sampler reads every tick.
+        usage = self.libproc.rusage(pid)
+        age = (
+            None
+            if usage is None
+            else process_age_seconds(
+                int(usage.ri_proc_start_abstime),
+                self.libproc.timebase_numer,
+                self.libproc.timebase_denom,
+            )
+        )
         # Reset before the first read, not just after it. Nobody has reset this
         # counter since the target launched, so an un-reset first sample reports
         # the peak since process start: 7.4 GB on the incident daemon, which
@@ -1068,10 +1260,45 @@ class Watch:
                 "event": "target_acquired",
                 "pid": pid,
                 "start_time": process_start_time(pid),
+                "target_age_s": None if age is None else round(age, 3),
             }
         )
+        # A target still climbing to its working set would fire the rise rule on
+        # the climb, so the rule is held off for whatever is left of one baseline
+        # window. An unreadable age suppresses nothing, and says so: a missing
+        # fact must never be able to silence a real spike.
+        suppressed_until = None
+        if age is None:
+            self.emit(
+                {
+                    "event": "target_age_unknown",
+                    "pid": pid,
+                    "note": "process age unreadable; the rise rule is not suppressed",
+                }
+            )
+        elif age < self.args.baseline_window:
+            suppressed_until = now + (self.args.baseline_window - age)
+            self.emit(
+                {
+                    # Stamped with the tick that acquired the target rather
+                    # than with the instant this line was written, so a replay
+                    # applies it to the same sample the live detector did.
+                    "epoch": now,
+                    "event": "rise_suppressed",
+                    "pid": pid,
+                    "until": suppressed_until,
+                    "until_iso": iso(suppressed_until),
+                    "target_age_s": round(age, 3),
+                }
+            )
+        # A fresh detector per target. A restarted daemon climbs from nothing to
+        # its working set in the first seconds, and measuring that climb against
+        # the dead process's baseline, or inheriting its in-spike state, would
+        # report the new process's startup as a spike of the old one.
+        self.detector = self.make_detector(rise_suppressed_until=suppressed_until)
         if not reset_ok:
             self.note_reset_failure()
+        return True
 
     def note_reset_failure(self) -> None:
         """Record, once per acquired target, that the interval reset is failing.
@@ -1093,6 +1320,8 @@ class Watch:
             # reuse the moment the process is gone, so a remembered marker
             # would suppress the description of a different process.
             self._comm_noted.discard(self.pid)
+        # The lock names a target, and this watch no longer holds one.
+        self.release_lock()
         self.pid = None
         self._prev_cpu = None
 
@@ -1147,18 +1376,6 @@ class Watch:
         self.captures_dir.mkdir(parents=True, exist_ok=True)
         self._samples = self.samples_path.open("a", encoding="utf-8")
 
-        if not self.libproc.timebase_ok:
-            # 1/1 is also the real Apple-Intel ratio, so without this marker a
-            # run that gave up on the timebase is indistinguishable from one
-            # that read it, and every cpu_pct in it would be wrong by ~41.7 on
-            # Apple silicon with nothing in the record to say so.
-            self.emit(
-                {
-                    "event": "timebase_fallback",
-                    "note": "mach_timebase_info unavailable; CPU scaled 1:1",
-                }
-            )
-
         initial_pid = self.resolve_pid()
         if initial_pid is None and self.args.pid is not None:
             # An explicit --pid names one process. If it cannot be read it is
@@ -1183,6 +1400,23 @@ class Watch:
             except OSError:
                 pass
             return 2
+
+        # Emitted below the bail above, not before it: a marker written first
+        # leaves a non-empty samples.jsonl behind for a --pid that could not be
+        # read at all, and the corrected retry against the same --out is then
+        # refused as a second run appended to a first.
+        if not self.libproc.timebase_ok:
+            # 1/1 is also the real Apple-Intel ratio, so without this marker a
+            # run that gave up on the timebase is indistinguishable from one
+            # that read it, and every cpu_pct in it would be wrong by ~41.7 on
+            # Apple silicon with nothing in the record to say so.
+            self.emit(
+                {
+                    "event": "timebase_fallback",
+                    "note": "mach_timebase_info unavailable; CPU scaled 1:1",
+                }
+            )
+
         sidecar_pid = None
         # Everything from the sidecar's first breath onwards is inside the try,
         # so nothing between spawning it and entering the loop can leave a `log
@@ -1220,7 +1454,7 @@ class Watch:
                     self.stop_event.wait(remaining)
         finally:
             self.shutdown()
-        return 0
+        return self.exit_code
 
     def write_run_json(self, initial_pid: int | None, sidecar_pid: int | None) -> None:
         (self.out_dir / "run.json").write_text(
@@ -1265,12 +1499,25 @@ class Watch:
             found = self.resolve_pid()
             if found is None:
                 return
-            self.acquire(found)
+            if not self.acquire(found, now):
+                return
 
         assert self.pid is not None
         usage = self.libproc.rusage(self.pid)
         if usage is None:
+            lost = self.pid
             self.lose()
+            if self.args.pid is not None:
+                # An explicit --pid names one process. The pid file can point at
+                # a restarted daemon, so that path keeps looking; this one has
+                # nothing left to look at, and going quiet would sample nothing
+                # all night while reporting success at the end of it.
+                print(
+                    f"target pid {lost} is gone and --pid names no replacement; stopping",
+                    file=sys.stderr,
+                )
+                self.exit_code = 3
+                self.stop_event.set()
             return
 
         # Reset immediately after the read, so the next tick's interval max is
@@ -1358,6 +1605,9 @@ class Watch:
                 self.emit({"event": "capture_abandoned", "why": abandoned})
         if self.sidecar is not None:
             self.sidecar.stop()
+        # Last thing before the record closes: after this the target is free for
+        # another watch, and nothing else will ever remove this file.
+        self.release_lock()
         with self._emit_lock:
             if self._samples is not None:
                 self._samples.close()
@@ -1413,7 +1663,11 @@ def load_run(run_dir: Path) -> tuple[list[dict], list[dict], dict]:
     return samples, events, config
 
 
-def find_spikes(samples: list[dict], detector: SpikeDetector) -> list[Spike]:
+def find_spikes(
+    samples: list[dict],
+    detector: SpikeDetector,
+    suppressions: Sequence[tuple[float, float]] = (),
+) -> list[Spike]:
     """Replay the live detector over recorded samples and bracket its spikes.
 
     The report used to re-test `value >= threshold` on its own, which could not
@@ -1422,11 +1676,21 @@ def find_spikes(samples: list[dict], detector: SpikeDetector) -> list[Spike]:
     construction: a spike is the interval from the tick that put the detector
     into `in_spike` to the tick that took it out again, or to the last sample if
     the run ended mid-spike, and its reason is whichever rule fired at onset.
+
+    `suppressions` is the run's own `rise_suppressed` markers as (when, until)
+    pairs, applied as the replay reaches each one. They are part of that same
+    agreement: a run that acquired a target seconds after it launched told its
+    detector to ignore the climb to a working set, and a replay that does not
+    hear about it re-invents exactly the spike the live run was right not to
+    report.
     """
+    pending = sorted(suppressions)
     spikes: list[Spike] = []
     current: Spike | None = None
     for sample in samples:
         when = sample.get("epoch", 0.0)
+        while pending and pending[0][0] <= when:
+            detector.rise_suppressed_until = pending.pop(0)[1]
         footprint = int(sample.get("phys_footprint", 0))
         interval_max = int(sample.get("interval_max_phys_footprint", 0))
         value = max(footprint, interval_max)
@@ -1472,9 +1736,14 @@ def parse_log_epoch(line: str) -> float | None:
 
 
 def log_windows(
-    path: Path, windows: list[tuple[str, float, float]]
+    path: Path, windows: list[tuple[str, float, float, bool]]
 ) -> dict[str, tuple[Counter, list[tuple[float, str]]]]:
     """Category counts and `rpc in-flight high` lines for every window at once.
+
+    A window is (key, start, end, end_inclusive). The flag is what lets the
+    report's two windows per spike partition the log instead of overlapping at
+    one line: the 60 s before onset ends exclusively, the spike itself is
+    inclusive at both ends, so the row logged exactly at onset is counted once.
 
     One pass over `daemon-log.txt`, bucketing each line into whichever of the
     requested windows contain it. A `log stream` sidecar left running overnight
@@ -1493,14 +1762,14 @@ def log_windows(
     are considered in.
     """
     results: dict[str, tuple[Counter, list[tuple[float, str]]]] = {
-        key: (Counter(), []) for key, _, _ in windows
+        key: (Counter(), []) for key, _, _, _ in windows
     }
     if not windows or not path.exists():
         return results
     ordered = sorted(windows, key=lambda item: item[1])
-    starts = [start for _, start, _ in ordered]
+    starts = [start for _, start, _, _ in ordered]
     first_start = starts[0]
-    last_end = max(end for _, _, end in ordered)
+    last_end = max(end for _, _, end, _ in ordered)
     last_epoch: float | None = None
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line in handle:
@@ -1518,7 +1787,11 @@ def log_windows(
             # Windows starting after this line cannot contain it; of the rest,
             # only those still open at `epoch` do.
             reachable = bisect.bisect_right(starts, epoch)
-            matched = [key for key, _, end in ordered[:reachable] if epoch <= end]
+            matched = [
+                key
+                for key, _, end, inclusive in ordered[:reachable]
+                if (epoch <= end if inclusive else epoch < end)
+            ]
             if not matched:
                 continue
             # Both regexes run at most once per line, however many windows the
@@ -1615,6 +1888,9 @@ def report(
             "target_comm",
             "pid_file_mismatch",
             "timebase_fallback",
+            "rise_suppressed",
+            "target_age_unknown",
+            "watch_conflict",
         )
     ]
     if markers:
@@ -1629,6 +1905,12 @@ def report(
                 bits.append(f"comm {event['comm']}")
             if event.get("start_time"):
                 bits.append(f"started {event['start_time']}")
+            if event.get("target_age_s") is not None:
+                bits.append(f"age {event['target_age_s']:.1f} s")
+            if event.get("until_iso"):
+                bits.append(f"until {event['until_iso']}")
+            if event.get("holder_pid") is not None:
+                bits.append(f"held by pid {event['holder_pid']}")
             if event.get("note"):
                 bits.append(str(event["note"]))
             detail = "  ".join(bits)
@@ -1660,7 +1942,12 @@ def report(
         rearm_bytes=int(rearm_mb * MB),
         baseline_window=baseline_window,
     )
-    spikes = find_spikes(samples, detector)
+    suppressions = [
+        (float(event.get("epoch", 0.0)), float(event["until"]))
+        for event in events
+        if event.get("event") == "rise_suppressed" and event.get("until") is not None
+    ]
+    spikes = find_spikes(samples, detector, suppressions)
     attach_captures(spikes, events, slack=max(median_interval(samples), 1.0) * 2)
     rules = (
         f"threshold {threshold_mb:g} MB, rise {rise_mb:g} MB over a "
@@ -1674,10 +1961,13 @@ def report(
     print(f"SPIKES ({len(spikes)}), detector replayed with {rules}", file=out)
 
     # Every window the log is asked about, resolved in one pass over the file.
-    windows: list[tuple[str, float, float]] = []
+    windows: list[tuple[str, float, float, bool]] = []
     for index, spike in enumerate(spikes, start=1):
-        windows.append((f"{index}:before", spike.onset - 60, spike.onset))
-        windows.append((f"{index}:during", spike.onset, spike.end))
+        # End-exclusive before, inclusive during: the two partition the log, so
+        # the row logged at the onset instant belongs to the spike and is not
+        # also counted as part of what led up to it.
+        windows.append((f"{index}:before", spike.onset - 60, spike.onset, False))
+        windows.append((f"{index}:during", spike.onset, spike.end, True))
     scanned = log_windows(log_path, windows)
 
     for index, spike in enumerate(spikes, start=1):
@@ -1728,6 +2018,7 @@ def _detector(
     rise_mb: float,
     rearm_mb: float = 512,
     baseline_window: float = DEFAULT_BASELINE_WINDOW,
+    rise_suppressed_until: float | None = None,
 ) -> SpikeDetector:
     """A detector for one case. A zero threshold or rise disables that rule.
 
@@ -1741,6 +2032,7 @@ def _detector(
         rise_bytes=_mb(rise_mb),
         rearm_bytes=_mb(rearm_mb),
         baseline_window=baseline_window,
+        rise_suppressed_until=rise_suppressed_until,
     )
 
 
@@ -1758,12 +2050,19 @@ def _check(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def _synthetic_log_line(epoch: float, category: str) -> str:
+    """One `log stream --style compact` row, shaped so the report can parse it."""
+    stamp = datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    return f"{stamp} Db TBDDaemon[4242] [com.tbd.daemon:{category}] hello\n"
+
+
 def _write_synthetic_run(
     run_dir: Path,
     base: float,
     series: Sequence[float],
     run_args: dict,
     captures: list[tuple[float, str, str]],
+    markers: Sequence[dict] = (),
 ) -> None:
     """Write a `samples.jsonl` and `run.json` shaped exactly like a real run."""
     lines = []
@@ -1797,6 +2096,8 @@ def _write_synthetic_run(
                 }
             )
         )
+    for marker in markers:
+        lines.append(json.dumps(marker))
     (run_dir / "samples.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (run_dir / "run.json").write_text(json.dumps({"args": run_args}), encoding="utf-8")
 
@@ -2003,6 +2304,138 @@ def self_test() -> int:
         _check(again[0].peak == _mb(1500), "the re-issued capture should carry the same peak")
         _check(detector.in_spike, "the spike is still open after the re-issued capture")
 
+    def warmup_rise_is_suppressed() -> None:
+        # A daemon that has just restarted climbs from nothing to its working
+        # set. Against a floor of 20 MB that climb is a 630 MB rise, so a fresh
+        # detector fires on it, and then holds the spike open for a whole
+        # baseline window with every real spike folded into it.
+        detector = _detector(
+            threshold_mb=4096, rise_mb=512, rearm_mb=512, rise_suppressed_until=2000.0
+        )
+        events = _drive(detector, [20, 80, 200, 400, 650])
+        _check(
+            not events,
+            f"a warmup climb under suppression should capture nothing; got {events}",
+        )
+        _check(not detector.in_spike, "suppression should leave the detector out of a spike")
+
+    def warmup_rise_fires_once_suppression_expires() -> None:
+        # The same series against a suppression instant already in the past.
+        # Suppression must be a window, not an off switch: a daemon that has
+        # been up for hours is acquired unsuppressed and a rise in the first
+        # minutes of the watch is still caught.
+        detector = _detector(
+            threshold_mb=4096, rise_mb=512, rearm_mb=512, rise_suppressed_until=999.0
+        )
+        events = _drive(detector, [20, 80, 200, 400, 650])
+        reasons = [event.reason for event in events]
+        _check(reasons == ["rise"], f"expected exactly one rise capture; got {reasons}")
+        _check(
+            events[0].baseline == _mb(20),
+            f"the rise is measured against the warmup floor; got {events[0].baseline}",
+        )
+
+    def threshold_fires_during_suppression() -> None:
+        # Suppression holds off the rise rule alone. A young daemon crossing an
+        # absolute gigabyte is a real event whatever its age, and suppressing
+        # that too would blind the watch during exactly the window a restarted
+        # daemon is most likely to misbehave in.
+        detector = _detector(
+            threshold_mb=1024, rise_mb=512, rearm_mb=512, rise_suppressed_until=2000.0
+        )
+        events = _drive(detector, [20, 80, 2000])
+        reasons = [event.reason for event in events]
+        _check(
+            reasons == ["threshold"],
+            f"the threshold rule must survive suppression; got {reasons}",
+        )
+        _check(events[0].peak == _mb(2000), "the capture belongs to the crossing tick")
+
+    def log_windows_partition() -> None:
+        # The two windows the report asks about per spike have to partition the
+        # log. With both ends inclusive the row logged exactly at onset landed
+        # in the before window and the during window, and every report counted
+        # it twice, in the one place a reader is looking hardest for the row
+        # that explains the onset.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "daemon-log.txt"
+            onset = 1_700_000_100.0
+            path.write_text(
+                _synthetic_log_line(onset - 5, "early")
+                + _synthetic_log_line(onset, "boundary")
+                + _synthetic_log_line(onset + 5, "inside"),
+                encoding="utf-8",
+            )
+            scanned = log_windows(
+                path,
+                [
+                    ("1:before", onset - 60, onset, False),
+                    ("1:during", onset, onset + 10, True),
+                ],
+            )
+            before, _ = scanned["1:before"]
+            during, _ = scanned["1:during"]
+            _check(
+                before["com.tbd.daemon:early"] == 1,
+                f"the earlier row belongs to the before window; got {before}",
+            )
+            _check(
+                before["com.tbd.daemon:boundary"] == 0,
+                f"the onset row must not also be counted before onset; got {before}",
+            )
+            _check(
+                during["com.tbd.daemon:boundary"] == 1,
+                f"the onset row belongs to the spike; got {during}",
+            )
+            _check(
+                during["com.tbd.daemon:inside"] == 1,
+                f"a row inside the spike should be counted once; got {during}",
+            )
+
+    def report_honours_recorded_suppression() -> None:
+        # The warmup series again, this time through the report. A replay that
+        # ignores the run's own `rise_suppressed` marker prints the spike the
+        # live detector was told to ignore, so the operator reading the run at
+        # 3am sees a spike that was never captured and never happened.
+        with tempfile.TemporaryDirectory() as raw:
+            run_dir = Path(raw)
+            base = 1_700_000_000.0
+            series = [20, 80, 200, 400, 650, 650]
+            run_args = {
+                "threshold_mb": 4096,
+                "rise_mb": 100,
+                "rearm_mb": 512,
+                "baseline_window": DEFAULT_BASELINE_WINDOW,
+            }
+            marker = {
+                "event": "rise_suppressed",
+                "epoch": base,
+                "ts": iso(base),
+                "pid": 4242,
+                "until": base + DEFAULT_BASELINE_WINDOW,
+                "until_iso": iso(base + DEFAULT_BASELINE_WINDOW),
+                "target_age_s": 0.1,
+            }
+
+            _write_synthetic_run(run_dir, base, series, run_args, [], [marker])
+            buffer = io.StringIO()
+            _check(report(run_dir, None, out=buffer) == 0, "report should succeed")
+            text = buffer.getvalue()
+            _check(
+                "no spike in this run" in text,
+                f"a suppressed warmup must not be reported as a spike; got:\n{text}",
+            )
+
+            _write_synthetic_run(run_dir, base, series, run_args, [])
+            buffer = io.StringIO()
+            _check(report(run_dir, None, out=buffer) == 0, "report should succeed")
+            control = buffer.getvalue()
+            _check(
+                "SPIKES (1)" in control and "reason rise" in control,
+                "without the marker the same series is a rise spike, which is what "
+                f"makes the case above discriminate; got:\n{control}",
+            )
+
     def report_replay() -> None:
         with tempfile.TemporaryDirectory() as raw:
             run_dir = Path(raw)
@@ -2098,6 +2531,14 @@ def self_test() -> int:
     case("a climb off a released plateau is still caught", plateau_then_further_climb)
     case("a capture the runner refused is re-issued", withdrawn_capture_is_reissued)
     case("an onset the runner refused is re-issued on the next tick", withdrawn_onset_is_reissued)
+    case("a warmup climb under suppression captures nothing", warmup_rise_is_suppressed)
+    case(
+        "the same climb captures once suppression has expired",
+        warmup_rise_fires_once_suppression_expires,
+    )
+    case("the threshold rule still fires during suppression", threshold_fires_during_suppression)
+    case("the before and during log windows partition the log", log_windows_partition)
+    case("report honours a run's own rise suppression", report_honours_recorded_suppression)
     case("report replays a synthetic run and finds its spike", report_replay)
     case("report finds a rise spike below the threshold", report_sees_rise_spike)
 
@@ -2142,7 +2583,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help=f"rise above the rolling baseline that trips a capture (default {DEFAULT_RISE_MB}); "
-        "in --report mode, overrides the run's own rise",
+        "the same value sets the release band, because a spike releases once it is back "
+        "within half a rise of its baseline, so 0 is how the rise rule is disabled and a "
+        "huge value is not; in --report mode, overrides the run's own rise",
     )
     parser.add_argument(
         "--rearm-mb",
