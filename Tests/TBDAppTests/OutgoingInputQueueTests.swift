@@ -20,7 +20,7 @@ import TestSupport
 /// `TestClock` + queue; not required for correctness, matches this
 /// repo's convention for small clock-driven suites (`AppearanceDebounceTests`).
 ///
-/// `.clockDriven` is at SUITE level on purpose: four of these tests `await` a
+/// `.clockDriven` is at SUITE level on purpose: five of these tests `await` a
 /// continuation that a broken implementation would never resume, so each needs
 /// its own hang bound. The first depends on it explicitly — its `TestClock` is
 /// deliberately never advanced, so the time limit is what turns "released on
@@ -170,6 +170,14 @@ struct OutgoingInputQueueTests {
         await waitForHeldInjections(1, on: queue)
         await clock.advanceWhenSuspended(by: .seconds(999))
         #expect(await forced.value == false)
+
+        // Composed output, not three `== false`s: `false` is the fail-open
+        // answer, so an implementation that resolved `false` INSTEAD of
+        // attempting the write — stranding the injection while telling the
+        // daemon exactly what it wanted to hear — passes every assertion
+        // above unchanged. All three payloads must have been offered to the
+        // transport, in order; it is the transport that refused them.
+        #expect(recorder.writes == ["STRAIGHT", "HELD", "FORCED"].map { Data($0.utf8) })
     }
 
     @Test("Ordering within each stream is preserved")
@@ -261,24 +269,64 @@ struct OutgoingInputQueueTests {
         #expect(recorder.writes.isEmpty)
         #expect(queue.pendingInjectionCountForTesting == 0)
     }
+
+    @Test("A keystroke that reaches no transport is reported once per episode")
+    func unwrittenUserBytesReportOncePerEpisode() {
+        let recorder = WriteRecorder()
+        let queue = OutgoingInputQueue(pasteHoldBound: .seconds(999), clock: TestClock()) { data in
+            recorder.write(data)
+        }
+
+        // A working panel says nothing at all — the whole point of an
+        // edge-triggered diagnostic on a path this hot.
+        queue.enqueueUserBytes(Data("h".utf8))
+        queue.enqueueUserBytes(Data("i".utf8))
+        #expect(queue.userWriteOutcomeTransitionsForTesting == 0)
+
+        // The transport goes away (a holder-backed panel: every keystroke
+        // reaches nothing). The FIRST failed keystroke reports; the second
+        // must not — an unconditional log here would be one line per
+        // keystroke on the path `TerminalPanelView.swift:750` warns about,
+        // and this count is what discriminates the two implementations.
+        recorder.result = false
+        queue.enqueueUserBytes(Data("x".utf8))
+        #expect(queue.userWriteOutcomeTransitionsForTesting == 1)
+        queue.enqueueUserBytes(Data("y".utf8))
+        #expect(queue.userWriteOutcomeTransitionsForTesting == 1)
+
+        // The other edge: recovery reports exactly once too, so the episode
+        // has a visible end and not just a beginning.
+        recorder.result = true
+        queue.enqueueUserBytes(Data("z".utf8))
+        #expect(queue.userWriteOutcomeTransitionsForTesting == 2)
+        queue.enqueueUserBytes(Data("!".utf8))
+        #expect(queue.userWriteOutcomeTransitionsForTesting == 2)
+
+        // Reporting must not swallow the bytes: every keystroke was still
+        // offered to the transport, in order.
+        #expect(recorder.writes == ["h", "i", "x", "y", "z", "!"].map { Data($0.utf8) })
+    }
 }
 
 /// The production trigger for the hold, driven end to end.
 ///
-/// The four tests above call `beginUserPaste()`/`endUserPaste()` directly and
-/// so never exercise what actually decides a paste is open: a whole-payload
-/// equality test against SwiftTerm's bracketed-paste markers, inside
-/// `Coordinator.send(source:data:)`. That decision depends on a vendored
-/// fork's chunking behaviour, so it gets its own coverage on the real path —
-/// `makeCoordinatorHarness()` builds a `Coordinator` on production wiring with
-/// a real pty child.
+/// Five of the seven tests above call `beginUserPaste()`/`endUserPaste()`
+/// directly and so never exercise what actually decides a paste is open: a
+/// whole-payload equality test against SwiftTerm's bracketed-paste markers,
+/// inside `Coordinator.send(source:data:)`. That decision depends on a
+/// vendored fork's chunking behaviour, so it gets its own coverage on the real
+/// path — `makeCoordinatorHarness()` builds a `Coordinator` on production
+/// wiring with a real pty child.
 ///
 /// Scope, stated plainly: the chunks are handed to the delegate directly, the
 /// way `QuietIngestTests` does, so this pins the CLASSIFICATION rather than
 /// SwiftTerm's chunking. Driving the fork's own chunking would mean going
 /// through `paste(_:)`, which reads `NSPasteboard.general` — the developer's
-/// real clipboard. The coalesced case below is therefore a record of what
-/// happens if that chunking ever changes, not a guard against it changing.
+/// real clipboard. What happens if that chunking ever coalesces a marker with
+/// its payload is therefore recorded where it can be acted on — the comment
+/// in `Coordinator.send(source:data:)` — and not as a test: no assertion here
+/// could tell a coalescing fork from a chunking one, since the classifier
+/// behaves the same either way.
 @MainActor
 @Suite("OutgoingInputQueue paste-marker detection", .serialized)
 struct OutgoingInputQueuePasteMarkerTests {
@@ -309,29 +357,20 @@ struct OutgoingInputQueuePasteMarkerTests {
         defer { harness.tearDown() }
         let queue = harness.coordinator.outgoingQueueForTesting
 
+        // Positive control on the SAME path, before the absence is asserted
+        // (`QuietIngestTests`, which owns this harness, states the discipline
+        // in its own suite doc): `false` is also the constructor's initial
+        // value, so without a send that provably drives the getter to `true`
+        // and back this test would pass identically if `send` early-returned
+        // and never reached the queue at all.
+        harness.coordinator.send(source: harness.terminalView, data: Self.start)
+        #expect(queue.isPasteOpenForTesting == true)
+        harness.coordinator.send(source: harness.terminalView, data: Self.end)
+        #expect(queue.isPasteOpenForTesting == false)
+
         for chunk in ["h", "i", "\r"] {
             harness.coordinator.send(source: harness.terminalView, data: ArraySlice(chunk.utf8))
             #expect(queue.isPasteOpenForTesting == false)
         }
-    }
-
-    @Test("A marker coalesced with its payload is not recognized")
-    func coalescedMarkerAndPayloadIsNotRecognized() {
-        let harness = makeCoordinatorHarness()
-        defer { harness.tearDown() }
-        let queue = harness.coordinator.outgoingQueueForTesting
-
-        // Whole-payload equality, so a chunk carrying the marker AND the
-        // payload is not a marker. Recorded rather than desired: today
-        // `MacTerminalView` makes three separate `send` calls and the
-        // main-actor delivery buffer preserves each boundary, so this shape
-        // does not arise. If a fork bump ever produced it, no paste would be
-        // detected — harmless, because one `enqueueUserBytes` call is one
-        // atomic write that an injection lands wholly before or after, but the
-        // hold would stop happening and this test is where to notice.
-        harness.coordinator.send(
-            source: harness.terminalView,
-            data: ArraySlice(EscapeSequences.bracketedPasteStart + Array("hello".utf8)))
-        #expect(queue.isPasteOpenForTesting == false)
     }
 }

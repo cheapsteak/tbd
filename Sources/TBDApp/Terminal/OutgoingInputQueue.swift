@@ -57,6 +57,12 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "outgoingInputQu
 /// start marker is enqueued, and `endUserPaste()` **after** the end marker is
 /// enqueued. The paste is thus already open when its own first byte goes out,
 /// and still open when its last byte goes out.
+///
+/// That call order is **comment-enforced only**: no test can discriminate it,
+/// because the observable state a test can reach (`isPasteOpenForTesting`,
+/// the recorded writes) is identical whether the marker is enqueued just
+/// before or just after the flag flips, so reordering the two lines reddens
+/// nothing. Reorder them only with this paragraph in hand.
 @MainActor
 final class OutgoingInputQueue {
     /// Performs the actual write once the queue has decided a chunk may go
@@ -103,6 +109,14 @@ final class OutgoingInputQueue {
     private let pasteHoldBound: Duration
 
     private var isPasteOpen = false
+    /// The last outcome `enqueueUserBytes` saw. Exists only to make
+    /// `noteUserWriteOutcome` edge-triggered.
+    ///
+    /// Starts optimistic so a healthy panel logs **nothing**: were the
+    /// initial value `nil` or `false`, the first keystroke of every panel
+    /// that works fine would announce a recovery from a failure that never
+    /// happened.
+    private var lastUserWriteReachedTransport = true
     private struct PendingInjection {
         let id: UUID
         let data: Data
@@ -159,6 +173,16 @@ final class OutgoingInputQueue {
         pendingInjections.count
     }
 
+    /// Test-only: how many times `enqueueUserBytes` has seen the transport's
+    /// answer *change* — which is exactly the number of lines
+    /// `noteUserWriteOutcome` has logged. Counting the edges rather than
+    /// reading the current bit is what discriminates the mutation that
+    /// matters: a diagnostic that logged unconditionally would leave the bit
+    /// identical and this count climbing per keystroke. Zero means the panel
+    /// has been in one state throughout — which for a working panel is the
+    /// expected reading.
+    private(set) var userWriteOutcomeTransitionsForTesting = 0
+
     /// Test-only: whether a user paste is currently open. Lets a test drive
     /// the *production* marker-detection path (`Coordinator.send`) and observe
     /// what it decided, instead of calling `beginUserPaste()` directly and
@@ -176,8 +200,41 @@ final class OutgoingInputQueue {
     /// transport failure to, exactly as it was before this queue existed
     /// (`localProcess?.send` / `fdSidecar.sendInput` were already
     /// fire-and-forget).
+    ///
+    /// Nobody to report to is not the same as nothing to say: `write` now
+    /// *knows* the bytes reached no transport, and on a holder-backed panel
+    /// that is true of every keystroke, so a human types and the only
+    /// diagnostic is absence. `noteUserWriteOutcome` turns that into one log
+    /// line per episode.
     func enqueueUserBytes(_ data: Data) {
-        _ = write(data)
+        noteUserWriteOutcome(write(data))
+    }
+
+    /// Edge-triggered diagnostic for the user's stream: one line when
+    /// keystrokes stop reaching a transport, one when they start again, and
+    /// nothing at all on the happy path.
+    ///
+    /// Edge-triggered rather than per-event because this is the hot path the
+    /// output direction of this subsystem carries an explicit warning about
+    /// (`TerminalPanelView.swift:750`, the paint-starvation investigation),
+    /// and `docs/diagnostics-strategy.md` reserves per-event `.debug` for
+    /// paths that are not genuinely hot. `.info` per that taxonomy: a
+    /// lifecycle transition inside a subsystem, invisible in the default
+    /// stream, retrievable with `log stream --level info`.
+    ///
+    /// The injection side deliberately does not call this: it reports its
+    /// outcome to the daemon as a return value, which is a stronger channel
+    /// than a log.
+    private func noteUserWriteOutcome(_ reachedTransport: Bool) {
+        guard lastUserWriteReachedTransport != reachedTransport else { return }
+        lastUserWriteReachedTransport = reachedTransport
+        userWriteOutcomeTransitionsForTesting += 1
+        if reachedTransport {
+            logger.info("outgoingInputQueue: user input is reaching a transport again")
+        } else {
+            logger.info(
+                "outgoingInputQueue: user input reached no transport (no live pty and no connected sidecar attach); keystrokes are being dropped until this recovers")
+        }
     }
 
     /// Marks a user paste as open. Any injection enqueued before the matching
