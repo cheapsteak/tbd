@@ -373,6 +373,34 @@ So:
   exponent — and the freshness floor is waived for that single call, leaving the
   cadence, manual-refresh and activity paths floored. It is a per-gesture
   release, not a hole in the gate: a user cannot rotate in a loop.
+
+  **A rotation can outrun a probe of the token it replaces.** At most one
+  billed request per profile is ever in flight, so a rotation that lands while
+  the previous token's probe is still out has its own probe dropped rather
+  than issued — and the previous token's rejection can therefore arrive after
+  the rotation. A hold does not expire, so left alone that late rejection
+  would arm a hold describing a credential the user has already replaced,
+  pinning a freshly pasted and possibly perfectly good token behind the very
+  gesture the user just made. A per-profile **credential generation** prevents
+  it: a counter bumped whenever the profile's credential changes, captured
+  before a request is sent and compared when that request's outcome is
+  recorded. A mismatch means the outcome describes a credential that no longer
+  exists, and such an outcome may not arm a hold.
+
+  The generation governs the **retry regime and nothing else**. The stale
+  outcome is still recorded as the profile's status — writing an outcome the
+  credential has outrun is pre-existing accepted behavior, and suppressing it
+  would leave the row with no status at all in exactly the window this is
+  about — so only the choice between holding and scheduling keys off the
+  comparison. A mismatch falls through to the **timed schedule** rather than to
+  no retry at all, so the profile self-heals at the next turn end rather than
+  waiting on a gesture — the same bounded recovery every failure that is not a
+  live rejection gets. That direction is the point:
+  the mechanism **fails open**, routing any uncertainty about which credential
+  an outcome describes to the bounded timed schedule and never to a hold
+  nothing can release. The counter is in memory beside the retry state it
+  guards and resets with the daemon, which is harmless for the same reason —
+  the state it would have gated resets with it.
 - **Manual refresh** in the profile row's `⋯` menu, subject to the same floor,
   and the second release of the hold. It names a profile id, and a named id
   reaches the daemon from that gesture alone — picker-open and
