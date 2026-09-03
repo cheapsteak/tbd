@@ -122,7 +122,8 @@ struct RowActionMenuActions {
             location: worktree.location,
             provider: worktree.providerBinding?.provider,
             providerCapabilities: providerCapabilities,
-            isGone: isGone
+            isGone: isGone,
+            remoteDeleteEnabled: appState.remoteDeleteEnabled
         )
     }
 
@@ -216,6 +217,16 @@ struct RowActionMenuActions {
         case .archive:
             let wtID = worktree.id
             Task { await appState.archiveWorktree(id: wtID) }
+
+        case .deleteRemoteSession:
+            // Only a remote lane composes this item, so a local row cannot
+            // reach it; a row whose binding has gone missing returns rather
+            // than guessing at a session id.
+            guard let binding = worktree.providerBinding else { return }
+            Task {
+                await appState.deleteRemoteSession(
+                    provider: binding.provider, sessionID: binding.sessionID)
+            }
 
         case .pin:
             let wtID = worktree.id

@@ -1594,6 +1594,26 @@ final class AppState {
                 provider: provider, sessionID: sessionID, pinned: pinned)
         }
 
+    /// How `deleteRemoteSession` destroys a provider session — injectable for
+    /// the same reason as `remoteSessionPinSetter` (`DaemonClient` is concrete,
+    /// no protocol), so both outcomes of a delete are testable without a real
+    /// daemon and without anything actually being destroyed. Arguments are
+    /// `(provider, sessionID, retain)`.
+    @ObservationIgnored lazy var remoteSessionDeleter: @MainActor (String, String, Bool) async throws -> RemoteDeleteResult =
+        { [daemonClient] provider, sessionID, retain in
+            try await daemonClient.remoteDelete(
+                provider: provider, sessionID: sessionID, retain: retain)
+        }
+
+    /// How `deleteRemoteSession` asks the user before destroying something.
+    /// A seam rather than a direct `NSAlert` call for two reasons: the success
+    /// path is otherwise untestable, and a headless test that reached
+    /// `runModal()` would not fail — it would hang the whole suite waiting for
+    /// a click nobody is there to make. Returns whether the user confirmed;
+    /// a state that has gone away confirms nothing.
+    @ObservationIgnored lazy var remoteDeleteConfirmer: @MainActor (String) -> Bool =
+        { [weak self] message in self?.confirmRemoteDelete(message: message) ?? false }
+
     /// How `createRemoteLane` starts a provider session — injectable for the
     /// same reason as `remoteRenamePusher` (`DaemonClient` is concrete, no
     /// protocol), so the optimistic-placeholder paths are testable without a

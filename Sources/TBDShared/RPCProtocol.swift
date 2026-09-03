@@ -3377,6 +3377,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// verb and parsing its error string, exactly as `remoteBackendsLive` does
     /// for the outer flag.
     public let claudeCloudLive: Bool
+    /// Whether `remote.delete` is permitted (`remote_delete_enabled`). Default
+    /// OFF while it soaks. The app gates the Delete item on this, so with it
+    /// false the destructive action is not offered at all rather than offered
+    /// and refused — resolved through `Config.remoteDeleteEnabledDefault`, so
+    /// an install that never touched the toggle reports whatever the shipped
+    /// default currently is.
+    public let remoteDeleteEnabled: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -3390,7 +3397,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 remoteBackendsLive: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
-                claudeCloudLive: Bool = false) {
+                claudeCloudLive: Bool = false,
+                remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -3404,6 +3412,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.queuedPromptEnabled = queuedPromptEnabled
         self.claudeCloudEnabled = claudeCloudEnabled
         self.claudeCloudLive = claudeCloudLive
+        self.remoteDeleteEnabled = remoteDeleteEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -3440,6 +3449,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         claudeCloudEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .claudeCloudEnabled) ?? Config.claudeCloudEnabledDefault
         claudeCloudLive = try c.decodeIfPresent(Bool.self, forKey: .claudeCloudLive) ?? false
+        // New field for the remote-delete gate. A daemon that does not send it
+        // would refuse the verb anyway, so fall through to the shipped default
+        // rather than offering a destructive action nothing can carry out.
+        remoteDeleteEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteDeleteEnabled) ?? Config.remoteDeleteEnabledDefault
     }
 }
 

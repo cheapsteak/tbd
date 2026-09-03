@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// The remote half of retiring and reviving a lane
 /// (`docs/specs/2026-08-16-remote-lane-archive-design.md`, "Archive",
@@ -112,23 +113,16 @@ struct RemoteLaneLifecycle: Sendable {
     /// here; one that says nothing degrades to the `working` guard alone.
     /// **The guard is therefore inert until a provider adopts the key, and
     /// TBD never fabricates the fact.**
-    static let dirtyWorkspaceMetaKey = "workspace_dirty"
+    static let dirtyWorkspaceMetaKey = RemoteSessionPayload.dirtyWorkspaceMetaKey
 
     /// Reads the dirty-checkout claim out of a session's `meta`.
     ///
-    /// `meta` is a flat string-to-string map, so the claim arrives as text.
-    /// Only `"true"` and `"1"` (trimmed, case-insensitively) are read as a
-    /// claim; an absent key, an empty value, and anything unrecognized all
-    /// mean "no claim was made" and leave the guard inert. Deliberately not
-    /// a permissive truthiness test: this value decides whether a user's
-    /// archive is refused, and inventing a claim out of a value a provider
-    /// meant for display would refuse a gesture nobody asked to block.
+    /// The reading itself lives on `RemoteSessionPayload` in `TBDShared`,
+    /// because the app's delete confirmation asks the same question of the same
+    /// key and two copies of a rule this sharp would drift. This name stays as
+    /// the daemon's way in.
     static func metaReportsDirtyWorkspace(_ meta: [String: String]?) -> Bool {
-        guard let raw = meta?[dirtyWorkspaceMetaKey] else { return false }
-        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "true", "1": return true
-        default: return false
-        }
+        RemoteSessionPayload.metaReportsDirtyWorkspace(meta)
     }
 
     /// The refusal for a lane whose agent is mid-task. Parallels how local

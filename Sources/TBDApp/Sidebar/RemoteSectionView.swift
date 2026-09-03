@@ -636,7 +636,8 @@ struct RemoteSessionRowView: View {
                 // session always offer the same verb.
                 isPinned: appState.remoteSessionIsPinned(
                     provider: session.provider, sessionID: session.payload.id),
-                exited: session.payload.state == .exited
+                exited: session.payload.state == .exited,
+                deleteEnabled: appState.remoteDeleteEnabled
             )
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 switch item {
@@ -656,6 +657,8 @@ struct RemoteSessionRowView: View {
         } label: {
             Text(action.title)
         }
+        .disabled(!action.isEnabled)
+        .help(action.disabledHelp ?? "")
     }
 
     /// Dispatches a `RemoteSessionActionMenu.Kind` to its side effect. Kept
@@ -696,6 +699,15 @@ struct RemoteSessionRowView: View {
                     remoteRowLogger.error(
                         "remoteDismiss failed for \(session.provider, privacy: .public)/\(session.payload.id, privacy: .public): \(error, privacy: .public)")
                 }
+            }
+        case .delete:
+            // The confirmation, the retain decision and the error toast all
+            // live in `AppState.deleteRemoteSession` — the lane row's menu
+            // reaches the same method, so the two surfaces cannot come to
+            // different conclusions about the same session.
+            Task {
+                await appState.deleteRemoteSession(
+                    provider: session.provider, sessionID: session.payload.id)
             }
         case .pin, .unpin:
             let pinned = kind == .pin

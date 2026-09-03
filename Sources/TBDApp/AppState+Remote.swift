@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import TBDShared
 import os
@@ -233,6 +234,78 @@ extension AppState {
     /// offers the correct Pin/Unpin verb.
     func remoteSessionIsPinned(provider: String, sessionID: String) -> Bool {
         remoteSessions.first { $0.provider == provider && $0.payload.id == sessionID }?.pinnedAt != nil
+    }
+
+    // MARK: - Destroying a session
+
+    /// Whether the daemon currently permits `remote.delete`
+    /// (`remote_delete_enabled`). Read from the capability payload rather than
+    /// assumed, so with the flag off the menus compose no Delete at all instead
+    /// of offering a destructive action the daemon would refuse.
+    var remoteDeleteEnabled: Bool {
+        daemonCapabilities?.remoteDeleteEnabled ?? Config.remoteDeleteEnabledDefault
+    }
+
+    /// Destroy a remote session, confirming first unless nothing is at stake.
+    ///
+    /// **TBD asks for a receipt whenever the provider can give one.** The
+    /// contract forbids a *provider* from implying retention, not a caller from
+    /// requesting it, and the request is what this whole design is for:
+    /// destroying a session should not destroy the conversation. The receipt is
+    /// also what a later Revive-as-reseed reads. When the provider does not
+    /// declare `retain` no receipt is possible, and the confirmation says so in
+    /// as many words — that is the branch a user most needs to see.
+    ///
+    /// The confirmation itself is `RemoteDeleteConfirmation.decide`, which is
+    /// pure; this method supplies the facts and runs the alert. `expiresAt` is
+    /// nil at this point on purpose: no receipt exists yet, and the contract
+    /// makes stating an expiry TBD does not know a MUST NOT.
+    func deleteRemoteSession(provider: String, sessionID: String) async {
+        let session = remoteSessions.first {
+            $0.provider == provider && $0.payload.id == sessionID
+        }
+        let capabilities = remoteProviders.first { $0.config.name == provider }?
+            .describe?.capabilities ?? []
+        let willRetain = capabilities.contains("retain")
+        let decision = RemoteDeleteConfirmation.decide(
+            state: session?.payload.state ?? .unknown,
+            workspaceDirty: session?.payload.reportsDirtyWorkspace ?? false,
+            willRetain: willRetain,
+            sessionTitle: session?.payload.title ?? "",
+            expiresAt: nil)
+        if case .confirm(let message) = decision, !remoteDeleteConfirmer(message) {
+            return
+        }
+        do {
+            let outcome = try await remoteSessionDeleter(provider, sessionID, willRetain)
+            if !outcome.deleted {
+                // Not a failure: the contract has `delete` succeed on an id the
+                // provider no longer has. Say so rather than reporting nothing,
+                // because a gesture that appears to do nothing is
+                // indistinguishable from one that missed.
+                showAlert("That session was already gone on \(provider).")
+            }
+            await refreshRemote()
+        } catch {
+            remoteLogger.error(
+                "remoteDelete failed for \(provider, privacy: .public)/\(sessionID, privacy: .public): \(error, privacy: .public)")
+            showAlert("Couldn't delete the session: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Present the destructive confirm. Modal, mirroring
+    /// `confirmDefaultAccountFallback`; the destructive verb is the first
+    /// button and Cancel is the second, so Return does not destroy anything by
+    /// itself.
+    @MainActor
+    func confirmRemoteDelete(message: String) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete this remote session?"
+        alert.informativeText = message
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     // MARK: - Creating a session

@@ -819,6 +819,39 @@ public struct RetainReceipt: Codable, Sendable, Equatable {
 ///
 /// `deleted: false` is a success, not a failure: deleting an unknown or
 /// already-deleted id is idempotent and exits 0.
+public extension RemoteSessionPayload {
+    /// The `meta` key by which a provider claims its checkout has uncommitted
+    /// work. TBD never fabricates the fact: a provider that says nothing leaves
+    /// every guard reading this inert.
+    static let dirtyWorkspaceMetaKey = "workspace_dirty"
+
+    /// Reads the dirty-checkout claim out of a session's `meta`.
+    ///
+    /// `meta` is a flat string-to-string map, so the claim arrives as text.
+    /// Only `"true"` and `"1"` (trimmed, case-insensitively) are read as a
+    /// claim; an absent key, an empty value, and anything unrecognized all mean
+    /// "no claim was made". Deliberately not a permissive truthiness test: this
+    /// value decides whether a user's archive is refused and whether a delete
+    /// stops to confirm, and inventing a claim out of a value a provider meant
+    /// for display would block a gesture nobody asked to block.
+    ///
+    /// It lives here, beside the payload, because both sides of the wire read
+    /// it: the daemon's archive guard and the app's delete confirmation. Two
+    /// copies of a rule this sharp would drift.
+    static func metaReportsDirtyWorkspace(_ meta: [String: String]?) -> Bool {
+        guard let raw = meta?[dirtyWorkspaceMetaKey] else { return false }
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true", "1": return true
+        default: return false
+        }
+    }
+
+    /// This session's own dirty-checkout claim.
+    var reportsDirtyWorkspace: Bool {
+        Self.metaReportsDirtyWorkspace(meta)
+    }
+}
+
 public struct RemoteDeleteResult: Codable, Sendable, Equatable {
     public let id: String
     public let deleted: Bool

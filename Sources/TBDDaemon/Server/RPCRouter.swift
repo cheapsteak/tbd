@@ -815,7 +815,8 @@ public final class RPCRouter: Sendable {
             remoteBackendsLive: remoteManager != nil,
             queuedPromptEnabled: config.queuedPromptEnabled,
             claudeCloudEnabled: config.claudeCloudEnabled,
-            claudeCloudLive: claudeCloudLive))
+            claudeCloudLive: claudeCloudLive,
+            remoteDeleteEnabled: config.remoteDeleteEnabled))
     }
 
     // MARK: - PR Status
