@@ -69,6 +69,54 @@ struct RepoSectionRemoteSessionsTests {
         #expect(RepoSectionView.matchedRemoteSessions(sessions, repoID: UUID(), worktrees: []).isEmpty)
     }
 
+    // MARK: - archived sessions are display policy, applied here
+
+    /// A session built through the PRODUCTION decode path: the payload comes
+    /// from provider-shaped JSON, so these tests exercise the real
+    /// `archived` decoding — including the absent-reads-as-false case a
+    /// hand-assembled struct would never reach. `archivedJSON` is the raw
+    /// JSON value (or nil to omit the key entirely, as a provider that has
+    /// never heard of `archived` does).
+    private func decodedSession(
+        id: String, resolvedRepoID: UUID?, archivedJSON: String? = nil
+    ) throws -> RemoteSessionInfo {
+        var fields = ["\"id\": \"\(id)\"", "\"state\": \"running\""]
+        if let archivedJSON { fields.append("\"archived\": \(archivedJSON)") }
+        let json = "{ \(fields.joined(separator: ", ")) }"
+        let payload = try JSONDecoder().decode(RemoteSessionPayload.self, from: Data(json.utf8))
+        return RemoteSessionInfo(
+            provider: "acme", payload: payload,
+            gone: false, dismissed: false, lastSeen: Date(), resolvedRepoID: resolvedRepoID)
+    }
+
+    /// The contract keeps archived sessions in `list` and leaves the display
+    /// policy to the caller — this filter is where TBD writes it. Without
+    /// the exclusion, archiving an adopted lane retires its worktree row and
+    /// the session reappears immediately underneath as a bare session row
+    /// nothing can remove.
+    @Test func matchedRemoteSessionsExcludesArchivedSessions() throws {
+        let repoID = UUID()
+        let sessions = [
+            try decodedSession(id: "archived", resolvedRepoID: repoID, archivedJSON: "true"),
+            try decodedSession(id: "active", resolvedRepoID: repoID),
+        ]
+        let result = RepoSectionView.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        #expect(result.map(\.payload.id) == ["active"])
+    }
+
+    /// The other arm: the exclusion must not swallow ordinary sessions. Both
+    /// non-archived spellings are covered — an explicit `false`, and the key
+    /// omitted altogether, which the contract reads as `false`.
+    @Test func matchedRemoteSessionsIncludesUnarchivedSessions() throws {
+        let repoID = UUID()
+        let sessions = [
+            try decodedSession(id: "explicit-false", resolvedRepoID: repoID, archivedJSON: "false"),
+            try decodedSession(id: "absent", resolvedRepoID: repoID),
+        ]
+        let result = RepoSectionView.matchedRemoteSessions(sessions, repoID: repoID, worktrees: [])
+        #expect(Set(result.map(\.payload.id)) == ["explicit-false", "absent"])
+    }
+
     // MARK: - dedup against adopted worktree rows
 
     /// The defect this filter closes: a session adopted into a worktree row

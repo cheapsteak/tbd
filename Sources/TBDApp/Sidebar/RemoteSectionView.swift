@@ -122,11 +122,17 @@ struct RemoteSectionView: View {
     /// (including this one) — calling that inferred isolation from a plain
     /// (non-`@MainActor`) test context traps at runtime instead of failing
     /// to compile.
+    ///
+    /// Sessions the provider reports as `archived` are excluded too, for the
+    /// same reason `RepoSectionView.matchedRemoteSessions` excludes them: the
+    /// contract keeps archived sessions in `list` and assigns the caller the
+    /// display policy for them, and these two filters are where TBD applies
+    /// it. They stay reachable in the Provider Desk's session ledger.
     nonisolated static func sessions(
         in all: [RemoteSessionInfo], forProvider provider: String, knownRepoIDs: Set<UUID>
     ) -> [RemoteSessionInfo] {
         all.filter {
-            $0.provider == provider && !$0.dismissed
+            $0.provider == provider && !$0.dismissed && !$0.payload.isArchived
                 && ($0.resolvedRepoID == nil || !knownRepoIDs.contains($0.resolvedRepoID!))
         }
     }

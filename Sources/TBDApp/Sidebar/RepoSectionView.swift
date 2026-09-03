@@ -454,13 +454,21 @@ struct RepoSectionView: View {
     /// than defaulted so a new call site cannot silently reintroduce the
     /// duplicate.
     ///
-    /// An adopted lane therefore has exactly one surface, never two. It cannot
-    /// yet have zero either, because there is currently no way to retire an
-    /// adopted row: archiving a remote lane is refused (stopping the provider's
-    /// session is unimplemented), so the row simply persists. When remote
-    /// archive does land, this filter needs no change to stay correct —
-    /// `AppState.visibleWorktrees` drops archived rows from `worktrees`, so the
-    /// session would fall back to rendering as a plain session row.
+    /// An adopted lane therefore has exactly one surface, never two.
+    ///
+    /// A session the provider reports as `archived` gets NO surface here: it is
+    /// filtered out outright. The contract requires a provider to keep archived
+    /// sessions in `list` (`docs/remote-provider-contract.md` § "Archived
+    /// sessions stay in the inventory") and assigns the CALLER the display
+    /// policy for them — showing active sessions and hiding archived ones is a
+    /// decision applied to a complete inventory, and this filter is where TBD
+    /// makes it. Without it, archiving an adopted lane creates a row nothing
+    /// can remove: `AppState.visibleWorktrees` drops the archived worktree row,
+    /// the session falls back to rendering as a plain session row underneath
+    /// it, and no gesture retires that row while the provider keeps reporting
+    /// the session. Archived sessions stay reachable in the repo's Archived tab
+    /// (for an adopted lane) and in the Provider Desk's session ledger, which
+    /// lists every non-dismissed session the provider reports.
     nonisolated static func matchedRemoteSessions(
         _ all: [RemoteSessionInfo],
         repoID: UUID,
@@ -468,7 +476,7 @@ struct RepoSectionView: View {
     ) -> [RemoteSessionInfo] {
         let adopted = Set(worktrees.map(\.location).filter { !$0.isLocal })
         return all
-            .filter { $0.resolvedRepoID == repoID && !$0.dismissed }
+            .filter { $0.resolvedRepoID == repoID && !$0.dismissed && !$0.payload.isArchived }
             .filter { !adopted.contains(.remote(provider: $0.provider, sessionID: $0.payload.id)) }
             .sorted(by: RepoSectionView.isOrderedByCreation)
     }
