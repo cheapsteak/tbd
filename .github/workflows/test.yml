@@ -560,13 +560,149 @@ jobs:
         # the step is not quiet at all, defeating its entire purpose. With the
         # flag they run strictly one at a time (24 s). Serial execution on an
         # idle machine IS this step; do not "optimize" the flag away.
+        #
+        # The pty (`script -q /dev/null`) is what makes this step's log arrive
+        # in real time. On the serial path SwiftPM relays the test binary's
+        # output through `print($0, terminator: "")` on its own stdout
+        # (`SwiftTestCommand.runTestProducts`). `scripts/test.sh` runs
+        # `scripts/swift-safe` with no pipe of its own and `swift-safe`
+        # `os.execv`s `swift`, so whatever this step hands the script becomes
+        # SwiftPM's stdout directly. Piping into `tee` makes that stdout a pipe,
+        # and C stdio then fully buffers it in 16 KB blocks (a pipe's
+        # `st_blksize` on macOS). This pass emits roughly 16 KB per minute, so
+        # the log lagged the run by about a minute and was cut at an arbitrary
+        # byte boundary: runs 33797806278 (stalled) and 33787142345 (green) both
+        # stopped at exactly byte 16384, mid-way through the same
+        # `keepsTheReaderForAJobThatIsStillRunning()` line. The last line a
+        # wedged step showed was the buffer boundary, not the hung test. The
+        # fast passes only look real-time because they emit 16 KB a second.
+        # A pty makes SwiftPM's stdout a terminal, so C stdio line-buffers it
+        # and every line lands as it is produced. The pty translates `\n` to
+        # `\r\n`, which is harmless both to the runner log and to the
+        # `grep -oE 'Test run with [0-9]+ tests?'` floor check below. `script`
+        # propagates the child's exit status, `< /dev/null` guarantees nothing
+        # ever waits on the pty for input, and `TERM=dumb` keeps SwiftPM's build
+        # progress line-oriented instead of cursor-rewriting animations.
+        #
+        # The watchdog exists because GitHub's step timeout leaves no evidence.
+        # A stall here is a thread blocked somewhere no Swift Testing time limit
+        # can reach, so the step timeout is the only bound, and being killed by
+        # it records nothing about which test or which frame. So the pipeline
+        # runs in the background and a loop watches it: a healthy pass takes
+        # about 2 minutes (`Test run with 179 tests in 37 suites passed after
+        # 116.847 seconds`), the budget is six times that, and it lands three
+        # minutes short of `timeout-minutes` so sampling and artifact upload
+        # have room.
+        #
+        # On expiry the whole machine's process listing is written first and
+        # unconditionally. The runner is single-tenant, so that listing is both
+        # the record of the fixture's holder, tmux and job processes and the way
+        # we learn what anything is really called. The processes to sample are
+        # then found structurally, by descending the pipeline subshell's own
+        # tree with `pgrep -P`, and never by name: a CI probe of this watchdog
+        # matched `pgrep -x TBDPackageTests` against a live pass and
+        # found nothing, because the swift-testing binary does not run under its
+        # bundle name. A name match fails silently — it samples nothing and
+        # reports success at having collected nothing — whereas a tree walk
+        # finds whatever the pipeline actually spawned. The test binary is
+        # picked out of those descendants by matching `swiftpm-testing`,
+        # `xctest` or `TBDPackageTests` anywhere in the full argv from
+        # `ps -o command=`, not against a name: SwiftPM's
+        # `TestRunner.args(forTestAt:)` runs a swift-testing bundle as
+        # `<toolchain>/swiftpm-testing-helper --test-bundle-path <bundle> …
+        # --testing-library swift-testing` and an XCTest bundle as
+        # `<toolchain>/xctest <bundle>`, so the process executing the tests is
+        # the helper and never carries the bundle's own name — and the kernel
+        # truncates `p_comm` to 15 characters, which would render the helper as
+        # `swiftpm-testing` anyway. Matching unanchored against argv — read
+        # with `-ww` so ps never clips the long toolchain path — sidesteps both
+        # the truncation and the path prefix. When no descendant matches, every
+        # descendant that is not known plumbing
+        # (`script`, the shells, `tee`, `sleep`, python, `swift-safe`) is worth
+        # a stack, and the list is short enough that sampling all of them costs
+        # nothing. `/usr/bin/sample` — part of macOS, present on the runner
+        # image — captures every thread's stack of each target, and only then
+        # are those pids killed, by the pid we captured.
         # timeout-minutes so a wedged tmux test can't eat the job's 6 h default.
         timeout-minutes: 15
         run: |
           set -o pipefail
-          scripts/test.sh --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel \
-            --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure \
-            2>&1 | tee /tmp/quiet-pass.log
+          stall_budget_seconds=720
+          rm -f /tmp/quiet-pass.rc
+          (
+            TERM=dumb script -q /dev/null scripts/test.sh --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel \
+              --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure \
+              < /dev/null 2>&1 | tee /tmp/quiet-pass.log
+            echo "${PIPESTATUS[0]}" > /tmp/quiet-pass.rc
+          ) &
+          pipeline=$!
+          waited=0
+          while kill -0 "$pipeline" 2>/dev/null && [ "$waited" -lt "$stall_budget_seconds" ]; do
+            sleep 5
+            waited=$((waited + 5))
+          done
+          # Collect a process tree by parent pid, so targets are found by
+          # lineage from the pipeline rather than by executable name.
+          descendants() {
+            local parent="$1" child
+            for child in $(pgrep -P "$parent" || true); do
+              echo "$child"
+              descendants "$child"
+            done
+          }
+          if kill -0 "$pipeline" 2>/dev/null; then
+            echo "::error::Quiet pass has been running for ${stall_budget_seconds}s and is being sampled before it is killed."
+            {
+              echo "=== whole-machine process listing at stall (budget ${stall_budget_seconds}s) ==="
+              ps -ww -axo pid,ppid,pgid,stat,%cpu,etime,comm,command || true
+            } > /tmp/quiet-pass-stall-ps.txt
+            kids=$(descendants "$pipeline" || true)
+            {
+              echo
+              echo "=== descendants of the pipeline subshell (pid $pipeline) ==="
+            } >> /tmp/quiet-pass-stall-ps.txt
+            if [ -n "$kids" ]; then
+              kid_list=$(echo $kids | tr ' ' ',')
+              ps -ww -o pid,ppid,pgid,stat,%cpu,etime,comm,command -p "$kid_list" >> /tmp/quiet-pass-stall-ps.txt || true
+            else
+              echo "(none)" >> /tmp/quiet-pass-stall-ps.txt
+            fi
+            targets=""
+            for pid in $kids; do
+              argv=$(ps -ww -o command= -p "$pid" 2>/dev/null || true)
+              case "$argv" in
+                *swiftpm-testing*|*xctest*|*TBDPackageTests*) targets="$targets $pid" ;;
+              esac
+            done
+            if [ -z "$targets" ]; then
+              for pid in $kids; do
+                comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+                case "${comm##*/}" in
+                  ""|script|bash|sh|tee|sleep|Python|python3|swift-safe) ;;
+                  *) targets="$targets $pid" ;;
+                esac
+              done
+            fi
+            if [ -z "$targets" ]; then
+              echo "The pipeline has no sampleable descendants — /tmp/quiet-pass-stall-ps.txt carries the whole-machine listing instead."
+            else
+              {
+                echo
+                echo "=== sampled processes ==="
+              } >> /tmp/quiet-pass-stall-ps.txt
+              for pid in $targets; do
+                ps -ww -o pid,comm,command -p "$pid" >> /tmp/quiet-pass-stall-ps.txt || true
+                sample "$pid" 5 -mayDie -file "/tmp/quiet-pass-stall-sample-$pid.txt" || echo "sample $pid failed"
+              done
+              for pid in $targets; do
+                kill -KILL "$pid" 2>/dev/null || true
+              done
+            fi
+            wait "$pipeline" || true
+            exit 1
+          fi
+          wait "$pipeline" || true
+          rc=$(cat /tmp/quiet-pass.rc 2>/dev/null || echo 1)
           # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
           # with no summary line makes the first `grep` exit 1 and a failing
           # command substitution in an assignment kills the shell — so the
@@ -577,7 +713,23 @@ jobs:
             echo "::error::Quiet pass ran ${count:-no} tests (floor 35) — the --filter regex matched nothing or the target was renamed."
             exit 1
           fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Quiet pass exited $rc"
+            exit "$rc"
+          fi
           echo "Quiet pass executed $count tests."
+
+      # `ignore`, not the `warn` its neighbours use: a green run deliberately
+      # produces no stall files, so absence here is the normal case rather than
+      # a sign that the wiring broke.
+      - name: Upload quiet-pass stall diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quiet-pass-stall-diagnostics
+          path: /tmp/quiet-pass-stall-*.txt
+          if-no-files-found: ignore
+          retention-days: 14
 
       # `warn`, not `ignore`: an absent file means the metrics wiring broke, and
       # that must be visible rather than silently producing an empty dashboard.
