@@ -106,9 +106,9 @@ composer.
 ## Driving `claude` by hand from another pane
 
 `--print-env` starts the server, prints shell-quoted `export` lines, and keeps
-serving until SIGINT or SIGTERM. Use it when you want to type into `claude`
-yourself, or run it under instrumentation, rather than have the wrapper launch
-it.
+serving until SIGINT, SIGTERM or SIGHUP. Use it when you want to type into
+`claude` yourself, or run it under instrumentation, rather than have the
+wrapper launch it.
 
 The exports go to stdout and everything else to stderr, so redirect stdout to a
 file the other pane can source:
@@ -156,7 +156,8 @@ block prints.
 
 `PATH` is deliberately not exported — you already have your own. `TERM`,
 `COLORTERM` and `LANG` are whatever pane 1's own terminal had. Ctrl-C (or a
-`SIGTERM` to the process) stops the server and prints the same summary:
+`SIGTERM` or `SIGHUP` to the process) stops the server and prints the same
+summary:
 
 ```text
 claude-stub: 1 request(s) served at http://127.0.0.1:49593

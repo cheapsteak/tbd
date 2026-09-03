@@ -534,9 +534,13 @@ class QueuedSpawnSignalTests(SignalTargetsFixture):
 
     The handler cannot forward to a child that does not exist yet, so a stop
     signal landing inside `Popen` is parked in `pending_signum` and handed over
-    by `run_claude`. That hand-off runs the same foreground-group check the
-    handler does, or a terminal Ctrl-C queued across the spawn would reach the
-    child a second time.
+    by `run_claude`. That hand-off is unconditional — it skips the
+    foreground-group check `deliver` applies to a live child, because the check
+    answers whether the terminal delivered this signal to the child and for a
+    queued signal it cannot: a signal from before the fork never reached a
+    child that did not exist, and one from after it reaches a child too young
+    to have installed a handler, which the terminal's own copy has already
+    killed under the default disposition.
 
     What these exercise is the hand-off, not the race that fills the queue: a
     stand-in `Popen` parks `pending_signum` the way the handler would, because
@@ -546,7 +550,7 @@ class QueuedSpawnSignalTests(SignalTargetsFixture):
     wrapper before `claude` is spawned.
     """
 
-    def _run_with_queued(self, signum: int, already_delivered: bool) -> list[int]:
+    def _run_with_queued(self, signum: int, foreground: bool) -> list[int]:
         class WaitableChild(FakeChild):
             def wait(self):
                 return 0
@@ -564,15 +568,22 @@ class QueuedSpawnSignalTests(SignalTargetsFixture):
         ), mock.patch.object(
             claude_stub,
             "sigint_reached_child_already",
-            return_value=already_delivered,
+            return_value=foreground,
         ):
             self.assertEqual(0, claude_stub.run_claude("claude", [], {}))
         return child.sent
 
-    def test_a_queued_terminal_ctrl_c_is_not_delivered_to_the_child_again(self):
-        self.assertEqual([], self._run_with_queued(signal.SIGINT, True))
+    def test_a_queued_sigint_is_forwarded_even_from_the_foreground_group(self):
+        # The discriminating case. The check is patched True — the answer a
+        # real wrapper gets, since it runs after the child exists and shares
+        # the group — and the queued SIGINT must be forwarded anyway: it landed
+        # before the fork, so the terminal never delivered it to a child that
+        # did not yet exist, and dropping it loses the user's Ctrl-C entirely.
+        self.assertEqual(
+            [int(signal.SIGINT)], self._run_with_queued(signal.SIGINT, True)
+        )
 
-    def test_a_queued_interrupt_the_child_cannot_have_seen_is_delivered(self):
+    def test_a_queued_sigint_is_forwarded_from_outside_the_foreground_group(self):
         self.assertEqual(
             [int(signal.SIGINT)], self._run_with_queued(signal.SIGINT, False)
         )

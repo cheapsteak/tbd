@@ -287,7 +287,12 @@ def forward(child: subprocess.Popen, signum: int) -> None:
 
 
 def deliver(child: subprocess.Popen, signum: int) -> None:
-    """Forward `signum` to the child, unless the terminal already has.
+    """Forward `signum` to a *live* child, unless the terminal already has.
+
+    This is the rule for a child old enough to own a SIGINT handler of its
+    own — the handler's live-child branch. A signal queued across the spawn
+    goes through `forward` instead and is handed over unconditionally; see
+    `run_claude`.
 
     Only SIGINT can have reached the child on its own: a tty delivers it to
     every process in the foreground group, and `claude` deliberately shares the
@@ -402,8 +407,9 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
     would unwind past a process nothing can signal or wait for, orphaning it.
     Masking the signals across the spawn is not the fix, because the mask
     survives `exec` and would hand `claude` a blocked SIGTERM. So the handler
-    queues instead, and the signal is delivered by hand once the child has a
-    name.
+    queues instead, and the signal is handed over by hand once the child has a
+    name — unconditionally, through `forward`, without the foreground-group
+    check `deliver` applies to a live child.
     """
     SIGNAL_TARGETS.pending_signum = None
     SIGNAL_TARGETS.spawning = True
@@ -429,7 +435,18 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
 
     try:
         if queued is not None:
-            deliver(child, queued)
+            # `forward`, not `deliver`: the position check answers whether the
+            # terminal delivered this signal to the child. For a signal that
+            # arrived before the fork the answer is no — the child did not
+            # exist to be in any process group — yet the check runs after the
+            # child exists and shares the group, so it would answer "already
+            # delivered" and drop a Ctrl-C the child never received. For one
+            # that arrived after the fork the child is microseconds old and has
+            # not installed any handler, so the terminal's copy already
+            # terminates it with the default disposition and a second copy is
+            # harmless (and `forward` swallows the error if it is already
+            # gone). Either way forwarding is right and dropping is wrong.
+            forward(child, queued)
         # No `except KeyboardInterrupt` here: SIGINT is in STOP_SIGNALS, so
         # `handle_stop_signal` owns it for the whole of this call — installed
         # by `main` before any resource existed and restored only in `main`'s
