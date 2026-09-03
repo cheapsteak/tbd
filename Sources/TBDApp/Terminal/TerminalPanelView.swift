@@ -531,6 +531,28 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// synchronous, so everything it enqueued is already on the main queue
         /// by the time this block is appended, and a serial FIFO queue runs all
         /// of it first.
+        ///
+        /// **Precondition: feed the preamble BEFORE live output is wired to
+        /// this view.** The mute is a property of the window, not of the bytes:
+        /// nothing here can tell a preamble-provoked callback from a live one,
+        /// so *everything* delivered while the flag is up is dropped regardless
+        /// of origin — including a batch already parsing on the IO thread when
+        /// the flag went up. `dataReceived` feeds synchronously off main, and
+        /// SwiftTerm's terminal lock serialises the two parses but not the
+        /// order their `onMain` blocks land in, so a live batch's callbacks can
+        /// be queued ahead of the restore and swallowed with the rest.
+        ///
+        /// What that costs if a caller ignores it: a live DA1, DSR or DECRQM
+        /// the agent is waiting on is answered by nobody, and the agent waits
+        /// forever for a reply that was silently dropped. A live OSC 777 in the
+        /// same window is worse than deferred — the observation is nil for the
+        /// whole ingest, so the notification is lost outright. Live keystrokes
+        /// land in the same hole.
+        ///
+        /// The window is **not** negligible: it is the preamble parse plus one
+        /// main-queue turn, and it is largest exactly when the preamble is a
+        /// full scrollback replay, which is the normal case. Order the attach
+        /// so the preamble goes in first and the live feed is connected after.
         @MainActor
         func feedSnapshot(_ data: Data, into terminalView: TerminalView) {
             snapshotIngestDepth += 1
