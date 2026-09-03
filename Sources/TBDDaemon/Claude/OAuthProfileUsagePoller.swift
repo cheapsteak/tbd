@@ -724,6 +724,26 @@ public actor OAuthProfileUsagePoller {
     /// anyone can act on, and a hold armed on it would be unreleasable in
     /// practice: the gesture that releases a hold has already happened. That
     /// case takes the timed schedule instead.
+    ///
+    /// **Signed off as a design position, not derived from the code.** Three
+    /// choices here — a rejected token held while every other failure kind
+    /// stays on the timed schedule, exactly two gestures releasing that hold,
+    /// and a credential generation deciding whether a late-returning rejection
+    /// may arm one at all — were specified by the repository owner before any
+    /// of this was written; they are not an agent's inference from the
+    /// surrounding code. The asymmetry is the substance of the answer. A
+    /// signed-in `.oauth` profile recording `.needsLogin` must keep retrying,
+    /// because re-running `/login` emits no event the daemon can observe and
+    /// the free cadence sweep re-reading `loginIdentity` is that profile's only
+    /// recovery path. A `.httpError` must keep retrying too, because its repair
+    /// ships as a TBD change and the profile has to recover on its own once
+    /// that lands.
+    ///
+    /// So do not simplify this back into a single unified backoff regime for
+    /// all failure kinds. Collapsed toward the timed schedule it restores an
+    /// unbounded loop of billed requests against a credential only the user can
+    /// replace; collapsed the other way, toward the hold, it strands a
+    /// re-logged-in profile on "needs re-login" for as long as the daemon runs.
     private func holdForUserAction(_ profileID: UUID) {
         backoff[profileID] = BackoffState(awaitingUserAction: true)
     }

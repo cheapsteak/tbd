@@ -336,6 +336,15 @@ So:
   either way — the row goes on reading `Token rejected — Replace token…` off
   the status kind, and widening that enum would break snapshot decode on older
   apps, where `decodeIfPresent` throws on an unrecognised raw value.
+
+  The split into two regimes, and the choice of exactly two gestures to release
+  the hold, are design positions settled by the repository owner rather than
+  conclusions anyone should re-derive from the implementation. Neither regime
+  generalises to the other: unifying them under the timed schedule reinstates an
+  unbounded loop of billed requests against a credential only the user can
+  replace, and unifying them under the hold strands a re-logged-in `.oauth`
+  profile — and any profile whose `.httpError` waits on a TBD change — with no
+  recovery path at all.
 - **One probe whenever the credential changes** — creation *and* rotation — so a
   freshly pasted token shows bars immediately and a bad paste is caught at once
   rather than at first spawn. Rotation matters as much as creation: the user
