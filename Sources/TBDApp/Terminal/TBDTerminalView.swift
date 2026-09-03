@@ -745,6 +745,29 @@ class TBDTerminalView: TerminalView {
         }
     }
 
+    /// Suspends OSC event observation and returns a token that restores it.
+    /// A replayed OSC 777 would otherwise raise a real user notification for a
+    /// message the agent sent minutes ago. The observer is not a
+    /// `TerminalViewDelegate` callback, so the coordinator's ingest flag does
+    /// not cover it — the observation itself has to go.
+    func suspendOscObservation() -> OscObservationSuspension {
+        let cancelled = oscObservation
+        oscObservation = nil
+        cancelled?.cancel()
+        return OscObservationSuspension { [weak self] in self?.installNotificationObserver() }
+    }
+
+    /// Restores the OSC observation `suspendOscObservation()` took away.
+    ///
+    /// `@unchecked Sendable` so the token can be carried across the main-queue
+    /// hop that ends a snapshot ingest; `resume()` is only ever called back on
+    /// main, where the observer install belongs.
+    struct OscObservationSuspension: @unchecked Sendable {
+        private let restore: () -> Void
+        init(restore: @escaping () -> Void) { self.restore = restore }
+        func resume() { restore() }
+    }
+
     /// Mirrors upstream's `Terminal.oscNotification` parse:
     /// `notify;title;body` where the body may itself contain `;`.
     nonisolated static func parseNotifyPayload(_ payload: [UInt8]) -> (title: String, body: String)? {

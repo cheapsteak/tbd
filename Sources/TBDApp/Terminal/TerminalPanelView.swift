@@ -493,6 +493,47 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// so plain-var access is race-free.
         private var isTornDown = false
 
+        /// Depth of the snapshot-preamble feeds currently in flight; > 0 while
+        /// `isIngestingSnapshot` is raised. A counter rather than a Bool so two
+        /// overlapping feeds cannot have the first one's restore lower the flag
+        /// out from under the second. MainActor-confined like `isTornDown`.
+        private var snapshotIngestDepth = 0
+
+        /// True only while a snapshot preamble is being fed.
+        ///
+        /// A preamble is replayed history, not live output. Its bytes still
+        /// *look* live to the emulator, so every query in it produces a reply
+        /// and every BEL rings — and the reply path here does not merely echo,
+        /// it types into the child's stdin. Feeding a snapshot without this
+        /// raised is how a cursor-report ends up as input to somebody's agent.
+        var isIngestingSnapshot: Bool { snapshotIngestDepth > 0 }
+
+        /// Feeds a snapshot preamble into `terminalView` with every side effect
+        /// its bytes imply suppressed: the delegate callbacks TBD owns return
+        /// early while `isIngestingSnapshot` is up, and the OSC 777 observer —
+        /// which is not a delegate callback and so is not covered by the flag —
+        /// is suspended for the duration.
+        ///
+        /// The flag is lowered a main-queue turn later, not on return, and that
+        /// is load-bearing. SwiftTerm hops every delegate callback through
+        /// `TerminalView.onMain`, an **unconditional** `DispatchQueue.main.async`
+        /// even when the parse already runs on main, so the replies this feed
+        /// provokes are queued behind us rather than delivered yet; lowering on
+        /// return would leave every one of them unguarded. The parse itself is
+        /// synchronous, so everything it enqueued is already on the main queue
+        /// by the time this block is appended, and a serial FIFO queue runs all
+        /// of it first.
+        @MainActor
+        func feedSnapshot(_ data: Data, into terminalView: TerminalView) {
+            snapshotIngestDepth += 1
+            let observation = (terminalView as? TBDTerminalView)?.suspendOscObservation()
+            terminalView.feed(byteArray: [UInt8](data)[...])
+            DispatchQueue.main.async { [weak self] in
+                observation?.resume()
+                self?.snapshotIngestDepth -= 1
+            }
+        }
+
         @MainActor
         func syncTabCloseContext(_ context: TabCloseContext?, for terminalID: UUID) {
             guard tabCloseContext != context else { return }
@@ -1483,6 +1524,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // MARK: - TerminalViewDelegate
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
+            // Ordering matters: `handleOutgoingInput` scans for 0x03/0x1b and
+            // raises a user interrupt, so this guard must precede it, not
+            // merely the routing beneath it. Anything arriving while a snapshot
+            // preamble is in flight is replayed history or a keystroke aimed at
+            // history — neither is input for the live child.
+            guard !isIngestingSnapshot else { return }
             // Interrupt detection (Ctrl-C / Esc) must keep working in every
             // path, so run it FIRST regardless of where the bytes go next.
             handleOutgoingInput(data)
@@ -1518,6 +1565,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+            // A replayed DECCOLM (or any other size-changing sequence in a
+            // preamble) must not reach the child's `TIOCSWINSZ` or the daemon's
+            // `pane.resize`: the pane's real size is whatever the live view
+            // already has.
+            guard !isIngestingSnapshot else { return }
             // SwiftTerm delivers delegate callbacks on the main thread; the
             // resize/debounce state (`resizeDebounceTask`, `resizeSerializer`,
             // `controlModeAttach`) is MainActor-confined like the rest of the
@@ -1605,9 +1657,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
         }
 
-        func bell(source: TerminalView) { NSSound.beep() }
+        func bell(source: TerminalView) {
+            // A BEL in replayed history rang minutes ago; ringing it again on
+            // restore is noise the user cannot act on.
+            guard !isIngestingSnapshot else { return }
+            NSSound.beep()
+        }
 
         func clipboardCopy(source: TerminalView, content: Data) {
+            // An OSC 52 in replayed history would silently overwrite whatever
+            // the user has on the pasteboard right now.
+            guard !isIngestingSnapshot else { return }
             if let text = String(data: content, encoding: .utf8) {
                 let pb = NSPasteboard.general
                 pb.clearContents()
