@@ -3,7 +3,10 @@
 Mostly the pure parts: turn scripting, the env overlay, the `--print-env`
 exports, the sandbox config, and the closing summary. A second group runs the
 wrapper as a process against a shell script standing in for `claude`, which is
-the only way to observe signal handling and sandbox cleanup. One smoke test
+the only way to observe a real stop signal racing a real spawn. In-process
+tests cover the same handler logic where a stand-in can make the timing
+deterministic — driving `handle_stop_signal` directly, or handing `run_claude`
+a fake `Popen` — and say so where the distinction matters. One smoke test
 spawns the real `claude` against the stub end to end, and skips when no
 `claude` is on PATH. The e2e suite under `.github/workflows/claude-review-v2/tests/e2e/`
 exercises the same fake server, but it drives the review gate's own scenarios
@@ -48,6 +51,25 @@ claude_stub = _load_script_module()
 
 def parse(*argv: str):
     return claude_stub.parse_args(list(argv))
+
+
+def recording_mkdtemp(created: list[str], tmp_root: Path):
+    """A `tempfile.mkdtemp` replacement that records the sandbox it makes.
+
+    Patched over `claude_stub.tempfile.mkdtemp`, it pins the wrapper's auto
+    sandbox under `tmp_root` — which the test already reclaims, so a wrapper
+    that fails to remove its own leaves nothing behind — and appends the path,
+    which is how the test names a directory the wrapper never printed.
+    """
+    real_mkdtemp = tempfile.mkdtemp
+
+    def mkdtemp(*args, **kwargs):
+        kwargs["dir"] = str(tmp_root)
+        path = real_mkdtemp(*args, **kwargs)
+        created.append(path)
+        return path
+
+    return mkdtemp
 
 
 class TurnScriptTests(unittest.TestCase):
@@ -411,10 +433,14 @@ class SignalHandlerStateTests(SignalTargetsFixture):
         # The tty already delivered it to the whole foreground process group,
         # which the child shares; the TUI exits on a double Ctrl-C, so a second
         # one would answer the user's first press with the exit confirmation.
+        # The rule is by position, so a `kill -INT` at a foreground wrapper is
+        # dropped with the keypress — SIGTERM is the way to stop it from
+        # outside.
         self.assertEqual([], self._handle_with_predicate(signal.SIGINT, True))
 
-    def test_a_kill_int_the_child_cannot_have_seen_is_forwarded(self):
-        # `kill -INT` aimed at the wrapper alone never reached the child.
+    def test_a_sigint_from_outside_the_foreground_group_is_forwarded(self):
+        # No controlling terminal, or the wrapper in the background: nothing
+        # but this wrapper can have handed the child that signal.
         self.assertEqual(
             [int(signal.SIGINT)], self._handle_with_predicate(signal.SIGINT, False)
         )
@@ -452,20 +478,15 @@ class LateSignalExitStatusTests(SignalTargetsFixture):
         root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         created: list[str] = []
-        real_mkdtemp = tempfile.mkdtemp
-
-        def recording_mkdtemp(*args, **kwargs):
-            kwargs["dir"] = str(root)
-            path = real_mkdtemp(*args, **kwargs)
-            created.append(path)
-            return path
 
         def finishing_then_signalled(binary, claude_args, env):
             claude_stub.SIGNAL_TARGETS.finishing = True
             os.kill(os.getpid(), signal.SIGTERM)
             return 7
 
-        with mock.patch.object(claude_stub.tempfile, "mkdtemp", recording_mkdtemp):
+        with mock.patch.object(
+            claude_stub.tempfile, "mkdtemp", recording_mkdtemp(created, root)
+        ):
             with mock.patch.object(
                 claude_stub, "run_claude", finishing_then_signalled
             ):
@@ -478,18 +499,24 @@ class LateSignalExitStatusTests(SignalTargetsFixture):
 
 
 class TerminalSigintTests(unittest.TestCase):
-    """When a Ctrl-C has already reached the child through the shared tty."""
+    """The position test that decides whether a SIGINT is forwarded.
+
+    True means the wrapper is the terminal's foreground process group, so the
+    tty delivered the SIGINT to the child as well and the wrapper must not send
+    a second. It is a test of position and not of provenance — a Python handler
+    gets no siginfo, so nothing here can tell a keypress from a `kill -INT`.
+    """
 
     def test_a_tty_the_wrapper_is_not_the_foreground_group_of_is_not_shared(self):
         # A fresh pty is nobody's controlling terminal, so this process cannot
-        # be its foreground group: the SIGINT did not come from there.
+        # be its foreground group: no tty delivered this SIGINT to the child.
         master, slave = pty.openpty()
         self.addCleanup(os.close, master)
         self.addCleanup(os.close, slave)
         self.assertTrue(os.isatty(slave))
         self.assertFalse(claude_stub.sigint_reached_child_already(slave))
 
-    def test_a_non_tty_stdin_means_the_signal_came_from_a_kill(self):
+    def test_a_non_tty_stdin_means_no_terminal_delivered_it(self):
         read_fd, write_fd = os.pipe()
         self.addCleanup(os.close, read_fd)
         self.addCleanup(os.close, write_fd)
@@ -510,6 +537,13 @@ class QueuedSpawnSignalTests(SignalTargetsFixture):
     by `run_claude`. That hand-off runs the same foreground-group check the
     handler does, or a terminal Ctrl-C queued across the spawn would reach the
     child a second time.
+
+    What these exercise is the hand-off, not the race that fills the queue: a
+    stand-in `Popen` parks `pending_signum` the way the handler would, because
+    landing a real signal between a real fork and its `child = ...` assignment
+    is a window microseconds wide and cannot be hit on demand. The real-signal
+    races are covered by the subprocess tests below, which signal a live
+    wrapper before `claude` is spawned.
     """
 
     def _run_with_queued(self, signum: int, already_delivered: bool) -> list[int]:
@@ -554,21 +588,22 @@ class QueuedSpawnSignalTests(SignalTargetsFixture):
 
 class EarlyInterruptTests(SignalTargetsFixture):
     def test_a_ctrl_c_before_claude_runs_exits_130_and_removes_the_sandbox(self):
+        # `main`'s KeyboardInterrupt belt, raised by a stand-in `run_claude`
+        # rather than by a real SIGINT: this is the disposition that can still
+        # fire either side of the handler's reign, and raising it directly is
+        # the only way to land it there on demand. That a real SIGINT before
+        # `claude` starts also exits 130 and strands nothing is the subprocess
+        # test `test_a_sigint_before_claude_starts_is_handled_like_a_sigterm`.
         root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         created: list[str] = []
-        real_mkdtemp = tempfile.mkdtemp
-
-        def recording_mkdtemp(*args, **kwargs):
-            kwargs["dir"] = str(root)
-            path = real_mkdtemp(*args, **kwargs)
-            created.append(path)
-            return path
 
         def interrupted(binary, claude_args, env):
             raise KeyboardInterrupt
 
-        with mock.patch.object(claude_stub.tempfile, "mkdtemp", recording_mkdtemp):
+        with mock.patch.object(
+            claude_stub.tempfile, "mkdtemp", recording_mkdtemp(created, root)
+        ):
             with mock.patch.object(claude_stub, "run_claude", interrupted):
                 status = claude_stub.main(["--text", "x", "--", "-p", "hi"])
 
@@ -895,10 +930,18 @@ class WrapperProcessTests(unittest.TestCase):
                 start_new_session=True,
             )
         self.addCleanup(self._kill_group, wrapper)
+        # Gated on the stderr `serving` line, not on the exports: the exports
+        # are printed and flushed *before* `serve_until_signalled` publishes
+        # the serving event, so a signal sent on the strength of stdout can
+        # land in that gap, find no target, and unwind as `Terminated` with
+        # status 130 instead of stopping the server. The `serving` line is
+        # written after the event is published, so it is a true readiness
+        # signal; `report` flushes, so it reaches this file as it is written.
         self._wait_for(
-            lambda: "ANTHROPIC_BASE_URL" in out.read_text(encoding="utf-8"),
-            "the export lines on stdout",
+            lambda: "serving; Ctrl-C" in err.read_text(encoding="utf-8"),
+            "the serving line on stderr",
         )
+        self.assertIn("ANTHROPIC_BASE_URL", out.read_text(encoding="utf-8"))
 
         wrapper.send_signal(sig)
         try:
@@ -924,30 +967,56 @@ class WrapperProcessTests(unittest.TestCase):
         self._print_env_stops_on(signal.SIGINT)
 
 
-class SandboxCleanupTests(unittest.TestCase):
-    def test_a_failure_after_the_temp_sandbox_exists_still_removes_it(self):
-        # The auto-created sandbox is only reclaimable by the wrapper's own
-        # `finally`, so setup that can fail has to sit inside it.
-        root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
-        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+class SandboxCleanupTests(SignalTargetsFixture):
+    """Setup that fails after the sandbox exists, and what the latch does then.
+
+    `SignalTargetsFixture` is not optional here: `main`'s cleanup latches
+    `finishing` on the module global, so without the swap these runs would
+    silence every later in-process test that expects a signal to be acted on.
+    """
+
+    def _failed_setup(self, root: Path) -> list[str]:
+        """Run `main` with `write_config` raising; return the sandboxes made."""
         created: list[str] = []
-        real_mkdtemp = tempfile.mkdtemp
-
-        def recording_mkdtemp(*args, **kwargs):
-            kwargs["dir"] = str(root)
-            path = real_mkdtemp(*args, **kwargs)
-            created.append(path)
-            return path
-
-        with mock.patch.object(claude_stub.tempfile, "mkdtemp", recording_mkdtemp):
+        with mock.patch.object(
+            claude_stub.tempfile, "mkdtemp", recording_mkdtemp(created, root)
+        ):
             with mock.patch.object(
                 claude_stub, "write_config", side_effect=RuntimeError("boom")
             ):
                 with self.assertRaises(RuntimeError):
                     claude_stub.main(["--text", "x", "--", "-p", "hi"])
+        return created
+
+    def test_a_failure_after_the_temp_sandbox_exists_still_removes_it(self):
+        # The auto-created sandbox is only reclaimable by the wrapper's own
+        # `finally`, so setup that can fail has to sit inside it.
+        root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+
+        created = self._failed_setup(root)
 
         self.assertEqual(1, len(created), "the wrapper did not create a temp sandbox")
         self.assertFalse(Path(created[0]).exists(), "the temp sandbox leaked")
+
+    def test_a_failure_during_setup_still_arms_the_finishing_latch(self):
+        # `write_config` failing means neither `run_claude` nor
+        # `serve_until_signalled` ran, so the latch those two arm themselves
+        # was never touched. Unarmed, a stop signal landing in the wrapper's
+        # `shutil.rmtree` would find no target at all and raise `Terminated`
+        # out of a half-walked sandbox — so `main`'s own cleanup has to arm it
+        # for every path into that block, this one included.
+        root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+
+        created = self._failed_setup(root)
+
+        self.assertEqual(1, len(created), "the wrapper did not create a temp sandbox")
+        self.assertFalse(Path(created[0]).exists(), "the temp sandbox leaked")
+        self.assertTrue(
+            self.targets.finishing,
+            "a run that failed before spawning claude left the latch unarmed",
+        )
 
 
 @unittest.skipUnless(shutil.which("claude"), "no claude binary on PATH")

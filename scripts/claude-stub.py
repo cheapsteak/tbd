@@ -217,6 +217,10 @@ def summary_lines(server: StubServer, env: dict[str, str]) -> list[str]:
 def report(lines: list[str]) -> None:
     for line in lines:
         print(f"claude-stub: {line}", file=sys.stderr)
+    # Flushed rather than left to stderr's buffering: the `serving` line is
+    # what a caller (and the tests) wait on to know the server is up, so it
+    # has to reach a redirected stderr as soon as it is written.
+    sys.stderr.flush()
 
 
 class Terminated(Exception):
@@ -248,8 +252,9 @@ class SignalTargets:
         self.spawning = False
         self.pending_signum: int | None = None
         self.serving_event: threading.Event | None = None
-        # Set once the child has been waited for (or the `--print-env` server
-        # has stopped): from there on the wrapper is only unwinding.
+        # Set once the child has been waited for, the `--print-env` server has
+        # stopped, or `main` has reached its cleanup by any route at all:
+        # from there on the wrapper is only unwinding.
         self.finishing = False
         # A stop signal that arrived during that unwind, kept for the summary.
         self.late_signum: int | None = None
@@ -282,15 +287,23 @@ def forward(child: subprocess.Popen, signum: int) -> None:
 
 
 def deliver(child: subprocess.Popen, signum: int) -> None:
-    """Forward `signum` to the child, unless the terminal beat us to it.
+    """Forward `signum` to the child, unless the terminal already has.
 
     Only SIGINT can have reached the child on its own: a tty delivers it to
     every process in the foreground group, and `claude` deliberately shares the
     wrapper's group so it can own the tty. A second one would read as the
-    double Ctrl-C the TUI exits on, so a Ctrl-C typed at the terminal is not
-    forwarded — while a `kill -INT` aimed at the wrapper alone still is
-    (`sigint_reached_child_already`). Every other signal is forwarded
-    unconditionally; nothing else reaches the child by any route but this one.
+    double Ctrl-C the TUI exits on, so the rule is by position rather than by
+    sender: when the wrapper is the terminal's foreground process group, a
+    SIGINT is treated as a Ctrl-C the child already received and is not
+    forwarded, whatever sent it. A `kill -INT` aimed at a foreground wrapper is
+    indistinguishable from the keypress and is dropped with it. A SIGINT that
+    arrives while the wrapper has no controlling terminal or is not the
+    foreground group — from a script, `nohup`, `start_new_session` — is
+    forwarded (`sigint_reached_child_already`).
+
+    SIGTERM is the signal for stopping a wrapped session from outside: it, like
+    every stop signal that is not SIGINT, is forwarded unconditionally, and
+    nothing reaches the child by any route but this one.
     """
     if signum == signal.SIGINT and sigint_reached_child_already():
         return
@@ -335,19 +348,28 @@ def restore_signal_handlers(previous: dict[int, Any]) -> None:
 
 
 def sigint_reached_child_already(stdin_fd: int = 0) -> bool:
-    """True when the terminal delivered this Ctrl-C to the child as well.
+    """True when the wrapper sits where the terminal delivers SIGINT itself.
 
     A tty sends its SIGINT to every process in the terminal's foreground
     process group, and `claude` deliberately stays in the wrapper's own group
-    so it can own the tty — so when the wrapper is that foreground group, the
-    child already has the signal. Forwarding a second one is not harmless: the
-    TUI exits on a double Ctrl-C, so the wrapper would be answering the user's
-    first press with the confirmation for a second.
+    so it can own the tty — so when the wrapper is that foreground group, a
+    Ctrl-C reached the child directly. Forwarding a second one is not harmless:
+    the TUI exits on a double Ctrl-C, so the wrapper would be answering the
+    user's first press with the confirmation for a second.
 
-    False whenever that reasoning does not hold — stdin is not a tty, there is
-    no controlling terminal, or the wrapper is in the background — because the
-    SIGINT then came from a `kill` aimed at the wrapper alone and the child
-    has not seen it. False is the safe answer either way: it forwards.
+    This is a test of *position*, not of provenance, and it cannot be anything
+    else: a Python handler is handed a signal number and no siginfo, so a
+    `kill -INT <wrapper pid>` and a keypress are the same event here. The rule
+    the wrapper commits to is therefore stated in those terms — in the
+    foreground-group case a SIGINT is treated as a terminal Ctrl-C the child
+    already has, whatever sent it, and is not forwarded. Use SIGTERM to stop a
+    wrapped session from outside; that is forwarded from every position.
+
+    False whenever the foreground reasoning does not hold — stdin is not a tty,
+    there is no controlling terminal, or the wrapper is in the background
+    (a script, `nohup`, `start_new_session`) — because nothing but this wrapper
+    can have handed the child that signal. False is the safe answer either
+    way: it forwards.
     """
     try:
         return os.isatty(stdin_fd) and os.tcgetpgrp(stdin_fd) == os.getpgrp()
@@ -361,12 +383,15 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
     The child deliberately stays in this process's own group and session: the
     interactive TUI has to remain in the terminal's foreground process group to
     own the tty, so it cannot be put behind `start_new_session`. That shared
-    group is why `deliver` drops a Ctrl-C typed at the terminal rather than
-    forwarding it. All this has to do is publish the child for the handlers
-    `main` installed before any resource existed. Without those a stop signal
-    to the wrapper would take the interpreter's default disposition — the
-    process dies where it stands, `main`'s `finally` never runs, the sandbox is
-    left on disk, and `claude` keeps running with nobody waiting on it.
+    group is why `deliver` does not forward a SIGINT the wrapper takes while it
+    is the foreground group: there the terminal delivered it to the child too,
+    so it is treated as a Ctrl-C the child already has whatever sent it, and
+    SIGTERM is the signal for stopping the pair from outside. All this has to
+    do is publish the child for the handlers `main` installed before any
+    resource existed. Without those a stop signal to the wrapper would take the
+    interpreter's default disposition — the process dies where it stands,
+    `main`'s `finally` never runs, the sandbox is left on disk, and `claude`
+    keeps running with nobody waiting on it.
 
     PEP 475 retries the interrupted `wait()` once a handler returns, so the
     call resumes and returns the child's status as soon as the forwarded
@@ -413,13 +438,18 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
         # so the wait can only be interrupted and then resumed by PEP 475.
         status = child.wait()
     finally:
-        SIGNAL_TARGETS.child = None
         # The child has been waited for, so from here the wrapper is only
         # unwinding — a few milliseconds of summary, sandbox removal, and
         # return. A stop signal landing in that window has nothing to reach,
         # so the handler swallows it rather than replacing the child's status
         # with a `Terminated` or interrupting the sandbox removal.
+        #
+        # Latched before the child is dropped, never after: the handler tests
+        # `finishing` first and `child` second, so this order leaves no
+        # bytecode gap in which a signal finds neither. The reverse order has
+        # one, and a signal landing in it raises `Terminated`.
         SIGNAL_TARGETS.finishing = True
+        SIGNAL_TARGETS.child = None
     # Popen.wait reports a signal death as a negative signal number; callers
     # reading an exit status expect the shell's conventional 128 + signal.
     return status if status >= 0 else 128 - status
@@ -443,6 +473,10 @@ def serve_until_signalled(
     print(f"# run claude from this directory (the sandbox trusts it): {Path.cwd()}")
     sys.stdout.flush()
     stop = threading.Event()
+    # Published before the line that announces it, never after: the `serving`
+    # line is what a caller waits on to know the server is up, and a signal
+    # arriving between the line and the event would find no target and raise
+    # `Terminated` instead of stopping the server cleanly.
     SIGNAL_TARGETS.serving_event = stop
     try:
         report(["serving; Ctrl-C (or SIGTERM) to stop"])
@@ -489,12 +523,20 @@ def main(argv: list[str]) -> int:
     any of SIGTERM, SIGHUP and SIGINT arriving anywhere below — building the
     sandbox, binding the stub server, spawning claude — unwinds through the
     cleanup instead of taking the interpreter's default disposition. Once the
-    run is finishing — the child waited for, or the `--print-env` server
-    stopped — a stop signal is instead recorded and swallowed, so the last few
-    milliseconds of summary and sandbox removal cannot be interrupted either,
-    and the status stays the one the child exited with. The guarantee is the
-    same for all three: only SIGKILL or a hard crash can leave the sandbox on
-    disk or the child unwaited-for.
+    run is finishing — the child waited for, the `--print-env` server stopped,
+    or the run failing its way into the cleanup below — a stop signal is
+    instead recorded and swallowed, so the last few milliseconds of summary and
+    sandbox removal cannot be interrupted either, and the status stays the one
+    the child exited with. The guarantee is the same for all three: only
+    SIGKILL or a hard crash can leave the sandbox on disk or the child
+    unwaited-for.
+
+    What the three do differs only for SIGINT, and only by where the wrapper
+    sits: as the terminal's foreground process group it treats a SIGINT as a
+    Ctrl-C `claude` already received and does not forward it, whatever sent it,
+    while a SIGINT arriving with no controlling terminal or from the background
+    is forwarded like any other. SIGTERM is the signal for stopping the wrapper
+    and its child from outside.
     """
     previous_handlers = install_signal_handlers()
     try:
@@ -543,6 +585,17 @@ def main(argv: list[str]) -> int:
                     status = run_claude(args.claude_binary, claude_args, env)
                 report(summary_lines(server, env))
         finally:
+            # Armed here for every path into this block, not just the two that
+            # arm it themselves: by the time control reaches it any child has
+            # been waited for or never existed, and the wrapper is a few
+            # milliseconds from returning. An exception out of `mkdir`,
+            # `write_config` or the server's socket bind would otherwise get
+            # here with the latch unset, and a stop signal landing during the
+            # `rmtree` below would raise `Terminated` out of a half-walked
+            # sandbox. `run_claude` and `serve_until_signalled` still latch on
+            # their own way out — that covers the window between the child
+            # exiting and control reaching this line.
+            SIGNAL_TARGETS.finishing = True
             if sandbox is not None:
                 if keep:
                     report([f"sandbox kept at {sandbox}"])

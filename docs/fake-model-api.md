@@ -246,6 +246,16 @@ and the only credential in the environment is a placeholder. The summary's
 request count is what the loopback server actually answered — if the CLI had
 reached an upstream, the count would not add up.
 
+Ctrl-C behaves as it would in a bare `claude`: when the wrapper is running in
+the foreground of a terminal, the terminal delivers the SIGINT to `claude`
+directly — the child shares the wrapper's process group so it can own the tty —
+and the wrapper does not forward a second one, which the TUI would read as the
+double Ctrl-C it exits on. To stop a wrapped session from another shell, send
+`SIGTERM` to the wrapper: it forwards that to `claude`, waits for it, prints the
+summary, and removes the sandbox. A `kill -INT` aimed at a wrapper running in a
+terminal's foreground is not forwarded, by design — the terminal is what
+delivers SIGINT there, and the wrapper cannot tell the two apart.
+
 The claim is about model traffic, which is all the stub can see. The CLI's
 other outbound calls — telemetry and the like — are not observed to be absent;
 they are switched off, by the `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` the
