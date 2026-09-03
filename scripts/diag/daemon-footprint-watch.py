@@ -42,7 +42,10 @@ user, and does not suspend or otherwise disturb the target. Recorded per tick:
   ri_lifetime_max_phys_footprint   the peak since the process started.
   ri_resident_size                 RSS, recorded only so the divergence from
                                    footprint stays visible in the record.
-  ri_user_time, ri_system_time     CPU, in nanoseconds, differenced per tick.
+  ri_user_time, ri_system_time     CPU, reported by the kernel in mach time
+                                   units and converted to nanoseconds through
+                                   `mach_timebase_info` before being recorded,
+                                   then differenced per tick.
   ri_pageins                       compressor and swap activity.
 
 After each read the script calls `proc_reset_footprint_interval(pid)`, so the
@@ -192,6 +195,7 @@ from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Sequence
 
 # Python 3.9 floor: this must run on the stock /usr/bin/python3, so no `match`,
 # no `dataclass(slots=True)`, and the `__future__` import above is what keeps
@@ -216,7 +220,9 @@ RELEASE_FRACTION = 0.75
 # trough. RELEASE_FRACTION alone can never fire when the trough itself sits
 # above it, and the incident daemon idled at 990 MB against a 1024 MB threshold,
 # so it would have stayed "in spike" for the rest of the night and the 7 GB and
-# 8 GB spikes that followed would have captured nothing.
+# 8 GB spikes that followed would have captured nothing. It is not guarded by
+# the absolute threshold: the threshold onset is edge triggered, so a plateau
+# that releases under this rule cannot re-fire one.
 RELEASE_RISE_FRACTION = 0.5
 
 # At most an onset capture and one high-water capture per spike. A capture costs
@@ -290,6 +296,35 @@ class RusageInfoV4(ctypes.Structure):
     ]
 
 
+class MachTimebaseInfo(ctypes.Structure):
+    """<mach/mach_time.h> struct mach_timebase_info: nanoseconds = units * numer / denom."""
+
+    _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+
+def read_mach_timebase() -> tuple[int, int]:
+    """The machine's mach-time to nanosecond ratio, read once from libSystem.
+
+    `ri_user_time` and `ri_system_time` are mach absolute time units, not
+    nanoseconds, and on Apple silicon the two differ by a factor of about 41.7:
+    a measured 1.705 s of burned CPU produced a delta of 40,915,797 units
+    against a timebase of numer 125 / denom 3. Reading them as nanoseconds
+    understates CPU by that factor, which is how a busy process reports a
+    fraction of a percent. Falls back to 1/1 (the Intel identity) if the call
+    fails, so a bad read is a wrong scale rather than a dead sampler.
+    """
+    try:
+        lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        lib.mach_timebase_info.argtypes = [ctypes.POINTER(MachTimebaseInfo)]
+        lib.mach_timebase_info.restype = ctypes.c_int
+        info = MachTimebaseInfo()
+        if lib.mach_timebase_info(ctypes.byref(info)) == 0 and info.denom:
+            return int(info.numer), int(info.denom)
+    except Exception:  # noqa: BLE001 - a missing timebase must not stop the watch
+        pass
+    return 1, 1
+
+
 class LibProc:
     """The two libproc entry points this script needs, bound once."""
 
@@ -299,6 +334,7 @@ class LibProc:
         self._lib.proc_pid_rusage.restype = ctypes.c_int
         self._lib.proc_reset_footprint_interval.argtypes = [ctypes.c_int]
         self._lib.proc_reset_footprint_interval.restype = ctypes.c_int
+        self.timebase_numer, self.timebase_denom = read_mach_timebase()
 
     def rusage(self, pid: int) -> RusageInfoV4 | None:
         """Kernel counters for `pid`, or None if it is gone or not ours."""
@@ -306,6 +342,14 @@ class LibProc:
         if self._lib.proc_pid_rusage(pid, RUSAGE_INFO_V4, ctypes.byref(buf)) != 0:
             return None
         return buf
+
+    def mach_to_ns(self, units: int) -> int:
+        """Scale one mach absolute time value to nanoseconds."""
+        return int(units) * self.timebase_numer // self.timebase_denom
+
+    def cpu_times_ns(self, usage: RusageInfoV4) -> tuple[int, int]:
+        """(user, system) CPU for this sample, in true nanoseconds."""
+        return self.mach_to_ns(usage.ri_user_time), self.mach_to_ns(usage.ri_system_time)
 
     def reset_footprint_interval(self, pid: int) -> bool:
         """Restart the interval max, so the next read is the peak since now."""
@@ -335,6 +379,34 @@ class SpikeDetector:
     Pure and side effect free on purpose: the live loop and the self-test drive
     exactly the same `observe`, so the rate-limiting rules can be tested against
     synthetic series without a daemon, a clock, or a filesystem.
+
+    THE RULES, AND WHY THEY ARE SHAPED THIS WAY
+
+    Onset, absolute threshold: edge triggered. It fires when the peak reaches
+    the threshold and the previous tick's peak did not, or when there was no
+    previous tick at all. The second half is deliberate: a daemon already over
+    the threshold when the watch starts is a spike in progress, and starting a
+    watch mid-spike is the normal way this instrument gets used, so it earns one
+    capture at t0. What the edge stops is the level plateau. A daemon idling at
+    1100 MB against the 1024 MB default would otherwise re-arm and re-fire the
+    same onset forever, which is what the level-triggered version did.
+
+    Onset, rise: the peak stands `rise` above the rolling baseline minimum.
+    Level triggered, and safely so, because the baseline climbs to meet a
+    plateau within one baseline window and the rise then goes to zero.
+
+    Release, either rule: (a) the peak has fallen below `release_fraction` of
+    the level that fired the spike, or (b) the peak is back within
+    `release_rise_fraction` of a rise above the rolling trough. Rule (b) carries
+    no absolute-threshold guard; it does not need one now that the threshold
+    onset is edge triggered, and the rise onset cannot re-fire on a plateau
+    because the baseline has climbed up to the plateau.
+
+    The consequence worth stating: a plateau releases once its baseline catches
+    up, and a further climb off that plateau (5 GB held for an hour, then 8 GB)
+    is then caught by the rise rule measured against the plateau baseline. The
+    old design, which held one plateau open as a single unending spike, missed
+    exactly that second step.
     """
 
     def __init__(
@@ -358,7 +430,11 @@ class SpikeDetector:
         self._in_spike = False
         self._trigger_level = 0
         self._last_capture_value = 0
+        self._previous_capture_value = 0
         self._captures_this_spike = 0
+        # The previous tick's peak, which is what makes the threshold onset an
+        # edge rather than a level. None means no tick has been seen yet.
+        self._previous_peak: int | None = None
 
     @property
     def in_spike(self) -> bool:
@@ -383,24 +459,29 @@ class SpikeDetector:
         # The interval max is a peak the current footprint may have already
         # walked back from, so a spike between two ticks still trips this.
         peak = max(footprint, interval_max)
+        previous_peak = self._previous_peak
+        self._previous_peak = peak
         actions: list[CaptureRequest] = []
 
         if not self._in_spike:
-            reason, level = self._trigger_for(peak, baseline)
+            reason, level = self._trigger_for(peak, baseline, previous_peak)
             if reason is not None:
                 self._in_spike = True
                 self._trigger_level = level
+                self._previous_capture_value = 0
                 self._last_capture_value = peak
                 self._captures_this_spike = 1
                 actions.append(CaptureRequest(now, reason, footprint, interval_max, peak, baseline))
             return actions
 
         if self._releases(peak, baseline):
-            # Fallen far enough below what fired it. The spike is over and the
-            # onset trigger is armed again; no capture on the way down.
+            # Fallen far enough below what fired it, or back down onto its own
+            # baseline. The spike is over and the onset triggers are armed
+            # again; no capture on the way down.
             self._in_spike = False
             self._trigger_level = 0
             self._last_capture_value = 0
+            self._previous_capture_value = 0
             self._captures_this_spike = 0
             return actions
 
@@ -409,39 +490,72 @@ class SpikeDetector:
             and peak >= self._last_capture_value + self.rearm_bytes
         ):
             self._captures_this_spike += 1
+            self._previous_capture_value = self._last_capture_value
             self._last_capture_value = peak
             actions.append(
                 CaptureRequest(now, "highwater", footprint, interval_max, peak, baseline)
             )
         return actions
 
+    def withdraw(self, request: CaptureRequest) -> None:
+        """Give back the accounting for a capture the runner refused to take.
+
+        `observe` bills the capture before the runner is asked, because it is
+        the detector that decides a capture is warranted. When the runner is
+        busy with the previous one it declines, and without this the spike has
+        silently spent a slot on a capture that never happened: a spike is
+        allowed only `max_captures_per_spike`, so on a two-capture budget one
+        refusal can mean the peak of the spike is never sampled at all.
+
+        A refused high-water also has to give back `_last_capture_value`, or the
+        rearm bar stays raised to a level nothing was recorded at. A refused
+        onset does not clear `in_spike`: the spike is real, it was detected, and
+        re-entering it from scratch on the next tick would re-fire an onset
+        capture on every tick for as long as the runner stays busy.
+        """
+        if self._captures_this_spike > 0:
+            self._captures_this_spike -= 1
+        if request.reason == "highwater":
+            self._last_capture_value = self._previous_capture_value
+
     def _releases(self, peak: int, baseline: int) -> bool:
         """Whether this tick ends the spike. Either rule is enough.
 
         (a) The original hysteresis: the peak has fallen well below the level
-        that fired the spike. It is the only rule that can end a spike which is
-        still above the absolute threshold, and it cannot fire at all when the
-        trough sits above `release_fraction` of that level.
+        that fired the spike. It is the only rule that can end a spike while the
+        footprint is still far above its own baseline, and it cannot fire at all
+        when the trough sits above `release_fraction` of that level.
 
-        (b) Back within half a rise of the rolling trough, and below the
-        absolute threshold. This is the case (a) cannot reach: a daemon idling
-        at 990 MB against a 1024 MB threshold, or a rise-triggered spike whose
-        baseline is more than three times the rise. The `peak < threshold` guard
-        is what stops (b) from turning a sustained plateau into a capture on
-        every tick: hold a plateau for longer than the baseline window and the
-        rolling minimum climbs up to meet it, so `peak - baseline` goes to zero
-        and (b) would release, re-arm, and fire a fresh onset capture the very
-        next tick, forever. Above the threshold the plateau stays one spike.
+        (b) Back within half a rise of the rolling trough. This is the case (a)
+        cannot reach: a daemon idling at 990 MB against a 1024 MB threshold, or
+        a rise-triggered spike whose baseline is more than three times the rise.
+        It also ends a sustained plateau, because holding a level for longer than
+        the baseline window drags the rolling minimum up to meet it, so
+        `peak - baseline` goes to zero. That is the intended reading: a level
+        held for a whole baseline window is the new normal, not an ongoing
+        event. Nothing re-fires when it releases, because the threshold onset is
+        edge triggered and the rise onset measures against that same climbed
+        baseline. What does still fire is a further climb off the plateau, which
+        is the case the old absolute-threshold guard on this rule swallowed.
         """
         if peak < self._trigger_level * self.release_fraction:
             return True
-        below_threshold = self.threshold_bytes <= 0 or peak < self.threshold_bytes
-        return below_threshold and peak - baseline < self.rise_bytes * self.release_rise_fraction
+        return peak - baseline < self.rise_bytes * self.release_rise_fraction
 
-    def _trigger_for(self, peak: int, baseline: int) -> tuple[str | None, int]:
-        """Which rule fires on this peak, and the level to release against."""
+    def _trigger_for(
+        self, peak: int, baseline: int, previous_peak: int | None
+    ) -> tuple[str | None, int]:
+        """Which rule fires on this peak, and the level to release against.
+
+        The threshold rule is edge triggered against `previous_peak`: no
+        previous tick, or a previous tick below the threshold. A target already
+        over the threshold when the watch starts therefore gets exactly one
+        capture, and a plateau parked above it gets nothing after that.
+        """
         if self.threshold_bytes > 0 and peak >= self.threshold_bytes:
-            return "threshold", self.threshold_bytes
+            crossed = previous_peak is None or previous_peak < self.threshold_bytes
+            if crossed:
+                return "threshold", self.threshold_bytes
         if self.rise_bytes > 0 and peak - baseline >= self.rise_bytes:
             return "rise", baseline + self.rise_bytes
         return None, 0
@@ -680,6 +794,30 @@ def read_pid_file(path: Path) -> int | None:
         return None
 
 
+# The daemon executable is named TBDDaemon. `tbdd` is accepted too, so a future
+# rename to match the pid file does not silently stop the watch from acquiring.
+DAEMON_COMM_NAMES = ("TBDDaemon", "tbdd")
+
+
+def process_comm(pid: int) -> str | None:
+    """The executable path `ps` reports for `pid`, or None if it cannot say."""
+    try:
+        done = subprocess.run(
+            ["/bin/ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True, timeout=10
+        )
+    except Exception:  # noqa: BLE001 - an unreadable comm is not fatal
+        return None
+    value = done.stdout.strip()
+    return value or None
+
+
+def comm_is_daemon(comm: str | None) -> bool:
+    """Whether a `ps -o comm=` value names the TBD daemon executable."""
+    if not comm:
+        return False
+    return comm.rsplit("/", 1)[-1] in DAEMON_COMM_NAMES
+
+
 def process_start_time(pid: int) -> str | None:
     """The target's wall-clock start, so a restart mid-run is unambiguous."""
     try:
@@ -730,13 +868,13 @@ class Watch:
         self.samples_path = out_dir / "samples.jsonl"
         self.log_path = out_dir / "daemon-log.txt"
         self.stop_event = threading.Event()
+        # A second SIGINT during shutdown sets this and abandons the join on an
+        # in-flight capture. Separate from stop_event because by then stop_event
+        # is already set and would tell us nothing.
+        self.abandon_event = threading.Event()
+        self.signal_count = 0
         self.libproc = LibProc()
-        self.detector = SpikeDetector(
-            threshold_bytes=int(args.threshold_mb * MB),
-            rise_bytes=int(args.rise_mb * MB),
-            rearm_bytes=int(args.rearm_mb * MB),
-            baseline_window=args.baseline_window,
-        )
+        self.detector = self.make_detector()
         self._emit_lock = threading.Lock()
         self._samples = None
         self.capture_runner = CaptureRunner(
@@ -749,6 +887,20 @@ class Watch:
         self.pid: int | None = None
         self._prev_cpu: tuple[float, int, int] | None = None
         self._reset_failure_noted = False
+        # `ps` results, and the markers already written about them, kept per pid
+        # so a pid file pointing at the wrong process does not fork a `ps` per
+        # tick and does not write the same marker forever.
+        self._comm_cache: dict[int, str | None] = {}
+        self._comm_noted: set[int] = set()
+
+    def make_detector(self) -> SpikeDetector:
+        """A detector carrying no history, built from this run's thresholds."""
+        return SpikeDetector(
+            threshold_bytes=int(self.args.threshold_mb * MB),
+            rise_bytes=int(self.args.rise_mb * MB),
+            rearm_bytes=int(self.args.rearm_mb * MB),
+            baseline_window=self.args.baseline_window,
+        )
 
     # -- record ------------------------------------------------------------
 
@@ -769,6 +921,11 @@ class Watch:
         self.pid = pid
         self._prev_cpu = None
         self._reset_failure_noted = False
+        # A fresh detector per target. A restarted daemon climbs from nothing to
+        # its working set in the first seconds, and measuring that climb against
+        # the dead process's baseline, or inheriting its in-spike state, would
+        # report the new process's startup as a spike of the old one.
+        self.detector = self.make_detector()
         # Reset before the first read, not just after it. Nobody has reset this
         # counter since the target launched, so an un-reset first sample reports
         # the peak since process start: 7.4 GB on the incident daemon, which
@@ -803,16 +960,42 @@ class Watch:
         self.pid = None
         self._prev_cpu = None
 
+    def comm_for(self, pid: int) -> str | None:
+        """`ps -o comm=` for a pid, asked once. Only ever called on acquire."""
+        if pid not in self._comm_cache:
+            self._comm_cache[pid] = process_comm(pid)
+        return self._comm_cache[pid]
+
     def resolve_pid(self) -> int | None:
-        if self.args.pid is not None:
-            candidate = self.args.pid
-        else:
-            candidate = read_pid_file(pid_file_path())
+        """The pid to sample, or None to keep looking on the next tick.
+
+        A pid alone is not identity. Pids are reused, and `$TBD_HOME/tbdd.pid`
+        outlives the daemon that wrote it, so a readable pid can be any process
+        the user happens to own. When the pid came from the file it therefore
+        has to name the daemon executable as well; when the operator passed
+        `--pid` it is taken as given, and the record says what was sampled so
+        nobody has to guess afterwards which process a run describes.
+        """
+        explicit = self.args.pid is not None
+        candidate = self.args.pid if explicit else read_pid_file(pid_file_path())
         if candidate is None:
             return None
         # Only accept a pid we can actually read, so a stale pid file does not
         # look like an acquired target.
-        return candidate if self.libproc.rusage(candidate) is not None else None
+        if self.libproc.rusage(candidate) is None:
+            return None
+        comm = self.comm_for(candidate)
+        if explicit:
+            if candidate not in self._comm_noted:
+                self._comm_noted.add(candidate)
+                self.emit({"event": "target_comm", "pid": candidate, "comm": comm})
+            return candidate
+        if not comm_is_daemon(comm):
+            if candidate not in self._comm_noted:
+                self._comm_noted.add(candidate)
+                self.emit({"event": "pid_file_mismatch", "pid": candidate, "comm": comm})
+            return None
+        return candidate
 
     # -- loop --------------------------------------------------------------
 
@@ -823,10 +1006,40 @@ class Watch:
 
         initial_pid = self.resolve_pid()
         sidecar_pid = None
-        if not self.args.no_log_stream:
-            self.sidecar = LogSidecar(self.log_path)
-            sidecar_pid = self.sidecar.start()
+        # Everything from the sidecar's first breath onwards is inside the try,
+        # so nothing between spawning it and entering the loop can leave a `log
+        # stream` child running with nobody left to terminate it. Writing
+        # run.json is the concrete way that used to happen: an --out path that
+        # is unwritable raises after the child exists.
+        try:
+            if not self.args.no_log_stream:
+                self.sidecar = LogSidecar(self.log_path)
+                sidecar_pid = self.sidecar.start()
+            self.write_run_json(initial_pid, sidecar_pid)
 
+            print(f"watching -> {self.out_dir}")
+            if initial_pid is None:
+                print("no target yet; will keep looking at the pid file every tick")
+            else:
+                print(f"target pid {initial_pid}")
+            if sidecar_pid is not None:
+                print(f"log sidecar pid {sidecar_pid} -> {self.log_path.name}")
+            print("Ctrl-C to stop")
+
+            if initial_pid is not None:
+                self.acquire(initial_pid)
+
+            while not self.stop_event.is_set():
+                tick_started = time.time()
+                self.tick(tick_started)
+                remaining = self.args.interval - (time.time() - tick_started)
+                if remaining > 0:
+                    self.stop_event.wait(remaining)
+        finally:
+            self.shutdown()
+        return 0
+
+    def write_run_json(self, initial_pid: int | None, sidecar_pid: int | None) -> None:
         (self.out_dir / "run.json").write_text(
             json.dumps(
                 {
@@ -855,29 +1068,6 @@ class Watch:
             encoding="utf-8",
         )
 
-        print(f"watching -> {self.out_dir}")
-        if initial_pid is None:
-            print("no target yet; will keep looking at the pid file every tick")
-        else:
-            print(f"target pid {initial_pid}")
-        if sidecar_pid is not None:
-            print(f"log sidecar pid {sidecar_pid} -> {self.log_path.name}")
-        print("Ctrl-C to stop")
-
-        if initial_pid is not None:
-            self.acquire(initial_pid)
-
-        try:
-            while not self.stop_event.is_set():
-                tick_started = time.time()
-                self.tick(tick_started)
-                remaining = self.args.interval - (time.time() - tick_started)
-                if remaining > 0:
-                    self.stop_event.wait(remaining)
-        finally:
-            self.shutdown()
-        return 0
-
     def tick(self, now: float) -> None:
         if self.pid is None:
             found = self.resolve_pid()
@@ -896,14 +1086,17 @@ class Watch:
         if not self.libproc.reset_footprint_interval(self.pid):
             self.note_reset_failure()
 
+        # Scaled out of mach time units first: differencing the raw counters and
+        # calling the result nanoseconds understates CPU by the timebase ratio.
+        user_ns, system_ns = self.libproc.cpu_times_ns(usage)
         cpu_pct = None
         if self._prev_cpu is not None:
             prev_when, prev_user, prev_system = self._prev_cpu
             elapsed = now - prev_when
             if elapsed > 0:
-                busy_ns = (usage.ri_user_time - prev_user) + (usage.ri_system_time - prev_system)
+                busy_ns = (user_ns - prev_user) + (system_ns - prev_system)
                 cpu_pct = round(busy_ns / 1e9 / elapsed * 100, 2)
-        self._prev_cpu = (now, usage.ri_user_time, usage.ri_system_time)
+        self._prev_cpu = (now, user_ns, system_ns)
 
         footprint = int(usage.ri_phys_footprint)
         interval_max = int(usage.ri_interval_max_phys_footprint)
@@ -916,8 +1109,8 @@ class Watch:
                 "interval_max_phys_footprint": interval_max,
                 "lifetime_max_phys_footprint": int(usage.ri_lifetime_max_phys_footprint),
                 "resident_size": int(usage.ri_resident_size),
-                "user_time_ns": int(usage.ri_user_time),
-                "system_time_ns": int(usage.ri_system_time),
+                "user_time_ns": user_ns,
+                "system_time_ns": system_ns,
                 "pageins": int(usage.ri_pageins),
                 "cpu_pct": cpu_pct,
             }
@@ -925,7 +1118,13 @@ class Watch:
 
         for request in self.detector.observe(now, footprint, interval_max):
             name = self.capture_runner.start(self.pid, request)
-            if name is not None:
+            if name is None:
+                # The runner was busy with the previous capture. Hand the slot
+                # back so the spike can spend it on the next tick that still
+                # justifies one, rather than losing it to a capture that was
+                # never taken.
+                self.detector.withdraw(request)
+            else:
                 self.emit(
                     {
                         "event": "capture",
@@ -941,8 +1140,30 @@ class Watch:
     def shutdown(self) -> None:
         self.emit({"event": "watch_stopped"})
         # An in-flight capture gets a bounded chance to finish; it is a child we
-        # spawned and it holds nothing the target needs.
-        self.capture_runner.join(timeout=self.capture_runner.worst_case_seconds())
+        # spawned and it holds nothing the target needs. That bound is the sum
+        # of the enabled tools' timeouts, up to 125 s, which is long enough that
+        # a silent wait reads as a hang: say what is being waited for, and take
+        # a second Ctrl-C as permission to stop waiting.
+        if self.capture_runner.busy():
+            budget = self.capture_runner.worst_case_seconds()
+            print(
+                f"waiting up to {budget:.0f}s for an in-flight capture "
+                "(Ctrl-C again to abandon it)"
+            )
+            deadline = time.time() + budget
+            while (
+                self.capture_runner.busy()
+                and not self.abandon_event.is_set()
+                and time.time() < deadline
+            ):
+                # Sliced, not one long join: a signal handler runs on the main
+                # thread but a join resumes for its full remaining timeout
+                # afterwards, so a second Ctrl-C would otherwise change nothing.
+                self.capture_runner.join(timeout=0.25)
+            if self.capture_runner.busy():
+                abandoned = "signal" if self.abandon_event.is_set() else "timeout"
+                print(f"abandoning the in-flight capture ({abandoned}); its directory is partial")
+                self.emit({"event": "capture_abandoned", "why": abandoned})
         if self.sidecar is not None:
             self.sidecar.stop()
         with self._emit_lock:
@@ -1115,7 +1336,14 @@ def median_interval(samples: list[dict], fallback: float = 1.0) -> float:
     return deltas[len(deltas) // 2]
 
 
-def report(run_dir: Path, threshold_override_mb: float | None, out=sys.stdout) -> int:
+def report(
+    run_dir: Path,
+    threshold_override_mb: float | None = None,
+    rise_override_mb: float | None = None,
+    rearm_override_mb: float | None = None,
+    baseline_window_override: float | None = None,
+    out=sys.stdout,
+) -> int:
     samples, events, config = load_run(run_dir)
     if not samples:
         print(f"no samples in {run_dir / 'samples.jsonl'}", file=out)
@@ -1123,22 +1351,27 @@ def report(run_dir: Path, threshold_override_mb: float | None, out=sys.stdout) -
 
     run_args = config.get("args") or {}
 
-    def setting(name: str, fallback: float) -> float:
-        value = run_args.get(name)
-        return float(value) if value is not None else float(fallback)
+    def setting(name: str, override: float | None, fallback: float) -> tuple[float, str]:
+        """One replay setting, and where it came from.
 
-    configured = run_args.get("threshold_mb")
-    threshold_mb = (
-        threshold_override_mb
-        if threshold_override_mb is not None
-        else (configured if configured is not None else DEFAULT_THRESHOLD_MB)
+        A replay whose rules are not the run's own rules answers a different
+        question than the run did, so every one of the four says which it is.
+        Overriding all four is legitimate: re-reading last night's samples with
+        a tighter rise is exactly what the recorded stream is for.
+        """
+        if override is not None:
+            return float(override), "override"
+        configured = run_args.get(name)
+        if configured is not None:
+            return float(configured), "run.json"
+        return float(fallback), "built-in default"
+
+    threshold_mb, source = setting("threshold_mb", threshold_override_mb, DEFAULT_THRESHOLD_MB)
+    rise_mb, rise_source = setting("rise_mb", rise_override_mb, DEFAULT_RISE_MB)
+    rearm_mb, rearm_source = setting("rearm_mb", rearm_override_mb, DEFAULT_REARM_MB)
+    baseline_window, baseline_source = setting(
+        "baseline_window", baseline_window_override, DEFAULT_BASELINE_WINDOW
     )
-    source = "override" if threshold_override_mb is not None else (
-        "run.json" if configured is not None else "built-in default"
-    )
-    rise_mb = setting("rise_mb", DEFAULT_RISE_MB)
-    rearm_mb = setting("rearm_mb", DEFAULT_REARM_MB)
-    baseline_window = setting("baseline_window", DEFAULT_BASELINE_WINDOW)
 
     first, last = samples[0], samples[-1]
     span = last.get("epoch", 0.0) - first.get("epoch", 0.0)
@@ -1153,11 +1386,9 @@ def report(run_dir: Path, threshold_override_mb: float | None, out=sys.stdout) -
         f"span            {iso(first['epoch'])}  ->  {iso(last['epoch'])}  ({span:.1f} s)", file=out
     )
     print(f"threshold       {threshold_mb:g} MB (from {source})", file=out)
-    print(
-        f"rise rule       {rise_mb:g} MB above a {baseline_window:g} s rolling baseline "
-        f"(rearm {rearm_mb:g} MB)",
-        file=out,
-    )
+    print(f"rise            {rise_mb:g} MB (from {rise_source})", file=out)
+    print(f"rearm           {rearm_mb:g} MB (from {rearm_source})", file=out)
+    print(f"baseline window {baseline_window:g} s (from {baseline_source})", file=out)
     print(f"highest sample  {fmt_bytes(highest)}", file=out)
     print(f"lifetime peak   {fmt_bytes(lifetime)}", file=out)
     print(file=out)
@@ -1165,12 +1396,21 @@ def report(run_dir: Path, threshold_override_mb: float | None, out=sys.stdout) -
     markers = [
         e
         for e in events
-        if e.get("event") in ("target_acquired", "target_lost", "interval_reset_failed")
+        if e.get("event")
+        in (
+            "target_acquired",
+            "target_lost",
+            "interval_reset_failed",
+            "target_comm",
+            "pid_file_mismatch",
+        )
     ]
     if markers:
         print(f"MARKERS ({len(markers)})", file=out)
         for event in markers:
             detail = f"pid {event.get('pid')}"
+            if event.get("comm"):
+                detail += f"  comm {event['comm']}"
             if event.get("start_time"):
                 detail += f"  started {event['start_time']}"
             print(f"  {hhmmss(event.get('epoch', 0.0)):<14}{event['event']:<24}{detail}", file=out)
@@ -1238,8 +1478,8 @@ def report(run_dir: Path, threshold_override_mb: float | None, out=sys.stdout) -
             print(f"    log, {label}:", file=out)
             if not counts:
                 print("        (no com.tbd rows in this window)", file=out)
-            for key, count in counts.most_common(10):
-                print(f"        {count:>7}  {key}", file=out)
+            for category, count in counts.most_common(10):
+                print(f"        {count:>7}  {category}", file=out)
             if inflight:
                 print(f"        rpc in-flight high lines: {len(inflight)}", file=out)
                 for when, line in inflight[:5]:
@@ -1256,12 +1496,24 @@ def _mb(value: float) -> int:
     return int(value * MB)
 
 
-def _detector(threshold_mb: float, rise_mb: float, rearm_mb: float = 512) -> SpikeDetector:
+def _detector(
+    threshold_mb: float,
+    rise_mb: float,
+    rearm_mb: float = 512,
+    baseline_window: float = DEFAULT_BASELINE_WINDOW,
+) -> SpikeDetector:
+    """A detector for one case. A zero threshold or rise disables that rule.
+
+    Disabling the rise rule is spelled 0, never a huge out-of-reach number: the
+    rise participates in the release rules as well as the onset ones, so a rise
+    of a million megabytes does not mean "never rises", it means "always back at
+    its baseline", which releases every spike on the tick after it opens.
+    """
     return SpikeDetector(
         threshold_bytes=_mb(threshold_mb),
         rise_bytes=_mb(rise_mb),
         rearm_bytes=_mb(rearm_mb),
-        baseline_window=DEFAULT_BASELINE_WINDOW,
+        baseline_window=baseline_window,
     )
 
 
@@ -1282,7 +1534,7 @@ def _check(condition: bool, message: str) -> None:
 def _write_synthetic_run(
     run_dir: Path,
     base: float,
-    series: list[float],
+    series: Sequence[float],
     run_args: dict,
     captures: list[tuple[float, str, str]],
 ) -> None:
@@ -1335,9 +1587,9 @@ def self_test() -> int:
             print(f"FAIL  {name}: {exc}")
 
     def balloon() -> None:
-        # rise is set out of reach so this case exercises the absolute threshold
-        # rule alone; the rise rule has its own case.
-        detector = _detector(threshold_mb=1024, rise_mb=1_000_000, rearm_mb=512)
+        # The rise rule is switched off, so this case exercises the absolute
+        # threshold rule alone; the rise rule has its own case.
+        detector = _detector(threshold_mb=1024, rise_mb=0, rearm_mb=512)
         events = _drive(detector, [100, 100, 100, 1100, 1200, 1700, 2400, 1500, 1000, 700, 1100])
         reasons = [event.reason for event in events]
         _check(
@@ -1353,7 +1605,7 @@ def self_test() -> int:
     def subtick_spike() -> None:
         # Every current footprint stays far below the threshold; only the
         # interval max ever sees the balloon.
-        detector = _detector(threshold_mb=1024, rise_mb=1_000_000, rearm_mb=512)
+        detector = _detector(threshold_mb=1024, rise_mb=0, rearm_mb=512)
         events = _drive(detector, [(100, 100), (100, 100), (100, 2000), (100, 100), (100, 100)])
         _check(len(events) == 1, f"expected exactly one capture, got {len(events)}")
         _check(events[0].reason == "threshold", f"unexpected reason {events[0].reason}")
@@ -1389,9 +1641,11 @@ def self_test() -> int:
 
     def sustained_plateau_does_not_refire() -> None:
         # A plateau held for longer than the baseline window drags the rolling
-        # minimum up to meet it, so the rise-based release rule would fire on
-        # every tick if it were not guarded by the absolute threshold. The cap
-        # on captures per spike only helps while it is still the same spike.
+        # minimum up to meet it, so the rise-based release rule fires and the
+        # spike ends. Nothing re-fires afterwards: the threshold onset is edge
+        # triggered and the peak never leaves the plateau again. The old design
+        # kept this open as one unending spike instead, which is what let a daemon
+        # sitting above the threshold latch the detector for the whole night.
         detector = _detector(threshold_mb=1024, rise_mb=512, rearm_mb=512)
         ticks = int(DEFAULT_BASELINE_WINDOW) + 100
         events = _drive(detector, [100, 100, 100] + [5000] * ticks)
@@ -1404,7 +1658,13 @@ def self_test() -> int:
             reasons == ["threshold"],
             f"a flat plateau earns the onset capture and nothing else; got {reasons}",
         )
-        _check(detector.in_spike, "a plateau above the threshold is still one spike")
+        # Expectation re-derived for the edge-triggered rules: the plateau is no
+        # longer held open as a spike, because a level held for a whole baseline
+        # window is the new normal rather than an ongoing event.
+        _check(
+            not detector.in_spike,
+            "a plateau should release once its own baseline catches up with it",
+        )
 
     def high_baseline_rise_releases() -> None:
         # A rise-triggered spike whose baseline is more than three times the
@@ -1415,6 +1675,86 @@ def self_test() -> int:
         _check(len(events) == 1, f"expected exactly one capture, got {len(events)}")
         _check(events[0].reason == "rise", f"unexpected reason {events[0].reason}")
         _check(not detector.in_spike, "the spike should release back at the trough")
+
+    def steady_state_above_threshold() -> None:
+        # The shape that latched the old detector: a daemon idling at 1100 MB
+        # against the 1024 MB default. Level-triggered, the threshold fired at
+        # t0 and never released, so every real excursion afterwards was already
+        # "in spike" and captured nothing. Edge-triggered, t0 earns the one
+        # capture that starting a watch mid-spike deserves, the plateau earns
+        # nothing more, and each 8 GB excursion is caught by the rise rule
+        # against the 1100 MB baseline.
+        detector = _detector(threshold_mb=1024, rise_mb=512, rearm_mb=512, baseline_window=10_000)
+        series = (
+            [1100] * 5 + [8000] + [1100] * 20 + [8000] + [1100] * 20 + [8000] + [1100] * 5
+        )
+        events = _drive(detector, series)
+        reasons = [event.reason for event in events]
+        _check(
+            reasons == ["threshold", "rise", "rise", "rise"],
+            f"expected one onset at t0 and one rise per excursion; got {reasons}",
+        )
+        _check(
+            events[0].when == 1000.0,
+            f"the threshold capture should be the first tick, got {events[0].when}",
+        )
+        _check(
+            [event.peak for event in events[1:]] == [_mb(8000)] * 3,
+            "each rise capture should be taken at the excursion's peak",
+        )
+        _check(not detector.in_spike, "the run should end back at its idle plateau, not in a spike")
+
+    def plateau_then_further_climb() -> None:
+        # A daemon already over the threshold when the watch starts, holding
+        # 5 GB for longer than the baseline window, then stepping to 8 GB. The
+        # old rules held the whole plateau open as one spike and so could never
+        # see the step; the new ones close the plateau once the baseline catches
+        # up and the step is a rise above that plateau baseline.
+        detector = _detector(threshold_mb=1024, rise_mb=512, rearm_mb=512)
+        plateau = int(DEFAULT_BASELINE_WINDOW) + 50
+        events = _drive(detector, [5000] * plateau + [8000] * 3)
+        reasons = [event.reason for event in events]
+        _check(
+            reasons == ["threshold", "rise"],
+            f"expected the t0 onset and one rise at the step; got {reasons}",
+        )
+        _check(
+            events[0].when == 1000.0 and events[0].peak == _mb(5000),
+            "the onset capture belongs to the first tick of the plateau",
+        )
+        _check(
+            events[1].when == 1000.0 + plateau,
+            f"the rise capture belongs to the step, got {events[1].when}",
+        )
+        _check(
+            events[1].baseline == _mb(5000),
+            f"the step should be measured against the plateau, got {events[1].baseline}",
+        )
+        _check(detector.in_spike, "the step off the plateau is still in progress at the end")
+
+    def withdrawn_capture_is_reissued() -> None:
+        # The runner takes one capture at a time. When it refuses, the slot has
+        # to go back: a spike gets two, and a spike whose second one is refused
+        # while the first is still running would otherwise never sample its own
+        # peak.
+        detector = _detector(threshold_mb=1024, rise_mb=0, rearm_mb=512)
+        onset = _drive(detector, [100, 100, 1100])
+        _check([event.reason for event in onset] == ["threshold"], "expected the onset capture")
+
+        refused = detector.observe(1003.0, _mb(1700), _mb(1700))
+        _check(
+            [event.reason for event in refused] == ["highwater"],
+            f"expected a high-water capture at 1700 MB; got {refused}",
+        )
+        detector.withdraw(refused[0])
+
+        again = detector.observe(1004.0, _mb(1700), _mb(1700))
+        _check(
+            [event.reason for event in again] == ["highwater"],
+            "a withdrawn high-water should be re-issued at the same peak",
+        )
+        _check(again[0].peak == _mb(1700), "the re-issued capture should carry the same peak")
+        _check(detector.in_spike, "withdrawing a capture must not end the spike")
 
     def report_replay() -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1507,6 +1847,9 @@ def self_test() -> int:
     case("a trough above 75% of the threshold still re-arms", high_trough_rearms)
     case("a plateau past the baseline window does not re-fire", sustained_plateau_does_not_refire)
     case("a rise spike over a high baseline releases", high_baseline_rise_releases)
+    case("an idle plateau above the threshold does not latch", steady_state_above_threshold)
+    case("a climb off a released plateau is still caught", plateau_then_further_climb)
+    case("a capture the runner refused is re-issued", withdrawn_capture_is_reissued)
     case("report replays a synthetic run and finds its spike", report_replay)
     case("report finds a rise spike below the threshold", report_sees_rise_spike)
 
@@ -1549,22 +1892,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rise-mb",
         type=float,
-        default=DEFAULT_RISE_MB,
-        help=f"rise above the rolling baseline that trips a capture (default {DEFAULT_RISE_MB})",
+        default=None,
+        help=f"rise above the rolling baseline that trips a capture (default {DEFAULT_RISE_MB}); "
+        "in --report mode, overrides the run's own rise",
     )
     parser.add_argument(
         "--rearm-mb",
         type=float,
-        default=DEFAULT_REARM_MB,
+        default=None,
         help="further rise within one spike that earns a second capture "
-        f"(default {DEFAULT_REARM_MB})",
+        f"(default {DEFAULT_REARM_MB}); in --report mode, overrides the run's own rearm",
     )
     parser.add_argument(
         "--baseline-window",
         type=float,
-        default=DEFAULT_BASELINE_WINDOW,
+        default=None,
         help="seconds the rolling baseline minimum looks back "
-        f"(default {DEFAULT_BASELINE_WINDOW:g})",
+        f"(default {DEFAULT_BASELINE_WINDOW:g}); in --report mode, overrides the run's own window",
     )
     parser.add_argument(
         "--out", help="run directory (default $TBD_HOME/diag/daemon-footprint/<ts>)"
@@ -1592,10 +1936,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_test:
         return self_test()
     if args.report:
-        return report(Path(args.report).expanduser(), args.threshold_mb)
+        # All four detector settings are replay overrides here: unset means the
+        # run's own value, so a bare --report always replays the run's rules.
+        return report(
+            Path(args.report).expanduser(),
+            args.threshold_mb,
+            args.rise_mb,
+            args.rearm_mb,
+            args.baseline_window,
+        )
 
+    # Live mode: the same four arguments take the built-in defaults when unset.
     if args.threshold_mb is None:
         args.threshold_mb = DEFAULT_THRESHOLD_MB
+    if args.rise_mb is None:
+        args.rise_mb = DEFAULT_RISE_MB
+    if args.rearm_mb is None:
+        args.rearm_mb = DEFAULT_REARM_MB
+    if args.baseline_window is None:
+        args.baseline_window = DEFAULT_BASELINE_WINDOW
     if args.interval <= 0:
         print("--interval must be positive", file=sys.stderr)
         return 2
@@ -1616,6 +1975,14 @@ def main(argv: list[str] | None = None) -> int:
     watch = Watch(args, out_dir)
 
     def handle(_signum, _frame) -> None:
+        # First signal stops the loop; a second one, which is what an operator
+        # sends when the shutdown wait looks like a hang, also gives up on the
+        # in-flight capture. The sidecar is still stopped and the samples file
+        # still closed on the way out, so this never trades a stuck wait for an
+        # orphaned `log stream` child.
+        watch.signal_count += 1
+        if watch.signal_count > 1:
+            watch.abandon_event.set()
         watch.stop_event.set()
 
     signal.signal(signal.SIGINT, handle)
