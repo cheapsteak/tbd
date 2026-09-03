@@ -19,7 +19,8 @@ struct StatusBarViewChipsTests {
         _ state: PRMergeableState?,
         worktreeID: UUID = UUID(),
         title: String? = nil,
-        observedAt: Date? = nil
+        observedAt: Date? = nil,
+        mergeQueuePosition: Int? = nil
     ) -> PRBinding {
         let url = "https://github.com/acme/acme-prod/pull/\(number)"
         return PRBinding(
@@ -27,7 +28,8 @@ struct StatusBarViewChipsTests {
             number: number, url: url,
             title: title,
             status: state.map {
-                PRStatus(number: number, url: url, state: $0, observedAt: observedAt)
+                PRStatus(number: number, url: url, state: $0,
+                         mergeQueuePosition: mergeQueuePosition, observedAt: observedAt)
             },
             source: .hook
         )
@@ -127,10 +129,12 @@ struct StatusBarViewChipsTests {
         number: Int = 412,
         state: PRMergeableState? = .mergeable,
         title: String? = nil,
-        observedAt: Date? = nil
+        observedAt: Date? = nil,
+        mergeQueuePosition: Int? = nil
     ) -> StatusBarView.PRChip {
         StatusBarView.prChips([
-            binding(number, state, title: title, observedAt: observedAt)
+            binding(number, state, title: title, observedAt: observedAt,
+                    mergeQueuePosition: mergeQueuePosition)
         ]).chips[0]
     }
 
@@ -400,6 +404,79 @@ struct StatusBarViewChipsTests {
         #expect(unobserved.rows.last?.value == StatusBarView.chipOpenActionValue(.github))
         #expect(unobserved.rows.last?.alternateValue
                 == StatusBarView.chipUntrackActionValue(.github))
+    }
+
+    // MARK: - The merge queue
+
+    /// The chip cannot derive the queue from `state`: a queued PR reports
+    /// UNKNOWN, which decays to the ordinary pending state. So the position has
+    /// to ride on the chip, which is what the leading slot swaps its dot for a
+    /// bus on.
+    @Test("a chip carries the merge-queue position, and nil when the PR is not queued")
+    func chipCarriesTheQueuePosition() {
+        #expect(StatusBarView.prChips([binding(412, .pending, mergeQueuePosition: 3)])
+            .chips[0].mergeQueuePosition == 3)
+        #expect(StatusBarView.prChips([binding(412, .pending)])
+            .chips[0].mergeQueuePosition == nil)
+        // A binding nothing has polled has no status to read a position from.
+        #expect(StatusBarView.prChips([binding(412, nil)]).chips[0].mergeQueuePosition == nil)
+    }
+
+    /// The queue clause SUPERSEDES the state's words rather than joining them —
+    /// the same short-circuit `PRStatusPresentation.make(for:)` makes before it
+    /// ever reads `state`. A queued PR's reason is the pending wording its
+    /// UNKNOWN check status decayed into, so a headline carrying both would say
+    /// the PR is waiting on its author and sitting in the queue at once.
+    @Test("a queued chip's headline says the queue position instead of the state's reason")
+    func headlineSupersedesTheReasonWhenQueued() {
+        let queued = chip(state: .pending, mergeQueuePosition: 3)
+        #expect(StatusBarView.chipHeadline(queued) == "PR#412 (In merge queue, position 3)")
+        // Not appended: neither the generic pending label nor a second clause
+        // survives beside the queue sentence.
+        #expect(StatusBarView.chipHeadline(queued)
+            .contains(PRMergeableState.pending.displayReason) == false)
+        // …and the same holds for the state that would otherwise read as the
+        // most confident thing a chip can say.
+        let ready = chip(state: .mergeable, mergeQueuePosition: 1)
+        #expect(StatusBarView.chipHeadline(ready) == "PR#412 (In merge queue, position 1)")
+        #expect(StatusBarView.chipHeadline(ready)
+            .contains(PRMergeableState.mergeable.displayReason) == false)
+        // The title still follows the clause, so the queue does not cost the
+        // headline its third fact.
+        #expect(StatusBarView.chipHeadline(
+            chip(state: .pending, title: "Fix the login timeout", mergeQueuePosition: 3))
+            == "PR#412 (In merge queue, position 3) - Fix the login timeout")
+    }
+
+    /// The tooltip and the VoiceOver hint read the same sentence the card does.
+    /// A chip whose glyph is a bus and whose hint says "Checks pending" would
+    /// have the words under the pointer contradict the glyph the pointer is on.
+    @Test("the open target says the queue position too")
+    func openLabelSpeaksTheQueue() {
+        let queued = chip(state: .pending, mergeQueuePosition: 3)
+        #expect(StatusBarView.openLabel(queued) == "Open PR #412 — In merge queue, position 3")
+        #expect(StatusBarView.openLabel(queued)
+            .contains(PRMergeableState.pending.displayReason) == false)
+        // The icon slot's resting meaning is that same sentence, since a click
+        // on the drawn bus opens the PR exactly as a click on a dot does.
+        #expect(StatusBarView.iconSlotLabel(queued, isHovering: false)
+            == StatusBarView.openLabel(queued))
+    }
+
+    /// The queue clause is a replacement for one chip's state sentence, not a
+    /// change to how every chip describes itself.
+    @Test("an unqueued chip's headline and open label are untouched")
+    func unqueuedChipIsUnchanged() {
+        let plain = chip(state: .checksFailed, title: "Fix the login timeout")
+        #expect(StatusBarView.chipHeadline(plain)
+            == "PR#412 (\(PRMergeableState.checksFailed.displayReason)) - Fix the login timeout")
+        #expect(StatusBarView.openLabel(plain)
+            == "Open PR #412 — \(PRMergeableState.checksFailed.displayReason)")
+        #expect(StatusBarView.chipHeadline(plain).contains("merge queue") == false)
+        #expect(StatusBarView.openLabel(plain).contains("merge queue") == false)
+        // A chip with no status at all still says only what it observed.
+        #expect(StatusBarView.chipHeadline(chip(state: nil)) == "PR#412")
+        #expect(StatusBarView.openLabel(chip(state: nil)) == "Open PR #412")
     }
 
     // MARK: - Forge vocabulary

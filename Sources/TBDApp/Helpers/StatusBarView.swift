@@ -108,11 +108,31 @@ struct StatusBarView: View {
         /// PR to the daemon — a synthetic chip has no row to name by id.
         let url: URL?
         let state: PRMergeableState?
+        /// 1-indexed merge-queue position, or nil when the PR is not queued —
+        /// the fact `PRStatusPresentation.make(for:)` short-circuits to the bus
+        /// glyph on. Carried because the chip cannot derive it from `state`: a
+        /// queued PR reports UNKNOWN, which maps to the ordinary olive pending
+        /// dot, so the dot alone does not merely under-describe the PR, it
+        /// actively misdescribes it as still waiting on its author.
+        let mergeQueuePosition: Int?
         /// The status's own words for that state, when it has any — the same
         /// `reason ?? state.displayReason` the overflow menu and the toolbar
         /// dropdown render. Carried rather than derived so the three surfaces
         /// cannot describe one observation differently.
         let reason: String?
+        /// The one sentence every chip surface uses to describe this PR's
+        /// state. The queue clause **supersedes** `reason` rather than
+        /// appending to it, for the same reason `PRStatusPresentation.make(for:)`
+        /// short-circuits before reading `state`: a queued PR's reason is the
+        /// pending wording its UNKNOWN check status decayed into, and a
+        /// sentence that said both would have the chip claim the PR is waiting
+        /// on its author *and* sitting in the queue. Reading it from one place
+        /// is what stops the words under the pointer from disagreeing with the
+        /// glyph the pointer is on.
+        var stateDescription: String? {
+            if let mergeQueuePosition { return "In merge queue, position \(mergeQueuePosition)" }
+            return reason
+        }
         /// The PR's title, or nil when it was never observed (a chip lifted
         /// from a cached `Worktree.prStatus` has none). The hover overlay
         /// omits the line rather than fabricating a placeholder.
@@ -184,6 +204,7 @@ struct StatusBarView: View {
                 forge: Forge.forURL(binding.url),
                 url: URL(string: binding.url),
                 state: binding.status?.state,
+                mergeQueuePosition: binding.status?.mergeQueuePosition,
                 reason: binding.status.map { $0.reason ?? $0.state.displayReason },
                 title: binding.title,
                 observedAt: binding.status?.observedAt,
@@ -259,8 +280,9 @@ struct StatusBarView: View {
     nonisolated static func chipHeadline(_ chip: PRChip) -> String {
         var headline = "\(chip.forge.refNoun)\(chip.label)"
         // The status's own words when it has any, exactly as the overflow menu
-        // and the toolbar dropdown render them.
-        if let state = chip.reason?.trimmingCharacters(in: .whitespacesAndNewlines),
+        // and the toolbar dropdown render them — except for a queued PR, whose
+        // sentence `stateDescription` replaces outright. See it for why.
+        if let state = chip.stateDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
            !state.isEmpty {
             headline += " (\(state))"
         }
@@ -308,12 +330,14 @@ struct StatusBarView: View {
     /// Tooltip and accessibility hint for the chip's own click target, e.g.
     /// `Open PR #412 — Checks failing`.
     ///
-    /// Reads the same carried `reason` the hover overlay does. Deriving it from
-    /// `state` here instead would put the generic label in the tooltip and in
-    /// VoiceOver while the card beside them showed the status's own words.
+    /// Reads the same `stateDescription` the hover overlay does. Deriving it
+    /// from `state` here instead would put the generic label in the tooltip and
+    /// in VoiceOver while the card beside them showed the status's own words —
+    /// and, for a queued PR, would announce the pending wording the bus glyph
+    /// under the pointer flatly contradicts.
     nonisolated static func openLabel(_ chip: PRChip) -> String {
-        guard let reason = chip.reason else { return "Open \(chip.refLabel)" }
-        return "Open \(chip.refLabel) — \(reason)"
+        guard let state = chip.stateDescription else { return "Open \(chip.refLabel)" }
+        return "Open \(chip.refLabel) — \(state)"
     }
 
     /// What the leading icon slot's tooltip says, and therefore what clicking it
@@ -563,13 +587,22 @@ private struct PRChipView: View {
     /// from the number onto the slot cannot flicker the xmark back to a dot.
     @State private var isSlotHovered = false
 
-    /// The fixed square the status dot and the untrack xmark share.
+    /// The fixed square this chip's resting glyph and the untrack xmark share.
     ///
     /// Sized for the LARGER of the two glyphs, with both centred in it, so the
     /// chip is exactly as wide hovered as at rest. A slot that grew on hover
     /// would shove every chip to its right and slide the xmark out from under
     /// the cursor that summoned it.
-    private static let iconSlotSide: CGFloat = 9
+    ///
+    /// A queued chip draws the bus rather than a 6pt dot, which needs the same
+    /// 12 the sidebar row gives it, so the side depends on WHICH CHIP THIS IS —
+    /// never on hover state. That is the whole invariant: two chips in the same
+    /// bar may differ in width, but neither changes width under the pointer, so
+    /// hovering still cannot shove a neighbour or slide the xmark away.
+    private var iconSlotSide: CGFloat { chip.mergeQueuePosition == nil ? 9 : Self.busSide }
+    /// The bus glyph's drawn side, kept identical to `WorktreeRowView.prGlyph`'s
+    /// so the status bar's bus and the sidebar's are the same image.
+    private static let busSide: CGFloat = 12
     /// The drawn xmark's point size — under `iconSlotSide` in both axes.
     private static let xmarkPointSize: CGFloat = 8
     /// The untrack click region, contributed as a transparent **overlay** on
@@ -578,7 +611,9 @@ private struct PRChipView: View {
     /// wider than the glyph costs no layout width. 12pt centred on the 6pt dot
     /// reaches 3pt past the dot on each side, well inside the 6pt gap
     /// `PRChipCluster` puts between chips, so no chip can take a neighbour's
-    /// click.
+    /// click. On a queued chip the slot is already 12, so the region covers the
+    /// bus exactly and overhangs nothing — the property that matters is that it
+    /// is never SMALLER than the glyph it arms, which holds in both cases.
     private static let untrackHitSide: CGFloat = 12
     /// Gap between the icon slot and the number. Applied as leading padding on
     /// the text rather than as `HStack` spacing so the gap belongs to the
@@ -587,8 +622,10 @@ private struct PRChipView: View {
 
     /// The dot color, taken from the shared PR palette so a chip cannot drift
     /// from the sidebar glyph or the toolbar icon for the same state. The
-    /// synthetic `PRStatus` exists only to reach that palette — `make(for:)`
-    /// reads nothing but `state` once `mergeQueuePosition` is nil.
+    /// synthetic `PRStatus` exists only to reach that palette, and passing no
+    /// position is faithful rather than lossy: this is reached only on the
+    /// non-queued branch, and `make(for:)` reads nothing but `state` once
+    /// `mergeQueuePosition` is nil.
     private var dotColor: Color {
         guard let state = chip.state,
               let presentation = PRStatusPresentation.make(
@@ -600,9 +637,10 @@ private struct PRChipView: View {
     var body: some View {
         HStack(spacing: 0) {
             // Above the number in z-order, so the 1.5pt by which the untrack
-            // region overhangs the slot on the trailing side wins the hit test
-            // against the text's own leading padding. Later `HStack` children
-            // are otherwise drawn — and hit-tested — on top.
+            // region overhangs a dot-sized slot on the trailing side wins the
+            // hit test against the text's own leading padding. Later `HStack`
+            // children are otherwise drawn — and hit-tested — on top. A queued
+            // chip has no overhang to defend, and is unharmed by the same rule.
             iconSlot.zIndex(1)
             Text(chip.label)
                 .lineLimit(1)
@@ -658,8 +696,9 @@ private struct PRChipView: View {
     /// can never advertise untracking while the slot is showing a status dot.
     private var isUntrackTarget: Bool { isHovering && isSlotHovered }
 
-    /// The fixed-size leading slot: the status dot at rest, the untrack xmark
-    /// while the chip is hovered. Both centred in the same square.
+    /// The fixed-size leading slot: at rest the merge-queue bus for a queued PR
+    /// and the status dot for every other, the untrack xmark while the chip is
+    /// hovered. All centred in the same square.
     private var iconSlot: some View {
         ZStack {
             if isHovering {
@@ -680,17 +719,29 @@ private struct PRChipView: View {
                             .fill(Color.primary.opacity(isSlotHovered ? 0.11 : 0))
                             .frame(width: Self.untrackHitSide, height: Self.untrackHitSide)
                     }
+            } else if let position = chip.mergeQueuePosition {
+                // The same bus, with the same baked position badge, at the same
+                // side as the sidebar row draws — one image, so the two
+                // surfaces cannot describe one queued PR differently. Full
+                // color and NOT tinted: `busImage` is non-template, so
+                // `.renderingMode(.original)` is what keeps the chip's
+                // `.foregroundStyle(.secondary)` off it.
+                Image(nsImage: PRStatusPresentation.busImage(position: position, side: Self.busSide))
+                    .renderingMode(.original)
+                    .resizable()
+                    .scaledToFit()
             } else {
                 Circle()
                     .fill(dotColor)
                     .frame(width: 6, height: 6)
             }
         }
-        .frame(width: Self.iconSlotSide, height: Self.iconSlotSide)
+        .frame(width: iconSlotSide, height: iconSlotSide)
         .overlay {
-            // Transparent, larger than the slot, and laid over it — sized by
-            // this overlay and not by the layout, so it widens the hit area
-            // without widening the chip.
+            // Transparent, never smaller than the slot, and laid over it —
+            // sized by this overlay and not by the layout, so it widens the hit
+            // area (on a queued chip, merely matches it) without widening the
+            // chip.
             Color.clear
                 .frame(width: Self.untrackHitSide, height: Self.untrackHitSide)
                 .contentShape(Rectangle())
@@ -872,9 +923,10 @@ private struct AutoArchiveChipView: View {
     /// the larger of the two glyphs, both centred, so the capsule cannot change
     /// width when the pointer crosses it.
     ///
-    /// 11, not `PRChipView`'s 9, and the difference is not drift. That slot is
-    /// sized to a 6pt status dot; this one holds SF Symbols, so it takes the
-    /// size the bar's other symbol slot already uses — `CopyableStatusText`
+    /// 11, not the 9 `PRChipView` uses for a dot-bearing chip, and the
+    /// difference is not drift. That slot is sized to a 6pt status dot (12 on
+    /// the queued chips that draw a bus); this one holds SF Symbols, so it
+    /// takes the size the bar's other symbol slot already uses — `CopyableStatusText`
     /// frames its leading `GitBranchIcon` at 11×11 to match the caption text
     /// this bar is set in. Following the neighbour that hosts the same kind of
     /// glyph is what keeps the bar even.
