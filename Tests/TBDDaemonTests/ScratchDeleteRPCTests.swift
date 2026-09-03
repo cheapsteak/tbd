@@ -221,7 +221,7 @@ struct ScratchDeleteRPCTests {
         // records the session as ended with an unknown status. That recorded
         // status is what separates "the row went away" from "the holder was
         // disposed of".
-        await registry.adoptAll()
+        _ = await registry.adoptAll()
         let armed = await registry.lastKnownStatus(for: terminal.id)
         #expect(armed == .exitedStatusUnknown, "the fixture never armed the observable")
         router.holderRegistry = registry

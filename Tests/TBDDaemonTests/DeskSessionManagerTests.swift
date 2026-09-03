@@ -1405,7 +1405,7 @@ extension TBDHomeSerialized {
             let terminal = try await db.terminals.create(
                 worktreeID: desk.id, tmuxWindowID: "", tmuxPaneID: "",
                 kind: .claude, transport: .holder, holderPID: 9101, childPID: 0)
-            await registry.adoptAll()
+            _ = await registry.adoptAll()
             let armed = await registry.lastKnownStatus(for: terminal.id)
             #expect(armed == .exitedStatusUnknown, "the fixture never armed the observable")
 

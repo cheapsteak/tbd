@@ -123,11 +123,24 @@ struct HolderAdoptAllBoundingTests {
         defer { releaseInBackground(registry) }
 
         let elapsed = await ContinuousClock().measure {
-            await registry.adoptAll()
+            _ = await registry.adoptAll()
         }
         #expect(
             elapsed < .seconds(6),
             "one wedged holder held the daemon for \(elapsed) before it could bind its socket")
+        // Two more assertions, because the upper bound alone passes vacuously:
+        // if this fixture's path and the registry's ever diverged, `connect`
+        // would fail `ECONNREFUSED` in microseconds and it would be satisfied
+        // having probed nothing. The recorded status does not settle it either
+        // — `adoptAll` brands a refused connection `exitedStatusUnknown`
+        // exactly as it brands a silent one — so the lower bound is what says
+        // the row was not merely reached but waited on.
+        #expect(
+            elapsed > .seconds(1),
+            "the wedged holder cost only \(elapsed), under one receive timeout: nothing waited")
+        #expect(
+            await registry.lastKnownStatus(for: wedged.terminal.id) == .exitedStatusUnknown,
+            "the wedged row was never probed at all")
     }
 
     /// The phase as a whole is bounded, not merely each holder in it.
@@ -150,7 +163,7 @@ struct HolderAdoptAllBoundingTests {
         defer { releaseInBackground(registry) }
 
         let elapsed = await ContinuousClock().measure {
-            await registry.adoptAll()
+            _ = await registry.adoptAll()
         }
         #expect(
             elapsed < .seconds(12),
@@ -193,7 +206,7 @@ struct HolderAdoptAllBoundingTests {
         defer { releaseInBackground(registry) }
 
         let elapsed = await ContinuousClock().measure {
-            await registry.adoptAll()
+            _ = await registry.adoptAll()
         }
         let reader = await registry.reader(for: fixture.sessionID)
         #expect(reader != nil, "the healthy holder was not adopted")

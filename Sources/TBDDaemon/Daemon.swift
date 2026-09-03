@@ -1147,11 +1147,13 @@ public final class Daemon: Sendable {
         // duration is `adoptAllBudget` plus the row in flight when it expired,
         // independent of how many holders are wedged. Binding first would
         // instead open a window in which the socket answers while holder
-        // sessions have no readers — `terminal.output` renders an empty screen
-        // for a live session and `terminal.attach` refuses one — and it would
-        // not even make the daemon answerable, because steps 8b-8d ahead of it
-        // are pre-bind too. The overflow, and only the overflow, is what moves
-        // past the bind: see step 9c.
+        // sessions have no readers — `terminal.output` fails a live session
+        // with "its session is gone or was never adopted", a sentence no caller
+        // can tell apart from the truth about a genuinely dead one, and the
+        // app's `attach.request` throws `noLiveReader` for the same session —
+        // and it would not even make the daemon answerable, because steps 8b-8d
+        // ahead of it are pre-bind too. The overflow, and only the overflow, is
+        // what moves past the bind: see step 9c.
         var deferredHolderAdoptions: [Terminal] = []
         if let holderRegistry {
             deferredHolderAdoptions = await holderRegistry.adoptAll()
@@ -1172,9 +1174,24 @@ public final class Daemon: Sendable {
         // go undrained for the process's whole life, and a job cannot finish
         // exiting while anything it wrote is still queued on its terminal. The
         // budget therefore bounds when the *socket* is bound, not whether these
-        // sessions are rescued. Detached because nobody is waiting on it — the
-        // socket is up, so the cost of a slow holder is now paid by that
-        // session alone.
+        // sessions are rescued. Detached because nobody is waiting on it: the
+        // socket is up, so no RPC caller waits on a slow holder here.
+        //
+        // **The rescue is serial, so a stranded row strands the rows behind
+        // it**, and that is a deliberate trade rather than an oversight.
+        // `HolderClient` opens its connection with a blocking `Darwin.connect`
+        // and sets `SO_RCVTIMEO` only afterwards, so a rendezvous whose
+        // listener never drains its backlog is unbounded, and the busy-retry
+        // loop can re-attempt at a receive timeout apiece — one row really can
+        // park this task for the process's life. A `Task` per row would trade
+        // that head-of-line cost for a worse one: the client's I/O is
+        // deliberately blocking, so N rows in flight park N cooperative-pool
+        // threads, and a wedged fleet would starve the executor that serves the
+        // socket just bound above — turning one stalled session into a daemon
+        // that answers nobody, which is the failure the startup budget exists
+        // to prevent. Serial parks at most one thread. `adoptRemaining` logs
+        // its start and its completion, so a stranded tail is visible as a
+        // rescue that began and never finished.
         if let holderRegistry, !deferredHolderAdoptions.isEmpty {
             let remaining = deferredHolderAdoptions
             Task { await holderRegistry.adoptRemaining(remaining) }

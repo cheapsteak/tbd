@@ -457,7 +457,7 @@ struct HolderAdoptionTests {
             listTerminals: { [tmuxRow, holderRow] })
         defer { releaseInBackground(registry) }
 
-        await registry.adoptAll()
+        _ = await registry.adoptAll()
 
         let tmuxReader = await registry.reader(for: tmuxRow.id)
         #expect(tmuxReader == nil)

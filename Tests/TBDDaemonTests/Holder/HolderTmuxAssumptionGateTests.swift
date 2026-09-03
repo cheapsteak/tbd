@@ -457,7 +457,7 @@ struct HolderTmuxAssumptionGateTests {
         // at the derived rendezvous, so the startup sweep records the session as
         // having ended with an unknown status — and that recorded status is what
         // separates "the row went away" from "the holder was disposed of".
-        await registry.adoptAll()
+        _ = await registry.adoptAll()
         let armed = await registry.lastKnownStatus(for: terminal.id)
         #expect(armed == .exitedStatusUnknown, "the fixture never armed the observable")
 
@@ -555,7 +555,7 @@ struct HolderTmuxAssumptionGateTests {
         let registry = holderRegistry(listing: [busy])
         // Nothing answers at the derived rendezvous, so the startup sweep
         // records the session as ended with an unknown status.
-        await registry.adoptAll()
+        _ = await registry.adoptAll()
         let ended = await registry.lastKnownStatus(for: terminal.id)
         #expect(ended == .exitedStatusUnknown, "the fixture never armed the unknown status")
 
@@ -598,7 +598,7 @@ struct HolderTmuxAssumptionGateTests {
         let busy = try #require(try await db.terminals.get(id: terminal.id))
 
         let registry = holderRegistry(listing: [busy])
-        await registry.adoptAll()
+        _ = await registry.adoptAll()
         #expect(await registry.lastKnownStatus(for: terminal.id) == .exitedStatusUnknown,
                 "the fixture never armed the unknown status")
 
@@ -1034,7 +1034,7 @@ struct HolderTmuxAssumptionGateTests {
         listing terminals: [Terminal], for terminalID: UUID
     ) async throws -> HolderRegistry {
         let registry = holderRegistry(listing: terminals)
-        await registry.adoptAll()
+        _ = await registry.adoptAll()
         let armed = await registry.lastKnownStatus(for: terminalID)
         #expect(armed == .exitedStatusUnknown, "the fixture never armed the observable")
         return registry

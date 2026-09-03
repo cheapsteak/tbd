@@ -887,13 +887,15 @@ actor HolderRegistry {
     /// `adopt`, so a row abandoned here would stay undrained for the process's
     /// whole life — and an undrained pty master does not merely cost a screen,
     /// it stops the job on it from finishing its exit. `Daemon` resumes them
-    /// immediately after the socket is bound, which is where the wait is free.
+    /// immediately after the socket is bound, where the wait costs no RPC
+    /// caller — `adoptRemaining` documents what it does still cost. The result
+    /// is deliberately **not** `@discardableResult`, so the obligation is one
+    /// the compiler holds rather than one a reader has to notice.
     ///
     /// Nothing is recorded about a row that was not reached. A missing status
     /// reads as `.running`, which is the honest answer for a holder nobody
     /// asked; `exitedStatusUnknown` would be a claim about an answer that was
     /// never sought.
-    @discardableResult
     func adoptAll() async -> [Terminal] {
         let terminals: [Terminal]
         do {
@@ -945,12 +947,42 @@ actor HolderRegistry {
 
     /// Adopts rows a budgeted pass left behind, with no budget of its own.
     ///
-    /// Called once the socket is bound, where a slow holder delays nobody. The
-    /// per-holder bound still applies, so this is finite for any finite list.
+    /// Called once the socket is bound, where a slow holder delays no RPC
+    /// caller. **It is serial, and one row really can strand the rest.** The
+    /// per-row receive timeout is not a bound on a row: `HolderClient` connects
+    /// with a blocking `Darwin.connect` and applies `SO_RCVTIMEO` only after it
+    /// returns, so a rendezvous whose listener never drains its backlog blocks
+    /// indefinitely, and the busy-retry loop can re-attempt at a receive
+    /// timeout apiece. Serial anyway, because the alternative is worse: this
+    /// client's I/O is blocking, so a task per row would park a
+    /// cooperative-pool thread per row and a wedged fleet would starve the
+    /// executor serving the socket — one stalled session becoming a daemon that
+    /// answers nobody.
+    ///
+    /// Hence the log lines. A rescue that started and never finished is the
+    /// only evidence of a stranded tail, so both ends of the pass are recorded
+    /// at `.info`; the per-row line is `.debug` — silent until somebody streams
+    /// the subsystem — and names the row a stall stopped on.
     func adoptRemaining(_ terminals: [Terminal]) async {
-        for terminal in terminals where terminal.transport == .holder {
+        let rows = terminals.filter { $0.transport == .holder }
+        guard !rows.isEmpty else { return }
+        Self.logger.info(
+            """
+            finishing the startup adoption of \(rows.count, privacy: .public) holder sessions the \
+            budget did not reach
+            """)
+        for (index, terminal) in rows.enumerated() {
+            Self.logger.debug(
+                """
+                adopting deferred holder session \(terminal.id.uuidString, privacy: .public) \
+                (\(index + 1, privacy: .public) of \(rows.count, privacy: .public))
+                """)
             await adoptOne(terminal)
         }
+        Self.logger.info(
+            """
+            finished the deferred adoption of all \(rows.count, privacy: .public) holder sessions
+            """)
     }
 
     /// Marks the startup adoption budget spent. Actor-isolated so the timer's
