@@ -279,7 +279,7 @@ sessions — in a worktree manager "remote" reads as git remote first.
 
 ```
 tbd remote list [--provider <name>] [--archived] [--json]
-tbd remote create --provider <name> [--param key=value]... [--profile <name>]
+tbd remote create --provider <name> [--param key=value]...
                   [--continue <terminal-id> | --from-key <key> | --from-file <path|->] [--json]
 tbd remote stop <session> [--json]
 tbd remote archive <session> [--json]
@@ -297,6 +297,14 @@ tbd remote dismiss <session>
   the compound a human reads off `tbd remote list`. Key-addressed commands take
   `--provider` explicitly, because keys are provider-scoped and may contain any
   character.
+- **`create` names no identity.** TBD's `remote.create` composes the provider's
+  stdin as `{params, [seed], idempotency_key}` and never sends the contract's
+  optional `profile` object, so both an ordinary and a seeded create run under
+  the provider's default identity — which is exactly what an absent `profile`
+  means to a provider. Nothing on this path carries an identity to expose, so
+  there is no flag for one: sending `profile` is separate work, taking a profile
+  projection all the way from the app and the CLI through the RPC to the
+  composed body, and it belongs with `set-profile` rather than here.
 - **`create --continue <terminal-id>` is the teleport.** TBD reads that
   terminal's local Claude transcript, `import`s it on the chosen provider, then
   `create`s seeded from the returned key. `--from-key` and `--from-file` are the
