@@ -536,9 +536,95 @@ private func finishActivityObservation(
         clearedAwaitingInput: application.clearedAwaitingInput)
 }
 
+/// One transaction's worth of activity-write result: what to hand the caller,
+/// and whether the write crossed the `working -> idle` edge (and for which
+/// profile), so the notification can be fired AFTER the transaction commits
+/// rather than from inside it.
+private struct ActivityWriteOutcome<Result: Sendable>: Sendable {
+    var result: Result
+    var becameIdleProfileID: UUID?
+}
+
+/// Spelled out so every `return` in `applyActivityObservation` states the
+/// generic argument instead of leaning on inference through an optional.
+private typealias AppliedActivityWriteOutcome =
+    ActivityWriteOutcome<AppliedTerminalActivityObservation?>
+
+/// Fan-out for `working -> idle` activity transitions.
+///
+/// A reference type because `TerminalStore` is a value type constructed inside
+/// `TBDDatabase.init`, long before the usage poller that consumes these edges
+/// exists. The daemon installs the observer once, afterwards.
+///
+/// Deliberately narrow: it carries a profile id and nothing else. It is not a
+/// general event bus, and a second kind of transition should get its own
+/// reason for existing rather than a second case here.
+public final class TerminalActivityTransitionNotifier: @unchecked Sendable {
+    private let lock = NSLock()
+    private var becameIdle: (@Sendable (UUID) -> Void)?
+
+    public init() {}
+
+    /// Install (or replace) the observer. The daemon wires exactly one.
+    public func onSessionBecameIdle(_ observer: @escaping @Sendable (UUID) -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        becameIdle = observer
+    }
+
+    /// Called by the store after an activity write commits. Never called from
+    /// inside a database transaction: the observer is free to do real work.
+    func notifySessionBecameIdle(profileID: UUID) {
+        lock.lock()
+        let observer = becameIdle
+        lock.unlock()
+        observer?(profileID)
+    }
+}
+
 /// Provides CRUD operations for terminals.
 public struct TerminalStore: Sendable {
     let writer: any DatabaseWriter
+
+    /// `working -> idle` transitions reported by an OBSERVER of the session.
+    ///
+    /// Its one consumer today is the token-profile usage probe, which is a
+    /// billed request and therefore fires on completed turns instead of a
+    /// timer (`docs/specs/2026-09-01-token-based-claude-profiles-design.md`).
+    /// That consumer defines what the edge means: *a turn finished, so this
+    /// profile's utilization moved*. It is not "the `activity_state` column
+    /// changed value".
+    ///
+    /// **Two writers fire it**, and they are the two that carry an outside
+    /// observation of what the agent did: `applyActivityObservation` (the path
+    /// every Claude and Codex hook takes) and `setActivityState`. The edge is
+    /// detected inside the store rather than at their call sites because a
+    /// caller-side check would have to be written twice, kept in sync, and
+    /// would still miss the next call site.
+    ///
+    /// **Four other writers set `activityState = .idle` and deliberately do
+    /// not fire it**, because none of them observed a turn finishing:
+    ///
+    /// - `applySessionStart`'s Codex branch — a session *starting* is the
+    ///   opposite of a turn completing, and it is also how a resumed session
+    ///   arrives. The non-ordered path's `unknown -> idle` case is excluded
+    ///   for the same reason.
+    /// - `beginHibernatedShellRespawn`, `finalizeHibernatedShellRespawn`,
+    ///   `persistHibernatedState` — a park writes `.idle` with
+    ///   `FactSource.database`: TBD's own bookkeeping that it stopped the
+    ///   session, not evidence from the session that it stopped working. Most
+    ///   parks are of sessions that were already idle, and the sweep that
+    ///   issues them is a background timer — wiring a billed probe to it would
+    ///   put token profiles back on exactly the blind cadence the design
+    ///   removed.
+    ///
+    /// The one case that genuinely loses information is a session parked
+    /// **mid-turn**: utilization moved and no probe fires. It is accepted.
+    /// Those numbers are not lost, only late — the next turn on that profile
+    /// probes, the profile row renders its staleness note meanwhile, and the
+    /// profile's `⋯` menu offers a manual refresh. Paying a billed request per
+    /// park to shave that latency is the wrong trade.
+    public let activityTransitions = TerminalActivityTransitionNotifier()
 
     init(writer: any DatabaseWriter) {
         self.writer = writer
@@ -1063,10 +1149,16 @@ public struct TerminalStore: Sendable {
         observedAt: Date = Date(),
         awaitingInputReason: AwaitingInputReason? = nil
     ) async throws -> Bool {
-        try await writer.write { db in
+        let outcome = try await writer.write { db -> ActivityWriteOutcome<Bool> in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
+            // Read before the mutation below: `working -> idle` is the moment a
+            // turn completed, and it is only visible against the state the row
+            // held on entry.
+            let previousState = record.activityState
+                .flatMap(TerminalActivityState.init(rawValue:))
+            let rowProfileID = record.profile_id.flatMap(UUID.init(uuidString:))
             let hadReason = record.awaitingInputReason != nil
                 || record.awaitingInputObservedAt != nil
             record.activityState = activityState.rawValue
@@ -1082,8 +1174,15 @@ public struct TerminalStore: Sendable {
             record.awaitingInputReason = FactColumnJSON.encode(awaitingInputReason)
             record.awaitingInputObservedAt = awaitingInputReason == nil ? nil : observedAt
             try record.update(db)
-            return hadReason && awaitingInputReason == nil
+            let becameIdle = previousState == .working && activityState == .idle
+            return ActivityWriteOutcome(
+                result: hadReason && awaitingInputReason == nil,
+                becameIdleProfileID: becameIdle ? rowProfileID : nil)
         }
+        if let profileID = outcome.becameIdleProfileID {
+            activityTransitions.notifySessionBecameIdle(profileID: profileID)
+        }
+        return outcome.result
     }
 
     /// Apply an activity fact after validating process identity in the same
@@ -1118,10 +1217,18 @@ public struct TerminalStore: Sendable {
         processBound: Bool = true,
         replaceSameValue: Bool = false
     ) async throws -> AppliedTerminalActivityObservation? {
-        try await writer.write { db in
+        let outcome = try await writer.write { db -> AppliedActivityWriteOutcome in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
+            // Read before any mutation, for the same reason `setActivityState`
+            // does: the edge is only visible against the state on entry.
+            // `AppliedTerminalActivityObservation.activityStateChanged` is NOT
+            // a substitute — the ordered path returns it true for an accepted
+            // observation that changed no durable value.
+            let previousState = record.activityState
+                .flatMap(TerminalActivityState.init(rawValue:))
+            let rowProfileID = record.profile_id.flatMap(UUID.init(uuidString:))
             let usesOrderedCodexActivity = record.kind == TerminalKind.codex.rawValue
                 || record.label == TerminalLabel.codex
                 || source == .terminalInterrupt
@@ -1133,10 +1240,10 @@ public struct TerminalStore: Sendable {
             if processBound {
                 guard record.pendingSessionIncarnationID == nil,
                       record.sessionIncarnationID == sessionIncarnationID?.uuidString else {
-                    return nil
+                    return AppliedActivityWriteOutcome(result: nil)
                 }
                 if let sessionID, sessionID != record.claudeSessionID {
-                    return nil
+                    return AppliedActivityWriteOutcome(result: nil)
                 }
             }
             guard usesOrderedCodexActivity else {
@@ -1155,11 +1262,14 @@ public struct TerminalStore: Sendable {
                         orderObservedAt: observedAt,
                         activityStateChanged: false,
                         clearedAwaitingInput: cleared)
-                    return try finishActivityObservation(
-                        application,
-                        activityState: activityState,
-                        terminalID: id.uuidString,
-                        in: db)
+                    // The durable value did not move, so no edge was crossed.
+                    let finished: AppliedTerminalActivityObservation? =
+                        try finishActivityObservation(
+                            application,
+                            activityState: activityState,
+                            terminalID: id.uuidString,
+                            in: db)
+                    return AppliedActivityWriteOutcome(result: finished)
                 }
                 let hadReason = record.awaitingInputReason != nil
                     || record.awaitingInputObservedAt != nil
@@ -1176,11 +1286,16 @@ public struct TerminalStore: Sendable {
                     observedAt: observedAt,
                     orderObservedAt: observedAt,
                     clearedAwaitingInput: hadReason)
-                return try finishActivityObservation(
-                    application,
-                    activityState: activityState,
-                    terminalID: id.uuidString,
-                    in: db)
+                let finished: AppliedTerminalActivityObservation? =
+                    try finishActivityObservation(
+                        application,
+                        activityState: activityState,
+                        terminalID: id.uuidString,
+                        in: db)
+                let becameIdle = previousState == .working && activityState == .idle
+                return AppliedActivityWriteOutcome(
+                    result: finished,
+                    becameIdleProfileID: becameIdle ? rowProfileID : nil)
             }
             guard let application = applyActivityObservationToRecord(
                 to: &record,
@@ -1188,14 +1303,27 @@ public struct TerminalStore: Sendable {
                 source: source,
                 observedAt: observedAt,
                 replaceSameValue: replaceSameValue
-            ) else { return nil }
+            ) else { return AppliedActivityWriteOutcome(result: nil) }
             try record.update(db)
-            return try finishActivityObservation(
-                application,
-                activityState: activityState,
-                terminalID: id.uuidString,
-                in: db)
+            // The ordered path may keep the stored value (`sameCompleteFact`),
+            // so ask the record what was actually committed rather than what
+            // the observation asserted.
+            let becameIdle = previousState == .working
+                && record.activityState == TerminalActivityState.idle.rawValue
+            let finished: AppliedTerminalActivityObservation? =
+                try finishActivityObservation(
+                    application,
+                    activityState: activityState,
+                    terminalID: id.uuidString,
+                    in: db)
+            return AppliedActivityWriteOutcome(
+                result: finished,
+                becameIdleProfileID: becameIdle ? rowProfileID : nil)
         }
+        if let profileID = outcome.becameIdleProfileID {
+            activityTransitions.notifySessionBecameIdle(profileID: profileID)
+        }
+        return outcome.result
     }
 
     /// Record a wait reason observed by a hook, WITHOUT asserting an activity

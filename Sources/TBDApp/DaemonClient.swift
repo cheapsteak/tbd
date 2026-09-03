@@ -1758,6 +1758,15 @@ actor DaemonClient {
         )
     }
 
+    /// Replace the stored setup token on a token profile. The raw secret
+    /// string MUST NOT be logged.
+    func updateModelProfileToken(id: UUID, token: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.modelProfileUpdateToken,
+            params: ModelProfileUpdateTokenParams(id: id, token: token)
+        )
+    }
+
     /// Update a bedrock model profile's region, awsProfile, model, and fallback list.
     func updateModelProfileBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String,
                                    fallbackModels: [String]? = nil) async throws {

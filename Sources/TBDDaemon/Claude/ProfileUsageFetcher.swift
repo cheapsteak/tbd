@@ -114,7 +114,15 @@ public struct SecurityCLIOAuthTokenReader: ClaudeOAuthTokenReading {
 // MARK: - Per-profile usage fetch
 
 public enum ProfileUsageFetchStatus: Equatable, Sendable {
-    case ok([ClaudeUsageLimitBucket])
+    /// Buckets from a successful fetch, plus the `anthropic-organization-id`
+    /// response header when one was sent.
+    ///
+    /// Both fetchers read that header opportunistically: the token probe is
+    /// known to return it, and whether `/api/oauth/usage` does is unverified,
+    /// so nil is a normal outcome rather than a failure. It is an account
+    /// identifier, not a credential — safe to log at `.public`, but it must
+    /// never be composed into a string that also carries token bytes.
+    case ok([ClaudeUsageLimitBucket], organizationID: String?)
     /// No stored credential for this profile (not logged in), or the
     /// credential could not be read. The reason is human-readable and MUST
     /// NOT contain token bytes.
@@ -127,7 +135,12 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
     /// HTTP 429. `retryAfter` carries the server's `Retry-After` (seconds) when
     /// present, so the poller can honor it instead of guessing a backoff.
     case rateLimited(retryAfter: TimeInterval?)
-    case httpError(Int)
+    /// A status code with no dedicated case. `detail` is a bounded, redacted
+    /// slice of the response body when the fetcher captured one — the server's
+    /// own account of what it disliked, which for a malformed request is the
+    /// entire diagnosis (`anthropic-version: header is required`). nil when no
+    /// body was read or it was empty.
+    case httpError(Int, detail: String?)
     case networkError(String)
     case decodeError(String)
 
@@ -140,10 +153,46 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
         case .needsLogin(let reason): return "needs re-login (\(reason))"
         case .rateLimited(let ra):
             return ra.map { "rate limited (retry \(Int($0))s)" } ?? "rate limited"
-        case .httpError(let code): return "HTTP \(code)"
+        case .httpError(let code, let detail):
+            // A permanent request error must not read like a transient one:
+            // "HTTP 400" alongside a "retrying" note tells the reader to wait
+            // for something that will never happen. Naming the request as the
+            // faulty party is the whole value of the string.
+            let base = Self.isPermanentRequestError(code)
+                ? "request rejected (HTTP \(code)) — malformed request, retrying cannot fix it"
+                : "HTTP \(code)"
+            return detail.map { "\(base): \($0)" } ?? base
         case .networkError(let msg): return "network error: \(msg)"
         case .decodeError(let msg): return "decode error: \(msg)"
         }
+    }
+
+    /// The 4xx statuses that describe a recoverable condition rather than a
+    /// defect in the request's shape, so repeating the same request can
+    /// succeed.
+    ///
+    /// - 401, 403: credential states — a fresh token or a refresh clears them.
+    /// - 408 Request Timeout: RFC 9110 §15.5.9 explicitly says the client "MAY
+    ///   repeat the request without modifications at any later time".
+    /// - 425 Too Early: RFC 8470 — the server declined to risk replaying an
+    ///   early-data request; the same request succeeds once the TLS handshake
+    ///   completes.
+    /// - 429: a rate limit — time clears it.
+    ///
+    /// Deliberately not here: 409 Conflict and 423 Locked describe resource
+    /// state a *different* request would have to resolve, and neither can
+    /// arise from a `max_tokens: 0` POST; 420 and 449 are vendor extensions no
+    /// RFC defines; 499 is nginx's record of a client that hung up, not a
+    /// response an HTTP client ever receives.
+    static let retryableClientErrorCodes: Set<Int> = [401, 403, 408, 425, 429]
+
+    /// Whether an HTTP status means *the request we sent is wrong* rather than
+    /// *try again later*.
+    ///
+    /// True for 4xx except `retryableClientErrorCodes`. 5xx is the server's
+    /// problem and is genuinely retryable.
+    public static func isPermanentRequestError(_ code: Int) -> Bool {
+        (400..<500).contains(code) && !retryableClientErrorCodes.contains(code)
     }
 
     /// Machine-readable classification for the snapshot / UI.
@@ -166,11 +215,40 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
     }
 }
 
+/// Where a fetcher gets its bearer credential.
+///
+/// `.configDir` resolves a `/login` credential out of an isolated
+/// `CLAUDE_CONFIG_DIR`; `.token` is a stored `claude setup-token` used
+/// directly. The enum exists so `OAuthProfileUsagePoller` can dispatch on
+/// profile kind without knowing how either fetcher obtains its credential.
+///
+/// A `.token` value carries secret bytes, so `CustomStringConvertible` is
+/// implemented to *enforce* that it never reaches a log line or an error
+/// string. Merely omitting the conformance would not: Swift's default
+/// reflection renders `String(describing:)` of this enum as
+/// `token("sk-ant-oat01-…")`, printing the secret in full. The conformance
+/// below makes every interpolation, every `String(describing:)`, and every
+/// `%@`-style rendering safe by construction. The config-dir path is not
+/// secret and stays visible, because it is the only thing that makes a
+/// `.configDir` failure diagnosable.
+public enum ProfileUsageCredential: Equatable, Sendable, CustomStringConvertible {
+    case configDir(String)
+    case token(String)
+
+    public var description: String {
+        switch self {
+        case let .configDir(path): return "configDir(\(path))"
+        case .token: return "token(<redacted>)"
+        }
+    }
+}
+
 public protocol ProfileUsageFetching: Sendable {
-    /// Fetch the usage buckets for the OAuth account logged into the given
-    /// isolated `CLAUDE_CONFIG_DIR`. Never throws — failures come back as
-    /// non-ok statuses so a poller sweep can record them per profile.
-    func fetchUsage(configDirPath: String) async -> ProfileUsageFetchStatus
+    /// Fetch the usage buckets for the account the given credential
+    /// authenticates. Never throws — failures come back as non-ok statuses so
+    /// a poller sweep can record them per profile. A fetcher that cannot serve
+    /// a credential shape returns `.noCredentials` rather than trapping.
+    func fetchUsage(credential: ProfileUsageCredential) async -> ProfileUsageFetchStatus
 }
 
 /// Live fetcher: resolve the profile's OAuth access token, then GET
@@ -203,7 +281,15 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
         self.now = now ?? { Date() }
     }
 
-    public func fetchUsage(configDirPath: String) async -> ProfileUsageFetchStatus {
+    public func fetchUsage(credential: ProfileUsageCredential) async -> ProfileUsageFetchStatus {
+        // This fetcher serves `/login`-authenticated profiles only. A setup
+        // token 403s on `/api/oauth/usage` (it lacks the `user:profile`
+        // scope), so there is nothing sensible to do with `.token` here —
+        // `TokenProfileUsageFetcher` serves those.
+        guard case .configDir(let configDirPath) = credential else {
+            return .noCredentials("config-dir fetcher cannot serve a token credential")
+        }
+
         // 1. Read the full credential blob.
         let blob: Data?
         do {
@@ -230,7 +316,7 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
 
         // 3. Fetch usage. On 401/403, refresh once and retry.
         let firstAttempt = await requestUsage(accessToken: creds.accessToken)
-        if case .httpError(let code) = firstAttempt, code == 401 || code == 403 {
+        if case .httpError(let code, _) = firstAttempt, code == 401 || code == 403 {
             switch await refreshAndPersist(creds, blob: blob, configDirPath: configDirPath) {
             case .refreshed(let updated):
                 return await requestUsage(accessToken: updated.accessToken)
@@ -289,7 +375,7 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
             case .network(let msg):
                 return .transient(.networkError("refresh: \(msg)"))
             case .http(let code):
-                return .transient(.httpError(code))
+                return .transient(.httpError(code, detail: nil))
             case .badResponse(let msg):
                 return .transient(.networkError("refresh: \(msg)"))
             }
@@ -321,7 +407,15 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
         switch http.statusCode {
         case 200:
             do {
-                return .ok(try ClaudeUsagePayloadParser.parseBuckets(from: data))
+                let buckets = try ClaudeUsagePayloadParser.parseBuckets(from: data)
+                // Opportunistic: whether this endpoint sends the header is
+                // unverified, so nil is a normal outcome. An empty string
+                // becomes nil — "" would read as "this account's id is the
+                // empty string" rather than "absent".
+                let organizationID = http
+                    .value(forHTTPHeaderField: "anthropic-organization-id")
+                    .flatMap { $0.isEmpty ? nil : $0 }
+                return .ok(buckets, organizationID: organizationID)
             } catch {
                 return .decodeError("\(error)")
             }
@@ -329,7 +423,10 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
             let ra = (http.value(forHTTPHeaderField: "Retry-After")).flatMap(TimeInterval.init)
             return .rateLimited(retryAfter: ra)
         default:
-            return .httpError(http.statusCode)
+            // The signed-in fetcher does not retain a body slice: its failures
+            // are credential states with dedicated cases, not requests TBD
+            // could have built wrong.
+            return .httpError(http.statusCode, detail: nil)
         }
     }
 }

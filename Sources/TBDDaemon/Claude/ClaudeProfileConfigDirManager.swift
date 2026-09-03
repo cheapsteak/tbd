@@ -677,7 +677,8 @@ extension ClaudeProfileConfigDirManager {
     /// need config-dir isolation), nil profile, and apiKey profiles with
     /// a missing secret.
     ///
-    /// For `.oauth` profiles, calls `ensureOAuthDir`.
+    /// For `.oauth` and `.oauthToken` profiles, calls `ensureOAuthDir` — a
+    /// token profile gets the same isolated dir; only its credential differs.
     /// For `.apiKey` profiles, calls `ensureAPIKeyDir` (needs `profile.secret`;
     /// if the secret is nil, logs a warning and returns nil).
     /// For `.bedrock` profiles, returns nil.
@@ -695,7 +696,11 @@ extension ClaudeProfileConfigDirManager {
         guard let profile else { return nil }
 
         switch profile.kind {
-        case .oauth:
+        // A token profile is structurally identical to a signed-in one: same
+        // isolated config dir, same mirror symlinks, same GC coverage. Only
+        // the credential differs (an injected CLAUDE_CODE_OAUTH_TOKEN instead
+        // of a /login inside the dir), and that is the spawn builder's job.
+        case .oauth, .oauthToken:
             do {
                 let url = try ensureOAuthDir(forProfileID: profile.profileID)
                 return url.path

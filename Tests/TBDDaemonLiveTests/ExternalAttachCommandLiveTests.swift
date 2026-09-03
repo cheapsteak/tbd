@@ -539,6 +539,8 @@ struct ExternalAttachCommandLiveTests {
         shell.standardOutput = FileHandle.nullDevice
         shell.standardError = FileHandle.nullDevice
         try shell.run()
+        // Launch and wait on one thread, which the per-thread task list that
+        // `BoundedProcessTeardown` documents leaves unaffected.
         shell.waitUntilExit()
 
         #expect(
@@ -881,6 +883,8 @@ private struct TmuxServer {
         do {
             try process.run()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            // Launch and wait on one thread: not the cross-thread shape
+            // `BoundedProcessTeardown` exists for.
             process.waitUntilExit()
             let output = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -993,7 +997,12 @@ private final class PTYProcess: @unchecked Sendable {
     /// sitting in that call for thirteen minutes with no child process left
     /// alive, killed by hand. Polling `isRunning` against a deadline reaps in
     /// the same few hundred milliseconds on the ordinary path and gives up
-    /// rather than hanging on the pathological one.
+    /// rather than hanging on the pathological one. The escalation goes through
+    /// `BoundedProcessTeardown.killAndReap`, so the SIGKILL precedes any reap
+    /// and carries that helper's `pid > 1` guard. An expired bound there is
+    /// recorded as `TeardownBoundExpired` rather than discarded, so a lost exit
+    /// reds the test that owned this client instead of passing silently — the
+    /// same shape as `AgentReaperHolderLegLiveTests.killAndReap`.
     func terminate() {
         terminationLock.lock()
         let alreadyTerminated = isTerminated
@@ -1004,8 +1013,11 @@ private final class PTYProcess: @unchecked Sendable {
         if process.isRunning {
             process.terminate()
             if !awaitExit(within: 2) {
-                kill(process.processIdentifier, SIGKILL)
-                _ = awaitExit(within: 2)
+                if case .unobserved(let pid, let diagnostic) =
+                    BoundedProcessTeardown.killAndReap(process, within: 2)
+                {
+                    Issue.record(TeardownBoundExpired(pid: pid, diagnostic: diagnostic))
+                }
             }
         }
         // Closing the primary ends the drain thread's blocking read.
@@ -1013,15 +1025,10 @@ private final class PTYProcess: @unchecked Sendable {
     }
 
     /// True once the child is no longer running, false when `limit` elapses
-    /// first. Bounded by construction — see `terminate()` for why the obvious
-    /// `waitUntilExit()` is not usable here.
+    /// first. Bounded by construction — `BoundedProcessTeardown` carries the
+    /// mechanism; see `terminate()` for the wedge measured here.
     private func awaitExit(within limit: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(limit)
-        while Date() < deadline {
-            if !process.isRunning { return true }
-            usleep(20_000)
-        }
-        return !process.isRunning
+        BoundedProcessTeardown.awaitExit(process, within: limit) == .exited
     }
 
     /// Head-capped so a chatty tmux client cannot grow this without bound; the

@@ -642,22 +642,22 @@ struct StalenessNoteTests {
     @Test func freshHealthySnapshotHasNoNote() {
         let now = Date()
         let fresh = snapshot(buckets: [], fetchedAt: now.addingTimeInterval(-30))
-        #expect(ProfileUsagePresentation.stalenessNote(for: fresh, now: now) == nil)
+        #expect(ProfileUsagePresentation.stalenessNote(for: fresh, kind: .oauth, now: now) == nil)
     }
 
     @Test func neverFetchedSnapshotSaysNoDataYet() {
         let never = snapshot(buckets: [], fetchedAt: nil)
-        #expect(ProfileUsagePresentation.stalenessNote(for: never) == "no usage data yet")
+        #expect(ProfileUsagePresentation.stalenessNote(for: never, kind: .oauth) == "no usage data yet")
     }
 
     @Test func oldSnapshotReportsAgeInMinutes() {
         let now = Date()
         let old = snapshot(buckets: [], fetchedAt: now.addingTimeInterval(-600))
-        #expect(ProfileUsagePresentation.stalenessNote(for: old, now: now) == "updated 10m ago")
+        #expect(ProfileUsagePresentation.stalenessNote(for: old, kind: .oauth, now: now) == "updated 10m ago")
     }
 
     @Test func missingSnapshotHasNoNote() {
-        #expect(ProfileUsagePresentation.stalenessNote(for: nil) == nil)
+        #expect(ProfileUsagePresentation.stalenessNote(for: nil, kind: .oauth) == nil)
     }
 
     // MARK: Typed failure states — each renders distinct, explicit copy.
@@ -666,19 +666,19 @@ struct StalenessNoteTests {
         let failing = snapshot(buckets: [], fetchedAt: nil,
                                status: "fetch failed: needs re-login (refresh token expired)",
                                statusKind: .needsLogin)
-        #expect(ProfileUsagePresentation.stalenessNote(for: failing) == "needs re-login")
+        #expect(ProfileUsagePresentation.stalenessNote(for: failing, kind: .oauth) == "needs re-login")
     }
 
     @Test func noCredentialsRendersNotLoggedIn() {
         let failing = snapshot(buckets: [], fetchedAt: nil,
                                status: "fetch failed: no credentials", statusKind: .noCredentials)
-        #expect(ProfileUsagePresentation.stalenessNote(for: failing) == "not logged in")
+        #expect(ProfileUsagePresentation.stalenessNote(for: failing, kind: .oauth) == "not logged in")
     }
 
     @Test func rateLimitedWithoutPriorDataSaysRetrying() {
         let failing = snapshot(buckets: [], fetchedAt: nil,
                                status: "fetch failed: rate limited", statusKind: .rateLimited)
-        #expect(ProfileUsagePresentation.stalenessNote(for: failing)
+        #expect(ProfileUsagePresentation.stalenessNote(for: failing, kind: .oauth)
                 == "usage unavailable — retrying")
     }
 
@@ -689,7 +689,7 @@ struct StalenessNoteTests {
                                fetchedAt: now.addingTimeInterval(-7200),
                                status: "stale since …; fetch failed: rate limited",
                                statusKind: .rateLimited)
-        #expect(ProfileUsagePresentation.stalenessNote(for: failing, now: now)
+        #expect(ProfileUsagePresentation.stalenessNote(for: failing, kind: .oauth, now: now)
                 == "usage unavailable — retrying · last data 2h ago")
     }
 
@@ -697,7 +697,7 @@ struct StalenessNoteTests {
         let failing = snapshot(buckets: [], fetchedAt: nil,
                                status: "fetch failed: network error: timed out",
                                statusKind: .networkError)
-        #expect(ProfileUsagePresentation.stalenessNote(for: failing)
+        #expect(ProfileUsagePresentation.stalenessNote(for: failing, kind: .oauth)
                 == "usage unavailable — retrying")
     }
 
@@ -705,7 +705,7 @@ struct StalenessNoteTests {
         // Older daemon: no statusKind field → inferred .unknown on decode.
         let failing = snapshot(buckets: [], fetchedAt: nil,
                                status: "fetch failed: HTTP 503", statusKind: .unknown)
-        #expect(ProfileUsagePresentation.stalenessNote(for: failing)
+        #expect(ProfileUsagePresentation.stalenessNote(for: failing, kind: .oauth)
                 == "usage unavailable — retrying")
     }
 
@@ -723,7 +723,7 @@ struct StalenessNoteTests {
 @Suite("ProfileUsagePresentation — secondary line honesty")
 struct SecondaryLineHonestyTests {
     @Test func healthyFreshShowsUsageNumbers() {
-        let line = ProfileUsagePresentation.secondaryLine(for: gmailSnapshot, timeZone: utc)
+        let line = ProfileUsagePresentation.secondaryLine(for: gmailSnapshot, kind: .oauth, timeZone: utc)
         #expect(line == "5h 0% used · resets 11:10pm · week 76% · Fable 100%")
     }
 
@@ -737,7 +737,7 @@ struct SecondaryLineHonestyTests {
             lastAttemptAt: now,
             status: "stale since …; fetch failed: rate limited",
             statusKind: .rateLimited)
-        let line = ProfileUsagePresentation.secondaryLine(for: stale, timeZone: utc, now: now)
+        let line = ProfileUsagePresentation.secondaryLine(for: stale, kind: .oauth, timeZone: utc, now: now)
         #expect(line == "usage unavailable — retrying · last data 1h ago")
     }
 
@@ -745,11 +745,11 @@ struct SecondaryLineHonestyTests {
         let needs = ProfileUsageSnapshot(
             buckets: [], fetchedAt: nil, lastAttemptAt: Date(),
             status: "fetch failed: needs re-login", statusKind: .needsLogin)
-        #expect(ProfileUsagePresentation.secondaryLine(for: needs) == "needs re-login")
+        #expect(ProfileUsagePresentation.secondaryLine(for: needs, kind: .oauth) == "needs re-login")
     }
 
     @Test func noSnapshotHasNoSecondaryLine() {
-        #expect(ProfileUsagePresentation.secondaryLine(for: nil) == nil)
+        #expect(ProfileUsagePresentation.secondaryLine(for: nil, kind: .oauth) == nil)
     }
 
     @Test func healthyButAgingAppendsAgeNote() {
@@ -758,7 +758,7 @@ struct SecondaryLineHonestyTests {
             buckets: [bucket(kind: "session", percent: 12)],
             fetchedAt: now.addingTimeInterval(-600),
             lastAttemptAt: now, status: "ok", statusKind: .ok)
-        #expect(ProfileUsagePresentation.secondaryLine(for: aging, timeZone: utc, now: now)
+        #expect(ProfileUsagePresentation.secondaryLine(for: aging, kind: .oauth, timeZone: utc, now: now)
                 == "5h 12% used · updated 10m ago")
     }
 
@@ -1077,5 +1077,96 @@ struct ResetClockTextTests {
             utcDate(month: 7, day: 3, hour: 19, minute: 0), timeZone: utc) == "Fri 7pm")
         #expect(ProfileUsagePresentation.weekdayResetTimeText(
             utcDate(month: 7, day: 6, hour: 9, minute: 0), timeZone: utc) == "Mon 9am")
+    }
+}
+
+// MARK: - Cadence-relative staleness (token profiles)
+
+@Suite("ProfileUsagePresentation — cadence-relative staleness")
+struct CadenceRelativeStalenessTests {
+    /// A single shared threshold cannot serve both cadences. Signed-in
+    /// profiles are swept every ~90s, so five minutes means several misses;
+    /// token profiles refresh on a five-minute activity floor, so the same
+    /// five minutes would flag every one of them the instant it was fetched.
+    @Test func staleThresholdIsCadenceRelative() {
+        #expect(ProfileUsagePresentation.staleAge(forKind: .oauth) == 300)
+        #expect(ProfileUsagePresentation.staleAge(forKind: .apiKey) == 300)
+        #expect(ProfileUsagePresentation.staleAge(forKind: .bedrock) == 300)
+        #expect(ProfileUsagePresentation.staleAge(forKind: .oauthToken) == 900)
+    }
+
+    /// Every age below is chosen to sit BETWEEN the two thresholds, or to
+    /// bracket one of them — never below both, where the same verdict would
+    /// come back whatever `staleAge(forKind:)` returned and the assertion
+    /// would prove nothing. Each is also mid-minute (6.5, 14.5, 16.5) rather
+    /// than on a bucket edge, so sub-second `Date` wobble cannot shift the
+    /// "Nm" string `ageText` renders.
+    private func aging(_ secondsAgo: TimeInterval,
+                       from now: Date) -> ProfileUsageSnapshot {
+        snapshot(buckets: [bucket(kind: "session", percent: 12)],
+                 fetchedAt: now.addingTimeInterval(-secondsAgo))
+    }
+
+    /// 390s is past the 300s signed-in threshold and well short of the 900s
+    /// token one, so the two kinds must disagree here. A `staleAge(forKind:)`
+    /// that ignored its argument — returning a constant 300 or a constant 900
+    /// — fails one leg or the other.
+    @Test func atSixMinutesOnlyTheSignedInProfileIsStale() {
+        let now = Date()
+        let sixMinutesOld = aging(390, from: now)
+        #expect(ProfileUsagePresentation.stalenessNote(for: sixMinutesOld, kind: .oauth,
+                                                       now: now) == "updated 6m ago")
+        #expect(ProfileUsagePresentation.stalenessNote(for: sixMinutesOld, kind: .oauthToken,
+                                                       now: now) == nil)
+    }
+
+    /// Brackets the token threshold in (870s, 990s]: fresh at 14.5 minutes,
+    /// stale at 16.5. That interval excludes 300, so the token window is
+    /// provably its own value and not the shared one — and it is finite, so a
+    /// token profile whose probe genuinely stopped landing is still called out.
+    @Test func theTokenThresholdSitsWellAboveTheSignedInOne() {
+        let now = Date()
+        #expect(ProfileUsagePresentation.stalenessNote(for: aging(870, from: now),
+                                                       kind: .oauthToken, now: now) == nil)
+        #expect(ProfileUsagePresentation.stalenessNote(for: aging(990, from: now),
+                                                       kind: .oauthToken,
+                                                       now: now) == "updated 16m ago")
+        // The signed-in profile crossed long before either of those.
+        #expect(ProfileUsagePresentation.stalenessNote(for: aging(870, from: now),
+                                                       kind: .oauth,
+                                                       now: now) == "updated 14m ago")
+    }
+
+    /// The same disagreement has to survive the hop through `secondaryLine`,
+    /// which is what the Settings rows and account menus actually call.
+    @Test func secondaryLineThreadsKindThroughToTheThreshold() {
+        let now = Date()
+        let sixMinutesOld = aging(390, from: now)
+        #expect(ProfileUsagePresentation.secondaryLine(for: sixMinutesOld, kind: .oauthToken,
+                                                       timeZone: utc, now: now)
+                == "5h 12% used")
+        #expect(ProfileUsagePresentation.secondaryLine(for: sixMinutesOld, kind: .oauth,
+                                                       timeZone: utc, now: now)
+                == "5h 12% used · updated 6m ago")
+    }
+
+    /// A rejected setup-token is repaired by pasting a new one, never by
+    /// /login — the affordance this kind exists to remove.
+    @Test func rejectedTokenReadsAsTokenRejected() {
+        let rejected = snapshot(buckets: [], fetchedAt: nil,
+                                status: "fetch failed: token rejected (HTTP 401)",
+                                statusKind: .needsLogin)
+        #expect(ProfileUsagePresentation.stalenessNote(for: rejected, kind: .oauthToken)
+                == "token rejected")
+        // Off-branch: the same snapshot state on a signed-in profile still
+        // asks for a /login.
+        #expect(ProfileUsagePresentation.stalenessNote(for: rejected, kind: .oauth)
+                == "needs re-login")
+    }
+
+    @Test func tokenProfileIsAlwaysSelectable() {
+        // needsLogin is false for .oauthToken, so the picker never disables it.
+        let tokenProfile = entry(name: "Acme (token)", kind: .oauthToken)
+        #expect(ProfileUsagePresentation.isSelectable(tokenProfile))
     }
 }

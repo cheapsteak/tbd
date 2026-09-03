@@ -147,7 +147,8 @@ private struct AccountPickerRow: View {
                         .foregroundStyle(.tertiary)
                 }
 
-                if let note = ProfileUsagePresentation.stalenessNote(for: entry.usageSnapshot) {
+                if let note = ProfileUsagePresentation.stalenessNote(for: entry.usageSnapshot,
+                                                                    kind: entry.profile.kind) {
                     Text(note)
                         .font(.caption2)
                         .foregroundStyle(.orange)

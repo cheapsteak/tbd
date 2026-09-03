@@ -73,6 +73,55 @@ struct HolderAdoptionTests {
         #expect(holderProcessIsAlive(fixture.handle.childPID))
     }
 
+    /// The re-adopted emulator is built at the size of the **pty**, not the size
+    /// the session was launched at.
+    ///
+    /// A session resized while it ran has a pty whose window size moved
+    /// (`HolderReader.resize` sets `TIOCSWINSZ` so the child gets `SIGWINCH`
+    /// and lays itself out) and a `HolderLaunchRequest` that did not: the
+    /// request records what was asked for once at spawn, and the hand-over
+    /// carries it unchanged forever after. Building the new emulator from it
+    /// gives the child a grid narrower and shorter than the one it is drawing
+    /// into — 123 columns of output wrapping into 80 — and nothing in the
+    /// daemon reports the mismatch.
+    ///
+    /// The numbers are the ones a real session was measured at, and the
+    /// assertion is deliberately on the pty's size rather than "not the launch
+    /// size": a fix that guessed, or that read some other geometry, must fail
+    /// here too.
+    @Test func adoptionBuildsTheEmulatorAtThePTYSizeNotTheLaunchSize() async throws {
+        let fixture = try await HolderProcessFixture.start(command: "sleep 30")
+        defer { fixture.tearDown() }
+
+        // The daemon that spawned this session resized it while it was running,
+        // through the production path. Everything else about the session is
+        // untouched: the holder, the pty and the job all outlive the reader.
+        let (described, ptyFD) = try await fixture.client.handOverPTY()
+        #expect(
+            described.launch.columns == 80 && described.launch.rows == 24,
+            "the fixture no longer launches at 80x24, so this test proves nothing")
+        let previous = HolderReader(
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+        try await previous.start()
+        await previous.resize(columns: 123, rows: 41)
+        await previous.stop()
+        await fixture.client.close()
+
+        let registry = makeRegistry(owner: fixture.owner, home: fixture.home)
+        defer { releaseInBackground(registry) }
+
+        let reader = try await registry.adopt(
+            terminal: holderTerminal(id: fixture.sessionID))
+        let grid = await reader.gridSize
+        #expect(
+            grid.columns == 123 && grid.rows == 41,
+            """
+            the re-adopted emulator is \(grid.columns)x\(grid.rows); the pty is 123x41 and the \
+            launch request — which nothing updates on a resize — is \
+            \(described.launch.columns)x\(described.launch.rows)
+            """)
+    }
+
     // MARK: - One reader, ever
 
     /// Two adoptions of one session yield one reader and one drain loop.

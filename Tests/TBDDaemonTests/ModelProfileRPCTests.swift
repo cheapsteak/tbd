@@ -30,6 +30,22 @@ final class StubClaudeUsageFetcher: ClaudeUsageFetcher, @unchecked Sendable {
     }
 }
 
+/// Records every credential a poller sweep hands it, so a test can assert both
+/// that a probe fired and what it carried. Returns an empty successful reading:
+/// nothing here is testing the parse, only the wiring.
+final class CountingProfileUsageFetcher: ProfileUsageFetching, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _credentials: [ProfileUsageCredential] = []
+
+    var credentials: [ProfileUsageCredential] { lock.withLock { _credentials } }
+    var callCount: Int { lock.withLock { _credentials.count } }
+
+    func fetchUsage(credential: ProfileUsageCredential) async -> ProfileUsageFetchStatus {
+        lock.withLock { _credentials.append(credential) }
+        return .ok([], organizationID: nil)
+    }
+}
+
 /// Keychain seam that samples the database from *inside* the delete handler's
 /// cleanup block, recording whether the `model_profiles` row still existed at
 /// that moment.
@@ -362,6 +378,413 @@ struct ModelProfileRPCTests {
         let resp = await router.handle(second)
         #expect(!resp.success)
         #expect(try await db.modelProfiles.list().count == 1)
+    }
+
+    // MARK: - token profiles (CredentialKind.oauthToken)
+
+    private func addTokenProfile(_ router: RPCRouter, name: String,
+                                 token: String) async throws -> RPCResponse {
+        await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(name: name, kind: .claudeToken, token: token)))
+    }
+
+    @Test("add: kind .claudeToken stores the secret as an oauthToken profile")
+    func addTokenProfileStoresSecret() async throws {
+        let (router, db, stub) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+
+        let token = freshToken()
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: token)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfileAddResult.self)
+        #expect(result.profile.kind == .oauthToken)
+        // No warning: unlike the signed-in path, the token was kept.
+        #expect(result.warning == nil)
+        let stored = try ModelProfileKeychain.load(id: result.profile.id.uuidString)
+        #expect(stored == token)
+        // The legacy api-key usage endpoint is never consulted for this kind.
+        #expect(stub.callCount == 0)
+    }
+
+    /// A token profile is nothing without its credential, so the row is never
+    /// created half-formed: there is no state where the kind says "token" and
+    /// no token is stored.
+    @Test("add: .claudeToken with no token is rejected and creates nothing")
+    func addTokenProfileWithoutSecretRejected() async throws {
+        let (router, db, _) = makeRouter()
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(name: "NoToken", kind: .claudeToken, token: nil)))
+        #expect(!resp.success)
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    @Test("add: .claudeToken with a whitespace-only token is rejected")
+    func addTokenProfileWithBlankSecretRejected() async throws {
+        let (router, db, _) = makeRouter()
+        let resp = try await addTokenProfile(router, name: "Blank", token: "   ")
+        #expect(!resp.success)
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    @Test("add: .claudeToken with a baseURL is rejected (token profiles are Claude-direct)")
+    func addTokenProfileWithBaseURLRejected() async throws {
+        let (router, db, _) = makeRouter()
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(name: "ProxyToken", kind: .claudeToken,
+                                          token: freshToken(),
+                                          baseURL: "http://127.0.0.1:3456")))
+        #expect(!resp.success)
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    /// A newline would break tmux's single-line `-e KEY=VALUE` parsing, so the
+    /// store refuses it — and refuses it before any row or secret file exists.
+    @Test("add: .claudeToken with an embedded newline is rejected, nothing stored")
+    func addTokenProfileWithNewlineRejected() async throws {
+        let (router, db, _) = makeRouter()
+        let resp = try await addTokenProfile(router, name: "Bad",
+                                             token: Self.oauthPrefix + "abc\ndef")
+        #expect(!resp.success)
+        #expect(resp.error?.contains("invalid characters") == true)
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    @Test("updateToken: replaces the stored secret")
+    func updateTokenReplacesStoredSecret() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+
+        let first = freshToken()
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: first)
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+
+        let second = freshToken()
+        let rotate = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileUpdateToken,
+            params: ModelProfileUpdateTokenParams(id: profile.id, token: second)))
+        #expect(rotate.success)
+        let stored = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        #expect(stored == second)
+        // Rotation keeps the row: the profile's id, config dir and history all
+        // survive, which is the whole point of not delete-and-recreating.
+        let row = try await db.modelProfiles.get(id: profile.id)
+        #expect(row?.kind == .oauthToken)
+    }
+
+    @Test("updateToken: a blank token is rejected and leaves the stored secret alone")
+    func updateTokenRejectsBlank() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+
+        let original = freshToken()
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: original)
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+
+        let rotate = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileUpdateToken,
+            params: ModelProfileUpdateTokenParams(id: profile.id, token: "   ")))
+        #expect(!rotate.success)
+        let stored = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        #expect(stored == original)
+    }
+
+    /// Off-branch: rotation is not reachable for a signed-in profile at all, so
+    /// the assertion is the rejection itself rather than only a probe count,
+    /// which would pass for the wrong reason. A `.oauth` profile stores no
+    /// TBD-side secret; its repair is `/login`, not a paste.
+    @Test("updateToken: rejected on a signed-in profile, which stores no secret")
+    func updateTokenRejectedOnOAuthProfile() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+        let oauthFetcher = CountingProfileUsageFetcher()
+        let tokenFetcher = CountingProfileUsageFetcher()
+        router.oauthUsagePoller = makeCountingPoller(
+            db: db, fetcher: oauthFetcher, tokenFetcher: tokenFetcher)
+        let profile = try await db.modelProfiles.create(name: "SignedIn", kind: .oauth)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileUpdateToken,
+            params: ModelProfileUpdateTokenParams(id: profile.id, token: freshToken())))
+        #expect(!resp.success)
+        #expect(resp.error == "Can only replace the token on a token profile")
+        // Nothing was written for a kind that authenticates by /login.
+        let stored = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        #expect(stored == nil)
+        // ...and no billed probe was spent on the rejected call.
+        await settleProbes()
+        #expect(tokenFetcher.callCount == 0)
+        #expect(oauthFetcher.callCount == 0)
+    }
+
+    @Test("updateToken: unknown id fails with profile-not-found")
+    func updateTokenUnknownID() async throws {
+        let (router, _, _) = makeRouter()
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileUpdateToken,
+            params: ModelProfileUpdateTokenParams(id: UUID(), token: freshToken())))
+        #expect(!resp.success)
+        #expect(resp.error == "Profile not found")
+    }
+
+    /// A secret that outlives its profile is a credential nothing owns, so
+    /// deletion reclaims a token profile's file exactly as it reclaims an
+    /// api-key profile's.
+    @Test("delete: reclaims a token profile's stored secret")
+    func deleteReclaimsTokenSecret() async throws {
+        let (router, db, _) = makeRouter(claudeCredentialsKeychain: ProfileRowPresenceProbe())
+        defer { Task { await cleanupKeychain(db) } }
+
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: freshToken())
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+        let beforeDelete = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        #expect(beforeDelete != nil, "the secret really was stored — otherwise this proves nothing")
+
+        let del = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileDelete,
+            params: ModelProfileDeleteParams(id: profile.id)))
+        #expect(del.success)
+        let afterDelete = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        #expect(afterDelete == nil)
+    }
+
+    /// The app never holds a profile secret, so the daemon computes the four
+    /// characters the settings row shows — and sends nothing else.
+    @Test("list: a token profile carries the masked tail, a signed-in one does not")
+    func listCarriesTokenTail() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+
+        let resp = try await addTokenProfile(router, name: "Acme (token)",
+                                             token: "sk-ant-oat01-AAAA4f2a")
+        let tokenProfile = try resp.decodeResult(ModelProfileAddResult.self).profile
+        let oauthProfile = try await db.modelProfiles.create(name: "SignedIn", kind: .oauth)
+
+        let listResp = await router.handle(RPCRequest(method: RPCMethod.modelProfileList))
+        #expect(listResp.success)
+        let result = try listResp.decodeResult(ModelProfileListResult.self)
+        let tokenEntry = result.profiles.first { $0.profile.id == tokenProfile.id }
+        let oauthEntry = result.profiles.first { $0.profile.id == oauthProfile.id }
+        #expect(tokenEntry?.tokenTail == "4f2a")
+        #expect(oauthEntry?.tokenTail == nil)
+        // The secret itself never leaves the daemon: the whole encoded list
+        // payload contains the tail and nothing more of the token.
+        let encoded = try JSONEncoder().encode(result)
+        let wirePayload = String(decoding: encoded, as: UTF8.self)
+        #expect(!wirePayload.contains("sk-ant-oat01-AAAA4f2a"))
+        #expect(wirePayload.contains("4f2a"))
+    }
+
+    @Test("list: a stored secret shorter than four characters yields no tail")
+    func listShortSecretYieldsNoTail() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+
+        let resp = try await addTokenProfile(router, name: "Stub", token: "abc")
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+
+        let listResp = await router.handle(RPCRequest(method: RPCMethod.modelProfileList))
+        let result = try listResp.decodeResult(ModelProfileListResult.self)
+        let entry = result.profiles.first { $0.profile.id == profile.id }
+        #expect(entry?.tokenTail == nil)
+    }
+
+    /// A poller wired the way `Daemon.swift` wires the real one — profiles read
+    /// from this router's database, the secret read back through the same
+    /// `ModelProfileKeychain` the add handler wrote it to — with both fetchers
+    /// replaced by counters. Never `start()`ed: these tests exercise the
+    /// targeted creation probe, not the cadence loop.
+    private func makeCountingPoller(
+        db: TBDDatabase,
+        fetcher: CountingProfileUsageFetcher,
+        tokenFetcher: CountingProfileUsageFetcher
+    ) -> OAuthProfileUsagePoller {
+        OAuthProfileUsagePoller(
+            profilesProvider: { try await db.modelProfiles.list() },
+            loginIdentity: { _ in nil },
+            configDirPath: { id in "/tmp/profiles/\(id.uuidString)/claude" },
+            fetcher: fetcher,
+            tokenFetcher: tokenFetcher,
+            profileSecret: { id in try? ModelProfileKeychain.load(id: id.uuidString) },
+            broadcast: {},
+            sleeper: { _ in }
+        )
+    }
+
+    /// Reported when a probe that should have fired never did. Handed to
+    /// `Issue.record` as an Error rather than left to a bare
+    /// `#expect(count == n)`, whose `condition(value → 1)` rendering drops the
+    /// whole finding from a CI summary — `Tests/CLAUDE.md`, "Timeout errors
+    /// must report observed state".
+    private struct ProbeCountUnmet: Error, CustomStringConvertible {
+        let expected: Int
+        let observed: Int
+        let after: Double
+
+        var description: String {
+            "usage probe never reached \(expected) call(s) — observed \(observed) "
+                + "after polling up to \(after) seconds. The probe is dispatched "
+                + "fire-and-forget from the RPC handler, so either it was never "
+                + "dispatched or the poller never reached its fetcher."
+        }
+    }
+
+    /// Waits for a probe that MUST arrive. A credential probe is deliberately
+    /// fire-and-forget — it must not delay the RPC response — so it lands after
+    /// the handler returns, and bounded polling is the sound way to observe it
+    /// (`Tests/CLAUDE.md` assertion-hygiene rule 3).
+    ///
+    /// The deadline is a hang-catcher, not a latency budget: it costs a passing
+    /// run nothing, and it is sized for the fast parallel pass, where a task
+    /// can sit suspended for tens of seconds behind the whole population rather
+    /// than behind anything this test did.
+    private func waitForProbes(_ fetcher: CountingProfileUsageFetcher,
+                               toReach target: Int,
+                               within seconds: Double = 30,
+                               sourceLocation: SourceLocation = #_sourceLocation) async {
+        let deadline = Date().addingTimeInterval(seconds)
+        while fetcher.callCount < target, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        if fetcher.callCount < target {
+            Issue.record(
+                ProbeCountUnmet(expected: target, observed: fetcher.callCount, after: seconds),
+                sourceLocation: sourceLocation)
+        }
+    }
+
+    /// Grace window for asserting that NO probe fires. Weaker than the positive
+    /// wait by construction, and named so nobody reads it otherwise: it samples
+    /// once at the end of a fixed window, so under enough load it can pass
+    /// because a probe had not landed *yet* rather than because none was
+    /// dispatched. The real evidence for these branches is that the handler
+    /// contains no dispatch at all; this guards against one being added
+    /// silently, and pairs with an exact count at the call site.
+    private func settleProbes(_ seconds: Double = 1) async {
+        try? await Task.sleep(for: .milliseconds(Int(seconds * 1000)))
+    }
+
+    /// A bad paste must be caught at creation — the row shows a rejected token
+    /// straight away — rather than at the user's first spawn.
+    @Test("add: creating a token profile probes usage exactly once")
+    func addTokenProfileProbesOnce() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+        let oauthFetcher = CountingProfileUsageFetcher()
+        let tokenFetcher = CountingProfileUsageFetcher()
+        router.oauthUsagePoller = makeCountingPoller(
+            db: db, fetcher: oauthFetcher, tokenFetcher: tokenFetcher)
+
+        let token = freshToken()
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: token)
+        #expect(resp.success)
+
+        await waitForProbes(tokenFetcher, toReach: 1)
+        #expect(tokenFetcher.callCount == 1)
+        // Not just "a probe happened": it carried the secret the add had only
+        // just stored, which is the whole chain — handler to keychain to poller.
+        #expect(tokenFetcher.credentials == [.token(token)])
+        // Dispatch is by kind, so the signed-in fetcher is never consulted.
+        #expect(oauthFetcher.callCount == 0)
+    }
+
+    /// Off-branch: creating a signed-in profile spends no billed request. Its
+    /// usage endpoint is free and the cadence sweep already serves it.
+    @Test("add: creating a signed-in profile probes nothing")
+    func addOAuthProfileProbesNothing() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+        let oauthFetcher = CountingProfileUsageFetcher()
+        let tokenFetcher = CountingProfileUsageFetcher()
+        router.oauthUsagePoller = makeCountingPoller(
+            db: db, fetcher: oauthFetcher, tokenFetcher: tokenFetcher)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(name: "SignedIn", token: nil)))
+        #expect(resp.success)
+
+        await settleProbes()
+        #expect(tokenFetcher.callCount == 0)
+        #expect(oauthFetcher.callCount == 0)
+    }
+
+    /// Rotation probes too, and must: the user is looking at a row that says
+    /// "Token rejected" and has just pasted the fix. Leaving that to the next
+    /// `working -> idle` transition reproduces the exact confusion the creation
+    /// probe removes, at the moment the user is most certainly watching.
+    ///
+    /// This also pins the released freshness gate end to end. The creation
+    /// probe left a snapshot seconds old, so the second probe fires only
+    /// because a credential change is exempt from the five-minute floor.
+    @Test("updateToken: rotating a token probes once with the new credential")
+    func updateTokenProbesOnce() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+        let oauthFetcher = CountingProfileUsageFetcher()
+        let tokenFetcher = CountingProfileUsageFetcher()
+        router.oauthUsagePoller = makeCountingPoller(
+            db: db, fetcher: oauthFetcher, tokenFetcher: tokenFetcher)
+
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: freshToken())
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+        await waitForProbes(tokenFetcher, toReach: 1)
+        #expect(tokenFetcher.callCount == 1, "the creation probe is the baseline this test measures against")
+
+        let replacement = freshToken()
+        let rotate = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileUpdateToken,
+            params: ModelProfileUpdateTokenParams(id: profile.id, token: replacement)))
+        #expect(rotate.success)
+
+        await waitForProbes(tokenFetcher, toReach: 2)
+        #expect(tokenFetcher.callCount == 2)
+        // The second probe carried the REPLACEMENT, not the token it replaced —
+        // otherwise the row would be "corrected" with the dead credential's answer.
+        #expect(tokenFetcher.credentials.last == .token(replacement))
+        #expect(oauthFetcher.callCount == 0)
+    }
+
+    /// Off-branch: a rename changes no credential, so it spends no billed
+    /// probe. Only a credential gesture is worth one.
+    @Test("rename: renaming a token profile probes nothing")
+    func renameProbesNothing() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+        let oauthFetcher = CountingProfileUsageFetcher()
+        let tokenFetcher = CountingProfileUsageFetcher()
+        router.oauthUsagePoller = makeCountingPoller(
+            db: db, fetcher: oauthFetcher, tokenFetcher: tokenFetcher)
+
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: freshToken())
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+        await waitForProbes(tokenFetcher, toReach: 1)
+
+        let renamed = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileRename,
+            params: ModelProfileRenameParams(id: profile.id, name: "Acme (renamed)")))
+        #expect(renamed.success)
+
+        await settleProbes()
+        #expect(tokenFetcher.callCount == 1)
+    }
+
+    @Test("fetchUsage: rejected for token profiles (the setup token 403s there)")
+    func fetchUsageRejectsTokenProfiles() async throws {
+        let (router, db, stub) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+
+        let resp = try await addTokenProfile(router, name: "Acme (token)", token: freshToken())
+        let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
+
+        let usage = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileFetchUsage,
+            params: ModelProfileFetchUsageParams(id: profile.id)))
+        #expect(!usage.success)
+        #expect(usage.error?.contains("token") == true)
+        #expect(stub.callCount == 0)
     }
 
     // MARK: - list

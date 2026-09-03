@@ -302,7 +302,10 @@ actor HolderRegistry {
         let adoption: Adoption
         do {
             adoption = try await Self.take(
-                terminalID: terminalID, over: spawned.client, expecting: owner)
+                terminalID: terminalID,
+                over: spawned.client,
+                expecting: owner,
+                onEndOfOutput: endOfOutputNotifier(for: terminalID))
         } catch {
             // The holder is up and supervising a job that no row will ever
             // name, so leaving it would orphan both. Best-effort, and the
@@ -595,13 +598,15 @@ actor HolderRegistry {
         let expected = owner
         let budget = busyRetryBudget
         let clock = self.clock
+        let notifyEndOfOutput = endOfOutputNotifier(for: terminalID)
         let task = Task<Adoption, Swift.Error> {
             try await Self.attach(
                 terminalID: terminalID,
                 socketPath: socketPath,
                 expecting: expected,
                 busyRetryBudget: budget,
-                clock: clock)
+                clock: clock,
+                onEndOfOutput: notifyEndOfOutput)
         }
         attachRoundTripsStarted += 1
         slots[terminalID] = .adopting(task)
@@ -761,13 +766,17 @@ actor HolderRegistry {
         socketPath: String,
         expecting owner: HolderOwnerToken,
         busyRetryBudget: Duration,
-        clock: any Clock<Duration>
+        clock: any Clock<Duration>,
+        onEndOfOutput: (@Sendable () -> Void)?
     ) async throws -> Adoption {
         var waited: Duration = .zero
         while true {
             do {
                 return try await attemptAttach(
-                    terminalID: terminalID, socketPath: socketPath, expecting: owner)
+                    terminalID: terminalID,
+                    socketPath: socketPath,
+                    expecting: owner,
+                    onEndOfOutput: onEndOfOutput)
             } catch HolderClient.Error.rejected(let version) {
                 guard waited < busyRetryBudget else {
                     throw HolderClient.Error.rejected(version: version)
@@ -787,12 +796,14 @@ actor HolderRegistry {
     private static func attemptAttach(
         terminalID: UUID,
         socketPath: String,
-        expecting owner: HolderOwnerToken
+        expecting owner: HolderOwnerToken,
+        onEndOfOutput: (@Sendable () -> Void)?
     ) async throws -> Adoption {
         try await take(
             terminalID: terminalID,
             over: HolderClient(socketPath: socketPath),
-            expecting: owner)
+            expecting: owner,
+            onEndOfOutput: onEndOfOutput)
     }
 
     /// The hand-over itself, over a connection the caller supplies.
@@ -807,7 +818,8 @@ actor HolderRegistry {
     private static func take(
         terminalID: UUID,
         over client: HolderClient,
-        expecting owner: HolderOwnerToken
+        expecting owner: HolderOwnerToken,
+        onEndOfOutput: (@Sendable () -> Void)? = nil
     ) async throws -> Adoption {
         let description: HolderChildDescription
         let ptyFD: Int32
@@ -825,11 +837,32 @@ actor HolderRegistry {
                 terminalID: terminalID, holderOwner: description.owner.rawValue)
         }
 
+        // **The pty is the authority on the grid, not the launch request.**
+        // `HolderLaunchRequest` records the size a session was asked for once,
+        // at spawn, and nothing ever updates it; every resize since — the app's
+        // `setMainAreaSize` fan-out reaching `HolderReader.resize` — moved the
+        // terminal itself with `TIOCSWINSZ`. Rebuilding the emulator from the
+        // request would hand a re-adopted session a grid the child stopped
+        // drawing into long ago: a job laying out 123 columns wraps every line
+        // into an 80-column emulator, and nothing in the daemon would say so.
+        // The request is the fallback for the one case the ioctl cannot answer.
+        let launched = (columns: Int(description.launch.columns), rows: Int(description.launch.rows))
+        let grid = HolderReader.windowSize(ptyFD: ptyFD) ?? launched
+        if grid != launched {
+            Self.logger.debug(
+                """
+                session \(terminalID.uuidString, privacy: .public) was resized since it was \
+                launched; building its emulator at \(grid.columns, privacy: .public)x\
+                \(grid.rows, privacy: .public) rather than the launch request's \
+                \(launched.columns, privacy: .public)x\(launched.rows, privacy: .public)
+                """)
+        }
         let reader = HolderReader(
             sessionID: terminalID,
             ptyFD: ptyFD,
-            columns: Int(description.launch.columns),
-            rows: Int(description.launch.rows))
+            columns: grid.columns,
+            rows: grid.rows,
+            onEndOfOutput: onEndOfOutput)
         do {
             try await reader.start()
         } catch {
@@ -840,6 +873,280 @@ actor HolderRegistry {
             throw error
         }
         return Adoption(reader: reader, description: description)
+    }
+
+    // MARK: - Reclaiming a finished session
+
+    /// How long the reclaimer keeps asking a holder whose pty has gone quiet
+    /// whether its child has actually exited.
+    ///
+    /// End of file on the master and the holder's `waitpid` are two different
+    /// observations of one event, made by two processes: the slave closes as
+    /// the job's descriptors are released, and the holder learns of the exit on
+    /// its next poll slice. So the first ask can legitimately answer "alive",
+    /// and a reclaimer that gave up on it would keep the reader forever. The
+    /// budget is comfortably longer than the holder's 50 ms poll slice and
+    /// finite next to the ten-second window a holder keeps its rendezvous bound
+    /// after its child dies.
+    static let exitConfirmationBudget: Duration = .seconds(2)
+    static let exitConfirmationInterval: Duration = .milliseconds(50)
+
+    /// The callback a reader announces its exhausted drain on.
+    ///
+    /// Weak, and that is not a formality: the reader is owned by this registry,
+    /// so a strong capture here would be a cycle keeping every reader — and its
+    /// thread, its emulator and its pty dup — alive for as long as the process
+    /// runs, which is the leak this whole section exists to close. The hop onto
+    /// a `Task` is what keeps the drain thread free: it is the thread the
+    /// release will have to join.
+    private func endOfOutputNotifier(for terminalID: UUID) -> @Sendable () -> Void {
+        { [weak self] in
+            guard let self else { return }
+            Task { await self.reclaimIfSessionEnded(terminalID) }
+        }
+    }
+
+    /// **The reclaimer for a reader whose session is over.**
+    ///
+    /// A reader is not free. It owns a dedicated thread with a 1 MB stack, a
+    /// 64 KB read buffer, an emulator holding thousands of lines of scrollback,
+    /// and a dup of the pty master — and after end of file its drain thread
+    /// parks on the wake pipe rather than exiting, deliberately, so that the
+    /// descriptor's close stays on the stop path. Nothing but a `release`
+    /// unwinds that, so without this the daemon's memory tracked sessions
+    /// *adopted since it started*, not sessions alive.
+    ///
+    /// Two conditions, and both are load-bearing:
+    ///
+    ///   - **The drain has reached the end of the output.** A holder hands its
+    ///     master over even after its child has exited, precisely so the bytes
+    ///     the job wrote and nobody read can still be drained; releasing on the
+    ///     exit alone would throw away exactly what that rule rescues. The
+    ///     exhausted edge is the proof that nothing is left queued.
+    ///   - **The holder says the child exited.** End of file means the last
+    ///     slave closed, which is nearly always the job exiting — but a job that
+    ///     closes its terminal and keeps running is entitled to, and its session
+    ///     row is still live. So the holder is asked, and a child it still
+    ///     reports as alive keeps its reader.
+    ///
+    /// The second condition is only a condition if it takes an *answer*. A
+    /// holder that could not be reached has told us nothing, and a probe that
+    /// failed must never be read as one that succeeded — otherwise a single
+    /// dropped connection at the instant the drain runs dry collapses the two
+    /// conditions back to the first, which is the shape that throws a live
+    /// session's scrollback away. `exitProbeOutcome` is where each way a probe
+    /// can fail is ruled on.
+    ///
+    /// Idempotent and safe to call for any session: it re-reads the slot on
+    /// both sides of every suspension and does nothing unless the reader it
+    /// finds is one that has genuinely finished.
+    func reclaimIfSessionEnded(_ terminalID: UUID) async {
+        guard case .adopted(let reader) = slots[terminalID] else { return }
+        guard await reader.hasReachedEndOfOutput else { return }
+        // Re-read after the suspension, as everywhere else here: an actor's
+        // methods are not atomic across `await`, and a release or a re-adoption
+        // could have taken this slot while the reader was answering.
+        guard case .adopted(let stillAdopted) = slots[terminalID],
+            stillAdopted === reader
+        else { return }
+
+        let status: HolderChildStatus?
+        switch statuses[terminalID] {
+        case .exited, .exitedStatusUnknown:
+            // Already established — a job that ended before this daemon adopted
+            // it reports its status on the hand-over itself.
+            status = statuses[terminalID]
+        case .alive, nil:
+            guard
+                let socketPath = try? HolderRendezvous.socketPath(
+                    sessionID: terminalID, environment: environment)
+            else { return }
+            status = await Self.confirmChildExit(
+                socketPath: socketPath,
+                expecting: owner,
+                budget: Self.exitConfirmationBudget,
+                clock: clock)
+        }
+
+        // A child that is still running, a holder somebody else is attached to,
+        // or one that answered for another installation: nothing here
+        // establishes that this session is over, so its reader stays.
+        guard let status else { return }
+        guard case .adopted(let current) = slots[terminalID], current === reader else { return }
+
+        statuses[terminalID] = status
+        await release(terminalID: terminalID)
+        Self.logger.info(
+            """
+            released the reader for session \(terminalID.uuidString, privacy: .public): its \
+            output is drained and its job is \(String(describing: status), privacy: .public)
+            """)
+    }
+
+    /// Asks a holder whether its child has exited, briefly retrying while the
+    /// answer is "alive".
+    ///
+    /// Returns the terminal status when one is established, and nil when this
+    /// registry must keep its reader — a child still running, a holder serving
+    /// somebody else, or one that turns out to belong to another installation.
+    ///
+    /// **`describe` is safe here and nowhere earlier.** A holder winds itself
+    /// down the moment an answer carrying the terminal status reaches a client,
+    /// which is why adoption asks for the hand-over instead: a `describe` before
+    /// the master had been taken would end the holder and take everything the
+    /// job wrote and nobody read down with it. This runs only past the exhausted
+    /// edge, where there is nothing left to lose — and winding the holder down
+    /// is then the right outcome rather than a cost.
+    ///
+    /// **A failed probe is not an answer.** Only a holder that says so, or a
+    /// rendezvous that provably has nobody behind it, establishes that this
+    /// session is over; every other way a round trip can fail is retried within
+    /// the same budget and then kept. See `exitProbeOutcome`.
+    private static func confirmChildExit(
+        socketPath: String,
+        expecting owner: HolderOwnerToken,
+        budget: Duration,
+        clock: any Clock<Duration>
+    ) async -> HolderChildStatus? {
+        var waited: Duration = .zero
+        while true {
+            let client = HolderClient(socketPath: socketPath)
+            do {
+                let description = try await client.describe()
+                await client.close()
+                guard description.owner == owner else { return nil }
+                switch description.status {
+                case .exited, .exitedStatusUnknown:
+                    return description.status
+                case .alive:
+                    break
+                }
+            } catch {
+                await client.close()
+                switch exitProbeOutcome(for: error) {
+                case .established(let status):
+                    return status
+                case .keep:
+                    return nil
+                case .retry:
+                    break
+                }
+            }
+            guard waited < budget else {
+                Self.logger.debug(
+                    """
+                    keeping the reader for a session at \(socketPath, privacy: .public): its \
+                    holder never established that the job had exited within \
+                    \(String(describing: budget), privacy: .public)
+                    """)
+                return nil
+            }
+            try? await clock.sleep(for: Self.exitConfirmationInterval)
+            waited += Self.exitConfirmationInterval
+        }
+    }
+
+    /// What one failed exit probe bears on the question "is this session over?".
+    ///
+    /// Three outcomes rather than two, because "the round trip failed" and "the
+    /// holder is gone" are different facts and only the second one is evidence.
+    enum ExitProbeOutcome: Equatable {
+        /// The session is over, and this is how it ended.
+        case established(HolderChildStatus)
+        /// This attempt failed in a way another one might not. Ask again, on
+        /// the same budget the "alive" answer is retried on.
+        case retry
+        /// Nothing here says the session ended. The reader stays.
+        case keep
+    }
+
+    /// How a thrown `describe` bears on releasing a reader.
+    ///
+    /// **The two conditions are only two if the second one takes positive
+    /// evidence.** A release is irreversible and asymmetric: it stops the drain
+    /// thread, closes the pty dup, and drops an emulator holding everything the
+    /// session ever printed, while a reader kept in error costs one emulator
+    /// until its session row is closed or the daemon restarts. So a probe that
+    /// merely failed must never stand in for a holder that answered — otherwise
+    /// one dropped connection at the instant the drain runs dry silently
+    /// collapses "end of output **and** confirmed exit" back to "end of
+    /// output", which is the condition that would throw away a job that closed
+    /// its terminal and kept running.
+    ///
+    /// Exhaustive on purpose: a new `HolderClient.Error` case must be classified
+    /// here rather than inheriting a catch-all.
+    ///
+    /// Internal rather than private so the classification can be pinned case by
+    /// case without standing up a holder for each one.
+    static func exitProbeOutcome(for error: Swift.Error) -> ExitProbeOutcome {
+        guard let clientError = error as? HolderClient.Error else {
+            // Nothing else is thrown on this path today. Whatever a future one
+            // throws, it is not an answer from a holder, so it cannot license a
+            // release.
+            return .keep
+        }
+        switch clientError {
+        case .rejected:
+            // A live holder, busy serving somebody else. That is evidence of
+            // liveness and explicitly not of exit — the same reading `adoptAll`
+            // and the row-less sweep both take of a refusal.
+            return .keep
+
+        case .cannotConnect(_, let code) where code == ENOENT || code == ECONNREFUSED:
+            // Nothing is listening at the rendezvous, so the holder process is
+            // gone. These are the only two errnos that mean absence rather than
+            // this daemon's own failure to reach a socket, and they are read
+            // that way in exactly one other place already —
+            // `RowlessHolderCollector.productionHandshake` and
+            // `HolderRendezvousCollector.probeForListener` — which must not
+            // disagree with this one.
+            //
+            // Established rather than retried, because absence is monotone
+            // here: this session's holder provably bound the path once, since a
+            // hand-over came over it, and a holder that has gone does not come
+            // back. Recorded the way `adoptAll` records the same observation —
+            // `exitedStatusUnknown`, never a fabricated code, which downstream
+            // could not tell from a real one.
+            return .established(.exitedStatusUnknown)
+
+        case .cannotConnect:
+            // Any other errno describes *this* process failing to open a
+            // connection — `EINTR`, `EMFILE`/`ENFILE` under descriptor
+            // pressure, `ENOBUFS`/`ENOMEM`, `ETIMEDOUT` — and says nothing
+            // whatever about the child.
+            return .retry
+
+        case .peerClosed, .transportFailed:
+            // The socket was reached and the round trip failed: a hang-up
+            // between the accept and the answer, `EPIPE`, `ECONNRESET`, or the
+            // receive timeout expiring. A holder winding down looks exactly
+            // like this, and so does one killed mid-frame — and neither says
+            // whether the child exited. The next attempt either finds no
+            // listener, which is established above, or gets a real answer.
+            return .retry
+
+        case .unexpectedResponse:
+            // A frame that is not the description that was asked for. Retried
+            // because the client's queue can carry an unsolicited push that
+            // crossed the wire with somebody else's answer, and kept if it
+            // persists: a protocol disagreement is a reason to stop trusting
+            // the answer, never a reason to believe the job is dead.
+            return .retry
+
+        case .socketPathTooLong:
+            // Deterministic, so retrying is pointless — and nothing was ever
+            // asked, so there is nothing to conclude either.
+            return .keep
+
+        case .noDescriptor, .notConnected:
+            // Neither is reachable from a `describe` over a client built for
+            // this one call: `noDescriptor` belongs to the hand-over, and
+            // `notConnected` to a client that has already been closed. Named so
+            // that they are classified rather than swept into a fall-through,
+            // and classified as keeps for the same reason as everything else
+            // here.
+            return .keep
+        }
     }
 
     // MARK: - Release
