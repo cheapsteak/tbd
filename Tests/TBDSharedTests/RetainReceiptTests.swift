@@ -72,7 +72,7 @@ struct RetainReceiptTests {
         let original = RetainReceipt(
             key: "k", expiresAt: ISO8601DateFormatter().date(from: "2026-10-01T00:00:00Z"), bytes: 9)
         let data = try JSONEncoder().encode(original)
-        let text = String(decoding: data, as: UTF8.self)
+        let text = try #require(String(bytes: data, encoding: .utf8))
         #expect(text.contains("expires_at"))
         #expect(text.contains("2026-10-01T00:00:00Z"))
         let decoded = try JSONDecoder().decode(RetainReceipt.self, from: data)
@@ -81,7 +81,7 @@ struct RetainReceiptTests {
 
     @Test func encodesNoExpiresAtKeyWhenThereIsNoClaim() throws {
         let data = try JSONEncoder().encode(RetainReceipt(key: "k", bytes: 9))
-        let text = String(decoding: data, as: UTF8.self)
+        let text = try #require(String(bytes: data, encoding: .utf8))
         #expect(text.contains("expires_at") == false)
     }
 }
