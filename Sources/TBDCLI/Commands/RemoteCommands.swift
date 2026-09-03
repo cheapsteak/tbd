@@ -979,14 +979,19 @@ struct RemoteCreate: AsyncParsableCommand {
         // would leave a retained blob nobody will ever use.
         if let worktree = fleet.worktrees.first(where: { $0.id == terminal.worktreeID }),
            worktree.location.isLocal, !worktree.localPath.isEmpty {
-            guard let summary = readTeleportSummary(worktreePath: worktree.localPath) else {
+            if let summary = readTeleportSummary(worktreePath: worktree.localPath) {
+                if let refusal = TeleportPrecondition.refusal(summary, force: force) {
+                    remoteNote(refusal)
+                    throw ExitCode.failure
+                }
+            } else if !force {
+                // Unknown is refused rather than assumed clean: guessing zero
+                // would carry a conversation away from work the user believed
+                // was coming with it. --force still gets through, on the same
+                // terms as every other teleport refusal.
                 throw CLIError.invalidArgument(
                     "Could not read the git state of \(worktree.localPath), so what would be "
                     + "left behind is unknown. Re-run with --force to move the conversation anyway.")
-            }
-            if let refusal = TeleportPrecondition.refusal(summary, force: force) {
-                remoteNote(refusal)
-                throw ExitCode.failure
             }
         }
         guard let jsonl = try? String(contentsOfFile: transcriptPath, encoding: .utf8) else {
