@@ -499,6 +499,7 @@ import Testing
             "20260901135111_config_gc_holder_rendezvous",
             "20260901161500_config_gc_rowless_holders",
             "20260901180118_config_reap_holder_children",
+            "20260902120000_retained_transcript",
             "20260902130000_config_remote_delete",
         ]
         let found = try SQLMigrationLoader.bundled.get()
