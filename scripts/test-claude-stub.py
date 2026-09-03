@@ -397,6 +397,38 @@ class SignalHandlerStateTests(SignalTargetsFixture):
         self.assertIsNone(claude_stub.handle_stop_signal(signal.SIGTERM, None))
         self.assertEqual([int(signal.SIGTERM)], child.sent)
 
+    def _handle_with_predicate(self, signum: int, already_delivered: bool) -> list[int]:
+        """Signal a live child with the foreground-group answer forced."""
+        child = FakeChild()
+        self.targets.child = child
+        with mock.patch.object(
+            claude_stub, "sigint_reached_child_already", return_value=already_delivered
+        ):
+            self.assertIsNone(claude_stub.handle_stop_signal(signum, None))
+        return child.sent
+
+    def test_a_terminal_ctrl_c_is_not_forwarded_to_the_child_a_second_time(self):
+        # The tty already delivered it to the whole foreground process group,
+        # which the child shares; the TUI exits on a double Ctrl-C, so a second
+        # one would answer the user's first press with the exit confirmation.
+        self.assertEqual([], self._handle_with_predicate(signal.SIGINT, True))
+
+    def test_a_kill_int_the_child_cannot_have_seen_is_forwarded(self):
+        # `kill -INT` aimed at the wrapper alone never reached the child.
+        self.assertEqual(
+            [int(signal.SIGINT)], self._handle_with_predicate(signal.SIGINT, False)
+        )
+
+    def test_a_sigterm_is_forwarded_whatever_the_terminal_did(self):
+        # Only SIGINT can reach the child by the tty, so the check must not
+        # start swallowing signals that arrive by no route but this one.
+        for shared in (True, False):
+            with self.subTest(shared=shared):
+                self.assertEqual(
+                    [int(signal.SIGTERM)],
+                    self._handle_with_predicate(signal.SIGTERM, shared),
+                )
+
     def test_forwarding_tolerates_a_child_that_exited_first(self):
         # The race every forwarding site runs: the pid is gone by the time the
         # signal is sent, which is the outcome that was wanted, not a crash.
@@ -470,43 +502,54 @@ class TerminalSigintTests(unittest.TestCase):
             self.assertTrue(claude_stub.sigint_reached_child_already(0))
 
 
-class RunClaudeInterruptTests(SignalTargetsFixture):
-    """Both branches of the Ctrl-C decision, with a stand-in for Popen."""
+class QueuedSpawnSignalTests(SignalTargetsFixture):
+    """A signal queued across the spawn, delivered once the child has a name.
 
-    def _run_with_interrupt(self, already_delivered: bool) -> list[int]:
-        sent: list[int] = []
+    The handler cannot forward to a child that does not exist yet, so a stop
+    signal landing inside `Popen` is parked in `pending_signum` and handed over
+    by `run_claude`. That hand-off runs the same foreground-group check the
+    handler does, or a terminal Ctrl-C queued across the spawn would reach the
+    child a second time.
+    """
 
-        class InterruptingChild(FakeChild):
-            def __init__(self) -> None:
-                super().__init__()
-                self.waits = 0
-
-            def send_signal(self, signum):
-                sent.append(signum)
-
+    def _run_with_queued(self, signum: int, already_delivered: bool) -> list[int]:
+        class WaitableChild(FakeChild):
             def wait(self):
-                self.waits += 1
-                if self.waits == 1:
-                    raise KeyboardInterrupt
                 return 0
 
+        child = WaitableChild()
+
+        def popen(*args, **kwargs):
+            # What the handler does when it fires between the fork and the
+            # `child = ...` assignment: nothing to forward to, so it queues.
+            claude_stub.SIGNAL_TARGETS.pending_signum = signum
+            return child
+
         with mock.patch.object(
-            claude_stub.subprocess, "Popen", lambda *a, **k: InterruptingChild()
+            claude_stub.subprocess, "Popen", popen
         ), mock.patch.object(
             claude_stub,
             "sigint_reached_child_already",
             return_value=already_delivered,
         ):
             self.assertEqual(0, claude_stub.run_claude("claude", [], {}))
-        return sent
+        return child.sent
 
-    def test_a_terminal_ctrl_c_is_not_delivered_to_the_child_a_second_time(self):
-        # The TUI exits on a double Ctrl-C, so forwarding the one the tty
-        # already delivered would turn one press into the exit confirmation.
-        self.assertEqual([], self._run_with_interrupt(True))
+    def test_a_queued_terminal_ctrl_c_is_not_delivered_to_the_child_again(self):
+        self.assertEqual([], self._run_with_queued(signal.SIGINT, True))
 
-    def test_an_interrupt_the_child_cannot_have_seen_is_forwarded(self):
-        self.assertEqual([int(signal.SIGINT)], self._run_with_interrupt(False))
+    def test_a_queued_interrupt_the_child_cannot_have_seen_is_delivered(self):
+        self.assertEqual(
+            [int(signal.SIGINT)], self._run_with_queued(signal.SIGINT, False)
+        )
+
+    def test_a_queued_sigterm_is_delivered_whatever_the_terminal_did(self):
+        for shared in (True, False):
+            with self.subTest(shared=shared):
+                self.assertEqual(
+                    [int(signal.SIGTERM)],
+                    self._run_with_queued(signal.SIGTERM, shared),
+                )
 
 
 class EarlyInterruptTests(SignalTargetsFixture):
@@ -765,10 +808,76 @@ class WrapperProcessTests(unittest.TestCase):
     def test_a_sighup_before_claude_starts_is_handled_like_a_sigterm(self):
         self._stop_signal_leaves_nothing_behind(signal.SIGHUP, at_sandbox=True)
 
-    def test_print_env_stops_on_sighup_and_still_reports_the_summary(self):
-        # `serve_until_signalled` used to take SIGINT and SIGTERM only, so a
-        # SIGHUP — the signal a closing terminal sends — killed the server
-        # outright: no summary, and the temp sandbox left on disk.
+    def test_a_sigint_before_claude_starts_is_handled_like_a_sigterm(self):
+        # SIGINT is a stop signal like the other two rather than being left to
+        # Python's default KeyboardInterrupt, so it has to hold the same two
+        # windows: the instant the sandbox appears, and before any resource
+        # exists at all.
+        #
+        # `send_signal` here is `os.kill(wrapper.pid, SIGINT)`, not a Ctrl-C
+        # typed at a terminal: `_spawn_wrapper` launches the wrapper with
+        # `start_new_session=True`, so it has no controlling tty,
+        # `sigint_reached_child_already` answers False, and the signal is
+        # forwarded like any other. The foreground-group case — where the tty
+        # delivered the Ctrl-C to the child too and the wrapper must not
+        # forward a second — is covered by the unit tests instead.
+        for attempt in range(5):
+            with self.subTest(attempt=attempt):
+                self._stop_signal_leaves_nothing_behind(signal.SIGINT, at_sandbox=True)
+        self._stop_signal_leaves_nothing_behind(signal.SIGINT, at_sandbox=False)
+
+    def test_a_sigint_while_claude_runs_reaches_it_and_still_cleans_up(self):
+        # The window `wait()` occupies for the whole of a real session. Left to
+        # KeyboardInterrupt the exception unwinds out of `run_claude` with the
+        # child neither signalled nor waited for, and `main` removes the
+        # sandbox under a `claude` that is still running.
+        root = self._root()
+        tmpdir = root / "tmp"
+        tmpdir.mkdir()
+        child_report = root / "child.txt"
+        binary = self._fake_claude(
+            root / "fake-claude.sh",
+            f'printf \'%s\\n\' "$$" > {shlex.quote(str(child_report))}\n'
+            # `exec` keeps the pid just written, and the sleep outlasts the
+            # deadline so "the child is gone" cannot pass by expiry.
+            "exec sleep 600\n",
+        )
+        wrapper = self._spawn_wrapper(
+            root, binary, env={**os.environ, "TMPDIR": str(tmpdir)}
+        )
+
+        def reported():
+            if wrapper.poll() is not None:
+                self.fail("the wrapper exited before the stub claude reported in")
+            text = child_report.read_text(encoding="utf-8").strip() if child_report.exists() else ""
+            return int(text) if text else None
+
+        child_pid = self._wait_for(reported, "the stub claude to report its pid")
+
+        wrapper.send_signal(signal.SIGINT)
+        try:
+            _, stderr = wrapper.communicate(timeout=self.DEADLINE)
+        except subprocess.TimeoutExpired:
+            self.fail(f"the wrapper did not finish {self.DEADLINE}s after SIGINT")
+
+        self._wait_for(
+            lambda: self._pid_gone(child_pid),
+            f"the stub claude (pid {child_pid}) to exit",
+        )
+        self.assertEqual(
+            [], list(tmpdir.glob("claude-stub-*")), f"a sandbox leaked\n{stderr}"
+        )
+        self.assertEqual(130, self._exit_status(wrapper.returncode), stderr)
+        self.assertIn("request(s) served", stderr)
+
+    def _print_env_stops_on(self, sig: int) -> None:
+        """Signal a `--print-env` server and assert it stopped cleanly.
+
+        Every stop signal takes the same route here: the handler sets the
+        serving event, `serve_until_signalled` returns normally, and the caller
+        gets the closing summary and an exit status of 0 rather than a signal
+        death with the temp sandbox left on disk.
+        """
         root = self._root()
         tmpdir = root / "tmp"
         tmpdir.mkdir()
@@ -791,16 +900,28 @@ class WrapperProcessTests(unittest.TestCase):
             "the export lines on stdout",
         )
 
-        wrapper.send_signal(signal.SIGHUP)
+        wrapper.send_signal(sig)
         try:
             wrapper.communicate(timeout=self.DEADLINE)
         except subprocess.TimeoutExpired:
-            self.fail(f"the wrapper kept serving {self.DEADLINE}s after SIGHUP")
+            self.fail(f"the wrapper kept serving {self.DEADLINE}s after signal {sig}")
 
         stderr_text = err.read_text(encoding="utf-8")
         self.assertEqual(0, wrapper.returncode, stderr_text)
         self.assertIn("request(s) served", stderr_text)
         self.assertEqual([], list(tmpdir.glob("claude-stub-*")), "a sandbox leaked")
+
+    def test_print_env_stops_on_sighup_and_still_reports_the_summary(self):
+        # `serve_until_signalled` used to take SIGINT and SIGTERM only, so a
+        # SIGHUP — the signal a closing terminal sends — killed the server
+        # outright: no summary, and the temp sandbox left on disk.
+        self._print_env_stops_on(signal.SIGHUP)
+
+    def test_print_env_stops_on_sigint_and_still_reports_the_summary(self):
+        # Ctrl-C is the documented way to stop a `--print-env` server, and it
+        # now arrives at the handler rather than as a KeyboardInterrupt out of
+        # `Event.wait()`. The summary has to survive the change of route.
+        self._print_env_stops_on(signal.SIGINT)
 
 
 class SandboxCleanupTests(unittest.TestCase):

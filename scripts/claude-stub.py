@@ -220,7 +220,7 @@ def report(lines: list[str]) -> None:
 
 
 class Terminated(Exception):
-    """SIGTERM or SIGHUP arrived with nothing else to hand it to.
+    """A stop signal arrived with nothing else to hand it to.
 
     Raised out of the signal handler so the signal unwinds through `main`'s
     cleanup instead of the interpreter dying where it stands.
@@ -236,7 +236,8 @@ class SignalTargets:
 
     The handler tests these in order: once the run is `finishing` there is
     nothing left to signal and the signal is swallowed; a live `claude` owns
-    the signal and gets it forwarded; a spawn in flight queues it, because the
+    the signal and is handed it by `deliver`; a spawn in flight queues it (to
+    be handed over the same way once the child has a name), because the
     fork may already exist under a name nothing has been handed yet; a
     `--print-env` server stops serving; otherwise nothing is running that can
     take it, so the signal becomes a `Terminated`.
@@ -255,7 +256,15 @@ class SignalTargets:
 
 
 SIGNAL_TARGETS = SignalTargets()
-STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+# SIGINT is one of these rather than being left to Python's default
+# `KeyboardInterrupt`, so a Ctrl-C gets the same phase-aware treatment as the
+# other two: held off across `mkdtemp`, queued across the spawn, turned into a
+# clean stop while `--print-env` is serving, and swallowed while finishing.
+# Under the default disposition it could land between `mkdtemp` creating the
+# directory and the name reaching `sandbox` (the sandbox then leaks), or
+# between the fork inside `Popen` and the child reaching `SIGNAL_TARGETS`
+# (the sandbox is then removed out from under a still-running `claude`).
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
 
 
 def forward(child: subprocess.Popen, signum: int) -> None:
@@ -272,6 +281,22 @@ def forward(child: subprocess.Popen, signum: int) -> None:
         pass
 
 
+def deliver(child: subprocess.Popen, signum: int) -> None:
+    """Forward `signum` to the child, unless the terminal beat us to it.
+
+    Only SIGINT can have reached the child on its own: a tty delivers it to
+    every process in the foreground group, and `claude` deliberately shares the
+    wrapper's group so it can own the tty. A second one would read as the
+    double Ctrl-C the TUI exits on, so a Ctrl-C typed at the terminal is not
+    forwarded — while a `kill -INT` aimed at the wrapper alone still is
+    (`sigint_reached_child_already`). Every other signal is forwarded
+    unconditionally; nothing else reaches the child by any route but this one.
+    """
+    if signum == signal.SIGINT and sigint_reached_child_already():
+        return
+    forward(child, signum)
+
+
 def handle_stop_signal(signum: int, _frame: Any) -> None:
     if SIGNAL_TARGETS.finishing:
         # The child has already been waited for and the wrapper is at most a
@@ -286,7 +311,7 @@ def handle_stop_signal(signum: int, _frame: Any) -> None:
     if child is not None:
         # PEP 475 retries the interrupted `wait()` once this returns, so the
         # wrapper's own status follows however the child answers the signal.
-        forward(child, signum)
+        deliver(child, signum)
         return
     if SIGNAL_TARGETS.spawning:
         SIGNAL_TARGETS.pending_signum = signum
@@ -299,7 +324,7 @@ def handle_stop_signal(signum: int, _frame: Any) -> None:
 
 
 def install_signal_handlers() -> dict[int, Any]:
-    """Take SIGTERM and SIGHUP; return what they were, for restoring after."""
+    """Take every stop signal; return what they were, for restoring after."""
     return {sig: signal.signal(sig, handle_stop_signal) for sig in STOP_SIGNALS}
 
 
@@ -336,15 +361,12 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
     The child deliberately stays in this process's own group and session: the
     interactive TUI has to remain in the terminal's foreground process group to
     own the tty, so it cannot be put behind `start_new_session`. That shared
-    group is also why a Ctrl-C typed at the terminal is not forwarded — the tty
-    already delivered it to the child, and a second one would read as the
-    double Ctrl-C the TUI exits on (`sigint_reached_child_already`). Other
-    signals are forwarded by pid, and all this has to do is publish the child for
-    the handlers `main` installed before any resource existed. Without that
-    forwarding a SIGTERM to the wrapper would take the interpreter's default
-    disposition — the process dies where it stands, `main`'s `finally` never
-    runs, the sandbox is left on disk, and `claude` keeps running with nobody
-    waiting on it.
+    group is why `deliver` drops a Ctrl-C typed at the terminal rather than
+    forwarding it. All this has to do is publish the child for the handlers
+    `main` installed before any resource existed. Without those a stop signal
+    to the wrapper would take the interpreter's default disposition — the
+    process dies where it stands, `main`'s `finally` never runs, the sandbox is
+    left on disk, and `claude` keeps running with nobody waiting on it.
 
     PEP 475 retries the interrupted `wait()` once a handler returns, so the
     call resumes and returns the child's status as soon as the forwarded
@@ -382,16 +404,14 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
 
     try:
         if queued is not None:
-            forward(child, queued)
-        while True:
-            try:
-                status = child.wait()
-                break
-            except KeyboardInterrupt:
-                # Only when the child cannot have had it already; either way
-                # the loop goes back to waiting for the child to answer.
-                if not sigint_reached_child_already():
-                    forward(child, signal.SIGINT)
+            deliver(child, queued)
+        # No `except KeyboardInterrupt` here: SIGINT is in STOP_SIGNALS, so
+        # `handle_stop_signal` owns it for the whole of this call — installed
+        # by `main` before any resource existed and restored only in `main`'s
+        # outermost `finally`. Python raises KeyboardInterrupt from the default
+        # SIGINT disposition alone, and that disposition is not installed here,
+        # so the wait can only be interrupted and then resumed by PEP 475.
+        status = child.wait()
     finally:
         SIGNAL_TARGETS.child = None
         # The child has been waited for, so from here the wrapper is only
@@ -410,11 +430,12 @@ def serve_until_signalled(
 ) -> None:
     """--print-env: hand the caller exports, keep serving until a stop signal.
 
-    No handler is installed here: SIGTERM and SIGHUP are already `main`'s, and
-    publishing the event is what turns them into a clean stop rather than a
-    `Terminated` unwind. SIGINT keeps its default disposition and arrives as a
-    KeyboardInterrupt, which stops serving the same way. Either route returns
-    normally, so the caller still gets the closing summary.
+    No handler is installed here: every stop signal is already `main`'s, and
+    publishing the event is what turns one into a clean stop rather than a
+    `Terminated` unwind. Ctrl-C takes that same route, since SIGINT is a stop
+    signal like the other two — the handler sets the event and returns, the
+    `wait()` resumes and sees it set, and the caller still gets the closing
+    summary.
     """
     for line in export_lines(env, extra_env):
         print(line)
@@ -425,10 +446,7 @@ def serve_until_signalled(
     SIGNAL_TARGETS.serving_event = stop
     try:
         report(["serving; Ctrl-C (or SIGTERM) to stop"])
-        try:
-            stop.wait()
-        except KeyboardInterrupt:
-            pass
+        stop.wait()
     finally:
         SIGNAL_TARGETS.serving_event = None
         # Same as after the child is waited for: serving is over, so a stop
@@ -468,14 +486,15 @@ def main(argv: list[str]) -> int:
     """Serve the fake API for one run, and reclaim the sandbox afterwards.
 
     The stop-signal handlers go on first, before a single resource exists, so
-    a SIGTERM or SIGHUP anywhere below — building the sandbox, binding the
-    stub server, spawning claude — unwinds through the cleanup instead of
-    taking the interpreter's default disposition. Once the run is finishing —
-    the child waited for, or the `--print-env` server stopped — a stop signal
-    is instead recorded and swallowed, so the last few milliseconds of summary
-    and sandbox removal cannot be interrupted either, and the status stays the
-    one the child exited with. Only SIGKILL or a hard crash can leave the
-    sandbox on disk or the child unwaited-for.
+    any of SIGTERM, SIGHUP and SIGINT arriving anywhere below — building the
+    sandbox, binding the stub server, spawning claude — unwinds through the
+    cleanup instead of taking the interpreter's default disposition. Once the
+    run is finishing — the child waited for, or the `--print-env` server
+    stopped — a stop signal is instead recorded and swallowed, so the last few
+    milliseconds of summary and sandbox removal cannot be interrupted either,
+    and the status stays the one the child exited with. The guarantee is the
+    same for all three: only SIGKILL or a hard crash can leave the sandbox on
+    disk or the child unwaited-for.
     """
     previous_handlers = install_signal_handlers()
     try:
@@ -541,10 +560,13 @@ def main(argv: list[str]) -> int:
         report([f"stopped by signal {terminated.signum}"])
         return 128 + terminated.signum
     except KeyboardInterrupt:
-        # A Ctrl-C before `claude` is running — while the sandbox is built or
-        # the stub server binds — has nowhere to be forwarded, and is the same
-        # outcome as the SIGTERM above: report the signal, keep the cleanup the
-        # `finally` blocks already did, and answer 130 rather than a traceback.
+        # A belt for the instants either side of the handler's reign: SIGINT is
+        # a stop signal, so a Ctrl-C from here on arrives as `Terminated` like
+        # any other, and only one landing before `install_signal_handlers` has
+        # returned — or after `restore_signal_handlers` puts the default back —
+        # can still take the KeyboardInterrupt disposition. Same outcome as the
+        # `Terminated` above: report the signal, keep the cleanup the `finally`
+        # blocks already did, and answer 130 rather than a traceback.
         report([f"stopped by signal {int(signal.SIGINT)}"])
         return 128 + int(signal.SIGINT)
     finally:
