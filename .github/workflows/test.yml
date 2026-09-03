@@ -622,7 +622,16 @@ jobs:
         # a stack, and the list is short enough that sampling all of them costs
         # nothing. `/usr/bin/sample` — part of macOS, present on the runner
         # image — captures every thread's stack of each target, and only then
-        # are those pids killed, by the pid we captured.
+        # are those pids killed, by the pid we captured. Five seconds of it, at
+        # sample's 1 ms interval, is what it takes to show a blocked thread's
+        # stack unambiguously: a parked thread looks identical in every sample
+        # so a longer capture buys nothing, while a shorter one risks reading a
+        # scheduler blip as the stall — and symbolicating the ~200 MB debug
+        # helper still finishes well inside the three-minute margin. The 30 s
+        # between SIGTERM and SIGKILL is likewise sized to a job: it is what
+        # `scripts/test.sh`'s EXIT trap gets to run its tmux `kill-server` sweep
+        # and fence checks, generous against the few seconds those take and
+        # still inside that same margin.
         # timeout-minutes so a wedged tmux test can't eat the job's 6 h default.
         timeout-minutes: 15
         run: |
