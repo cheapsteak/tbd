@@ -1283,6 +1283,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
             resizeDebounceTask?.cancel()
             resizeDebounceTask = nil
+            // Ends the pump task and releases any injection still parked
+            // behind an open paste (Task 10). `shutdown()` is safe to call
+            // even if `send(source:data:)` never ran — the lazy queue is
+            // simply constructed here for the first time and immediately
+            // torn down.
+            Task { await outgoingQueue.shutdown() }
             // Release the vended pty. No daemon-side detach goes with it yet
             // (`pane.detach` has no holder branch), so the session is left with
             // nobody draining it until the next attach — the reason `stop()`
@@ -1733,20 +1739,60 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // Interrupt detection (Ctrl-C / Esc) must keep working in every
             // path, so run it FIRST regardless of where the bytes go next.
             handleOutgoingInput(data)
+            // Everything this panel writes goes through one queue (Task 10),
+            // so a daemon injection — once one can arrive, over the fd
+            // sidecar while a holder-backed session is attached — can never
+            // land inside a user paste's ESC[200~/ESC[201~ brackets.
+            //
+            // Pastes NEVER reach here while control-mode attached: every
+            // paste, any size, is intercepted at the view level and shipped
+            // as a `.paste` frame (or refused when oversize) BEFORE SwiftTerm
+            // brackets it (see TBDTerminalView.paste + the
+            // `onControlModePaste` wiring in startControlModeClient). So the
+            // marker detection below only ever fires for the local-PTY /
+            // holder passthrough path, which is exactly the path where the
+            // app itself can write an injection to the same fd — the case
+            // this queue exists for.
+            let payload = Data(data)
+            if payload.elementsEqual(EscapeSequences.bracketedPasteStart) {
+                outgoingQueue.beginUserPaste()
+            }
+            outgoingQueue.enqueueUserBytes(payload)
+            if payload.elementsEqual(EscapeSequences.bracketedPasteEnd) {
+                outgoingQueue.endUserPaste()
+            }
+        }
+
+        /// The single serialization point for everything this panel writes to
+        /// its session (Task 10). Lazy because its write closure captures
+        /// `self` weakly and this class has no designated initializer of its
+        /// own to do that capture in — first access happens on `send`'s first
+        /// call, always on the main thread.
+        private lazy var outgoingQueue = OutgoingInputQueue { [weak self] data in
+            await self?.performOutgoingWrite(data)
+        }
+
+        /// Delivers one chunk `outgoingQueue` has decided may go out now.
+        /// Same two destinations `send(source:data:)` used before the queue
+        /// existed — `OutgoingInputRoute.decide` is unchanged, only WHEN a
+        /// chunk is allowed to reach either of them moved into the queue.
+        ///
+        /// A holder-backed panel has neither `localProcess` nor
+        /// `controlModeAttach`, so it falls into `.localPTY` with a nil
+        /// `localProcess` and this is a no-op for it — unchanged from before
+        /// this queue existed. Wiring an actual write destination for a
+        /// holder session's own fd is the injection task's job, not this
+        /// one's.
+        @MainActor
+        private func performOutgoingWrite(_ data: Data) {
             switch OutgoingInputRoute.decide(
                 controlModeAttached: controlModeAttach != nil, byteCount: data.count) {
             case .localPTY:
-                localProcess?.send(data: data)
+                localProcess?.send(data: [UInt8](data)[...])
             case .sidecarInput:
-                // Keystrokes ride the sidecar. Pastes NEVER reach here while
-                // attached — every paste, any size, is intercepted at the view
-                // level and shipped as a `.paste` frame (or refused when
-                // oversize) BEFORE SwiftTerm brackets it (see
-                // TBDTerminalView.paste + the `onControlModePaste` wiring in
-                // startControlModeClient).
                 guard let attach = controlModeAttach else { return }
                 appState?.daemonClient.fdSidecar.sendInput(
-                    worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: Data(data))
+                    worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: data)
             }
         }
 
