@@ -573,8 +573,7 @@ struct RemoteDelete: AsyncParsableCommand {
 
     @Flag(
         name: .long, inversion: .prefixedNo,
-        help: "Retain the transcript before destroying the session "
-            + "(default: on wherever the provider supports it; --no-retain destroys it too)")
+        help: "Retain the transcript before destroying the session (default: on wherever the provider supports it; --no-retain destroys it too)")
     var retain: Bool?
 
     @Flag(name: .long, help: "Destroy a running session, or one with uncommitted work")
