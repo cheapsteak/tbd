@@ -82,7 +82,14 @@ public enum TerminalCellWalk {
         // what withholds its line ending so DECAWM re-wraps it in the
         // receiver. Otherwise the line is trimmed, so a mostly-empty screen
         // does not cost `cols` bytes/row.
-        let limit = fullWidth ? cols : min(line.getTrimmedLength(), cols)
+        //
+        // The full-width branch caps at `line.count`, not just `cols`: a
+        // scrollback line shorter than the terminal's current column count
+        // (reachable around resize/reflow) would otherwise read past its own
+        // storage — `BufferLine`'s subscript clamps an out-of-range index to
+        // its last cell instead of trapping, which would silently repeat
+        // that cell out to `cols`.
+        let limit = fullWidth ? min(cols, line.count) : min(line.getTrimmedLength(), cols)
         guard limit > 0 else { return "" }
 
         var out = ""
@@ -96,7 +103,18 @@ public enum TerminalCellWalk {
                 out += SGREncoder.sequence(for: cell.attribute)
                 openAttribute = cell.attribute
             }
-            out.append(cell.getCharacter())
+            // An unwritten or erased cell carries code 0, and
+            // `CharData.getCharacter()` renders that literally as
+            // `Character(Unicode.Scalar(0))`. On the receiving terminal 0x00
+            // is an `.execute` code with no case in ground-state dispatch —
+            // it logs an unknown code and advances nothing, so the column
+            // collapses instead of holding a position: `ESC[10Chello` comes
+            // back as `hello` at column 0, and any background colour on the
+            // blank cell is lost with it. A space cell moves the cursor
+            // forward exactly one column, under whatever SGR run is already
+            // open, so a coloured blank still paints its background.
+            let character = cell.getCharacter()
+            out.append(character == Character(Unicode.Scalar(0)) ? " " : character)
         }
         // Never leave an attribute open across a line boundary.
         if openAttribute != nil { out += "\u{1b}[0m" }

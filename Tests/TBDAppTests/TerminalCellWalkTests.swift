@@ -38,6 +38,24 @@ private func lineCount(_ text: String) -> Int {
     text.components(separatedBy: "\r\n").count
 }
 
+/// Strips `ESC[...m` SGR runs, leaving only the characters a receiving
+/// terminal would actually place into its grid. Used to pin the walk's
+/// per-cell character choices directly, independent of styling.
+private func visibleCharacters(_ text: String) -> String {
+    var out = ""
+    var chars = Substring(text)
+    while let char = chars.first {
+        if char == "\u{1b}" {
+            chars = chars.drop { $0 != "m" }
+            if !chars.isEmpty { chars.removeFirst() }
+            continue
+        }
+        out.append(char)
+        chars.removeFirst()
+    }
+    return out
+}
+
 @Suite("Terminal cell walk")
 struct TerminalCellWalkTests {
     @Test("Plain text survives a round trip")
@@ -97,9 +115,53 @@ struct TerminalCellWalkTests {
         // 25 columns across a 10-column terminal is ONE logical line.
         #expect(lineCount(history) == 1, "wrapped continuations must not be separated")
 
+        // Belt-and-suspenders: blank cells must never reach the wire as a
+        // literal NUL (see `blankCellIsSpace` below for the assertion that
+        // actually discriminates this — in THIS fixture the trailing-blank
+        // trim already removes rows 3 and 4, so a correct lookahead never
+        // reaches a blank cell here at all and this check alone cannot tell
+        // the fix from its absence).
+        #expect(!history.unicodeScalars.contains { $0.value == 0 }, "blank cells must not be emitted as NUL")
+
+        // The discriminating assertion for the lookahead fix itself. Under
+        // `fullWidth = line.isWrapped` (the brief's original, wrong,
+        // self-referential check), the wrap's last physical row (row 2, only
+        // 5 columns of real content) gets forced to full width and padded
+        // with 5 extra blank cells — which the NUL fix above turns into 5
+        // extra spaces rather than 5 NULs, so a rendered-row comparison
+        // alone stays green under that mutation. Stripping SGR and joins
+        // down to the raw characters catches it: the padding survives as
+        // trailing spaces the source terminal never had.
+        #expect(
+            visibleCharacters(history) == String(repeating: "a", count: 25),
+            "the wrap's last physical row must be trimmed, not padded to full width")
+
         let fresh = replay(history, cols: 10, rows: 5)
         #expect(fresh.row(0) == String(repeating: "a", count: 10))
         #expect(fresh.row(2) == String(repeating: "a", count: 5))
+    }
+
+    @Test("A blank cell inside a row renders as a space, not a raw NUL")
+    func blankCellIsSpace() {
+        let source = Harness()
+        // Move the cursor forward 11 columns without writing anything, then
+        // write "hello" — the untouched prefix cells carry code 0 (never
+        // written), the same shape `getTrimmedLength()` includes whenever a
+        // row's last write is not its first: cursor positioning, a
+        // multi-column erase, anything that leaves a gap before real content.
+        source.feed("\u{1b}[11Chello")
+        let history = TerminalCellWalk.styledHistory(of: source.terminal, maxScrollbackLines: 10)
+
+        // A raw NUL hits the receiving parser's ground-state dispatch with no
+        // case for 0x00 — it is logged as an unknown code and the column does
+        // not advance, so the gap collapses instead of holding position.
+        #expect(!history.unicodeScalars.contains { $0.value == 0 }, "blank cells must not be emitted as NUL")
+
+        // The direct consequence if they were: "hello" would land at column 0
+        // instead of column 11, because the collapsed gap consumed no columns
+        // on the receiver.
+        let fresh = replay(history)
+        #expect(fresh.row(0) == String(repeating: " ", count: 11) + "hello")
     }
 
     @Test("The viewport-only walk excludes scrollback")
