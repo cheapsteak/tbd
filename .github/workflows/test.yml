@@ -630,6 +630,11 @@ jobs:
           stall_budget_seconds=720
           rm -f /tmp/quiet-pass.rc
           (
+            # This subshell's only job is to run the pipeline and record its
+            # status, so errexit is wrong here: on a red run it would abort the
+            # subshell before the `echo` below and discard the very status we
+            # came to capture (a real failure, or swift-safe's 75/76).
+            set +e
             TERM=dumb script -q /dev/null scripts/test.sh --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel \
               --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure \
               < /dev/null 2>&1 | tee /tmp/quiet-pass.log
@@ -662,7 +667,7 @@ jobs:
               echo "=== descendants of the pipeline subshell (pid $pipeline) ==="
             } >> /tmp/quiet-pass-stall-ps.txt
             if [ -n "$kids" ]; then
-              kid_list=$(echo $kids | tr ' ' ',')
+              kid_list=$(printf '%s\n' "$kids" | paste -sd, -)
               ps -ww -o pid,ppid,pgid,stat,%cpu,etime,comm,command -p "$kid_list" >> /tmp/quiet-pass-stall-ps.txt || true
             else
               echo "(none)" >> /tmp/quiet-pass-stall-ps.txt
@@ -697,6 +702,31 @@ jobs:
               for pid in $targets; do
                 kill -KILL "$pid" 2>/dev/null || true
               done
+            fi
+            # Take the pipeline down within a bounded 30 s instead of leaving
+            # `wait` to block until `timeout-minutes` fires — the very outcome
+            # this budget exists to avoid. Killing the sampled targets is not
+            # enough on its own: with no targets found nothing has been killed
+            # at all, and even when the helper dies its parents (`script`,
+            # `swift-test`, `scripts/test.sh`) can outlive it. SIGTERM goes
+            # first so `scripts/test.sh`'s EXIT trap still runs its tmux and
+            # fence cleanup, and the list is walked deepest-first (descendants
+            # were recorded parents-before-children) so `tee` and `script` —
+            # the direct children that carry the log — are the last to go.
+            kids_reversed=$(printf '%s\n' "$kids" | tail -r)
+            for pid in $kids_reversed; do
+              kill -TERM "$pid" 2>/dev/null || true
+            done
+            teardown_waited=0
+            while kill -0 "$pipeline" 2>/dev/null && [ "$teardown_waited" -lt 30 ]; do
+              sleep 1
+              teardown_waited=$((teardown_waited + 1))
+            done
+            if kill -0 "$pipeline" 2>/dev/null; then
+              for pid in $kids_reversed; do
+                kill -KILL "$pid" 2>/dev/null || true
+              done
+              kill -KILL "$pipeline" 2>/dev/null || true
             fi
             wait "$pipeline" || true
             exit 1
