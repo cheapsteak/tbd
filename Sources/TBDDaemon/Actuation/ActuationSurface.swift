@@ -115,6 +115,14 @@ enum ActuationSurface: CaseIterable, Sendable {
     /// matching `worktreeRevive`'s kind for the same reason: it brings a
     /// retired lane back into use.
     case remoteUnarchive
+    /// Destroys a remote session outright
+    /// (`docs/remote-provider-contract.md` § `delete <id>`) — `dispose`, like
+    /// `remoteStop` and `remoteArchive`, and the strongest of the three: it
+    /// ends compute AND removes the record. When an adopted lane is deleted
+    /// its worktree row is archived underneath this row rather than earning a
+    /// second one, for the same reason `remoteArchive` sits under
+    /// `worktreeArchive`: one intent, one row.
+    case remoteDelete
 
     /// The exact public method name that carries this surface's requests.
     var method: String {
@@ -147,6 +155,7 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .remoteSend: return RPCMethod.remoteSend
         case .remoteArchive: return RPCMethod.remoteArchive
         case .remoteUnarchive: return RPCMethod.remoteUnarchive
+        case .remoteDelete: return RPCMethod.remoteDelete
         }
     }
 
@@ -161,7 +170,8 @@ enum ActuationSurface: CaseIterable, Sendable {
              .scratchCreate, .worktreeRevive, .worktreeReviveConversationFresh,
              .worktreeRerunPreSession, .remoteCreate, .remoteUnarchive: return .spawn
         case .terminalDelete, .worktreeArchive, .worktreeForget, .repoRemove,
-             .scratchDelete, .scratchArchive, .remoteStop, .remoteArchive: return .dispose
+             .scratchDelete, .scratchArchive, .remoteStop, .remoteArchive,
+             .remoteDelete: return .dispose
         case .terminalHibernate, .terminalSuspend, .worktreeSuspend: return .hibernate
         case .terminalWake, .terminalResume, .worktreeResume: return .wake
         }

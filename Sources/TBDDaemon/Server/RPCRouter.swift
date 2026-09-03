@@ -692,6 +692,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetGCRowlessHoldersEnabled(request.paramsData)
             case RPCMethod.configSetReapHolderChildrenEnabled:
                 return try await handleConfigSetReapHolderChildrenEnabled(request.paramsData)
+            case RPCMethod.configSetRemoteDeleteEnabled:
+                return try await handleConfigSetRemoteDeleteEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -722,6 +724,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteRecall(request.paramsData)
             case RPCMethod.remoteRetainedList:
                 return try await handleRemoteRetainedList(request.paramsData)
+            case RPCMethod.remoteDelete:
+                return try await handleRemoteDelete(request.paramsData, actor: request.actor)
             case RPCMethod.remoteSetPin:
                 return try await handleRemoteSetPin(request.paramsData)
             case RPCMethod.remoteReportAttachExit:

@@ -261,6 +261,34 @@ extension RemoteLaneLifecycle {
         return nil
     }
 
+    /// Files an adopted lane whose remote session has just been **destroyed**
+    /// by `remote.delete`.
+    ///
+    /// A deleted lane keeps its place: the worktree row goes to the repo's
+    /// Archived tab with its branch and PR context intact, which is where a
+    /// human looks for work they finished with, and where Revive-as-reseed
+    /// later finds the receipt. Losing the row would lose that context along
+    /// with the session.
+    ///
+    /// It reuses `performArchive` rather than writing a second archive path —
+    /// the watermark ordering, the row write and the broadcast are all the same
+    /// obligations — with `.rowOnly` as the step, and only `.rowOnly`. The
+    /// session no longer exists on the provider, so there is no `archive <id>`
+    /// left to invoke: a verb call here would address an id the provider has
+    /// just been told to forget, and the `gone` exemption `.rowOnly` was built
+    /// for describes exactly this situation — nothing live to misdescribe, and
+    /// no verb that could reach it.
+    ///
+    /// Returns `nil` on success, or the message to surface. The `.rowOnly` step
+    /// invokes nothing, so the only failure it can report is a row write that
+    /// threw — and that throws rather than returning a message, as it does for
+    /// every other caller of `performArchive`.
+    func archiveLaneAfterDelete(
+        _ worktree: Worktree, now: @Sendable () -> Date = { Date() }
+    ) async throws -> String? {
+        try await performArchive(.rowOnly, worktree: worktree, now: now)
+    }
+
     /// What a retirement verb came back with.
     ///
     /// The Session object travels out rather than being mirrored here, so the

@@ -293,6 +293,10 @@ public enum RPCMethod {
     public static let configSetGCHolderRendezvousEnabled = "config.setGCHolderRendezvousEnabled"
     public static let configSetGCRowlessHoldersEnabled = "config.setGCRowlessHoldersEnabled"
     public static let configSetReapHolderChildrenEnabled = "config.setReapHolderChildrenEnabled"
+    /// The remote-delete gate (`remote_delete_enabled`) — the feature's only
+    /// opt-in, and the supported way to turn the soak on. Reading needs no
+    /// method of its own: `config.get` already carries the resolved value.
+    public static let configSetRemoteDeleteEnabled = "config.setRemoteDeleteEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -316,6 +320,12 @@ public enum RPCMethod {
     /// there is nothing for the cloud gate to refuse and no provider name to
     /// refuse it by.
     public static let remoteRetainedList = "remote.retainedList"
+    /// Destroys a provider-hosted session outright
+    /// (`docs/remote-provider-contract.md` § `delete <id> [--retain]`).
+    /// The one `remote.*` verb behind a feature flag of its own
+    /// (`config.remoteDeleteEnabled`), because it is the one whose effect no
+    /// reconciler on this machine can undo.
+    public static let remoteDelete = "remote.delete"
     public static let remoteSetPin = "remote.setPin"
     public static let remoteReportAttachExit = "remote.reportAttachExit"
 
@@ -338,7 +348,7 @@ public enum RPCMethod {
     public static let providerNamedRemoteMethods: [String] = [
         remoteCreate, remoteStop, remoteArchive, remoteUnarchive,
         remoteSend, remoteLog, remoteRename, remoteDismiss,
-        remoteRetain, remoteImport, remoteRecall,
+        remoteRetain, remoteImport, remoteRecall, remoteDelete,
         remoteSetPin, remoteReportAttachExit,
     ]
 
@@ -1671,6 +1681,38 @@ public struct RemoteRecallResult: Codable, Sendable {
     public let localPath: String?
     public init(jsonl: String?, localPath: String?) {
         self.jsonl = jsonl; self.localPath = localPath
+    }
+}
+
+/// Params for `remote.delete` — destroy a provider-hosted session
+/// (`docs/remote-provider-contract.md` § `delete <id> [--retain]`). The result
+/// is a `RemoteDeleteResult`.
+///
+/// `retain` maps to the verb's `--retain` flag, and is a request rather than a
+/// preference: the contract makes retention something a caller asks for
+/// explicitly, never something implied by the provider declaring `retain`. So
+/// an absent field decodes as `false` — a caller that said nothing did not ask
+/// for storage, and allocating it anyway would put a copy of a conversation on
+/// a remote store nobody asked to write to. The hand-written decoder exists for
+/// that default, and so params from a client that predates the field still
+/// decode.
+public struct RemoteDeleteParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let retain: Bool
+    public init(provider: String, sessionID: String, retain: Bool = false) {
+        self.provider = provider; self.sessionID = sessionID; self.retain = retain
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case provider, sessionID, retain
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decode(String.self, forKey: .provider)
+        sessionID = try c.decode(String.self, forKey: .sessionID)
+        retain = try c.decodeIfPresent(Bool.self, forKey: .retain) ?? false
     }
 }
 
@@ -3102,6 +3144,16 @@ public struct ConfigSetGCRowlessHoldersEnabledParams: Codable, Sendable {
 /// the database by hand would make it un-soakable. Design:
 /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
 public struct ConfigSetReapHolderChildrenEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setRemoteDeleteEnabled` — the gate on `remote.delete`,
+/// the verb that destroys a provider-hosted session (default OFF during soak).
+/// This is how the soak is turned on: without it the one irreversible verb
+/// would be the one reachable only by hand-editing `~/tbd/state.db`. Design:
+/// `docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`.
+public struct ConfigSetRemoteDeleteEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

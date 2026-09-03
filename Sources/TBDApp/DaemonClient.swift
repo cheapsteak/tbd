@@ -1281,6 +1281,29 @@ actor DaemonClient {
         )
     }
 
+    /// Destroy a provider-hosted session
+    /// (`docs/remote-provider-contract.md` § `delete <id> [--retain]`).
+    ///
+    /// Gated daemon-side by `config.remoteDeleteEnabled` and by the provider's
+    /// `delete` capability — both refuse before anything is spawned, so a
+    /// caller that has not checked gets a refusal naming what is missing rather
+    /// than a destroyed session.
+    ///
+    /// `retain` asks the provider to keep the transcript first, and needs the
+    /// `retain` capability as well. The returned `RemoteDeleteResult` carries a
+    /// receipt exactly when it was asked for, and `deleted: false` — nothing
+    /// was there to destroy — is a success, not an error.
+    func remoteDelete(
+        provider: String, sessionID: String, retain: Bool = false
+    ) async throws -> RemoteDeleteResult {
+        try await callAsync(
+            method: RPCMethod.remoteDelete,
+            params: RemoteDeleteParams(
+                provider: provider, sessionID: sessionID, retain: retain),
+            resultType: RemoteDeleteResult.self
+        )
+    }
+
     /// Dismiss a gone/errored remote session from the mirror.
     func remoteDismiss(provider: String, sessionID: String) async throws {
         try await callVoidAsync(

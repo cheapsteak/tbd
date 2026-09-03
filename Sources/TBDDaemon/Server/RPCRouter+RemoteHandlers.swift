@@ -57,6 +57,18 @@ extension RPCRouter {
     /// off entirely, this says the compiled cloud provider is.
     private static let claudeCloudDisabledResponse = RPCResponse(error: "claude cloud sessions disabled")
 
+    /// `remote.delete`'s own refusal, and the only feature-flag refusal in this
+    /// file. It names the flag and how to lift it, because a refusal that only
+    /// says "disabled" leaves a soak participant guessing which of three gates
+    /// stopped them — the subsystem, the cloud gate, or this one.
+    ///
+    /// Kept as a shared value for the same reason
+    /// `remoteBackendsDisabledResponse` is: tests assert equality against the
+    /// exact string.
+    static let remoteDeleteDisabledResponse = RPCResponse(error:
+        "remote delete is disabled (config remote_delete_enabled); " +
+        "turn it on with `tbd remote allow-delete on`")
+
     /// The per-invocation timeout for the `create` verb, applied to both the
     /// initial call and its one same-key retry below. Provider-agnostic at
     /// this layer — every `remote.*` backend's `create` gets this budget —
@@ -845,6 +857,161 @@ extension RPCRouter {
                 """)
         }
         return url.path
+    }
+
+    /// The contract's budget for `delete`. Shorter than the exchange verbs'
+    /// 60 seconds because a delete moves no transcript — with `--retain` the
+    /// provider is doing both, and the contract still says 30, so this follows
+    /// the contract rather than second-guessing it.
+    private static let deleteTimeout: TimeInterval = 30
+
+    /// Destroys a provider-hosted session (`docs/remote-provider-contract.md` §
+    /// `delete <id> [--retain]`). Mirrors `handleRemoteStop`'s shape — same
+    /// outer gate, same cloud gate, same `ProviderRunError` timeout branch,
+    /// same `failureClass` branch surfacing `decodedError?.message` — with
+    /// three additions the other verbs do not carry.
+    ///
+    /// **The feature flag is checked before the capability, and after the two
+    /// subsystem gates.** The subsystem gates answer whether the request is
+    /// admissible at all, and every provider-named `remote.*` method must
+    /// refuse identically when they are shut; the flag is this feature's own
+    /// policy and belongs after them. It sits before the capability check and
+    /// before anything is spawned, so a daemon with the flag off never runs a
+    /// provider's `delete` for any reason.
+    ///
+    /// **`--retain` needs the `retain` capability too.** The contract makes the
+    /// flag valid only where the provider declares `retain`; sending it to a
+    /// provider that does not would either be ignored — destroying a session
+    /// the caller believed was being preserved — or fail after the fact.
+    ///
+    /// **A successful delete drops the mirror row at once.** See
+    /// `RemoteSessionStore.deleteRow` for why this must not wait for the drift
+    /// rule; it is the piece of this handler most likely to read as redundant
+    /// and be removed.
+    ///
+    /// `deleted: false` is a success, not an error: the contract has deleting
+    /// an unknown or already-deleted id exit 0 saying so, and the caller's
+    /// intent — that this session not exist — holds either way. The row is
+    /// dropped and the lane filed on that reading too, because the provider has
+    /// just stated the session is not there.
+    func handleRemoteDelete(
+        _ paramsData: Data, actor: ActuationActor? = nil,
+        now: @Sendable () -> Date = { Date() }
+    ) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteDeleteParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
+        guard try await db.config.get().remoteDeleteEnabled else {
+            return Self.remoteDeleteDisabledResponse
+        }
+        let capabilities = await declaredCapabilities(manager, provider: params.provider)
+        guard capabilities.contains("delete") else {
+            return Self.missingCapabilityResponse(
+                provider: params.provider, capability: "delete",
+                section: "delete <id> [--retain]")
+        }
+        if params.retain, !capabilities.contains("retain") {
+            return Self.missingCapabilityResponse(
+                provider: params.provider, capability: "retain",
+                section: "delete <id> [--retain]")
+        }
+        let actuationID = try await beginActuation(
+            .remoteDelete, actor: actor,
+            target: .remote(provider: params.provider, session: params.sessionID))
+        var verb = ["delete", params.sessionID]
+        if params.retain { verb.append("--retain") }
+        let result: ProviderResult
+        do {
+            result = try await manager.invoke(
+                providerName: params.provider, verb: verb, stdin: nil,
+                timeout: Self.deleteTimeout)
+        } catch let error as ProviderRunError {
+            remoteHandlerLogger.error(
+                "remote.delete provider=\(params.provider, privacy: .public) timed out")
+            let message = Self.friendlyMessage(for: error, provider: params.provider)
+            await finishActuation(actuationID, .transportFailed, error: message)
+            return RPCResponse(error: message)
+        }
+        if result.failureClass != nil {
+            let message = result.decodedError?.message ?? "delete failed (exit \(result.exitCode))"
+            remoteHandlerLogger.error(
+                "remote.delete provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            await finishActuation(actuationID, .transportFailed, error: message)
+            return RPCResponse(error: message)
+        }
+        let outcome: RemoteDeleteResult
+        do {
+            outcome = try result.decoded(RemoteDeleteResult.self, provider: params.provider)
+        } catch {
+            // The session may well be destroyed — the provider exited 0 — but
+            // TBD cannot say so from an unreadable answer, and must not drop
+            // the row on a guess. A contract bug is reported as one.
+            let message = "provider '\(params.provider)' returned an unreadable delete result"
+            remoteHandlerLogger.error(
+                "remote.delete provider=\(params.provider, privacy: .public): \(message, privacy: .public)")
+            await finishActuation(actuationID, .transportFailed, error: message)
+            return RPCResponse(error: message)
+        }
+        await recordDeleteAftermath(outcome, params: params, now: now)
+        await finishActuation(actuationID, .dispatched)
+        return try RPCResponse(result: outcome)
+    }
+
+    /// Everything TBD writes down once a `delete` has come back successfully,
+    /// in the one order that works.
+    ///
+    /// 1. **Record the receipt first**, while the mirror row and the lane are
+    ///    still there to be read: `recordReceipt` fills the row's title, repo
+    ///    and originating lane from them, and those are what make a key
+    ///    findable by a human months later. After step 2 they are gone.
+    /// 2. **Drop the mirror row**, immediately — see
+    ///    `RemoteSessionStore.deleteRow`.
+    /// 3. **File the adopted lane**, so a deleted lane keeps its place in the
+    ///    repo's Archived tab with its branch and PR context.
+    ///
+    /// Nothing here can fail the delete. The provider has already destroyed the
+    /// session; a bookkeeping write that throws is logged and the caller still
+    /// hears that the destruction happened, because reporting failure would
+    /// invite a retry of an act that cannot be repeated.
+    private func recordDeleteAftermath(
+        _ outcome: RemoteDeleteResult, params: RemoteDeleteParams,
+        now: @Sendable () -> Date
+    ) async {
+        if let receipt = outcome.retained {
+            await recordReceipt(
+                receipt, provider: params.provider, sessionID: params.sessionID)
+        }
+        let lane = try? await db.worktrees.findRemote(
+            provider: params.provider, sessionID: params.sessionID)
+        do {
+            if try await db.remoteSessions.deleteRow(
+                provider: params.provider, sessionID: params.sessionID) {
+                subscriptions.broadcast(delta: .remoteSessionsChanged)
+            }
+        } catch {
+            remoteHandlerLogger.error("""
+                deleted \(params.provider, privacy: .public)/\(params.sessionID, privacy: .public) \
+                but could not drop its mirror row: \(error.localizedDescription, privacy: .public). \
+                The drift rule will reach the same answer two polls from now
+                """)
+        }
+        guard let lane, let manager = remoteManager else { return }
+        let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
+        do {
+            if let message = try await lanes.archiveLaneAfterDelete(lane, now: now) {
+                remoteHandlerLogger.error("""
+                    deleted \(params.provider, privacy: .public)/\(params.sessionID, privacy: .public) \
+                    but could not file its lane: \(message, privacy: .public)
+                    """)
+            }
+        } catch {
+            remoteHandlerLogger.error("""
+                deleted \(params.provider, privacy: .public)/\(params.sessionID, privacy: .public) \
+                but could not file its lane: \(error.localizedDescription, privacy: .public)
+                """)
+        }
     }
 
     func handleRemoteDismiss(_ paramsData: Data) async throws -> RPCResponse {

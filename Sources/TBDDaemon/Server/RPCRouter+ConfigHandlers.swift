@@ -255,6 +255,24 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the remote-delete gate — the default-off soak switch for
+    /// `remote.delete`, the verb that destroys a provider-hosted session.
+    ///
+    /// This is how the soak is turned on. Every other flag in this file gates
+    /// something a reconciler could undo; this one gates the single act that
+    /// nothing on this machine can reverse, which is exactly why it must have a
+    /// supported switch rather than being reachable only by hand-editing the
+    /// database. Flipping it off refuses the next delete; it cannot recall one
+    /// already made.
+    func handleConfigSetRemoteDeleteEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetRemoteDeleteEnabledParams.self, from: paramsData)
+        try await db.config.setRemoteDeleteEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the orphaned-process collector gate — the default-off soak
     /// switch for reclaiming processes that outlived the worktree they were
     /// rooted in, read on top of the GC master switch.
