@@ -221,6 +221,19 @@ successful `delete` the daemon removes the `remote_session` row at once. Without
 this the UI shows a session the user just deleted as live, then stale, then
 gone, over two poll intervals.
 
+That drop races the poll loop, so it is interlocked the way archive and revive
+already are: a **deletion watermark**, stamped before the verb and again once it
+returns, and withdrawn if the verb fails. A `list` whose snapshot was captured
+before the provider committed the destruction still names the session, and
+applying it afterwards would silently re-insert the row — the same two-poll
+limbo, reached from the other side. The watermark is keyed by
+`(provider, session id)` rather than by worktree, because most deletable
+sessions were never adopted and have no worktree at all, and it is held in
+memory and swept to two poll intervals: the window it defends is open only while
+a provider request is outstanding, no such request survives a restart, and a
+session legitimately re-created under the same id is mirrored again by the first
+poll whose request began after the delete returned.
+
 **A new table, `retained_transcript`**: provider, key, `expiresAt`, `bytes`,
 source session id, source title, resolved repo, originating worktree, local
 path, `createdAt`. Rows are written by every path that obtains a key —

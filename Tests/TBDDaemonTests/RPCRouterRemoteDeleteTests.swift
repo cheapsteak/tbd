@@ -330,4 +330,104 @@ struct RPCRouterRemoteDeleteTests: ~Copyable {
         #expect(response.error?.contains("unreadable") == true)
         #expect(try await db.remoteSessions.row(provider: "agentbox", sessionID: sessionID) != nil)
     }
+
+    // MARK: - A poll in flight across the delete
+
+    /// The manager the router is built on, so a test can drive a poll through
+    /// it directly — `router(invoker:)` keeps its own to itself.
+    private func managerAndRouter(
+        invoker: FakeProviderInvoker
+    ) async -> (RemoteProviderManager, RPCRouter) {
+        let manager = RemoteProviderManager(
+            db: db, subscriptions: subs, runner: invoker, registryURL: registryURL,
+            actuationLog: makeTestActuationLog())
+        await manager.loadRegistryAndDescribe()
+        return (manager, router(manager: manager))
+    }
+
+    private func staleSighting() -> [RemoteSessionPayload] {
+        [RemoteSessionPayload(id: sessionID, title: "fix flaky CI", state: .running, agentState: .idle)]
+    }
+
+    /// The interlock, and the reason `remote.delete` is not just "call the verb
+    /// then DELETE the row". A `list` that captured its snapshot before the
+    /// provider committed the destruction lands *after* the row is dropped and
+    /// re-inserts it with `gone` false — the two-poll limbo the immediate drop
+    /// exists to prevent, arrived at from the other side. Without the deletion
+    /// watermark this test finds the row back in the mirror.
+    @Test func aSnapshotCapturedBeforeTheDeleteCannotResurrectTheRow() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteDeleteEnabled(true)
+        try await mirrorSession()
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["delete"]),
+            providerOK(deletedJSON),
+        ])
+        let (manager, r) = await managerAndRouter(invoker: invoker)
+        // The poll went out a second before the delete, so nothing in its
+        // answer can have accounted for one.
+        let pollStartedAt = Date().addingTimeInterval(-1)
+        let inFlight = staleSighting()
+
+        #expect(await call(r, "remote.delete", deleteParams()).success)
+        #expect(try await db.remoteSessions.row(provider: "agentbox", sessionID: sessionID) == nil)
+
+        try await manager.apply(
+            snapshot: inFlight, provider: "agentbox", now: Date(),
+            requestStartedAt: pollStartedAt)
+        #expect(
+            try await db.remoteSessions.row(provider: "agentbox", sessionID: sessionID) == nil,
+            "a snapshot captured before the delete must not put the row back")
+    }
+
+    /// The other branch, and what keeps the watermark from being a permanent
+    /// blocklist: it suppresses stale answers, not the id. A poll whose request
+    /// began after the delete returned is reporting something it learned
+    /// afterwards — a session genuinely re-created under the same id — and it
+    /// mirrors exactly as it always did.
+    @Test func aSnapshotTakenAfterTheDeleteMirrorsTheSessionAgain() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteDeleteEnabled(true)
+        try await mirrorSession()
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["delete"]),
+            providerOK(deletedJSON),
+        ])
+        let (manager, r) = await managerAndRouter(invoker: invoker)
+
+        #expect(await call(r, "remote.delete", deleteParams()).success)
+        #expect(try await db.remoteSessions.row(provider: "agentbox", sessionID: sessionID) == nil)
+
+        try await manager.apply(
+            snapshot: staleSighting(), provider: "agentbox", now: Date(),
+            requestStartedAt: Date())
+        #expect(
+            try await db.remoteSessions.row(provider: "agentbox", sessionID: sessionID) != nil,
+            "the watermark must not hide a session the provider reports after the delete")
+    }
+
+    /// A delete that failed destroyed nothing, so its watermark is taken back
+    /// rather than left to hide a session that is still alive. No mirror row is
+    /// seeded here on purpose: a watermark left standing would suppress the
+    /// INSERT, which is the observable this asserts.
+    @Test func aFailedDeleteWithdrawsItsWatermark() async throws {
+        try await db.config.setRemoteBackendsEnabled(true)
+        try await db.config.setRemoteDeleteEnabled(true)
+        let invoker = FakeProviderInvoker(script: [
+            describeDeclaring(["delete"]),
+            providerError("permission_denied", "cannot end compute for this session"),
+        ])
+        let (manager, r) = await managerAndRouter(invoker: invoker)
+        let pollStartedAt = Date().addingTimeInterval(-1)
+
+        #expect(await call(r, "remote.delete", deleteParams()).success == false)
+        #expect(await manager.deletionWatermark(provider: "agentbox", sessionID: sessionID) == nil)
+
+        try await manager.apply(
+            snapshot: staleSighting(), provider: "agentbox", now: Date(),
+            requestStartedAt: pollStartedAt)
+        #expect(
+            try await db.remoteSessions.row(provider: "agentbox", sessionID: sessionID) != nil,
+            "a session nothing destroyed must keep being mirrored")
+    }
 }

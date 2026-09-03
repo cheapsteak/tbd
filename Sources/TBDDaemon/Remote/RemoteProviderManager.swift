@@ -148,6 +148,46 @@ public actor RemoteProviderManager {
     /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Stale
     /// snapshots"). Swept on every apply so it cannot grow without bound.
     private var filingDecisions: [UUID: Date] = [:]
+
+    /// The identity a remote session is addressed by everywhere except the
+    /// worktree table. `delete` names one of these, and so does every mirror
+    /// row — whether or not a lane was ever adopted for it.
+    private struct DeletedSessionKey: Hashable {
+        let provider: String
+        let sessionID: String
+    }
+
+    /// `(provider, session id)` → the moment TBD destroyed that session through
+    /// `remote.delete`. The deletion watermark: a response whose request began
+    /// before one of these entries composed its answer without knowing about
+    /// the delete, so a sighting it carries of that session is dropped instead
+    /// of being allowed to re-insert the mirror row the delete removed.
+    ///
+    /// **Keyed by the session, not by a worktree.** `filingDecisions` above is
+    /// keyed by worktree id because archive and revive are acts upon a lane.
+    /// Delete is not: most deletable sessions were never adopted and have no
+    /// worktree at all — they are the bare rows in the sidebar — so a
+    /// worktree-keyed watermark would leave the common case unprotected. This
+    /// key is the one `remote.delete` itself is addressed by, so an adopted
+    /// lane and a bare row take exactly the same path.
+    ///
+    /// **In memory, and a watermark rather than a tombstone row.** The
+    /// alternative — a `deletedAt` column on `remote_session` that the
+    /// snapshot-apply path refuses to resurrect — costs a migration, a GRDB
+    /// record field and a `TBDShared` model field, and then leaves a row in a
+    /// table whose entire meaning is "sessions the provider enumerates", so
+    /// every reader of it (both sidebar filters, adoption, `remote.list`, the
+    /// pin dock) would have to learn to skip a state it has no other reason to
+    /// know about — and a tombstone that outlives the daemon needs a reconciler
+    /// to reclaim it. None of that buys anything here, because the window this
+    /// defends is open only while a provider request is outstanding and no such
+    /// request survives a restart: afterwards every request start is later than
+    /// every prior delete, so there is nothing left to suppress. That is the
+    /// same argument `filingDecisions` makes, and this map is bounded the same
+    /// way — swept to two poll intervals on every apply (`sweepDeletions`), so
+    /// a session legitimately re-created under a deleted id is mirrored again
+    /// by the first poll whose request began after the delete returned.
+    private var deletions: [DeletedSessionKey: Date] = [:]
     /// True once `loadRegistryAndDescribe()` has swept the registry. It is
     /// the line between "boot will describe this provider" and "nothing ever
     /// will" — see `enrollIfNeeded`, which is a no-op before it flips.
@@ -510,8 +550,14 @@ public actor RemoteProviderManager {
         complete: Bool = true, now: Date = Date(),
         requestStartedAt: Date? = nil
     ) async throws {
+        // Dropped before any of the three writers below sees them: the mirror,
+        // adoption and the filing sync each hold something a sighting of an
+        // already-deleted session would resurrect.
+        let sightedSince = requestStartedAt ?? now
+        let sightings = suppressingDeleted(
+            sessions, provider: provider, sightedSince: sightedSince, now: now)
         let outcome = try await db.remoteSessions.applySnapshot(
-            provider: provider, sessions: sessions, complete: complete, now: now)
+            provider: provider, sessions: sightings, complete: complete, now: now)
         // After the mirror, never before: adoption reads the repo association
         // `applySnapshot` just pinned rather than resolving `meta["repo"]` a
         // second time. Unconditional on `outcome.changed` — a session can
@@ -520,7 +566,7 @@ public actor RemoteProviderManager {
         // and the poll after the user registers the repo is exactly that case.
         // Also unconditional on `complete`: an incomplete snapshot is
         // authoritative about presence, so a session it sighted is adopted.
-        broadcastAdoptions(await adopter.adopt(sessions: sessions, provider: provider))
+        broadcastAdoptions(await adopter.adopt(sessions: sightings, provider: provider))
         // After adoption, never before: a session first sighted in this very
         // snapshot already reporting `archived: true` must be filed on the
         // row adoption just minted, not skipped for lack of one.
@@ -531,8 +577,8 @@ public actor RemoteProviderManager {
         // here as a complete one. Completeness gates only the absence-derived
         // and inventory-freshness conclusions below.
         await syncFilingDecisions(
-            sessions: sessions, provider: provider,
-            requestStartedAt: requestStartedAt ?? now, now: now)
+            sessions: sightings, provider: provider,
+            requestStartedAt: sightedSince, now: now)
         if complete {
             lastSuccessfulSnapshotAt[provider] = now
             // A live COMPLETE snapshot supersedes whatever the persisted row
@@ -575,11 +621,23 @@ public actor RemoteProviderManager {
     /// user started the lane from a worktree's nested `+`: it is the parent
     /// they asked for, handed to adoption as an override of whatever the
     /// provider stamped. See `RemoteSessionAdopter.adopt(session:provider:parentOverride:)`.
+    ///
+    /// `composedSince` is the earliest moment the provider could have written
+    /// this line. It is nil — meaning "arrival" — for every response to a verb
+    /// this daemon just issued, which is fresh by construction. The events
+    /// stream supplies the moment it opened the connection instead, because a
+    /// line pushed over a long-lived connection may have been composed at any
+    /// point since. Only the deletion watermark reads it; the filing sync keeps
+    /// taking a pushed line as fresh, which is what it has always done.
     func applyUpsert(
         _ session: RemoteSessionPayload, provider: String, parentWorktreeID: UUID? = nil,
-        date: Date = Date()
+        date: Date = Date(), composedSince: Date? = nil
     ) async {
         let arrivedAt = date
+        guard !suppressingDeleted(
+            [session], provider: provider,
+            sightedSince: composedSince ?? arrivedAt, now: arrivedAt).isEmpty
+        else { return }
         let outcome: SnapshotOutcome
         do {
             outcome = try await db.remoteSessions.upsertOne(
@@ -725,6 +783,97 @@ public actor RemoteProviderManager {
     /// none survived the sweep). Nothing in production reads this.
     func filingDecision(for worktreeID: UUID) -> Date? {
         filingDecisions[worktreeID]
+    }
+
+    /// Records that TBD itself just destroyed `(provider, sessionID)` through
+    /// `remote.delete`, so a provider response composed before `at` cannot put
+    /// its mirror row back.
+    ///
+    /// Stamped twice by the handler, for the reason the retirement verbs stamp
+    /// twice (`RPCRouter.retire`): once before the verb, so a `list` already in
+    /// flight cannot act on the session while the delete runs, and again once
+    /// the verb has returned, because a poll launched *after* the first stamp
+    /// but before the provider committed the destruction still carries the
+    /// pre-delete inventory. A poll whose request begins after the second stamp
+    /// cannot see the session at all — the provider destroyed it before
+    /// answering.
+    ///
+    /// **The map only ever moves forward**, and for the same reason
+    /// `noteFilingDecision` does: the instants arriving here are not ordered by
+    /// the order of the calls, and a blind assignment could hand a
+    /// still-outstanding response a watermark it predates. Returns whatever was
+    /// on file before, so a delete that then fails can put it back through
+    /// `withdrawDeletion`.
+    @discardableResult
+    func noteDeletion(provider: String, sessionID: String, at date: Date) -> Date? {
+        let key = DeletedSessionKey(provider: provider, sessionID: sessionID)
+        let prior = deletions[key]
+        if let prior, prior >= date { return prior }
+        deletions[key] = date
+        return prior
+    }
+
+    /// Takes back a watermark recorded in anticipation of a delete that then
+    /// did not happen — the verb failed, or answered something TBD could not
+    /// read — leaving the session where it was. Keeping it would hide a live
+    /// session from the mirror for up to two poll intervals over a destruction
+    /// that never occurred.
+    ///
+    /// Restores rather than deletes, and only while the map still holds what
+    /// this caller wrote: `withdrawFilingDecision` documents both conditions,
+    /// and they hold here for the same reasons.
+    func withdrawDeletion(
+        provider: String, sessionID: String, restoring prior: Date?, ifStillAt written: Date
+    ) {
+        let key = DeletedSessionKey(provider: provider, sessionID: sessionID)
+        guard deletions[key] == written else { return }
+        if let prior {
+            deletions[key] = prior
+        } else {
+            deletions.removeValue(forKey: key)
+        }
+    }
+
+    /// Test seam: the deletion watermark on file for one session, or nil when
+    /// none is (or none survived the sweep). Nothing in production reads this.
+    func deletionWatermark(provider: String, sessionID: String) -> Date? {
+        deletions[DeletedSessionKey(provider: provider, sessionID: sessionID)]
+    }
+
+    /// Drops the sightings a `remote.delete` this daemon issued has already
+    /// answered: a session is suppressed when its watermark is *later* than the
+    /// moment the response carrying it could first have been composed.
+    ///
+    /// The boundary belongs to the response, exactly as in
+    /// `filingDecisionAllowsFlip`: a delete recorded at the very instant the
+    /// request began is one that request could have accounted for. Everything
+    /// else passes through untouched, so a provider whose sessions nobody has
+    /// deleted pays one empty-dictionary check per poll.
+    private func suppressingDeleted(
+        _ sessions: [RemoteSessionPayload], provider: String,
+        sightedSince: Date, now: Date
+    ) -> [RemoteSessionPayload] {
+        defer { sweepDeletions(now: now) }
+        guard !deletions.isEmpty else { return sessions }
+        return sessions.filter { session in
+            let key = DeletedSessionKey(provider: provider, sessionID: session.id)
+            guard let deletedAt = deletions[key], deletedAt > sightedSince else { return true }
+            remoteLogger.debug(
+                "dropped \(provider, privacy: .public)/\(session.id, privacy: .public) from a response that predates its delete"
+            )
+            return false
+        }
+    }
+
+    /// Drops deletion watermarks older than two poll intervals, on the same
+    /// reasoning and the same cutoff as `sweepFilingDecisions`: a provider
+    /// request outstanding for longer has already timed out (`list` is bounded
+    /// at 30s), so no response can still be in flight from before them. Past
+    /// that the entry can only do harm — it would hide a session somebody
+    /// legitimately re-created under the same id.
+    private func sweepDeletions(now: Date) {
+        let cutoff = now.addingTimeInterval(-2 * Self.pollInterval)
+        deletions = deletions.filter { $0.value >= cutoff }
     }
 
     /// Test seam: awaited inside the check-then-act window, immediately before

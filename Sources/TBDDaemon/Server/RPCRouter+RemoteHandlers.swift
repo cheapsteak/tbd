@@ -35,6 +35,39 @@ struct RemoteFilingWatermark {
     }
 }
 
+/// A deletion recorded in anticipation of `delete`, held across the call so it
+/// can be re-stamped when the verb returns or taken back when it fails.
+///
+/// The session-shaped twin of `RemoteFilingWatermark`, and it is keyed by
+/// `(provider, sessionID)` rather than by a worktree for the reason
+/// `RemoteProviderManager.deletions` gives: most deletable sessions were never
+/// adopted, so a worktree-keyed watermark would protect only the rare case.
+/// It carries `prior` and `decidedAt` for exactly the reasons the filing twin
+/// documents above.
+struct RemoteDeletionWatermark {
+    let manager: RemoteProviderManager
+    let provider: String
+    let sessionID: String
+    /// The instant written before the verb was invoked.
+    let decidedAt: Date
+    /// Whatever the map held before `decidedAt` was written, if anything.
+    let prior: Date?
+
+    /// The delete did not happen: put back what was there before, so a session
+    /// that is still alive is not hidden from the mirror over a destruction
+    /// that never occurred.
+    func withdraw() async {
+        await manager.withdrawDeletion(
+            provider: provider, sessionID: sessionID, restoring: prior, ifStillAt: decidedAt)
+    }
+
+    /// The verb returned: move the watermark forward past every poll that could
+    /// have been launched while it ran.
+    func restamp(at date: Date) async {
+        await manager.noteDeletion(provider: provider, sessionID: sessionID, at: date)
+    }
+}
+
 /// RPC handlers for remote agent backends (`docs/remote-provider-contract.md`).
 /// Every `remote.*` verb gates on `config.remoteBackendsEnabled` AND on the
 /// `remoteManager` actor existing — the daemon only constructs it at boot
@@ -957,6 +990,15 @@ extension RPCRouter {
     /// rule; it is the piece of this handler most likely to read as redundant
     /// and be removed.
     ///
+    /// **And the drop is interlocked against polls in flight.** Dropping a row
+    /// races the `list` loop: a poll that captured its snapshot before the
+    /// provider committed the deletion applies it afterwards and re-inserts the
+    /// row with `gone` false, which is the two-poll limbo the immediate drop
+    /// exists to prevent, arrived at by a different route. So the delete stamps
+    /// a deletion watermark before the verb and again after it returns, and
+    /// withdraws it on every failure exit —
+    /// `RemoteProviderManager.noteDeletion`.
+    ///
     /// `deleted: false` is a success, not an error: the contract has deleting
     /// an unknown or already-deleted id exit 0 saying so, and the caller's
     /// intent — that this session not exist — holds either way. The row is
@@ -988,6 +1030,18 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .remoteDelete, actor: actor,
             target: .remote(provider: params.provider, session: params.sessionID))
+        // Stamped BEFORE the verb, and again after it returns. See
+        // `RemoteProviderManager.noteDeletion` for what each stamp covers;
+        // without them the row this handler drops below is re-inserted, with
+        // `gone` false, by the next `list` whose snapshot predates the delete —
+        // reproducing exactly the two-poll limbo the immediate drop exists to
+        // prevent.
+        let decidedAt = now()
+        let deletion = RemoteDeletionWatermark(
+            manager: manager, provider: params.provider, sessionID: params.sessionID,
+            decidedAt: decidedAt,
+            prior: await manager.noteDeletion(
+                provider: params.provider, sessionID: params.sessionID, at: decidedAt))
         var verb = ["delete", params.sessionID]
         if params.retain { verb.append("--retain") }
         let result: ProviderResult
@@ -999,6 +1053,7 @@ extension RPCRouter {
             remoteHandlerLogger.error(
                 "remote.delete provider=\(params.provider, privacy: .public) timed out")
             let message = Self.friendlyMessage(for: error, provider: params.provider)
+            await deletion.withdraw()
             await finishActuation(actuationID, .transportFailed, error: message)
             return RPCResponse(error: message)
         }
@@ -1006,6 +1061,7 @@ extension RPCRouter {
             let message = result.decodedError?.message ?? "delete failed (exit \(result.exitCode))"
             remoteHandlerLogger.error(
                 "remote.delete provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            await deletion.withdraw()
             await finishActuation(actuationID, .transportFailed, error: message)
             return RPCResponse(error: message)
         }
@@ -1019,9 +1075,15 @@ extension RPCRouter {
             let message = "provider '\(params.provider)' returned an unreadable delete result"
             remoteHandlerLogger.error(
                 "remote.delete provider=\(params.provider, privacy: .public): \(message, privacy: .public)")
+            await deletion.withdraw()
             await finishActuation(actuationID, .transportFailed, error: message)
             return RPCResponse(error: message)
         }
+        // The session is destroyed, whether this call did it or found it
+        // already gone. Either way a poll launched while the verb ran carries
+        // the pre-delete inventory, so the watermark moves past it before the
+        // row is dropped.
+        await deletion.restamp(at: now())
         await recordDeleteAftermath(outcome, params: params, now: now)
         await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: outcome)

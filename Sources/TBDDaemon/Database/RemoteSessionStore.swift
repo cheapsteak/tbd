@@ -305,6 +305,14 @@ public struct RemoteSessionStore: Sendable {
     /// to the drift rule, a session the user just deleted would render as live,
     /// then stale, then gone, across two poll intervals.
     ///
+    /// **On its own this write is not enough**, and the missing half lives in
+    /// `RemoteProviderManager.noteDeletion`: a `list` whose snapshot was
+    /// captured before the provider committed the deletion still names the
+    /// session, and applying it after this DELETE would silently insert the row
+    /// back with `gone` false. The caller stamps a deletion watermark that the
+    /// snapshot-apply path checks, so such a snapshot is dropped rather than
+    /// applied.
+    ///
     /// Returns whether a row actually went away, mirroring `markGone` and
     /// `dismiss` so the handler can skip a pointless UI broadcast. Deleting a
     /// session TBD never mirrored changes nothing, which is a normal outcome:
