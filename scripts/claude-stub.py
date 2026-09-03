@@ -499,11 +499,17 @@ def serve_until_signalled(
         report(["serving; Ctrl-C (or SIGTERM) to stop"])
         stop.wait()
     finally:
-        SIGNAL_TARGETS.serving_event = None
-        # Same as after the child is waited for: serving is over, so a stop
-        # signal arriving during the summary and the sandbox removal has
-        # nothing left to stop and must not unwind the cleanup.
+        # Serving is over, so from here the wrapper is only unwinding — a few
+        # milliseconds of summary, sandbox removal, and return. A stop signal
+        # landing in that window has nothing to reach, so the handler
+        # swallows it rather than interrupting the sandbox removal.
+        #
+        # Latched before serving_event is cleared, never after: the handler
+        # tests `finishing` first and `serving_event` second, so this order
+        # leaves no bytecode gap in which a signal finds neither. The reverse
+        # order has one, and a signal landing in it raises `Terminated`.
         SIGNAL_TARGETS.finishing = True
+        SIGNAL_TARGETS.serving_event = None
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

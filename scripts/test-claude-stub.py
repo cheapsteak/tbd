@@ -467,6 +467,32 @@ class SignalHandlerStateTests(SignalTargetsFixture):
         claude_stub.forward(child, signal.SIGTERM)
         self.assertEqual([int(signal.SIGTERM)], child.sent)
 
+    def test_the_serving_cleanup_order_leaves_no_gap_for_a_late_signal(self):
+        # `serve_until_signalled`'s `finally` latches `finishing` before
+        # clearing `serving_event`, the same order `run_claude`'s `finally`
+        # latches `finishing` before dropping `child`: a signal landing
+        # between the two statements finds `finishing` already set and is
+        # recorded and swallowed rather than raising `Terminated`.
+        self.targets.serving_event = claude_stub.threading.Event()
+
+        self.targets.finishing = True
+        self.assertIsNone(claude_stub.handle_stop_signal(signal.SIGTERM, None))
+        self.targets.serving_event = None
+
+        self.assertEqual(int(signal.SIGTERM), self.targets.late_signum)
+
+    def test_the_old_gap_between_finishing_and_serving_event_would_terminate(self):
+        # The discriminator for the test above: with `finishing` still False
+        # and `serving_event` already cleared — the reversed order the bug
+        # produced — the handler has nothing to hand the signal to and raises
+        # `Terminated` instead of swallowing it.
+        self.targets.serving_event = None
+        self.targets.finishing = False
+
+        with self.assertRaises(claude_stub.Terminated) as raised:
+            claude_stub.handle_stop_signal(signal.SIGTERM, None)
+        self.assertEqual(int(signal.SIGTERM), raised.exception.signum)
+
 
 class LateSignalExitStatusTests(SignalTargetsFixture):
     def test_a_signal_after_the_child_exits_keeps_the_status_and_cleans_up(self):
