@@ -300,10 +300,17 @@ extension RPCRouter {
         await manager.declaredCapabilities(provider: provider)
     }
 
-    private static func missingCapabilityResponse(provider: String, capability: String) -> RPCResponse {
+    /// The refusal a handler returns instead of invoking a verb the provider
+    /// has not declared. `section` names the contract heading to read, and
+    /// defaults to the `<verb> <id>` shape the session-addressed verbs use;
+    /// the exchange verbs pass their own, because `import` takes no id and
+    /// `recall` takes a key rather than one.
+    private static func missingCapabilityResponse(
+        provider: String, capability: String, section: String? = nil
+    ) -> RPCResponse {
         RPCResponse(error:
             "provider '\(provider)' has not declared capability '\(capability)' " +
-            "(docs/remote-provider-contract.md § \(capability) <id>)")
+            "(docs/remote-provider-contract.md § \(section ?? "\(capability) <id>"))")
     }
 
     /// Retires a session from the working inventory
@@ -573,6 +580,250 @@ extension RPCRouter {
             await manager.applyUpsert(session, provider: params.provider)
         }
         return .ok()
+    }
+
+    // MARK: - The transcript exchange
+
+    /// The budget for all three exchange verbs, matching the contract's
+    /// 60-second timeout for `retain`, `import`, and `recall` — a transcript is
+    /// a whole conversation, and the two store-writing verbs may be moving it
+    /// across a network.
+    private static let exchangeTimeout: TimeInterval = 60
+
+    /// Retains one of the provider's own sessions' transcripts
+    /// (`docs/remote-provider-contract.md` § `retain <id>`). Mirrors
+    /// `handleRemoteLog`'s shape — same outer gate, same cloud gate, same
+    /// timeout and `failureClass` branches — with two additions.
+    ///
+    /// **The capability is checked before anything is invoked.** The contract
+    /// states a caller "MUST NOT invoke a verb whose capability the provider
+    /// has not declared", and nothing upstream of this handler is trusted to
+    /// have checked, so a missing capability is a refusal naming it rather than
+    /// an opaque provider failure — the same rule `retire` follows for
+    /// `archive`/`unarchive`.
+    ///
+    /// **The receipt is recorded before the response is returned.** A key is
+    /// opaque and the contract gives no way to enumerate the keys a provider
+    /// issued, so a key that does not reach `retained_transcript` is a
+    /// retained transcript nobody can ever recall. Recording it is therefore
+    /// part of the verb, not bookkeeping around it — but a row that fails to
+    /// write must not fail a retention the provider already performed, so the
+    /// failure is logged and the receipt is still returned.
+    func handleRemoteRetain(_ paramsData: Data) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteRetainParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
+        guard await declaredCapabilities(manager, provider: params.provider).contains("retain") else {
+            return Self.missingCapabilityResponse(
+                provider: params.provider, capability: "retain", section: "retain <id> / import")
+        }
+        let result: ProviderResult
+        do {
+            result = try await manager.invoke(
+                providerName: params.provider, verb: ["retain", params.sessionID],
+                stdin: nil, timeout: Self.exchangeTimeout)
+        } catch let error as ProviderRunError {
+            remoteHandlerLogger.error("remote.retain provider=\(params.provider, privacy: .public) timed out")
+            return RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+        }
+        if result.failureClass != nil {
+            let message = result.decodedError?.message ?? "retain failed (exit \(result.exitCode))"
+            remoteHandlerLogger.error(
+                "remote.retain provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            return RPCResponse(error: message)
+        }
+        let receipt = try result.decoded(RetainReceipt.self, provider: params.provider)
+        await recordReceipt(receipt, provider: params.provider, sessionID: params.sessionID)
+        return try RPCResponse(result: receipt)
+    }
+
+    /// Puts a transcript from anywhere — including this machine — into a
+    /// provider's durable store (`docs/remote-provider-contract.md` §
+    /// `import`). See `handleRemoteRetain` for the shared shape and for why the
+    /// capability check and the receipt row are both part of the verb.
+    ///
+    /// Unlike `retain` there is no session on this provider, so the recorded
+    /// row carries no source session id and no origin lane. Malformed JSONL is
+    /// the provider's `invalid_params`, surfaced through the ordinary
+    /// `failureClass` branch rather than pre-validated here: the contract makes
+    /// the provider the validator of record, and a caller that parsed the
+    /// records first would be a second, divergent one.
+    func handleRemoteImport(_ paramsData: Data) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteImportParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
+        guard await declaredCapabilities(manager, provider: params.provider).contains("import") else {
+            return Self.missingCapabilityResponse(
+                provider: params.provider, capability: "import", section: "retain <id> / import")
+        }
+        let result: ProviderResult
+        do {
+            result = try await manager.invoke(
+                providerName: params.provider, verb: ["import"],
+                stdin: Data(params.jsonl.utf8), timeout: Self.exchangeTimeout)
+        } catch let error as ProviderRunError {
+            remoteHandlerLogger.error("remote.import provider=\(params.provider, privacy: .public) timed out")
+            return RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+        }
+        if result.failureClass != nil {
+            let message = result.decodedError?.message ?? "import failed (exit \(result.exitCode))"
+            remoteHandlerLogger.error(
+                "remote.import provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            return RPCResponse(error: message)
+        }
+        let receipt = try result.decoded(RetainReceipt.self, provider: params.provider)
+        await recordReceipt(receipt, provider: params.provider, sessionID: nil)
+        return try RPCResponse(result: receipt)
+    }
+
+    /// Reads a retained transcript back (`docs/remote-provider-contract.md` §
+    /// `recall <key>`). See `handleRemoteRetain` for the shared shape.
+    ///
+    /// **stdout is the whole response.** `recall` writes nothing to stderr —
+    /// the contract keeps exactly one stderr exception, `transcript`'s cursor
+    /// envelope, and a retained transcript is immutable so a cursor would have
+    /// nothing to mean. Truncation is detected against the receipt's `bytes`
+    /// instead, which is why a short read is logged here naming both counts.
+    ///
+    /// A short read is **not** an error: the records that did arrive are real,
+    /// and refusing them would turn a partial transcript into no transcript.
+    /// The caller gets the bytes and the log says what was missing.
+    func handleRemoteRecall(_ paramsData: Data) async throws -> RPCResponse {
+        guard let manager = try await remoteGate() else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteRecallParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
+        guard await declaredCapabilities(manager, provider: params.provider).contains("recall") else {
+            return Self.missingCapabilityResponse(
+                provider: params.provider, capability: "recall", section: "recall <key>")
+        }
+        let result: ProviderResult
+        do {
+            result = try await manager.invoke(
+                providerName: params.provider, verb: ["recall", params.key],
+                stdin: nil, timeout: Self.exchangeTimeout)
+        } catch let error as ProviderRunError {
+            remoteHandlerLogger.error("remote.recall provider=\(params.provider, privacy: .public) timed out")
+            return RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+        }
+        if result.failureClass != nil {
+            // Carries `not_found` and `expired` — the two codes this verb
+            // defines — through unchanged, so a caller can say a record lapsed
+            // rather than claim it never existed.
+            let message = result.decodedError?.message ?? "recall failed (exit \(result.exitCode))"
+            remoteHandlerLogger.error(
+                "remote.recall provider=\(params.provider, privacy: .public) failed: \(message, privacy: .public)")
+            return RPCResponse(error: message)
+        }
+        await warnOnShortRecall(
+            provider: params.provider, key: params.key, received: result.stdout.count)
+        // JSONL records by contract — lossy UTF-8 decode, never sanitized or
+        // re-encoded, on the same terms as `remote.log`'s raw bytes.
+        // swiftlint:disable:next optional_data_string_conversion
+        let jsonl = String(decoding: result.stdout, as: UTF8.self)
+        var localPath: String?
+        if params.saveLocally {
+            localPath = await saveRecalledTranscript(
+                result.stdout, provider: params.provider, key: params.key)
+        }
+        return try RPCResponse(result: RemoteRecallResult(jsonl: jsonl, localPath: localPath))
+    }
+
+    /// Writes one receipt into `retained_transcript`, filling in whatever TBD
+    /// already knows about the session it came from.
+    ///
+    /// Never throws. A retention the provider already performed must not be
+    /// reported as a failure because a local row would not write — the key
+    /// would then be lost twice over, since the response the caller never saw
+    /// carried it. The error is logged loudly instead, naming the key, because
+    /// that log line is the last place the key exists.
+    private func recordReceipt(
+        _ receipt: RetainReceipt, provider: String, sessionID: String?
+    ) async {
+        var sourceTitle: String?
+        var resolvedRepoID: UUID?
+        var originWorktreeID: UUID?
+        if let sessionID {
+            let row = try? await db.remoteSessions.row(provider: provider, sessionID: sessionID)
+            sourceTitle = row?.decodedPayload?.title
+            resolvedRepoID = row?.resolvedRepoIDUUID
+            originWorktreeID = try? await db.worktrees
+                .findRemote(provider: provider, sessionID: sessionID)?.id
+        }
+        do {
+            try await db.retainedTranscripts.insert(RetainedTranscript(
+                provider: provider, key: receipt.key, expiresAt: receipt.expiresAt,
+                bytes: receipt.bytes, sourceSessionID: sessionID, sourceTitle: sourceTitle,
+                resolvedRepoID: resolvedRepoID, originWorktreeID: originWorktreeID,
+                localPath: nil))
+        } catch {
+            remoteHandlerLogger.error("""
+                could not record the retained-transcript receipt for \
+                \(provider, privacy: .public) key \(receipt.key, privacy: .public): \
+                \(error.localizedDescription, privacy: .public). The key is in this log line \
+                and nowhere else — nothing enumerates a provider's keys
+                """)
+        }
+    }
+
+    /// Compares what `recall` returned against the byte count the receipt
+    /// claimed, and logs at `.error` when it falls short.
+    ///
+    /// Silent when TBD holds no receipt for this key — a key recalled from
+    /// another machine, or one recorded before this table existed, gives
+    /// nothing to compare against, and a comparison against zero would report
+    /// every such recall as short.
+    private func warnOnShortRecall(provider: String, key: String, received: Int) async {
+        guard let receipt = try? await db.retainedTranscripts.find(provider: provider, key: key),
+              received < receipt.bytes else { return }
+        remoteHandlerLogger.error("""
+            remote.recall provider=\(provider, privacy: .public) returned \
+            \(received, privacy: .public) bytes for a receipt claiming \
+            \(receipt.bytes, privacy: .public); the transcript is truncated
+            """)
+    }
+
+    /// Writes the recalled records under `~/tbd/transcripts/<provider>/<key>.jsonl`
+    /// and records that path on the receipt row. Returns the path written, or
+    /// nil when nothing was written.
+    ///
+    /// The path comes from `TBDConstants`, never composed from `$HOME`, so the
+    /// test fence covers it.
+    ///
+    /// A failed write is nil rather than an error: the records arrived, and the
+    /// caller has them in the response regardless of whether this disk would
+    /// take a copy.
+    private func saveRecalledTranscript(_ data: Data, provider: String, key: String) async -> String? {
+        let url = TBDConstants.retainedTranscriptPath(provider: provider, key: key)
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            remoteHandlerLogger.error("""
+                could not write the recalled transcript for \(provider, privacy: .public) \
+                key \(key, privacy: .public) to \(url.path, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            return nil
+        }
+        do {
+            try await db.retainedTranscripts.setLocalPath(
+                provider: provider, key: key, localPath: url.path)
+        } catch {
+            // The file is on disk either way; only the row's pointer to it is
+            // lost, and the GC leg reconciles files against rows.
+            remoteHandlerLogger.warning("""
+                wrote \(url.path, privacy: .public) but could not record it on the receipt row: \
+                \(error.localizedDescription, privacy: .public)
+                """)
+        }
+        return url.path
     }
 
     func handleRemoteDismiss(_ paramsData: Data) async throws -> RPCResponse {

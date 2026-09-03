@@ -1242,6 +1242,45 @@ actor DaemonClient {
         )
     }
 
+    /// Ask a provider to retain one of its own sessions' transcripts
+    /// (`docs/remote-provider-contract.md` § `retain <id>`), and record the
+    /// receipt daemon-side. Unlike `remoteRename`, the capability check is the
+    /// DAEMON's here — the handler refuses before invoking anything — so a
+    /// caller need not pre-check, and gets a refusal naming the capability
+    /// rather than a raw provider error.
+    func remoteRetain(provider: String, sessionID: String) async throws -> RetainReceipt {
+        try await callAsync(
+            method: RPCMethod.remoteRetain,
+            params: RemoteRetainParams(provider: provider, sessionID: sessionID),
+            resultType: RetainReceipt.self
+        )
+    }
+
+    /// Put a transcript from anywhere — including this machine — into a
+    /// provider's durable store (`docs/remote-provider-contract.md` §
+    /// `import`). `jsonl` is Claude Code transcript JSONL.
+    func remoteImport(provider: String, jsonl: String) async throws -> RetainReceipt {
+        try await callAsync(
+            method: RPCMethod.remoteImport,
+            params: RemoteImportParams(provider: provider, jsonl: jsonl),
+            resultType: RetainReceipt.self
+        )
+    }
+
+    /// Read a retained transcript back (`docs/remote-provider-contract.md` §
+    /// `recall <key>`). With `saveLocally`, the daemon also writes it under
+    /// `~/tbd/transcripts/` and returns that path; the records come back in
+    /// `jsonl` either way.
+    func remoteRecall(
+        provider: String, key: String, saveLocally: Bool = false
+    ) async throws -> RemoteRecallResult {
+        try await callAsync(
+            method: RPCMethod.remoteRecall,
+            params: RemoteRecallParams(provider: provider, key: key, saveLocally: saveLocally),
+            resultType: RemoteRecallResult.self
+        )
+    }
+
     /// Dismiss a gone/errored remote session from the mirror.
     func remoteDismiss(provider: String, sessionID: String) async throws {
         try await callVoidAsync(

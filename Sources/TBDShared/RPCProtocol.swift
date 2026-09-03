@@ -303,6 +303,13 @@ public enum RPCMethod {
     public static let remoteLog = "remote.log"
     public static let remoteRename = "remote.rename"
     public static let remoteDismiss = "remote.dismiss"
+    /// The transcript exchange (`docs/remote-provider-contract.md` §
+    /// `retain <id>` / `import`, § `recall <key>`). All three are
+    /// non-destructive and gated by their capabilities alone — no feature flag
+    /// stands in front of them.
+    public static let remoteRetain = "remote.retain"
+    public static let remoteImport = "remote.import"
+    public static let remoteRecall = "remote.recall"
     public static let remoteSetPin = "remote.setPin"
     public static let remoteReportAttachExit = "remote.reportAttachExit"
 
@@ -325,6 +332,7 @@ public enum RPCMethod {
     public static let providerNamedRemoteMethods: [String] = [
         remoteCreate, remoteStop, remoteArchive, remoteUnarchive,
         remoteSend, remoteLog, remoteRename, remoteDismiss,
+        remoteRetain, remoteImport, remoteRecall,
         remoteSetPin, remoteReportAttachExit,
     ]
 
@@ -1577,6 +1585,86 @@ public struct RemoteDismissParams: Codable, Sendable {
     public let sessionID: String
     public init(provider: String, sessionID: String) {
         self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+// MARK: - The transcript exchange
+
+/// Params for `remote.retain` — ask a provider to put one of its own sessions'
+/// transcripts into its durable store (`docs/remote-provider-contract.md` §
+/// `retain <id>`). The result is a `RetainReceipt`.
+public struct RemoteRetainParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Params for `remote.import` — put a transcript from somewhere else, including
+/// this machine, into a provider's durable store with no session of the
+/// provider's involved (`docs/remote-provider-contract.md` § `import`). The
+/// result is a `RetainReceipt`.
+///
+/// `jsonl` is Claude Code transcript JSONL, which the contract's format-scope
+/// paragraph fixes for this verb. It rides as a `String` rather than `Data`
+/// because that is what every other text-bearing param on this protocol does
+/// (`RemoteSendParams.text`), and because the daemon hands it straight to the
+/// provider's stdin without interpreting it.
+public struct RemoteImportParams: Codable, Sendable {
+    public let provider: String
+    public let jsonl: String
+    public init(provider: String, jsonl: String) {
+        self.provider = provider; self.jsonl = jsonl
+    }
+}
+
+/// Params for `remote.recall` — read back a transcript the provider retained
+/// (`docs/remote-provider-contract.md` § `recall <key>`).
+///
+/// `key` is opaque and provider-scoped, so the provider travels with it: the
+/// same string may mean different things to two providers, and a caller MUST
+/// NOT present one to a provider that did not issue it.
+public struct RemoteRecallParams: Codable, Sendable {
+    public let provider: String
+    public let key: String
+    /// Whether the daemon also writes the JSONL to
+    /// `TBDConstants.retainedTranscriptPath(provider:key:)` and records that
+    /// path on the receipt row.
+    ///
+    /// Decoded with a `false` default so params from a client that predates
+    /// the field still decode — and `false` is the right default besides:
+    /// reading a transcript should not put a file on disk unless asked.
+    public let saveLocally: Bool
+    public init(provider: String, key: String, saveLocally: Bool = false) {
+        self.provider = provider; self.key = key; self.saveLocally = saveLocally
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case provider, key, saveLocally
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decode(String.self, forKey: .provider)
+        key = try c.decode(String.self, forKey: .key)
+        saveLocally = try c.decodeIfPresent(Bool.self, forKey: .saveLocally) ?? false
+    }
+}
+
+/// Result of `remote.recall`.
+///
+/// `jsonl` carries the records whether or not they were also written to disk —
+/// a caller that asked to save still gets the bytes, so a short read is
+/// detectable at the caller as well as logged by the daemon. `localPath` is
+/// non-nil only when `saveLocally` was set and the write succeeded; a failed
+/// write leaves it nil rather than failing the recall, because the records
+/// themselves arrived.
+public struct RemoteRecallResult: Codable, Sendable {
+    public let jsonl: String?
+    public let localPath: String?
+    public init(jsonl: String?, localPath: String?) {
+        self.jsonl = jsonl; self.localPath = localPath
     }
 }
 
