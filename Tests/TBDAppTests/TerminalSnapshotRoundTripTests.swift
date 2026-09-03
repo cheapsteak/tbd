@@ -127,6 +127,28 @@ struct TerminalSnapshotRoundTripTests {
         #expect(pair.source.getLine(row: 0)?.translateToString(trimRight: true) == "primary text")
     }
 
+    @Test("The saved cursor a receiver restores on exit is the PRIMARY one")
+    func primarySavedCursorSurvivesAltScreen() {
+        let pair = Pair()
+        // Two saved cursors, deliberately different. `?1049h` stores the
+        // primary cursor — here row 7, col 20 — for a later `?1049l` to
+        // restore; the `\e[s` on the alt screen stores an unrelated second one
+        // at row 10, col 30. `capture` reads whichever buffer is active, so an
+        // alt-screen snapshot sees the alt one, and emitting THAT as the
+        // pre-switch CUP sends a returning viewer to the wrong column on exit.
+        pair.transfer(
+            "primary text\u{1b}[7;20H\u{1b}[?1049h\u{1b}[2J\u{1b}[Halt content"
+                + "\u{1b}[10;30H\u{1b}[s\u{1b}[1;12H")
+        pair.fresh.feed(text: "\u{1b}[?1049l")
+        pair.source.feed(text: "\u{1b}[?1049l")
+        #expect(pair.fresh.buffer.x == pair.source.buffer.x)
+        #expect(pair.fresh.buffer.y == pair.source.buffer.y)
+        // Pin the absolute position too. The comparison alone would still hold
+        // if both terminals agreed on the wrong cursor.
+        #expect(pair.fresh.buffer.x == 19)
+        #expect(pair.fresh.buffer.y == 6)
+    }
+
     @Test("The cursor lands where it was, under origin mode and a scroll region")
     func originModeCursor() {
         let pair = Pair()

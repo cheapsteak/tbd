@@ -50,9 +50,9 @@ public enum TerminalSnapshotWriter {
         // viewport blank, and both ends run the buffer's saved-cursor
         // save/restore, which carries the current SGR run, DECOM, DECAWM,
         // DECLRMM and reverse wraparound with it. `restoreAlternateScreen`
-        // paints those back from the state captured a moment ago, so a live
-        // session — this is the daemon's real emulator, not a copy — is left
-        // as it was found. Its doc comment records what cannot be put back.
+        // paints those back from the state captured a moment ago. Its doc
+        // comment records what cannot be put back, and why the residue is
+        // survivable.
         let attribute = terminal.currentAttribute
         let altScreen = TerminalCellWalk.styledViewport(of: terminal)
         terminal.feed(text: "\(esc)[?1049l")
@@ -63,9 +63,23 @@ public enum TerminalSnapshotWriter {
             restoreAlternateScreen(
                 of: terminal, content: altScreen, state: state, attribute: attribute)
         }
+
+        // `capture` reads `savedX`/`savedY` off whichever buffer is active, so
+        // on an alt screen it returns the ALT buffer's DECSC. `assemble` needs
+        // the other one: it emits these as the cursor `?1049h` will store for
+        // a later `?1049l` to restore, which is the PRIMARY buffer's saved
+        // position. Emitting the alt buffer's sends a returning viewer to the
+        // wrong place on exit — and usually to 0,0, because an alt-screen app
+        // that never issues DECSC leaves it unset, which is what made the bug
+        // invisible. The toggle has just made the primary current, so read
+        // them here, where they mean what `assemble` needs.
+        var primaryState = state
+        primaryState.savedX = terminal.buffer.savedX
+        primaryState.savedY = terminal.buffer.savedY
+
         let history = TerminalCellWalk.styledHistory(
             of: terminal, maxScrollbackLines: maxScrollbackLines)
-        return assemble(history: history, altScreen: altScreen, state: state)
+        return assemble(history: history, altScreen: altScreen, state: primaryState)
     }
 
     public static func assemble(
@@ -105,12 +119,34 @@ public enum TerminalSnapshotWriter {
     /// region, the cursor, the modes the saved-cursor restore overwrote, and
     /// the open SGR run.
     ///
-    /// Three things it cannot put back, all outside `CapturedTerminalState`:
-    /// the selected character set (SCS — saved and restored alongside the
-    /// cursor, and not readable through any public API), kitty graphics
-    /// attached to the alt buffer, and the two `bufferActivated` /
-    /// alternate-screen-switch delegate callbacks the toggle fires on the way
-    /// through.
+    /// **Three residual losses are accepted, not oversights.** What the toggle
+    /// mutates is the daemon's headless *model* of the screen — no ioctl and
+    /// no byte reaches the pty, so the child process never sees it — and the
+    /// preamble's content is captured before the destructive half, so what the
+    /// viewer receives is unaffected either way. At detach the daemon resets
+    /// this emulator and replays the viewer's handback, overwriting the model
+    /// wholesale. The real cost is therefore a briefly degraded model, which
+    /// matters for a `terminal.output` supervision read taken inside that
+    /// window, and which persists only if an attach fails before the detach
+    /// that would have overwritten it.
+    ///
+    /// - The selected character set (SCS). `cmdSaveCursor` carries `charset`,
+    ///   it is absent from `CapturedTerminalState`, and no public SwiftTerm
+    ///   API exposes it.
+    /// - Kitty graphics attached to the alt buffer: both buffer activations
+    ///   call `clearKittyImages`, and there is no sequence that re-attaches
+    ///   them.
+    /// - Two spurious `bufferActivated` / alternate-screen-switch delegate
+    ///   rounds. Inert in the daemon, whose delegate is
+    ///   `ReplyForwardingDelegate` (`HolderReader.swift`) and implements only
+    ///   `send`. **Not inert in the app**, where `MacTerminalView` posts each
+    ///   one onto its event queue and reacts — so running this same path
+    ///   against an app-side emulator, as the detach handback would, needs
+    ///   that considered first.
+    ///
+    /// The alt buffer's own DECSC (`altBuffer.savedX/savedY`) goes with the
+    /// `clear()` too, and no escape sequence can restore it without first
+    /// moving the real cursor.
     private static func restoreAlternateScreen(
         of terminal: Terminal,
         content: String,
