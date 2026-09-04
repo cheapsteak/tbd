@@ -17,6 +17,14 @@ public final class SocketServer: Sendable {
     private let group: MultiThreadedEventLoopGroup
     private nonisolated(unsafe) var channel: Channel?
 
+    /// Identity of the socket file this server actually bound, read from the
+    /// path right after `bind(2)`. `nil` until a successful bind, and again
+    /// once `stop()` has settled the file.
+    ///
+    /// This is what licenses the unlink in `stop()`. See
+    /// `unlinkOwnedSocketFile()`.
+    private nonisolated(unsafe) var boundSocketIdentity: SocketFileIdentity?
+
     /// Number of currently connected clients. Updated atomically.
     private let _connectedClients = ManagedAtomic<Int>(0)
 
@@ -47,8 +55,14 @@ public final class SocketServer: Sendable {
         let connectedClients = self._connectedClients
         let limiter = self.limiter
 
+        // The backlog is deliberately not set here: this bootstrap is handed an
+        // already-bound descriptor (below), and NIO listens on it while
+        // constructing the channel — before any server-channel option is
+        // applied — so the accept queue takes NIO's own default of 128. That is
+        // strictly more forgiving than the 64 it replaces, which matters because
+        // a full accept queue is indistinguishable from a dead socket at the
+        // client's `connect(2)`.
         let bootstrap = ServerBootstrap(group: group)
-            .serverChannelOption(.backlog, value: 64)
             .childChannelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
                     let handler = SocketRPCHandler(
@@ -60,14 +74,40 @@ public final class SocketServer: Sendable {
                 }
             }
 
-        let ch = try await bootstrap.bind(
-            unixDomainSocketPath: socketPath
-        ).get()
-
-        // Set socket permissions so any local user can connect
-        chmod(socketPath, 0o700)
+        // Bind the socket here and hand NIO the descriptor, rather than calling
+        // `bind(unixDomainSocketPath:)` and letting NIO do it.
+        //
+        // NIO's own bind marks the server socket `cleanupOnClose`, and that
+        // cleanup runs `unlink(2)` on the *path* the socket was bound to when
+        // the channel closes — its only check is that something at that path is
+        // a socket, never that it is still the socket this process created. So
+        // a daemon shutting down deletes the rendezvous file that a successor
+        // daemon has since bound, and the successor keeps accepting on a
+        // listener no client can reach. Handing NIO a descriptor that is
+        // already bound sets `cleanupOnClose` to false — "socket already bound,
+        // owner must clean up" — which is what puts the unlink under the
+        // ownership check in `unlinkOwnedSocketFile()`.
+        let boundFD = try Self.bindListeningSocket(at: socketPath)
+        // Read the file's identity as close to `bind(2)` as possible, before
+        // any await gives a successor the chance to replace it. A successor
+        // daemon's `start()` unlinks whatever is at this path and binds a fresh
+        // socket, so the inode is what separates our file from theirs.
+        let identity = SocketFileIdentity(path: socketPath)
+        let ch: Channel
+        do {
+            ch = try await bootstrap.withBoundSocket(boundFD).get()
+        } catch {
+            // Do not close `boundFD` here: NIO takes ownership of the
+            // descriptor as soon as it wraps it, and closing a descriptor
+            // another layer already closed can later shut down an unrelated
+            // reused one. The socket file is unambiguously ours, so reclaim
+            // that and let a failed start surface.
+            try? fm.removeItem(atPath: socketPath)
+            throw error
+        }
 
         self.channel = ch
+        self.boundSocketIdentity = identity
         logger.info("Listening on \(self.socketPath, privacy: .public)")
     }
 
@@ -79,7 +119,138 @@ public final class SocketServer: Sendable {
             // Already closed
         }
         try? await group.shutdownGracefully()
+        unlinkOwnedSocketFile()
+    }
+
+    /// Create an `AF_UNIX` stream socket and `bind(2)` it at `path`, returning
+    /// the bound descriptor for NIO to adopt.
+    ///
+    /// Only creation and bind happen here. NIO sets the descriptor
+    /// non-blocking and calls `listen(2)` on it while it builds the channel,
+    /// exactly as it would for a socket it had made itself. What changes is
+    /// ownership of the *file*: because NIO did not open the path, it will not
+    /// unlink the path when the channel closes, and `stop()` decides that
+    /// instead.
+    private static func bindListeningSocket(at path: String) throws -> Int32 {
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8)
+        let capacity = MemoryLayout.size(ofValue: addr.sun_path)
+        guard pathBytes.count < capacity else {
+            throw SocketServerStartError.socketPathTooLong(path: path, limit: capacity - 1)
+        }
+        withUnsafeMutableBytes(of: &addr.sun_path) { raw in
+            raw.copyBytes(from: pathBytes)
+            raw[pathBytes.count] = 0
+        }
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw SocketServerStartError.socketCreationFailed(code: errno)
+        }
+
+        let bound = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                bind(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard bound == 0 else {
+            let code = errno
+            close(fd)
+            throw SocketServerStartError.bindFailed(path: path, code: code)
+        }
+
+        // Restrict the socket before anything can connect to it. NIO's listen
+        // comes later, so there is no window here where the file is reachable
+        // at the old mode.
+        chmod(path, 0o700)
+        return fd
+    }
+
+    /// Reclaim the socket file **only if it is still the one this server
+    /// bound.**
+    ///
+    /// The socket path is a rendezvous every daemon generation binds in turn,
+    /// so existence at that path proves nothing about who owns it. A successor
+    /// that has already bound is the common case: it unlinked our file and
+    /// created its own under the same name. Unlinking on existence alone
+    /// deletes the successor's socket, and it never finds out — it keeps
+    /// accepting on an open listener no client can reach any more, and every
+    /// client fails against a path that is simply gone.
+    ///
+    /// The honest primitive is the file's identity, not its name: `(st_dev,
+    /// st_ino)` captured immediately after `bind(2)` names one inode, and a
+    /// successor's `bind(2)` always makes a different one. So the unlink is
+    /// gated on that identity still being what sits at the path.
+    ///
+    /// A residual window of microseconds remains between the `lstat(2)` and the
+    /// `unlink(2)`, lost only if a successor unlinks our file and binds its own
+    /// inside it — darwin has no unlink-if-inode primitive to close it with. It
+    /// is accepted on width; the unconditional unlink it replaces lost the same
+    /// race for the whole of every shutdown.
+    private func unlinkOwnedSocketFile() {
+        guard let bound = boundSocketIdentity else {
+            // Never bound, or already settled. Nothing here is ours.
+            return
+        }
+        boundSocketIdentity = nil
+        guard let current = SocketFileIdentity(path: socketPath) else {
+            // Already gone — reclaimed by a successor's `start()`, or by hand.
+            return
+        }
+        guard current == bound else {
+            let boundInode = bound.inode
+            let currentInode = current.inode
+            logger.info(
+                "Leaving socket at \(self.socketPath, privacy: .public) in place: it is now inode \(currentInode, privacy: .public), not the \(boundInode, privacy: .public) this server bound"
+            )
+            return
+        }
         try? FileManager.default.removeItem(atPath: socketPath)
+    }
+}
+
+// MARK: - Start errors
+
+/// Why binding the RPC socket failed. These are all fatal to daemon startup;
+/// they exist so the failure names itself instead of arriving as a bare errno.
+public enum SocketServerStartError: Error, LocalizedError, CustomStringConvertible {
+    case socketPathTooLong(path: String, limit: Int)
+    case socketCreationFailed(code: Int32)
+    case bindFailed(path: String, code: Int32)
+
+    public var errorDescription: String? { description }
+
+    public var description: String {
+        switch self {
+        case .socketPathTooLong(let path, let limit):
+            return "socket path is \(path.utf8.count) bytes, over the \(limit)-byte sun_path limit: \(path)"
+        case .socketCreationFailed(let code):
+            return "socket(AF_UNIX, SOCK_STREAM): \(String(cString: strerror(code)))"
+        case .bindFailed(let path, let code):
+            return "bind(2) on \(path): \(String(cString: strerror(code)))"
+        }
+    }
+}
+
+// MARK: - Socket file identity
+
+/// The identity of a file on disk — `(st_dev, st_ino)` — as distinct from its
+/// path. Two sockets bound in turn at one path are two different inodes, and
+/// that is the only thing that tells them apart.
+struct SocketFileIdentity: Equatable {
+    let device: dev_t
+    let inode: ino_t
+
+    /// Reads the identity of whatever is at `path`, or `nil` if nothing is.
+    ///
+    /// `lstat` rather than `stat`: a symlink swapped in at the path is not the
+    /// socket we bound, and must not be mistaken for it.
+    init?(path: String) {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return nil }
+        self.device = info.st_dev
+        self.inode = info.st_ino
     }
 }
 
