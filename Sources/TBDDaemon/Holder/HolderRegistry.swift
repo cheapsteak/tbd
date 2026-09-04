@@ -1515,6 +1515,15 @@ actor HolderRegistry {
         pendingAttaches[terminalID] = nil
     }
 
+    /// Drops a viewer's claim on a pty, but only while it is still the one
+    /// named — the `clearPendingAttach` of the other map, and generation-checked
+    /// for the same reason: a clear that resumes after a suspension must not
+    /// discard a claim a later attach has since recorded.
+    private func clearViewerAttachment(terminalID: UUID, generation: UInt64) {
+        guard viewerAttachments[terminalID] == generation else { return }
+        viewerAttachments[terminalID] = nil
+    }
+
     /// The attach generation a viewer holds this session's pty under, if one
     /// may. Test-facing, and the honest instrument for "who owns this pty": the
     /// absence of a reader cannot tell a vended session from a released one.
@@ -1576,32 +1585,50 @@ actor HolderRegistry {
         }
 
         let reader: HolderReader
-        switch slots[terminalID] {
-        case .adopted(let suspended):
-            // The unacknowledged-attach arm. The reader never left the
-            // descriptor, so the screen goes in before the drain restarts and
-            // the resume is a restart of its thread.
-            await suspended.ingest(preamble: preamble)
-            try await suspended.resumeDraining()
-            reader = suspended
-        case nil:
-            reader = try await beginAdoption(of: terminalID, seedingScreenWith: preamble)
-        case .adopting, .releasing:
-            // Unreachable while the claim above stands — `adopt` and `release`
-            // are the only writers of those states and the first refuses on the
-            // claim outright, while the second clears it before it takes the
-            // slot. Refused rather than assumed away: whatever put a task in
-            // that slot owns this session now, and a resume beside it would be
-            // the second reader.
-            throw Error.superseded(terminalID: terminalID)
+        do {
+            switch slots[terminalID] {
+            case .adopted(let suspended):
+                // The unacknowledged-attach arm. The reader never left the
+                // descriptor, so the screen goes in before the drain restarts
+                // and the resume is a restart of its thread.
+                await suspended.ingest(preamble: preamble)
+                try await suspended.resumeDraining()
+                reader = suspended
+            case nil:
+                reader = try await beginAdoption(of: terminalID, seedingScreenWith: preamble)
+            case .adopting, .releasing:
+                // Unreachable while the claim above stands — `adopt` and
+                // `release` are the only writers of those states and the first
+                // refuses on the claim outright, while the second clears it
+                // before it takes the slot. Refused rather than assumed away:
+                // whatever put a task in that slot owns this session now, and a
+                // resume beside it would be the second reader.
+                throw Error.superseded(terminalID: terminalID)
+            }
+        } catch {
+            // The take-back failed — a holder busy past its retry budget, an
+            // adoption that timed out, a missing rendezvous socket, a `pipe()`
+            // that would not open. The claim must not outlive the attempt, for
+            // the reason `cancelPendingAttach`'s failed-resume arm states: the
+            // app closed its descriptor before it sent this, by the contract
+            // that licenses the resume at all, so nothing else holds one and an
+            // attach is a legitimate recovery. Leaving the claim standing is
+            // the exact brick this method exists to prevent — undrained,
+            // unwritable, and refused by `beginAttach` until the session is
+            // torn down — and the app has already closed both descriptors and
+            // will never send another detach.
+            //
+            // Generation-checked like every other clear here: a `release` or a
+            // successor attach racing the failure above may already own this
+            // session, and discarding its claim would let a second reader in.
+            clearViewerAttachment(terminalID: terminalID, generation: generation)
+            throw error
         }
         // Cleared only now, and only while it is still this attach's to clear:
         // a `release` racing the adoption above may already have taken the
         // session, and re-clearing a claim a later attach has since recorded
         // would let a third reader in beside it.
-        if viewerAttachments[terminalID] == generation {
-            viewerAttachments[terminalID] = nil
-        }
+        clearViewerAttachment(terminalID: terminalID, generation: generation)
         // After the resume, never before: a repaint provoked while nothing is
         // draining sits in the tty queue instead of reaching the screen it was
         // asked for. It heals only programs that repaint, which is why the

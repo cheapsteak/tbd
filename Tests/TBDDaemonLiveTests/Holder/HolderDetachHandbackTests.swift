@@ -135,7 +135,11 @@ struct HolderDetachHandbackTests {
         let viewer = try await fixture.attachAViewer()
         defer { viewer.close() }
 
-        await #expect(throws: HolderRegistry.Error.self) {
+        // The specific case, not merely `Error.self`: a mutation that threw
+        // `notAHolderSession` — refusing every handback, including the ones
+        // this path exists to accept — would satisfy the loose form.
+        await #expect(throws: HolderRegistry.Error.handbackSuperseded(
+            terminalID: fixture.terminalID, generation: viewer.generation &+ 1)) {
             try await fixture.registry.acceptHandback(
                 terminal: fixture.terminalRow, generation: viewer.generation &+ 1,
                 preamble: Data("STALE".utf8))
@@ -144,6 +148,50 @@ struct HolderDetachHandbackTests {
                 "a stale detach took the pty from the attach that holds it")
         #expect(await fixture.registry.reader(for: fixture.terminalID) == nil,
                 "a stale detach put the daemon back on a pty a viewer is reading")
+    }
+
+    /// A handback whose take-back **fails** must still drop the claim, or the
+    /// error path re-creates the exact brick this method exists to prevent: the
+    /// session undrained, unwritable, and refused by `beginAttach` until it is
+    /// torn down, with no second detach ever coming — the app closed its
+    /// descriptors before it sent this one. Reachable without a race: a holder
+    /// busy past the retry budget, an adoption that times out, or (here) a
+    /// rendezvous socket that has gone.
+    @Test func aFailedHandbackDoesNotLeaveTheSessionClaimed() async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+        defer { fixture.tearDown() }
+
+        let viewer = try await fixture.attachAViewer()
+        viewer.close()
+        // The holder is still alive and still bound to this socket; unlinking
+        // the path is what a connect can no longer find, so `beginAdoption`
+        // fails on its first attempt rather than spending the busy budget.
+        try FileManager.default.removeItem(
+            atPath: try HolderRendezvous.socketPath(
+                sessionID: fixture.terminalID,
+                environment: HolderProcessFixture.environment(home: fixture.process.home)))
+
+        await #expect(throws: (any Swift.Error).self) {
+            try await fixture.registry.acceptHandback(
+                terminal: fixture.terminalRow, generation: viewer.generation,
+                preamble: Data("PREAMBLE".utf8))
+        }
+
+        #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == nil, """
+            a handback that could not take the session back left the viewer's claim standing, so \
+            nothing drains this pty, no injection can reach it, and every re-open is refused
+            """)
+        // And the claim is not merely absent from the map: the guard that reads
+        // it no longer refuses a recovery. This adopt fails too — the socket is
+        // gone — but it must fail on the socket, not on the claim.
+        do {
+            _ = try await fixture.registry.adopt(terminal: fixture.terminalRow)
+        } catch {
+            #expect(
+                (error as? HolderRegistry.Error)
+                    != .attachedToViewer(terminalID: fixture.terminalID),
+                "a recovery attach is still refused on the claim the failed handback left behind")
+        }
     }
 
     /// The negative that scopes this task: **an app that dies mid-detach needs
