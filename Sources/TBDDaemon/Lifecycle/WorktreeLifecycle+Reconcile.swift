@@ -847,13 +847,38 @@ extension WorktreeLifecycle {
     /// may have hundreds of rows behind it.
     static let holderProbeTimeout: Duration = .seconds(2)
 
-    /// How long the holder arm gets across a whole reconcile pass.
+    /// How long the holder arm gets across one `reconcileTerminals` call.
     ///
-    /// The same five seconds `HolderRegistry.defaultAdoptAllBudget` allows, and
-    /// deliberately the same number: both bound a serial holder phase that runs
-    /// before the daemon's socket is bound, and a reader comparing them should
-    /// find one answer rather than two. See `HolderProbeBudget` for why a
-    /// per-probe timeout is not a bound on the phase.
+    /// The same five seconds `HolderRegistry.defaultAdoptAllBudget` allows,
+    /// because per pass it is the same trade against the same per-probe
+    /// timeout. **It is not the same ceiling, and a reader comparing the two
+    /// must not read parity into the number.** `begin`/`end` bracket one
+    /// `reconcileTerminals` call, and `performStartupReconciliation` makes one
+    /// `reconcile(repoID:)` call per repo plus one `reconcileScratchTerminals`
+    /// — each its own pass, each with its own budget. So what this constant
+    /// implies before the socket is bound is `(repos + 1) × 5 s`, about 45 s on
+    /// an eight-repo install whose rendezvous sockets all listen and never
+    /// answer, where `adoptAllBudget` is a single 5 s across every holder row
+    /// on the machine.
+    ///
+    /// **Per pass rather than hoisted around startup, deliberately.** The arm
+    /// has callers startup does not own — `repo.add`
+    /// (`RPCRouter+RepoHandlers`), the `cleanup` RPC and the hourly
+    /// `performOrphanMaintenance` (`RPCRouter+TerminalHandlers`, scratch rows)
+    /// — and a budget begun inside `performStartupReconciliation` would bound
+    /// none of them. Those callers run after the socket is bound, so their
+    /// stake is an RPC handler rather than startup, but a serial arm with no
+    /// bound at all is what this exists to prevent wherever it runs.
+    ///
+    /// For the same reason the arm is not simply reordered to run after
+    /// `HolderRegistry.adoptAll` and lean on *its* budget: adoption precedes
+    /// none of those callers. And even where it does precede a pass, the rows
+    /// adoption's own budget deferred, rows a foreign owner answered for and
+    /// rows a busy holder refused all leave no remembered status behind, so
+    /// they reach the probe below and need bounding regardless.
+    ///
+    /// See `HolderProbeBudget` for why a per-probe timeout is not a bound on a
+    /// pass at all.
     static let holderPhaseBudget: Duration = .seconds(5)
 
     /// Why the sweep deleted a row rather than parking it, for the one log line
@@ -947,7 +972,13 @@ extension WorktreeLifecycle {
     /// wrote and nobody read with it — the rule
     /// `HolderRegistry.confirmChildExit` states, and the reason adoption asks
     /// for the hand-over rather than a description. Connecting asks for nothing
-    /// that could be an answer, so it cannot collect the exit it is looking for.
+    /// that could be an answer, so it cannot collect the exit it is looking
+    /// for — near-absolutely rather than absolutely: `Holder.run`'s reaping
+    /// branch speaks first to whatever client is connected, so a child that
+    /// exits inside the few milliseconds this probe is attached can still be
+    /// collected by it. That window is a race with the child's own exit, not a
+    /// question this daemon asked, and it is narrower than a `describe` by the
+    /// whole life of the session.
     ///
     /// What that costs is the *fidelity* of the positive case: a holder that is
     /// alive with an exited child reads as `keep` here, where a `describe`
@@ -1058,6 +1089,16 @@ extension WorktreeLifecycle {
         // Established without a round trip, and by the same rule the probe
         // uses: this is what a holder said, or what its absence said, and
         // neither becomes less true for being remembered.
+        //
+        // **That claim is a claim about provenance, and it is enforced at the
+        // writes rather than assumed here.** A status is recorded in exactly
+        // three places: two hand-overs, which are answers, and
+        // `HolderRegistry.adoptOne`, which brands only the
+        // `exitProbeOutcome`-established errnos — the same `ENOENT` and
+        // `ECONNREFUSED` the probes below read as absence. A round trip that
+        // merely timed out records nothing, so it cannot reach this gate: it
+        // would otherwise delete the row and its tab of a holder that is alive
+        // but slow, and hand a live session to `RowlessHolderCollector`.
         case .exited(let code):
             verdict = .sessionOver(.exited(code: code))
         case .exitedStatusUnknown:

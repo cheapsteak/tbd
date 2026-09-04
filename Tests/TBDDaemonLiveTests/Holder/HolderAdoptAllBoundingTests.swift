@@ -139,15 +139,21 @@ struct HolderAdoptAllBoundingTests {
         // Two more assertions, because the upper bound alone passes vacuously:
         // if this fixture's path and the registry's ever diverged, `connect`
         // would fail `ECONNREFUSED` in microseconds and it would be satisfied
-        // having probed nothing. The recorded status does not settle it either
-        // — `adoptAll` brands a refused connection `exitedStatusUnknown`
-        // exactly as it brands a silent one — so the lower bound is what says
-        // the row was not merely reached but waited on.
+        // having probed nothing. The lower bound says the row was not merely
+        // reached but waited on; the counter says a round trip was opened
+        // against it at all.
+        //
+        // **Not the recorded status, deliberately.** A holder that is merely
+        // silent is exactly a holder that is alive and wedged, so `adoptOne`
+        // records nothing for one — the reconcile arm's gate 4 would otherwise
+        // delete a live session's row on a timeout. `lastKnownStatus` is
+        // therefore `nil` here whether the row was probed or skipped, and can
+        // no longer discriminate.
         #expect(
             elapsed > .seconds(1),
             "the wedged holder cost only \(elapsed), under one receive timeout: nothing waited")
         #expect(
-            await registry.lastKnownStatus(for: wedged.terminal.id) == .exitedStatusUnknown,
+            await registry.attachRoundTripsStarted == 1,
             "the wedged row was never probed at all")
     }
 
@@ -155,10 +161,15 @@ struct HolderAdoptAllBoundingTests {
     ///
     /// Four wedged holders at a two-second per-row bound is eight seconds of
     /// silence if nothing stops the walk, so the budget has to leave at least
-    /// one row unprobed. **Unprobed means no status recorded**: a row the pass
-    /// never reached must not be branded `exitedStatusUnknown`, which is a claim
-    /// about a holder that answered nothing — and which downstream reads as a
-    /// session whose job may be gone.
+    /// one row unprobed — counted by the round trips the registry opened,
+    /// which is the one instrument that separates a row it reached from a row
+    /// it never got to.
+    ///
+    /// **Not by the absence of a recorded status.** A wedged holder is a
+    /// holder that may well be alive, so `adoptOne` records nothing for a
+    /// probed one either; only nothing *bound* at the rendezvous is evidence
+    /// the session is over. So no row here is branded, and the branding cannot
+    /// tell reached from skipped.
     @Test func aWedgedFleetStopsAtTheBudgetRatherThanProbingEveryRow() async throws {
         let home = HolderProcessFixture.scratchHome()
         defer { try? FileManager.default.removeItem(atPath: home) }
@@ -177,13 +188,10 @@ struct HolderAdoptAllBoundingTests {
             elapsed < .seconds(12),
             "four wedged holders held the daemon for \(elapsed); the phase is not bounded")
 
-        var unprobed = 0
-        for row in rows {
-            if await registry.lastKnownStatus(for: row.id) == nil { unprobed += 1 }
-        }
+        let probed = await registry.attachRoundTripsStarted
         #expect(
-            unprobed > 0,
-            "every wedged row was probed, so the budget never stopped the walk")
+            probed < rows.count,
+            "all \(rows.count) wedged rows were probed; the budget never stopped the walk")
     }
 
     /// A live session is still rescued when it shares the fleet with wedged

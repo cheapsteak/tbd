@@ -69,11 +69,12 @@ struct HolderReconcileInventoryTests {
     }
 
     private func makeLifecycle(
-        db: TBDDatabase, signaller: ProcessSignaller, registry: HolderRegistry?
+        db: TBDDatabase, signaller: ProcessSignaller, registry: HolderRegistry?,
+        clock: any Clock<Duration> = ContinuousClock()
     ) -> WorktreeLifecycle {
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: deadWindowTmux(), hooks: HookResolver(),
-            processSignaller: signaller)
+            processSignaller: signaller, clock: clock)
         lifecycle.holderRegistry = registry
         return lifecycle
     }
@@ -411,6 +412,187 @@ struct HolderReconcileInventoryTests {
             "a pass inside its budget did not reach the rendezvous")
     }
 
+    // MARK: - Where a remembered status may come from
+
+    /// A rendezvous with a socket bound and listening that nobody ever accepts
+    /// on: a holder that is **alive but wedged**. `connect(2)` completes into
+    /// the backlog, the hand-over request goes out, and the receive times out.
+    ///
+    /// The caller owns the returned descriptor.
+    private func wedgedHolderRendezvous(for sessionID: UUID, home: String) throws -> Int32 {
+        let socketPath = try HolderRendezvous.socketPath(
+            sessionID: sessionID, environment: ["TBD_HOME": home])
+        try FileManager.default.createDirectory(
+            atPath: (socketPath as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        // Room for both connections the test opens — the adoption's and the
+        // sweep's. Nothing accepts either, so a backlog of one would make the
+        // sweep's connect fail with `ECONNREFUSED`, which is the one errno that
+        // means "gone" — the fixture would then be testing a saturated queue
+        // rather than a wedged holder.
+        let fd = try #require(
+            HolderRendezvousFixture.bind(at: socketPath, listening: true, backlog: 16),
+            "could not bind a listening rendezvous at \(socketPath)")
+        return fd
+    }
+
+    private func holderRow() -> Terminal {
+        Terminal(
+            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder)
+    }
+
+    /// Gate 4 short-circuits on a remembered status **without probing**, and
+    /// then `deleteTerminalAndTab` runs — which leaves a still-living holder
+    /// rowless for `RowlessHolderCollector` to `SIGKILL`. So what may be
+    /// remembered is the whole safety of that gate, and a receive timeout is
+    /// neither an answer from a holder nor evidence of its absence.
+    ///
+    /// Real sockets rather than an injected error, because the fact under test
+    /// is which failures the *production* adoption path brands, and a fixture
+    /// that threw a chosen error would be asserting the classifier that the
+    /// path was free not to consult.
+    @Test("an adoption that only timed out remembers nothing about the session")
+    func aWedgedHolderIsNeverRememberedAsExited() async throws {
+        let home = "/tmp/tbdwedge-\(UUID().uuidString.prefix(8).lowercased())"
+        defer { try? FileManager.default.removeItem(atPath: home) }
+
+        let terminal = holderRow()
+        let fd = try wedgedHolderRendezvous(for: terminal.id, home: home)
+        defer { close(fd) }
+
+        let registry = registry(environment: ["TBD_HOME": home])
+        await registry.adoptRemaining([terminal])
+
+        #expect(
+            await registry.lastKnownStatus(for: terminal.id) == nil,
+            """
+            a holder that was merely slow to answer was remembered as exited; gate 4 would \
+            then delete its row and its tab with no probe, and RowlessHolderCollector would \
+            SIGKILL the live job and the live holder behind it
+            """)
+
+        // The whole chain, not just the branding: the sweep must reach its own
+        // probe and read the listener that is still there.
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(
+            db: db, signaller: FakeProcessSignaller(), registry: registry)
+        let verdict = await lifecycle.holderRowVerdict(for: terminal)
+        #expect(
+            verdict == .keep(reason: "listening"),
+            """
+            the sweep judged a live-but-wedged holder's row on a status that came from a \
+            timeout: \(String(describing: verdict))
+            """)
+    }
+
+    /// The other polarity, and the case the branding exists for: a rendezvous
+    /// with nothing bound at it. Without this, an adoption that remembered
+    /// nothing at all would pass the test above and silently cost the sweep the
+    /// no-round-trip answer it is built on.
+    @Test("an adoption that found nothing bound still remembers an uncollected exit")
+    func anAbsentHolderIsStillRememberedAsExited() async throws {
+        let home = "/tmp/tbdgone-\(UUID().uuidString.prefix(8).lowercased())"
+        defer { try? FileManager.default.removeItem(atPath: home) }
+
+        let terminal = holderRow()
+        let registry = registry(environment: ["TBD_HOME": home])
+        await registry.adoptRemaining([terminal])
+
+        #expect(
+            await registry.lastKnownStatus(for: terminal.id) == .exitedStatusUnknown,
+            """
+            nothing was bound at the rendezvous, which is the one observation that establishes \
+            the holder is gone, and the adoption forgot it
+            """)
+    }
+
+    // MARK: - The budget the production pass arms
+
+    /// **The bracket in `reconcileTerminals` is the untested line, not the
+    /// budget actor.** A test that calls `begin` itself stays green with both
+    /// the `begin` and the `end` deleted from production, while the whole
+    /// pre-bind bound silently disappears — so this one runs the real pass and
+    /// watches the lifecycle's own clock be asked for the budget.
+    @Test("the reconcile pass itself arms the phase budget, on the lifecycle's own clock")
+    func theProductionPassArmsThePhaseBudget() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        try await enableTheHolderArm(db)
+        let clock = SleepRecordingClock()
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243, 4245]),
+            registry: registry(environment: vanishedHolderEnvironment()), clock: clock)
+        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
+
+        let claude = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-holder",
+            kind: .claude, transport: .holder, holderPID: 4242, childPID: 4243)
+        let shell = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4244, childPID: 4245)
+
+        try await lifecycle.reconcile(
+            repoID: repo.id,
+            actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: true)
+
+        // The pass really did the work the budget bounds, so a recorded sleep
+        // is not a sleep from some other pass that judged nothing.
+        #expect(try await db.terminals.get(id: claude.id) == nil)
+        #expect(try await db.terminals.get(id: shell.id) == nil)
+
+        // The budget's timer is its own task, so it can reach the clock a hop
+        // or two after the pass that armed it has already cancelled it.
+        let sleeps = await clock.settledSleeps()
+        let requested = try #require(
+            sleeps.first,
+            """
+            the reconcile pass never asked the lifecycle's clock for a budget: the whole \
+            pre-bind bound on this serial arm is gone
+            """)
+        #expect(
+            requested <= WorktreeLifecycle.holderPhaseBudget
+                && requested > WorktreeLifecycle.holderPhaseBudget - .milliseconds(500),
+            """
+            the pass armed a budget of \(requested) rather than \
+            \(WorktreeLifecycle.holderPhaseBudget)
+            """)
+    }
+
+    /// The gate's off branch: with the arm disabled there is no probing to
+    /// bound, so no budget is armed at all and no timer task is left running.
+    @Test("with its gate off the reconcile pass arms no budget")
+    func theShippedDefaultArmsNoPhaseBudget() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        #expect(
+            try await db.config.get().holderRowReconcileEnabled == false,
+            "this test asserts the shipped default; it must not have been touched")
+        let clock = SleepRecordingClock()
+        let lifecycle = makeLifecycle(
+            db: db, signaller: deadJobs([4243]),
+            registry: registry(environment: vanishedHolderEnvironment()), clock: clock)
+        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
+        _ = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4242, childPID: 4243)
+
+        try await lifecycle.reconcile(
+            repoID: repo.id,
+            actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: true)
+
+        #expect(
+            await clock.settledSleeps().isEmpty,
+            "the holder arm armed its phase budget with its own gate off")
+    }
+
     // MARK: - What the deletion says about itself
 
     /// The two deletions are different events and the log must not conflate
@@ -430,5 +612,42 @@ struct HolderReconcileInventoryTests {
             worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
             kind: .shell, transport: .holder)
         #expect(WorktreeLifecycle.deletionRationale(for: holderShell) == "no session to preserve")
+    }
+}
+
+/// A clock that records the duration of every sleep asked of it and otherwise
+/// behaves exactly like the production one.
+///
+/// **It records the request, not a firing.** The pass under test finishes in
+/// milliseconds and cancels its own budget timer, so a test that waited for the
+/// budget to elapse would be measuring the clock rather than the bracket.
+private final class SleepRecordingClock: Clock, @unchecked Sendable {
+    typealias Instant = ContinuousClock.Instant
+
+    private let base = ContinuousClock()
+    private let lock = NSLock()
+    private var recorded: [Duration] = []
+
+    var now: Instant { base.now }
+    var minimumResolution: Duration { base.minimumResolution }
+
+    var requestedSleeps: [Duration] {
+        lock.withLock { recorded }
+    }
+
+    /// The recorded sleeps once the budget timer has had a chance to reach this
+    /// clock, bounded so a missing bracket fails rather than hangs.
+    func settledSleeps() async -> [Duration] {
+        for _ in 0..<500 {
+            if !requestedSleeps.isEmpty { break }
+            await Task.yield()
+        }
+        return requestedSleeps
+    }
+
+    func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+        let requested = base.now.duration(to: deadline)
+        lock.withLock { recorded.append(requested) }
+        try await base.sleep(until: deadline, tolerance: tolerance)
     }
 }

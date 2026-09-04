@@ -998,6 +998,25 @@ actor HolderRegistry {
     }
 
     /// One row's adoption, with every failure classified and none propagated.
+    ///
+    /// **A failure is only branded when it is evidence of absence, and that
+    /// distinction is load-bearing rather than tidy.** What is written here is
+    /// remembered as `lastKnownStatus`, and a remembered terminal status is
+    /// taken as established *without a further round trip* by two readers:
+    /// `reclaimIfSessionEnded`, which releases the reader on it, and the
+    /// reconcile arm's gate 4
+    /// (`WorktreeLifecycle.holderRowVerdict(for:)`), which deletes the row and
+    /// its tab on it — leaving a still-living holder rowless for
+    /// `RowlessHolderCollector` to SIGKILL. A blanket brand would put a holder
+    /// that was merely *slow to answer* — a receive timeout, `EMFILE`, a
+    /// hang-up mid-frame — on that path and end a live agent session.
+    ///
+    /// So the classification is `exitProbeOutcome`'s, exactly as the reconcile
+    /// probe's is: only `ENOENT` and `ECONNREFUSED` at the rendezvous mean the
+    /// holder is gone. Everything else is this daemon's failure to complete a
+    /// round trip, says nothing about the child, and leaves no memory behind —
+    /// so the row is judged by a fresh probe rather than by a remembered
+    /// guess.
     private func adoptOne(_ terminal: Terminal) async {
         do {
             _ = try await adopt(terminal: terminal)
@@ -1021,16 +1040,30 @@ actor HolderRegistry {
                 client; leaving it alone
                 """)
         } catch {
-            // Nothing answered at the rendezvous. The session is over, and
-            // the only honest thing to say about how it ended is that
-            // nobody collected the status.
-            statuses[terminal.id] = .exitedStatusUnknown
-            Self.logger.info(
-                """
-                no holder answered for session \(terminal.id.uuidString, privacy: .public), so \
-                its job ended with an unknown status: \
-                \(error.localizedDescription, privacy: .public)
-                """)
+            switch Self.exitProbeOutcome(for: error) {
+            case .established(let status):
+                // Nothing is bound at the rendezvous, so the holder is gone.
+                // The session is over, and the only honest thing to say about
+                // how it ended is that nobody collected the status.
+                statuses[terminal.id] = status
+                Self.logger.info(
+                    """
+                    no holder answered for session \(terminal.id.uuidString, privacy: .public), so \
+                    its job ended with an unknown status: \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+            case .retry, .keep:
+                // The round trip failed; the holder may well be alive and
+                // wedged. Nothing is remembered, so the reconcile arm reaches
+                // its own probe instead of short-circuiting on this.
+                Self.logger.info(
+                    """
+                    could not complete a hand-over for session \
+                    \(terminal.id.uuidString, privacy: .public), and nothing about it says the \
+                    job ended; leaving the row unjudged: \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+            }
         }
     }
 
