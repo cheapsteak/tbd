@@ -238,7 +238,16 @@ Sequence, with the app running throughout:
    successor instead **writes its own pid over the file first**, then sends
    the predecessor `SIGTERM`, then waits for the predecessor's pid to exit —
    polling, bounded at 30 s, then `SIGKILL` and one more wait. Only then
-   does it continue its normal start.
+   does it continue its normal start. A predecessor that outlives `SIGKILL`
+   aborts the start: the successor writes the predecessor's pid back into the
+   file (three attempts, 100 ms apart) and exits, and the result says whether
+   the write-back landed. A write-back that never lands is not a two-writer
+   hazard — `SIGKILL` cannot be caught, so a pid still present after it is in
+   an uninterruptible kernel wait, not serving, and the successor is exiting
+   too. The file then names a dead or dying pid, which is the ordinary
+   stale-pid case with an existing reconciler: `PIDFile.cleanupIfStale` at
+   the top of `Daemon.start()` removes it, and the app's poller starts a fresh
+   daemon from the installed bundle. Recovery is delayed, not corrupted.
 2. The predecessor's `stop()` runs as today, except it **removes the pid file
    only if the file still names its own pid** (compare-and-delete) and removes
    the port file the same way. Its socket unlinks are unchanged: the
@@ -274,6 +283,13 @@ the handover safe:
   consistent view; the second run un-parks anything the same boot parked
   whose pane demonstrably still runs Claude. The pass is cheap: it only
   examines parked rows.
+- Every other caller that mutates on a negative probe takes the tri-state
+  probe too, and treats `unknown` as a refusal to act: `terminal.recreateWindow`
+  (which parks and kills on absence) returns a retryable error and touches
+  nothing; the activity rail's tmux leg reports `unknown` so a close that
+  respects rails fails closed; and the wake path's recreate arm fails the wake
+  and leaves the row parked rather than kill a window it could not see.
+  Callers that only skip on a negative answer keep the `Bool` probes.
 
 Holder-transport sessions are unaffected: the predecessor's `releaseAll` and
 the successor's `adoptAll` already bracket a restart, and the handover

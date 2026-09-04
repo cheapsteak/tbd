@@ -734,7 +734,10 @@ public final class Daemon: Sendable {
             // claim. See `HandoverClaim` for why each of the three steps is
             // there.
             switch try await HandoverClaim(pidFile: pidFile).takeOver(from: predecessor) {
-            case .predecessorSurvived:
+            case let .predecessorSurvived(claimRestored):
+                if !claimRestored {
+                    daemonLogger.error("handover: the pid file still names this exiting process — the next daemon start will clear it as stale")
+                }
                 // Nothing downstream is a backstop: the socket bind is
                 // hundreds of lines past startup reconciliation, so this
                 // process would already have run a second reconciler against

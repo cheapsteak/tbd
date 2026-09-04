@@ -226,27 +226,52 @@ public struct DaemonHandover: Sendable {
 /// The branch it replaces sat between the single-instance gate and the socket
 /// bind, hundreds of lines apart, and could only be exercised by hand.
 public struct HandoverClaim: Sendable {
-    private let pidFile: PIDFile
     private let handover: DaemonHandover
     private let ownPID: pid_t
+    /// How a claim is written. Defaults to the pid file itself.
+    ///
+    /// A seam rather than a direct call, because the retry below is only
+    /// interesting when a write fails and a later one succeeds, and contriving
+    /// a filesystem that breaks on that schedule is far less honest than
+    /// injecting the failure. Every write in this type goes through it, so the
+    /// default path is the one the tests exercise everywhere else.
+    private let writeClaim: @Sendable (pid_t) throws -> Void
+
+    /// How many times to try handing the claim back before giving up.
+    private let writeBackAttempts: Int
+    /// Gap between those attempts.
+    private let writeBackRetryDelay: Duration
+    private let clock: any Clock<Duration>
 
     /// What the caller should do next.
     public enum Result: Equatable, Sendable {
         /// The predecessor is gone and the pid file names us. Carry on.
         case claimed(DaemonHandover.Outcome)
-        /// The predecessor outlived `SIGKILL`. Its claim has been handed back
-        /// and the caller must not start.
-        case predecessorSurvived
+        /// The predecessor outlived `SIGKILL`. The caller must not start.
+        ///
+        /// `claimRestored` says whether the predecessor's pid made it back into
+        /// the file. It is a value rather than only a log line because it is the
+        /// difference between leaving the world as it was found and leaving a
+        /// file naming a pid that is about to die — the caller decides how
+        /// loudly to say so, and a test can assert it.
+        case predecessorSurvived(claimRestored: Bool)
     }
 
     public init(
         pidFile: PIDFile,
         handover: DaemonHandover = DaemonHandover(),
-        ownPID: pid_t = ProcessInfo.processInfo.processIdentifier
+        ownPID: pid_t = ProcessInfo.processInfo.processIdentifier,
+        writeBackAttempts: Int = 3,
+        writeBackRetryDelay: Duration = .milliseconds(100),
+        clock: any Clock<Duration> = ContinuousClock(),
+        writeClaim: (@Sendable (pid_t) throws -> Void)? = nil
     ) {
-        self.pidFile = pidFile
         self.handover = handover
         self.ownPID = ownPID
+        self.writeBackAttempts = max(1, writeBackAttempts)
+        self.writeBackRetryDelay = writeBackRetryDelay
+        self.clock = clock
+        self.writeClaim = writeClaim ?? { try pidFile.write(pid: $0) }
     }
 
     public func takeOver(from predecessor: pid_t) async throws -> Result {
@@ -254,20 +279,16 @@ public struct HandoverClaim: Sendable {
         // spurious spawn during the retirement — the app's two-second poller,
         // a stray `restart.sh` — meets a file naming a live daemon and exits at
         // the same gate we just came through.
-        try pidFile.write(pid: ownPID)
+        try writeClaim(ownPID)
         handoverLogger.info("handover: claimed the pid file from predecessor daemon \(predecessor, privacy: .public); retiring it now")
 
         let outcome = await handover.retire(predecessor: predecessor)
         if outcome == .stillAlive {
             // Hand the claim back so the world is exactly as it was found: the
             // file names the live predecessor, and nothing treats the daemon
-            // that is still serving as absent.
-            do {
-                try pidFile.write(pid: predecessor)
-            } catch {
-                handoverLogger.error("handover: could not restore predecessor daemon \(predecessor, privacy: .public)'s pid file claim: \(String(describing: error), privacy: .public)")
-            }
-            return .predecessorSurvived
+            // that is still serving as absent. Retried, because the write is a
+            // whole-file replace that a transient filesystem error can lose.
+            return .predecessorSurvived(claimRestored: await restoreClaim(to: predecessor))
         }
 
         // Re-assert the claim, because the predecessor may have deleted it on
@@ -290,7 +311,40 @@ public struct HandoverClaim: Sendable {
         // here. That window is the retirement poll interval at most, against
         // the app's two-second poll, and it is strictly narrower than the one
         // this write closes.
-        try pidFile.write(pid: ownPID)
+        try writeClaim(ownPID)
         return .claimed(outcome)
+    }
+
+    /// Put the predecessor's pid back in the file, retrying a few times.
+    ///
+    /// **Failing to restore it is not a two-writer hazard, and it is worth
+    /// saying why rather than leaving it to be re-derived.** This path is only
+    /// reached when the predecessor outlived `SIGKILL`, and `SIGKILL` cannot be
+    /// caught, blocked or ignored — a pid still present five seconds after it is
+    /// in an uninterruptible kernel wait, not serving RPCs. Meanwhile this
+    /// process is about to exit. So the worst case is a pid file naming a pid
+    /// that is dead or dying, which is exactly the stale-pid case the rest of
+    /// the system already reconciles: `PIDFile.cleanupIfStale` removes a file
+    /// whose pid is not a live `TBDDaemon` (called at the top of
+    /// `Daemon.start()`), and the app's poller spawns a fresh daemon from the
+    /// installed bundle whenever the pid file names no live daemon
+    /// (`startDaemonAndConnect` in `Sources/TBDApp/AppState.swift`). The cost of
+    /// the failure is a delayed recovery, not a corrupted one.
+    ///
+    /// Returns whether the claim was restored.
+    private func restoreClaim(to predecessor: pid_t) async -> Bool {
+        for attempt in 1...writeBackAttempts {
+            do {
+                try writeClaim(predecessor)
+                return true
+            } catch {
+                handoverLogger.error("handover: attempt \(attempt, privacy: .public) of \(self.writeBackAttempts, privacy: .public) to restore predecessor daemon \(predecessor, privacy: .public)'s pid file claim failed: \(String(describing: error), privacy: .public)")
+                if attempt < writeBackAttempts {
+                    try? await clock.sleep(for: writeBackRetryDelay)
+                }
+            }
+        }
+        handoverLogger.error("handover: could not restore predecessor daemon \(predecessor, privacy: .public)'s pid file claim after \(self.writeBackAttempts, privacy: .public) attempts — the file now names this exiting process, which reads as a stale pid and is cleaned up by the next daemon start")
+        return false
     }
 }

@@ -315,9 +315,94 @@ struct DaemonHandoverTests {
             pidFilePath: path, predecessorPID: 4242,
             aliveForChecks: .max, deletesPIDFileOnExit: false, advances: 3)
 
-        #expect(result == .predecessorSurvived)
+        #expect(result == .predecessorSurvived(claimRestored: true))
         #expect(PIDFile(path: path).read() == 4242,
                 "the successor kept a claim on a daemon that is still serving")
+    }
+
+    // MARK: - Handing the claim back
+
+    /// A `writeClaim` that fails on the attempts a test names.
+    ///
+    /// Call 1 is the opening claim, which must succeed or the fixture never
+    /// reaches the write-back at all; the failing calls are therefore counted
+    /// from 2.
+    private final class FlakyClaimWriter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        private var written: [pid_t] = []
+        private let failingCalls: Set<Int>
+
+        init(failingCalls: Set<Int>) { self.failingCalls = failingCalls }
+
+        struct WriteRefused: Error {}
+
+        var recorded: [pid_t] {
+            lock.lock(); defer { lock.unlock() }
+            return written
+        }
+
+        @Sendable func write(_ pid: pid_t) throws {
+            lock.lock()
+            calls += 1
+            let call = calls
+            lock.unlock()
+            if failingCalls.contains(call) { throw WriteRefused() }
+            lock.lock(); written.append(pid); lock.unlock()
+        }
+    }
+
+    private func runSurvivingTakeOver(
+        failingCalls: Set<Int>, advances: Int
+    ) async throws -> (result: HandoverClaim.Result, writes: [pid_t]) {
+        let predecessor = Predecessor(aliveForChecks: .max)
+        let writer = FlakyClaimWriter(failingCalls: failingCalls)
+        let clock = EventDrivenTestClock()
+        let claim = HandoverClaim(
+            pidFile: PIDFile(path: tmpPidPath()),
+            handover: DaemonHandover(
+                termBudget: .milliseconds(200), killBudget: .milliseconds(100),
+                pollInterval: .milliseconds(100),
+                sendSignal: predecessor.send, isLive: predecessor.isLive, clock: clock),
+            ownPID: 777,
+            writeBackAttempts: 3,
+            writeBackRetryDelay: .milliseconds(100),
+            clock: clock,
+            writeClaim: writer.write)
+        let work = Task { try await claim.takeOver(from: 4242) }
+        for _ in 0..<advances {
+            try await clock.requireAdvanceWhenArmed(by: .milliseconds(100))
+        }
+        return (try await work.value, writer.recorded)
+    }
+
+    /// A transient failure must not cost the predecessor its claim. Three
+    /// retirement polls, then two write-back attempts fail and the third lands.
+    @Test("a write-back that fails twice and then succeeds still restores the claim")
+    func writeBackRetriesUntilItLands() async throws {
+        let run = try await runSurvivingTakeOver(
+            failingCalls: [2, 3], advances: 3 + 2)
+
+        #expect(run.result == .predecessorSurvived(claimRestored: true))
+        #expect(run.writes == [777, 4242],
+                "the predecessor's claim was not the last thing written")
+    }
+
+    /// Exhausting the retries is reported in the value, not only in a log line.
+    ///
+    /// It is also not a two-writer hazard, which is why the successor still
+    /// exits rather than pressing on: `SIGKILL` cannot be caught, so a pid still
+    /// present after it is in an uninterruptible wait rather than serving, and a
+    /// file naming a dying pid is the ordinary stale-pid case that
+    /// `PIDFile.cleanupIfStale` and the app's daemon poller already reconcile.
+    @Test("a write-back that never lands is reported, not swallowed")
+    func writeBackFailureIsReported() async throws {
+        let run = try await runSurvivingTakeOver(
+            failingCalls: [2, 3, 4], advances: 3 + 2)
+
+        #expect(run.result == .predecessorSurvived(claimRestored: false))
+        #expect(run.writes == [777],
+                "a failing write-back still recorded a claim")
     }
 
     // MARK: - Budget arithmetic
