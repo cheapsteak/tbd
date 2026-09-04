@@ -478,21 +478,41 @@ test_stale_lock_takeover_leaves_no_debris() {
     assert_contains "a lock with no pid in it is taken over too" "rc=0" "$out"
     assert_eq "and that one names the taker as well" "$$" "$(lock_holder_pid "$home/update.lock")"
 
-    if [ -z "$(find "$home" -name 'update.lock.stale.*' -print -quit)" ]; then
-        pass "the renamed-aside stale lock is cleaned up"
+    assert_no_lock_debris "the takeover leaves no temporary files behind" "$home"
+}
+
+# Every scratch name the takeover can create: the temp file it renames onto the
+# lock, the takeover mutex, and the rename-aside file an older design used. A
+# successful takeover must leave none of them.
+assert_no_lock_debris() {
+    local description="$1" home="$2" found
+    found="$(find "$home" -name 'update.lock.new.*' -o -name 'update.lock.stale.*' \
+        -o -name 'update.lock.takeover' 2>/dev/null)"
+    if [ -z "$found" ]; then
+        pass "$description"
     else
-        fail "the renamed-aside stale lock is cleaned up: $(ls "$home")"
+        fail "$description: $found"
     fi
 }
 
-# The put-back branch: we rename a stale lock aside and discover it names a
-# live process after all, because a racer replaced the file between our read
-# and our rename. Simulated deterministically by making liveness depend on the
-# path — false for the lock we read, true for the file we took. The override is
-# a parameter expansion rather than a case statement because bash 3.2, the
-# macOS /bin/bash the Lint job runs, cannot parse a case pattern inside a
-# command substitution.
-test_stale_lock_takeover_restores_a_lock_that_turned_live() {
+# Set a path's mtime ten minutes into the past. BSD and GNU date spell relative
+# times differently, so try the BSD form first and fall back to the GNU one.
+backdate_ten_minutes() {
+    local path="${1-}" stamp
+    stamp="$(date -v-10M +%Y%m%d%H%M.%S 2>/dev/null)"
+    [ -n "$stamp" ] || stamp="$(date -d '-10 min' +%Y%m%d%H%M.%S 2>/dev/null)"
+    [ -n "$stamp" ] || return 1
+    touch -t "$stamp" "$path"
+}
+
+# The refusal branch: a lock we judged stale turns out to name a live process
+# when we re-read it inside the takeover critical section, because a racer
+# replaced the file in between. Simulated deterministically by counting calls
+# to lock_is_live — false for the read that admits us to the section, true for
+# the re-read inside it. A counter rather than a path test because both calls
+# now look at the same path, and a file rather than a variable because
+# acquire_lock runs in a command substitution, whose variables do not escape.
+test_stale_lock_takeover_refuses_a_lock_that_turned_live() {
     local home dead out
     home="$TEST_TMP/stale-racer/updates"
     mkdir -p "$home"
@@ -500,24 +520,87 @@ test_stale_lock_takeover_restores_a_lock_that_turned_live() {
     while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
 
     printf '%s\n' "$dead" > "$home/update.lock"
+    printf '0\n' > "$home/liveness-calls"
     out="$(
         UPDATE_HOME="$home"
         UPDATE_LOCK="$home/update.lock"
         UPDATE_LOG="$home/update.log"
         OPT_AUTO=true
-        lock_is_live() { [ "${1-}" != "${1%.stale.*}" ]; }
+        lock_is_live() {
+            local n
+            n="$(cat "$home/liveness-calls" 2>/dev/null)"
+            n=$(( ${n:-0} + 1 ))
+            printf '%s\n' "$n" > "$home/liveness-calls"
+            [ "$n" -ge 2 ]
+        }
         acquire_lock 2>/dev/null
         printf 'rc=%s\n' "$?"
     )"
     assert_contains "a lock that turns live under us is not stolen" "rc=1" "$out"
     assert_contains "and the refusal names its holder" \
         "another update is already running (pid $dead)" "$(cat "$home/update.log")"
-    assert_eq "the lock is put back exactly as it was" "$dead" \
+    assert_eq "the lock is left exactly as it was" "$dead" \
         "$(lock_holder_pid "$home/update.lock")"
-    if [ -z "$(find "$home" -name 'update.lock.stale.*' -print -quit)" ]; then
-        pass "and nothing is left renamed aside"
+    assert_no_lock_debris "and the refusal leaves nothing behind" "$home"
+}
+
+# The mutex cannot become a deadlock: a run that died inside the critical
+# section leaves a takeover directory nobody will ever remove, so one older
+# than a minute is reclaimed before the next run contends for it.
+test_an_abandoned_takeover_mutex_is_reclaimed() {
+    local home dead out
+    home="$TEST_TMP/takeover-abandoned/updates"
+    mkdir -p "$home/update.lock.takeover"
+    dead=$(( ($$ + 100000) % 60000 + 2 ))
+    while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+    printf '%s\n' "$dead" > "$home/update.lock"
+
+    if ! backdate_ten_minutes "$home/update.lock.takeover"; then
+        fail "backdating a path needs a date that speaks BSD or GNU relative times"
+        return
+    fi
+
+    out="$(
+        UPDATE_HOME="$home"
+        UPDATE_LOCK="$home/update.lock"
+        UPDATE_LOG="$home/update.log"
+        OPT_AUTO=true
+        acquire_lock 2>/dev/null
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "an abandoned takeover mutex does not block the next run" "rc=0" "$out"
+    assert_eq "and the stale lock is taken over" "$$" "$(lock_holder_pid "$home/update.lock")"
+    assert_no_lock_debris "and the reclaimed mutex is gone" "$home"
+}
+
+# The other half of the same rule: a mutex young enough to belong to a live
+# takeover is left strictly alone, and the run that finds it refuses rather
+# than replacing a lock somebody else is in the middle of replacing.
+test_a_fresh_takeover_mutex_refuses_the_run() {
+    local home dead out
+    home="$TEST_TMP/takeover-held/updates"
+    mkdir -p "$home/update.lock.takeover"
+    dead=$(( ($$ + 100000) % 60000 + 2 ))
+    while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+    printf '%s\n' "$dead" > "$home/update.lock"
+
+    out="$(
+        UPDATE_HOME="$home"
+        UPDATE_LOCK="$home/update.lock"
+        UPDATE_LOG="$home/update.log"
+        OPT_AUTO=true
+        acquire_lock 2>/dev/null
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "a takeover somebody else is running refuses this one" "rc=1" "$out"
+    assert_contains "and says the lock could not be taken" \
+        "could not take the update lock" "$(cat "$home/update.log")"
+    assert_eq "the stale lock is not clobbered" "$dead" \
+        "$(lock_holder_pid "$home/update.lock")"
+    if [ -d "$home/update.lock.takeover" ]; then
+        pass "and somebody else's takeover mutex is left alone"
     else
-        fail "and nothing is left renamed aside: $(ls "$home")"
+        fail "and somebody else's takeover mutex is left alone"
     fi
 }
 
@@ -1291,6 +1374,89 @@ test_handover_wait_gives_up() {
     assert_contains "a daemon reporting the new binary ends the wait" "rc=0" "$out"
 }
 
+# The Medium finding this guards: the successor was backgrounded without its
+# pid being captured, so a handover that timed out because the successor was
+# merely slow — rather than dead — rolled the bundle back while that successor
+# went on to bind and serve from the new build. Installed bundle and running
+# daemon would disagree about which build is live.
+#
+# The stub daemon here outlives the timeout by a wide margin and never reports
+# itself. It `exec`s the sleep so the pid handover captured is the process that
+# has to be signalled, rather than a shell that would leave an orphan behind.
+test_a_timed_out_handover_stops_the_successor() {
+    local root out pid
+    root="$TEST_TMP/handover-stop"
+    mkdir -p "$root/bin" "$root/state" "$root/updates"
+    mkstub_tbd "$root/bin"
+    printf '{"executablePath":"/somewhere/else/TBDDaemon"}\n' > "$root/state/status.json"
+
+    cat > "$root/newdaemon" << EOF
+#!/bin/sh
+printf '%s\n' "\$\$" > "$root/successor.pid"
+exec sleep 45
+EOF
+    chmod +x "$root/newdaemon"
+
+    out="$(
+        export FAKE_TBD_STATE="$root/state" PATH="$root/bin:$PATH"
+        OPT_AUTO=false
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        DAEMON_PID_FILE="$root/tbdd.pid"
+        DAEMON_LOG="$root/tbdd.log"
+        HANDOVER_TIMEOUT=1
+        HANDOVER_STOP_GRACE=3
+        handover "$root/newdaemon"
+        printf 'rc=%s\n' "$?"
+    )"
+
+    assert_contains "a successor that never reports fails the handover" "rc=1" "$out"
+    pid="$(head -1 "$root/successor.pid" 2>/dev/null | tr -dc '0-9')"
+    if [ -z "$pid" ]; then
+        fail "the stub successor recorded its pid"
+        return
+    fi
+    pass "the stub successor recorded its pid"
+    assert_contains "the failure names the pid it stopped" \
+        "stopping the new daemon (pid $pid)" "$out"
+    assert_contains "and says it stopped" "the new daemon (pid $pid) stopped" "$out"
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null
+        fail "no daemon from the new build survives a failed handover"
+    else
+        pass "no daemon from the new build survives a failed handover"
+    fi
+}
+
+# The stop is only ever reached on the failure path, and it has to cope with a
+# successor that has already exited on its own — a crash rather than a stall.
+test_stopping_a_successor_that_is_already_gone_is_not_an_error() {
+    local root out dead
+    root="$TEST_TMP/handover-stop-gone"
+    mkdir -p "$root/updates"
+    dead=$(( ($$ + 100000) % 60000 + 2 ))
+    while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+
+    out="$(
+        OPT_AUTO=false
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        stop_handover_successor "$dead"
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "a successor that already exited needs no stopping" "rc=0" "$out"
+    assert_contains "and says so" "pid $dead) is not running" "$out"
+
+    out="$(
+        OPT_AUTO=false
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        stop_handover_successor ""
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "an empty pid is a no-op" "rc=0" "$out"
+}
+
 test_help_lists_every_flag
 test_unknown_flag_is_rejected
 test_parse_args_sets_options
@@ -1300,7 +1466,9 @@ test_update_refuses_while_another_run_holds_the_lock
 test_a_stale_lock_is_taken_over
 test_simultaneous_acquire_lock_admits_exactly_one
 test_stale_lock_takeover_leaves_no_debris
-test_stale_lock_takeover_restores_a_lock_that_turned_live
+test_stale_lock_takeover_refuses_a_lock_that_turned_live
+test_an_abandoned_takeover_mutex_is_reclaimed
+test_a_fresh_takeover_mutex_refuses_the_run
 test_remote_resolution_order
 test_source_worktree_resolution
 test_json_field_reads_nested_paths
@@ -1329,6 +1497,8 @@ test_a_completed_handover_keeps_the_previous_bundle
 test_a_first_install_has_no_previous_bundle
 test_paths_match_resolves_symlinks
 test_handover_wait_gives_up
+test_a_timed_out_handover_stops_the_successor
+test_stopping_a_successor_that_is_already_gone_is_not_an_error
 
 if [ "$FAIL" -ne 0 ]; then
     echo "SOME UPDATE TESTS FAILED"

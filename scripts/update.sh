@@ -46,6 +46,11 @@ BUILD_CONFIG=release
 # generously past that and still bounded.
 HANDOVER_TIMEOUT=120
 
+# How long a successor that has to be stopped gets to exit on SIGTERM before
+# it is killed, in seconds. It only runs on the failure path, so it is short:
+# the process being stopped has already missed a two-minute deadline.
+HANDOVER_STOP_GRACE=5
+
 # MARK: - Derived paths
 
 UPDATE_SRC="$UPDATE_HOME/src"
@@ -190,19 +195,47 @@ lock_holder_pid() {
 # clobber the first, and both would then build and install against the same
 # clone.
 #
-# Taking over a stale lock renames it aside rather than deleting it, so a lock
-# some other run won between our read and our takeover can never be removed out
-# from under it: after the rename we re-inspect what we actually took, and put
-# it back if it turned out to name a live process.
+# Taking over a stale lock has two requirements the create alone cannot meet,
+# and each gets its own atomic primitive.
+#
+# The lock path must never be vacant. If a takeover removed the lock, or moved
+# it aside and put it back, a third run's noclobber create could land in that
+# gap and believe it holds an exclusive lock while somebody else believes the
+# same. So the replacement is a rename over the path: the temp file is written
+# beside the lock as `<lock>.new.<pid>` and `mv`d onto it, and rename(2)
+# replaces the entry atomically — every create attempt in flight either sees
+# the old file or the new one, and none of them ever sees nothing there.
+#
+# Only one run at a time may replace it. Deciding a lock is stale and then
+# replacing it is a read followed by a write, and two runs can both read the
+# same dead pid. The takeover critical section is guarded by `mkdir` on
+# `<lock>.takeover`, which is atomic on every filesystem worth having: whoever
+# creates the directory owns the right to replace the lock, and re-reads it
+# inside the section, so a lock that turned live in the meantime is refused
+# rather than stolen. Runs that lose the mkdir go back to the create.
+#
+# An abandoned mutex must not deadlock every later run. The critical section is
+# a read and a rename, so it lasts milliseconds; a `<lock>.takeover` directory
+# older than a minute belonged to a run that died inside it and is removed
+# before the mkdir is attempted.
+#
+# The create itself IS the decision for the ordinary path. Under `set -C` bash
+# opens the redirection target with O_EXCL, so of any number of runs starting
+# at once — a manual `tbd update` racing the daemon's auto-launch — exactly one
+# create succeeds and every loser sees a file that is already there. A check
+# followed by a separate write would let two callers both pass the check and
+# the second clobber the first, and both would then build and install against
+# the same clone.
 #
 # A lock naming THIS process is one we already hold. `exec` keeps the pid, so
 # the self-re-exec in maybe_reexec arrives here still holding it; the
 # alternative — releasing before the exec — opens a window in which a second
 # update can start against the same clone.
 acquire_lock() {
-    local holder attempt renamed stale_holder
+    local holder attempt takeover_dir tmp_lock
     mkdir -p "$UPDATE_HOME" || return 1
 
+    takeover_dir="$UPDATE_LOCK.takeover"
     attempt=0
     while [ "$attempt" -lt 3 ]; do
         attempt=$((attempt + 1))
@@ -222,23 +255,50 @@ acquire_lock() {
             return 1
         fi
 
-        # Stale: a dead pid, or garbage with no pid in it at all.
-        renamed="$UPDATE_LOCK.stale.$$"
-        rm -f "$renamed"
-        # A failed rename means another run took the same stale lock first;
-        # go back to the create and let it decide.
-        mv "$UPDATE_LOCK" "$renamed" 2>/dev/null || continue
-        stale_holder="$(lock_holder_pid "$renamed")"
-        if [ "$stale_holder" != "$$" ] && lock_is_live "$renamed"; then
-            # We took a lock somebody wrote between our read and our rename.
-            # Put it back with a hard link, which fails rather than clobbers
-            # if a third run has created a lock in the meantime.
-            ln "$renamed" "$UPDATE_LOCK" 2>/dev/null || true
-            rm -f "$renamed"
-            log_error "another update is already running (pid $stale_holder). Its log is $UPDATE_LOG"
+        # Stale: a dead pid, or garbage with no pid in it at all. Reclaim a
+        # mutex left behind by a run that died mid-takeover. `find -mmin` is
+        # the portable age test; BSD and GNU `stat` disagree on their flags.
+        if [ -d "$takeover_dir" ] &&
+            [ -n "$(find "$takeover_dir" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+            rmdir "$takeover_dir" 2>/dev/null || true
+        fi
+        # Losing the mutex means another run is replacing the lock right now.
+        # Give it a moment and go back to the create, which is what decides.
+        if ! mkdir "$takeover_dir" 2>/dev/null; then
+            sleep 0.1
+            continue
+        fi
+
+        # Inside the critical section. Re-read: the lock we judged stale may
+        # have been replaced by the run that held the mutex before us.
+        holder="$(lock_holder_pid "$UPDATE_LOCK")"
+        if [ ! -f "$UPDATE_LOCK" ]; then
+            # Released rather than replaced. The create is the way in.
+            rmdir "$takeover_dir" 2>/dev/null || true
+            continue
+        fi
+        if [ "$holder" = "$$" ]; then
+            rmdir "$takeover_dir" 2>/dev/null || true
+            UPDATE_LOCK_HELD=true
+            return 0
+        fi
+        if lock_is_live "$UPDATE_LOCK"; then
+            rmdir "$takeover_dir" 2>/dev/null || true
+            log_error "another update is already running (pid $holder). Its log is $UPDATE_LOG"
             return 1
         fi
-        rm -f "$renamed"
+
+        tmp_lock="$UPDATE_LOCK.new.$$"
+        rm -f "$tmp_lock"
+        if ! printf '%s\n' "$$" > "$tmp_lock" 2>/dev/null ||
+            ! mv "$tmp_lock" "$UPDATE_LOCK" 2>/dev/null; then
+            rm -f "$tmp_lock"
+            rmdir "$takeover_dir" 2>/dev/null || true
+            continue
+        fi
+        rmdir "$takeover_dir" 2>/dev/null || true
+        UPDATE_LOCK_HELD=true
+        return 0
     done
 
     log_error "could not take the update lock at $UPDATE_LOCK"
@@ -557,9 +617,17 @@ wait_for_daemon_executable() {
 # before it signals its predecessor, so the app's respawn watchdog — and any
 # stray restart.sh — finds a live daemon in that file from the first instant
 # and exits at the single-instance gate instead of racing us.
+#
+# A handover that times out has not necessarily started a dead daemon: a
+# successor that is merely slow is still running, already holds the pid file,
+# and would go on to bind and serve from the new build long after the caller
+# rolled the installed bundle back to the previous one. Installed bundle and
+# running daemon would then disagree about which build is live. So the
+# successor's pid is captured at the moment it is backgrounded, and a handover
+# that fails stops it before it returns — see stop_handover_successor.
 handover() {
     local new_daemon="${1-}"
-    local old_pid
+    local old_pid new_pid
 
     if [ ! -x "$new_daemon" ]; then
         log_error "no daemon binary at $new_daemon"
@@ -578,12 +646,59 @@ handover() {
     # output, so this file is the only record of a crash before the handover.
     [ -f "$DAEMON_LOG" ] && mv "$DAEMON_LOG" "$DAEMON_LOG.1"
     TBD_HANDOVER_FROM_PID="$old_pid" "$new_daemon" > "$DAEMON_LOG" 2>&1 &
+    new_pid=$!
 
     if wait_for_daemon_executable "$new_daemon" "$HANDOVER_TIMEOUT"; then
         log "daemon is serving from $new_daemon"
         return 0
     fi
     log_error "the new daemon did not report itself within ${HANDOVER_TIMEOUT}s — see $DAEMON_LOG"
+    stop_handover_successor "$new_pid" || true
+    return 1
+}
+
+# Stop the successor a failed handover started, so that after the caller puts
+# the previous bundle back no daemon from the new build is left running.
+#
+#   stop_handover_successor <pid>
+#
+# SIGTERM first, then a bounded wait, then SIGKILL. Every outcome is logged,
+# including the one this cannot fix: a process that survives SIGKILL, where
+# the operator has to be told which pid to look at. A pid that is already gone
+# is the ordinary case for a successor that crashed rather than stalled.
+stop_handover_successor() {
+    local pid="${1-}"
+    local waited=0
+
+    [ -n "$pid" ] || return 0
+    if ! kill -0 "$pid" 2>/dev/null; then
+        log "the new daemon (pid $pid) is not running; nothing to stop"
+        return 0
+    fi
+
+    log "stopping the new daemon (pid $pid) so the rollback leaves no daemon from the new build"
+    kill -TERM "$pid" 2>/dev/null || true
+    while [ "$waited" -lt "$HANDOVER_STOP_GRACE" ]; do
+        sleep 1
+        waited=$((waited + 1))
+        if ! kill -0 "$pid" 2>/dev/null; then
+            log "the new daemon (pid $pid) stopped"
+            return 0
+        fi
+    done
+
+    log "the new daemon (pid $pid) ignored SIGTERM for ${HANDOVER_STOP_GRACE}s — killing it"
+    kill -KILL "$pid" 2>/dev/null || true
+    waited=0
+    while [ "$waited" -lt 3 ]; do
+        sleep 1
+        waited=$((waited + 1))
+        if ! kill -0 "$pid" 2>/dev/null; then
+            log "the new daemon (pid $pid) stopped after SIGKILL"
+            return 0
+        fi
+    done
+    log "WARNING: the new daemon (pid $pid) is still running after SIGKILL"
     return 1
 }
 
