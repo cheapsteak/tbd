@@ -2242,75 +2242,40 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
         }
 
-        /// Write one chunk to this holder session's pty, and report whether
-        /// all of it went.
+        /// Write one chunk to this holder session's pty, and report what the
+        /// kernel took.
         ///
-        /// **What a short write means here, and what it costs today.**
-        /// A pty master's input queue is small, so a multi-KiB injected prompt
-        /// can legitimately take only a prefix; `PTYWrite.all` waits a few
-        /// milliseconds for room and then gives up rather than parking the
-        /// main actor. A partial write is reported as a **failure**, on the
-        /// reasoning that the daemon then rewrites the whole payload on top of
-        /// the prefix — visibly doubled rather than quietly truncated.
+        /// One attempt, no waiting: a raw-mode pty master accepts 1,022 bytes
+        /// and then refuses, and `PTYWrite.all` reports the refusal rather than
+        /// polling for room on the main actor.
         ///
-        /// **The daemon cannot rewrite in this state.** This panel is
-        /// attached, so the acknowledgement has already released the daemon's
-        /// reader and closed its descriptor, and `HolderInjectionCourier`'s
-        /// fail-open fallback answers `.notDelivered` instead of writing. So a
-        /// 6 KB prompt into a panel whose agent is momentarily not draining
-        /// leaves a **truncated fragment** in the composer while the caller is
-        /// told the send failed. Not silent — the caller is told and the
-        /// actuation row records it — but a loss, and the fork this design
-        /// takes everywhere resolved on the wrong side of itself.
-        ///
-        /// It is left this way on purpose. Whether the daemon can rewrite is
-        /// the descriptor question — whether it keeps a **write-only** dup
-        /// across an attach — which is a human decision already filed;
-        /// answered one way the reasoning above becomes true as written, and
-        /// changing the retry semantics here now would pre-empt it. Reporting
-        /// `true` for a prefix is not the alternative: that is the invisible
-        /// loss this path exists to prevent, with no error anywhere.
-        ///
-        /// Only the partial case logs every time. "Nothing was written"
-        /// needs no line of its own — for user bytes `OutgoingInputQueue`
-        /// already emits one edge-triggered line per episode, and for an
-        /// injection the return value reaches the daemon, which is a stronger
-        /// channel than a log. A partial write is rare enough to be worth a
-        /// line each time, because it is what explains the truncation that
-        /// follows it, and it is per-payload rather than per-keystroke anyway.
+        /// **A partial write is still reported unwritten here, and that is a
+        /// loss.** Nothing yet keeps the remainder, so a payload above a
+        /// kilobyte into a child that is not draining leaves a truncated
+        /// fragment on the session. The outbox in `OutgoingInputQueue` is what
+        /// fixes it, and this function is rewritten when it lands.
         ///
         /// **`.failed` is edge-triggered, and it has to be.** Once the child
         /// exits, every write to the master returns `EIO` — and nothing lowers
         /// `holderWriteFD`, because `HolderStreamReader.readLoop` closes its
         /// own descriptor on EOF and never calls `stopHolderReader`. An
         /// unconditional line there is one `.error` per keystroke for as long
-        /// as somebody keeps typing at a dead session, which is exactly the
-        /// per-keystroke logging this file warns against above and R20 built
-        /// the queue's own latch to avoid.
+        /// as somebody keeps typing at a dead session.
         private func writeToHolderPTY(_ data: Data) -> Bool {
             switch PTYWrite.all(data, to: holderWriteFD) {
             case .complete:
                 holderWriteIsFailing = false
                 return true
-            case .nothingWritten:
-                // A full input queue, not a dead descriptor: the write path is
-                // alive, so the next `.failed` starts a new episode and logs.
-                holderWriteIsFailing = false
-                return false
             case .partial(let written):
                 holderWriteIsFailing = false
+                guard written > 0 else { return false }
                 logger.error("""
                     terminal \(self.panelID, privacy: .public): only \
                     \(written, privacy: .public) of \(data.count, privacy: .public) bytes \
-                    reached the session's pty; reporting the write unwritten — the daemon \
-                    re-sends the payload whole if it still holds a descriptor for this pty, \
-                    and otherwise the session keeps the prefix
+                    reached the session's pty; the remainder is dropped until the outbox lands
                     """)
                 return false
-            case .failed(let code):
-                // One line per episode, keyed on the transition rather than on
-                // the errno: a descriptor that has started failing keeps
-                // failing, and the interesting fact is when it began.
+            case .failed(let code, _):
                 if !holderWriteIsFailing {
                     holderWriteIsFailing = true
                     holderWriteFailureLogsForTesting += 1

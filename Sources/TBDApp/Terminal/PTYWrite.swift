@@ -1,85 +1,75 @@
 import Darwin
 import Foundation
 
-/// Writing a whole payload to a pty master, from the app's side.
+/// One non-blocking attempt to hand a payload to a pty master, from the app's
+/// side.
 ///
-/// Exists because the app now writes to a session's pty as well as reading it
-/// (a holder-backed panel holds its own `dup` of the master), and a single
-/// `write(2)` to a tty is not a delivery: the terminal's input queue is small
-/// — a few hundred bytes to a couple of KiB — so a multi-KiB injected prompt
-/// short-writes routinely whenever the child is not draining it fast.
+/// Exists because the app writes to a session's pty as well as reading it (a
+/// holder-backed panel holds its own `dup` of the master), and a single
+/// `write(2)` to a tty is not a delivery: a raw-mode master accepts
+/// `TTYHOG − 2` — measured at 1,022 bytes — and then refuses, so every payload
+/// above a kilobyte into an agent session is short-written whenever the child
+/// is not draining it at that instant.
 ///
-/// ## Why it waits at all, and why so briefly
+/// ## Why it does not wait
 ///
-/// The caller is `TerminalPanelView.performOutgoingWrite`, which is
-/// synchronous and main-actor: it has to answer "did this go out?" in the turn
-/// the bytes arrived in, because that answer is the ack the daemon reads and
-/// because a keystroke must not acquire a scheduling hop. So the wait is a
-/// `poll(POLLOUT)` loop with a **20 ms** ceiling — enough for the kernel to
-/// hand a few buffer-fulls to a child that is reading, far too short to be
-/// felt as typing latency, and self-limiting for a child that is not reading
-/// at all (the budget expires once and the payload is refused).
+/// It used to spend a 20 ms `poll(POLLOUT)` budget looking for room, because
+/// there was nowhere to keep what the kernel refused: the budget's expiry was
+/// the truncation point. `OutgoingInputQueue` now keeps the remainder and
+/// finishes it on write-readiness, so waiting here buys nothing and costs the
+/// main actor — the caller is `TerminalPanelView.performOutgoingWrite`, which
+/// is synchronous, main-actor, and must answer in the turn a keystroke arrived
+/// in. One `write(2)`, no `poll`, and the refusal is reported rather than
+/// waited out.
+///
+/// **Nothing here decides where the payload is cut.** The kernel commits per
+/// byte (`ptcwrite` feeds the tty queue a byte at a time and returns how many
+/// it took), so a marker or a multi-byte UTF-8 sequence can be split. That is
+/// healed by the *next* accepted bytes continuing the same stream with nothing
+/// written in between — which is the outbox's hold, not this function's
+/// business.
 enum PTYWrite {
-    /// What one attempt achieved. Three outcomes, not two, because the middle
-    /// one is the case that decides how the daemon's fail-open fallback
-    /// behaves.
+    /// What one attempt achieved. Three outcomes, and the middle one is not a
+    /// failure: it is the normal shape of writing to a tty whose child is busy.
     enum Outcome: Equatable {
         /// Every byte reached the terminal's input queue.
         case complete
-        /// Nothing was written — the queue was full for the whole budget, or
-        /// the descriptor is gone. The clean refusal: the caller reports
-        /// `false`, the daemon rewrites the payload itself, and the session
-        /// sees it exactly once.
-        case nothingWritten
-        /// A prefix went and the rest did not. The caller reports it as a
-        /// failure — and what that buys today is less than it looks.
-        ///
-        /// The intent is that the daemon rewrites the whole payload on top of
-        /// the prefix: visibly doubled rather than quietly truncated, the
-        /// deliberate side of the fork this design takes everywhere. **The
-        /// daemon usually cannot do that**, and least of all in the state this
-        /// case arises in. A short write happens while a viewer is attached
-        /// and its child is not draining; an acknowledged attach has already
-        /// released the daemon's reader and closed its descriptor, so
-        /// `HolderInjectionCourier`'s fallback finds nothing to write to and
-        /// answers `.notDelivered`. What is actually left behind is a
-        /// truncated fragment on the session and a transport error at the
-        /// caller — the duplicate-versus-loss fork resolved, here, on the loss
-        /// side.
-        ///
-        /// The behavior stands rather than being patched because whether the
-        /// daemon can rewrite is the descriptor question — whether it keeps a
-        /// **write-only** dup across an attach — and that is a human decision
-        /// already filed. Decided one way, the paragraph above becomes true as
-        /// written and nothing here changes; decided the other, this is where
-        /// the honest resolution goes.
+        /// The kernel took `written` bytes (possibly zero, for a queue that was
+        /// already full) and refused the rest with `EAGAIN`. **The transport is
+        /// alive**; the remainder is the caller's to keep and finish. The
+        /// caller must not report this as a failed write — the prefix is
+        /// committed and cannot be un-written, so a `false` here is what makes
+        /// a sender re-send on top of it.
         case partial(written: Int)
-        /// The descriptor rejected the write outright (`EIO` on a pty whose
-        /// child is gone, `EBADF`, …). Nothing was written.
-        case failed(errno: Int32)
+        /// The descriptor rejected the write (`EIO` once the last slave closes,
+        /// `EBADF` after teardown, …). Nothing more will ever land through it.
+        /// `written` may be non-zero: a prefix can be committed and the
+        /// descriptor die before the rest goes, and the caller needs to know
+        /// both — it drops what it was holding *and* reports the write
+        /// unwritten, because the honest answer to "did this arrive" for a
+        /// child that is gone is no.
+        case failed(errno: Int32, written: Int)
     }
 
-    /// Default ceiling on how long one call may spend waiting for room.
-    static let defaultBudgetMilliseconds: Int32 = 20
+    // The absence of the poll is not testable. A test that "proves" no wait
+    // happens has to assert on elapsed time, and every threshold that
+    // separates 0 ms from the old 20 ms budget is inside the noise of a loaded
+    // shared box. What replaces the test is the type: there is no budget
+    // parameter to pass, and no `poll` in the body. Reviewers enforce it.
 
-    /// Write all of `data` to `fd`, waiting for room only within `budget`.
+    /// Write as much of `data` to `fd` as the kernel will take, right now.
     ///
     /// The pty master this is called on is `O_NONBLOCK` — the flag lives on the
     /// open file description the daemon opened and rides the `dup` (see
     /// `HolderAttachment.ptyFD`) — so `write` returns rather than parking the
-    /// main actor, and the `poll` below is the only waiting that happens. A
-    /// blocking descriptor would still be correct here, just less bounded; the
-    /// flags belong to whoever vended the descriptor and this call must not
-    /// change them out from under a concurrent reader.
-    static func all(
-        _ data: Data, to fd: Int32,
-        budgetMilliseconds budget: Int32 = defaultBudgetMilliseconds
-    ) -> Outcome {
+    /// main actor. A blocking descriptor would park it, which is why this call
+    /// must never be given one and must never change the flags out from under
+    /// a concurrent reader.
+    static func all(_ data: Data, to fd: Int32) -> Outcome {
         guard !data.isEmpty else { return .complete }
-        guard fd >= 0 else { return .nothingWritten }
+        guard fd >= 0 else { return .failed(errno: EBADF, written: 0) }
         return data.withUnsafeBytes { raw -> Outcome in
             var offset = 0
-            var remaining = budget
             while offset < raw.count {
                 let written = Darwin.write(
                     fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
@@ -88,24 +78,11 @@ enum PTYWrite {
                     continue
                 }
                 if written < 0, errno == EINTR { continue }
-                guard written < 0, errno == EAGAIN || errno == EWOULDBLOCK else {
-                    let code = errno
-                    return offset == 0 ? .failed(errno: code) : .partial(written: offset)
+                let code = errno
+                if code == EAGAIN || code == EWOULDBLOCK {
+                    return .partial(written: offset)
                 }
-                guard remaining > 0 else {
-                    return offset == 0 ? .nothingWritten : .partial(written: offset)
-                }
-                // Slices rather than one long wait, so a descriptor that never
-                // becomes writable still costs at most `budget` in total and a
-                // spurious `EINTR` from `poll` does not restart the clock.
-                let slice = min(remaining, 5)
-                var watched = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-                let ready = poll(&watched, 1, slice)
-                if ready < 0, errno != EINTR {
-                    let code = errno
-                    return offset == 0 ? .failed(errno: code) : .partial(written: offset)
-                }
-                remaining -= slice
+                return .failed(errno: code, written: offset)
             }
             return .complete
         }
