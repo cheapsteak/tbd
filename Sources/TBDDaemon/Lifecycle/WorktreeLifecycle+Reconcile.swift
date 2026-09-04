@@ -864,7 +864,7 @@ extension WorktreeLifecycle {
     /// **Per pass rather than hoisted around startup, deliberately.** The arm
     /// has callers startup does not own — `repo.add`
     /// (`RPCRouter+RepoHandlers`), the `cleanup` RPC and the hourly
-    /// `performOrphanMaintenance` (`RPCRouter+TerminalHandlers`, scratch rows)
+    /// `performOrphanMaintenance` (`Daemon.swift`, scratch rows)
     /// — and a budget begun inside `performStartupReconciliation` would bound
     /// none of them. Those callers run after the socket is bound, so their
     /// stake is an RPC handler rather than startup, but a serial arm with no
@@ -1091,14 +1091,29 @@ extension WorktreeLifecycle {
         // neither becomes less true for being remembered.
         //
         // **That claim is a claim about provenance, and it is enforced at the
-        // writes rather than assumed here.** A status is recorded in exactly
-        // three places: two hand-overs, which are answers, and
-        // `HolderRegistry.adoptOne`, which brands only the
-        // `exitProbeOutcome`-established errnos — the same `ENOENT` and
-        // `ECONNREFUSED` the probes below read as absence. A round trip that
-        // merely timed out records nothing, so it cannot reach this gate: it
-        // would otherwise delete the row and its tab of a holder that is alive
-        // but slow, and hand a live session to `RowlessHolderCollector`.
+        // writes rather than assumed here.** A status is recorded at four
+        // sites: `HolderRegistry.spawn` and the hand-over inside `adopt`
+        // (`beginAdoption`), both answers a holder gave; `adoptOne`, which
+        // brands only the `exitProbeOutcome`-established errnos — the same
+        // `ENOENT` and `ECONNREFUSED` the probes below read as absence; and
+        // `reclaimIfSessionEnded`, whose value is either an already-remembered
+        // terminal status or `confirmChildExit`'s return, and
+        // `confirmChildExit` itself returns only a `describe` answer or
+        // `exitProbeOutcome`'s `.established` — so it satisfies the same
+        // answer-or-absence property rather than being exempt from it.
+        // (`abandon` also touches this dictionary, but only to clear it to nil
+        // on teardown; that is direction-safe and not a write of a status.) A
+        // round trip that merely timed out records nothing at any of these
+        // sites, so it cannot reach this gate: it would otherwise delete the
+        // row and tab of a holder that is alive but slow. The childPID gate
+        // below still keeps a row whose job is provably still running, so
+        // what that would actually cost is narrower than ending a live
+        // session outright: a wedged holder whose child had already exited
+        // would lose its row, its tab, and the undrained gravestone screen,
+        // with the holder reclaimed. Reaching a genuinely live session would
+        // additionally require that gate to miss — a null `childPID`, or a
+        // liveness probe reading false — and the holder to unwedge before
+        // `RowlessHolderCollector` can `describe` it.
         case .exited(let code):
             verdict = .sessionOver(.exited(code: code))
         case .exitedStatusUnknown:

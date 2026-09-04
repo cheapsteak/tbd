@@ -1007,9 +1007,15 @@ actor HolderRegistry {
     /// reconcile arm's gate 4
     /// (`WorktreeLifecycle.holderRowVerdict(for:)`), which deletes the row and
     /// its tab on it — leaving a still-living holder rowless for
-    /// `RowlessHolderCollector` to SIGKILL. A blanket brand would put a holder
-    /// that was merely *slow to answer* — a receive timeout, `EMFILE`, a
-    /// hang-up mid-frame — on that path and end a live agent session.
+    /// `RowlessHolderCollector` to SIGKILL. That deletion is itself gated on
+    /// the child's pid being unrecorded or dead, so a blanket brand would not
+    /// reach a job that is still running; what it would put on that path is a
+    /// holder that was merely *slow to answer* — a receive timeout, `EMFILE`,
+    /// a hang-up mid-frame — whose child had already exited, losing its row,
+    /// its tab, and the undrained gravestone screen. Ending a genuinely live
+    /// agent session would additionally require the childPID gate to miss —
+    /// a null `childPID`, or a liveness probe reading false — before
+    /// `RowlessHolderCollector` ever gets to describe it.
     ///
     /// So the classification is `exitProbeOutcome`'s, exactly as the reconcile
     /// probe's is: only `ENOENT` and `ECONNREFUSED` at the rendezvous mean the
