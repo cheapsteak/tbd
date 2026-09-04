@@ -798,6 +798,17 @@ jobs:
           fi
           wait "$pipeline" || true
           rc=$(cat /tmp/quiet-pass.rc 2>/dev/null || echo 1)
+          # An unreadable status fails closed, the same way the floor below
+          # guards its own empty `count`: the `|| echo 1` covers only a missing
+          # file, and a writer that died mid-write leaves an empty or
+          # non-numeric one, on which `[ "$rc" -ne 0 ]` errors — and an erroring
+          # `if` condition reads as false, letting a failed run walk on to the
+          # floor check as though it had succeeded.
+          case "$rc" in
+            ''|*[!0-9]*)
+              echo "::error::Quiet pass left no readable exit status (got '$rc'); treating the run as failed."
+              exit 1 ;;
+          esac
           # The status comes first: it is the pipeline's own verdict and has to
           # reach the job untouched — a build error, an early crash, or
           # swift-safe's 75 and 76 all log fewer than 35 tests, and reporting
