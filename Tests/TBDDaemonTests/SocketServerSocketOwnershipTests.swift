@@ -184,6 +184,14 @@ struct SocketServerSocketOwnershipTests {
         let clientFd = connectRawClient(to: socketPath)
         #expect(clientFd >= 0, "clients can no longer reach the live daemon at \(socketPath)")
         if clientFd >= 0 { close(clientFd) }
+
+        // Tearing the failed server down afterwards must not finish the job
+        // its failed start did not do — it bound nothing it still owns.
+        await predecessor.stop()
+        #expect(
+            socketFileInode(at: socketPath) == successorInode,
+            "stop() after a failed start deleted the live successor's socket"
+        )
     }
 
     @Test("a start that fails after binding still reclaims the file it bound")
@@ -211,6 +219,9 @@ struct SocketServerSocketOwnershipTests {
             socketFileInode(at: socketPath) == nil,
             "a failed start left its own socket file behind"
         )
+
+        // Releases the event loop group the failed start left running.
+        await server.stop()
     }
 }
 
