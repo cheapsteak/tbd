@@ -488,7 +488,10 @@ test_stale_lock_takeover_leaves_no_debris() {
 # The put-back branch: we rename a stale lock aside and discover it names a
 # live process after all, because a racer replaced the file between our read
 # and our rename. Simulated deterministically by making liveness depend on the
-# path — false for the lock we read, true for the file we took.
+# path — false for the lock we read, true for the file we took. The override is
+# a parameter expansion rather than a case statement because bash 3.2, the
+# macOS /bin/bash the Lint job runs, cannot parse a case pattern inside a
+# command substitution.
 test_stale_lock_takeover_restores_a_lock_that_turned_live() {
     local home dead out
     home="$TEST_TMP/stale-racer/updates"
@@ -502,7 +505,7 @@ test_stale_lock_takeover_restores_a_lock_that_turned_live() {
         UPDATE_LOCK="$home/update.lock"
         UPDATE_LOG="$home/update.log"
         OPT_AUTO=true
-        lock_is_live() { case "${1-}" in *.stale.*) return 0 ;; *) return 1 ;; esac; }
+        lock_is_live() { [ "${1-}" != "${1%.stale.*}" ]; }
         acquire_lock 2>/dev/null
         printf 'rc=%s\n' "$?"
     )"
