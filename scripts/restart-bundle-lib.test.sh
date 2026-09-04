@@ -260,9 +260,11 @@ test_assemble_bundle_produces_a_launchable_bundle() {
 
     # A hard link, not a copy or a symlink: open(1) resolves symlinks before
     # exec, which would leave the process with no surrounding .app.
+    # `ls -di` rather than `stat`, whose BSD and GNU dialects disagree about
+    # what `-f` means and do not fail over to each other.
     local build_inode bundle_inode
-    build_inode="$(stat -f %i "$build/TBDApp")"
-    bundle_inode="$(stat -f %i "$bundle/Contents/MacOS/TBDApp")"
+    build_inode="$(ls -di "$build/TBDApp" | awk '{print $1}')"
+    bundle_inode="$(ls -di "$bundle/Contents/MacOS/TBDApp" | awk '{print $1}')"
     assert_eq "the bundle binary is a hard link to the build output" \
         "$build_inode" "$bundle_inode"
 

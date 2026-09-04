@@ -50,6 +50,9 @@ these steps in order.
 - **Assembles, signs and installs** `/Applications/TBD.app`, using the same
   code `scripts/restart.sh` uses (`scripts/restart-bundle-lib.sh`). The bundle
   carries the sidecar and a `SourceWorktreePath.txt` naming the update clone.
+  The bundle being replaced is moved to `~/tbd/updates/previous/TBD.app` first,
+  and stays there — it is what a failed handover puts back, and afterwards it
+  is the quickest way to return to the build you were on.
 - **Hands the daemon over.** See below.
 - **Restarts the app**, unless you pass `--no-app`. The app is a viewer;
   nothing in it holds a session.
@@ -138,16 +141,33 @@ woken, and how many could not be.
 
 ## Going back to the previous build
 
-There is no automated rollback, by design. Two routes back exist instead.
+There is no automated rollback, by design. Three routes back exist instead, in
+the order you would reach for them.
 
+- **From the kept bundle**, the fastest, because it needs no build. Every
+  update moves the app bundle it is replacing to
+  `~/tbd/updates/previous/TBD.app` and leaves it there. Put it back with
+  `rm -rf /Applications/TBD.app && cp -cR ~/tbd/updates/previous/TBD.app
+  /Applications/TBD.app`, then relaunch. That bundle's
+  `Contents/SourceWorktreePath.txt` names the tree the previous daemon came
+  from, so `scripts/restart.sh --release` run from inside that tree completes
+  the rollback for the daemon as well.
 - **From the update clone.** `~/tbd/updates/src` keeps its full history. Check
   out the commit you want (`git -C ~/tbd/updates/src checkout --detach
   <commit>`) and run `scripts/restart.sh --release` from inside it. That
-  rebuilds and reinstalls from that commit exactly as an update would.
+  rebuilds and reinstalls from that commit exactly as an update would. Slower
+  than the kept bundle, and the only route to a commit that is neither the one
+  you are on nor the one you came from.
 - **From any worktree.** `scripts/restart.sh` still works from any TBD
   checkout, and still wins `/Applications` and the `tbd://` handler for
   whichever tree ran it most recently. This is the route back when the update
   clone is the thing that is broken.
+
+An update that gets as far as installing and then cannot bring the new daemon
+up performs the first of those itself: it moves the kept bundle back, tells
+LaunchServices about it, logs `restored previous app bundle`, and exits
+non-zero. That is the case the kept bundle exists for — a new app driving the
+old daemon is a state nobody should be left in.
 
 Either way, run the script from the worktree you want installed — never an
 absolute path to another tree's copy — or you will build one tree and leave

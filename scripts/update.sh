@@ -56,6 +56,7 @@ DAEMON_PID_FILE="$TBD_HOME_DIR/tbdd.pid"
 DAEMON_LOG="/tmp/tbdd.log"
 APP_LOG="/tmp/tbdapp.log"
 INSTALLED_BUNDLE="/Applications/TBD.app"
+PREVIOUS_BUNDLE="$UPDATE_HOME/previous/TBD.app"
 CLI_INSTALL_PATH="$HOME/.local/bin/tbd"
 
 UPDATE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -171,16 +172,29 @@ lock_is_live() {
     local lock_file="${1-}"
     local pid
     [ -f "$lock_file" ] || return 1
-    pid="$(head -1 "$lock_file" 2>/dev/null | tr -dc '0-9')"
+    pid="$(lock_holder_pid "$lock_file")"
     [ -n "$pid" ] || return 1
     kill -0 "$pid" 2>/dev/null
 }
 
+# The pid named in a lock file, or nothing.
+lock_holder_pid() {
+    head -1 "${1-}" 2>/dev/null | tr -dc '0-9'
+}
+
 acquire_lock() {
+    local holder
     mkdir -p "$UPDATE_HOME" || return 1
     if lock_is_live "$UPDATE_LOCK"; then
-        log_error "another update is already running (pid $(head -1 "$UPDATE_LOCK")). Its log is $UPDATE_LOG"
-        return 1
+        holder="$(lock_holder_pid "$UPDATE_LOCK")"
+        # A lock naming THIS process is one we already hold. `exec` keeps the
+        # pid, so the self-re-exec below arrives here still holding it; the
+        # alternative — releasing before the exec — opens a window in which a
+        # second update can start against the same clone.
+        if [ "$holder" != "$$" ]; then
+            log_error "another update is already running (pid $holder). Its log is $UPDATE_LOG"
+            return 1
+        fi
     fi
     printf '%s\n' "$$" > "$UPDATE_LOCK" || return 1
     UPDATE_LOCK_HELD=true
@@ -327,7 +341,10 @@ maybe_reexec() {
     local fetched="$UPDATE_SRC/scripts/update.sh"
     if should_reexec "$fetched" "$UPDATE_SCRIPT_PATH"; then
         log "re-exec: the fetched update.sh differs from the running one"
-        release_lock
+        # Carry the lock across. `exec` replaces the image but keeps the pid,
+        # so the file already names the process that is about to run; clearing
+        # the trap stops the outgoing image from deleting it on the way out.
+        trap - EXIT
         TBD_UPDATE_REEXEC=1 exec bash "$fetched" "$@"
     fi
 }
@@ -365,6 +382,92 @@ build_products() {
             [ -n "$line" ] && log "  $line"
         done
     done
+}
+
+# MARK: - Keeping the previous app bundle
+
+# Move the installed bundle out of the way, keeping it whole at
+# $UPDATE_HOME/previous/TBD.app. Two jobs: it is what a failed handover puts
+# back, and it is the fastest route to the previous build afterwards — a
+# reinstall with no rebuild (see docs/updating.md).
+#
+# A move, not a copy: the bundle is small, the move is atomic within a volume,
+# and a half-copied "previous" is worse than none. The running app is
+# unaffected either way — it holds its executable by inode, not by path.
+stash_installed_bundle() {
+    local installed_bundle="${1:-$INSTALLED_BUNDLE}"
+    if [ ! -d "$installed_bundle" ]; then
+        log "nothing installed at $installed_bundle — keeping no previous bundle"
+        return 0
+    fi
+    mkdir -p "$(dirname "$PREVIOUS_BUNDLE")" || return 1
+    rm -rf "$PREVIOUS_BUNDLE"
+    if ! mv "$installed_bundle" "$PREVIOUS_BUNDLE"; then
+        log_error "could not move $installed_bundle aside — installing nothing"
+        return 1
+    fi
+    log "kept the previous app bundle at $PREVIOUS_BUNDLE"
+}
+
+# Put the kept bundle back where it was and tell LaunchServices. Called when
+# the installation is in place but the daemon behind it is not, which would
+# otherwise leave a new app talking to an old daemon.
+restore_previous_bundle() {
+    local installed_bundle="${1:-$INSTALLED_BUNDLE}"
+    if [ ! -d "$PREVIOUS_BUNDLE" ]; then
+        log_error "no previous app bundle to restore — $installed_bundle is the new build"
+        return 1
+    fi
+    rm -rf "$installed_bundle"
+    if ! mv "$PREVIOUS_BUNDLE" "$installed_bundle"; then
+        log_error "could not restore the previous app bundle from $PREVIOUS_BUNDLE"
+        return 1
+    fi
+    register_app_bundle "$installed_bundle"
+    log "restored previous app bundle"
+}
+
+# Put the new bundle in place and move the fleet onto it, undoing the
+# installation if the successor daemon never arrives.
+#
+#   install_and_handover <bundle_dir> <installed_bundle> <new_daemon>
+#
+# Sets HANDOVER_STARTED to the moment the handover began, which is the cutoff
+# the wake sweep filters parked sessions against.
+install_and_handover() {
+    local bundle_dir="${1-}"
+    local installed_bundle="${2-}"
+    local new_daemon="${3-}"
+
+    # Keeping the previous bundle: undone by moving it back, which is what the
+    # two failure paths below do.
+    stash_installed_bundle "$installed_bundle" || return 1
+
+    # Installing: the new bundle replaces the old one on disk. The RUNNING app
+    # is untouched — it holds its executable by inode — so this is still
+    # reversible until something launches from the new path.
+    #
+    # It happens BEFORE the handover on purpose. During the socket gap the app
+    # may decide the daemon is missing and spawn one, and the daemon it spawns
+    # is the one named by the bundle's SourceWorktreePath. That must already be
+    # the update clone, or a rescue spawn in that window reinstates the old
+    # binary underneath the new install.
+    if ! install_app_bundle "$bundle_dir" "$installed_bundle"; then
+        log_error "could not install to $installed_bundle"
+        restore_previous_bundle "$installed_bundle"
+        return 1
+    fi
+
+    # The handover is the one step with no undo: the predecessor daemon is
+    # gone. Everything before it can still be put back, and a handover that
+    # never completes does exactly that with the bundle, leaving the operator
+    # on the build they started the day with rather than a new app driving an
+    # old daemon.
+    HANDOVER_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if ! handover "$new_daemon"; then
+        restore_previous_bundle "$installed_bundle"
+        return 1
+    fi
 }
 
 # MARK: - Handover
@@ -804,22 +907,19 @@ main() {
     local bundle_dir
     bundle_dir="$(bundle_dir_for_build "$build_dir")"
     sign_app_bundle "$bundle_dir" || { log_error "could not sign the app bundle"; return 1; }
-    install_app_bundle "$bundle_dir" "$INSTALLED_BUNDLE" || {
-        log_error "could not install to $INSTALLED_BUNDLE"
-        return 1
-    }
 
-    # Everything above this line is reversible by walking away; the handover is
-    # where the running installation changes.
-    local handover_started
-    handover_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    handover "$build_dir/TBDDaemon" || return 1
+    # Up to here nothing outside the update clone has changed: walking away
+    # costs a wasted build and nothing else. install_and_handover is where the
+    # running installation moves, and it says at each line what undoing that
+    # line costs.
+    install_and_handover "$bundle_dir" "$INSTALLED_BUNDLE" "$build_dir/TBDDaemon" \
+        || return 1
 
     refresh_installed_cli "$build_dir/TBDCLI"
 
     run_app_stage
 
-    run_wake_stage "$handover_started"
+    run_wake_stage "${HANDOVER_STARTED:-}"
 
     print_summary "$old_commit" "$new_commit" "$advanced" \
         "${WAKE_CANDIDATES:-0}" "${WAKE_WOKEN:-0}" "${WAKE_FAILED:-0}"

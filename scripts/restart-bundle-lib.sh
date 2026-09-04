@@ -23,6 +23,12 @@ fi
 # calls install-affecting, and the set whose dirtiness the build identity
 # records: a change under any of them means the sidecar's commit no longer
 # describes the binary beside it.
+# The LaunchServices registration tool. A variable because it is an absolute
+# path: a test cannot shadow it by putting a stub first on PATH the way it can
+# with codesign or open, and a harness that ran the real one would register its
+# fixture bundles with the developer's LaunchServices database.
+TBD_LSREGISTER="${TBD_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister}"
+
 BUILD_IDENTITY_PATHSPECS=(
     Sources
     Resources
@@ -248,7 +254,6 @@ sign_app_bundle() {
 install_app_bundle() {
     local bundle_dir="${1-}"
     local installed_bundle="${2-}"
-    local lsregister="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
 
     if [ -z "$bundle_dir" ] || [ -z "$installed_bundle" ]; then
         echo "error: install_app_bundle needs a bundle dir and an install path" >&2
@@ -257,9 +262,20 @@ install_app_bundle() {
 
     rm -rf "$installed_bundle"
     cp -cR "$bundle_dir" "$installed_bundle" || return 1
+    register_app_bundle "$installed_bundle"
+}
 
-    if [ -x "$lsregister" ]; then
-        "$lsregister" -f "$installed_bundle" >/dev/null 2>&1 || true
+# Tell LaunchServices about a bundle that appeared or moved at <path>. Its own
+# function because an update that has to put the previous bundle back must
+# re-register it exactly as an install does — a bundle LaunchServices does not
+# know about takes no tbd:// URL and shows a stale icon.
+register_app_bundle() {
+    local installed_bundle="${1-}"
+
+    [ -n "$installed_bundle" ] || return 1
+
+    if [ -x "$TBD_LSREGISTER" ]; then
+        "$TBD_LSREGISTER" -f "$installed_bundle" >/dev/null 2>&1 || true
     fi
 
     # Bump the installed bundle's mtime so Notification Center and System

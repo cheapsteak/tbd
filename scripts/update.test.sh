@@ -14,6 +14,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$HERE/.." && pwd)"
 SCRIPT="$HERE/update.sh"
 
 if [ ! -f "$SCRIPT" ]; then
@@ -43,6 +44,16 @@ OPT_AUTO=true   # keep the sourced log() out of the harness output
 INSTALLED_BUNDLE="$TEST_TMP/Applications/TBD.app"
 mkdir -p "$INSTALLED_BUNDLE/Contents/MacOS"
 
+# The library reaches LaunchServices by absolute path, so PATH cannot shadow
+# it. Point its seam at a stub that records the call instead, or the harness
+# would register its fixture bundles with the developer's LaunchServices.
+export TBD_LSREGISTER="$TEST_TMP/stub-lsregister"
+cat > "$TBD_LSREGISTER" << 'EOF'
+#!/bin/sh
+printf 'lsregister %s\n' "$*" >> "${FAKE_LSREGISTER_LOG:-/dev/null}"
+EOF
+chmod +x "$TBD_LSREGISTER"
+
 FAIL=0
 pass() { echo "ok   - $1"; }
 fail() { echo "FAIL - $1"; FAIL=1; }
@@ -67,6 +78,15 @@ assert_contains() {
     else
         fail "$1: [$2] not found in output"
     fi
+}
+
+# `stat` is not portable and its two dialects do not fail over cleanly: `-f`
+# selects a format string on BSD and FILESYSTEM STATUS on GNU, so
+# `stat -f %i x || stat -c %i x` succeeds on GNU with entirely the wrong
+# answer. That is what reddened this harness on the Linux runner. `ls -di` is
+# POSIX and says the same thing on both.
+file_inode() {
+    ls -di "${1-}" 2>/dev/null | awk '{print $1}'
 }
 
 # For output that is itself a regex — the anchored pkill pattern, say — where
@@ -128,6 +148,9 @@ EOF
     echo "// seed" > "$d/Sources/Seed.swift"
     echo "// package" > "$d/Package.swift"
     printf 'icns' > "$d/Resources/AppIcon.icns"
+    # The real source plist, so a fixture build can be assembled into a bundle
+    # the way an install does.
+    cp "$REPO_ROOT/Resources/TBDApp.Info.plist" "$d/Resources/TBDApp.Info.plist"
     git -C "$d" init -q -b main
     git -C "$d" config user.email t@t.t
     git -C "$d" config user.name t
@@ -307,6 +330,43 @@ test_lock_refuses_a_live_run() {
     assert_fail "a missing lock is not live" lock_is_live "$TEST_TMP/absent.lock"
 }
 
+test_acquire_lock_recognises_its_own_lock() {
+    local home
+    home="$TEST_TMP/own-lock"
+    mkdir -p "$home/updates"
+
+    out="$(
+        UPDATE_HOME="$home/updates"
+        UPDATE_LOCK="$home/updates/update.lock"
+        UPDATE_LOG="$home/updates/update.log"
+        OPT_AUTO=true
+        printf '%s\n' "$$" > "$UPDATE_LOCK"
+        acquire_lock
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "a lock naming this very process is ours to keep" "rc=0" "$out"
+
+    # A process this user owns but is not: `kill -0` on someone else's pid
+    # fails with EPERM, which would read as a dead holder.
+    local other
+    sleep 30 &
+    other=$!
+    out="$(
+        UPDATE_HOME="$home/updates"
+        UPDATE_LOCK="$home/updates/update.lock"
+        UPDATE_LOG="$home/updates/update.log"
+        OPT_AUTO=true
+        printf '%s\n' "$other" > "$UPDATE_LOCK"
+        acquire_lock 2>/dev/null
+        printf 'rc=%s\n' "$?"
+    )"
+    kill "$other" 2>/dev/null
+    wait "$other" 2>/dev/null
+    assert_contains "a lock naming another live process is refused" "rc=1" "$out"
+    assert_contains "and names the process holding it" "another update is already running (pid $other)" \
+        "$(cat "$home/updates/update.log")"
+}
+
 test_update_refuses_while_another_run_holds_the_lock() {
     local case_dir out
     case_dir="$(mkcase lock-case)"
@@ -406,8 +466,12 @@ test_reexec_happens_once_and_passes_arguments() {
     marker="$TEST_TMP/reexec-marker.sh"
     cat > "$marker" << 'EOF'
 #!/usr/bin/env bash
-# Stand-in for a newer update.sh: report that it ran, and with what.
-printf 'REEXECED guard=%s args=%s\n' "${TBD_UPDATE_REEXEC:-unset}" "$*"
+# Stand-in for a newer update.sh: report that it ran, with what, and what the
+# lock file said when it arrived. `exec` keeps the pid, so a lock naming this
+# process is the one the outgoing image was holding.
+lock="${TBD_HOME:-$HOME/tbd}/updates/update.lock"
+printf 'REEXECED guard=%s args=%s lock=%s pid=%s\n' \
+    "${TBD_UPDATE_REEXEC:-unset}" "$*" "$(cat "$lock" 2>/dev/null)" "$$"
 EOF
     case_dir="$(mkcase reexec-case "$marker")"
     out="$(run_update "$case_dir" --dry-run --no-wake)"
@@ -419,6 +483,18 @@ EOF
     assert_eq "the fetched script runs exactly once" "1" \
         "$(printf '%s' "$out" | grep -c REEXECED)"
     assert_contains "the re-exec is logged" "re-exec: the fetched update.sh differs" "$out"
+
+    # The lock is carried across rather than released and retaken: releasing it
+    # first would leave a window in which a second update could start against
+    # the same clone.
+    local lock_pid own_pid
+    lock_pid="$(printf '%s' "$out" | sed -n 's/.*lock=\([0-9]*\) .*/\1/p')"
+    own_pid="$(printf '%s' "$out" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
+    if [ -n "$lock_pid" ] && [ "$lock_pid" = "$own_pid" ]; then
+        pass "the re-exec keeps the lock, still naming the same process"
+    else
+        fail "the re-exec keeps the lock, still naming the same process: lock=[$lock_pid] pid=[$own_pid]"
+    fi
 }
 
 # MARK: - --check
@@ -891,8 +967,113 @@ test_cli_refresh_only_touches_an_existing_install() {
         refresh_installed_cli "$new_cli"
     )
     assert_eq "an existing CLI install is relinked to the new build" \
-        "$(stat -f %i "$new_cli" 2>/dev/null || stat -c %i "$new_cli")" \
-        "$(stat -f %i "$target" 2>/dev/null || stat -c %i "$target")"
+        "$(file_inode "$new_cli")" "$(file_inode "$target")"
+}
+
+# MARK: - Installing and handing over
+
+# A directory that looks enough like an assembled bundle for install and
+# restore to move it around. Echoes its path.
+mkbundle() {
+    local dir="$1" marker="$2"
+    mkdir -p "$dir/Contents/MacOS"
+    printf '%s' "$marker" > "$dir/Contents/SourceWorktreePath.txt"
+    printf '#!/bin/sh\nexit 0\n' > "$dir/Contents/MacOS/TBDApp"
+    chmod +x "$dir/Contents/MacOS/TBDApp"
+    printf '%s\n' "$dir"
+}
+
+# Drive install_and_handover against scratch paths, with a stub `tbd` whose
+# reported executable decides whether the handover completes.
+run_install_and_handover() {
+    local case_root="$1" reports="$2" timeout="$3"
+    local state="$case_root/state"
+    mkdir -p "$state"
+    printf '{"executablePath":"%s"}\n' "$reports" > "$state/status.json"
+
+    (
+        export FAKE_TBD_STATE="$state" PATH="$case_root/bin:$PATH" \
+            FAKE_LSREGISTER_LOG="$case_root/lsregister.log"
+        OPT_AUTO=false
+        UPDATE_HOME="$case_root/updates"
+        UPDATE_LOG="$case_root/updates/update.log"
+        PREVIOUS_BUNDLE="$case_root/updates/previous/TBD.app"
+        DAEMON_PID_FILE="$case_root/tbdd.pid"
+        DAEMON_LOG="$case_root/tbdd.log"
+        HANDOVER_TIMEOUT="$timeout"
+        install_and_handover "$case_root/new/TBD.app" \
+            "$case_root/Applications/TBD.app" "$case_root/newdaemon"
+        printf 'rc=%s\n' "$?"
+    )
+}
+
+# The Medium finding this guards: the bundle used to be installed before the
+# handover with nothing to undo it, so a handover that never completed left a
+# new app driving the old daemon.
+test_a_failed_handover_restores_the_previous_bundle() {
+    local root out
+    root="$TEST_TMP/handover-restore"
+    mkdir -p "$root/bin" "$root/Applications"
+    mkstub_tbd "$root/bin"
+    mkbundle "$root/Applications/TBD.app" "old-worktree" >/dev/null
+    mkbundle "$root/new/TBD.app" "new-clone" >/dev/null
+    printf '#!/bin/sh\nexit 0\n' > "$root/newdaemon"
+    chmod +x "$root/newdaemon"
+
+    # The daemon never reports the new binary, so the handover times out.
+    out="$(run_install_and_handover "$root" "/somewhere/else/TBDDaemon" 1)"
+
+    assert_contains "a handover that never completes fails the step" "rc=1" "$out"
+    assert_contains "the failure says the previous bundle went back" \
+        "restored previous app bundle" "$out"
+    assert_eq "the installed bundle is the one that was there before" \
+        "old-worktree" \
+        "$(cat "$root/Applications/TBD.app/Contents/SourceWorktreePath.txt")"
+    if [ -d "$root/updates/previous/TBD.app" ]; then
+        fail "restoring consumes the kept bundle"
+    else
+        pass "restoring consumes the kept bundle"
+    fi
+    assert_contains "the restored bundle is re-registered with LaunchServices" \
+        "lsregister -f $root/Applications/TBD.app" \
+        "$(cat "$root/lsregister.log" 2>/dev/null)"
+}
+
+test_a_completed_handover_keeps_the_previous_bundle() {
+    local root out
+    root="$TEST_TMP/handover-keep"
+    mkdir -p "$root/bin" "$root/Applications"
+    mkstub_tbd "$root/bin"
+    mkbundle "$root/Applications/TBD.app" "old-worktree" >/dev/null
+    mkbundle "$root/new/TBD.app" "new-clone" >/dev/null
+    printf '#!/bin/sh\nexit 0\n' > "$root/newdaemon"
+    chmod +x "$root/newdaemon"
+
+    out="$(run_install_and_handover "$root" "$root/newdaemon" 5)"
+
+    assert_contains "a completed handover succeeds" "rc=0" "$out"
+    assert_eq "the new bundle is what is installed" "new-clone" \
+        "$(cat "$root/Applications/TBD.app/Contents/SourceWorktreePath.txt")"
+    assert_eq "the previous bundle is kept for a manual rollback" "old-worktree" \
+        "$(cat "$root/updates/previous/TBD.app/Contents/SourceWorktreePath.txt")"
+    assert_not_contains "a completed handover restores nothing" \
+        "restored previous app bundle" "$out"
+}
+
+test_a_first_install_has_no_previous_bundle() {
+    local root out
+    root="$TEST_TMP/handover-first"
+    mkdir -p "$root/bin" "$root/Applications"
+    mkstub_tbd "$root/bin"
+    mkbundle "$root/new/TBD.app" "new-clone" >/dev/null
+    printf '#!/bin/sh\nexit 0\n' > "$root/newdaemon"
+    chmod +x "$root/newdaemon"
+
+    out="$(run_install_and_handover "$root" "$root/newdaemon" 5)"
+    assert_contains "installing where nothing was installed still succeeds" "rc=0" "$out"
+    assert_contains "and says there was nothing to keep" "keeping no previous bundle" "$out"
+    assert_eq "the new bundle is what is installed" "new-clone" \
+        "$(cat "$root/Applications/TBD.app/Contents/SourceWorktreePath.txt")"
 }
 
 # MARK: - Handover helpers
@@ -935,6 +1116,7 @@ test_help_lists_every_flag
 test_unknown_flag_is_rejected
 test_parse_args_sets_options
 test_lock_refuses_a_live_run
+test_acquire_lock_recognises_its_own_lock
 test_update_refuses_while_another_run_holds_the_lock
 test_a_stale_lock_is_taken_over
 test_remote_resolution_order
@@ -958,6 +1140,9 @@ test_terminals_are_collected_across_worktrees
 test_summary_reports_the_move
 test_summary_survives_an_unknown_commit
 test_cli_refresh_only_touches_an_existing_install
+test_a_failed_handover_restores_the_previous_bundle
+test_a_completed_handover_keeps_the_previous_bundle
+test_a_first_install_has_no_previous_bundle
 test_paths_match_resolves_symlinks
 test_handover_wait_gives_up
 
