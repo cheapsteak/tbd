@@ -117,7 +117,12 @@ A daemon actor `UpdateChecker` (new file under `Sources/TBDDaemon/Update/`,
 injected clock per the repo rule):
 
 - Runs only when `update_mode` is `check` or `auto`. Reads the setting on
-  each tick so `tbd config set` takes effect without a restart.
+  each tick, and the `config.setUpdateMode` handler starts the loop whenever
+  the new mode is not `off` — so the first opt-in on a daemon that booted in
+  the shipped default starts checking there and then, and turning the setting
+  back off quiets the next tick. Nothing about the setting waits for a
+  restart. `start()` is idempotent, so repeating the gesture never adds a
+  second loop.
 - A tick runs `git ls-remote <url> refs/heads/main` where `<url>` is the
   `upstream` remote of the daemon's source worktree, else `origin`, else
   the setting is unusable and the checker logs once and idles. `ls-remote`
@@ -163,8 +168,10 @@ Surfaces: `tbd config get` prints it; `tbd config set update-mode
 <off|check|auto>` writes it through a `config.setUpdateMode` RPC that writes
 the column on every call; the app's Settings shows a three-way picker fed
 from `daemon.capabilities` (which gains `updateMode`) and writes through the
-same RPC. The checker reads the setting on each tick, so no `*Live` twin is
-needed: a change takes effect at the next tick without a restart.
+same RPC. The checker reads the setting on each tick and that RPC starts its
+loop when the new mode is not `off`, so no `*Live` twin is needed: a change
+takes effect on the daemon already running, in either direction, without a
+restart.
 
 Default-off satisfies the "large or risky behavior" rule: with the default,
 the daemon runs no timer and spawns nothing. `check` is a read-only network
@@ -341,6 +348,10 @@ shortens the gap between them rather than lengthening it.
 - `UpdateChecker` with an injected clock: `off` runs nothing; `check`
   ticks and never launches; `auto` launches once per latest commit and not
   again for the same commit; setting changes take effect on the next tick.
+- `config.setUpdateMode` against a live router: `check` starts the loop on a
+  checker that has none, `off` starts none and quiets a running one at its
+  next tick, and repeating the gesture leaves one loop at one tick per
+  interval.
 - Handover gate: pid file names the handover pid — successor claims the file
   and signals; pid file names a different live daemon — successor exits as
   before; pid file stale — normal path.

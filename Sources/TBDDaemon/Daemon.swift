@@ -1409,9 +1409,12 @@ public final class Daemon: Sendable {
             }
 
             // 12a-bis. Wire the update checker. Always constructed so
-            // `daemon.checkForUpdate` can answer an explicit question; its
-            // periodic loop starts only when the mode is not `off`, which is
-            // what makes the shipped default cost nothing but this one read.
+            // `daemon.checkForUpdate` can answer an explicit question, and so a
+            // later `tbd config set update-mode` has something to start; its
+            // periodic loop starts here only when the boot-time mode is not
+            // `off`, which is what makes the shipped default cost nothing but
+            // this one read. An opt-in arriving afterwards starts the loop from
+            // `handleConfigSetUpdateMode`, so neither direction needs a restart.
             let buildIdentity = RPCRouter.resolvedBuildIdentity
             let updateSourceWorktree = buildIdentity?.sourceWorktree
                 ?? BuildIdentityLoader.sourceWorktree(

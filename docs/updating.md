@@ -111,8 +111,9 @@ than a rebuild.
   not retried until `main` moves again; a manual `tbd update` always runs.
 
 Set it with `tbd config set update-mode <off|check|auto>`, read it back with
-`tbd config get`, or use the picker in the app's Settings. The daemon reads the
-setting on each tick, so a change takes effect without a restart.
+`tbd config get`, or use the picker in the app's Settings. The change lands on
+the daemon already running: turning the check on starts it right away, turning
+it off quiets it at the next tick. Nothing here waits for a restart.
 
 ## The log
 

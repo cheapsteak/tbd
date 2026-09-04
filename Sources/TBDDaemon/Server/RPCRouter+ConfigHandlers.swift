@@ -429,20 +429,24 @@ extension RPCRouter {
     /// itself, and the default-off gate on a feature that rebuilds and replaces
     /// the whole installation.
     ///
-    /// **It takes effect at the next checker tick**, not at the next daemon
-    /// start: `UpdateChecker` reads the column fresh on every tick, so `check`
-    /// starts observing and `off` stops it without a restart. The one thing a
-    /// flip cannot do is start the loop in a daemon that booted in `off` —
-    /// nothing is spawned then, by design — so a first opt-in is followed by
-    /// the daemon's next restart before the timer runs. `tbd version --check`
-    /// and the app's "Check for Updates…" work regardless, since an explicit
-    /// question is not the thing this flag gates.
+    /// **It takes effect on the daemon already running**, with no restart in
+    /// any direction. A flip to `check` or `auto` starts the checker's periodic
+    /// loop from here, which is what a daemon that booted in the shipped `off`
+    /// needs — nothing was spawned at boot then, by design. `UpdateChecker.start()`
+    /// is idempotent, so a loop already ticking keeps its own cadence instead
+    /// of gaining a second one. A flip to `off` starts nothing and stops
+    /// nothing: every tick reads the column fresh, so the next one simply does
+    /// no work. `tbd version --check` and the app's "Check for Updates…" work
+    /// regardless, since an explicit question is not the thing this flag gates.
     ///
     /// The column is written on every call, because writing any value is the
     /// explicit gesture that lifts it out of NULL forever after.
     func handleConfigSetUpdateMode(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetUpdateModeParams.self, from: paramsData)
         try await db.config.setUpdateMode(params.mode)
+        if params.mode.runsChecks {
+            await updateChecker?.start()
+        }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
