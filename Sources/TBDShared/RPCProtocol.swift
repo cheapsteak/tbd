@@ -3397,10 +3397,30 @@ public struct PaneDetachParams: Codable, Sendable {
     /// generation-checked — a stale detach from a closing view no-ops against
     /// a newer attach's sink. Absent (older app) → unconditional detach.
     public let generation: UInt64?
-    public init(worktreeID: UUID, paneID: String, generation: UInt64? = nil) {
+    /// Present when the panel is holder-backed, and then it — not
+    /// `worktreeID`/`paneID` — is the key the daemon resolves. A holder row
+    /// carries no tmux coordinates at all, so the transport on the row this
+    /// names is the only thing that can discriminate the two paths.
+    public let terminalID: UUID?
+    /// The screen the viewer is handing back, as the byte stream that
+    /// reconstructs it — the mirror of `AttachRequestResult.snapshotPreamble`,
+    /// produced by the same `TerminalSnapshotWriter` in the other direction.
+    ///
+    /// Holder transport only, and it is what keeps the daemon's model of the
+    /// session from being frozen at the instant the viewer arrived: the jiggle
+    /// that follows heals only programs that repaint, so a plain shell would
+    /// otherwise hand back nothing at all. Absent or empty is tolerated — the
+    /// detach still releases the session — and costs exactly the screen.
+    public let snapshotPreamble: Data?
+    public init(
+        worktreeID: UUID, paneID: String, generation: UInt64? = nil,
+        terminalID: UUID? = nil, snapshotPreamble: Data? = nil
+    ) {
         self.worktreeID = worktreeID
         self.paneID = paneID
         self.generation = generation
+        self.terminalID = terminalID
+        self.snapshotPreamble = snapshotPreamble
     }
 }
 

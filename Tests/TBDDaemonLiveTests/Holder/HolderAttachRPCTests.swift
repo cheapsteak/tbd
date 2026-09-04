@@ -374,6 +374,98 @@ struct HolderAttachRPCTests {
         try harness.write(fd: vend.fd, "MINE-NOW\n")
         #expect(readPTYUntil(fd: vend.fd, contains: "GOT:MINE-NOW") != nil)
     }
+
+    // MARK: - pane.detach
+
+    /// The wiring the handback rides on. Before this branch existed a holder
+    /// row fell through to the control-mode arm, which resolves nothing for it
+    /// and answers ok — so a closed tab left its session claimed by a viewer
+    /// that no longer existed, undrained and un-reattachable for the daemon's
+    /// life.
+    @Test func aDetachHandsTheSessionBackToTheDaemon() async throws {
+        let harness = try await RPCHarness.start(command: Self.echoJob)
+        defer { harness.tearDown() }
+        let vend = try await harness.attach()
+        _ = await harness.router.handle(
+            try RPCRequest(
+                method: RPCMethod.attachReady,
+                params: AttachReadyParams(
+                    worktreeID: harness.worktreeID, paneID: "",
+                    generation: vend.generation, terminalID: harness.terminalID)))
+        #expect(await harness.registry.viewerAttachment(for: harness.terminalID) == vend.generation)
+
+        Darwin.close(vend.fd)
+        let response = await harness.router.handle(
+            try RPCRequest(
+                method: RPCMethod.paneDetach,
+                params: PaneDetachParams(
+                    worktreeID: harness.worktreeID, paneID: "", generation: vend.generation,
+                    terminalID: harness.terminalID,
+                    snapshotPreamble: Data("\u{1b}[2J\u{1b}[HHANDED-BACK".utf8))))
+
+        #expect(response.success)
+        #expect(await harness.registry.viewerAttachment(for: harness.terminalID) == nil)
+        let reader = try #require(await harness.registry.reader(for: harness.terminalID))
+        #expect(await reader.isDraining)
+        #expect(await reader.renderScreen().contains("HANDED-BACK"),
+                "the screen the viewer handed back did not reach the daemon's model")
+    }
+
+    /// Without a generation there is nothing to check the handback against, and
+    /// clearing a claim by session id alone would let a stale detach take the
+    /// pty from the attach that superseded it.
+    @Test func aDetachWithoutAGenerationLeavesTheViewerClaim() async throws {
+        let harness = try await RPCHarness.start(command: Self.echoJob)
+        defer { harness.tearDown() }
+        let vend = try await harness.attach()
+        defer { Darwin.close(vend.fd) }
+        _ = await harness.router.handle(
+            try RPCRequest(
+                method: RPCMethod.attachReady,
+                params: AttachReadyParams(
+                    worktreeID: harness.worktreeID, paneID: "",
+                    generation: vend.generation, terminalID: harness.terminalID)))
+
+        let response = await harness.router.handle(
+            try RPCRequest(
+                method: RPCMethod.paneDetach,
+                params: PaneDetachParams(
+                    worktreeID: harness.worktreeID, paneID: "", generation: nil,
+                    terminalID: harness.terminalID)))
+
+        // Ok, like every other detach — the app has nothing to do with the
+        // refusal — but the claim stands.
+        #expect(response.success)
+        #expect(await harness.registry.viewerAttachment(for: harness.terminalID) == vend.generation)
+        #expect(await harness.registry.reader(for: harness.terminalID) == nil,
+                "a detach the daemon could not check put it back on a pty a viewer holds")
+    }
+
+    /// The discriminator for the branch itself: a detach with no `terminalID`
+    /// is a control-mode detach and must not touch a holder session, however
+    /// the worktree resolves.
+    @Test func aDetachWithoutATerminalIDLeavesHolderSessionsAlone() async throws {
+        let harness = try await RPCHarness.start(command: Self.echoJob)
+        defer { harness.tearDown() }
+        let vend = try await harness.attach()
+        defer { Darwin.close(vend.fd) }
+        _ = await harness.router.handle(
+            try RPCRequest(
+                method: RPCMethod.attachReady,
+                params: AttachReadyParams(
+                    worktreeID: harness.worktreeID, paneID: "",
+                    generation: vend.generation, terminalID: harness.terminalID)))
+
+        let response = await harness.router.handle(
+            try RPCRequest(
+                method: RPCMethod.paneDetach,
+                params: PaneDetachParams(
+                    worktreeID: harness.worktreeID, paneID: "%9",
+                    generation: vend.generation)))
+
+        #expect(response.success)
+        #expect(await harness.registry.viewerAttachment(for: harness.terminalID) == vend.generation)
+    }
 }
 
 // MARK: - Harness
@@ -465,11 +557,16 @@ private struct RPCHarness {
                 params: AttachReadyParams(
                     worktreeID: worktreeID, paneID: "", generation: vend.generation,
                     terminalID: terminalID)))
+        // The viewer's descriptor goes first and the detach follows, which is
+        // the order the app keeps and the reason the daemon may resume: the
+        // handback puts a reader back on the pty.
         Darwin.close(vend.fd)
-        // Stands in for the detach the app has not learned to send yet: drop
-        // the viewer's claim and re-adopt, which is what puts a reader back.
-        await registry.release(terminalID: terminalID)
-        _ = try await registry.adopt(terminal: fixture.terminalRow)
+        _ = await router.handle(
+            try RPCRequest(
+                method: RPCMethod.paneDetach,
+                params: PaneDetachParams(
+                    worktreeID: worktreeID, paneID: "", generation: vend.generation,
+                    terminalID: terminalID)))
     }
 
     func write(fd: Int32, _ text: String) throws {

@@ -1475,10 +1475,21 @@ actor DaemonClient {
     /// from `openAttach` so the daemon detaches generation-checked — a stale
     /// detach from a closing view must not kill a newer attach's sink; nil
     /// (unknown generation) detaches unconditionally, as before.
-    func paneDetach(worktreeID: UUID, paneID: String, generation: UInt64? = nil) async throws {
+    ///
+    /// `terminalID` names a holder-backed session, which has no pipe and no
+    /// pane: there the detach is a *handback* — the daemon takes the pty back
+    /// and puts a drain on it — and `snapshotPreamble` is the screen the viewer
+    /// was showing, so the session's model is not left frozen at the instant
+    /// the viewer arrived. Both are nil on the control-mode path.
+    func paneDetach(
+        worktreeID: UUID, paneID: String, generation: UInt64? = nil,
+        terminalID: UUID? = nil, snapshotPreamble: Data? = nil
+    ) async throws {
         try await callVoidAsync(
             method: RPCMethod.paneDetach,
-            params: PaneDetachParams(worktreeID: worktreeID, paneID: paneID, generation: generation)
+            params: PaneDetachParams(
+                worktreeID: worktreeID, paneID: paneID, generation: generation,
+                terminalID: terminalID, snapshotPreamble: snapshotPreamble)
         )
     }
 

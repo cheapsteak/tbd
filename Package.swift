@@ -291,6 +291,10 @@ let package = Package(
                 // only honest test of a preamble: it asserts on what a viewer
                 // would paint rather than on the bytes.
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
+                // The detach-handback suite serializes that terminal back out
+                // again, through the same writer the app uses, so the round
+                // trip is the production code in both directions.
+                "TBDTerminalSerialization",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),
             ]

@@ -490,6 +490,29 @@ actor HolderReader {
         emulator.snapshotPreamble(maxScrollbackLines: maxScrollbackLines)
     }
 
+    /// Feeds a departing viewer's handback preamble into this session's screen
+    /// model — `snapshotPreamble` run backwards.
+    ///
+    /// **It does not reset the emulator first, and does not need to.** The
+    /// preamble opens with `TerminalSnapshotWriter.resetPrelude`, whose whole
+    /// purpose is to supersede whatever state the receiving terminal was
+    /// already in: it leaves the alt screen, resets the scroll region and every
+    /// mode the capture carries, and erases the display *and the scrollback*
+    /// (`ESC[3J`, which SwiftTerm implements as a trim of every line above the
+    /// viewport). A separate reset would only be a second way to say that, and
+    /// there is no way to say it that the writer does not already own.
+    ///
+    /// **Must be called with nothing else feeding this emulator**, which on the
+    /// handback path means before `resumeDraining()` or before the first
+    /// `start()`. The emulator's lock makes a concurrent feed safe but not
+    /// *ordered*, and a live byte parsed ahead of the prelude would be erased
+    /// by it — output the viewer never saw and the daemon then throws away.
+    /// A stopped reader ignores the feed: its screen has no further readers.
+    func ingest(preamble: Data) {
+        guard state != .stopped, !preamble.isEmpty else { return }
+        emulator.feed([UInt8](preamble)[...])
+    }
+
     // MARK: - Input and size
 
     /// Writes input to the child. Bounded: a child that has stopped reading its

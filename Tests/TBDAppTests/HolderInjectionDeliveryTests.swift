@@ -333,6 +333,11 @@ struct HolderInjectionDeliveryTests {
         func ready(
             worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64
         ) async throws {}
+
+        func detach(
+            worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
+            snapshotPreamble: Data
+        ) async throws {}
     }
 
     @MainActor

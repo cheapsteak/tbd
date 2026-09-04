@@ -400,6 +400,21 @@ extension RPCRouter {
     /// route). Absent generation (older app) → unconditional, as before.
     func handlePaneDetach(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PaneDetachParams.self, from: paramsData)
+        // The holder branch, first and for the same reasons as on the attach:
+        // no tmux coordinates to resolve, and no tmux gate to consult. Reaching
+        // the arm below with a holder row is not merely useless — it resolves
+        // nothing and returns ok, which is exactly the silence that leaves a
+        // closed tab's session claimed by a viewer that no longer exists.
+        // The holder branch, first and for the same reasons as on the attach:
+        // no tmux coordinates to resolve, and no tmux gate to consult. Reaching
+        // the arm below with a holder row is not merely useless — it resolves
+        // nothing and returns ok, which is exactly the silence that leaves a
+        // closed tab's session claimed by a viewer that no longer exists.
+        if let terminalID = params.terminalID,
+           let terminal = try? await db.terminals.get(id: terminalID),
+           terminal.transport == .holder {
+            return await handleHolderPaneDetach(params: params, terminal: terminal)
+        }
         if let bridge = controlMode,
            let worktree = try? await db.worktrees.getLocal(id: params.worktreeID) {
             let server = worktree.tmuxServer
@@ -412,6 +427,50 @@ extension RPCRouter {
                 bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: params.paneID)
                 await bridge.supervisor.detach(server: server, paneID: params.paneID)
             }
+        }
+        return .ok()
+    }
+
+    /// The holder half of `pane.detach`: the viewer has closed its descriptor,
+    /// so the daemon takes the session back and puts a drain on it again.
+    ///
+    /// Ordering is the app's to keep and is stated where it is kept
+    /// (`Coordinator.detachHolderSession`): the descriptor is closed *before*
+    /// this is sent. Nothing here can verify it — a detach carries no evidence
+    /// about another process's file table — which is why the app-side test
+    /// asserts the close has already happened at the instant this call is made.
+    ///
+    /// **Every outcome is RPC success**, matching the control-mode arm, and the
+    /// reason is stronger here than "best effort": a detach fires on every view
+    /// teardown, the app has already released everything it held by the time it
+    /// sends one, and there is no recovery it could run on a refusal. A refused
+    /// handback is a stale one — a closing viewer racing its successor's attach
+    /// — and the successor is the truth. It is logged, not returned.
+    private func handleHolderPaneDetach(
+        params: PaneDetachParams, terminal: Terminal
+    ) async -> RPCResponse {
+        guard let registry = holderRegistry else { return .ok() }
+        guard let generation = params.generation else {
+            // Nothing to check the handback against. Clearing a claim by name
+            // alone would let a stale detach take the pty from the attach that
+            // superseded it, which is the failure the generation exists for.
+            logger.error("""
+                a holder pane.detach for terminal \(terminal.id.uuidString, privacy: .public) \
+                carried no attach generation, so the session was left with its viewer claim
+                """)
+            return .ok()
+        }
+        do {
+            try await registry.acceptHandback(
+                terminal: terminal, generation: generation,
+                preamble: params.snapshotPreamble ?? Data())
+        } catch {
+            logger.error("""
+                holder pane.detach refused for terminal \
+                \(terminal.id.uuidString, privacy: .public) generation \
+                \(generation, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
         }
         return .ok()
     }

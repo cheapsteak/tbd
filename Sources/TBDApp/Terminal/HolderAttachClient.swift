@@ -50,6 +50,10 @@ protocol HolderAttaching: Sendable {
     func ready(
         worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64
     ) async throws
+    func detach(
+        worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
+        snapshotPreamble: Data
+    ) async throws
 }
 
 /// Drives the daemon's holder attach handshake: `attach.request` for the pty
@@ -117,6 +121,23 @@ struct HolderAttachClient: HolderAttaching {
             worktreeID: worktreeID, paneID: paneID,
             generation: generation, terminalID: terminalID)
     }
+
+    /// Hand the session back: the viewer has stopped reading and closed its
+    /// descriptor, and this carries the screen it was showing.
+    ///
+    /// **Send order is the whole of this call's contract**, and it lives at the
+    /// caller because only the caller can honour it: the descriptor is closed
+    /// first, and only then is this sent. The daemon resumes its drain on
+    /// receipt, so a notify-first detach would put it on the pty while the
+    /// viewer's last `read()` was still outstanding.
+    func detach(
+        worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
+        snapshotPreamble: Data
+    ) async throws {
+        try await daemonClient.paneDetach(
+            worktreeID: worktreeID, paneID: paneID, generation: generation,
+            terminalID: terminalID, snapshotPreamble: snapshotPreamble)
+    }
 }
 
 /// Drains a vended pty descriptor on a dedicated thread, handing each chunk to
@@ -144,6 +165,12 @@ final class HolderStreamReader: @unchecked Sendable {
     private let stateLock = NSLock()
     private var stopped = false
     private var thread: Thread?
+    /// Raised by the reader thread after it has closed the descriptor, which is
+    /// the only moment this process is provably off the pty.
+    private var closed = false
+    /// Callers parked in `awaitClosed()`. Resumed once, from the reader thread,
+    /// after the `close`.
+    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
 
     /// How long one `poll` waits before the loop re-checks `stopped`. Short
     /// enough that a closing view releases the pty promptly, long enough that
@@ -161,8 +188,50 @@ final class HolderStreamReader: @unchecked Sendable {
         return stopped
     }
 
+    /// Whether `start()` has been called. Read by `awaitClosed()`, which must
+    /// not park forever on a reader whose thread will never run.
+    private var started = false
+
+    /// Resumes once this reader's thread has closed the descriptor.
+    ///
+    /// **The handback's ordering rests on this.** `stop()` only raises a flag;
+    /// the thread notices it up to one poll interval later and does the `close`
+    /// on its way out. A detach sent on `stop()`'s return would therefore reach
+    /// the daemon with this process still on the fd — two readers on one pty,
+    /// which is silent byte theft — so the notification waits for this.
+    ///
+    /// A reader that was never started resumes immediately: its thread will
+    /// never close anything, and a caller parked on it would never send its
+    /// detach at all. Idempotent, and safe from any number of callers.
+    func awaitClosed() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            stateLock.lock()
+            if closed || !started {
+                stateLock.unlock()
+                continuation.resume()
+                return
+            }
+            closeWaiters.append(continuation)
+            stateLock.unlock()
+        }
+    }
+
+    /// Announces the close to everyone parked on it. Called from the reader
+    /// thread, once, after `Darwin.close`.
+    private func noteClosed() {
+        stateLock.lock()
+        closed = true
+        let waiters = closeWaiters
+        closeWaiters.removeAll()
+        stateLock.unlock()
+        for waiter in waiters { waiter.resume() }
+    }
+
     func start() {
         precondition(thread == nil, "start called twice")
+        stateLock.lock()
+        started = true
+        stateLock.unlock()
         let thread = Thread { [self] in self.readLoop() }
         thread.name = "holder-reader-\(label)"
         thread.stackSize = 512 * 1024
@@ -199,8 +268,17 @@ final class HolderStreamReader: @unchecked Sendable {
                     Darwin.read(fd, $0.baseAddress, $0.count)
                 }
                 if count > 0 {
-                    if isStopped { break loop }
+                    // Fed FIRST, and the stop is checked after. These bytes
+                    // have been taken off the pty: nobody else will ever see
+                    // them, so dropping them because a stop landed mid-read
+                    // would lose output outright — and on the detach path it
+                    // would lose exactly the output the handback preamble is
+                    // about to be serialized from. One further chunk after a
+                    // stop is bounded and harmless; the sink outlives the
+                    // close by construction (`detachHolderSession` clears it
+                    // only after `awaitClosed()`).
                     onChunk(Data(buffer[0..<count]))
+                    if isStopped { break loop }
                     continue
                 }
                 // 0 is EOF. EIO is what a pty master reports once its last
@@ -213,6 +291,7 @@ final class HolderStreamReader: @unchecked Sendable {
             if revents & POLLHUP != 0 { break }
         }
         Darwin.close(fd)
+        noteClosed()
         logger.info("holder reader exited \(self.label, privacy: .public)")
     }
 }

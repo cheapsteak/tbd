@@ -147,6 +147,11 @@ struct TerminalHolderTransportGateTests {
             }
             try readyOutcome()
         }
+
+        func detach(
+            worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
+            snapshotPreamble: Data
+        ) async throws {}
     }
 
     /// A pipe standing in for the vended pty: the read end goes to the panel's
