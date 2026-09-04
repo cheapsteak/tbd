@@ -712,6 +712,29 @@ jobs:
                 kill -KILL "$pid" 2>/dev/null || true
               done
             fi
+            # The sampled targets were SIGKILLed the moment their stacks were
+            # captured — they are wedged, and the graceful pass below is for the
+            # plumbing that can still clean up after itself — so drop them from
+            # the list before the order is built. Signalling a pid that is
+            # already gone is inert at best and reaches whatever reused the
+            # number at worst.
+            is_target() {
+              local needle="$1" candidate
+              for candidate in $targets; do
+                if [ "$candidate" = "$needle" ]; then
+                  return 0
+                fi
+              done
+              return 1
+            }
+            remaining=""
+            for pid in $kids; do
+              if is_target "$pid"; then
+                continue
+              fi
+              remaining="$remaining $pid"
+            done
+            kids="$remaining"
             # Take the pipeline down within a bounded 30 s instead of leaving
             # `wait` to block until `timeout-minutes` fires — the very outcome
             # this budget exists to avoid. Killing the sampled targets is not
