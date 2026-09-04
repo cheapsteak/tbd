@@ -28,6 +28,13 @@ final class RawPTYPair {
     let ptyFD: Int32
     /// The slave end, held open and unread so the master's queue stays full.
     let sessionEnd: Int32
+    /// Both ends are closed exactly once, and a test may close the session end
+    /// early (`closeSessionEnd()`) to make the master return `EIO`. Without
+    /// these flags the `close()` in a `defer` would close a number the kernel
+    /// has already reissued — and every test target compiles into one process,
+    /// so the new owner would be another suite's socket or file.
+    private var sessionEndIsOpen = true
+    private var ptyIsOpen = true
 
     init() throws {
         let m = posix_openpt(O_RDWR | O_NOCTTY)
@@ -47,6 +54,14 @@ final class RawPTYPair {
         // the dup; a blocking master here would hang the test rather than
         // refuse.
         _ = fcntl(m, F_SETFL, fcntl(m, F_GETFL, 0) | O_NONBLOCK)
+        // And the session end, so a read that finds nothing returns instead of
+        // parking the caller. `drainSessionFully` polls first and would be
+        // fine either way, but `drainAll`/`drainUntil` read until the queue is
+        // empty — on a blocking slave that last read never returns, and on the
+        // main actor it takes the drain notifier's own queue down with it.
+        // Nothing about the 1,022-byte ceiling depends on this flag: it is a
+        // property of the line discipline, not of how the reader waits.
+        _ = fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK)
         ptyFD = m
         sessionEnd = s
     }
@@ -92,8 +107,76 @@ final class RawPTYPair {
         return out
     }
 
-    func close() {
+    /// Reads everything the slave has right now and reports how much that was.
+    ///
+    /// Used to learn *this* kernel's ceiling rather than hard-coding 1,022: the
+    /// number is measured on one arm64 macOS and a test that asserts on it
+    /// turns a kernel change into a red run instead of a finding.
+    @discardableResult
+    func drainAll() -> Int {
+        var total = 0
+        while true {
+            let chunk = drainSession(64 * 1024)
+            if chunk.isEmpty { return total }
+            total += chunk.count
+        }
+    }
+
+    /// Reads the slave until `byteCount` bytes have arrived, yielding the main
+    /// actor between reads so the panel's drain notifier — a `DispatchSource`
+    /// on the main queue — can run and write the next slice.
+    ///
+    /// The yield is the point. A synchronous poll loop on the main actor would
+    /// block the very queue that delivers write-readiness, and the remainder
+    /// would never move; this is why the helper is `async` and `@MainActor`
+    /// rather than a sibling of `drainSessionFully`.
+    ///
+    /// A deadline that passes throws `DrainTimeout` carrying what was expected
+    /// and what actually arrived, so "the remainder never landed" is a named
+    /// failure with the observed prefix length in it rather than a hang.
+    @MainActor
+    func drainUntil(byteCount: Int, within: Duration = .seconds(5)) async throws -> Data {
+        var out = Data()
+        let deadline = ContinuousClock.now.advanced(by: within)
+        while out.count < byteCount {
+            let chunk = drainSession(64 * 1024)
+            if !chunk.isEmpty {
+                out.append(chunk)
+                continue
+            }
+            guard ContinuousClock.now < deadline else {
+                throw DrainTimeout(expected: byteCount, observed: out.count)
+            }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        return out
+    }
+
+    /// Closes the slave and leaves the master open, so every later write to the
+    /// master returns `EIO` — the line discipline's report that the child is
+    /// gone. `close()` stays correct over it.
+    func closeSessionEnd() {
+        guard sessionEndIsOpen else { return }
+        sessionEndIsOpen = false
         Darwin.close(sessionEnd)
+    }
+
+    func close() {
+        closeSessionEnd()
+        guard ptyIsOpen else { return }
+        ptyIsOpen = false
         Darwin.close(ptyFD)
+    }
+}
+
+/// What `drainUntil` throws when the session end never saw the bytes it was
+/// promised. Carries observed against expected, because the count that did
+/// arrive is what tells a truncation from a stall.
+struct DrainTimeout: Error, CustomStringConvertible {
+    let expected: Int
+    let observed: Int
+
+    var description: String {
+        "the session end never received \(expected) bytes; \(observed) arrived"
     }
 }
