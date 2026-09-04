@@ -13,9 +13,21 @@ private let handoverLogger = Logger(subsystem: "com.tbd.daemon", category: "hand
 /// `TBD_HANDOVER_FROM_PID=<pid of the running daemon>`. The successor's
 /// single-instance gate reads the variable exactly once, at startup, and honors
 /// it only when the pid file names a *live* `TBDDaemon` whose pid equals the
-/// value. Any other combination — a stale file, a different live daemon, an
-/// unparsable value — falls back to today's behavior, so a mistyped or
-/// out-of-date variable can never take over a daemon it was not aimed at.
+/// value.
+///
+/// **The script always sets the variable, and sets it to `0` when no daemon is
+/// running.** So `0` is a first-class value meaning "there is nobody to hand
+/// over from", not a malformed one — the script does not have to branch on
+/// whether to export it at all, and this side does not have to tell an absent
+/// variable from a deliberate "none". Unset, empty, `0`, a negative number and
+/// anything unparsable are therefore all the same statement, and none of them
+/// authorises a take-over.
+///
+/// Every other combination falls back to today's behavior — the ordinary
+/// single-instance gate, which starts when no live daemon owns the pid file and
+/// exits when one does. A stale file, a pid that is not a live `TBDDaemon`, a
+/// different live daemon, a mistyped value: none of them can take over a daemon
+/// the variable was not aimed at.
 ///
 /// The variable must not outlive that read: `Daemon.scrubInheritedTBDEnv()`
 /// unsets it before any tmux server is spawned, because a tmux server bakes its
@@ -42,16 +54,42 @@ public enum HandoverDecision: Equatable, Sendable {
         handoverEnv: String?,
         isLiveDaemon: (pid_t) -> Bool
     ) -> HandoverDecision {
+        // Nobody live owns the pid file: start, whatever the variable says. A
+        // stale file was already removed by `PIDFile.cleanupIfStale`, so a
+        // handover aimed at a daemon that died before the successor launched
+        // lands here and is simply an ordinary start.
         guard let existing = pidFileContents, isLiveDaemon(existing) else {
             return .normal
         }
-        guard let raw = handoverEnv?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let requested = pid_t(raw),
-              requested == existing
+        // A live daemon owns the file. Only an explicit, positive, matching pid
+        // that is itself a live daemon may displace it; everything else — unset,
+        // empty, `0` (the script's "no daemon was running"), negative,
+        // unparsable, or a different pid — leaves the ordinary gate to refuse.
+        guard let requested = requestedPredecessor(handoverEnv),
+              requested == existing,
+              isLiveDaemon(requested)
         else {
             return .refuse(existing: existing)
         }
         return .takeOver(predecessor: existing)
+    }
+
+    /// The pid the handover variable names, or `nil` when it names none.
+    ///
+    /// `nil` covers unset, empty, whitespace, unparsable, and every
+    /// non-positive value including the script's `0`. A pid of `0` is not a
+    /// process this daemon could ever be replacing — it addresses the caller's
+    /// own process group — so refusing it here rather than relying on a
+    /// liveness check keeps the "no predecessor" case from depending on what an
+    /// injected `isLiveDaemon` happens to say about pid `0`.
+    static func requestedPredecessor(_ handoverEnv: String?) -> pid_t? {
+        guard let raw = handoverEnv?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let requested = pid_t(raw),
+              requested > 0
+        else {
+            return nil
+        }
+        return requested
     }
 }
 

@@ -91,6 +91,48 @@ struct DaemonHandoverTests {
                 == .refuse(existing: 4242))
     }
 
+    /// `scripts/update.sh` always exports the variable and exports `0` when no
+    /// daemon is running, so `0` means "nobody to hand over from" rather than a
+    /// malformed value. It must behave exactly as an unset variable does: the
+    /// ordinary gate, which starts when the pid file is free and refuses when a
+    /// live daemon owns it.
+    @Test("the script's no-daemon sentinel is an ordinary start")
+    func zeroMeansNoPredecessor() {
+        let sentinels: [String?] = ["0", " 0\n", "-1", "", "   ", "nonsense", "12.5", nil]
+        for sentinel in sentinels {
+            #expect(
+                HandoverDecision.decide(
+                    pidFileContents: nil, handoverEnv: sentinel, isLiveDaemon: { _ in true })
+                    == .normal,
+                "a free pid file must start normally for handover value \(sentinel ?? "nil")")
+            #expect(
+                HandoverDecision.decide(
+                    pidFileContents: 4242, handoverEnv: sentinel, isLiveDaemon: { _ in true })
+                    == .refuse(existing: 4242),
+                "a live daemon must still be refused for handover value \(sentinel ?? "nil")")
+        }
+        #expect(HandoverDecision.requestedPredecessor("0") == nil)
+        #expect(HandoverDecision.requestedPredecessor("4242") == 4242)
+    }
+
+    /// A handover aimed at a daemon that died before the successor launched.
+    /// `PIDFile.cleanupIfStale` has already removed the stale file by the time
+    /// the gate runs, so this is an ordinary start — not a take-over of a
+    /// process that is no longer there.
+    @Test("a handover pid that is no longer a live daemon starts normally")
+    func deadPredecessorStartsNormally() {
+        #expect(
+            HandoverDecision.decide(
+                pidFileContents: nil, handoverEnv: "4242", isLiveDaemon: { _ in false })
+                == .normal)
+        // Belt and braces: even if the stale file survived cleanup, a pid that
+        // is not a live daemon cannot be taken over.
+        #expect(
+            HandoverDecision.decide(
+                pidFileContents: 4242, handoverEnv: "4242", isLiveDaemon: { _ in false })
+                == .normal)
+    }
+
     // MARK: - The retirement
 
     @Test("a predecessor that is already gone is not signalled")
