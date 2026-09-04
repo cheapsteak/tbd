@@ -260,7 +260,6 @@ Sequence, with the app running throughout:
    successor instead **writes its own pid over the file first**, then sends
    the predecessor `SIGTERM`, then waits for the predecessor's pid to exit —
    polling, bounded at 30 s, then `SIGKILL` and one more wait. Only then
-   does it continue its normal start.
    does it continue its normal start. A predecessor that outlives `SIGKILL`
    aborts the start: the successor writes the predecessor's pid back into the
    file (three attempts, 100 ms apart) and exits, and the result says whether
