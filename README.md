@@ -51,6 +51,24 @@ scripts/restart.sh --app    # restart app only
 scripts/restart.sh --quick  # skip build
 ```
 
+## Updating
+
+`tbd update` moves the whole installation to the head of `main`. It builds in a
+dedicated clone under `~/tbd/updates/`, then hands the running daemon over to
+its successor rather than killing it, so tmux sessions survive and anything the
+new daemon's startup reconcile parks anyway is woken a few at a time.
+
+```bash
+tbd version                       # what is running, and whether main has moved
+tbd update                        # build the latest main and hand over
+tbd config set update-mode check  # be told when main moves; act by hand
+```
+
+The daemon can also watch for updates itself, and in `auto` mode run them
+unattended. Both are off by default. See [`docs/updating.md`](docs/updating.md)
+for the modes, the log at `~/tbd/updates/update.log`, and how to get back to a
+previous build.
+
 ## Test
 
 ```bash
