@@ -733,12 +733,17 @@ jobs:
                 kill -KILL "$pid" 2>/dev/null || true
               done
             fi
-            # The sampled targets were SIGKILLed the moment their stacks were
-            # captured — they are wedged, and the graceful pass below is for the
-            # plumbing that can still clean up after itself — so drop them from
-            # the list before the order is built. Signalling a pid that is
+            # Re-walk the tree now that sampling is done. The `$kids` above is
+            # the snapshot taken before the samples were captured, and sampling
+            # several targets takes 20 s or more, so anything the pipeline
+            # spawned in the meantime would never be signalled by the sweep
+            # below. The sampled targets are then dropped from that fresh list:
+            # they were SIGKILLed the moment their stacks were captured, since
+            # they are wedged and the graceful pass below is for the plumbing
+            # that can still clean up after itself. Signalling a pid that is
             # already gone is inert at best and reaches whatever reused the
             # number at worst.
+            kids=$(descendants "$pipeline" || true)
             is_target() {
               local needle="$1" candidate
               for candidate in $targets; do
