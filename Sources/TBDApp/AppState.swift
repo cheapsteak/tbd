@@ -2421,7 +2421,10 @@ final class AppState {
             return nil
         }
         return "Couldn't create worktree \"\(worktree.displayName)\" — the git worktree add failed. " +
-               "See Console (log show --predicate 'subsystem == \"com.tbd.daemon\"') for details."
+               // Absolute path deliberately: `log` is a zsh builtin that eats
+               // the arguments and prints nothing, so the bare command reads
+               // as "there was nothing logged".
+               "See Console (/usr/bin/log show --predicate 'subsystem == \"com.tbd.daemon\"') for details."
     }
 
     /// Apply a Claude session rollover (post-`/clear` / `/compact` / startup)

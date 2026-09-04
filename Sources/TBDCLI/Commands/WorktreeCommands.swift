@@ -180,10 +180,14 @@ struct WorktreeCreate: AsyncParsableCommand {
                 // named nothing, and the two obvious guesses are both wrong:
                 // ~/Library/Logs/TBD/exceptions.log is the app's crash log, and
                 // predicating on TBDApp searches the wrong process entirely.
+                //
+                // The absolute path is load-bearing: `log` is a zsh builtin
+                // that consumes the arguments and prints nothing, so a bare
+                // `log show` reads as "the daemon logged nothing".
                 throw CLIError.invalidArgument("""
                     Worktree creation failed and was rolled back. The daemon logged why:
 
-                      log show --predicate 'subsystem == "com.tbd.daemon"' --last 5m --info
+                      /usr/bin/log show --predicate 'subsystem == "com.tbd.daemon"' --last 5m --info
 
                     (Common cause: the branch already exists and is checked out in \
                     another worktree — git's error names that directory.)

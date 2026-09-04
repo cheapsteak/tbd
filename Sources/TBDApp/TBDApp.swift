@@ -439,6 +439,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct TBDAppMain: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
+    /// Adopt the bundle's `LSEnvironment.PATH` before anything can spawn a child.
+    ///
+    /// **Declaration order is the mechanism.** Swift evaluates a struct's
+    /// stored-property default expressions in source order, so this `setenv`
+    /// runs before the `appState` expression below is even evaluated. That
+    /// initializer does not spawn the daemon itself — it schedules an async
+    /// `Task` that later calls `startDaemonAndConnect()` — and the ordering
+    /// holds through that indirection: `Process` given a nil `environment`
+    /// inherits the live `environ` as it stands at `run()` time, which is long
+    /// after this line. So this property must stay above `appState`; moving it
+    /// down silently reinstates the bug on the launches that need it most
+    /// (LaunchServices relaunching the installed bundle at login without
+    /// applying the key itself). `appDelegate` above only constructs the
+    /// delegate object; its launch callbacks run later still.
+    private let adoptedLaunchPATH: String? = LaunchEnvironment.adoptBundlePATHIfNeeded()
+
     /// `@State`, not `@StateObject`: `AppState` is `@Observable`.
     ///
     /// The swap is not purely notational and was audited rather than assumed.
@@ -483,7 +500,11 @@ struct TBDAppMain: App {
     }
 
     init() {
-        lifecycleLogger.info("TBDApp launching pid=\(getpid(), privacy: .public)")
+        let didAdoptLaunchPATH = adoptedLaunchPATH != nil
+        lifecycleLogger.info("""
+        TBDApp launching pid=\(getpid(), privacy: .public) \
+        adoptedLaunchPATH=\(didAdoptLaunchPATH, privacy: .public)
+        """)
         DiffSyntaxHighlighter.warmUp()
     }
 
