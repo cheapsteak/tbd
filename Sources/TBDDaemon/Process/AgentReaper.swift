@@ -226,36 +226,36 @@ public struct AgentReaper: Sendable {
     ///    and nothing under it is an orphan. A row that never recorded a holder
     ///    pid is a session still being established, and is kept for the same
     ///    reason the reconcilers are keep-biased for young resources.
-    /// 3. **A pid naming nothing is not killed blindly.** `isAlive` false means
-    ///    there is nothing to reap, and the recorded number must never become a
-    ///    signal target on the strength of the row alone.
-    /// 4. **Identity.** The process now holding the pid must have started
-    ///    within `holderIdentityWindow` of the row's `createdAt`, and must
-    ///    present an executable a holder's job could have. An unreadable start
-    ///    time or command line is an uncertain identity and keeps.
+    /// 3. **Identity**, through the shared `ProcessIdentityCheck` — which is
+    ///    also what the app-liveness arbitration consults, so a reused pid is
+    ///    recognized the same way on both paths. A pid naming nothing is not
+    ///    killed blindly; the process now holding it must have started within
+    ///    `holderIdentityWindow` of the row's `createdAt` and must present an
+    ///    executable a holder's job could have; and an unreadable start time or
+    ///    command line is an uncertain identity, which keeps. **Every one of
+    ///    that check's answers except `.same` is a keep here**, and that
+    ///    asymmetry is this leg's alone — the arbitration reads the very same
+    ///    answers in the opposite direction.
     func decideHolderChild(_ record: HolderChildRecord) -> HolderChildDecision {
         guard record.childPID > 1 else { return .keep(reason: "invalid-child-pid") }
         guard let holderPID = record.holderPID, holderPID > 1 else {
             return .keep(reason: "holder-unrecorded")
         }
         guard !signaller.isAlive(holderPID) else { return .keep(reason: "holder-alive") }
-        guard signaller.isAlive(record.childPID) else { return .keep(reason: "child-gone") }
-        guard let started = signaller.startTime(record.childPID) else {
-            return .keep(reason: "start-time-unreadable")
+        switch ProcessIdentityCheck.verify(
+            pid: record.childPID,
+            startedWithin: holderIdentityWindow,
+            of: record.createdAt,
+            executableIsAcceptable: Self.isHolderChildExecutable,
+            signaller: signaller
+        ) {
+        case .notRunning: return .keep(reason: "child-gone")
+        case .startTimeUnreadable: return .keep(reason: "start-time-unreadable")
+        case .startTimeMismatch: return .keep(reason: "start-time-mismatch")
+        case .commandUnreadable: return .keep(reason: "command-unreadable")
+        case .foreignExecutable: return .keep(reason: "foreign-executable")
+        case .same: return .reap
         }
-        guard abs(started.timeIntervalSince(record.createdAt)) <= holderIdentityWindow else {
-            return .keep(reason: "start-time-mismatch")
-        }
-        // Empty counts as unreadable, not as a foreign command. `ps` prints
-        // nothing at all for a pid that vanished between the liveness check
-        // above and this call, and the production reader trims that to "" —
-        // reporting it as a stranger's executable would name the wrong reason
-        // for the right decision.
-        guard let cmd = signaller.commandLine(record.childPID), !cmd.isEmpty else {
-            return .keep(reason: "command-unreadable")
-        }
-        guard Self.isHolderChildExecutable(cmd) else { return .keep(reason: "foreign-executable") }
-        return .reap
     }
 
     /// The holder-transport leg of the sweep

@@ -75,6 +75,15 @@ private final class ConnectionEpochBox: @unchecked Sendable {
 actor FDVendingServer {
     private let logger = Logger(subsystem: "com.tbd.daemon", category: "fdVending")
     private var clientFD: Int32 = -1
+    /// Who was at the other end of `clientFD`, recorded at adopt time.
+    ///
+    /// Recorded rather than looked up on demand for the reason
+    /// `ProcessIdentity.ofPeer` gives: `LOCAL_PEERPID` is a property of the
+    /// **socket**, so once the connection is gone the pid is unrecoverable —
+    /// and the pid alone would not be enough anyway. The start time and command
+    /// line beside it are what let a later liveness check tell this process
+    /// from a stranger that inherited its pid.
+    private var clientIdentity: ProcessIdentity?
     /// Per-connection epoch (see `ConnectionEpochBox`): advanced by every
     /// `adoptConnection`, so a superseded receive thread detects — before each
     /// frame delivery — that a newer connection owns the sinks, and drops out.
@@ -90,6 +99,10 @@ actor FDVendingServer {
     /// is a 450 ms window — the pre-seam behaviour, unchanged.
     private let retryAttempts: Int
     private let retryInterval: Duration
+    /// Reads the identity of the process at the other end of an adopted socket.
+    /// An injection seam: tests adopt `socketpair` ends, whose peer is the test
+    /// process itself.
+    private let peerIdentity: @Sendable (Int32) -> ProcessIdentity?
     /// Delay seam (`docs/specs/2026-07-24-test-hardening-design.md` §5).
     /// Existential, not generic: this is an `actor` carrying `Sendable`
     /// conformances, and a generic parameter would infect its type.
@@ -97,9 +110,13 @@ actor FDVendingServer {
 
     init(retryAttempts: Int = 10,
          retryInterval: Duration = .milliseconds(50),
+         peerIdentity: @escaping @Sendable (Int32) -> ProcessIdentity? = {
+             ProcessIdentity.ofPeer(onSocket: $0, signaller: ProductionProcessSignaller())
+         },
          clock: any Clock<Duration> = ContinuousClock()) {
         self.retryAttempts = retryAttempts
         self.retryInterval = retryInterval
+        self.peerIdentity = peerIdentity
         self.clock = clock
     }
 
@@ -124,6 +141,21 @@ actor FDVendingServer {
     /// directly (see `HolderInjectionCourier`).
     var onInjectionAck: (@Sendable (SidecarInjectionAck) -> Void)?
 
+    /// Sink for "the app's connection went away", carrying the identity
+    /// recorded for it at adopt time (nil when the peer could not be
+    /// identified).
+    ///
+    /// **A disconnect is not a death**, and this sink must not be read as one:
+    /// the app reconnects, so the drop is only the prompt to ask whether that
+    /// process is still there. `SidecarDisconnectArbiter` is what answers, and
+    /// only its verdict licenses taking any pty back.
+    ///
+    /// Fired only for the connection that was still current when its receive
+    /// loop exited. A **superseded** connection's exit is the ordinary shape of
+    /// a reconnect — `adoptConnection` shut it down itself — and arbitrating on
+    /// it would ask whether an app that has just connected again is alive.
+    var onClientDisconnect: (@Sendable (ProcessIdentity?) -> Void)?
+
     /// Test seam: invoked from `receiveLoopExited` (on the actor) AFTER `clientFD`
     /// is cleared and the fd closed, so once it fires the stale fd is fully gone —
     /// tests can await deterministic post-cleanup state instead of sleeping.
@@ -146,6 +178,12 @@ actor FDVendingServer {
     /// at adopt time.
     func setOnInjectionAck(_ handler: (@Sendable (SidecarInjectionAck) -> Void)?) {
         onInjectionAck = handler
+    }
+
+    /// Install the disconnect sink (see `onClientDisconnect`). Like the other
+    /// sinks, install it before `listen`/`adoptConnection`.
+    func setOnClientDisconnect(_ handler: (@Sendable (ProcessIdentity?) -> Void)?) {
+        onClientDisconnect = handler
     }
 
     /// Install the receive-loop-exit test hook (see `onReceiveLoopExit`).
@@ -218,6 +256,9 @@ actor FDVendingServer {
             clientFD = -1
         }
         clientFD = fd
+        // Read here, while the socket exists: `LOCAL_PEERPID` is a property of
+        // the connection, so after it closes there is nothing left to ask.
+        clientIdentity = peerIdentity(fd)
         // The old reader will later call `receiveLoopExited(oldFD)`; its
         // `clientFD == fd` guard ensures that stale signal does NOT clear this
         // freshly-adopted `clientFD` (different fd number). Advancing the epoch
@@ -236,18 +277,34 @@ actor FDVendingServer {
     /// closing here is safe. Clearing `clientFD` first is what stops a later
     /// `send()` from writing a vend frame into a recycled fd number.
     func receiveLoopExited(fd: Int32) {
-        if clientFD == fd { clientFD = -1 }   // guard: a newer adopt may own a different fd now
+        // A newer adopt may own a different fd now, in which case this thread
+        // belongs to a superseded connection: its exit is a reconnect's
+        // ordinary teardown, not the app going away, and the identity in
+        // `clientIdentity` belongs to the connection that replaced it.
+        let wasCurrent = clientFD == fd
+        var departed: ProcessIdentity?
+        if wasCurrent {
+            clientFD = -1
+            departed = clientIdentity
+            clientIdentity = nil
+        }
         Darwin.close(fd)
+        if wasCurrent { onClientDisconnect?(departed) }
         onReceiveLoopExit?()
     }
 
     /// Close the current client connection (if any) without stopping the
     /// listener. Signals the reader, which performs the actual `close()`.
+    /// Deliberately does **not** fire `onClientDisconnect`: this is the daemon
+    /// dropping the app, not the app going away, and its only caller is `stop`.
+    /// Clearing `clientFD` here also means the woken reader sees itself as
+    /// superseded and stays quiet too.
     func disconnect() {
         if clientFD >= 0 {
             shutdown(clientFD, SHUT_RDWR)
             clientFD = -1
         }
+        clientIdentity = nil
     }
 
     /// Stop the listener and drop any active client. Idempotent. Closing the

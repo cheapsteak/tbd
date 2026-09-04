@@ -222,7 +222,12 @@ struct HolderDetachHandbackTests {
 
 /// A live holder, a registry that has adopted it, and everything needed to play
 /// a viewer against it.
-private struct HandbackFixture {
+///
+/// Internal rather than file-private because `HolderAppDeathSeizureTests` plays
+/// the *uncooperative* half of this same choreography against it — an app that
+/// died still holding the pty — and a second copy of a fixture that spawns real
+/// holders is a second thing to keep correct.
+struct HandbackFixture {
     let process: HolderProcessFixture
     let registry: HolderRegistry
     let reader: HolderReader
@@ -280,7 +285,7 @@ private struct HandbackFixture {
 
 /// The viewer's side of an attach: the descriptor it reads, the generation that
 /// names it, and the terminal it paints into.
-private final class Viewer {
+final class Viewer {
     let ptyFD: Int32
     let generation: UInt64
     let terminal: ViewerTerminal
@@ -309,7 +314,7 @@ private final class Viewer {
 /// allows and a `TerminalView` does not: a view hops every reply through
 /// `onMain`. That difference is why the app carries `RecordedModeReplies` and a
 /// main-queue turn, and it is the one thing this stand-in does not model.
-private final class ViewerTerminal {
+final class ViewerTerminal {
     private let terminal: SwiftTerm.Terminal
     private let delegate = CollectingDelegate()
 

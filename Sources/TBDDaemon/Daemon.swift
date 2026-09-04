@@ -1228,6 +1228,28 @@ public final class Daemon: Sendable {
             }
         }
 
+        // The app's sidecar going away, arbitrated rather than acted on.
+        // **A disconnect is not a death**: the sidecar reconnects, so a socket
+        // drop can leave the app alive, holding its `dup`s and still reading
+        // them, and seizing then is the double-reader corruption this transport
+        // exists to prevent. `SidecarDisconnectArbiter` re-verifies the pid the
+        // connection was adopted under — start time and executable included,
+        // through the same `ProcessIdentityCheck` the reaper's holder leg uses
+        // before it signals anything — and only a confirmed death reverts the
+        // sessions that app was holding to daemon-read.
+        //
+        // Installed with the other sinks, before the sidecar listens, because a
+        // connection captures them at adopt time. Dispatched into a `Task`: the
+        // sink runs on the vending actor and the verdict shells out to `ps`.
+        if let holderRegistry {
+            let arbiter = SidecarDisconnectArbiter(
+                liveness: AppLivenessArbiter(signaller: ProductionProcessSignaller()),
+                reclaim: { await holderRegistry.reclaimSessionsFromADeadApp() })
+            await fdVendingServer.setOnClientDisconnect { identity in
+                Task { await arbiter.handleDisconnect(identity: identity) }
+            }
+        }
+
         // 9b. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the
         // app). Failure is non-fatal: control-mode attaches will fail and the
         // app falls back to grouped sessions.

@@ -1349,6 +1349,31 @@ actor HolderRegistry {
     /// Generation-checked. A stale ack — a superseded viewer's, or a duplicate
     /// — is refused rather than allowed to release a reader a live attach is
     /// relying on.
+    ///
+    /// **A refused ack records no claim, and that is examined rather than
+    /// assumed.** The viewer sending one has the descriptor, so a refusal that
+    /// clears the pending entry without recording a claim would leave a pty
+    /// nothing in this registry accounts for — R15's family, and the reason it
+    /// was handed to the app-death arbitration to rule on. The ruling is that
+    /// neither arm needs one:
+    ///
+    /// - The **second** guard (the slot no longer holds this attach's reader)
+    ///   is unreachable. Every writer of `slots` that can change the reader
+    ///   under a live pending entry clears `pendingAttaches` first (`release`),
+    ///   and the two that would install a different reader refuse outright
+    ///   while a pending entry exists (`adopt`, `beginAttach`).
+    /// - The **first** guard (the pending entry is already gone) is reachable
+    ///   only through a clearer that has itself settled the question:
+    ///   `cancelPendingAttach(.unacknowledged)` records the claim,
+    ///   `.descriptorNeverDelivered` is by definition an attach whose
+    ///   descriptor never left this process, and `release` is tearing the
+    ///   session down — where a claim would be the brick `release`'s own
+    ///   comment exists to prevent, refusing every later adoption of a session
+    ///   that is going away.
+    ///
+    /// So the state is bounded by who *clears*, not by what this method
+    /// records, and adding a claim here would brick sessions rather than
+    /// protect them.
     func confirmAttach(terminalID: UUID, generation: UInt64) async throws {
         guard let pending = pendingAttaches[terminalID], pending.generation == generation else {
             throw Error.attachSuperseded(terminalID: terminalID, generation: generation)
@@ -1409,9 +1434,8 @@ actor HolderRegistry {
     /// other arm deliberately leaves the session unread: that is the fail-closed
     /// direction, and it is not free, because a job that exits with unread
     /// output cannot finish exiting. Resuming is licensed by evidence that the
-    /// viewer is gone — an app-liveness verdict this registry does not yet
-    /// take — so for now an unacknowledged attach is logged loudly and left for
-    /// that arbitration.
+    /// viewer is gone — either its own detach (`acceptHandback`) or an
+    /// app-liveness verdict (`seizeFromDeadApp`), and by nothing weaker.
     func cancelPendingAttach(
         terminalID: UUID, generation: UInt64, reason: AttachCancelReason
     ) async {
@@ -1472,8 +1496,8 @@ actor HolderRegistry {
             //
             // Refusing to read the pty while cheerfully duplicating it for
             // somebody else would be the same evidence answered two ways.
-            // Task 13's app-liveness verdict is what clears this, which is the
-            // gate the design spec names for app death.
+            // What clears it is the viewer's own detach, or the app-liveness
+            // verdict the design spec names for app death — `seizeFromDeadApp`.
             // Recorded before the claim is dropped, so the two hand off with
             // nothing between them — not even a synchronous instant in which
             // both maps are empty.
@@ -1485,7 +1509,7 @@ actor HolderRegistry {
                 \(terminalID.uuidString, privacy: .public) was never acknowledged. Its viewer has \
                 the pty and may be reading it, so the daemon stays off that descriptor and hands \
                 out no other: nothing is draining this session, and a job that exits now cannot \
-                finish exiting until an app-liveness verdict releases it
+                finish exiting until that viewer detaches or is confirmed gone
                 """)
         }
     }
@@ -1576,10 +1600,31 @@ actor HolderRegistry {
     func acceptHandback(
         terminal: Terminal, generation: UInt64, preamble: Data
     ) async throws {
-        let terminalID = terminal.id
         guard terminal.transport == .holder else {
-            throw Error.notAHolderSession(terminalID: terminalID)
+            throw Error.notAHolderSession(terminalID: terminal.id)
         }
+        try await takeBackFromViewer(
+            terminalID: terminal.id, generation: generation, preamble: preamble)
+    }
+
+    /// Takes a session back from a viewer, with or without the viewer's help.
+    ///
+    /// One implementation, two callers, because the two differ in exactly one
+    /// respect and share every hazard: `acceptHandback` arrives with the
+    /// viewer's screen and `seizeFromDeadApp` arrives with nothing, and
+    /// `preamble == nil` is that difference. Everything else — the generation
+    /// check, the two arms, the claim held across the resume and dropped on the
+    /// failure path, the jiggle after the resume — is identical, and a second
+    /// copy of it would be a second place for the single-reader invariant to
+    /// rot.
+    ///
+    /// With no preamble there is simply nothing to ingest: the suspended reader
+    /// still holds the screen it had before the attach, a fresh adoption seeds
+    /// from the holder's hand-over as any adoption does, and the jiggle is what
+    /// gets a repainting program to redraw the rest.
+    private func takeBackFromViewer(
+        terminalID: UUID, generation: UInt64, preamble: Data?
+    ) async throws {
         guard viewerAttachments[terminalID] == generation else {
             throw Error.handbackSuperseded(terminalID: terminalID, generation: generation)
         }
@@ -1591,11 +1636,12 @@ actor HolderRegistry {
                 // The unacknowledged-attach arm. The reader never left the
                 // descriptor, so the screen goes in before the drain restarts
                 // and the resume is a restart of its thread.
-                await suspended.ingest(preamble: preamble)
+                if let preamble { await suspended.ingest(preamble: preamble) }
                 try await suspended.resumeDraining()
                 reader = suspended
             case nil:
-                reader = try await beginAdoption(of: terminalID, seedingScreenWith: preamble)
+                reader = try await beginAdoption(
+                    of: terminalID, seedingScreenWith: preamble ?? Data())
             case .adopting, .releasing:
                 // Unreachable while the claim above stands — `adopt` and
                 // `release` are the only writers of those states and the first
@@ -1637,10 +1683,78 @@ actor HolderRegistry {
         Self.logger.info(
             """
             attach \(generation, privacy: .public) for session \
-            \(terminalID.uuidString, privacy: .public) was handed back: the viewer's descriptor is \
-            closed, the daemon is draining the pty again and its screen carries the \
-            \(preamble.count, privacy: .public) bytes the viewer handed over
+            \(terminalID.uuidString, privacy: .public) was taken back from its viewer; the daemon \
+            is draining the pty again and its screen carries the \
+            \(preamble?.count ?? 0, privacy: .public) bytes the viewer handed over
             """)
+    }
+
+    // MARK: - Taking a session back from an app that died
+
+    /// Takes one session back from a viewer that is **confirmed gone**.
+    ///
+    /// The uncooperative mirror of `acceptHandback`, and the reason a crashed
+    /// app does not brick every session it had open. Where the handback is
+    /// licensed by the viewer's own detach — which proves it closed its
+    /// descriptor first — this is licensed by an app-liveness verdict reached
+    /// from the recorded pid, its start time and its executable
+    /// (`AppLivenessArbiter`). A dead process closes its descriptors as it
+    /// dies, so the same thing the detach proves is true here; nothing else in
+    /// the take-back changes.
+    ///
+    /// **Nothing in this registry establishes the death.** It is a caller's
+    /// verdict, and calling this on a live app's session is exactly the
+    /// double-reader corruption the transport exists to prevent — which is why
+    /// the arbitration is a separate, testable type rather than something this
+    /// method could be tempted to do for itself.
+    ///
+    /// Generation-checked, and that matters more here than on the handback, not
+    /// less: the arbitration is asynchronous, so a verdict about a dead app can
+    /// land after a live one has attached the same session.
+    func seizeFromDeadApp(terminalID: UUID, generation: UInt64) async throws {
+        try await takeBackFromViewer(
+            terminalID: terminalID, generation: generation, preamble: nil)
+    }
+
+    /// Reverts every session a confirmed-dead app was holding to daemon-read,
+    /// and answers with the ones it took back.
+    ///
+    /// The claims are snapshotted before the loop because each take-back
+    /// suspends, and `viewerAttachments` is written across every one of those
+    /// suspensions; iterating the live map would be iterating a collection that
+    /// mutates under it. The generation snapshotted with each session is what
+    /// makes a stale entry harmless — `takeBackFromViewer` refuses any claim
+    /// that has moved on since, so a session re-attached by a *new* app while
+    /// this loop ran is left to that app.
+    ///
+    /// A take-back that fails is logged and skipped rather than aborting the
+    /// pass: the sessions are independent, and one unreachable holder must not
+    /// strand every other session the dead app was holding. It drops its claim
+    /// on the way out regardless, so nothing stays bricked either way.
+    @discardableResult
+    func reclaimSessionsFromADeadApp() async -> [UUID] {
+        let claims = viewerAttachments
+        guard !claims.isEmpty else { return [] }
+        Self.logger.info(
+            """
+            an app that held \(claims.count, privacy: .public) session(s) is confirmed gone; \
+            taking them back
+            """)
+        var reclaimed: [UUID] = []
+        for (terminalID, generation) in claims {
+            do {
+                try await seizeFromDeadApp(terminalID: terminalID, generation: generation)
+                reclaimed.append(terminalID)
+            } catch {
+                Self.logger.error(
+                    """
+                    could not take session \(terminalID.uuidString, privacy: .public) back from a \
+                    dead app's attach \(generation, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+            }
+        }
+        return reclaimed
     }
 
     // MARK: - Reclaiming a finished session
