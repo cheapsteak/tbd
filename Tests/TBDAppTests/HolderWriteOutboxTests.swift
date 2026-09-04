@@ -163,6 +163,40 @@ struct HolderWriteOutboxTests {
             """)
     }
 
+    // MARK: - Teardown with a remainder outstanding
+
+    // What this test cannot reach: that a readiness callback is *impossible*
+    // after cancellation. That is a property of one serial queue, not of this
+    // code — a test could only observe that it did not happen on this run,
+    // which is true of a racy implementation too. Driving `drain()` by hand
+    // after the teardown is the closest observable: it proves the queue is
+    // inert, which is the half that is ours.
+    @MainActor
+    @Test("a teardown with a remainder outstanding drops it, logs the count, and cannot fire after")
+    func teardownWithARemainderDropsAndLogs() async throws {
+        let panel = try await makeHolderPanel()
+        // `tearDown()` is still deferred: `cleanup()` and `close()` are both
+        // idempotent, and the deferred call is what removes the isolated
+        // defaults suite whatever this test does to the panel.
+        defer { panel.tearDown() }
+        let queue = panel.coordinator.outgoingQueueForTesting
+        panel.pty.fillPTY()
+        panel.coordinator.send(
+            source: panel.view, data: [UInt8](Data(repeating: 0x61, count: 4_096))[...])
+        #expect(queue.pendingByteCountForTesting > 0,
+                "the fixture must actually produce a remainder, or this test is vacuous")
+
+        panel.coordinator.cleanup()
+
+        #expect(queue.pendingByteCountForTesting == 0)
+        #expect(queue.outboxDropLogsForTesting == 1,
+                "a person who closes a tab mid-stall loses the tail of their paste — logged, never silent")
+        // The descriptor is closed; a drain that ran now would write to a
+        // reissued fd number. Drive one deliberately and require it to be inert.
+        queue.drain()
+        #expect(queue.pendingByteCountForTesting == 0)
+    }
+
     // MARK: - The fixture
 
     /// The panel wired the way production wires one, attached to a real pty

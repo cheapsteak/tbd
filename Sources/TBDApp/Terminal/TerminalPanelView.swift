@@ -985,6 +985,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// descriptor, not to the view. `shutdown()` is idempotent, and
         /// `cleanup()` keeps its own call for panels that never had a holder.
         ///
+        /// **A remainder outstanding here is dropped, and that is a decision.**
+        /// The handback carries the screen, not unwritten input, so a person who
+        /// closes a tab while their paste is still draining into a stalled child
+        /// loses its tail — logged with the byte count, never silently. One
+        /// hazard is named rather than solved: if the dropped remainder held a
+        /// paste's end marker, the child is left mid-paste after the handback,
+        /// and a later injection can be absorbed into it. Keeping a writer alive
+        /// past the handback to land a pending marker is possible and is
+        /// deliberately not done — it puts new state into the most delicate
+        /// teardown in this file for a case that needs a large paste, a stalled
+        /// child and a close inside the stall at once.
+        ///
         /// The view holder is deliberately **not** cleared here: on the detach
         /// path the reader's last chunk is exactly the output the handback
         /// preamble is serialized from, so the sink has to outlive the stop.
