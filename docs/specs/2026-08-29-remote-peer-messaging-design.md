@@ -355,12 +355,20 @@ a session that has moved on, and would grow an ack layer the local channel does
 not have.
 
 **Link-down means the listener is closed and unlinked, not that it stops
-answering.** A listening socket cannot decline: `connect()` succeeds while the
-listener exists, and the protocol is connect-write-close with no handshake, so a
-bound socket always reports success to the sender. ECONNREFUSED is what makes a
-sender see the same failure as a dead local session and what makes the
+answering.** The protocol is connect-write-close with no handshake, so while the
+listener exists and has room in its accept queue a bound socket reports success
+to the sender and there is no way to decline a frame. ECONNREFUSED is what makes
+a sender see the same failure as a dead local session and what makes the
 `ListAgents` probe delist the row. Both halves **MUST** close and unlink on link
 loss.
+
+**A saturated listener refuses, and that frame is dropped.** On darwin the
+accept queue's limit is exactly the backlog passed to `listen(2)`, and a
+`connect()` that arrives with the queue full returns ECONNREFUSED immediately
+rather than blocking (measured). So a peer that is momentarily behind loses the
+frame aimed at it, indistinguishably from a peer that is gone. That is accepted:
+it is the same clean, unbuffered failure this section already specifies, and a
+retry layer would be the mailbox this design rejects.
 
 **The in-flight window is accepted, not solved.** A frame accepted by a shadow
 socket whose link dies before handoff is lost after the sender saw success. The
@@ -472,7 +480,8 @@ recorded:
 - helper processes with no bridged session behind them
 - shadow records with no live helper, including the **recycled-pid ghost** that
   Claude Code's reaper provably will not collect
-- socket files TBD created with nothing listening
+- socket files TBD created, at a pid that no longer exists, that refuse a
+  connect
 - records TBD published under a previous daemon generation
 
 It **MUST NOT** reclaim by inference — never "any socket with nothing
@@ -499,6 +508,32 @@ indistinguishable from any other session's by construction, since TBD puts no
 marker inside one, which is the reason the whitelist exists at all. The soak
 criterion — no ghost record outliving its daemon — is the field check that would
 surface it happening.
+
+**A refused connect is not proof that a socket is unowned, so the pid gates the
+unlink.** Since a saturated listener refuses exactly as an empty path does, the
+connect cannot distinguish "TBD's dead helper left this file" from "a live
+session is behind it and busy". The pid can: a Claude Code session and TBD's
+helper each bind exactly one socket, named after their own pid, so the only
+process that may legitimately be listening at `<pid>.sock` is the one holding
+that pid. Three rules follow, and they are what the reconciler implements:
+
+- Once the recorded pid is provably gone the socket is probed, whoever wrote the
+  record beside it, and unlinked if the connect refuses. A record left behind by
+  a pid's later owner says who wrote that file; it says nothing about a socket
+  whose only possible listener has since exited, so it must not stop the probe —
+  answering "foreign" there would retire the row and strand the socket with
+  nothing left able to recognise it.
+- A socket at a pid that is alive but is not TBD's helper is never probed. Its
+  row is **deferred**, not retired — the row is the only record naming that
+  file, so the sweep that finds the pid gone is what reclaims it.
+- A socket at a **live** pid whose sibling record carries a session id TBD never
+  published is never touched at all, and its row retires: that record is proof
+  the pid was recycled and that the socket belongs to the live session that
+  wrote it, so nothing of TBD's remains for the row to name.
+
+Retrying the probe is not a substitute for the pid gate. It narrows the window
+in which a busy listener looks empty and cannot close it, and a listener whose
+accept loop is wedged refuses every attempt for as long as it lives.
 
 Detection is the half that has historically been missing: every unbounded leak
 in this repo's history went unnoticed because nothing counted it. So each sweep

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import GRDB
 import Testing
@@ -116,10 +117,13 @@ private struct FakeProbe: ShadowPeerSocketProbing {
 /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Reclamation and
 /// detection").
 ///
-/// Tier 1: no process is signalled, no socket is bound, and every path the
-/// sweep touches is one the test itself planted under the process temp
-/// directory. The registry the real thing sweeps is shared with every Claude
-/// Code session on the machine, which is exactly why nothing here goes near it.
+/// Tier 1: no process is signalled, and every path the sweep touches is one the
+/// test itself planted and removes. Most tests plant plain files under the
+/// process temp directory; the two that drive the real probe bind their own
+/// listeners, in a directory created directly under `/tmp` so the socket path
+/// fits inside `sun_path`. The registry the real thing sweeps is shared with
+/// every Claude Code session on the machine, which is exactly why nothing here
+/// goes near it.
 @Suite("ShadowPeerReconciler")
 struct ShadowPeerReconcilerTests {
 
@@ -138,6 +142,15 @@ struct ShadowPeerReconcilerTests {
             .appendingPathComponent("tbd-shadow-peer-reconciler-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    /// A scratch directory **directly under `/tmp`**, for the tests that bind a
+    /// real socket. `sockaddr_un.sun_path` is about 104 bytes on darwin and the
+    /// per-process temporary directory spends most of that on its own, so a
+    /// real probe pointed into `makeScratchDirectory()` would answer
+    /// `.inconclusive` without ever connecting — a green run measuring nothing.
+    private static func makeShortScratchDirectory() throws -> URL {
+        try UnixSocketTestListener.makeShortScratchDirectory(prefix: "tbd-shadow")
     }
 
     private struct PlantedShadow {
@@ -233,7 +246,7 @@ struct ShadowPeerReconcilerTests {
         store: ShadowPeerArtifactStore,
         bridge: FakeBridge,
         signaller: FakeSignaller,
-        probe: FakeProbe = FakeProbe(),
+        probe: any ShadowPeerSocketProbing = FakeProbe(),
         procStarts: [pid_t: String] = [:]
     ) -> ShadowPeerReconciler {
         ShadowPeerReconciler(
@@ -369,10 +382,17 @@ struct ShadowPeerReconcilerTests {
     /// checks pid liveness and nothing else, so a record whose pid has been
     /// reused by an unrelated process survives it forever.
     ///
-    /// The artifacts are reclaimed and **the pid is never signalled** — it now
-    /// belongs to somebody else's process, and killing it would be the worst
-    /// thing this sweep could do.
-    @Test func aRecycledPIDGhostIsReclaimedWithoutEverSignallingThatPID() async throws {
+    /// **Neither the pid nor the socket named after it is touched while it
+    /// lives.** The pid belongs to somebody else's process, and killing it
+    /// would be the worst thing this sweep could do. The socket is the same
+    /// argument one step further out: a session binds exactly one socket, named
+    /// after its own pid, so a file at `<pid>.sock` while that pid is alive can
+    /// only have been bound by whoever holds it — and a connect cannot tell a
+    /// listener whose accept queue is momentarily full from a path nobody is
+    /// behind. Only the record carries proof of its own author, so only the
+    /// record is reclaimed here. The row is **deferred**, not retired: it is
+    /// the only entry naming a file a later sweep may still have to collect.
+    @Test func aRecycledPIDsSocketIsLeftAloneAndItsRowDeferredWhileThePIDLives() async throws {
         let directory = try Self.makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let db = try TBDDatabase(inMemory: true)
@@ -400,10 +420,136 @@ struct ShadowPeerReconcilerTests {
         #expect(signaller.groupSignalled.isEmpty)
         #expect(signaller.isAlive(950), "the stranger holding the recycled pid must still be running")
 
+        // The record proved itself TBD's, so it goes.
         #expect(result.recordsUnlinked == 1)
-        #expect(result.socketsUnlinked == 1)
         #expect(!Self.exists(ghost.recordPath))
+
+        // The socket proved nothing, so it stays — and so does the row.
+        #expect(result.socketsUnlinked == 0)
+        #expect(Self.exists(ghost.socketPath),
+                "a socket at a live stranger's pid must never be unlinked on a refused connect")
+        #expect(result.deferred == 1)
+        #expect(result.rowsForgotten == 0)
+        let remaining = try await store.all().map(\.pid)
+        #expect(remaining == [950], "the row is the only entry naming that socket; it must survive")
+    }
+
+    /// The other half of that deferral, and this resource's answer to "who
+    /// reclaims the orphan": the sweep that finds the pid gone. The socket the
+    /// pass above refused to judge is reclaimed here, and the row that kept it
+    /// findable retires with it — so deferring leaks nothing, it waits.
+    @Test func theSweepThatFindsTheRecycledPIDGoneReclaimsTheSocketItDeferred() async throws {
+        let directory = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let db = try TBDDatabase(inMemory: true)
+        let store = db.shadowPeerArtifacts
+
+        let ghost = try await Self.plant(
+            directory: directory, store: store, pid: 950, handle: "remote-recycled")
+        let bridge = FakeBridge(inventories: [
+            ShadowPeerBridgeInventory(provider: "cloud", pidsByHandle: [:]),
+        ])
+
+        let firstPass = await Self.makeReconciler(
+            store: store, bridge: bridge, signaller: FakeSignaller(alive: [950]),
+            procStarts: [950: "Sun Aug 30 09:15:02 2026"]
+        ).sweep()
+        #expect(firstPass.deferred == 1)
+        #expect(Self.exists(ghost.socketPath))
+
+        // The stranger exits. Nothing else about the row has changed.
+        let secondPass = await Self.makeReconciler(
+            store: store, bridge: bridge, signaller: FakeSignaller(alive: [])
+        ).sweep()
+
+        #expect(secondPass.socketsUnlinked == 1)
         #expect(!Self.exists(ghost.socketPath))
+        #expect(secondPass.rowsForgotten == 1)
+        let remaining = try await store.all()
+        #expect(remaining.isEmpty)
+    }
+
+    /// **The exact case the pid gate exists for, driven through the real
+    /// probe.** A row whose pid was recycled, whose socket path now carries a
+    /// live listener whose accept queue happens to be full.
+    ///
+    /// On darwin that listener refuses the connect, indistinguishably from a
+    /// path nobody is behind — the test asserts the refusal before sweeping, so
+    /// it cannot pass for the wrong reason. The socket directory this feature
+    /// really uses is shared with every Claude Code session on the machine, so
+    /// unlinking on that refusal deletes a running session's socket out from
+    /// under it and leaves it silently unaddressable for the rest of its life,
+    /// while the next sweep reads the path as absent and retires the row
+    /// cleanly. Nothing about it is visible afterwards, which is why it is
+    /// pinned here.
+    @Test func aSaturatedListenerAtARecycledPIDSurvivesTheRealProbe() async throws {
+        let directory = try Self.makeShortScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let db = try TBDDatabase(inMemory: true)
+        let store = db.shadowPeerArtifacts
+
+        let ghost = try await Self.plant(
+            directory: directory, store: store, pid: 952, handle: "remote-saturated",
+            writeSocket: false)
+        let listener = try UnixSocketTestListener.bindListener(at: ghost.socketPath, backlog: 1)
+        defer { Darwin.close(listener) }
+        let queued = try UnixSocketTestListener.connectAndHold(to: ghost.socketPath)
+        defer { Darwin.close(queued) }
+        #expect(
+            UnixSocketShadowPeerProbe().listenerState(atPath: ghost.socketPath) == .refused,
+            "the premise of this test is that a live saturated listener does refuse")
+
+        let signaller = FakeSignaller(alive: [952])
+        let bridge = FakeBridge(inventories: [
+            ShadowPeerBridgeInventory(provider: "cloud", pidsByHandle: [:]),
+        ])
+        let reconciler = Self.makeReconciler(
+            store: store, bridge: bridge, signaller: signaller,
+            probe: UnixSocketShadowPeerProbe(),
+            procStarts: [952: "Sun Aug 30 09:15:02 2026"])
+
+        let result = await reconciler.sweep()
+
+        #expect(result.socketsUnlinked == 0)
+        #expect(Self.exists(ghost.socketPath),
+                "a live session's socket was unlinked because its accept queue was momentarily full")
+        #expect(result.deferred == 1)
+        #expect(result.rowsForgotten == 0)
+        let remaining = try await store.all().map(\.pid)
+        #expect(remaining == [952])
+    }
+
+    /// The real probe's happy path, so the gate above is not the only thing
+    /// this file drives a socket through: a pid that is provably gone, and a
+    /// file its listener left behind when it closed. Closing a Unix listener
+    /// never unlinks its socket file, which is precisely why this orphan needs
+    /// a reconciler.
+    @Test func aClosedListenersFileAtADeadPIDIsUnlinkedByTheRealProbe() async throws {
+        let directory = try Self.makeShortScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let db = try TBDDatabase(inMemory: true)
+        let store = db.shadowPeerArtifacts
+
+        let ghost = try await Self.plant(
+            directory: directory, store: store, pid: 953, handle: "remote-closed",
+            writeSocket: false)
+        let listener = try UnixSocketTestListener.bindListener(at: ghost.socketPath, backlog: 8)
+        Darwin.close(listener)
+        #expect(Self.exists(ghost.socketPath))
+
+        let signaller = FakeSignaller(alive: [])
+        let bridge = FakeBridge(inventories: [
+            ShadowPeerBridgeInventory(provider: "cloud", pidsByHandle: [:]),
+        ])
+        let reconciler = Self.makeReconciler(
+            store: store, bridge: bridge, signaller: signaller,
+            probe: UnixSocketShadowPeerProbe())
+
+        let result = await reconciler.sweep()
+
+        #expect(result.socketsUnlinked == 1)
+        #expect(!Self.exists(ghost.socketPath))
+        #expect(result.rowsForgotten == 1)
         let remaining = try await store.all()
         #expect(remaining.isEmpty)
     }
@@ -412,6 +558,13 @@ struct ShadowPeerReconcilerTests {
     /// rather than unlinked on the strength of its path: the pid's new owner is
     /// a real Claude Code session, which has written **its own** record at
     /// exactly `<pid>.json`. Unlinking that would delist a live teammate.
+    ///
+    /// That record is also proof about the socket beside it. A session binds
+    /// one socket, named after its own pid, so a record at `<pid>.json` written
+    /// by somebody else says who bound `<pid>.sock` too — and the sweep does
+    /// not probe it at all. Both artifacts are counted as foreign and left
+    /// where they are, and the row retires because nothing of TBD's remains for
+    /// it to name.
     @Test func aRecordARecycledPIDsNewOwnerWroteIsLeftOnDisk() async throws {
         let directory = try Self.makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -433,13 +586,66 @@ struct ShadowPeerReconcilerTests {
         let result = await reconciler.sweep()
 
         #expect(result.recordsUnlinked == 0)
-        #expect(result.foreignArtifactsLeftAlone == 1)
+        #expect(result.socketsUnlinked == 0)
+        #expect(result.foreignArtifactsLeftAlone == 2,
+                "the record and the socket beside it are both somebody else's")
         #expect(Self.exists(ghost.recordPath), "a record TBD did not publish must never be unlinked")
+        #expect(Self.exists(ghost.socketPath),
+                "a socket beside a record somebody else wrote was bound by that somebody else")
         #expect(signaller.terminated.isEmpty)
         // Nothing is left to recognise, so the row retires rather than naming a
         // stranger's file forever.
         let remaining = try await store.all()
         #expect(remaining.isEmpty)
+    }
+
+    /// The record that vouches for a socket stops vouching once the pid dies,
+    /// and this is the sweep that has to notice.
+    ///
+    /// The sequence is one TBD can produce on its own: TBD's helper at pid N is
+    /// `SIGKILL`ed and leaves `N.sock` behind, the kernel hands N to a real
+    /// Claude Code session that writes its own `N.json`, and that session then
+    /// exits too. What is left is a stranger's record — never TBD's to unlink —
+    /// beside a socket that is TBD's own orphan. Reading the record as proof
+    /// about the socket here would leave the file on disk *and* retire the row
+    /// that names it, which is a leak nothing can recognise afterwards. With
+    /// the pid gone, no process can legitimately be listening at a path named
+    /// after it, so the socket is probed and reclaimed on the refusal.
+    @Test func aDeadPIDsSocketIsReclaimedEvenBesideAStrangersRecord() async throws {
+        let directory = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let db = try TBDDatabase(inMemory: true)
+        let store = db.shadowPeerArtifacts
+
+        let ghost = try await Self.plant(
+            directory: directory, store: store, pid: 954, handle: "remote-recycled-and-gone",
+            sessionID: "ours", recordSessionID: "someone-elses")
+
+        let signaller = FakeSignaller(alive: [])
+        let bridge = FakeBridge(inventories: [
+            ShadowPeerBridgeInventory(provider: "cloud", pidsByHandle: [:]),
+        ])
+        let reconciler = Self.makeReconciler(
+            store: store, bridge: bridge, signaller: signaller)
+
+        let result = await reconciler.sweep()
+
+        // The record is somebody else's whatever the pid is doing.
+        #expect(result.recordsUnlinked == 0)
+        #expect(Self.exists(ghost.recordPath), "a record TBD did not publish must never be unlinked")
+        #expect(result.foreignArtifactsLeftAlone == 1,
+                "only the record proved a foreign owner; the socket was probed instead")
+
+        // The socket is TBD's orphan: nothing can be listening at a dead pid's
+        // path, and the connect refused.
+        #expect(result.socketsUnlinked == 1)
+        #expect(!Self.exists(ghost.socketPath),
+                "a socket at a pid nobody holds must be reclaimed, whoever wrote the record beside it")
+
+        #expect(result.deferred == 0)
+        #expect(result.rowsForgotten == 1)
+        let remaining = try await store.all()
+        #expect(remaining.isEmpty, "nothing of TBD's is left for the row to name")
     }
 
     /// The socket half of the same rule. TBD created the path, but something is

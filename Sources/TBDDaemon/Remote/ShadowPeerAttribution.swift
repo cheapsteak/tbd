@@ -232,11 +232,18 @@ public protocol LocalPeerDelivering: Sendable {
 /// (`docs/research/2026-08-29-cross-machine-messaging/findings.md` § T1).
 ///
 /// The syscalls run on a dedicated serial queue rather than on the caller's
-/// actor. A `connect(2)` to a Unix socket whose listener has a full backlog
-/// blocks, and blocking an actor's executor is the starvation class
-/// `ProviderEventsSupervisor` documents at length; hopping costs one context
-/// switch per message on a channel whose traffic is, by design, aggregate and
-/// small.
+/// actor. The `connect(2)` does not block — on darwin it refuses immediately
+/// when the listener's accept queue is full — but the `write(2)` after it can
+/// park for the whole of `SO_SNDTIMEO` against a receiver that has stopped
+/// draining, and blocking an actor's executor for two seconds is the starvation
+/// class `ProviderEventsSupervisor` documents at length. Hopping costs one
+/// context switch per message on a channel whose traffic is, by design,
+/// aggregate and small.
+///
+/// A corollary of that same refusal: a frame aimed at a saturated peer is
+/// refused at the connect and dropped, exactly as one aimed at a session that
+/// has exited is. That is the designed failure semantics of this channel — no
+/// buffering, no retry — not an incident.
 public struct UnixSocketLocalPeerDelivery: LocalPeerDelivering {
     /// How long a write may take before the frame is abandoned.
     ///
@@ -304,9 +311,11 @@ public struct UnixSocketLocalPeerDelivery: LocalPeerDelivering {
             }
         }
         guard connected == 0 else {
-            // ECONNREFUSED here is the *designed* signal that a peer is gone:
-            // a listener that has been closed and unlinked is what makes a
-            // sender see the same failure as a session that exited.
+            // ECONNREFUSED here is what a gone peer produces — a listener that
+            // has been closed and unlinked — and equally what a live peer whose
+            // accept queue is full produces. This side does not try to tell the
+            // two apart: either way the frame is dropped, which is the designed
+            // failure semantics of this channel.
             throw LocalPeerDeliveryError.connectFailed(path: path, errno: errno)
         }
 
