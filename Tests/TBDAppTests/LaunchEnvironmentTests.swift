@@ -91,12 +91,16 @@ import Testing
     /// The adoption only works because of where it sits in `TBDAppMain`.
     ///
     /// Swift evaluates a struct's stored-property default expressions in source
-    /// order, `setenv` reaches only children born after it, and `appState`'s
-    /// initializer is what spawns the daemon. So `adoptedLaunchPATH` must be
-    /// declared above `appState` — and nothing in the compiler says so. Moving the
-    /// property down, or adding a new subprocess-spawning property above it, would
-    /// leave a daemon on launchd's bare `PATH` again with every test still green.
-    /// This is the tie: it reads the source file and fails on the wrong order.
+    /// order, so the `setenv` must run before the `appState` expression is
+    /// evaluated. `AppState.init` does not spawn the daemon itself — it
+    /// schedules an async `Task` that later calls `startDaemonAndConnect()` —
+    /// and the ordering holds through that indirection because a `Process`
+    /// given a nil `environment` inherits the live `environ` as it stands at
+    /// `run()` time. So `adoptedLaunchPATH` must be declared above `appState`,
+    /// and nothing in the compiler says so. Moving the property down, or adding
+    /// a new subprocess-spawning property above it, would leave a daemon on
+    /// launchd's bare `PATH` again with every test still green. This is the
+    /// tie: it reads the source file and fails on the wrong order.
     @Test func adoptedLaunchPATHIsDeclaredBeforeTheAppStateThatSpawnsTheDaemon() throws {
         // Walk up from this source file to the repo root (the dir holding `Sources/`).
         var dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
@@ -132,10 +136,13 @@ import Testing
         #expect(adoption.lowerBound < appState.lowerBound, """
         `\(adoptionDeclaration)` must be declared BEFORE `\(appStateDeclaration)` in \
         \(relativeSourcePath). Stored-property defaults are evaluated in source \
-        order, and AppState's initializer spawns the daemon, which inherits this \
-        process's PATH. Declared after it, the setenv lands too late and a daemon \
-        started by a LaunchServices relaunch keeps launchd's bare PATH — the bug \
-        this property exists to fix.
+        order, and AppState.init schedules the Task that calls \
+        startDaemonAndConnect(); the daemon Process inherits this process's environ \
+        as it stands when it runs. Declared above appState, the setenv is done \
+        before that Task even exists. Declared below it, whether the PATH lands \
+        before the spawn is left to main-actor scheduling — and when it loses, a \
+        daemon started by a LaunchServices relaunch keeps launchd's bare PATH, the \
+        bug this property exists to fix.
         """)
     }
 }
