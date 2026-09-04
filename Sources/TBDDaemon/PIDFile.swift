@@ -10,8 +10,12 @@ public struct PIDFile: Sendable {
         self.path = path ?? TBDConstants.pidFilePath
     }
 
-    public func write() throws {
-        let pid = ProcessInfo.processInfo.processIdentifier
+    /// Claim the pid file for `pid`, this process by default.
+    ///
+    /// The parameter exists for one caller: a successor whose handover failed
+    /// has to put the predecessor's pid back, returning the world to the state
+    /// it found. See `Daemon.start()`.
+    public func write(pid: pid_t = ProcessInfo.processInfo.processIdentifier) throws {
         try "\(pid)".write(toFile: path, atomically: true, encoding: .utf8)
     }
 

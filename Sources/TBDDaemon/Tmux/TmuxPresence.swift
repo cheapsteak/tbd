@@ -34,20 +34,11 @@ public enum TmuxPresence: String, Sendable, Equatable, CustomStringConvertible {
 /// alone" instead of to "destroy it". Only `TmuxError.commandFailed` can ever
 /// be `absent` — a `timedOut` never reached tmux, and `unexpectedOutput` means
 /// tmux answered something we could not read.
+///
+/// The whitelist is of *meanings*, not prefixes. tmux reuses one phrasing for a
+/// whole family of socket errors, so `indicatesAbsentServer` has to read the
+/// errno text too — see its doc comment.
 enum TmuxPresenceClassifier {
-    /// tmux's phrasing when the server socket has no server behind it. Covers
-    /// both a clean "no server running on <socket>" and the connect failure a
-    /// missing socket file produces ("error connecting to <socket> (No such
-    /// file or directory)").
-    /// Kept to tmux's own two phrasings rather than a generic "no such file"
-    /// match: a tmux command that failed for an unrelated reason can easily
-    /// mention a missing file, and reading that as `absent` would be the exact
-    /// mistake this type exists to prevent.
-    static let serverAbsentMarkers = [
-        "no server running on",
-        "error connecting to"
-    ]
-
     /// tmux's phrasing when a server is up but the target window is gone.
     static let windowAbsentMarkers = [
         "can't find window",
@@ -56,21 +47,47 @@ enum TmuxPresenceClassifier {
         "window not found"
     ]
 
-    /// The presence a *server* probe should report for a thrown error.
-    static func serverPresence(for error: Error) -> TmuxPresence {
-        presence(for: error, absentMarkers: serverAbsentMarkers)
+    /// Whether tmux's output positively says no server is behind the socket.
+    ///
+    /// tmux's client prints "no server running on <socket>" for exactly one
+    /// errno, `ECONNREFUSED`, and falls back to "error connecting to <socket>
+    /// (<errno text>)" for every other socket error. So that second prefix on
+    /// its own proves nothing: `Permission denied` is a server we cannot reach,
+    /// not a server that is gone, and reading it as absence would park and
+    /// delete the rows of a perfectly live fleet — the exact mistake this type
+    /// exists to prevent. Only the `ENOENT` spelling joins the first phrase as
+    /// evidence, because there the socket file itself is not there.
+    static func indicatesAbsentServer(_ output: String) -> Bool {
+        let haystack = output.lowercased()
+        if haystack.contains("no server running on") { return true }
+        return haystack.contains("error connecting to")
+            && haystack.contains("no such file or directory")
     }
 
-    /// The presence a *window* probe should report for a thrown error.
+    /// Whether tmux's output positively says the target window is gone.
     ///
     /// A server-absent answer counts as window-absent: if there is no server,
     /// there is positively no window on it. The reverse is not true, which is
-    /// why the two marker lists stay separate.
-    static func windowPresence(for error: Error) -> TmuxPresence {
-        presence(for: error, absentMarkers: windowAbsentMarkers + serverAbsentMarkers)
+    /// why the two tests stay separate.
+    static func indicatesAbsentWindow(_ output: String) -> Bool {
+        let haystack = output.lowercased()
+        return windowAbsentMarkers.contains(where: haystack.contains)
+            || indicatesAbsentServer(output)
     }
 
-    private static func presence(for error: Error, absentMarkers: [String]) -> TmuxPresence {
+    /// The presence a *server* probe should report for a thrown error.
+    static func serverPresence(for error: Error) -> TmuxPresence {
+        presence(for: error, indicatesAbsence: indicatesAbsentServer)
+    }
+
+    /// The presence a *window* probe should report for a thrown error.
+    static func windowPresence(for error: Error) -> TmuxPresence {
+        presence(for: error, indicatesAbsence: indicatesAbsentWindow)
+    }
+
+    private static func presence(
+        for error: Error, indicatesAbsence: (String) -> Bool
+    ) -> TmuxPresence {
         guard case let TmuxError.commandFailed(_, status, output) = error else {
             // `.timedOut` and `.unexpectedOutput` are both "no usable answer".
             return .unknown
@@ -79,7 +96,6 @@ enum TmuxPresenceClassifier {
         // failure and anything else that never launched a binary. Nothing tmux
         // says about a missing window arrives with it.
         guard status != 127 else { return .unknown }
-        let haystack = output.lowercased()
-        return absentMarkers.contains(where: haystack.contains) ? .absent : .unknown
+        return indicatesAbsence(output) ? .absent : .unknown
     }
 }

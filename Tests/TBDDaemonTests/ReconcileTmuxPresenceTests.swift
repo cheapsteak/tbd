@@ -138,6 +138,121 @@ struct ReconcileTmuxPresenceTests {
         #expect(try await run.db.terminals.get(id: run.shell) == nil)
     }
 
+    // MARK: - The stale-server self-heal
+
+    /// The self-heal that renames a worktree's non-canonical `tmuxServer`, and
+    /// why it needs the same tri-state treatment as the sweep above.
+    ///
+    /// A promoted scratch space's main worktree deliberately keeps the scratch
+    /// server its live sessions run on, so the rename fires only when that
+    /// server has no live window. Reading a timed-out probe as "no live window"
+    /// re-points the row at the canonical server, and the terminal sweep then
+    /// probes windows on a server that really does not have them. Its `absent`
+    /// is honest, so the sweep's own `unknown` guard never fires and the rows
+    /// are destroyed on evidence manufactured one pass earlier. Hardening the
+    /// sweep alone would have left that route open, which is why these four
+    /// tests sit beside the four above.
+    private func runSelfHeal(
+        tmux: TmuxManager, inheritedServer: String = "tbd-inherited-scratch"
+    ) async throws -> (db: TBDDatabase, worktree: UUID, canonical: String, cleanup: () -> Void) {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db, tmux: tmux)
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "acme", defaultBranch: "main")
+        let canonical = TmuxManager.serverName(forRepoPath: repoDir.path)
+        #expect(inheritedServer != canonical, "the fixture must start non-canonical")
+        let main = try await db.worktrees.createMain(
+            repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
+            tmuxServer: inheritedServer)
+        _ = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-inherited", kind: .claude)
+
+        try await lifecycle.reconcile(
+            repoID: repo.id,
+            actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: true)
+
+        return (db, main.id, canonical, { try? FileManager.default.removeItem(at: tempDir) })
+    }
+
+    @Test("an unanswered server probe does not canonicalize the server name")
+    func unknownServerLeavesTheServerNameAlone() async throws {
+        let run = try await runSelfHeal(
+            tmux: TmuxManager(dryRun: true, dryRunServerPresence: { _ in .unknown }))
+        defer { run.cleanup() }
+
+        let worktree = try #require(try await run.db.worktrees.getLocal(id: run.worktree))
+        #expect(worktree.tmuxServer == "tbd-inherited-scratch",
+                "an unanswered server probe renamed the row's tmux server")
+    }
+
+    @Test("an unanswered window probe does not canonicalize the server name")
+    func unknownWindowLeavesTheServerNameAlone() async throws {
+        let run = try await runSelfHeal(tmux: TmuxManager(
+            dryRun: true,
+            dryRunServerPresence: { _ in .alive },
+            dryRunWindowPresence: { _, _ in .unknown }))
+        defer { run.cleanup() }
+
+        let worktree = try #require(try await run.db.worktrees.getLocal(id: run.worktree))
+        #expect(worktree.tmuxServer == "tbd-inherited-scratch",
+                "an unanswered window probe renamed the row's tmux server")
+    }
+
+    /// The promoted-scratch case the self-heal has always had to respect.
+    @Test("a live window keeps the inherited server name")
+    func aliveWindowKeepsTheInheritedServerName() async throws {
+        let run = try await runSelfHeal(tmux: TmuxManager(
+            dryRun: true,
+            dryRunServerPresence: { _ in .alive },
+            dryRunWindowPresence: { _, _ in .alive }))
+        defer { run.cleanup() }
+
+        let worktree = try #require(try await run.db.worktrees.getLocal(id: run.worktree))
+        #expect(worktree.tmuxServer == "tbd-inherited-scratch",
+                "the self-heal orphaned live windows by renaming their server")
+    }
+
+    /// Positive evidence still heals. Without this the tri-state could be
+    /// satisfied by a self-heal that never fires.
+    @Test("a server tmux says has no windows is still canonicalized")
+    func absentWindowStillCanonicalizes() async throws {
+        let run = try await runSelfHeal(tmux: TmuxManager(
+            dryRun: true,
+            dryRunServerPresence: { _ in .alive },
+            dryRunWindowPresence: { _, _ in .absent }))
+        defer { run.cleanup() }
+
+        let worktree = try #require(try await run.db.worktrees.getLocal(id: run.worktree))
+        #expect(worktree.tmuxServer == run.canonical,
+                "the tri-state probe stopped the self-heal acting on positive evidence")
+    }
+
+    /// A server tmux says is gone is positive evidence too, and it must not
+    /// need a window probe to reach the rename.
+    @Test("a server tmux says is gone is canonicalized without a window probe")
+    func absentServerCanonicalizes() async throws {
+        let run = try await runSelfHeal(tmux: TmuxManager(
+            dryRun: true,
+            dryRunServerPresence: { server in
+                // The canonical server is probed by the later passes; only the
+                // inherited one is under test here.
+                server == "tbd-inherited-scratch" ? .absent : .alive
+            },
+            dryRunWindowPresence: { server, _ in
+                if server == "tbd-inherited-scratch" {
+                    Issue.record("the self-heal probed a window on a server tmux said was gone")
+                }
+                return .absent
+            }))
+        defer { run.cleanup() }
+
+        let worktree = try #require(try await run.db.worktrees.getLocal(id: run.worktree))
+        #expect(worktree.tmuxServer == run.canonical)
+    }
+
     /// The repair half, at the seam `Daemon.start()` calls.
     ///
     /// `Daemon.start()` runs `hibernationCoordinator.reconcileOnStartup()`

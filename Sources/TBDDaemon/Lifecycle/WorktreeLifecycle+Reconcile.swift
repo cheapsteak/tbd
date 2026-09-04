@@ -195,9 +195,23 @@ extension WorktreeLifecycle {
                 // while we waited. Only judge the server whose lock we hold.
                 guard let current = try await db.worktrees.getLocal(id: wt.id),
                       current.tmuxServer == wt.tmuxServer else { return }
-                if await hasLiveWindow(server: current.tmuxServer, worktreeID: current.id) {
+                switch await liveWindowPresence(
+                    server: current.tmuxServer, worktreeID: current.id)
+                {
+                case .alive:
                     logger.info("reconcile: keeping non-canonical tmux server \(current.tmuxServer, privacy: .public) for worktree \(current.id, privacy: .public) — it has live windows (promoted-scratch inheritance)")
                     return
+                case .unknown:
+                    // Renaming the server on ignorance is worse than renaming
+                    // it late: the row would be re-pointed at a server that
+                    // really has no windows, and the terminal sweep below
+                    // would then park and delete its rows on an answer that
+                    // looks affirmative. A later pass canonicalizes once tmux
+                    // answers.
+                    logger.warning("reconcile: leaving non-canonical tmux server \(current.tmuxServer, privacy: .public) for worktree \(current.id, privacy: .public) — tmux gave no usable answer about its windows; not canonicalizing this pass")
+                    return
+                case .absent:
+                    break
                 }
                 do {
                     try await db.worktrees.updateTmuxServer(
@@ -824,19 +838,52 @@ extension WorktreeLifecycle {
         }
     }
 
-    /// True when `server` is up AND hosts a live tmux window for at least one
-    /// of `worktreeID`'s terminal rows. Used by the stale-server self-heal to
-    /// distinguish a genuinely dead/renamed server (safe to canonicalize)
-    /// from a deliberately inherited one whose sessions are still running
-    /// (promoted scratch space). Early-exits on the first live window.
-    private func hasLiveWindow(server: String, worktreeID: UUID) async -> Bool {
-        guard await tmux.serverExists(server: server) else { return false }
+    /// Whether `server` hosts a live tmux window for any of `worktreeID`'s
+    /// terminal rows — `alive`, `absent`, or `unknown`.
+    ///
+    /// Used by the stale-server self-heal to distinguish a genuinely
+    /// dead/renamed server (safe to canonicalize) from a deliberately
+    /// inherited one whose sessions are still running (promoted scratch
+    /// space).
+    ///
+    /// **This is tri-state for the same reason the terminal sweep is, and the
+    /// two are load-bearing together.** A `Bool` here reads a timed-out probe
+    /// as "no live window", the row is re-pointed at the canonical server, and
+    /// the terminal sweep then probes windows on a server that genuinely does
+    /// not have them. Its answer is an honest `absent`, so the sweep's own
+    /// `unknown` guard never fires and the rows are parked and deleted on
+    /// evidence that was manufactured one pass earlier. Hardening the sweep
+    /// alone would have left that route open.
+    ///
+    /// `alive` on the first affirmative live window. Otherwise `unknown` if
+    /// any probe failed to answer, and `absent` only when every probe answered
+    /// and answered no.
+    ///
+    /// Rows carrying no tmux coordinate at all (holder-backed sessions, whose
+    /// `tmuxWindowID` is `""`) are skipped rather than probed: they are
+    /// evidence in neither direction, and probing `""` would answer `unknown`
+    /// forever and freeze the self-heal.
+    private func liveWindowPresence(server: String, worktreeID: UUID) async -> TmuxPresence {
+        switch await tmux.probeServer(server: server) {
+        case .absent:
+            return .absent
+        case .unknown:
+            return .unknown
+        case .alive:
+            break
+        }
         let terminals = (try? await db.terminals.list(worktreeID: worktreeID)) ?? []
-        for terminal in terminals {
-            if await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) {
-                return true
+        var sawUnknown = false
+        for terminal in terminals where !terminal.tmuxWindowID.isEmpty {
+            switch await tmux.probeWindow(server: server, windowID: terminal.tmuxWindowID) {
+            case .alive:
+                return .alive
+            case .unknown:
+                sawUnknown = true
+            case .absent:
+                continue
             }
         }
-        return false
+        return sawUnknown ? .unknown : .absent
     }
 }

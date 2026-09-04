@@ -61,4 +61,17 @@ import Testing
         let f = PIDFile(path: tmpPidPath())
         #expect(f.removeIfOwned(pid: 12345) == false)
     }
+
+    // A successor whose handover failed hands the file back, so the live
+    // predecessor keeps its claim and the app's poller does not read it as
+    // absent. `Daemon.start()` is the only caller that passes a pid.
+    @Test func writeCanRestoreAnotherProcessesClaim() throws {
+        let path = tmpPidPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let f = PIDFile(path: path)
+        try f.write(pid: 999)
+        #expect(f.read() == 999)
+        try f.write(pid: 4242)
+        #expect(f.read() == 4242, "a later claim must overwrite the earlier one")
+    }
 }

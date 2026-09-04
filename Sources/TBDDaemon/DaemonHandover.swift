@@ -122,8 +122,9 @@ public struct DaemonHandover: Sendable {
         /// It needed `SIGKILL` and then exited.
         case exitedAfterKill
         /// It was still alive after `SIGKILL` and the second budget. The
-        /// successor starts anyway: it already owns the pid file, and a
-        /// process this stuck is not going to serve anything.
+        /// successor must NOT start: see `Daemon.start()`, which hands the pid
+        /// file back to the predecessor and exits rather than put a second
+        /// writer on `state.db`.
         case stillAlive
     }
 
@@ -165,7 +166,7 @@ public struct DaemonHandover: Sendable {
             return .exitedAfterKill
         }
 
-        handoverLogger.error("handover: predecessor daemon \(predecessor, privacy: .public) still alive after SIGKILL and \(String(describing: self.killBudget), privacy: .public) — starting anyway")
+        handoverLogger.error("handover: predecessor daemon \(predecessor, privacy: .public) still alive after SIGKILL and \(String(describing: self.killBudget), privacy: .public) — the successor must not start alongside it")
         return .stillAlive
     }
 

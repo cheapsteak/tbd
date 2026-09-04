@@ -21,11 +21,31 @@ struct TmuxPresenceTests {
         #expect(TmuxPresenceClassifier.serverPresence(for: error) == .absent)
     }
 
-    @Test func serverProbeReadsConnectFailureAsAbsent() {
+    /// tmux says "no server running on" only for ECONNREFUSED and falls back to
+    /// "error connecting to <socket> (<errno>)" for everything else, so the
+    /// prefix is read together with the errno text. ENOENT is absence: the
+    /// socket file itself is not there.
+    @Test func serverProbeReadsAMissingSocketAsAbsent() {
         let error = TmuxError.commandFailed(
             command: "tmux -L tbd-abc list-sessions", status: 1,
             output: "error connecting to /private/tmp/tmux-501/tbd-abc (No such file or directory)")
         #expect(TmuxPresenceClassifier.serverPresence(for: error) == .absent)
+        #expect(TmuxPresenceClassifier.windowPresence(for: error) == .absent)
+    }
+
+    /// The same prefix, a different errno, and the opposite meaning. A socket
+    /// we may not open is a server we cannot reach, not one that is gone —
+    /// reading it as absence would park and delete a live fleet's rows.
+    @Test func serverProbeReadsAnUnreachableSocketAsUnknown() {
+        for errnoText in ["Permission denied", "Connection reset by peer", "Operation timed out"] {
+            let error = TmuxError.commandFailed(
+                command: "tmux -L tbd-abc list-sessions", status: 1,
+                output: "error connecting to /private/tmp/tmux-501/tbd-abc (\(errnoText))")
+            #expect(TmuxPresenceClassifier.serverPresence(for: error) == .unknown,
+                    "a socket error of \(errnoText) was read as proof the server is gone")
+            #expect(TmuxPresenceClassifier.windowPresence(for: error) == .unknown,
+                    "a socket error of \(errnoText) was read as proof the window is gone")
+        }
     }
 
     @Test func windowProbeReadsTmuxCantFindWindowAsAbsent() {
