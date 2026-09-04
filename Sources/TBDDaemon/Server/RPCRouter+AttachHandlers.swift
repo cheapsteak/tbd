@@ -438,9 +438,20 @@ extension RPCRouter {
     /// **Every outcome is RPC success**, matching the control-mode arm, and the
     /// reason is stronger here than "best effort": a detach fires on every view
     /// teardown, the app has already released everything it held by the time it
-    /// sends one, and there is no recovery it could run on a refusal. A refused
-    /// handback is a stale one — a closing viewer racing its successor's attach
-    /// — and the successor is the truth. It is logged, not returned.
+    /// sends one, and there is no recovery it could run on a refusal. So a
+    /// refusal is logged, not returned — and the log line means one of two
+    /// things, which is why it names the error.
+    ///
+    /// - The handback was **stale**: a closing viewer racing its successor's
+    ///   attach. The successor is the truth and owns the pty.
+    /// - The take-back itself **failed**: the rendezvous socket is gone, the
+    ///   holder stayed busy past its retry budget, `pipe()` would not open.
+    ///   There is **no** successor. `takeBackFromViewer` drops the claim on its
+    ///   way out, so the session is left with no reader at all until something
+    ///   adopts it again, and the next attach is what recovers it.
+    ///
+    /// So `holder pane.detach refused` is not by itself evidence that somebody
+    /// else holds this pty — on the second branch nobody does.
     private func handleHolderPaneDetach(
         params: PaneDetachParams, terminal: Terminal
     ) async -> RPCResponse {

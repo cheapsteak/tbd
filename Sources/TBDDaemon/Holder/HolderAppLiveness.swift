@@ -13,6 +13,17 @@ enum AppLivenessVerdict: Sendable, Equatable {
     case alive
     /// The recorded pid names nothing, or names a stranger. Its descriptors
     /// closed with it, so nothing it held can still be read by it.
+    ///
+    /// That implication is exact for the first case and holds for the second
+    /// only under one qualification, which `execve` breaks: an exec preserves
+    /// the pid *and* the start time while replacing the command line, and it
+    /// does not close descriptors that lack `FD_CLOEXEC`. An app that exec'd
+    /// itself in place, and whose sidecar connection had also dropped, would
+    /// therefore be read as `pid-reused-executable` and have its sessions
+    /// seized while its `dup`s were still live and readable. Left as it is
+    /// because a macOS GUI app does not re-exec itself in place — but the whole
+    /// design rests on "confirmed gone ⟹ descriptors closed", so the one shape
+    /// that would falsify it is named here rather than left to be rediscovered.
     case confirmedGone(reason: String)
     /// Something could not be read. **Not** death: the failure direction on
     /// this path is always toward reading nothing until liveness says

@@ -27,8 +27,14 @@ import TBDShared
 /// `kill(pid, 0)`: a dead app whose pid has been handed to something else would
 /// otherwise look alive forever and stall every session it was holding.
 ///
-/// Tier 1. No holder, no pty, no process is signalled — the process table is
-/// scripted through `FakeProcessSignaller`.
+/// Tier 1, with one exception. Seven of these tests touch no holder, no pty
+/// and no real process — the process table is scripted through
+/// `FakeProcessSignaller`. `aSupersededConnectionsExitIsNotADisconnect` is
+/// tier 2 by `Tests/CLAUDE.md`'s taxonomy: it uses real `socketpair`s, a real
+/// spawned receive `Thread`, and a bounded wall-clock wait. This is still its
+/// right home: tier 2 belongs in the fast parallel pass, and only tier 3 —
+/// an external process the test does not control — moves to
+/// `TBDDaemonLiveTests`.
 @Suite struct HolderAppLivenessTests {
 
     /// The executable the daemon recorded for the app when its sidecar

@@ -100,12 +100,16 @@ struct HolderAppDeathSeizureTests {
 
     // MARK: - The generation discipline
 
-    /// A seizure names the attach it is taking back, and a generation that has
-    /// moved on is refused — the same rule the handback keeps. It matters more
-    /// here, not less: an app death is arbitrated asynchronously, so a verdict
-    /// about a *dead* app can land after a *live* one has attached the same
-    /// session, and applying it would put a drain on a pty another process is
-    /// reading.
+    /// A seizure names the attach it is taking back, and any generation but the
+    /// standing one is refused — the same rule the handback keeps. It matters
+    /// more here, not less: an app death is arbitrated asynchronously, so a
+    /// verdict can be applied to a session whose claim has since moved on, and
+    /// applying it would put a drain on a pty another process is reading.
+    ///
+    /// The guard is `==`, so it is pinned identically in both directions and
+    /// either side proves it. This passes a generation one *ahead* of the one
+    /// the viewer holds, which is the cheaper side to construct: no second
+    /// attach is needed to move the standing claim off the number under test.
     @Test func aSeizureUnderAStaleGenerationLeavesTheCurrentAttachAlone() async throws {
         let fixture = try await HandbackFixture.start(command: Self.echoJob)
         defer { fixture.tearDown() }

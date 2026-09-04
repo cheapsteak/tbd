@@ -238,11 +238,30 @@ actor HolderRegistry {
     /// Attaches vended and not yet acknowledged, by session. At most one per
     /// session: a second `beginAttach` supersedes the first, whose ack is then
     /// refused by generation.
+    ///
+    /// **Invariant, jointly with `viewerAttachments`: for one session, a
+    /// pending entry and a viewer claim are never simultaneously live.** No
+    /// single line enforces it, so it is written down here rather than left to
+    /// be re-derived. `confirmAttach` clears the pending entry and then records
+    /// the claim; `cancelPendingAttach(.unacknowledged)` records the claim and
+    /// then clears the pending entry — both pairs synchronous, with no `await`
+    /// between, so neither leaves an instant in which both are set;
+    /// `beginAttach` refuses to record a pending entry over a standing claim
+    /// and re-reads the claim after its suspension.
+    ///
+    /// Unreachability arguments elsewhere in this type rest on it — notably
+    /// `confirmAttach`'s second guard, which is argued dead by enumerating the
+    /// writers of `slots`. **A new writer of `slots` or of either map has to
+    /// keep this true**, because the next reader will reach the guard long
+    /// before reaching the chain that makes it unreachable.
     private var pendingAttaches: [UUID: PendingAttach] = [:]
     /// Sessions whose pty a viewer owns, and the attach generation that owns
     /// it. **The daemon reads none of these**, and `adopt` refuses them, which
     /// is what keeps "one reader per pty" true across the app boundary rather
     /// than only inside this process.
+    ///
+    /// Never live at the same time as this session's `pendingAttaches` entry —
+    /// the invariant is stated in full there.
     private var viewerAttachments: [UUID: UInt64] = [:]
     /// Mints attach generations. Monotonic for the daemon's life, so an ack or
     /// a cancel naming an older attach can always be told from one naming the
