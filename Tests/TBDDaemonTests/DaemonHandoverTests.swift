@@ -355,7 +355,16 @@ struct DaemonHandoverTests {
     private func runSurvivingTakeOver(
         failingCalls: Set<Int>, advances: Int
     ) async throws -> (result: HandoverClaim.Result, writes: [pid_t]) {
-        let predecessor = Predecessor(aliveForChecks: .max)
+        try await runFlakyTakeOver(
+            aliveForChecks: .max, failingCalls: failingCalls, advances: advances)
+    }
+
+    /// A take-over against a predecessor that is alive for `aliveForChecks`
+    /// liveness checks, with a claim writer that fails on the named calls.
+    private func runFlakyTakeOver(
+        aliveForChecks: Int, failingCalls: Set<Int>, advances: Int
+    ) async throws -> (result: HandoverClaim.Result, writes: [pid_t]) {
+        let predecessor = Predecessor(aliveForChecks: aliveForChecks)
         let writer = FlakyClaimWriter(failingCalls: failingCalls)
         let clock = EventDrivenTestClock()
         let claim = HandoverClaim(
@@ -403,6 +412,54 @@ struct DaemonHandoverTests {
         #expect(run.result == .predecessorSurvived(claimRestored: false))
         #expect(run.writes == [777],
                 "a failing write-back still recorded a claim")
+    }
+
+    // MARK: - Re-asserting the claim
+
+    /// The re-assert after a successful retirement is the same kind of write as
+    /// the hand-back and gets the same retry: with the predecessor already
+    /// dead, one transient failure must not turn a finished handover into an
+    /// aborted start. One retirement poll, then two failed re-asserts and a
+    /// third that lands.
+    @Test("a re-assert that fails twice and then succeeds still claims")
+    func reassertRetriesUntilItLands() async throws {
+        let run = try await runFlakyTakeOver(
+            aliveForChecks: 1, failingCalls: [2, 3], advances: 1 + 2)
+
+        #expect(run.result == .claimed(.exitedAfterTerm))
+        #expect(run.writes == [777, 777],
+                "the re-assert did not land after the retries")
+    }
+
+    /// Exhausting the retries still aborts the start: a file that may name
+    /// nobody is the two-successor race the re-assert exists to close, and a
+    /// stale or missing pid file is what the app's poller recovers from.
+    @Test("a re-assert that never lands aborts the start")
+    func reassertFailureThrows() async throws {
+        let predecessor = Predecessor(aliveForChecks: 1)
+        let writer = FlakyClaimWriter(failingCalls: [2, 3, 4])
+        let clock = EventDrivenTestClock()
+        let claim = HandoverClaim(
+            pidFile: PIDFile(path: tmpPidPath()),
+            handover: DaemonHandover(
+                termBudget: .milliseconds(200), killBudget: .milliseconds(100),
+                pollInterval: .milliseconds(100),
+                sendSignal: predecessor.send, isLive: predecessor.isLive, clock: clock),
+            ownPID: 777,
+            writeBackAttempts: 3,
+            writeBackRetryDelay: .milliseconds(100),
+            clock: clock,
+            writeClaim: writer.write)
+        let work = Task { try await claim.takeOver(from: 4242) }
+        for _ in 0..<(1 + 2) {
+            try await clock.requireAdvanceWhenArmed(by: .milliseconds(100))
+        }
+
+        await #expect(throws: HandoverClaim.ReassertFailed.self) {
+            try await work.value
+        }
+        #expect(writer.recorded == [777],
+                "a failing re-assert still recorded a claim")
     }
 
     // MARK: - Budget arithmetic

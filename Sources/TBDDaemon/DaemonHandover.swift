@@ -311,8 +311,46 @@ public struct HandoverClaim: Sendable {
         // here. That window is the retirement poll interval at most, against
         // the app's two-second poll, and it is strictly narrower than the one
         // this write closes.
-        try writeClaim(ownPID)
+        //
+        // Retried like the hand-back, for the same reason: a whole-file
+        // replace that a transient error can lose, and here the predecessor is
+        // already dead, so one hiccup would otherwise turn a finished handover
+        // into an aborted start. If every attempt fails the start still
+        // aborts, because proceeding with a file that may name nobody is the
+        // two-successor race this write exists to close; the exit leaves a
+        // stale or missing pid file, which the app's poller answers by
+        // starting a fresh daemon from the installed bundle.
+        guard await writeClaimRetrying(ownPID, purpose: "re-assert this daemon's") else {
+            throw ReassertFailed(pid: ownPID, attempts: writeBackAttempts)
+        }
         return .claimed(outcome)
+    }
+
+    /// The re-assert after a successful retirement could not be written.
+    public struct ReassertFailed: LocalizedError, CustomStringConvertible, Sendable {
+        public let pid: pid_t
+        public let attempts: Int
+        public var description: String {
+            "handover: could not re-assert the pid file claim for \(pid) after \(attempts) attempts"
+        }
+        public var errorDescription: String? { description }
+    }
+
+    /// Write `pid` into the file, retrying `writeBackAttempts` times with
+    /// `writeBackRetryDelay` between attempts. Returns whether a write landed.
+    private func writeClaimRetrying(_ pid: pid_t, purpose: String) async -> Bool {
+        for attempt in 1...writeBackAttempts {
+            do {
+                try writeClaim(pid)
+                return true
+            } catch {
+                handoverLogger.error("handover: attempt \(attempt, privacy: .public) of \(self.writeBackAttempts, privacy: .public) to \(purpose, privacy: .public) pid file claim (\(pid, privacy: .public)) failed: \(String(describing: error), privacy: .public)")
+                if attempt < writeBackAttempts {
+                    try? await clock.sleep(for: writeBackRetryDelay)
+                }
+            }
+        }
+        return false
     }
 
     /// Put the predecessor's pid back in the file, retrying a few times.
@@ -333,16 +371,8 @@ public struct HandoverClaim: Sendable {
     ///
     /// Returns whether the claim was restored.
     private func restoreClaim(to predecessor: pid_t) async -> Bool {
-        for attempt in 1...writeBackAttempts {
-            do {
-                try writeClaim(predecessor)
-                return true
-            } catch {
-                handoverLogger.error("handover: attempt \(attempt, privacy: .public) of \(self.writeBackAttempts, privacy: .public) to restore predecessor daemon \(predecessor, privacy: .public)'s pid file claim failed: \(String(describing: error), privacy: .public)")
-                if attempt < writeBackAttempts {
-                    try? await clock.sleep(for: writeBackRetryDelay)
-                }
-            }
+        if await writeClaimRetrying(predecessor, purpose: "restore the predecessor's") {
+            return true
         }
         handoverLogger.error("handover: could not restore predecessor daemon \(predecessor, privacy: .public)'s pid file claim after \(self.writeBackAttempts, privacy: .public) attempts — the file now names this exiting process, which reads as a stale pid and is cleaned up by the next daemon start")
         return false
