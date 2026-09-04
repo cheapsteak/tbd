@@ -38,10 +38,17 @@ struct TerminalCloseRailsTests {
 
     /// `windowIsDead: true` forces the row's window to read as gone, which is
     /// what a crashed-mid-turn session looks like.
-    private func makeRouter(db: TBDDatabase, windowIsDead: Bool = false) -> RPCRouter {
+    private func makeRouter(
+        db: TBDDatabase, windowIsDead: Bool = false,
+        windowPresence: TmuxPresence? = nil
+    ) -> RPCRouter {
         var deadHook: (@Sendable (String) -> Bool)?
         if windowIsDead { deadHook = { _ in true } }
-        let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: deadHook)
+        var presenceHook: (@Sendable (String, String) -> TmuxPresence)?
+        if let windowPresence { presenceHook = { _, _ in windowPresence } }
+        let tmux = TmuxManager(
+            dryRun: true, dryRunWindowIsDead: deadHook,
+            dryRunWindowPresence: presenceHook)
         return RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -133,6 +140,26 @@ struct TerminalCloseRailsTests {
         #expect(resp.success, "a dead-window row cannot be mid-turn")
         #expect(resp.errorCode == nil)
         #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
+    }
+
+    /// The other half of the qualification, and the one that was missing.
+    ///
+    /// Only an *observed* stop may lift the rail. `windowExists` answered
+    /// `false` for a probe that timed out as readily as for a window that is
+    /// gone, so a busy machine could turn a mid-turn session into a "stopped"
+    /// one and let the close delete the row and kill the window. A rail that
+    /// cannot establish the session ended has to fail closed.
+    @Test("rails on: a mid-turn terminal whose window probe went unanswered is refused")
+    func railsOnRefusesWhenLivenessIsUnknown() async throws {
+        let fx = try await makeFixture(activityState: .working)
+        let router = makeRouter(db: fx.db, windowPresence: .unknown)
+
+        let resp = try await close(router, fx.terminal.id, rails: true)
+
+        #expect(!resp.success, "an unanswered probe lifted a rail it cannot satisfy")
+        #expect(resp.errorCode == RPCErrorCode.terminalBusy.rawValue)
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) != nil,
+                "an unanswered probe let the close delete a possibly-live session")
     }
 
     // MARK: - Idempotency and result payload

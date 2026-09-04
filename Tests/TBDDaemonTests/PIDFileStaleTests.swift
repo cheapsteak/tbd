@@ -31,4 +31,47 @@ import Testing
         let f = PIDFile(path: path)
         #expect(f.isStale(isLiveDaemon: { _ in false }) == true)
     }
+
+    // MARK: - Compare-and-delete
+
+    @Test func removeIfOwnedRemovesOurOwnPidFile() throws {
+        let path = tmpPidPath()
+        try "12345".write(toFile: path, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let f = PIDFile(path: path)
+        #expect(f.removeIfOwned(pid: 12345) == true)
+        #expect(FileManager.default.fileExists(atPath: path) == false)
+    }
+
+    // The handover case: a successor has already written its own pid over the
+    // file, and the predecessor is shutting down. An unconditional remove()
+    // here deletes the successor's claim and reopens the spawn race the
+    // successor-first write closes.
+    @Test func removeIfOwnedLeavesASuccessorsPidFile() throws {
+        let path = tmpPidPath()
+        try "999".write(toFile: path, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let f = PIDFile(path: path)
+        #expect(f.removeIfOwned(pid: 12345) == false)
+        #expect(FileManager.default.fileExists(atPath: path) == true)
+        #expect(f.read() == 999, "the successor's claim was rewritten")
+    }
+
+    @Test func removeIfOwnedOnAMissingFileIsANoOp() {
+        let f = PIDFile(path: tmpPidPath())
+        #expect(f.removeIfOwned(pid: 12345) == false)
+    }
+
+    // A successor whose handover failed hands the file back, so the live
+    // predecessor keeps its claim and the app's poller does not read it as
+    // absent. `Daemon.start()` is the only caller that passes a pid.
+    @Test func writeCanRestoreAnotherProcessesClaim() throws {
+        let path = tmpPidPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let f = PIDFile(path: path)
+        try f.write(pid: 999)
+        #expect(f.read() == 999)
+        try f.write(pid: 4242)
+        #expect(f.read() == 4242, "a later claim must overwrite the earlier one")
+    }
 }
