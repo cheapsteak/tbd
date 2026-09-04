@@ -237,6 +237,9 @@ per-request resource.
   crashed run names a dead pid; the next run takes it over. Acquisition is
   atomic (a noclobber create), so two simultaneous runs cannot both hold it.
 - `update.log` — one append-only log.
+- `wake` — one scratch directory for the wake step's per-terminal results,
+  emptied at the start of every wake and removed at its end. A run killed
+  mid-wake leaves it for the next run to empty.
 - `previous/TBD.app` — exactly one bundle, the one the last update replaced,
   overwritten by the next update and kept as the no-rebuild route back.
 

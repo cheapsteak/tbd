@@ -655,28 +655,32 @@ for row in rows:
         print(row["id"])
 ' 2>/dev/null)" || return 1
 
+    # One document per worktree, separated by ASCII record separator (0x1e).
+    # JSON forbids an unescaped control character inside a string, so the
+    # separator cannot occur in a document, whatever a label contains; each
+    # document is then parsed whole. Counting brackets line by line would let
+    # one `[` in a tab label swallow every row after it, silently.
     rows=""
     while IFS= read -r id; do
         [ -n "$id" ] || continue
         local one
         one="$(tbd terminal list "$id" --json 2>/dev/null)" || continue
-        rows="$rows$one"$'\n'
+        rows="$rows$one"$'\x1e'
     done <<< "$ids"
 
     printf '%s' "$rows" | python3 -c '
 import json, sys
 out = []
-buffer = ""
-depth = 0
-for chunk in sys.stdin.read().splitlines():
-    buffer += chunk + "\n"
-    depth += chunk.count("[") - chunk.count("]")
-    if buffer.strip() and depth == 0:
-        try:
-            out.extend(json.loads(buffer))
-        except Exception:
-            pass
-        buffer = ""
+for document in sys.stdin.read().split("\x1e"):
+    if not document.strip():
+        continue
+    try:
+        rows = json.loads(document)
+    except Exception:
+        print("update: skipping a terminal list that did not parse as JSON", file=sys.stderr)
+        continue
+    if isinstance(rows, list):
+        out.extend(row for row in rows if isinstance(row, dict))
 print(json.dumps(out))
 '
 }
@@ -735,7 +739,12 @@ wake_terminals() {
     WAKE_FAILED=0
     [ "$total" -gt 0 ] || return 0
 
-    result_dir="$(mktemp -d "${TMPDIR:-/tmp}/tbd-update-wake.XXXXXX")" || return 1
+    # A fixed path under the update home rather than a per-invocation mktemp:
+    # one directory, emptied at the start of every wake and removed at the end,
+    # so a run killed mid-wait leaves nothing a reconciler would have to find.
+    result_dir="$UPDATE_HOME/wake"
+    rm -rf "$result_dir"
+    mkdir -p "$result_dir" || return 1
 
     while [ "$index" -lt "$total" ]; do
         batch_ids=("${ids[@]:index:WAKE_CONCURRENCY}")

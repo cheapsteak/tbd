@@ -1018,6 +1018,60 @@ test_terminals_are_collected_across_worktrees() {
     assert_eq "rows from every worktree are considered" "a b " "$out"
 }
 
+# Production output is pretty-printed and a tab label is free text. The merge
+# must parse each worktree's document, not count brackets: one `[` in a label
+# used to unbalance the count and silently drop every row after it.
+test_terminals_survive_brackets_and_pretty_printing() {
+    local state out
+    state="$TEST_TMP/bracket-state"
+    mkdir -p "$state" "$TEST_TMP/bracket-bin"
+    mkstub_tbd "$TEST_TMP/bracket-bin"
+    printf '[{"id":"w1"},{"id":"w2"}]\n' > "$state/worktrees.json"
+    cat > "$state/terminals-w1.json" << 'EOF'
+[
+  {
+    "id" : "a",
+    "label" : "review [wip",
+    "hibernatedAt" : "2026-09-04T12:00:01Z",
+    "hibernateReason" : "recovery"
+  }
+]
+EOF
+    cat > "$state/terminals-w2.json" << 'EOF'
+[
+  {
+    "id" : "b",
+    "label" : "plain",
+    "hibernatedAt" : "2026-09-04T12:00:02Z",
+    "hibernateReason" : "recovery"
+  }
+]
+EOF
+
+    out="$(
+        export FAKE_TBD_STATE="$state" PATH="$TEST_TMP/bracket-bin:$PATH"
+        all_terminals_json | select_wake_candidates "" | tr '\n' ' '
+    )"
+    assert_eq "a bracket in a label drops no row, before or after it" "a b " "$out"
+}
+
+test_a_terminal_list_that_is_not_json_is_skipped_not_fatal() {
+    local state out
+    state="$TEST_TMP/badjson-state"
+    mkdir -p "$state" "$TEST_TMP/badjson-bin"
+    mkstub_tbd "$TEST_TMP/badjson-bin"
+    printf '[{"id":"w1"},{"id":"w2"}]\n' > "$state/worktrees.json"
+    printf 'not json\n' > "$state/terminals-w1.json"
+    printf '[{"id":"b","hibernatedAt":"2026-09-04T12:00:02Z","hibernateReason":"recovery"}]\n' \
+        > "$state/terminals-w2.json"
+
+    out="$(
+        export FAKE_TBD_STATE="$state" PATH="$TEST_TMP/badjson-bin:$PATH"
+        all_terminals_json 2>/dev/null | select_wake_candidates "" | tr '\n' ' '
+    )"
+    assert_eq "an unparseable worktree is skipped and the rest kept" "b " "$out"
+}
+
 # MARK: - Reporting
 
 test_summary_reports_the_move() {
@@ -1265,6 +1319,8 @@ test_wake_counts_failures
 test_wake_stagger_separates_batches
 test_no_wake_and_wake_only
 test_terminals_are_collected_across_worktrees
+test_terminals_survive_brackets_and_pretty_printing
+test_a_terminal_list_that_is_not_json_is_skipped_not_fatal
 test_summary_reports_the_move
 test_summary_survives_an_unknown_commit
 test_cli_refresh_only_touches_an_existing_install
