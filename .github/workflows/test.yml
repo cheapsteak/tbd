@@ -127,6 +127,19 @@ jobs:
       - name: Test the test fence
         run: bash scripts/test.test.sh
 
+      # The two installer harnesses that read macOS-only tools and so cannot
+      # join the Linux collection in `plans-guard`: the plist writer drives
+      # `plutil`, and the bundle assembly hard-links into a `.app` and installs
+      # it with `cp -cR`. Both build fixture repos in temp dirs and put stub
+      # codesign/security/open/pkill/pgrep first on PATH, so nothing here
+      # signs, launches, kills, or writes outside its own scratch directory.
+      # The WIP guard and update harnesses need only bash, git and python3 and
+      # run on Linux with the rest.
+      - name: Test the restart and bundle helpers
+        run: |
+          bash scripts/restart-environment-lib.test.sh
+          bash scripts/restart-bundle-lib.test.sh
+
   plans-guard:
     name: No committed implementation plans
     runs-on: ubuntu-latest
@@ -171,6 +184,8 @@ jobs:
           bash scripts/remote-verify.test.sh
           bash scripts/sweep-preflight-refs.test.sh
           bash scripts/nightly-flake-stress.test.sh
+          bash scripts/restart-guard-lib.test.sh
+          bash scripts/update.test.sh
           python3 scripts/diag/daemon-footprint-watch.py --self-test
 
   review-scripts-tests:
