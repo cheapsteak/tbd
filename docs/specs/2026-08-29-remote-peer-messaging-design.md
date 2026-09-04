@@ -517,14 +517,19 @@ helper each bind exactly one socket, named after their own pid, so the only
 process that may legitimately be listening at `<pid>.sock` is the one holding
 that pid. Three rules follow, and they are what the reconciler implements:
 
-- A socket is unlinked only when the recorded pid is provably gone **and** a
-  connect refuses.
+- Once the recorded pid is provably gone the socket is probed, whoever wrote the
+  record beside it, and unlinked if the connect refuses. A record left behind by
+  a pid's later owner says who wrote that file; it says nothing about a socket
+  whose only possible listener has since exited, so it must not stop the probe —
+  answering "foreign" there would retire the row and strand the socket with
+  nothing left able to recognise it.
 - A socket at a pid that is alive but is not TBD's helper is never probed. Its
   row is **deferred**, not retired — the row is the only record naming that
   file, so the sweep that finds the pid gone is what reclaims it.
-- A socket whose sibling record carries a session id TBD never published is
-  never touched at all: that record is proof the pid was recycled and that the
-  socket belongs to the session that wrote it.
+- A socket at a **live** pid whose sibling record carries a session id TBD never
+  published is never touched at all, and its row retires: that record is proof
+  the pid was recycled and that the socket belongs to the live session that
+  wrote it, so nothing of TBD's remains for the row to name.
 
 Retrying the probe is not a substitute for the pid gate. It narrows the window
 in which a busy listener looks empty and cannot close it, and a listener whose

@@ -311,9 +311,11 @@ public struct UnixSocketLocalPeerDelivery: LocalPeerDelivering {
             }
         }
         guard connected == 0 else {
-            // ECONNREFUSED here is the *designed* signal that a peer is gone:
-            // a listener that has been closed and unlinked is what makes a
-            // sender see the same failure as a session that exited.
+            // ECONNREFUSED here is what a gone peer produces — a listener that
+            // has been closed and unlinked — and equally what a live peer whose
+            // accept queue is full produces. This side does not try to tell the
+            // two apart: either way the frame is dropped, which is the designed
+            // failure semantics of this channel.
             throw LocalPeerDeliveryError.connectFailed(path: path, errno: errno)
         }
 
