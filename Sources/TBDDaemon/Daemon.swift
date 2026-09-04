@@ -236,6 +236,11 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var archivedBackfillTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
+    /// Compares this build against the head of `main` on the remote, and — in
+    /// `auto` mode only — launches `scripts/update.sh`. Constructed at every
+    /// boot; its loop is started only when `update_mode` is not `off`, so the
+    /// shipped default costs one config read and nothing else.
+    public nonisolated(unsafe) var updateChecker: UpdateChecker?
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
     /// on shutdown; `nil` in mock mode.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
@@ -1349,6 +1354,61 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 12a-bis. Wire the update checker. Always constructed so
+            // `daemon.checkForUpdate` can answer an explicit question; its
+            // periodic loop starts only when the mode is not `off`, which is
+            // what makes the shipped default cost nothing but this one read.
+            let buildIdentity = RPCRouter.resolvedBuildIdentity
+            let updateSourceWorktree = buildIdentity?.sourceWorktree
+                ?? BuildIdentityLoader.sourceWorktree(
+                    fromExecutablePath: CommandLine.arguments.first)
+            let checkerGit = git
+            let checker = UpdateChecker(
+                ourCommit: buildIdentity?.commit,
+                sourceWorktree: updateSourceWorktree,
+                readMode: { [database] in
+                    // Read fresh every tick so `tbd config set update-mode`
+                    // takes effect without a restart. A database that cannot
+                    // answer is treated as the shipped default rather than as
+                    // permission to act.
+                    (try? await database.config.get().updateMode) ?? Config.updateModeDefault
+                },
+                resolveRemote: { worktree in
+                    // `upstream` first: on a fork checkout that is the tree
+                    // everyone's `main` actually comes from, and `origin` is
+                    // the fork, which lags.
+                    if let upstream = await checkerGit.remoteURL("upstream", at: worktree) {
+                        return upstream
+                    }
+                    return await checkerGit.remoteURL("origin", at: worktree)
+                },
+                remoteHead: { url, worktree in
+                    try? await checkerGit.lsRemoteHead(
+                        url: url, ref: UpdateChecker.mainRef, repoPath: worktree)
+                },
+                isAncestor: { ours, latest, worktree in
+                    await checkerGit.isMergeBaseAncestor(
+                        repoPath: worktree, base: ours, branch: latest)
+                },
+                behindCount: { ours, latest, worktree in
+                    await checkerGit.commitCount(from: ours, to: latest, at: worktree)
+                },
+                launch: { worktree in
+                    UpdateLauncher.launch(UpdateLauncher.plan(sourceWorktree: worktree))
+                },
+                interval: UpdateChecker.interval(
+                    from: ProcessInfo.processInfo.environment)
+            )
+            self.updateChecker = checker
+            rpcRouter.updateChecker = checker
+            let updateMode = (try? await database.config.get().updateMode)
+                ?? Config.updateModeDefault
+            if updateMode.runsChecks {
+                await checker.start()
+                daemonLogger.info(
+                    "Update checker started in mode \(updateMode.rawValue, privacy: .public)")
+            }
+
             // 12b. Start Claude OAuth usage poller (30-min cadence, 30s stagger).
             let poller = ClaudeUsagePoller(
                 profiles: database.modelProfiles,
@@ -1610,6 +1670,11 @@ public final class Daemon: Sendable {
         }
         if let poller = oauthUsagePoller {
             await poller.stop()
+        }
+        // Stops the timer only. An update this daemon already launched is
+        // detached on purpose and must outlive the shutdown that installs it.
+        if let checker = updateChecker {
+            await checker.stop()
         }
 
         if let resumeScheduler = limitResumeScheduler {
