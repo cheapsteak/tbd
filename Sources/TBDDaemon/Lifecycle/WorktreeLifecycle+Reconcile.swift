@@ -11,6 +11,60 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 /// holder is gone" are different facts and only the second is evidence. The two
 /// failure shapes collapse into one `keep` here — this sweep asks once, and the
 /// next reconcile is the retry — but they keep their reasons apart in the log.
+/// The **whole-pass** bound on how long the holder arm may spend at
+/// rendezvous sockets, and the reason a per-probe timeout is not one.
+///
+/// A per-holder receive timeout bounds one probe; a serial phase over N rows
+/// costs N times that bound, and this arm runs inside
+/// `performStartupReconciliation` — before the socket is bound, holding a tmux
+/// server resource lock. That is the failure `HolderRegistry.adoptAllBudget`
+/// exists to prevent, and this is the same mechanism applied at the same place
+/// in startup: a timer flips one flag, the loop reads it before each probe, and
+/// a pass that runs out keeps every row it has not reached. Keeping is free —
+/// this sweep asks once and the next reconcile *is* the retry — so an unreached
+/// row loses nothing but a pass.
+///
+/// It bounds the pass, not a probe: the real cost is the budget plus the one
+/// round trip in flight when it expired, exactly as `adoptAllBudget`'s is. A
+/// blocking `Darwin.connect` against a listener whose backlog is full is
+/// unbounded on its own and no timer here can shorten it.
+///
+/// An actor because one `WorktreeLifecycle` value is copied per call and every
+/// copy must read the same flag — the same reason `conflictSweepCache` is one.
+actor HolderProbeBudget {
+    private var spent = false
+    private var timer: Task<Void, Never>?
+
+    /// Starts the clock for one pass. A second call while a pass is running is
+    /// a no-op, so a nested or re-entered pass shares the outer one's budget
+    /// rather than silently granting itself a fresh one.
+    func begin(_ budget: Duration, clock: any Clock<Duration>) {
+        guard timer == nil else { return }
+        spent = false
+        timer = Task { [weak self] in
+            do {
+                try await clock.sleep(for: budget)
+            } catch {
+                // Cancelled because the pass finished inside its budget.
+                return
+            }
+            await self?.expire()
+        }
+    }
+
+    /// Ends the pass and cancels the timer. Safe to call when no pass is
+    /// running.
+    func end() {
+        timer?.cancel()
+        timer = nil
+    }
+
+    /// Whether the current pass has already spent its budget.
+    var isSpent: Bool { spent }
+
+    private func expire() { spent = true }
+}
+
 enum HolderRowVerdict: Sendable, Equatable {
     /// Nothing can reach this session any more, and the status is the last
     /// thing anybody knew about how its job ended. `exitedStatusUnknown` is the
@@ -570,6 +624,40 @@ extension WorktreeLifecycle {
     private func reconcileTerminals(
         in worktrees: [LocalWorktree], actuationLog: ActuationLog
     ) async throws {
+        // Read once per pass, not per row: the gate decides what this whole
+        // sweep is allowed to do, and re-reading it mid-pass would let a flip
+        // land between two rows of one judgement.
+        let holderArmEnabled =
+            (try? await db.config.get().holderRowReconcileEnabled)
+            ?? Config.holderRowReconcileEnabledDefault
+        // The budget covers the pass, not one server: the arm is serial across
+        // every server this call reconciles, so a per-server budget would
+        // multiply by the server count exactly the way a per-probe timeout
+        // multiplies by the row count.
+        if holderArmEnabled {
+            await holderProbeBudget.begin(Self.holderPhaseBudget, clock: clock)
+        }
+        // `end()` has to run on every exit, including the throwing one: the
+        // budget's timer is what makes `begin` a no-op while a pass is running,
+        // so a pass that walked away from its own timer would leave every later
+        // pass reading a spent budget. `defer` cannot await, so the throw is
+        // caught and rethrown instead.
+        do {
+            try await reconcileTerminalsWhileLockedPerServer(
+                in: worktrees, actuationLog: actuationLog,
+                holderArmEnabled: holderArmEnabled)
+        } catch {
+            await holderProbeBudget.end()
+            throw error
+        }
+        await holderProbeBudget.end()
+    }
+
+    /// The per-server half of `reconcileTerminals`, split out only so its
+    /// caller can bracket it with the pass's probe budget.
+    private func reconcileTerminalsWhileLockedPerServer(
+        in worktrees: [LocalWorktree], actuationLog: ActuationLog, holderArmEnabled: Bool
+    ) async throws {
         let grouped = Dictionary(grouping: worktrees, by: \.tmuxServer)
         for server in grouped.keys.sorted() {
             let candidates = grouped[server] ?? []
@@ -581,7 +669,8 @@ extension WorktreeLifecycle {
                     currentWorktrees.append(current)
                 }
                 try await reconcileTerminalsWhileLocked(
-                    in: currentWorktrees, actuationLog: actuationLog)
+                    in: currentWorktrees, actuationLog: actuationLog,
+                    holderArmEnabled: holderArmEnabled)
             }
         }
     }
@@ -592,7 +681,8 @@ extension WorktreeLifecycle {
     /// depend on it: a holder row's ground truth is its own rendezvous, and
     /// holding this lock neither protects nor delays it.
     private func reconcileTerminalsWhileLocked(
-        in worktrees: [LocalWorktree], actuationLog: ActuationLog
+        in worktrees: [LocalWorktree], actuationLog: ActuationLog,
+        holderArmEnabled: Bool
     ) async throws {
         // Probe the server each worktree row actually stores, not a canonical
         // name. Promoted scratch worktrees keep their inherited scratch server.
@@ -629,6 +719,14 @@ extension WorktreeLifecycle {
                 let disposal: String
                 switch terminal.transport {
                 case .holder:
+                    // The gate, and the same `continue` the old exemption
+                    // took. Off — the shipped default — this arm establishes
+                    // nothing and moves nothing, so a holder row is exactly as
+                    // untouched as it was before the arm existed.
+                    guard holderArmEnabled else {
+                        logger.debug("reconcile: leaving holder-backed terminal \(terminal.id, privacy: .public) alone — holder_row_reconcile_enabled is off")
+                        continue
+                    }
                     switch await holderRowVerdict(for: terminal) {
                     case .keep(let reason):
                         logger.debug("reconcile: keeping holder-backed terminal \(terminal.id, privacy: .public) — \(reason, privacy: .public)")
@@ -690,7 +788,22 @@ extension WorktreeLifecycle {
                     disposal = "window \(terminal.tmuxWindowID) gone or reassigned"
                 }
 
-                if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
+                // **Parking is a tmux-transport outcome, and only that.** A
+                // holder-backed row is deleted even when it names a resumable
+                // Claude session, because a parked holder row is inert and
+                // noisy rather than recoverable: `HibernationCoordinator.wake`
+                // refuses `transport == .holder` ahead of its "wake any parked
+                // row" branch, and this sweep skips parked rows, so nothing
+                // would ever judge it again — while the app's focus-wake
+                // selects exactly `isParked && isClaudeResumable &&
+                // hibernateReason != .manual` and would fire a failing wake RPC
+                // on every focus of that worktree, forever. Deleting says the
+                // true thing instead. The cost is real and named in the PR: a
+                // holder-backed resumable Claude session that ends loses the
+                // park a tmux one would get, until a holder wake path lands —
+                // which is a feature, not a reconciler's job.
+                if terminal.transport != .holder, terminal.isClaudeResumable,
+                   let sessionID = terminal.claudeSessionID {
                     // This park bypasses `HibernationCoordinator`, so the
                     // reconcile rail records its own independent actuation.
                     // Fail closed if that authoritative record cannot be made.
@@ -713,7 +826,7 @@ extension WorktreeLifecycle {
                     logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
                 } else {
                     try? await db.deleteTerminalAndTab(id: terminal.id)
-                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), no session to preserve")
+                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), \(Self.deletionRationale(for: terminal), privacy: .public)")
                 }
                 await pendingQuestions.clear(terminalID: terminal.id)
                 await subscriptions?.broadcastPendingQuestions(
@@ -731,6 +844,29 @@ extension WorktreeLifecycle {
     /// stranger that connects and then says nothing must not stall a sweep that
     /// may have hundreds of rows behind it.
     static let holderProbeTimeout: Duration = .seconds(2)
+
+    /// How long the holder arm gets across a whole reconcile pass.
+    ///
+    /// The same five seconds `HolderRegistry.defaultAdoptAllBudget` allows, and
+    /// deliberately the same number: both bound a serial holder phase that runs
+    /// before the daemon's socket is bound, and a reader comparing them should
+    /// find one answer rather than two. See `HolderProbeBudget` for why a
+    /// per-probe timeout is not a bound on the phase.
+    static let holderPhaseBudget: Duration = .seconds(5)
+
+    /// Why the sweep deleted a row rather than parking it, for the one log line
+    /// that records the judgement.
+    ///
+    /// Composed by a named function so a test can pin the text: the two
+    /// deletions are not the same event, and a line that told a
+    /// holder-transport Claude row it had "no session to preserve" would be
+    /// false about the one row shape whose park was deliberately withheld.
+    static func deletionRationale(for terminal: Terminal) -> String {
+        guard terminal.transport == .holder, terminal.isClaudeResumable,
+            terminal.claudeSessionID != nil
+        else { return "no session to preserve" }
+        return "its Claude session is not resumable from a park on the holder transport"
+    }
 
     /// How a finished session's job ended, in words, for the one log line that
     /// records the sweep's judgement.
@@ -799,6 +935,46 @@ extension WorktreeLifecycle {
         }
     }
 
+    /// What one *connection* to a holder's rendezvous says about its row, for
+    /// the rows a `describe` may not be asked about.
+    ///
+    /// **A connect establishes absence and nothing else, which is the point.**
+    /// A holder winds itself down the moment an answer carrying the terminal
+    /// status reaches a client, so describing a session whose master this
+    /// daemon has never taken would end that holder and take the output its job
+    /// wrote and nobody read with it — the rule
+    /// `HolderRegistry.confirmChildExit` states, and the reason adoption asks
+    /// for the hand-over rather than a description. Connecting asks for nothing
+    /// that could be an answer, so it cannot collect the exit it is looking for.
+    ///
+    /// What that costs is the *fidelity* of the positive case: a holder that is
+    /// alive with an exited child reads as `keep` here, where a `describe`
+    /// would have carried a real exit code back. That is the right trade — the
+    /// row is judged on the next daemon start, whose adoption takes the master
+    /// first and records the status honestly, and until then the screen is
+    /// still there to hand a viewer.
+    ///
+    /// The failure half is `HolderRegistry.exitProbeOutcome(for:)`, exactly as
+    /// the describing verdict's is, so absence means the same thing whichever
+    /// probe observed it.
+    static func holderListenerVerdict(
+        connecting connect: () async throws -> Void
+    ) async -> HolderRowVerdict {
+        do {
+            try await connect()
+            // Something is bound to that path and accepting. Whose it is and
+            // what its child is doing were not asked and are not known.
+            return .keep(reason: "listening")
+        } catch {
+            switch HolderRegistry.exitProbeOutcome(for: error) {
+            case .established(let status):
+                return .sessionOver(status)
+            case .retry, .keep:
+                return .keep(reason: keepReason(for: error))
+            }
+        }
+    }
+
     /// The *label* a kept row carries into the log, and only the label — the
     /// decision was `exitProbeOutcome`'s.
     ///
@@ -831,7 +1007,19 @@ extension WorktreeLifecycle {
     ///   4. **A terminal status already recorded ends the questioning.** A
     ///      holder winds itself down the moment an answer carrying the status
     ///      reaches a client, so once one has there is nobody left to ask.
-    ///   5. **Otherwise, ask the rendezvous.**
+    ///   5. **Otherwise, ask the rendezvous — and *what* is asked depends on
+    ///      whether this daemon has ever taken the master.** A row the registry
+    ///      remembers as `.alive` was handed over, so a `describe` costs it
+    ///      nothing and gives a real exit code. A row it remembers nothing
+    ///      about may still be a holder sitting on output nobody has drained,
+    ///      and describing it would collect the exit, wind the holder down and
+    ///      destroy exactly the screen the handover exists to preserve — so
+    ///      that row gets `holderListenerVerdict`, which asks nothing.
+    ///
+    /// Every probe is additionally under the pass's `HolderProbeBudget`: gates
+    /// 1-4 are dictionary reads and always run, and a pass that has spent its
+    /// budget keeps the rest rather than opening more sockets before the
+    /// daemon's own is bound.
     ///
     /// The last gate is the one that is not about the holder at all. **A row
     /// whose job is still running is kept even when its holder is provably
@@ -840,10 +1028,19 @@ extension WorktreeLifecycle {
     /// holder died — reads exactly that record. Deleting the row here would
     /// reclaim an inventory entry and strand the process it named, which is the
     /// hazard `HolderRegistry.killJob`'s doc comment describes. So this sweep
-    /// signals nothing, ever: it waits for the reaper to do its half and clears
-    /// the row on a later pass. A pid the row names that has been reused by a
-    /// stranger keeps the row forever instead of killing that stranger, which
-    /// is the direction to fail in.
+    /// signals nothing, ever.
+    ///
+    /// **Naming that contingency honestly: the loop does not always close.**
+    /// The reaper leg this gate waits for is itself gated on
+    /// `reapHolderChildrenEnabled`, which ships off, so on the shipped defaults
+    /// nothing ever kills the job and the row is kept for as long as the pid is
+    /// alive. Even with both flags on, the reaper keeps rather than signals
+    /// whenever identity is uncertain — `holder-unrecorded`,
+    /// `start-time-mismatch`, `foreign-executable` — and each of those is a
+    /// permanent keep here too. A pid the row names that has been reused by a
+    /// stranger therefore keeps the row indefinitely instead of killing that
+    /// stranger. That is the direction to fail in, and a kept row is a visible
+    /// session the user can close by hand.
     func holderRowVerdict(for terminal: Terminal) async -> HolderRowVerdict {
         guard let holderRegistry else { return .keep(reason: "no-holder-registry") }
         if await holderRegistry.viewerAttachment(for: terminal.id) != nil {
@@ -854,7 +1051,8 @@ extension WorktreeLifecycle {
         }
 
         let verdict: HolderRowVerdict
-        switch await holderRegistry.lastKnownStatus(for: terminal.id) {
+        let lastKnown = await holderRegistry.lastKnownStatus(for: terminal.id)
+        switch lastKnown {
         // Established without a round trip, and by the same rule the probe
         // uses: this is what a holder said, or what its absence said, and
         // neither becomes less true for being remembered.
@@ -863,14 +1061,28 @@ extension WorktreeLifecycle {
         case .exitedStatusUnknown:
             verdict = .sessionOver(.exitedStatusUnknown)
         case .alive, nil:
+            // A remembered `.alive` is a status this daemon was *given*, which
+            // it is given only on a hand-over. So it doubles as the record that
+            // the master has been taken and a `describe` costs this session
+            // nothing; `nil` is the absence of that record.
+            let handedOver = lastKnown != nil
+            guard await !holderProbeBudget.isSpent else {
+                return .keep(reason: "phase-budget-spent")
+            }
             guard
                 let socketPath = try? HolderRendezvous.socketPath(
                     sessionID: terminal.id, environment: holderRegistry.environment)
             else { return .keep(reason: "unrepresentable-rendezvous") }
             let client = HolderClient(
                 socketPath: socketPath, receiveTimeout: Self.holderProbeTimeout)
-            verdict = await Self.holderRowVerdict(expecting: holderRegistry.owner) {
-                try await client.describe()
+            if handedOver {
+                verdict = await Self.holderRowVerdict(expecting: holderRegistry.owner) {
+                    try await client.describe()
+                }
+            } else {
+                verdict = await Self.holderListenerVerdict {
+                    try await client.connectOnly()
+                }
             }
             await client.close()
         }

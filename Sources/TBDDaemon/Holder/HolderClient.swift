@@ -130,6 +130,31 @@ actor HolderClient {
 
     // MARK: - Verbs
 
+    /// Establish the connection and ask nothing.
+    ///
+    /// **The one probe that cannot destroy what it is probing.** Every other
+    /// verb here can carry a terminal status back, and a holder winds itself
+    /// down the moment one reaches a client — so a `describe` against a holder
+    /// whose master has not been handed over ends the holder and takes down
+    /// with it everything the job wrote and nobody read.
+    /// `HolderRegistry.confirmChildExit` states that rule; this verb is what a
+    /// caller uses when it is on the wrong side of it and still needs to know
+    /// whether anybody is there.
+    ///
+    /// It establishes exactly one fact — something is bound to that path and
+    /// accepting — and asks for nothing that could be an answer. Failures come
+    /// out as the same `Error.cannotConnect` every other verb throws on the way
+    /// in, so `HolderRegistry.exitProbeOutcome(for:)` classifies them by the
+    /// same errno rules and those rules still live in one place.
+    ///
+    /// Bounded only by the kernel: `Darwin.connect` blocks while a listener's
+    /// backlog is full, and `SO_RCVTIMEO` is set after it returns, so a caller
+    /// that probes many paths in a row must bound the *phase*, not just the
+    /// probe.
+    func connectOnly() throws {
+        try connectIfNeeded()
+    }
+
     /// Report the child without transferring anything. Doubles as the
     /// handshake: a holder that answers this is alive, speaking the protocol,
     /// and naming the installation that spawned it.
