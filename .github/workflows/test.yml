@@ -154,6 +154,14 @@ jobs:
       # and where a `claude` binary is on PATH it runs the real CLI against
       # that socket — still no egress, and it self-skips on runners, which
       # have no `claude` installed.
+      #
+      # `daemon-footprint-watch.py` is a macOS instrument, but its `--self-test`
+      # drives the spike detector, the report and the run-directory sweep over
+      # synthetic series and temp directories: it touches no kernel counter, no
+      # `log stream` and no process. The only macOS-only calls it can reach are
+      # the `ctypes.CDLL` loads behind the process-identity seam, which fail
+      # closed on Linux and are caught there, and the libproc leg skips itself
+      # off macOS. So it runs here rather than costing a rationed macOS runner.
       - name: Test agent guardrails and the script harnesses
         run: |
           python3 .claude/hooks/guardrails/dispatch.py --self-test
@@ -163,6 +171,7 @@ jobs:
           bash scripts/remote-verify.test.sh
           bash scripts/sweep-preflight-refs.test.sh
           bash scripts/nightly-flake-stress.test.sh
+          python3 scripts/diag/daemon-footprint-watch.py --self-test
 
   review-scripts-tests:
     name: Review scripts tests
