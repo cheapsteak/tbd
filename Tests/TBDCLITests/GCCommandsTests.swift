@@ -21,6 +21,20 @@ struct GCCommandsTests {
         #expect(names.contains("holder-children"))
         #expect(names.contains("rowless-holders"))
         #expect(names.contains("orphan-processes"))
+        // The row sweep destroys database rows rather than files or processes,
+        // which is the same argument in a different currency: without a leg
+        // here, enabling it for the soak means hand-editing `state.db`.
+        #expect(names.contains("holder-rows"))
+    }
+
+    @Test func holderRowSwitchIsNamedForWhatItReclaims() {
+        #expect(GCHolderRows.configuration.commandName == "holder-rows")
+    }
+
+    @Test func holderRowSwitchTakesTheStateWordAsARequiredPositional() throws {
+        #expect(try GCHolderRows.parse(["on"]).state == "on")
+        #expect(try GCHolderRows.parse(["off"]).state == "off")
+        #expect(throws: (any Error).self) { try GCHolderRows.parse([]) }
     }
 
     /// The name is a noun phrase naming *what gets reclaimed*, like every

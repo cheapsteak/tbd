@@ -703,6 +703,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetGCRetainedTranscriptsEnabled(request.paramsData)
             case RPCMethod.configSetRemoteDeleteEnabled:
                 return try await handleConfigSetRemoteDeleteEnabled(request.paramsData)
+            case RPCMethod.configSetHolderRowReconcileEnabled:
+                return try await handleConfigSetHolderRowReconcileEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:

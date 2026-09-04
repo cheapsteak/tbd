@@ -10,6 +10,7 @@ struct GCCommand: ParsableCommand {
             GCList.self, GCRestore.self, GCSweep.self, GCProfileDirs.self,
             GCOrphanProcesses.self, GCHolders.self, GCRowlessHolders.self,
             GCHolderChildren.self, GCRetainedTranscripts.self,
+            GCHolderRows.self,
         ]
     )
 }
@@ -176,6 +177,34 @@ struct GCRetainedTranscripts: AsyncParsableCommand {
             method: RPCMethod.configSetGCRetainedTranscriptsEnabled,
             params: ConfigSetGCRetainedTranscriptsParams(enabled: enabled))
         print("Retained-transcript GC \(enabled ? "enabled" : "disabled").")
+    }
+}
+
+/// The soak switch for the reconcile arm that judges holder-backed session
+/// rows. It is the third of the pty-holder transport's named reclaimers and the
+/// only one that destroys database rows, so it is a switch of its own: enabling
+/// `tbd gc holders` (files) or `tbd gc holder-children` (processes) must never
+/// silently enable it. It lives under `gc` because that is where a soak
+/// participant already looks for a reclaimer's switch, though the arm itself
+/// runs on the reconcile rail rather than the GC timer.
+///
+/// Off — the shipped default — the arm judges nothing and deletes nothing.
+struct GCHolderRows: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "holder-rows",
+        abstract: "Enable or disable reconciling session rows whose pty holder is gone (default off)")
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetHolderRowReconcileEnabled,
+            params: ConfigSetHolderRowReconcileEnabledParams(enabled: enabled))
+        print("Holder row reconciliation \(enabled ? "enabled" : "disabled").")
     }
 }
 

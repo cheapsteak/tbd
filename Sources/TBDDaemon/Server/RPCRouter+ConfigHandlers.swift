@@ -292,6 +292,23 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the holder row sweep's gate — the default-off soak switch for
+    /// the reconcile arm that deletes a session row whose holder is gone.
+    ///
+    /// This is how the soak is turned on. It is a third verb rather than a
+    /// reuse of either holder gate above, because those reclaim a file and a
+    /// process and this one destroys the database row that names both. Flipping
+    /// it off does not cancel an in-progress sweep: the arm re-reads the flag
+    /// on its next pass, the same contract the GC gates keep.
+    func handleConfigSetHolderRowReconcileEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetHolderRowReconcileEnabledParams.self, from: paramsData)
+        try await db.config.setHolderRowReconcileEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the orphaned-process collector gate — the default-off soak
     /// switch for reclaiming processes that outlived the worktree they were
     /// rooted in, read on top of the GC master switch.

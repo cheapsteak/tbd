@@ -304,6 +304,7 @@ public enum RPCMethod {
     /// opt-in, and the supported way to turn the soak on. Reading needs no
     /// method of its own: `config.get` already carries the resolved value.
     public static let configSetRemoteDeleteEnabled = "config.setRemoteDeleteEnabled"
+    public static let configSetHolderRowReconcileEnabled = "config.setHolderRowReconcileEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -3228,6 +3229,17 @@ public struct ConfigSetGCRetainedTranscriptsParams: Codable, Sendable {
 /// would be the one reachable only by hand-editing `~/tbd/state.db`. Design:
 /// `docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`.
 public struct ConfigSetRemoteDeleteEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setHolderRowReconcileEnabled` — the gate on the reconcile
+/// arm that judges holder-backed session rows and deletes the ones nothing can
+/// reach any more (default OFF during soak). This is how the soak is turned on:
+/// the arm destroys database rows without a user gesture, so leaving it
+/// reachable only by editing the database by hand would make it un-soakable.
+/// Design: `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
+public struct ConfigSetHolderRowReconcileEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
