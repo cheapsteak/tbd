@@ -689,13 +689,34 @@ jobs:
               esac
             done
             if [ -z "$targets" ]; then
+              # The fallback takes at most four targets, in walk order (parents
+              # before children, so SwiftPM's driver processes come before the
+              # compiler processes they spawn): four serial 5 s samples plus
+              # symbolication stay well inside the three-minute margin, while an
+              # uncapped list — every non-plumbing process alive mid-compile —
+              # could eat that margin and leave the step to be killed by
+              # `timeout-minutes` after all. Whatever the cap drops is recorded
+              # in the ps file, so the omission is visible in the artifact. The
+              # argv-matched path above stays uncapped: it normally yields
+              # exactly one process.
+              fallback_cap=4
+              fallback_taken=0
+              fallback_skipped=0
               for pid in $kids; do
                 comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
                 case "${comm##*/}" in
-                  ""|script|bash|sh|tee|sleep|Python|python3|swift-safe) ;;
-                  *) targets="$targets $pid" ;;
+                  ""|script|bash|sh|tee|sleep|Python|python3|swift-safe) continue ;;
                 esac
+                if [ "$fallback_taken" -lt "$fallback_cap" ]; then
+                  targets="$targets $pid"
+                  fallback_taken=$((fallback_taken + 1))
+                else
+                  fallback_skipped=$((fallback_skipped + 1))
+                fi
               done
+              if [ "$fallback_skipped" -gt 0 ]; then
+                echo "(fallback sampling capped at $fallback_cap targets; $fallback_skipped further candidates skipped)" >> /tmp/quiet-pass-stall-ps.txt
+              fi
             fi
             if [ -z "$targets" ]; then
               echo "The pipeline has no sampleable descendants — /tmp/quiet-pass-stall-ps.txt carries the whole-machine listing instead."
