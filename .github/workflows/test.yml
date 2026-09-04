@@ -156,10 +156,12 @@ jobs:
       # have no `claude` installed.
       #
       # `daemon-footprint-watch.py` is a macOS instrument, but its `--self-test`
-      # drives the spike detector and the report over synthetic series and
-      # touches no kernel counter, no `log stream` and no process: every
-      # `ctypes.CDLL` in it is inside a function the self-test never reaches, so
-      # it runs here rather than costing a rationed macOS runner.
+      # drives the spike detector, the report and the run-directory sweep over
+      # synthetic series and temp directories: it touches no kernel counter, no
+      # `log stream` and no process. The only macOS-only calls it can reach are
+      # the `ctypes.CDLL` loads behind the process-identity seam, which fail
+      # closed on Linux and are caught there, and the libproc leg skips itself
+      # off macOS. So it runs here rather than costing a rationed macOS runner.
       - name: Test agent guardrails and the script harnesses
         run: |
           python3 .claude/hooks/guardrails/dispatch.py --self-test

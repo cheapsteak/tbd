@@ -3,6 +3,7 @@
 
     daemon-footprint-watch.py [--pid N] [--interval 1.0] [--threshold-mb 1024] [--out DIR]
     daemon-footprint-watch.py --report <run dir>
+    daemon-footprint-watch.py --prune [--keep-days 14]
     daemon-footprint-watch.py --self-test
 
 WHY THIS EXISTS
@@ -144,11 +145,41 @@ OUTPUT, AND WHO CLEANS IT UP
 Everything lands under `--out`, which defaults to
 `$TBD_HOME/diag/daemon-footprint/<YYYYmmdd-HHMMSS>/` (TBD_HOME defaults to
 `~/tbd`). The run directory holds `run.json`, `samples.jsonl`, `daemon-log.txt`,
-`sidecar.pid` and `captures/`. These files outlive the run and no reconciler
-covers them: this is operator scratch, and the operator who started the watch
-deletes it. Nothing here writes to the database, signals the daemon, or restarts
-anything; the only state it changes in the target is the footprint interval
-counter it resets.
+`sidecar.pid` and `captures/`. These files outlive the run, and no daemon-side
+sweep covers them: the daemon knows nothing about this directory.
+
+The named reconciler for them is this script's own startup sweep. Every live
+watch, before it samples anything, walks `$TBD_HOME/diag/daemon-footprint/` and
+removes each run directory whose newest file is older than `--keep-days`
+(default 14; `0` disables the sweep entirely), along with any
+`.watch-<pid>.lock` whose holder is dead. `--prune` runs the same pass alone and
+exits, for reclaiming without starting a watch. So a tree forgotten in August is
+reclaimed the next time anybody starts a watch, instead of waiting for the
+operator who started that watch to remember it.
+
+The exception is a run some watcher still holds. `run.json` records
+`watcher_pid` and `watcher_start_abstime`, the same pid-and-start-stamp pair the
+lock file carries and read from the same rusage, and a run whose watcher is
+still alive at that identity is never removed however old its files are. That
+has to be an exception rather than an inference from mtime: a watch that has not
+found a target writes no samples at all, so a perfectly live overnight run can
+have a `samples.jsonl` nothing has touched for days.
+
+The sweep is keep-biased throughout, because the cost of deleting a run somebody
+wanted is unbounded and the cost of keeping one nobody wants is a directory.
+Anything newer than the cutoff is never touched. A directory with no `run.json`,
+or one that cannot be parsed, is not read as unclaimed; it goes by age alone. A
+watcher pid that answers but whose identity cannot be established counts as
+alive. Symlinks are never followed: a link contributes its own mtime and never
+its target's, so a link into a directory somebody else is writing cannot keep a
+dead run alive forever, and nothing outside the daemon-footprint directory is
+ever removed. What the sweep did lands in the new run's `samples.jsonl` as a
+`swept` marker naming the directories it removed and how many it kept for a live
+watcher, and the same summary is printed to stdout.
+
+Nothing here writes to the database, signals the daemon, or restarts anything;
+the only state it changes in the target is the footprint interval counter it
+resets.
 
 A run directory is written once and never reused. If `--out` already holds a
 `samples.jsonl` or a `run.json` the watch refuses to start and exits 2, because
@@ -160,16 +191,18 @@ either direction. `ri_proc_start_abstime` is recorded for the target at acquire
 and compared on every tick, so a daemon that died and came back onto the same
 pid is lost and re-acquired rather than sampled straight through as if nothing
 had happened, and the run's markers say so. The lock file described next carries
-the same stamp for the same reason.
+the same stamp for the same reason, and it is what the startup sweep reads to
+tell a run somebody is still writing from a run somebody forgot.
 
 One file lives outside the run directory. While a watch holds a target it owns
 `$TBD_HOME/diag/daemon-footprint/.watch-<target pid>.lock`, a JSON object naming
 the watcher's own pid and start stamp, because `proc_reset_footprint_interval`
 is per-process and a second watch on the same target silently steals half of
 both watches' interval windows. The lock is removed when the target is lost and
-again at shutdown. A watcher killed with SIGKILL cannot remove it and no sweep
-covers it: a stale lock is reclaimed by the next watcher that finds its holder
-dead, which is the whole of this resource's reconciliation story. The stamp is
+again at shutdown. A watcher killed with SIGKILL cannot remove it, so a stale
+lock is reclaimed two ways: by the next watcher that wants that same target and
+finds its holder dead, and by the startup sweep above, which removes every lock
+in the directory whose holder is dead whatever target it names. The stamp is
 what makes "dead" answerable at all - a holder pid handed on to an unrelated
 process answers `kill -0` forever, and a lock reclaimed on liveness alone would
 never be reclaimed again. A lock written by an older watch holds a bare pid,
@@ -241,6 +274,7 @@ import json
 import mmap
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -264,6 +298,13 @@ DEFAULT_THRESHOLD_MB = 1024
 DEFAULT_RISE_MB = 512
 DEFAULT_REARM_MB = 512
 DEFAULT_BASELINE_WINDOW = 300.0
+
+# How long a run directory nobody is watching survives the next watch's startup
+# sweep. Two weeks, because that is longer than any investigation this
+# instrument has been pointed at and short enough that a forgotten overnight
+# tree does not sit on the disk for a quarter. 0 disables the sweep.
+DEFAULT_KEEP_DAYS = 14
+SECONDS_PER_DAY = 86400.0
 
 MB = 1024 * 1024
 
@@ -1072,9 +1113,14 @@ def read_pid_file(path: Path) -> int | None:
         return None
 
 
+def footprint_root() -> Path:
+    """The directory every run directory and every watch lock lives under."""
+    return tbd_home() / "diag" / "daemon-footprint"
+
+
 def watch_lock_path(target_pid: int) -> Path:
     """The rendezvous file that says a watch already holds this target."""
-    return tbd_home() / "diag" / "daemon-footprint" / f".watch-{target_pid}.lock"
+    return footprint_root() / f".watch-{target_pid}.lock"
 
 
 def read_lock(path: Path) -> tuple[int | None, int | None]:
@@ -1207,6 +1253,186 @@ def holder_is_alive(
     if recorded_start is None or current_start is None:
         return True
     return not identity_changed(recorded_start, current_start)
+
+
+# ----------------------------------------------------------------------------
+# RECLAIM: THE NAMED RECONCILER FOR RUN DIRECTORIES
+# ----------------------------------------------------------------------------
+
+
+@dataclass
+class SweepResult:
+    """What one pass over the daemon-footprint directory did."""
+
+    removed: list[str] = field(default_factory=list)
+    removed_locks: list[str] = field(default_factory=list)
+    kept_live: int = 0
+
+
+def newest_mtime(path: Path) -> float:
+    """The most recent mtime anywhere under `path`, symlinks never followed.
+
+    `lstat` throughout, so a symlink contributes its own mtime and never its
+    target's. Reading through one is both a way for a link into a directory
+    somebody else is writing to keep a dead run alive forever, and a way out of
+    this tree entirely.
+
+    The directory's own mtime is included, so a run directory holding nothing
+    still has an age instead of reading as epoch zero.
+    """
+    try:
+        newest = path.lstat().st_mtime
+    except OSError:
+        return 0.0
+    for current, dirs, files in os.walk(str(path), followlinks=False):
+        for name in dirs + files:
+            try:
+                stamp = os.lstat(os.path.join(current, name)).st_mtime
+            except OSError:
+                continue
+            if stamp > newest:
+                newest = stamp
+    return newest
+
+
+def read_run_watcher(run_dir: Path) -> tuple[int | None, int | None]:
+    """(watcher pid, its start stamp) from a run's `run.json`, or (None, None).
+
+    Anything missing, unreadable, unparseable, or written by a watch older than
+    these fields reads as "no watcher named", which leaves the directory to the
+    age rule alone rather than to a guess.
+    """
+    try:
+        payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    try:
+        pid = int(payload["watcher_pid"])
+    except (KeyError, TypeError, ValueError):
+        return None, None
+    raw = payload.get("watcher_start_abstime")
+    try:
+        start = int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        start = None
+    return pid, (start or None)
+
+
+def sweep_footprint_root(
+    root: Path | None = None,
+    keep_days: float = DEFAULT_KEEP_DAYS,
+    now: float | None = None,
+    identity=process_identity,
+    skip: Path | None = None,
+) -> SweepResult:
+    """Reclaim run directories nobody is watching, and locks nobody holds.
+
+    This is the named reconciler for `$TBD_HOME/diag/daemon-footprint/`. It runs
+    at the start of every live watch and on `--prune`, and nothing else ever
+    removes anything here: no daemon sweep covers this directory, and an
+    operator who has to remember a path is an operator who does not.
+
+    Two rules, and both have to hold before anything is removed. A run directory
+    goes when its newest file is older than `keep_days` and no live watcher
+    claims it; a `.watch-<pid>.lock` goes when its holder is dead. Liveness is
+    the same identity test the lock reclaim uses, injected so the self-test can
+    run where there is no libproc: a pid that answers *and* whose start stamp
+    matches the one recorded is the process that wrote the file.
+
+    Everything about it is keep-biased. `keep_days <= 0` disables it outright.
+    Anything younger than the cutoff is never looked at further. A run with no
+    readable watcher goes by age alone rather than being read as abandoned, an
+    unreadable identity counts as alive, and a removal that fails is dropped
+    rather than retried. Symlinks are skipped at the top level and never
+    followed below it, and every path removed is rebuilt under the resolved root
+    and checked against its prefix, so a name cannot reach out of this tree.
+
+    `skip` is the caller's own run directory, which is young by construction but
+    is named explicitly anyway: a sweep that could delete the directory it is
+    about to write into would be a bug that only shows up on a clock change.
+    """
+    result = SweepResult()
+    if keep_days <= 0:
+        return result
+    root = footprint_root() if root is None else root
+    try:
+        root_real = root.resolve()
+        names = sorted(os.listdir(str(root_real)))
+    except OSError:
+        return result
+    now = time.time() if now is None else now
+    cutoff = now - keep_days * SECONDS_PER_DAY
+    prefix = str(root_real).rstrip(os.sep) + os.sep
+    skip_real: Path | None = None
+    if skip is not None:
+        try:
+            skip_real = skip.resolve()
+        except OSError:
+            skip_real = None
+
+    for name in names:
+        path = root_real / name
+        if not str(path).startswith(prefix):
+            continue
+        if os.path.islink(str(path)):
+            # Never followed and never removed: whatever it points at is not
+            # this tree's to reclaim.
+            continue
+        if name.startswith(".watch-") and name.endswith(".lock"):
+            holder, holder_start = read_lock(path)
+            if holder is None or holder == os.getpid():
+                continue
+            if holder_is_alive(holder, holder_start, identity):
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            result.removed_locks.append(name)
+            continue
+        if not os.path.isdir(str(path)):
+            continue
+        if skip_real is not None and path == skip_real:
+            continue
+        if newest_mtime(path) >= cutoff:
+            continue
+        watcher_pid, watcher_start = read_run_watcher(path)
+        if watcher_pid is not None and holder_is_alive(watcher_pid, watcher_start, identity):
+            # Old files, live watch. A watch that has not found a target writes
+            # no samples, so age alone would reclaim a run in progress.
+            result.kept_live += 1
+            continue
+        try:
+            shutil.rmtree(str(path))
+        except OSError:
+            continue
+        result.removed.append(name)
+    return result
+
+
+def sweep_summary(result: SweepResult, keep_days: float, root: Path | None = None) -> str:
+    """One line saying what the sweep did, for stdout."""
+    root = footprint_root() if root is None else root
+    if keep_days <= 0:
+        return f"sweep disabled (--keep-days 0); nothing reclaimed under {root}"
+    return (
+        f"swept {root}: {len(result.removed)} run director"
+        f"{'y' if len(result.removed) == 1 else 'ies'} removed, "
+        f"{len(result.removed_locks)} stale lock(s) removed, "
+        f"{result.kept_live} kept for a live watch (--keep-days {keep_days:g})"
+    )
+
+
+def prune(keep_days: float) -> int:
+    """`--prune`: run the startup sweep on its own and say what it removed."""
+    root = footprint_root()
+    result = sweep_footprint_root(root=root, keep_days=keep_days)
+    for name in result.removed + result.removed_locks:
+        print(f"removed {root / name}")
+    print(sweep_summary(result, keep_days, root))
+    return 0
 
 
 # The daemon executable is named TBDDaemon. `tbdd` is accepted too, so a future
@@ -1644,11 +1870,36 @@ class Watch:
             return None
         return candidate
 
+    # -- reclaim -----------------------------------------------------------
+
+    def sweep_old_runs(self) -> SweepResult:
+        """Run the startup sweep and say on stdout what it did.
+
+        The reconciler for run directories runs here rather than on a timer or
+        in the daemon, because a watch is the only thing that ever visits this
+        directory and starting one is the moment somebody is looking at it. A
+        failure to reclaim must never stop a watch from measuring, so the whole
+        pass is guarded: a sweep that raises leaves an empty result and the
+        watch carries on.
+        """
+        try:
+            result = sweep_footprint_root(keep_days=self.args.keep_days, skip=self.out_dir)
+        except Exception as exc:  # noqa: BLE001 - reclaiming must not cost a watch
+            print(f"sweep failed, continuing without it: {exc!r}", file=sys.stderr)
+            return SweepResult()
+        print(sweep_summary(result, self.args.keep_days))
+        return result
+
     # -- loop --------------------------------------------------------------
 
     def run(self) -> int:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.captures_dir.mkdir(parents=True, exist_ok=True)
+        # Before anything else, including opening the record: a watch reclaims
+        # what earlier watches left behind whether or not it goes on to find a
+        # target. The marker it produces is emitted further down, below the
+        # `--pid` bail, for the same reason the timebase marker is.
+        sweep = self.sweep_old_runs()
         self._samples = self.samples_path.open("a", encoding="utf-8")
 
         initial_pid = self.resolve_pid()
@@ -1680,6 +1931,16 @@ class Watch:
         # leaves a non-empty samples.jsonl behind for a --pid that could not be
         # read at all, and the corrected retry against the same --out is then
         # refused as a second run appended to a first.
+        self.emit(
+            {
+                "event": "swept",
+                "removed": sweep.removed,
+                "kept_live": sweep.kept_live,
+                "removed_locks": sweep.removed_locks,
+                "keep_days": self.args.keep_days,
+                "root": str(footprint_root()),
+            }
+        )
         if not self.libproc.timebase_ok:
             # 1/1 is also the real Apple-Intel ratio, so without this marker a
             # run that gave up on the timebase is indistinguishable from one
@@ -1738,6 +1999,12 @@ class Watch:
                     "script_version": SCRIPT_VERSION,
                     "started_at": iso(time.time()),
                     "started_epoch": time.time(),
+                    # Who is writing this directory, in the same terms the watch
+                    # lock uses: a pid alone is reused, so the startup sweep of
+                    # a later watch needs the start stamp to tell "still being
+                    # written" from "the pid came round".
+                    "watcher_pid": os.getpid(),
+                    "watcher_start_abstime": process_identity(os.getpid())[1],
                     "target_pid": initial_pid,
                     "target_start_time": process_start_time(initial_pid) if initial_pid else None,
                     "log_stream_pid": sidecar_pid,
@@ -1760,6 +2027,7 @@ class Watch:
                         "no_sample": self.args.no_sample,
                         "no_log_stream": self.args.no_log_stream,
                         "pid_override": self.args.pid,
+                        "keep_days": self.args.keep_days,
                         "out": str(self.out_dir),
                     },
                 },
@@ -2500,6 +2768,40 @@ def _write_synthetic_run(
         lines.append(json.dumps(marker))
     (run_dir / "samples.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (run_dir / "run.json").write_text(json.dumps({"args": run_args}), encoding="utf-8")
+
+
+def _seed_swept_run(
+    root: Path,
+    name: str,
+    now: float,
+    age_days: float,
+    watcher: tuple[int, int | None] | None = None,
+    run_json: bool = True,
+) -> Path:
+    """A run directory of a chosen age, optionally naming the watcher that owns it.
+
+    Every entry and the directory itself are stamped, the directory last,
+    because writing a file into it bumps its own mtime back to the present.
+    """
+    run_dir = root / name
+    run_dir.mkdir(parents=True)
+    (run_dir / "samples.jsonl").write_text("{}\n", encoding="utf-8")
+    entries = [run_dir / "samples.jsonl"]
+    if run_json:
+        payload: dict = {"script_version": SCRIPT_VERSION}
+        if watcher is not None:
+            payload["watcher_pid"] = watcher[0]
+            payload["watcher_start_abstime"] = watcher[1]
+        (run_dir / "run.json").write_text(json.dumps(payload), encoding="utf-8")
+        entries.append(run_dir / "run.json")
+    stamp = now - age_days * SECONDS_PER_DAY
+    for entry in entries + [run_dir]:
+        os.utime(str(entry), (stamp, stamp))
+    return run_dir
+
+
+def _lock_text(pid: int, start: int | None) -> str:
+    return json.dumps({"pid": pid, "start_abstime": start}) + "\n"
 
 
 def self_test() -> int:
@@ -3298,6 +3600,169 @@ def self_test() -> int:
                 else:
                     os.environ["TBD_HOME"] = previous_home
 
+    def sweep_reclaims_forgotten_runs() -> None:
+        # The reconciler for run directories. Everything about it is driven
+        # through the injected clock and the injected identity seam, so it runs
+        # on a machine with no libproc and cannot depend on which pids happen to
+        # exist here.
+        now = time.time()
+        live, dead = 4242, 5150
+
+        def identity(pid: int) -> tuple[bool, int | None]:
+            return (True, 900) if pid == live else (False, None)
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            old_dead = _seed_swept_run(root, "old-dead", now, 40, watcher=(dead, 700))
+            old_live = _seed_swept_run(root, "old-live", now, 40, watcher=(live, 900))
+            young = _seed_swept_run(root, "young", now, 1, watcher=(dead, 700))
+            bare = _seed_swept_run(root, "old-bare", now, 40, run_json=False)
+            broken = _seed_swept_run(root, "old-broken", now, 40)
+            (broken / "run.json").write_text("{not json", encoding="utf-8")
+            current = _seed_swept_run(root, "old-current", now, 40, watcher=(dead, 700))
+            for path in (broken / "run.json", broken):
+                os.utime(str(path), (now - 40 * SECONDS_PER_DAY,) * 2)
+
+            result = sweep_footprint_root(
+                root=root, keep_days=14, now=now, identity=identity, skip=current
+            )
+            _check(
+                sorted(result.removed) == ["old-bare", "old-broken", "old-dead"],
+                f"expected the three unclaimed old runs to go; got {sorted(result.removed)}",
+            )
+            _check(not old_dead.exists(), "an old run whose watcher is dead should be removed")
+            _check(
+                old_live.exists() and result.kept_live == 1,
+                f"a live watcher's run is kept however old it is; got {result}",
+            )
+            _check(young.exists(), "a run inside the keep window is never touched")
+            _check(
+                not bare.exists() and not broken.exists(),
+                "a run with no readable run.json goes by age alone",
+            )
+            _check(current.exists(), "the caller's own run directory is never swept")
+
+            # The same directory, the same age, and a watcher pid that is alive
+            # but is no longer the process that wrote the run. Without this leg
+            # the case above would pass on liveness alone and the start stamp
+            # would be decorative.
+            def reused(pid: int) -> tuple[bool, int | None]:
+                return (True, 111) if pid == live else (False, None)
+
+            again = sweep_footprint_root(
+                root=root, keep_days=14, now=now, identity=reused, skip=current
+            )
+            _check(
+                again.removed == ["old-live"] and again.kept_live == 0,
+                f"a watcher pid handed on to another process holds nothing; got {again}",
+            )
+            _check(not old_live.exists(), "the reclaimed run should be gone from disk")
+
+    def sweep_reclaims_stale_locks_only() -> None:
+        # Locks go by holder liveness, never by age: these three are minutes
+        # old and two of them are still removed. A lock outlives the watcher
+        # that was SIGKILLed, and until something removes it that target can
+        # never be watched again.
+        now = time.time()
+        live, dead = 4242, 5150
+
+        def identity(pid: int) -> tuple[bool, int | None]:
+            return (True, 900) if pid == live else (False, None)
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            stale = root / f".watch-{dead}.lock"
+            stale.write_text(_lock_text(dead, 700), encoding="utf-8")
+            held = root / f".watch-{live}.lock"
+            held.write_text(_lock_text(live, 900), encoding="utf-8")
+            reused = root / ".watch-777.lock"
+            reused.write_text(_lock_text(live, 123), encoding="utf-8")
+            unreadable = root / ".watch-888.lock"
+            unreadable.write_text("not a lock at all", encoding="utf-8")
+
+            result = sweep_footprint_root(root=root, keep_days=14, now=now, identity=identity)
+            _check(
+                sorted(result.removed_locks) == [f".watch-{dead}.lock", ".watch-777.lock"],
+                f"expected the dead and the reused holder to go; got {result.removed_locks}",
+            )
+            _check(held.exists(), "a lock whose holder is alive at its own stamp is kept")
+            _check(not stale.exists() and not reused.exists(), "the stale locks should be gone")
+            _check(
+                unreadable.exists(),
+                "a lock naming no readable holder is left for take_lock to reclaim",
+            )
+            _check(result.removed == [], f"no run directories here to remove; got {result.removed}")
+
+    def sweep_does_not_follow_symlinks() -> None:
+        # A symlink must contribute its own mtime and never its target's, or a
+        # link into a directory somebody else is writing keeps a dead run alive
+        # for good, and rmtree must not reach through one.
+        #
+        # The sweep's clock is put 40 days ahead of the real one, so everything
+        # this case creates is already past the cutoff without any mtime being
+        # set, and the single file that has to read as fresh is stamped
+        # explicitly. That is what lets the case turn on the link's own mtime
+        # rather than on a lutimes call the platform may not offer.
+        now = time.time() + 40 * SECONDS_PER_DAY
+
+        def identity(_pid: int) -> tuple[bool, int | None]:
+            return False, None
+
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            root = base / "daemon-footprint"
+            root.mkdir()
+            outside = base / "outside"
+            outside.mkdir()
+            keeper = outside / "keeper.txt"
+            keeper.write_text("not this tree's to remove\n", encoding="utf-8")
+            os.utime(str(keeper), (now, now))
+
+            old = _seed_swept_run(root, "old-linked", now, 40, watcher=(5150, 700))
+            (old / "link").symlink_to(keeper)
+            top = root / "linked-elsewhere"
+            top.symlink_to(outside)
+
+            result = sweep_footprint_root(root=root, keep_days=14, now=now, identity=identity)
+            _check(
+                result.removed == ["old-linked"],
+                f"the link's fresh target must not keep a dead run alive; got {result.removed}",
+            )
+            _check(not old.exists(), "the old run should be gone")
+            _check(keeper.exists(), "a file outside the tree must survive a run being removed")
+            _check(outside.exists(), "a directory outside the tree must survive")
+            _check(top.is_symlink(), "a symlinked entry at the top level is left alone")
+
+    def sweep_is_disabled_by_zero_keep_days() -> None:
+        # `--keep-days 0` is the off switch, and it has to be complete: an
+        # operator who wants a tree kept must not have to trust that nothing in
+        # it looks reclaimable.
+        now = time.time()
+
+        def identity(_pid: int) -> tuple[bool, int | None]:
+            return False, None
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            old = _seed_swept_run(root, "old-dead", now, 400, watcher=(5150, 700))
+            stale = root / ".watch-5150.lock"
+            stale.write_text(_lock_text(5150, 700), encoding="utf-8")
+
+            off = sweep_footprint_root(root=root, keep_days=0, now=now, identity=identity)
+            _check(
+                off.removed == [] and off.removed_locks == [] and off.kept_live == 0,
+                f"keep-days 0 must remove nothing; got {off}",
+            )
+            _check(old.exists() and stale.exists(), "nothing should have been removed from disk")
+
+            # The same tree with the sweep armed, so the case above cannot pass
+            # because there was nothing to remove in the first place.
+            armed = sweep_footprint_root(root=root, keep_days=14, now=now, identity=identity)
+            _check(
+                armed.removed == ["old-dead"] and armed.removed_locks == [".watch-5150.lock"],
+                f"the same tree is reclaimable with the sweep armed; got {armed}",
+            )
+
     def libproc_glue_reads_this_process() -> None:
         # The one leg that exercises the ctypes glue itself: the struct layout,
         # the two libproc calls and the mach timebase scaling, all against this
@@ -3483,6 +3948,10 @@ def self_test() -> int:
         "a restart onto the same pid is lost and re-acquired",
         restart_onto_the_same_pid_is_noticed,
     )
+    case("the sweep reclaims forgotten runs and keeps held ones", sweep_reclaims_forgotten_runs)
+    case("the sweep removes stale locks and keeps held ones", sweep_reclaims_stale_locks_only)
+    case("the sweep never follows a symlink out of the tree", sweep_does_not_follow_symlinks)
+    case("keep-days 0 disables the sweep entirely", sweep_is_disabled_by_zero_keep_days)
     case("the libproc glue reads this process correctly", libproc_glue_reads_this_process)
     case("report replays a synthetic run and finds its spike", report_replay)
     case("report finds a rise spike below the threshold", report_sees_rise_spike)
@@ -3510,7 +3979,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Sample TBDDaemon's phys_footprint continuously and capture a spike "
         "in the act, without suspending it.",
-        epilog="Files under --out are operator scratch: no sweep reclaims them.",
+        epilog="Run directories are reclaimed by the startup sweep every watch runs, "
+        "and by --prune; see --keep-days. No daemon-side sweep covers them.",
     )
     parser.add_argument("--pid", type=int, help="target pid; defaults to $TBD_HOME/tbdd.pid")
     parser.add_argument(
@@ -3559,6 +4029,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-log-stream", action="store_true", help="do not run the `log stream` sidecar"
     )
+    parser.add_argument(
+        "--keep-days",
+        type=float,
+        default=DEFAULT_KEEP_DAYS,
+        help="age in days past which a run directory nobody is watching is removed by the "
+        f"startup sweep and by --prune (default {DEFAULT_KEEP_DAYS:g}); 0 disables the "
+        "sweep entirely",
+    )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="run the startup sweep on its own, print what it removed, and exit; "
+        "reclaims without starting a watch",
+    )
     parser.add_argument("--report", metavar="RUN_DIR", help="replay a run directory and exit")
     parser.add_argument(
         "--self-test", action="store_true", help="test the detector and the report, then exit"
@@ -3571,6 +4055,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.self_test:
         return self_test()
+    if args.prune:
+        return prune(args.keep_days)
     if args.report:
         # All four detector settings are replay overrides here: unset means the
         # run's own value, so a bare --report always replays the run's rules.
