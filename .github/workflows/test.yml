@@ -691,9 +691,15 @@ jobs:
             if [ -z "$targets" ]; then
               # The fallback takes at most four targets, in walk order (parents
               # before children, so SwiftPM's driver processes come before the
-              # compiler processes they spawn): four serial 5 s samples plus
-              # symbolication stay well inside the three-minute margin, while an
-              # uncapped list — every non-plumbing process alive mid-compile —
+              # compiler processes they spawn). Measured on a probe of this path
+              # with the argv match disabled (run 33902144920): three of the
+              # four slots were used — SwiftPM's `swift-test` driver at 87 KB,
+              # `swiftpm-testing-helper` at 796 KB symbolicated, and a fixture
+              # `TBDHolder` that exited mid-sample and was reported as failed —
+              # and the whole expiry path, from the whole-machine ps through the
+              # tree walk, the three serial samples and the SIGTERM sweep to the
+              # step exiting, took 42 s against the 180 s margin. An uncapped
+              # list — every non-plumbing process alive mid-compile — is what
               # could eat that margin and leave the step to be killed by
               # `timeout-minutes` after all. Whatever the cap drops is recorded
               # in the ps file, so the omission is visible in the artifact. The
