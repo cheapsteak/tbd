@@ -155,18 +155,30 @@ A run directory is written once and never reused. If `--out` already holds a
 appending a second run to the first one's sample stream produces a file whose
 gaps and pid changes read as the target's behaviour rather than as two runs.
 
+A pid is not an identity, and the watch does not treat one as an identity in
+either direction. `ri_proc_start_abstime` is recorded for the target at acquire
+and compared on every tick, so a daemon that died and came back onto the same
+pid is lost and re-acquired rather than sampled straight through as if nothing
+had happened, and the run's markers say so. The lock file described next carries
+the same stamp for the same reason.
+
 One file lives outside the run directory. While a watch holds a target it owns
-`$TBD_HOME/diag/daemon-footprint/.watch-<target pid>.lock`, containing the
-watcher's own pid, because `proc_reset_footprint_interval` is per-process and a
-second watch on the same target silently steals half of both watches' interval
-windows. The lock is removed when the target is lost and again at shutdown. A
-watcher killed with SIGKILL cannot remove it and no sweep covers it: a stale
-lock is reclaimed by the next watcher that finds its holder dead, which is the
-whole of this resource's reconciliation story. A watch that cannot create the
-file at all measures anyway and records a `watch_unlocked` marker; what it gives
-up is the guarantee that nobody else is resetting the same interval counter, so
-the record says the guarantee was not held rather than leaving a window somebody
-else shortened looking like the target's own behaviour.
+`$TBD_HOME/diag/daemon-footprint/.watch-<target pid>.lock`, a JSON object naming
+the watcher's own pid and start stamp, because `proc_reset_footprint_interval`
+is per-process and a second watch on the same target silently steals half of
+both watches' interval windows. The lock is removed when the target is lost and
+again at shutdown. A watcher killed with SIGKILL cannot remove it and no sweep
+covers it: a stale lock is reclaimed by the next watcher that finds its holder
+dead, which is the whole of this resource's reconciliation story. The stamp is
+what makes "dead" answerable at all - a holder pid handed on to an unrelated
+process answers `kill -0` forever, and a lock reclaimed on liveness alone would
+never be reclaimed again. A lock written by an older watch holds a bare pid,
+which is still read, and falls back to liveness alone. A watch that cannot
+create the file at all measures anyway and records a `watch_unlocked` marker;
+what it gives up is the guarantee that nobody else is resetting the same
+interval counter, so the record says the guarantee was not held rather than
+leaving a window somebody else shortened looking like the target's own
+behaviour.
 
 REJECTED ALTERNATIVES
 ---------------------
@@ -222,9 +234,11 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import contextlib
 import ctypes
 import io
 import json
+import mmap
 import os
 import re
 import signal
@@ -933,8 +947,15 @@ class LogSidecar:
     ordinary Popen child is re-parented to launchd and streams the whole system
     log into a file nobody is reading for as long as the machine is up. There is
     no reconciler for it, and the only trace it leaves is a file that grows. The
-    poll is what bounds that to five seconds; the trap is what keeps the normal
-    path prompt.
+    trap is what keeps the normal path prompt; the poll is what limits the
+    SIGKILL path to about five seconds in the normal case.
+
+    That is a normal case, not a hard bound. `kill -0` asks about a number, so a
+    watcher whose pid is handed to another process inside one poll window is
+    still answered for by the newcomer and the stream is kept alive by a pid
+    that is no longer this watch. It takes a pid wrapping round to a specific
+    number within five seconds, which is unlikely but not impossible, and the
+    cost when it happens is the orphan this watchdog exists to prevent.
 
     Nothing here ever signals a process it did not spawn: the group it kills is
     the one it created with `start_new_session`, and the killpg is guarded on
@@ -1056,23 +1077,136 @@ def watch_lock_path(target_pid: int) -> Path:
     return tbd_home() / "diag" / "daemon-footprint" / f".watch-{target_pid}.lock"
 
 
-def holder_is_alive(pid: int) -> bool:
-    """Whether a lock holder is still running. Uncertainty counts as alive.
+def read_lock(path: Path) -> tuple[int | None, int | None]:
+    """(holder pid, holder start stamp) from a lock file, or (None, None).
+
+    A lock is one JSON object: `{"pid": N, "start_abstime": S}`. The stamp is
+    what makes the pid mean something: a pid on its own is reused, so a watcher
+    that was SIGKILLed and whose pid was handed to an unrelated process reads as
+    a live holder for as long as that process runs, and nothing ever reclaims
+    the lock.
+
+    A file holding a bare pid, which is what earlier watches wrote, still reads:
+    it yields a pid and no stamp, and `holder_is_alive` then falls back to
+    liveness alone. A file that parses as neither yields no pid at all, which
+    `take_lock` reclaims exactly as it always did.
+    """
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None, None
+    if not text:
+        return None, None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict):
+        try:
+            pid = int(payload["pid"])
+        except (KeyError, TypeError, ValueError):
+            return None, None
+        raw = payload.get("start_abstime")
+        try:
+            start = int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            start = None
+        return pid, (start or None)
+    try:
+        return int(text), None
+    except ValueError:
+        return None, None
+
+
+def write_lock(handle: int, start_abstime: int | None) -> None:
+    """Write this process's identity into an open, exclusively created lock."""
+    with os.fdopen(handle, "w", encoding="utf-8") as lock:
+        lock.write(json.dumps({"pid": os.getpid(), "start_abstime": start_abstime}) + "\n")
+
+
+_LIBPROC: LibProc | None = None
+
+
+def shared_libproc() -> LibProc | None:
+    """The process-wide libproc binding, or None where there is no libproc.
+
+    Bound lazily and kept, because `process_identity` is called from the lock
+    paths a handful of times per run and binding costs a dylib load. None on any
+    machine without libproc, which is what keeps the self-test importable and
+    runnable on Linux.
+    """
+    global _LIBPROC
+    if _LIBPROC is None:
+        try:
+            _LIBPROC = LibProc()
+        except Exception:  # noqa: BLE001 - no libproc is not fatal, only less certain
+            return None
+    return _LIBPROC
+
+
+def process_identity(pid: int) -> tuple[bool, int | None]:
+    """(is `pid` live, its start stamp) - the seam every identity check goes through.
 
     A signal of 0 tests for the process without disturbing it. EPERM means it
-    exists and belongs to somebody else, which is still a live holder. Anything
-    non-positive is not a pid at all and is treated as dead, because signal 0 to
-    pid 0 addresses this process group rather than one process.
+    exists and belongs to somebody else, which is still live. Anything
+    non-positive is not a pid at all and is dead, because signal 0 to pid 0
+    addresses this process group rather than one process.
+
+    The stamp is `ri_proc_start_abstime`, the only thing that tells two
+    processes at one pid apart. None means "cannot tell", never "different": no
+    libproc, a process owned by somebody else, or a pid already gone.
+
+    Callers take this as a parameter rather than calling it directly, so a test
+    can hand back fixed tuples and run on a machine with no libproc at all.
     """
     if pid <= 0:
-        return False
+        return False, None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return False, None
     except OSError:
+        return True, None
+    lib = shared_libproc()
+    if lib is None:
+        return True, None
+    usage = lib.rusage(pid)
+    if usage is None:
+        return True, None
+    return True, (int(usage.ri_proc_start_abstime) or None)
+
+
+def identity_changed(recorded_start: int | None, current_start: int | None) -> bool:
+    """Whether a pid is now held by a different process than the one recorded.
+
+    True only when both stamps are known and they differ. An unknown stamp on
+    either side is "cannot tell", which every caller reads as "carry on": a fact
+    that could not be read must never be able to throw away a live target.
+    """
+    if not recorded_start or not current_start:
+        return False
+    return int(recorded_start) != int(current_start)
+
+
+def holder_is_alive(
+    pid: int,
+    recorded_start: int | None = None,
+    identity=process_identity,
+) -> bool:
+    """Whether a lock holder is still running. Uncertainty counts as alive.
+
+    Live means the pid answers *and* the process answering is the one that took
+    the lock. A recorded stamp the running process does not match means that pid
+    was reused after the holder died, so the lock is stale and reclaimable; a
+    lock with no recorded stamp, which is what a legacy plain-pid file is, falls
+    back to liveness alone and is reclaimed only when the pid is dead.
+    """
+    alive, current_start = identity(pid)
+    if not alive:
+        return False
+    if recorded_start is None or current_start is None:
         return True
-    return True
+    return not identity_changed(recorded_start, current_start)
 
 
 # The daemon executable is named TBDDaemon. `tbdd` is accepted too, so a future
@@ -1142,7 +1276,9 @@ def fmt_bytes(value: float) -> str:
 class Watch:
     """Sampler, detector, capture runner and sidecar, wired together."""
 
-    def __init__(self, args: argparse.Namespace, out_dir: Path) -> None:
+    def __init__(
+        self, args: argparse.Namespace, out_dir: Path, libproc: LibProc | None = None
+    ) -> None:
         self.args = args
         self.out_dir = out_dir
         self.captures_dir = out_dir / "captures"
@@ -1154,7 +1290,9 @@ class Watch:
         # is already set and would tell us nothing.
         self.abandon_event = threading.Event()
         self.signal_count = 0
-        self.libproc = LibProc()
+        # Injectable so the identity tests can drive `tick` on a machine with no
+        # libproc; every real run binds the real one here.
+        self.libproc = LibProc() if libproc is None else libproc
         self.detector = self.make_detector()
         self._emit_lock = threading.Lock()
         self._samples = None
@@ -1176,6 +1314,11 @@ class Watch:
         # marker on every tick for as long as they hold it.
         self._conflict_noted: set[int] = set()
         self._prev_cpu: tuple[float, int, int] | None = None
+        # The acquired target's `ri_proc_start_abstime`, which is what tells a
+        # daemon that restarted onto the same pid from the one that was
+        # acquired. None means the stamp could not be read, which suppresses the
+        # check rather than dropping a live target.
+        self._target_start_abstime: int | None = None
         self._reset_failure_noted = False
         # Which pids a comm marker has already been written about, so a pid file
         # pointing at the wrong process does not write the same marker forever.
@@ -1209,7 +1352,7 @@ class Watch:
 
     # -- target ------------------------------------------------------------
 
-    def take_lock(self, target_pid: int) -> tuple[str, int | None]:
+    def take_lock(self, target_pid: int, identity=process_identity) -> tuple[str, int | None]:
         """Claim this target's watch lock. Returns (status, holder pid or None).
 
         The status is one of three words, and nothing else:
@@ -1232,6 +1375,12 @@ class Watch:
         a SIGKILLed watcher cannot unlink its own. The lock is a guard against a
         second watcher, not a precondition for measuring anything, so an
         unwritable directory is "unlocked" and the watch goes on measuring.
+
+        What is written is the holder's pid *and* its start stamp, and both are
+        checked on reclaim, because a pid alone cannot say whether the process
+        answering is the watcher that took the lock or an unrelated process that
+        was handed its number afterwards. `identity` is the seam that reads
+        both, injectable so the tests can run where there is no libproc.
         """
         path = watch_lock_path(target_pid)
         try:
@@ -1242,8 +1391,12 @@ class Watch:
             try:
                 handle = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             except FileExistsError:
-                holder = read_pid_file(path)
-                if holder is not None and holder != os.getpid() and holder_is_alive(holder):
+                holder, holder_start = read_lock(path)
+                if (
+                    holder is not None
+                    and holder != os.getpid()
+                    and holder_is_alive(holder, holder_start, identity)
+                ):
                     return "conflict", holder
                 try:
                     path.unlink()
@@ -1255,15 +1408,14 @@ class Watch:
                 continue
             except OSError:
                 return "unlocked", None
-            with os.fdopen(handle, "w", encoding="utf-8") as lock:
-                lock.write(f"{os.getpid()}\n")
+            write_lock(handle, identity(os.getpid())[1])
             self._lock_path = path
             return "acquired", None
         # Both attempts lost the race to create the file, each time to a holder
         # that read as dead. Something is recreating it as fast as it is
         # reclaimed, which is a second watcher whether or not its pid is
         # readable now, and it is the one case that must not read as success.
-        return "conflict", read_pid_file(path)
+        return "conflict", read_lock(path)[0]
 
     def release_lock(self) -> None:
         """Give the lock back, and only ever our own."""
@@ -1272,7 +1424,7 @@ class Watch:
         if path is None:
             return
         try:
-            if read_pid_file(path) == os.getpid():
+            if read_lock(path)[0] == os.getpid():
                 path.unlink()
         except OSError:
             pass
@@ -1338,9 +1490,13 @@ class Watch:
         self.pid = pid
         self._prev_cpu = None
         self._reset_failure_noted = False
-        # How far into its own startup the target is. Read before the interval
-        # reset, from the same struct the sampler reads every tick.
+        # How far into its own startup the target is, and which process at this
+        # pid this is. Both read before the interval reset, from the same struct
+        # the sampler reads every tick.
         usage = self.libproc.rusage(pid)
+        self._target_start_abstime = (
+            None if usage is None else (int(usage.ri_proc_start_abstime) or None)
+        )
         age = (
             None
             if usage is None
@@ -1367,6 +1523,12 @@ class Watch:
                 "event": "target_acquired",
                 "pid": pid,
                 "start_time": process_start_time(pid),
+                # The stamp the tick-by-tick identity check compares against.
+                # Recorded so a restart onto the same pid is legible from the
+                # record: two acquisitions of one pid with different stamps are
+                # two processes, which no wall-clock start time can settle at
+                # one-second resolution.
+                "start_abstime": self._target_start_abstime,
                 "target_age_s": None if age is None else round(age, 3),
             }
         )
@@ -1436,6 +1598,7 @@ class Watch:
         self.release_lock()
         self.pid = None
         self._prev_cpu = None
+        self._target_start_abstime = None
 
     def comm_for(self, pid: int) -> str | None:
         """`ps -o comm=` for a pid, read fresh on every acquire attempt.
@@ -1631,6 +1794,38 @@ class Watch:
                 self.exit_code = 3
                 self.stop_event.set()
             return
+
+        if identity_changed(self._target_start_abstime, int(usage.ri_proc_start_abstime)):
+            # The pid still answers, but a different process holds it now: the
+            # daemon died and something was started onto its number, or it
+            # restarted onto its own. Sampling straight through that hands the
+            # new process the dead one's baseline, in-spike state, previous peak
+            # and CPU counters, and the record says nothing happened. So the
+            # target is lost and re-acquired in this same tick, exactly as a
+            # target that had gone away would have been, and the run's own
+            # `target_lost` and `target_acquired` markers are what let `--report`
+            # replay the change the way the live watch saw it.
+            lost = self.pid
+            self.lose(now)
+            if self.args.pid is not None:
+                # An explicit --pid names one process, and that process is gone
+                # whatever is answering to its number now. Same ending as the
+                # target dying outright, for the same reason.
+                print(
+                    f"target pid {lost} now belongs to a different process and --pid names "
+                    "no replacement; stopping",
+                    file=sys.stderr,
+                )
+                self.exit_code = 3
+                self.stop_event.set()
+                return
+            found = self.resolve_pid()
+            if found is None or not self.acquire(found, now):
+                return
+            usage = self.libproc.rusage(self.pid)
+            if usage is None:
+                self.lose(now)
+                return
 
         # Reset immediately after the read, so the next tick's interval max is
         # exactly the peak reached between these two ticks.
@@ -2245,6 +2440,16 @@ def _check(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+class _Skipped(Exception):
+    """Raised by a leg that cannot run here, so it prints `skip` rather than `ok`.
+
+    One leg exercises the ctypes glue against the real libproc, which exists
+    only on macOS. Reporting that as a pass on Linux would mean CI printing `ok`
+    for a check it never ran; reporting it as a failure would redden a suite
+    that is otherwise deliberately platform independent.
+    """
+
+
 def _synthetic_log_line(epoch: float, category: str) -> str:
     """One `log stream --style compact` row, shaped so the report can parse it."""
     stamp = datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -2305,6 +2510,8 @@ def self_test() -> int:
         try:
             body()
             print(f"ok    {name}")
+        except _Skipped as exc:
+            print(f"skip  {name}: {exc}")
         except AssertionError as exc:
             failures.append(f"{name}: {exc}")
             print(f"FAIL  {name}: {exc}")
@@ -2826,7 +3033,7 @@ def self_test() -> int:
                     Watch.take_lock(second, target) == ("acquired", None),
                     "a dead holder's lock is stale and is retaken",
                 )
-                _check(read_pid_file(path) == os.getpid(), "the retaken lock should name us")
+                _check(read_lock(path)[0] == os.getpid(), "the retaken lock should name us")
 
                 # Somebody recreating the file as fast as it is reclaimed. Both
                 # attempts reach a holder that reads as dead, both unlinks
@@ -2871,6 +3078,299 @@ def self_test() -> int:
                     os.environ.pop("TBD_HOME", None)
                 else:
                     os.environ["TBD_HOME"] = previous_home
+
+    def a_reused_holder_pid_does_not_hold_the_lock() -> None:
+        # The lock used to store a pid and nothing else, so a watcher killed
+        # with SIGKILL whose number was later handed to an unrelated process
+        # read as a live holder for as long as that process ran: the target
+        # could never be watched again and no sweep covers the file. Identity is
+        # injected as a function returning (live, start stamp), so this leg runs
+        # on a machine with no libproc.
+        class Standin:
+            def __init__(self) -> None:
+                self._lock_path = None
+
+        target = 4242
+        other = 31337
+        stamps = {os.getpid(): (True, 900), other: (True, 700)}
+
+        def identity(pid: int) -> tuple[bool, int | None]:
+            return stamps.get(pid, (False, None))
+
+        previous_home = os.environ.get("TBD_HOME")
+        with tempfile.TemporaryDirectory() as raw:
+            os.environ["TBD_HOME"] = raw
+            try:
+                path = watch_lock_path(target)
+                path.parent.mkdir(parents=True, exist_ok=True)
+
+                path.write_text(
+                    json.dumps({"pid": other, "start_abstime": 700}) + "\n", encoding="utf-8"
+                )
+                _check(
+                    Watch.take_lock(Standin(), target, identity) == ("conflict", other),
+                    "a holder whose stamp still matches is a live watcher",
+                )
+
+                # The same pid, alive, but not the process that took the lock.
+                path.write_text(
+                    json.dumps({"pid": other, "start_abstime": 123}) + "\n", encoding="utf-8"
+                )
+                reclaimed = Standin()
+                _check(
+                    Watch.take_lock(reclaimed, target, identity) == ("acquired", None),
+                    "a lock whose holder pid was reused is stale and is reclaimed",
+                )
+                _check(
+                    read_lock(path) == (os.getpid(), 900),
+                    f"the retaken lock should carry our pid and stamp; got {read_lock(path)}",
+                )
+                _check(
+                    isinstance(json.loads(path.read_text(encoding="utf-8")), dict),
+                    "a lock is written as a JSON object",
+                )
+
+                # A legacy plain-pid lock, which carries no stamp at all: live
+                # pid keeps it, dead pid reclaims it. Fail-safe, because the
+                # only thing an absent stamp can mean is "cannot tell".
+                path.write_text(f"{other}\n", encoding="utf-8")
+                _check(
+                    Watch.take_lock(Standin(), target, identity) == ("conflict", other),
+                    "a legacy lock held by a live pid is left alone",
+                )
+                path.write_text("99999\n", encoding="utf-8")
+                _check(
+                    Watch.take_lock(Standin(), target, identity) == ("acquired", None),
+                    "a legacy lock whose pid is dead is still reclaimable",
+                )
+
+                _check(
+                    holder_is_alive(other, None, identity),
+                    "no recorded stamp falls back to liveness alone",
+                )
+                _check(
+                    not holder_is_alive(other, 123, identity),
+                    "a stamp the running process does not match is a reused pid",
+                )
+                _check(
+                    holder_is_alive(other, 700, identity),
+                    "a matching stamp is the holder itself",
+                )
+            finally:
+                if previous_home is None:
+                    os.environ.pop("TBD_HOME", None)
+                else:
+                    os.environ["TBD_HOME"] = previous_home
+
+    def restart_onto_the_same_pid_is_noticed() -> None:
+        # `tick` read the pid it had acquired and never asked again whose pid it
+        # was, so a daemon that died and came back onto the same number was
+        # sampled straight through: the new process inherited the dead one's
+        # baseline, in-spike state, previous peak and CPU counters, and the
+        # record said nothing had happened. Driven through a stand-in libproc
+        # whose start stamp changes between ticks, which is the one thing that
+        # cannot be arranged for real - a pid cannot be made to come round.
+        _check(not identity_changed(None, 111), "an unknown recorded stamp changes nothing")
+        _check(not identity_changed(111, None), "an unreadable current stamp changes nothing")
+        _check(not identity_changed(111, 111), "the same process is not a change")
+        _check(identity_changed(111, 222), "a different stamp is a different process")
+
+        class FakeUsage:
+            def __init__(self, start: int) -> None:
+                self.ri_proc_start_abstime = start
+                self.ri_phys_footprint = _mb(100)
+                self.ri_interval_max_phys_footprint = _mb(100)
+                self.ri_lifetime_max_phys_footprint = _mb(120)
+                self.ri_resident_size = _mb(60)
+                self.ri_user_time = 0
+                self.ri_system_time = 0
+                self.ri_pageins = 0
+
+        class FakeLibProc:
+            """Enough of `LibProc` for the sampler, with a settable identity."""
+
+            timebase_numer = 1
+            timebase_denom = 1
+            timebase_ok = True
+
+            def __init__(self) -> None:
+                self.start = 111
+
+            def rusage(self, pid: int) -> FakeUsage:
+                return FakeUsage(self.start)
+
+            def cpu_times_ns(self, usage) -> tuple[int, int]:
+                return 0, 0
+
+            def reset_footprint_interval(self, pid: int) -> bool:
+                return True
+
+        previous_home = os.environ.get("TBD_HOME")
+        with tempfile.TemporaryDirectory() as raw:
+            os.environ["TBD_HOME"] = raw
+            try:
+                args = build_parser().parse_args(["--no-log-stream", "--no-sample"])
+                args.threshold_mb = 4096
+                args.rise_mb = 0
+                args.rearm_mb = 512
+                args.baseline_window = DEFAULT_BASELINE_WINDOW
+                libproc = FakeLibProc()
+                watch = Watch(args, Path(raw) / "run", libproc=libproc)
+                watch._samples = io.StringIO()
+                # The pid file is not what this leg is about, and reading one
+                # would drag `ps` into it.
+                watch.resolve_pid = lambda: 4242
+
+                watch.tick(1000.0)
+                watch.tick(1001.0)
+                libproc.start = 222  # the daemon restarted onto its own pid
+                watch.tick(1002.0)
+
+                records = [
+                    json.loads(line)
+                    for line in watch._samples.getvalue().splitlines()
+                    if line.strip()
+                ]
+                lifecycle = [
+                    record.get("event")
+                    for record in records
+                    if record.get("event") in ("target_acquired", "target_lost")
+                ]
+                _check(
+                    lifecycle == ["target_acquired", "target_lost", "target_acquired"],
+                    f"a restart onto the same pid should be lost and re-acquired; got {lifecycle}",
+                )
+                acquired = [r for r in records if r.get("event") == "target_acquired"]
+                _check(
+                    [r.get("start_abstime") for r in acquired] == [111, 222],
+                    "each acquisition should record the stamp of the process it took; "
+                    f"got {[r.get('start_abstime') for r in acquired]}",
+                )
+                _check(
+                    [r.get("epoch") for r in acquired] == [1000.0, 1002.0],
+                    "the re-acquisition belongs to the tick that noticed the change",
+                )
+                measured = [r for r in records if "phys_footprint" in r and not r.get("event")]
+                _check(
+                    len(measured) == 3,
+                    f"every tick should still record a sample; got {len(measured)}",
+                )
+                _check(
+                    watch.pid == 4242 and not watch.stop_event.is_set(),
+                    "the pid-file path re-acquires and keeps watching",
+                )
+
+                # The same change under an explicit --pid, which names one
+                # process and has no replacement to move to.
+                args.pid = 4242
+                libproc.start = 111
+                named = Watch(args, Path(raw) / "run-pid", libproc=libproc)
+                named._samples = io.StringIO()
+                named.resolve_pid = lambda: 4242
+                named.tick(2000.0)
+                libproc.start = 333
+                # Captured, because the operator being told is part of what is
+                # under test and a self-test that prints it is a self-test
+                # nobody reads.
+                complaint = io.StringIO()
+                with contextlib.redirect_stderr(complaint):
+                    named.tick(2001.0)
+                _check(
+                    "different process" in complaint.getvalue(),
+                    f"--pid should say why it stopped; got {complaint.getvalue()!r}",
+                )
+                _check(
+                    named.exit_code == 3 and named.stop_event.is_set(),
+                    f"--pid should stop with the target-gone code; got {named.exit_code}",
+                )
+                events = [
+                    json.loads(line).get("event")
+                    for line in named._samples.getvalue().splitlines()
+                    if line.strip()
+                ]
+                _check(
+                    "target_lost" in events,
+                    f"the loss should be in the record before it stops; got {events}",
+                )
+            finally:
+                if previous_home is None:
+                    os.environ.pop("TBD_HOME", None)
+                else:
+                    os.environ["TBD_HOME"] = previous_home
+
+    def libproc_glue_reads_this_process() -> None:
+        # The one leg that exercises the ctypes glue itself: the struct layout,
+        # the two libproc calls and the mach timebase scaling, all against this
+        # process, where the answers are known. A transcription error in
+        # `RusageInfoV4` does not fail loudly, it hands back a plausible number
+        # from the neighbouring field, and every other leg here feeds the
+        # detector numbers by hand and would never notice.
+        if sys.platform != "darwin":
+            raise _Skipped("libproc and mach_timebase_info are macOS only")
+
+        lib = LibProc()
+        me = os.getpid()
+        usage = lib.rusage(me)
+        _check(usage is not None, "libproc should read our own rusage")
+        footprint = int(usage.ri_phys_footprint)
+        lifetime = int(usage.ri_lifetime_max_phys_footprint)
+        _check(footprint > 0, f"a running process has a footprint; got {footprint}")
+        _check(
+            lifetime >= footprint,
+            f"the lifetime peak cannot sit below the current footprint; "
+            f"got {lifetime} < {footprint}",
+        )
+
+        # 64 MB touched page by page and then unmapped. The current footprint
+        # goes back down; the interval max is not allowed to, which is the whole
+        # premise of the sampler.
+        size = 64 * MB
+        _check(lib.reset_footprint_interval(me), "resetting our own interval should succeed")
+        block = mmap.mmap(-1, size)
+        try:
+            for offset in range(0, size, 4096):
+                block[offset] = 1
+        finally:
+            block.close()
+        after = lib.rusage(me)
+        _check(after is not None, "libproc should still read us after the mapping is gone")
+        released = int(after.ri_phys_footprint)
+        interval_max = int(after.ri_interval_max_phys_footprint)
+        _check(
+            interval_max - released > size // 2,
+            f"the interval max should remember the unmapped {size // MB} MB; "
+            f"got {fmt_bytes(interval_max)} against {fmt_bytes(released)}",
+        )
+
+        _check(lib.reset_footprint_interval(me), "a second reset should succeed")
+        settled = lib.rusage(me)
+        _check(settled is not None, "libproc should read us after the reset")
+        settled_max = int(settled.ri_interval_max_phys_footprint)
+        _check(
+            settled_max < interval_max,
+            f"a reset should drop the interval max back; got {fmt_bytes(settled_max)}",
+        )
+        _check(
+            abs(settled_max - int(settled.ri_phys_footprint)) < 8 * MB,
+            "after a reset the interval max is the current footprint; got "
+            f"{fmt_bytes(settled_max)} against {fmt_bytes(int(settled.ri_phys_footprint))}",
+        )
+
+        # The timebase scaling, against a CPU burn of a known size. Unscaled,
+        # these counters understate CPU by about 41.7 on Apple silicon.
+        started = time.process_time()
+        user0, system0 = lib.cpu_times_ns(lib.rusage(me))
+        while time.process_time() - started < 0.2:
+            pass
+        user1, system1 = lib.cpu_times_ns(lib.rusage(me))
+        elapsed_cpu = time.process_time() - started
+        burned = (user1 - user0) + (system1 - system0)
+        _check(elapsed_cpu > 0, "the burn should have taken measurable CPU")
+        ratio = burned / 1e9 / elapsed_cpu
+        _check(
+            0.5 <= ratio <= 1.5,
+            f"mach-scaled CPU should agree with process_time within 50%; got {ratio:.2f}",
+        )
 
     def report_replay() -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2978,6 +3478,12 @@ def self_test() -> int:
     case("report starts a new detector at a target change", report_resets_across_a_target_change)
     case("a busy runner is marked once per episode", busy_runner_notes_one_refusal_per_episode)
     case("take_lock names acquired, conflict and unlocked apart", lock_status_is_unambiguous)
+    case("a lock held by a reused pid is reclaimed", a_reused_holder_pid_does_not_hold_the_lock)
+    case(
+        "a restart onto the same pid is lost and re-acquired",
+        restart_onto_the_same_pid_is_noticed,
+    )
+    case("the libproc glue reads this process correctly", libproc_glue_reads_this_process)
     case("report replays a synthetic run and finds its spike", report_replay)
     case("report finds a rise spike below the threshold", report_sees_rise_spike)
 
