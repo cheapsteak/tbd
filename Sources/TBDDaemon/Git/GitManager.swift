@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "GitManager")
@@ -865,7 +866,8 @@ public struct GitManager: Sendable {
     // MARK: - Private
 
     /// The environment every git subprocess runs with: the daemon's own
-    /// environment, with the locale pinned to `C`.
+    /// environment, with the locale pinned to `C` and `PATH` floored with the
+    /// usual package-manager directories.
     ///
     /// Git's stderr is the only signal several callers have for *why* a command
     /// failed, and one of those decisions is destructive: `WorktreeLifecycle`'s
@@ -880,12 +882,26 @@ public struct GitManager: Sendable {
     /// bare dict would drop `PATH`, `HOME`, `SSH_AUTH_SOCK` and friends from
     /// every git call the daemon makes. (Same mistake, different subsystem:
     /// commit 56fa912f had to restore the launch `PATH` for tmux.)
+    ///
+    /// Inheriting `PATH` is necessary but not sufficient, because the daemon's
+    /// own `PATH` can be launchd's bare `/usr/bin:/bin:/usr/sbin:/sbin` — the
+    /// app is spawned that way whenever LaunchServices relaunches the bundle
+    /// without applying its `LSEnvironment`, and the daemon inherits it. Git
+    /// hands that environment to its filters and hooks, so an LFS repo with
+    /// `filter.lfs.required` then fails every `worktree add` with "git-lfs:
+    /// command not found" and exit 128. Appending the fallback directories
+    /// gives those children a floor without ever demoting a real launch `PATH`.
     static func gitEnvironment(
         inheriting base: [String: String] = ProcessInfo.processInfo.environment
     ) -> [String: String] {
         // `LC_ALL` is the one git actually obeys last; `LANG` is pinned too so
         // the child's own subprocesses don't see a mixed locale.
-        return base.merging(["LC_ALL": "C", "LANG": "C"]) { _, pinned in pinned }
+        let home = base["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+        return base.merging([
+            "LC_ALL": "C",
+            "LANG": "C",
+            "PATH": ExecutableSearchPath.augmented(base["PATH"], homeDirectory: home),
+        ]) { _, pinned in pinned }
     }
 
     /// Runs a git command with the given arguments at the given directory and returns stdout.

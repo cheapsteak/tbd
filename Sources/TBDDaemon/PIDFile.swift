@@ -10,8 +10,12 @@ public struct PIDFile: Sendable {
         self.path = path ?? TBDConstants.pidFilePath
     }
 
-    public func write() throws {
-        let pid = ProcessInfo.processInfo.processIdentifier
+    /// Claim the pid file for `pid`, this process by default.
+    ///
+    /// The parameter exists for one caller: a successor whose handover failed
+    /// has to put the predecessor's pid back, returning the world to the state
+    /// it found. See `Daemon.start()`.
+    public func write(pid: pid_t = ProcessInfo.processInfo.processIdentifier) throws {
         try "\(pid)".write(toFile: path, atomically: true, encoding: .utf8)
     }
 
@@ -37,6 +41,25 @@ public struct PIDFile: Sendable {
 
     public func remove() {
         try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// Remove the pid file only if it still names *this* process.
+    ///
+    /// A handover puts two daemons on one pid file for a moment: the successor
+    /// writes its own pid over the file first, so that every spurious spawn in
+    /// the gap — the app's two-second poller, a stray `restart.sh` — meets a
+    /// file naming a live daemon and exits at the gate. The predecessor then
+    /// shuts down. An unconditional `remove()` there deletes the *successor's*
+    /// claim, reopening exactly the race the successor-first write closes.
+    ///
+    /// Returns whether the file was ours, so callers can chain other
+    /// process-owned artifacts off the same answer.
+    @discardableResult
+    public func removeIfOwned(pid: pid_t = ProcessInfo.processInfo.processIdentifier) -> Bool {
+        guard let recorded = read() else { return false }
+        guard recorded == pid else { return false }
+        try? FileManager.default.removeItem(atPath: path)
+        return true
     }
 
     public func cleanupIfStale() {

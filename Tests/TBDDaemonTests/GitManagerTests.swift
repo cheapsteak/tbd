@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TBDShared
 @testable import TBDDaemonLib
 
 struct GitManagerTests {
@@ -317,9 +318,42 @@ struct GitManagerTests {
         ])
         #expect(composed["LC_ALL"] == "C")
         #expect(composed["LANG"] == "C")
-        #expect(composed["PATH"] == "/opt/homebrew/bin:/usr/bin")
+        #expect(composed["PATH"]?.hasPrefix("/opt/homebrew/bin:/usr/bin:") == true,
+                "the inherited PATH must keep its order and precedence")
         #expect(composed["HOME"] == "/Users/test")
         #expect(composed["SSH_AUTH_SOCK"] == "/tmp/agent.sock")
+    }
+
+    /// The daemon can be started by an app that LaunchServices relaunched with
+    /// launchd's bare `PATH`. Git hands its environment to LFS filters and
+    /// hooks, so without a floor every `worktree add` in an LFS repo dies with
+    /// "git-lfs: command not found".
+    @Test func gitSubprocessPATHIsFlooredWithTheUsualToolDirectories() {
+        let composed = GitManager.gitEnvironment(inheriting: [
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": "/Users/test",
+        ])
+        let directories = (composed["PATH"] ?? "").split(separator: ":").map(String.init)
+
+        #expect(Array(directories.prefix(4)) == ["/usr/bin", "/bin", "/usr/sbin", "/sbin"],
+                "the launch PATH must stay ahead of the floor")
+        #expect(directories.contains("/opt/homebrew/bin"))
+        #expect(directories.contains("/Users/test/.local/bin"))
+        #expect(directories.count == Set(directories).count)
+    }
+
+    /// The other branch: a `PATH` that already names every fallback is left
+    /// exactly as inherited.
+    @Test func anAlreadyCompletePATHIsInheritedUnchanged() {
+        let full = ExecutableSearchPath
+            .fallbackDirectories(homeDirectory: "/Users/test")
+            .joined(separator: ":")
+        let composed = GitManager.gitEnvironment(inheriting: [
+            "PATH": full,
+            "HOME": "/Users/test",
+        ])
+
+        #expect(composed["PATH"] == full)
     }
 
     // MARK: - Helpers

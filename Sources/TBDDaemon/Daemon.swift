@@ -276,7 +276,13 @@ public final class Daemon: Sendable {
     /// `TBD_WORKTREE_ID=<main-uuid>` or `CODEX_CI=1` from a managed launcher
     /// shell, every recreated pane would inherit stale routing/noninteractive
     /// state.
+    /// `TBD_HANDOVER_FROM_PID` is scrubbed here too, and the ordering matters:
+    /// `start()` reads it at the single-instance gate, several steps before
+    /// this runs. A tmux server bakes its spawn environment into every window
+    /// it later creates, so a variable left set would be handed to every pane
+    /// and to whatever those panes launch — including another daemon.
     public static func scrubInheritedTBDEnv() {
+        unsetenv(handoverFromPIDEnvVar)
         unsetenv("TBD_WORKTREE_ID")
         unsetenv("TBD_PROMPT_CONTEXT")
         unsetenv("TBD_PROMPT_INSTRUCTIONS")
@@ -707,14 +713,50 @@ public final class Daemon: Sendable {
         // would make this fresh daemon abort forever until that pid frees —
         // exactly the multi-minute "disconnected on restart" gap. cleanupIfStale
         // above already removed the pid/socket in that case, so read() is nil.
-        if let existingPID = pidFile.read(),
-           ProcessLiveness.isLiveNamedProcess(pid: existingPID, name: ProcessLiveness.daemonExecutableName) {
+        //
+        // 3a. `TBD_HANDOVER_FROM_PID` is the one way past that gate. When an
+        // update starts a successor with the running daemon's pid in that
+        // variable, the successor claims the pid file FIRST and then retires
+        // the predecessor. Claiming first is what closes the window a plain
+        // kill-then-start opens: the app polls every two seconds and spawns a
+        // daemon whenever the socket is missing *and* the pid file names no
+        // live daemon, so with the successor's pid in the file from the first
+        // instant, every spurious spawn exits at this same gate.
+        let handoverDecision = HandoverDecision.decide(
+            pidFileContents: pidFile.read(),
+            handoverEnv: ProcessInfo.processInfo.environment[handoverFromPIDEnvVar],
+            isLiveDaemon: {
+                ProcessLiveness.isLiveNamedProcess(
+                    pid: $0, name: ProcessLiveness.daemonExecutableName)
+            })
+
+        switch handoverDecision {
+        case let .refuse(existingPID):
             daemonLogger.error("Another daemon is already running (PID \(existingPID, privacy: .public)). Exiting.")
             Foundation.exit(1)
+        case let .takeOver(predecessor):
+            // 4. Claim the pid file, retire the predecessor, re-assert the
+            // claim. See `HandoverClaim` for why each of the three steps is
+            // there.
+            switch try await HandoverClaim(pidFile: pidFile).takeOver(from: predecessor) {
+            case let .predecessorSurvived(claimRestored):
+                if !claimRestored {
+                    daemonLogger.error("handover: the pid file still names this exiting process — the next daemon start will clear it as stale")
+                }
+                // Nothing downstream is a backstop: the socket bind is
+                // hundreds of lines past startup reconciliation, so this
+                // process would already have run a second reconciler against
+                // `state.db`. Two writers there is the failure the whole
+                // single-instance gate exists to prevent.
+                daemonLogger.error("handover: predecessor daemon \(predecessor, privacy: .public) survived SIGKILL — restored its pid file claim and exiting rather than running a second writer on state.db")
+                Foundation.exit(1)
+            case let .claimed(outcome):
+                daemonLogger.info("handover: predecessor daemon \(predecessor, privacy: .public) retired (\(outcome.rawValue, privacy: .public)); continuing startup")
+            }
+        case .normal:
+            // 4. Write PID file
+            try pidFile.write()
         }
-
-        // 4. Write PID file
-        try pidFile.write()
 
         // Refresh the agent runtime integration assets up front so both
         // Claude and Codex sessions pick up the current TBD hook/plugin state
@@ -1107,6 +1149,18 @@ public final class Daemon: Sendable {
         await performStartupReconciliation(
             mockMode: mockMode, database: database, git: git, lifecycle: lifecycle,
             actuationLog: actuationLog)
+
+        // 8d-ii. Un-park a second time, AFTER the reconcile pass. The first run
+        // has to precede reconcile so the destructive scratch-server reaping
+        // works from a consistent view, but that ordering also means it cannot
+        // repair anything the same boot parks. This run can: it re-examines the
+        // parked rows and clears every one whose pane demonstrably still runs
+        // Claude. Cheap — it only looks at parked rows — and it is the repair
+        // half of the tri-state reconcile probes, which stop the parks that are
+        // pure guesswork rather than the ones that merely raced.
+        if mockMode == nil {
+            await rpcRouter.hibernationCoordinator.reconcileOnStartup()
+        }
 
         // 8e. Re-adopt holder-backed sessions. A `HolderReader` lives only in
         // the memory of the daemon that made it, so after a restart every live
@@ -1782,11 +1836,26 @@ public final class Daemon: Sendable {
             await http.stop()
         }
 
-        // Remove PID file
-        pidFile.remove()
+        // Remove the PID file only if it still names this process. During a
+        // handover the successor has already written its own pid over it, and
+        // deleting that claim would reopen the spawn race the successor-first
+        // write exists to close.
+        let ownedPIDFile = pidFile.removeIfOwned()
 
-        // Remove port file
-        try? FileManager.default.removeItem(atPath: TBDConstants.portFilePath)
+        // The port file holds a port, not a pid, so it cannot answer "is this
+        // mine?" on its own. The pid file is the proxy for it: one daemon
+        // writes both and one daemon removes both, so a pid file that was still
+        // ours means the port file beside it was ours too.
+        //
+        // When the pid file has already been claimed by a successor, this
+        // leaves a port file naming a port nobody is listening on — for the few
+        // moments until the successor binds and overwrites it. That stale
+        // window is the deliberately cheaper failure: deleting the file instead
+        // would race the successor's own write and could leave the app with no
+        // address at all for a daemon that is up and serving.
+        if ownedPIDFile {
+            try? FileManager.default.removeItem(atPath: TBDConstants.portFilePath)
+        }
 
         daemonLogger.info("Stopped.")
         Foundation.exit(0)
