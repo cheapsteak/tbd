@@ -161,6 +161,9 @@ final class AppStateEmissionTracker {
         _ = state.dismissedProxyWarnings
         _ = state.daemonBuildMismatchMessage
         _ = state.daemonBuildMismatchDismissed
+        _ = state.daemonBuildIdentity
+        _ = state.daemonUpdateStatus
+        _ = state.dismissedUpdateCommit
         _ = state.controlModeAttachedPanes
         _ = state.controlModeFailingInputPanes
         _ = state.historyActiveWorktrees
@@ -271,6 +274,9 @@ final class AppStateEmissionTracker {
         "dismissedProxyWarnings",
         "daemonBuildMismatchMessage",
         "daemonBuildMismatchDismissed",
+        "daemonBuildIdentity",
+        "daemonUpdateStatus",
+        "dismissedUpdateCommit",
         "controlModeAttachedPanes",
         "controlModeFailingInputPanes",
         "historyActiveWorktrees",
