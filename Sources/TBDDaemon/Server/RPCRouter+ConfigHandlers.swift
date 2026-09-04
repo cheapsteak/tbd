@@ -424,4 +424,27 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
+
+    /// Persist the update mode — the daemon's only policy about updating
+    /// itself, and the default-off gate on a feature that rebuilds and replaces
+    /// the whole installation.
+    ///
+    /// **It takes effect at the next checker tick**, not at the next daemon
+    /// start: `UpdateChecker` reads the column fresh on every tick, so `check`
+    /// starts observing and `off` stops it without a restart. The one thing a
+    /// flip cannot do is start the loop in a daemon that booted in `off` —
+    /// nothing is spawned then, by design — so a first opt-in is followed by
+    /// the daemon's next restart before the timer runs. `tbd version --check`
+    /// and the app's "Check for Updates…" work regardless, since an explicit
+    /// question is not the thing this flag gates.
+    ///
+    /// The column is written on every call, because writing any value is the
+    /// explicit gesture that lifts it out of NULL forever after.
+    func handleConfigSetUpdateMode(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetUpdateModeParams.self, from: paramsData)
+        try await db.config.setUpdateMode(params.mode)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
 }

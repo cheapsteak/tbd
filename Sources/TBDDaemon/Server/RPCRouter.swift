@@ -89,6 +89,12 @@ public final class RPCRouter: Sendable {
     /// Session-limit auto-resume scheduler. `nil` in mock mode / tests that
     /// don't need it; set post-construction like `claudeUsagePoller`.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
+    /// Periodic comparison of this build against the remote's `main`. `nil`
+    /// when nothing wired one (mock mode, unit tests), in which case
+    /// `daemon.status` carries no `update` field and `daemon.checkForUpdate`
+    /// answers "nothing observed" rather than failing. Set post-construction
+    /// like `claudeUsagePoller`.
+    public nonisolated(unsafe) var updateChecker: UpdateChecker?
     /// Delivery acknowledgement (design §12). `terminal.send` hands a
     /// dispatched, verify-armed text send here and this is the only caller —
     /// see `DeliveryVerificationArming`. `nil` everywhere until the verifier
@@ -470,7 +476,9 @@ public final class RPCRouter: Sendable {
             case RPCMethod.terminalFocus:
                 return try await handleTerminalFocus(request.paramsData)
             case RPCMethod.daemonStatus:
-                return try handleDaemonStatus()
+                return try await handleDaemonStatus()
+            case RPCMethod.daemonCheckForUpdate:
+                return try await handleDaemonCheckForUpdate()
             case RPCMethod.resolvePath:
                 return try await handleResolvePath(request.paramsData)
             case RPCMethod.notificationsList:
@@ -738,6 +746,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetRemoteBackends(request.paramsData)
             case RPCMethod.configSetRemotePeerMessagingEnabled:
                 return try await handleConfigSetRemotePeerMessagingEnabled(request.paramsData)
+            case RPCMethod.configSetUpdateMode:
+                return try await handleConfigSetUpdateMode(request.paramsData)
             case RPCMethod.configSetPtyHolderEnabled:
                 return try await handleConfigSetPtyHolderEnabled(request.paramsData)
             case RPCMethod.peerStatus:
@@ -820,7 +830,8 @@ public final class RPCRouter: Sendable {
             queuedPromptEnabled: config.queuedPromptEnabled,
             claudeCloudEnabled: config.claudeCloudEnabled,
             claudeCloudLive: claudeCloudLive,
-            remoteDeleteEnabled: config.remoteDeleteEnabled))
+            remoteDeleteEnabled: config.remoteDeleteEnabled,
+            updateMode: config.updateMode))
     }
 
     // MARK: - PR Status

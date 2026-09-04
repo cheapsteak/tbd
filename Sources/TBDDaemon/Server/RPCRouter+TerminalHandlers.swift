@@ -3506,16 +3506,42 @@ extension RPCRouter {
 
     // MARK: - Daemon Status
 
-    func handleDaemonStatus() throws -> RPCResponse {
+    func handleDaemonStatus() async throws -> RPCResponse {
         let uptime = Date().timeIntervalSince(startTime)
         let status = DaemonStatusResult(
             version: TBDConstants.version,
             uptime: uptime,
             connectedClients: connectedClientsProvider?() ?? 0,
-            executablePath: Self.resolvedExecutablePath
+            executablePath: Self.resolvedExecutablePath,
+            buildIdentity: Self.resolvedBuildIdentity,
+            update: await updateChecker?.currentStatus()
         )
         return try RPCResponse(result: status)
     }
+
+    /// Run one update check synchronously and return the fresh status.
+    ///
+    /// The `--check` path of `tbd version` and the app's "Check for Updates…"
+    /// item. Deliberately does the work even when `update_mode` is `off`: a
+    /// user who just asked has made the gesture the flag exists to require, and
+    /// the check itself is one read-only `ls-remote`. The flag gates the
+    /// *timer* and the *launch*, not an explicit question.
+    func handleDaemonCheckForUpdate() async throws -> RPCResponse {
+        guard let updateChecker else {
+            // No checker wired (a daemon built without one, or a test router).
+            return try RPCResponse(result: UpdateStatus.unobserved)
+        }
+        return try RPCResponse(result: await updateChecker.checkNow())
+    }
+
+    /// This daemon's build identity, resolved once at first use.
+    ///
+    /// Memoized for the same reason as `resolvedExecutablePath`: the answer
+    /// cannot change while the process lives, and the `.worktreeHead` fallback
+    /// spawns a `git rev-parse` that must not run per RPC.
+    static let resolvedBuildIdentity: BuildIdentity? = BuildIdentityLoader.load(
+        executablePath: resolvedExecutablePath,
+        gitHead: BuildIdentityLoader.systemGitHead)
 
     /// Daemon's own executable path, resolved once at module load. Captures
     /// CWD at startup (rather than at each `daemon.status` RPC) so a later
