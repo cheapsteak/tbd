@@ -232,11 +232,18 @@ public protocol LocalPeerDelivering: Sendable {
 /// (`docs/research/2026-08-29-cross-machine-messaging/findings.md` § T1).
 ///
 /// The syscalls run on a dedicated serial queue rather than on the caller's
-/// actor. A `connect(2)` to a Unix socket whose listener has a full backlog
-/// blocks, and blocking an actor's executor is the starvation class
-/// `ProviderEventsSupervisor` documents at length; hopping costs one context
-/// switch per message on a channel whose traffic is, by design, aggregate and
-/// small.
+/// actor. The `connect(2)` does not block — on darwin it refuses immediately
+/// when the listener's accept queue is full — but the `write(2)` after it can
+/// park for the whole of `SO_SNDTIMEO` against a receiver that has stopped
+/// draining, and blocking an actor's executor for two seconds is the starvation
+/// class `ProviderEventsSupervisor` documents at length. Hopping costs one
+/// context switch per message on a channel whose traffic is, by design,
+/// aggregate and small.
+///
+/// A corollary of that same refusal: a frame aimed at a saturated peer is
+/// refused at the connect and dropped, exactly as one aimed at a session that
+/// has exited is. That is the designed failure semantics of this channel — no
+/// buffering, no retry — not an incident.
 public struct UnixSocketLocalPeerDelivery: LocalPeerDelivering {
     /// How long a write may take before the frame is abandoned.
     ///

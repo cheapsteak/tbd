@@ -80,11 +80,14 @@ public actor ShadowPeerBridgeRegistry: ShadowPeerBridgeInspecting {
 
 /// What a connect to a socket path found.
 public enum ShadowPeerListenerState: Sendable, Equatable {
-    /// Something accepted, or its backlog is full. Either way a listener
-    /// exists, so the file is not TBD's to unlink.
+    /// Something accepted the connect. A listener exists, so the file is not
+    /// TBD's to unlink.
     case listening
-    /// `ECONNREFUSED` — the file is there and nothing is behind it. This is the
-    /// designed signal that a peer is gone.
+    /// `ECONNREFUSED` — nothing accepted the connect. On darwin that is also
+    /// what a live listener whose accept queue is full reports, so this is
+    /// proof of absence only alongside a pid that is provably gone; see
+    /// `UnixSocketShadowPeerProbe` for the measurement and
+    /// `ShadowPeerReconciler.socketOutcome` for the gate that follows from it.
     case refused
     /// No such file. Already reclaimed, by the helper's own exit or by an
     /// earlier sweep.
@@ -102,11 +105,21 @@ public protocol ShadowPeerSocketProbing: Sendable {
 /// `SOCK_STREAM`, which is the same connect-and-drop `ListAgents` uses to
 /// delist a peer whose socket no longer answers.
 ///
-/// Non-blocking deliberately. A `connect` to a Unix socket whose listener has a
-/// full backlog blocks, and blocking the reconciler's actor executor is the
-/// starvation class the rest of this subsystem avoids everywhere. `EAGAIN` /
-/// `EINPROGRESS` from a non-blocking connect means a listener exists and is
-/// merely busy, which is exactly the answer the sweep needs.
+/// **A refused connect is not proof that nothing is listening.** On darwin, a
+/// `connect(2)` to an `AF_UNIX` socket whose listener's accept queue is full
+/// returns `ECONNREFUSED` immediately: the queue limit is exactly the backlog
+/// value passed to `listen(2)`, the call never blocks, and a non-blocking
+/// connect never comes back `EINPROGRESS` or `EAGAIN` (measured). So at this
+/// syscall "a listener is alive and saturated" and "nothing is behind the path"
+/// are the same answer, and no amount of probing separates them. What separates
+/// them is the pid the socket file is named after, which is why
+/// `ShadowPeerReconciler` unlinks only once that pid is gone.
+///
+/// Non-blocking is kept even though nothing here blocks. It costs nothing, it
+/// bounds how long one probe can hold an executor whatever a kernel does with
+/// this call later, and it makes an unexpected in-progress result fall through
+/// to `.inconclusive` — an answer the sweep refuses to act on — rather than be
+/// read as an answer.
 public struct UnixSocketShadowPeerProbe: ShadowPeerSocketProbing {
     public init() {}
 
@@ -145,7 +158,6 @@ public struct UnixSocketShadowPeerProbe: ShadowPeerSocketProbing {
         switch errno {
         case ECONNREFUSED: return .refused
         case ENOENT: return .absent
-        case EAGAIN, EINPROGRESS: return .listening
         default: return .inconclusive("connect(2): \(String(cString: strerror(errno)))")
         }
     }
@@ -220,7 +232,8 @@ public struct ShadowPeerSweepResult: Sendable, Equatable {
 /// - a record with no live helper — including the **recycled-pid ghost**, which
 ///   Claude Code's own reaper provably will not collect, because it checks pid
 ///   liveness and nothing else (measured),
-/// - a socket TBD created with nothing listening,
+/// - a socket TBD created, at a pid that no longer exists, that refuses a
+///   connect,
 /// - anything TBD published under a previous daemon generation.
 ///
 /// A fourth artifact rides along with the record: `ShadowPeerRecordStore.write`
@@ -230,12 +243,17 @@ public struct ShadowPeerSweepResult: Sendable, Equatable {
 /// reclaimed here — see `unlinkStrandedRecordTemporaries` for why that is still
 /// ledger-derived rather than the forbidden inference.
 ///
-/// **Ownership is proved before every unlink.** A pid outlives the process TBD
-/// filed under it: `<pid>.json` and `<pid>.sock` can be re-created by a real
-/// Claude Code session that inherited the number. So a record is unlinked only
-/// when the `sessionId` inside it is the one TBD published, and a socket only
-/// when a connect gets `ECONNREFUSED`. Anything else is somebody's live peer
-/// and is left exactly where it is.
+/// **Ownership is proved before every unlink, and the pid is what proves it.**
+/// A pid outlives the process TBD filed under it: `<pid>.json` and `<pid>.sock`
+/// can be re-created by a real Claude Code session that inherited the number. A
+/// record carries a session id, so it proves its own ownership and is unlinked
+/// only when that id is the one TBD published. A socket carries nothing, and a
+/// connect cannot supply the missing proof — on darwin a saturated listener
+/// refuses exactly like an empty path — so the socket is unlinked only when the
+/// pid it is named after is provably gone *and* a connect refuses. While that
+/// pid belongs to somebody else the socket is never even probed, and its row is
+/// kept so a later sweep can reclaim the file once the pid dies. Anything else
+/// is somebody's live peer and is left exactly where it is.
 public actor ShadowPeerReconciler {
     private let artifacts: ShadowPeerArtifactStore
     private let bridges: any ShadowPeerBridgeInspecting
@@ -461,11 +479,14 @@ public actor ShadowPeerReconciler {
             // nothing else, so this record would survive it forever. Its pid
             // now belongs to an unrelated process, which must never be
             // signalled — that is somebody's editor, or a session of their own.
+            // Only the record can be judged while that process lives, because
+            // only the record says who wrote it; the socket waits for the pid
+            // to go (`socketOutcome`).
             reconcilerLogger.info("""
                 recycled-pid ghost for shadow \(row.name, privacy: .public) \
                 (\(row.handle, privacy: .public)): pid \(row.pid, privacy: .public) is alive but \
-                is not the helper TBD recorded, so it is left running and only the artifacts are \
-                reclaimed
+                is not the helper TBD recorded, so it is left running and only the artifacts TBD \
+                can prove are its own are reclaimed
                 """)
 
         case .undecided:
@@ -489,8 +510,10 @@ public actor ShadowPeerReconciler {
             return
         }
 
+        var recordOutcome = ArtifactOutcome.absent
         if settled {
-            switch unlinkRecordIfOurs(row) {
+            recordOutcome = unlinkRecordIfOurs(row)
+            switch recordOutcome {
             case .unlinked:
                 result.recordsUnlinked += 1
             case .absent:
@@ -503,21 +526,26 @@ public actor ShadowPeerReconciler {
             }
         }
 
-        // The record's write-temps, and **only when the pid is provably gone**.
-        // A dead pid cannot be halfway through a `rename(2)`, which is the one
-        // thing that would make a temp at this name somebody's live business
-        // rather than an orphan.
+        // **The pid is re-read here, and both steps below turn on it.** A dead
+        // pid cannot be halfway through a `rename(2)`, which is the one thing
+        // that would make a write-temp at this name somebody's live business
+        // rather than an orphan; and a dead pid is the only thing that makes a
+        // refused connect mean the socket is unowned rather than merely busy.
         //
-        // Liveness is re-read rather than reused from the top of this call: a
-        // helper this pass has just killed leaves exactly the stranded temp
-        // this reclaims, and reusing the earlier `alive` would skip its own
-        // kill's leavings and then retire the row that named them.
-        if !signaller.isAlive(row.pid) {
+        // Re-read rather than reused from the top of this call: a helper this
+        // pass has just killed leaves exactly the stranded temp and the
+        // unanswered socket these two steps reclaim, and reusing the earlier
+        // `alive` would skip its own kill's leavings and then retire the row
+        // that named them.
+        let pidIsGone = !signaller.isAlive(row.pid)
+        if pidIsGone {
             result.recordTemporariesUnlinked += unlinkStrandedRecordTemporaries(row)
         }
 
         if settled {
-            switch unlinkSocketIfUnclaimed(row) {
+            switch socketOutcome(
+                row, recordProvedForeign: recordOutcome == .foreign, pidIsGone: pidIsGone
+            ) {
             case .unlinked:
                 result.socketsUnlinked += 1
             case .absent:
@@ -572,7 +600,7 @@ public actor ShadowPeerReconciler {
         return current == recorded ? .ourHelper : .stranger
     }
 
-    private enum ArtifactOutcome {
+    private enum ArtifactOutcome: Equatable {
         case unlinked
         case absent
         /// At the recorded path, but demonstrably not TBD's any more.
@@ -689,12 +717,86 @@ public actor ShadowPeerReconciler {
         return unlinked
     }
 
-    /// Unlink the socket only when a connect proves nothing is behind it.
+    /// Decide the socket half of one row — and decide it from the **pid**,
+    /// with the connect as corroboration rather than as the proof.
     ///
-    /// This is the narrow version of the rule the design forbids in general:
-    /// not "any socket with nothing listening", which races a real session
-    /// between `bind()` and `listen()`, but "this socket, which TBD's own
-    /// bookkeeping says TBD created, and which now refuses a connect".
+    /// A Claude Code session, and TBD's helper, each bind exactly one socket,
+    /// named after their own pid. So the only process that can legitimately be
+    /// listening at `<pid>.sock` is the one holding that pid, and the pid is
+    /// the honest primitive here. The connect is not: on darwin a connect to a
+    /// socket whose listener's accept queue is full refuses immediately and is
+    /// indistinguishable from a connect to a path nobody is behind
+    /// (`UnixSocketShadowPeerProbe`). Three answers follow, ordered by what TBD
+    /// can prove:
+    ///
+    /// - **The record proved a foreign owner.** `unlinkRecordIfOurs` read a
+    ///   record at this row's path carrying a session id TBD never published,
+    ///   which is proof the pid was recycled and that whatever sits at
+    ///   `<pid>.sock` was bound by that session. The socket is not probed at
+    ///   all: the proof is already in hand, and a probe could only return a
+    ///   refusal that invites an unlink. Counted as a foreign artifact when the
+    ///   file is there, and the row retires, because nothing of TBD's is left
+    ///   for it to name.
+    /// - **The pid is alive and is not TBD's helper.** A live stranger may be
+    ///   listening on that socket right now, and a saturated listener refuses
+    ///   exactly like an empty path, so there is nothing here to tell the two
+    ///   apart and the file is left untouched. The row is **deferred rather
+    ///   than retired**: if the stranger never bound it, the file is TBD's own
+    ///   orphan, and the row is the only entry that names it. The sweep that
+    ///   finds the pid gone takes it back — which is this resource's answer to
+    ///   "who reclaims the orphan", instead of leaking one forever.
+    /// - **The pid is gone.** Now a refusal means something. No process holds
+    ///   the number, so nothing can legitimately be listening at a path named
+    ///   after it, and the file is TBD's to take back. This is the narrow
+    ///   version of the rule the design forbids in general: not "any socket
+    ///   with nothing listening", which races a real session between `bind()`
+    ///   and `listen()`, but "this socket, which TBD's own bookkeeping says TBD
+    ///   created, whose pid no longer exists, and which now refuses a connect".
+    ///
+    /// **No retries, deliberately.** Probing again narrows the window in which
+    /// a busy listener looks empty; it cannot make an indistinguishable signal
+    /// distinguishable, and a listener whose accept loop is wedged rather than
+    /// merely busy refuses every attempt for as long as it lives. Only the pid
+    /// separates the two cases, so the pid is what this gates on.
+    ///
+    /// One residual race is accepted rather than solved: the pid could be
+    /// recycled between the liveness read in `reclaim` and the `unlink(2)`
+    /// below. The window is microseconds wide, and losing it needs the new
+    /// occupant to reach `bind()` inside it *and* to have a full accept queue
+    /// at the instant of the probe — with any room in the queue the probe reads
+    /// `.listening` and the file is left where it is.
+    private func socketOutcome(
+        _ row: ShadowPeerArtifact, recordProvedForeign: Bool, pidIsGone: Bool
+    ) -> ArtifactOutcome {
+        let socketExists = FileManager.default.fileExists(atPath: row.socketPath)
+        if recordProvedForeign {
+            guard socketExists else { return .absent }
+            reconcilerLogger.info("""
+                left the socket at \(row.socketPath, privacy: .public) alone without probing it: \
+                the record beside it proved pid \(row.pid, privacy: .public) was recycled, so this \
+                file belongs to the session that wrote that record and not to TBD's helper for \
+                shadow \(row.handle, privacy: .public)
+                """)
+            return .foreign
+        }
+        guard pidIsGone else {
+            guard socketExists else { return .absent }
+            reconcilerLogger.info("""
+                left the socket at \(row.socketPath, privacy: .public) unjudged: pid \
+                \(row.pid, privacy: .public) is alive and is not the helper TBD recorded, and a \
+                connect cannot tell a saturated listener from an empty path, so the row for shadow \
+                \(row.handle, privacy: .public) is kept for the sweep that finds the pid gone
+                """)
+            return .undecided
+        }
+        return unlinkSocketIfUnclaimed(row)
+    }
+
+    /// Probe the socket and unlink it when the connect refuses.
+    ///
+    /// **Only `socketOutcome` may call this**, and only once the recorded pid
+    /// is proved gone: a refused connect is not by itself proof that nothing is
+    /// behind the path (see `UnixSocketShadowPeerProbe`).
     private func unlinkSocketIfUnclaimed(_ row: ShadowPeerArtifact) -> ArtifactOutcome {
         switch probe.listenerState(atPath: row.socketPath) {
         case .absent:
