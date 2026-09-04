@@ -95,15 +95,80 @@ struct MarkdownWebViewConfigurationTests {
             for: url, isOwnLoad: false, isLinkActivation: true) == .openExternally(url))
     }
 
-    @Test("file links reveal in Finder and are never launched")
+    @Test("non-markdown file links reveal in Finder and are never launched")
     func fileRevealsRatherThanOpens() {
         // NSWorkspace.open on a file: URL launches it with its default app.
         // `git clone` sets only com.apple.provenance, NOT com.apple.quarantine
         // (verified), so a .app inside a freshly cloned repo would run with
         // Gatekeeper never consulted.
-        let url = URL(string: "file:///tmp/notes.md")!
+        let url = URL(string: "file:///tmp/install.command")!
         #expect(MarkdownWebViewConfiguration.policy(
             for: url, isOwnLoad: false, isLinkActivation: true) == .revealInFinder(url))
+    }
+
+    @Test("a link to a local markdown file navigates the pane")
+    func markdownFileOpensInPane() {
+        // `MarkdownLinkResolver` turns `[log](./log.md)` into this file: URL.
+        // Revealing it in Finder would be a worse answer than rendering it,
+        // and rendering happens entirely in-app.
+        let url = URL(string: "file:///repo/docs/log.md")!
+        #expect(MarkdownWebViewConfiguration.policy(
+            for: url, isOwnLoad: false, isLinkActivation: true) == .openInPane(url))
+    }
+
+    @Test("the .markdown extension and odd casing also navigate the pane")
+    func markdownExtensionVariants() {
+        for raw in ["file:///repo/a.markdown", "file:///repo/b.MD", "file:///repo/c.MarkDown"] {
+            let url = URL(string: raw)!
+            #expect(MarkdownWebViewConfiguration.policy(
+                for: url, isOwnLoad: false, isLinkActivation: true) == .openInPane(url))
+        }
+    }
+
+    @Test("a markdown file link still needs a real click")
+    func markdownFileNeedsLinkActivation() {
+        // The gesture gate covers the in-pane route too: a <meta refresh> must
+        // not be able to swap the pane's document out from under the user.
+        #expect(MarkdownWebViewConfiguration.policy(
+            for: URL(string: "file:///repo/docs/log.md"), isOwnLoad: false,
+            isLinkActivation: false) == .cancel)
+    }
+
+    @Test("no file: URL ever routes to openExternally")
+    func fileNeverOpensExternally() {
+        // The invariant the whole file: branch exists to hold. Whichever way a
+        // local file is routed, it is never handed to NSWorkspace.open.
+        let raws = [
+            "file:///repo/docs/log.md", "file:///repo/a.markdown",
+            "file:///repo/run.command", "file:///Applications/Evil.app",
+            "file:///repo/noextension", "file:///etc/passwd",
+        ]
+        for raw in raws {
+            let policy = MarkdownWebViewConfiguration.policy(
+                for: URL(string: raw), isOwnLoad: false, isLinkActivation: true)
+            switch policy {
+            case .openExternally:
+                Issue.record("file: URL \(raw) routed to openExternally")
+            case .openInPane, .revealInFinder, .cancel, .allowInPlace:
+                break
+            }
+        }
+    }
+
+    @Test("the pane renders in place exactly what the policy routes to it")
+    func paneRendersWhatThePolicyRoutes() {
+        // The two read one set, and the pane collapses to zero height if it is
+        // handed something it will not render as a full-pane webview. Asserting
+        // the set against itself — every entry equals its own lowercasing —
+        // could not fail; comparing the two consumers can.
+        for ext in ["md", "markdown", "MD", "MarkDown", "txt", "png", "swift", ""] {
+            let url = URL(fileURLWithPath: "/repo/file.\(ext)")
+            let routesToPane = MarkdownWebViewConfiguration.policy(
+                for: url, isOwnLoad: false, isLinkActivation: true) == .openInPane(url)
+            let paneRendersIt = MarkdownPaneLayout.usesFullPaneWebView(
+                showSourceCode: false, selectedFiles: [url.path], useWebView: true)
+            #expect(routesToPane == paneRendersIt, "disagreement on .\(ext)")
+        }
     }
 
     @Test("network-mount schemes are cancelled")
@@ -148,7 +213,7 @@ struct MarkdownWebViewConfigurationTests {
         let https = URL(string: "HTTPS://example.com/x")!
         #expect(MarkdownWebViewConfiguration.policy(
             for: https, isOwnLoad: false, isLinkActivation: true) == .openExternally(https))
-        let file = URL(string: "FILE:///tmp/x")!
+        let file = URL(string: "FILE:///tmp/x.command")!
         #expect(MarkdownWebViewConfiguration.policy(
             for: file, isOwnLoad: false, isLinkActivation: true) == .revealInFinder(file))
         #expect(MarkdownWebViewConfiguration.policy(

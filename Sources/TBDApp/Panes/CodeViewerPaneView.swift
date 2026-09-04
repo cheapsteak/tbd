@@ -205,9 +205,12 @@ private extension Color {
 }
 
 /// Files that have a rich rendered view in addition to raw source code.
+///
+/// Reads the same set the navigation policy uses to decide that a link should
+/// navigate this pane, so the pane can always render what a click routes here.
 private func isRenderableFile(_ path: String) -> Bool {
     let ext = (path as NSString).pathExtension.lowercased()
-    return ["md", "markdown"].contains(ext)
+    return MarkdownWebViewConfiguration.renderableExtensions.contains(ext)
 }
 
 /// Decides whether a rendered markdown document owns the whole code-viewer
@@ -238,6 +241,12 @@ struct CodeViewerPaneView: View {
     let path: String
     let worktreePath: String
     let showSourceCode: Bool
+    /// Points the ENCLOSING pane at another file. The pane's identity is its
+    /// `PaneContent.codeViewer(id:path:)`, so a navigation that only touched
+    /// this view's `selectedFiles` would leave the header title, the header
+    /// context menu, the slot's history and the persisted layout on the
+    /// previous document. Raised by `openLinkedFile`.
+    let onNavigate: (String) -> Void
 
     @State private var selectedFiles: [String] = []
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
@@ -285,7 +294,8 @@ struct CodeViewerPaneView: View {
                     filePath: selectedFiles[0],
                     worktreePath: worktreePath,
                     showSourceCode: showSourceCode,
-                    useWebViewMarkdown: true
+                    useWebViewMarkdown: true,
+                    onOpenFile: { openLinkedFile($0) }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -308,7 +318,8 @@ struct CodeViewerPaneView: View {
                                         filePath: filePath,
                                         worktreePath: worktreePath,
                                         showSourceCode: showSourceCode,
-                                        useWebViewMarkdown: false
+                                        useWebViewMarkdown: false,
+                                        onOpenFile: { openLinkedFile($0) }
                                     )
                                 }
                             }
@@ -330,6 +341,23 @@ struct CodeViewerPaneView: View {
                 selectedFiles = [newPath]
             }
         }
+    }
+
+    /// A relative link in a rendered markdown document that points at another
+    /// markdown file navigates this pane, the way picking the file in the
+    /// sidebar would.
+    ///
+    /// The navigation goes UP rather than into `selectedFiles`: the enclosing
+    /// pane owns the path, and `onChange(of: path)` brings the selection along
+    /// once the new content arrives.
+    ///
+    /// `MarkdownLinkNavigation` re-judges worktree containment here, where the
+    /// root is known — the navigation policy is pure and cannot — and rejects
+    /// a path that vanished between render and click.
+    private func openLinkedFile(_ url: URL) {
+        guard let target = MarkdownLinkNavigation.target(
+            for: url, worktreeRoot: worktreePath) else { return }
+        onNavigate(target)
     }
 
     private var emptyState: some View {
@@ -396,6 +424,8 @@ private struct FilePreviewView: View {
     /// Decided by the pane, not read from `UserDefaults` here: only the pane
     /// knows whether this preview owns the full height the webview needs.
     let useWebViewMarkdown: Bool
+    /// Where a repo-local markdown link goes. Only the webview path raises it.
+    let onOpenFile: (URL) -> Void
 
     @State private var revision: Int = 0
     private let watcher = FileWatcher()
@@ -407,7 +437,8 @@ private struct FilePreviewView: View {
                     filePath: filePath,
                     worktreePath: worktreePath,
                     revision: revision,
-                    useWebView: useWebViewMarkdown
+                    useWebView: useWebViewMarkdown,
+                    onOpenFile: onOpenFile
                 )
             } else if isImageFile(filePath) {
                 ImagePreviewView(filePath: filePath, revision: revision)
@@ -439,6 +470,7 @@ private struct RenderedContentView: View {
     let worktreePath: String
     let revision: Int
     let useWebView: Bool
+    let onOpenFile: (URL) -> Void
     @State private var content: String?
     @State private var loadError: String?
     @State private var renderedHTML: String?
@@ -478,7 +510,7 @@ private struct RenderedContentView: View {
                     .padding(12)
             } else if useWebView {
                 if let renderedHTML {
-                    MarkdownWebView(html: renderedHTML)
+                    MarkdownWebView(html: renderedHTML, onOpenFile: onOpenFile)
                 } else {
                     ProgressView().controlSize(.small)
                 }

@@ -181,4 +181,57 @@ struct ViewerRoutingTests {
         #expect(result.replaced == nil, "note panes are not viewer-class — must split instead")
         #expect(result.layout.allPaneIDs().count == 3)
     }
+
+    // MARK: - routeInPaneFileNavigation
+
+    @Test func routeInPaneFileNavigation_swapsThatPaneKeepingItsID() {
+        // The whole point of routing through the layout rather than the pane's
+        // own state: the pane's `path` is what the header title, the header
+        // context menu, the slot history and the persisted layout all read.
+        let viewerID = UUID()
+        let otherViewerID = UUID()
+        let layout = LayoutNode.split(
+            id: UUID(), direction: .horizontal,
+            children: [
+                .pane(.codeViewer(id: otherViewerID, path: "/other.md")),
+                .pane(.codeViewer(id: viewerID, path: "/old.md")),
+            ],
+            ratios: [0.5, 0.5]
+        )
+
+        let result = routeInPaneFileNavigation(into: layout, paneID: viewerID, path: "/new.md")
+
+        guard let result,
+              case .split(_, _, let children, let ratios) = result.layout,
+              case .pane(.codeViewer(let id, let path)) = children[1]
+        else {
+            Issue.record("Expected codeViewer in right child"); return
+        }
+        #expect(id == viewerID, "paneID must survive so the slot keeps its history and identity")
+        #expect(path == "/new.md")
+        #expect(ratios == [0.5, 0.5])
+        // The OTHER viewer must not be the one that moved — that is the
+        // difference from `routeFileClick`, which picks the first viewer it
+        // finds anywhere in the layout.
+        #expect(children[0] == .pane(.codeViewer(id: otherViewerID, path: "/other.md")))
+        #expect(result.replaced == .init(
+            paneID: viewerID,
+            outgoing: .codeViewer(id: viewerID, path: "/old.md"),
+            incoming: .codeViewer(id: viewerID, path: "/new.md")
+        ))
+    }
+
+    @Test func routeInPaneFileNavigation_isNilWhenAlreadyShowingThatFile() {
+        let viewerID = UUID()
+        let layout = LayoutNode.pane(.codeViewer(id: viewerID, path: "/same.md"))
+
+        #expect(routeInPaneFileNavigation(into: layout, paneID: viewerID, path: "/same.md") == nil,
+                "a no-op navigation must not push a duplicate history entry")
+    }
+
+    @Test func routeInPaneFileNavigation_isNilForAPaneNotInTheLayout() {
+        let layout = LayoutNode.pane(.codeViewer(id: UUID(), path: "/a.md"))
+
+        #expect(routeInPaneFileNavigation(into: layout, paneID: UUID(), path: "/b.md") == nil)
+    }
 }

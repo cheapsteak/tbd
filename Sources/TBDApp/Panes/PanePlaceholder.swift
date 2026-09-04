@@ -334,6 +334,22 @@ struct PanePlaceholder: View {
         layout = updated
     }
 
+    /// Point THIS pane at another file, keeping its pane UUID — raised by a
+    /// link click inside a rendered markdown document.
+    ///
+    /// Not `routeFileClick`: that one picks a destination slot, and the
+    /// destination here is already known. `routeInPaneFileNavigation` is the
+    /// same swap over the same primitives, aimed at one named pane, and its
+    /// result is consumed exactly like every other viewer route in this file.
+    private func navigateCodeViewer(to path: String) {
+        guard let result = routeInPaneFileNavigation(
+            into: layout, paneID: content.paneID, path: path) else { return }
+        if let replaced = result.replaced {
+            appState.recordPaneReplacement(replaced)
+        }
+        layout = result.layout
+    }
+
     // MARK: - Pane Body
 
     @ViewBuilder
@@ -344,7 +360,12 @@ struct PanePlaceholder: View {
         case .webview(_, let url):
             WebviewPaneView(url: url, state: webviewState)
         case .codeViewer(_, let path):
-            CodeViewerPaneView(path: path, worktreePath: worktree.path, showSourceCode: showSourceCode)
+            CodeViewerPaneView(
+                path: path,
+                worktreePath: worktree.path,
+                showSourceCode: showSourceCode,
+                onNavigate: { navigateCodeViewer(to: $0) }
+            )
         case .note(let noteID):
             NotePaneView(noteID: noteID, worktreeID: worktree.id)
         case .liveTranscript(_, let terminalID):

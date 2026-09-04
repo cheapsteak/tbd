@@ -138,8 +138,30 @@ Scope is global. No per-repo override and no repo-local config file.
 > both designs.
 
 The display webview uses a `.nonPersistent()` data store, installs **no script message
-handlers**, and denies in-place navigation — link clicks route to `NSWorkspace`. JavaScript is
-disabled (`allowsContentJavaScript = false`) unless `renderMermaidDiagrams` is enabled.
+handlers**, and registers **no URL scheme handler**. JavaScript is disabled
+(`allowsContentJavaScript = false`) unless `renderMermaidDiagrams` is enabled.
+
+Navigation is decided four ways, and everything but the first two requires a real link
+activation — a `<meta http-equiv="refresh">` fires with JavaScript off, so a gesture gate is what
+stops a rendered document acting on its own:
+
+- **In place** — our own document load, and a same-document `about:blank#fragment` anchor. README
+  tables of contents depend on the second.
+- **In the pane** — a link to a repo-local markdown file navigates the enclosing code-viewer pane,
+  which renders it. Entirely in-app: no launch decision is involved. Relative hrefs are rewritten
+  to absolute `file://` URLs at document-build time, and the resolved target must be a regular
+  file inside the symlink-resolved worktree root; the pane re-checks that containment before it
+  accepts the navigation, because the policy function itself is pure and knows no worktree.
+- **Out to `NSWorkspace`** — `http`, `https` and `mailto` only, on a click. An allowlist, not a
+  blocklist: `smb:`/`afp:`/`nfs:` mount against an attacker-chosen host and prompt for
+  credentials, `tbd:` drives TBD's own deep-link handler, and any installed app can claim a
+  scheme.
+- **Dropped** — everything else, including every unrecognised scheme.
+
+A `file:` URL is **never** handed to `NSWorkspace.open`. One that is not renderable markdown is
+revealed in Finder instead: `git clone` sets `com.apple.provenance` but not
+`com.apple.quarantine`, so a `.app` or `.command` inside a freshly cloned repo would otherwise
+launch with Gatekeeper never consulted.
 
 **Remote subresources are allowed.** Badges and remote images load normally. The accepted
 consequence is that opening an unaudited README issues requests to whatever hosts it names,

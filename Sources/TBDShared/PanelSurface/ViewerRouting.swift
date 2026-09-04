@@ -74,3 +74,32 @@ public func routeFileClick(into layout: LayoutNode, terminalID: UUID, path: Stri
         newContent: .codeViewer(id: UUID(), path: path)
     ))
 }
+
+// MARK: - routeInPaneFileNavigation
+
+/// Points ONE named pane at a file, keeping its pane UUID.
+///
+/// Distinct from `routeFileClick`, which *chooses* a destination slot. Here
+/// the destination is fixed: a link clicked inside a rendered markdown
+/// document navigates the pane the document is in, and no other. Going
+/// through the layout rather than the pane's own private state is what keeps
+/// the pane header, its context menu, the slot's history and the persisted
+/// layout pointed at the document the user is actually looking at — every one
+/// of those reads the path from `PaneContent.codeViewer`.
+///
+/// Returns nil when the pane is not in the layout, or is already showing that
+/// file — a no-op must not push a duplicate history entry.
+public func routeInPaneFileNavigation(
+    into layout: LayoutNode, paneID: UUID, path: String
+) -> ViewerRouteResult? {
+    guard let outgoing = layout.firstPaneContent(where: { $0.paneID == paneID }) else { return nil }
+    if case .codeViewer(_, let current) = outgoing, current == path { return nil }
+    let incoming = PaneContent.codeViewer(id: paneID, path: path)
+    guard let updated = layout.replacingContent(at: paneID, with: incoming) else { return nil }
+    logger.debug(
+        "routeInPaneFileNavigation: paneID=\(paneID, privacy: .public) path=\(path, privacy: .public)")
+    return ViewerRouteResult(
+        layout: updated,
+        replaced: .init(paneID: paneID, outgoing: outgoing, incoming: incoming)
+    )
+}
