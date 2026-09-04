@@ -64,12 +64,70 @@ extension AppState {
             appSiblingDaemonPath: siblingDaemonPath,
             sourceWorktreePath: sourceWorktreePath
         )
+        // Same response, second reading: what commit the daemon was built from
+        // and what it last saw on the remote. Carried on `daemon.status` rather
+        // than fetched separately so the two banners can never disagree about
+        // which daemon they are describing.
+        daemonBuildIdentity = status.buildIdentity
+        daemonUpdateStatus = status.update
         guard message != daemonBuildMismatchMessage else { return }
         daemonBuildMismatchMessage = message
         // A new (or cleared) verdict invalidates a previous dismissal.
         daemonBuildMismatchDismissed = false
         if let message {
             logger.warning("Daemon build skew detected: \(message, privacy: .public)")
+        }
+    }
+
+    /// The update banner's text, or nil when there is nothing to say or the
+    /// user has already dismissed this exact commit.
+    ///
+    /// Computed rather than stored so the dismissal and the observation cannot
+    /// drift apart: a new commit arriving makes the banner reappear by itself,
+    /// because the dismissal names the commit it dismissed.
+    var updateNoticeMessage: String? {
+        guard let latest = daemonUpdateStatus?.latestCommit,
+              latest != dismissedUpdateCommit
+        else { return nil }
+        return UpdateNotice.message(
+            daemon: daemonBuildIdentity, update: daemonUpdateStatus)
+    }
+
+    /// Dismiss the update notice for the commit it is currently about.
+    func dismissUpdateNotice() {
+        dismissedUpdateCommit = daemonUpdateStatus?.latestCommit
+    }
+
+    /// Ask the daemon to check the remote right now and report the answer as a
+    /// toast. The app's "Check for Updates…" menu item.
+    ///
+    /// Deliberately reports in every case, including "up to date" — an
+    /// unprompted banner earns its silence, a requested check does not.
+    func checkForUpdatesNow() async {
+        do {
+            let status = try await updateCheckRunner()
+            daemonUpdateStatus = status
+            // A fresh observation of a commit the user dismissed earlier stays
+            // dismissed for the banner; the toast still answers the question.
+            showTransientToast(
+                UpdateNotice.checkResultToast(daemon: daemonBuildIdentity, update: status),
+                style: status.relation == .behind ? .notice : .success)
+        } catch {
+            logger.error("Update check failed: \(error, privacy: .public)")
+            showErrorToast("Could not check for updates: \(error.localizedDescription)")
+        }
+    }
+
+    /// Persist the update mode, then re-fetch capabilities so the Settings
+    /// picker reflects the daemon's stored state. Applies at the daemon's next
+    /// check.
+    func setUpdateMode(_ mode: UpdateMode) async {
+        do {
+            try await updateModeSetter(mode)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set update mode: \(error, privacy: .public)")
+            showAlert("Failed to set update mode: \(error.localizedDescription)", isError: true)
         }
     }
 

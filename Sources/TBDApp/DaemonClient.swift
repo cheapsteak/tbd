@@ -1094,6 +1094,23 @@ actor DaemonClient {
         )
     }
 
+    /// Ask the daemon to run one update check now and answer with the result.
+    /// Read-only: one `git ls-remote`. Runs whatever `update_mode` says,
+    /// because an explicit question is not what that flag gates.
+    func checkForUpdate() async throws -> UpdateStatus {
+        return try await callNoParamsAsync(
+            method: RPCMethod.daemonCheckForUpdate, resultType: UpdateStatus.self)
+    }
+
+    /// Persist the update mode (`off`, `check`, `auto`). Takes effect at the
+    /// daemon's next check.
+    func setUpdateMode(_ mode: UpdateMode) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetUpdateMode,
+            params: ConfigSetUpdateModeParams(mode: mode)
+        )
+    }
+
     /// Persist the pending-input veto for auto-hibernate (machine-interface
     /// guard that prevents hibernation of sessions with typed-but-unsent input).
     /// Applies on the next hibernation sweep.
