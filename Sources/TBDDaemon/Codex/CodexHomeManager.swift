@@ -432,17 +432,10 @@ enum CodexExecutableResolver {
             isUsableExecutable(atPath: $0)
         }
     ) -> String? {
-        let fallbackDirectories = [
-            "\(homeDirectory)/.local/bin",
-            "\(homeDirectory)/.volta/bin",
-            "\(homeDirectory)/.cargo/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-        ]
-        let augmentedSearchPath = ([environment["PATH"]].compactMap { $0 }
-            + fallbackDirectories).joined(separator: ":")
+        let augmentedSearchPath = ExecutableSearchPath.augmented(
+            environment["PATH"],
+            homeDirectory: homeDirectory
+        )
 
         return try? resolve(
             configuredOverride: environment[executableOverrideEnvironmentKey],
