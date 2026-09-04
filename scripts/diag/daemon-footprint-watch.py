@@ -107,6 +107,14 @@ re-testing the threshold is what keeps the report and the live run in agreement:
 a rise-triggered spike well under the absolute threshold is a spike in both, or
 in neither.
 
+The run's own markers are replayed in step with its samples, for the same
+reason. A `target_lost` closes whatever spike was open at that instant and a
+`target_acquired` starts a detector with no history, exactly as the live watch
+does, because a daemon restart mid-run otherwise hands the new process's first
+sample the dead one's baseline, in-spike state and previous peak: a replacement
+daemon coming up above the threshold gets no onset in the report while the live
+run took one, and the capture directory that run wrote belongs to no spike.
+
 In the raw samples the two things worth reading together are the footprint and
 the interval max. A tick whose interval max is far above its own footprint saw a
 spike that opened and closed between two ticks. A run of ticks where both are
@@ -154,7 +162,11 @@ second watch on the same target silently steals half of both watches' interval
 windows. The lock is removed when the target is lost and again at shutdown. A
 watcher killed with SIGKILL cannot remove it and no sweep covers it: a stale
 lock is reclaimed by the next watcher that finds its holder dead, which is the
-whole of this resource's reconciliation story.
+whole of this resource's reconciliation story. A watch that cannot create the
+file at all measures anyway and records a `watch_unlocked` marker; what it gives
+up is the guarantee that nobody else is resetting the same interval counter, so
+the record says the guarantee was not held rather than leaving a window somebody
+else shortened looking like the target's own behaviour.
 
 REJECTED ALTERNATIVES
 ---------------------
@@ -510,6 +522,27 @@ class SpikeDetector:
     def in_spike(self) -> bool:
         return self._in_spike
 
+    def fresh(self, rise_suppressed_until: float | None = None) -> SpikeDetector:
+        """A detector with these same rules and none of this one's history.
+
+        The live watch builds one of these per target, because a restarted
+        daemon measured against the dead one's baseline, or inheriting its
+        in-spike state and its previous peak, reports the new process's startup
+        as a spike of the old one. `--report` needs the same thing at the same
+        instants, and it only has the detector it was handed, so it asks that
+        detector for a replacement rather than being told the thresholds twice.
+        """
+        return SpikeDetector(
+            threshold_bytes=self.threshold_bytes,
+            rise_bytes=self.rise_bytes,
+            rearm_bytes=self.rearm_bytes,
+            baseline_window=self.baseline_window,
+            release_fraction=self.release_fraction,
+            release_rise_fraction=self.release_rise_fraction,
+            max_captures_per_spike=self.max_captures_per_spike,
+            rise_suppressed_until=rise_suppressed_until,
+        )
+
     def baseline(self) -> int:
         """Lowest footprint seen inside the baseline window.
 
@@ -674,10 +707,29 @@ class CaptureRunner:
         self.want_vmmap = want_vmmap
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        # Whether the last start attempt was refused because a capture was
+        # already running. One busy episode is one marker: the sampler re-issues
+        # the request on every tick until the runner is free, and a `sample`
+        # call graph on a large process takes tens of seconds, so marking every
+        # refusal wrote the same line hundreds of times for one refused capture.
+        self._busy_refusal_noted = False
 
     def busy(self) -> bool:
         with self._lock:
-            return self._thread is not None and self._thread.is_alive()
+            return self._running()
+
+    def _running(self) -> bool:
+        """Whether a capture is in flight. Caller holds the lock.
+
+        Observing the runner idle also ends any refusal episode, so the next one
+        is announced again. That is the half `start` cannot do on its own: a
+        refusal is only ever recorded against a capture that was running, and
+        the flag has to be clear again before the next capture starts.
+        """
+        alive = self._thread is not None and self._thread.is_alive()
+        if not alive:
+            self._busy_refusal_noted = False
+        return alive
 
     def worst_case_seconds(self) -> float:
         """How long one capture can take, from the commands actually enabled.
@@ -693,16 +745,25 @@ class CaptureRunner:
         return total + 5
 
     def start(self, pid: int, request: CaptureRequest) -> str | None:
-        """Kick off a capture, returning its directory name, or None if busy."""
+        """Kick off a capture, returning its directory name, or None if busy.
+
+        A refusal is recorded once per busy episode rather than once per tick.
+        The sampler withdraws the refused capture and re-issues it on the next
+        tick, which is what gets it taken as soon as the runner is free, but it
+        means a `sample` that runs for a minute refuses sixty times over and
+        used to write sixty identical markers into the record.
+        """
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                self.emit(
-                    {
-                        "event": "capture_skipped",
-                        "reason": request.reason,
-                        "why": "a capture is already running",
-                    }
-                )
+            if self._running():
+                if not self._busy_refusal_noted:
+                    self._busy_refusal_noted = True
+                    self.emit(
+                        {
+                            "event": "capture_skipped",
+                            "reason": request.reason,
+                            "why": "a capture is already running",
+                        }
+                    )
                 return None
             stamp = datetime.fromtimestamp(request.when).strftime("%Y%m%d-%H%M%S")
             name = f"{stamp}-{request.reason}"
@@ -1148,42 +1209,61 @@ class Watch:
 
     # -- target ------------------------------------------------------------
 
-    def take_lock(self, target_pid: int) -> int | None:
-        """Claim this target's watch lock. Returns a live holder's pid on refusal.
+    def take_lock(self, target_pid: int) -> tuple[str, int | None]:
+        """Claim this target's watch lock. Returns (status, holder pid or None).
+
+        The status is one of three words, and nothing else:
+
+        "acquired"  the lock file is ours and `release_lock` will remove it.
+        "conflict"  somebody else holds it; the holder pid is returned with it
+                    when the file could be read, and None when it could not.
+        "unlocked"  no lock file could be created or reclaimed at all, so the
+                    watch proceeds without one and says so in the record.
+
+        The three words exist because this used to return `None` for both
+        "acquired" and "gave up", and callers read `None` as success: a second
+        FileExistsError from a holder that had already been declared dead
+        returned None and the watch believed it held a lock it had never
+        created. A watch reads the same three-way answer whatever happened.
 
         Created with O_EXCL, so two watchers starting at the same instant cannot
         both believe they took it. A lock whose holder is dead is stale and is
         removed and retaken here, which is the only thing that ever reclaims one:
-        a SIGKILLed watcher cannot unlink its own.
-
-        A lock that cannot be created at all (an unwritable directory) returns
-        None and the watch proceeds unlocked. The lock is a guard against a
-        second watcher, not a precondition for measuring anything.
+        a SIGKILLed watcher cannot unlink its own. The lock is a guard against a
+        second watcher, not a precondition for measuring anything, so an
+        unwritable directory is "unlocked" and the watch goes on measuring.
         """
         path = watch_lock_path(target_pid)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
         except OSError:
-            return None
+            return "unlocked", None
         for _ in range(2):
             try:
                 handle = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             except FileExistsError:
                 holder = read_pid_file(path)
                 if holder is not None and holder != os.getpid() and holder_is_alive(holder):
-                    return holder
+                    return "conflict", holder
                 try:
                     path.unlink()
                 except OSError:
-                    return None
+                    # The holder is dead but its file cannot be removed, so no
+                    # live watcher is being conflicted with and there is nothing
+                    # to reclaim either. Measure, unlocked.
+                    return "unlocked", None
                 continue
             except OSError:
-                return None
+                return "unlocked", None
             with os.fdopen(handle, "w", encoding="utf-8") as lock:
                 lock.write(f"{os.getpid()}\n")
             self._lock_path = path
-            return None
-        return None
+            return "acquired", None
+        # Both attempts lost the race to create the file, each time to a holder
+        # that read as dead. Something is recreating it as fast as it is
+        # reclaimed, which is a second watcher whether or not its pid is
+        # readable now, and it is the one case that must not read as success.
+        return "conflict", read_pid_file(path)
 
     def release_lock(self) -> None:
         """Give the lock back, and only ever our own."""
@@ -1197,7 +1277,24 @@ class Watch:
         except OSError:
             pass
 
-    def note_conflict(self, target_pid: int, holder: int) -> None:
+    def note_unlocked(self, target_pid: int) -> None:
+        """Record that this target is being watched without holding its lock.
+
+        Not a refusal: the measurement is unaffected. What it costs is the
+        guarantee that nobody else is resetting the same footprint interval, so
+        the record has to say the guarantee was not held rather than leaving an
+        interval max that somebody else shortened looking like the target's own.
+        """
+        self.emit(
+            {
+                "event": "watch_unlocked",
+                "pid": target_pid,
+                "lock": str(watch_lock_path(target_pid)),
+                "note": "watch lock could not be created; a second watcher would go unnoticed",
+            }
+        )
+
+    def note_conflict(self, target_pid: int, holder: int | None) -> None:
         """Record, and for an explicit --pid refuse outright, a second watcher.
 
         Two watches on one target both call `proc_reset_footprint_interval` on
@@ -1219,8 +1316,9 @@ class Watch:
                 }
             )
         if self.args.pid is not None:
+            named = f"pid {holder}" if holder is not None else "another watcher"
             print(
-                f"pid {target_pid} is already being watched by pid {holder} "
+                f"pid {target_pid} is already being watched by {named} "
                 f"({watch_lock_path(target_pid)}); two watches steal each other's "
                 "footprint interval resets. Stop that watch first.",
                 file=sys.stderr,
@@ -1230,11 +1328,13 @@ class Watch:
 
     def acquire(self, pid: int, now: float | None = None) -> bool:
         """Take the target, or refuse because another watch already holds it."""
-        holder = self.take_lock(pid)
-        if holder is not None:
+        status, holder = self.take_lock(pid)
+        if status == "conflict":
             self.note_conflict(pid, holder)
             return False
         now = time.time() if now is None else now
+        if status == "unlocked":
+            self.note_unlocked(pid)
         self.pid = pid
         self._prev_cpu = None
         self._reset_failure_noted = False
@@ -1257,6 +1357,13 @@ class Watch:
         reset_ok = self.libproc.reset_footprint_interval(pid)
         self.emit(
             {
+                # Stamped with the tick that acquired the target, like the
+                # `rise_suppressed` marker below and like the samples
+                # themselves. Stamped with the wall clock instead it lands
+                # *after* the first sample of the target it introduces, and a
+                # replay that resets the detector on this marker would hand that
+                # first sample to the previous target's detector.
+                "epoch": now,
                 "event": "target_acquired",
                 "pid": pid,
                 "start_time": process_start_time(pid),
@@ -1313,9 +1420,14 @@ class Watch:
         self._reset_failure_noted = True
         self.emit({"event": "interval_reset_failed", "pid": self.pid})
 
-    def lose(self) -> None:
+    def lose(self, now: float | None = None) -> None:
+        # Stamped with the tick that found the target gone, for the same reason
+        # `target_acquired` is: a replay closes the open spike at this instant,
+        # and the instant has to sit between the target's last sample and the
+        # next target's first one.
+        when = time.time() if now is None else now
         if self.pid is not None:
-            self.emit({"event": "target_lost", "pid": self.pid})
+            self.emit({"epoch": when, "event": "target_lost", "pid": self.pid})
             # Forget what was noted about this pid. The number is free for
             # reuse the moment the process is gone, so a remembered marker
             # would suppress the description of a different process.
@@ -1506,7 +1618,7 @@ class Watch:
         usage = self.libproc.rusage(self.pid)
         if usage is None:
             lost = self.pid
-            self.lose()
+            self.lose(now)
             if self.args.pid is not None:
                 # An explicit --pid names one process. The pid file can point at
                 # a restarted daemon, so that path keeps looking; this one has
@@ -1663,10 +1775,70 @@ def load_run(run_dir: Path) -> tuple[list[dict], list[dict], dict]:
     return samples, events, config
 
 
+def replay_actions(events: Sequence[dict]) -> list[tuple[float, str, float | None]]:
+    """The markers a replay has to act on, in the order it reaches them.
+
+    Three kinds, each as (when, kind, value):
+
+    "acquire"   a `target_acquired` marker. Its value is the suppression
+                instant from the `rise_suppressed` marker the live run wrote
+                immediately after it for the same pid, or None. The two are
+                paired here, in file order, rather than sorted together by
+                epoch, because the suppression is stamped with the acquiring
+                tick and the acquire marker with the same tick: sorting alone
+                cannot say which of two markers at one instant came first, and
+                pairing them makes the question moot.
+    "lose"      a `target_lost` marker.
+    "suppress"  a `rise_suppressed` marker with no acquire of its own to belong
+                to. Applied to whichever detector is current, which is what the
+                replay did with every suppression before acquires reset one.
+    """
+    consumed: set[int] = set()
+    paired: dict[int, float] = {}
+    for index, event in enumerate(events):
+        if event.get("event") != "target_acquired":
+            continue
+        # The suppression this acquire wrote: same pid, before the next acquire
+        # or loss, and not already claimed by an earlier acquire.
+        for offset in range(index + 1, len(events)):
+            following = events[offset]
+            kind = following.get("event")
+            if kind in ("target_acquired", "target_lost"):
+                break
+            if (
+                kind == "rise_suppressed"
+                and offset not in consumed
+                and following.get("pid") == event.get("pid")
+                and following.get("until") is not None
+            ):
+                consumed.add(offset)
+                paired[index] = float(following["until"])
+                break
+
+    actions: list[tuple[float, str, float | None]] = []
+    for index, event in enumerate(events):
+        name = event.get("event")
+        when = float(event.get("epoch", 0.0))
+        if name == "target_acquired":
+            actions.append((when, "acquire", paired.get(index)))
+        elif name == "target_lost":
+            actions.append((when, "lose", None))
+        elif (
+            name == "rise_suppressed"
+            and event.get("until") is not None
+            and index not in consumed
+        ):
+            actions.append((when, "suppress", float(event["until"])))
+    # A stable sort, so two markers stamped with the same tick keep the order
+    # the run wrote them in.
+    actions.sort(key=lambda action: action[0])
+    return actions
+
+
 def find_spikes(
     samples: list[dict],
     detector: SpikeDetector,
-    suppressions: Sequence[tuple[float, float]] = (),
+    events: Sequence[dict] = (),
 ) -> list[Spike]:
     """Replay the live detector over recorded samples and bracket its spikes.
 
@@ -1677,20 +1849,43 @@ def find_spikes(
     into `in_spike` to the tick that took it out again, or to the last sample if
     the run ended mid-spike, and its reason is whichever rule fired at onset.
 
-    `suppressions` is the run's own `rise_suppressed` markers as (when, until)
-    pairs, applied as the replay reaches each one. They are part of that same
-    agreement: a run that acquired a target seconds after it launched told its
-    detector to ignore the climb to a working set, and a replay that does not
-    hear about it re-invents exactly the spike the live run was right not to
-    report.
+    `events` is the run's own markers, replayed in epoch order alongside the
+    samples, and they are part of that same agreement. The live watch builds a
+    fresh detector per target and tells it about a warmup suppression; a replay
+    that drove one detector across a daemon restart handed the new process's
+    first sample the dead one's baseline, in-spike state and previous peak. A
+    new daemon coming up above the threshold then took no onset in the report
+    while the live run had taken one, and the capture directory the live run
+    wrote belonged to no spike at all.
     """
-    pending = sorted(suppressions)
+    pending = replay_actions(events)
     spikes: list[Spike] = []
     current: Spike | None = None
+
+    def close(at: float) -> None:
+        """End an open spike at `at`, because its target is going away."""
+        nonlocal current
+        if current is not None:
+            current.end = max(current.end, at)
+            spikes.append(current)
+            current = None
+
+    def apply(action: tuple[float, str, float | None]) -> None:
+        nonlocal detector
+        when, kind, value = action
+        if kind == "suppress":
+            detector.rise_suppressed_until = value
+            return
+        # Both a loss and an acquisition start a new process's history. The
+        # spike belonged to the process that is gone, so it ends here rather
+        # than being stretched across the gap to the next target's samples.
+        close(when)
+        detector = detector.fresh(rise_suppressed_until=value if kind == "acquire" else None)
+
     for sample in samples:
         when = sample.get("epoch", 0.0)
         while pending and pending[0][0] <= when:
-            detector.rise_suppressed_until = pending.pop(0)[1]
+            apply(pending.pop(0))
         footprint = int(sample.get("phys_footprint", 0))
         interval_max = int(sample.get("interval_max_phys_footprint", 0))
         value = max(footprint, interval_max)
@@ -1709,6 +1904,10 @@ def find_spikes(
             if not detector.in_spike:
                 spikes.append(current)
                 current = None
+    # A target lost after the last sample still ends the spike where the run
+    # said it ended, rather than at the last tick that happened to be recorded.
+    while pending:
+        apply(pending.pop(0))
     if current is not None:
         spikes.append(current)
     return spikes
@@ -1891,6 +2090,7 @@ def report(
             "rise_suppressed",
             "target_age_unknown",
             "watch_conflict",
+            "watch_unlocked",
         )
     ]
     if markers:
@@ -1942,12 +2142,7 @@ def report(
         rearm_bytes=int(rearm_mb * MB),
         baseline_window=baseline_window,
     )
-    suppressions = [
-        (float(event.get("epoch", 0.0)), float(event["until"]))
-        for event in events
-        if event.get("event") == "rise_suppressed" and event.get("until") is not None
-    ]
-    spikes = find_spikes(samples, detector, suppressions)
+    spikes = find_spikes(samples, detector, events)
     attach_captures(spikes, events, slack=max(median_interval(samples), 1.0) * 2)
     rules = (
         f"threshold {threshold_mb:g} MB, rise {rise_mb:g} MB over a "
@@ -2407,6 +2602,18 @@ def self_test() -> int:
                 "rearm_mb": 512,
                 "baseline_window": DEFAULT_BASELINE_WINDOW,
             }
+            # Written as the live watch writes them: the acquire first, then the
+            # suppression it decided on, both stamped with the acquiring tick.
+            # The replay has to pair the two, because the acquire resets the
+            # detector and a suppression applied to the detector it replaced is
+            # no suppression at all.
+            acquired = {
+                "event": "target_acquired",
+                "epoch": base,
+                "ts": iso(base),
+                "pid": 4242,
+                "target_age_s": 0.1,
+            }
             marker = {
                 "event": "rise_suppressed",
                 "epoch": base,
@@ -2417,7 +2624,7 @@ def self_test() -> int:
                 "target_age_s": 0.1,
             }
 
-            _write_synthetic_run(run_dir, base, series, run_args, [], [marker])
+            _write_synthetic_run(run_dir, base, series, run_args, [], [acquired, marker])
             buffer = io.StringIO()
             _check(report(run_dir, None, out=buffer) == 0, "report should succeed")
             text = buffer.getvalue()
@@ -2435,6 +2642,235 @@ def self_test() -> int:
                 "without the marker the same series is a rise spike, which is what "
                 f"makes the case above discriminate; got:\n{control}",
             )
+
+    def report_resets_across_a_target_change() -> None:
+        # A daemon restart mid-run. The live watch built a fresh detector for
+        # process B; a replay that drove one detector across both handed B's
+        # first sample A's history, and the edge-triggered threshold saw no
+        # crossing because A's previous peak was already above it. B's spike
+        # went unreported and the capture the live run took under it belonged
+        # to no spike at all.
+        with tempfile.TemporaryDirectory() as raw:
+            run_dir = Path(raw)
+            base = 1_700_000_000.0
+            gap = 60.0
+            first_pid, second_pid = 4242, 5150
+
+            def sample_line(epoch: float, pid: int, mb: float) -> str:
+                return json.dumps(
+                    {
+                        "epoch": epoch,
+                        "ts": iso(epoch),
+                        "pid": pid,
+                        "phys_footprint": _mb(mb),
+                        "interval_max_phys_footprint": _mb(mb),
+                        "lifetime_max_phys_footprint": _mb(mb),
+                        "resident_size": _mb(60),
+                        "user_time_ns": 0,
+                        "system_time_ns": 0,
+                        "pageins": 0,
+                        "cpu_pct": 0.0,
+                    }
+                )
+
+            def marker_line(epoch: float, **fields) -> str:
+                return json.dumps(dict(epoch=epoch, ts=iso(epoch), **fields))
+
+            lines = [marker_line(base, event="target_acquired", pid=first_pid, target_age_s=9000.0)]
+            lines += [sample_line(base + step, first_pid, 6000) for step in range(5)]
+            lost_at = base + 5
+            lines.append(marker_line(lost_at, event="target_lost", pid=first_pid))
+            acquired_at = lost_at + gap
+            lines.append(
+                marker_line(
+                    acquired_at, event="target_acquired", pid=second_pid, target_age_s=9000.0
+                )
+            )
+            lines += [sample_line(acquired_at + step, second_pid, 2000) for step in range(5)]
+            capture_at = acquired_at + 1
+            lines.append(
+                marker_line(capture_at, event="capture", dir="20260903-b", reason="threshold")
+            )
+            (run_dir / "samples.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            run_args = {
+                "threshold_mb": 1024,
+                "rise_mb": 512,
+                "rearm_mb": 512,
+                "baseline_window": DEFAULT_BASELINE_WINDOW,
+            }
+            (run_dir / "run.json").write_text(json.dumps({"args": run_args}), encoding="utf-8")
+
+            samples, events, _ = load_run(run_dir)
+            spikes = find_spikes(
+                samples, _detector(threshold_mb=1024, rise_mb=512, rearm_mb=512), events
+            )
+            _check(len(spikes) == 2, f"expected one spike per target, got {len(spikes)}")
+            _check(
+                spikes[0].onset == base and spikes[0].peak == _mb(6000),
+                f"the first spike belongs to the first target; got {spikes[0]}",
+            )
+            _check(
+                spikes[1].onset == acquired_at and spikes[1].peak == _mb(2000),
+                f"the second target should earn an onset of its own; got {spikes[1]}",
+            )
+            _check(
+                spikes[0].end <= lost_at,
+                f"a lost target closes its spike at that instant; got {spikes[0].end}",
+            )
+
+            attach_captures(spikes, events, slack=max(median_interval(samples), 1.0) * 2)
+            _check(
+                spikes[1].captures == ["20260903-b (threshold)"],
+                f"the capture belongs to the second target's spike; got {spikes[1].captures}",
+            )
+            _check(
+                spikes[0].captures == [],
+                f"nothing was captured under the first target; got {spikes[0].captures}",
+            )
+
+            buffer = io.StringIO()
+            _check(report(run_dir, None, out=buffer) == 0, "report should succeed")
+            text = buffer.getvalue()
+            _check("SPIKES (2)" in text, f"the report should print both spikes; got:\n{text}")
+
+    def busy_runner_notes_one_refusal_per_episode() -> None:
+        # A refused capture is re-issued on the next tick, so a `sample` that
+        # runs for a minute is refused once a second. One marker per busy
+        # episode, not one per tick: the re-issue is what gets the capture taken
+        # as soon as the runner is free and must not be paid for in noise.
+        # Driven with a plain thread rather than a real capture, because a real
+        # one shells out to macOS-only tools.
+        with tempfile.TemporaryDirectory() as raw:
+            emitted: list[dict] = []
+            runner = CaptureRunner(Path(raw), emitted.append, want_sample=False)
+            request = CaptureRequest(
+                when=1000.0,
+                reason="highwater",
+                footprint=_mb(1500),
+                interval_max=_mb(1500),
+                peak=_mb(1500),
+                baseline=_mb(100),
+            )
+
+            def episode() -> None:
+                release = threading.Event()
+                blocked = threading.Thread(target=release.wait, daemon=True)
+                # Stands in for the capture thread `start` would have created.
+                runner._thread = blocked
+                blocked.start()
+                for _ in range(5):
+                    _check(runner.start(4242, request) is None, "a busy runner must refuse")
+                release.set()
+                blocked.join(5)
+                _check(not blocked.is_alive(), "the stand-in capture should have finished")
+
+            episode()
+            skipped = [event for event in emitted if event.get("event") == "capture_skipped"]
+            _check(
+                len(skipped) == 1,
+                f"five refusals in one busy episode are one marker; got {len(skipped)}",
+            )
+            _check(
+                skipped[0].get("reason") == "highwater",
+                f"the marker should name the refused capture; got {skipped[0]}",
+            )
+
+            # The runner is observed idle, which ends the episode, and the next
+            # one is announced again rather than being swallowed as a repeat.
+            _check(not runner.busy(), "the runner should be idle between episodes")
+            episode()
+            skipped = [event for event in emitted if event.get("event") == "capture_skipped"]
+            _check(
+                len(skipped) == 2,
+                f"a second busy episode earns a second marker; got {len(skipped)}",
+            )
+
+    def lock_status_is_unambiguous() -> None:
+        # `take_lock` used to answer None for "acquired" and None again for
+        # "gave up after two attempts", and the caller read both as success: a
+        # watch could believe it held a lock it had never created. Driven
+        # against `Watch.take_lock` with a stand-in for `self`, because building
+        # a Watch binds libproc and this test has to run where there is none.
+        class Standin:
+            def __init__(self) -> None:
+                self._lock_path = None
+
+        previous_home = os.environ.get("TBD_HOME")
+        with tempfile.TemporaryDirectory() as raw:
+            os.environ["TBD_HOME"] = raw
+            try:
+                target = 4242
+                path = watch_lock_path(target)
+
+                first = Standin()
+                _check(
+                    Watch.take_lock(first, target) == ("acquired", None),
+                    "an unheld lock should be acquired",
+                )
+                _check(first._lock_path == path, "an acquired lock should be remembered")
+
+                # A live holder that is not us. The parent process is both.
+                path.write_text(f"{os.getppid()}\n", encoding="utf-8")
+                _check(
+                    Watch.take_lock(Standin(), target) == ("conflict", os.getppid()),
+                    "a live holder is a conflict, and is named",
+                )
+
+                dead = next(
+                    (pid for pid in range(99_990, 99_000, -1) if not holder_is_alive(pid)), None
+                )
+                _check(dead is not None, "the machine has no free pid to stand in for a dead one")
+                path.write_text(f"{dead}\n", encoding="utf-8")
+                second = Standin()
+                _check(
+                    Watch.take_lock(second, target) == ("acquired", None),
+                    "a dead holder's lock is stale and is retaken",
+                )
+                _check(read_pid_file(path) == os.getpid(), "the retaken lock should name us")
+
+                # Somebody recreating the file as fast as it is reclaimed. Both
+                # attempts reach a holder that reads as dead, both unlinks
+                # succeed, and the file is still not ours at the end of it.
+                real_open = os.open
+
+                def contested(target_path, flags, *rest):
+                    if str(target_path) == str(path):
+                        handle = real_open(
+                            str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644
+                        )
+                        os.write(handle, f"{dead}\n".encode("utf-8"))
+                        os.close(handle)
+                        raise FileExistsError(str(path))
+                    return real_open(target_path, flags, *rest)
+
+                path.unlink()
+                third = Standin()
+                os.open = contested
+                try:
+                    exhausted = Watch.take_lock(third, target)
+                finally:
+                    os.open = real_open
+                _check(
+                    exhausted == ("conflict", None),
+                    f"an exhausted retry is a conflict, never success; got {exhausted}",
+                )
+                _check(
+                    third._lock_path is None,
+                    "a lock that was never created must not be remembered as ours",
+                )
+
+                unwritable = Path(raw) / "not-a-directory"
+                unwritable.write_text("", encoding="utf-8")
+                os.environ["TBD_HOME"] = str(unwritable / "tbd")
+                _check(
+                    Watch.take_lock(Standin(), target) == ("unlocked", None),
+                    "a lock directory that cannot exist leaves the watch unlocked",
+                )
+            finally:
+                if previous_home is None:
+                    os.environ.pop("TBD_HOME", None)
+                else:
+                    os.environ["TBD_HOME"] = previous_home
 
     def report_replay() -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2539,6 +2975,9 @@ def self_test() -> int:
     case("the threshold rule still fires during suppression", threshold_fires_during_suppression)
     case("the before and during log windows partition the log", log_windows_partition)
     case("report honours a run's own rise suppression", report_honours_recorded_suppression)
+    case("report starts a new detector at a target change", report_resets_across_a_target_change)
+    case("a busy runner is marked once per episode", busy_runner_notes_one_refusal_per_episode)
+    case("take_lock names acquired, conflict and unlocked apart", lock_status_is_unambiguous)
     case("report replays a synthetic run and finds its spike", report_replay)
     case("report finds a rise spike below the threshold", report_sees_rise_spike)
 
