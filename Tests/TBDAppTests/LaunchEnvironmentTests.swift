@@ -85,4 +85,57 @@ import Testing
 
         #expect(installed.isEmpty)
     }
+
+    // MARK: - Cross-source consistency
+
+    /// The adoption only works because of where it sits in `TBDAppMain`.
+    ///
+    /// Swift evaluates a struct's stored-property default expressions in source
+    /// order, `setenv` reaches only children born after it, and `appState`'s
+    /// initializer is what spawns the daemon. So `adoptedLaunchPATH` must be
+    /// declared above `appState` — and nothing in the compiler says so. Moving the
+    /// property down, or adding a new subprocess-spawning property above it, would
+    /// leave a daemon on launchd's bare `PATH` again with every test still green.
+    /// This is the tie: it reads the source file and fails on the wrong order.
+    @Test func adoptedLaunchPATHIsDeclaredBeforeTheAppStateThatSpawnsTheDaemon() throws {
+        // Walk up from this source file to the repo root (the dir holding `Sources/`).
+        var dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let relativeSourcePath = "Sources/TBDApp/TBDApp.swift"
+        while !FileManager.default.fileExists(atPath: dir.appendingPathComponent(relativeSourcePath).path) {
+            let parent = dir.deletingLastPathComponent()
+            // Reached the filesystem root without finding it — skip rather than
+            // fail, so a packaged/sandboxed test run doesn't red for the wrong reason.
+            guard parent.path != dir.path else { return }
+            dir = parent
+        }
+        let source = try String(
+            contentsOf: dir.appendingPathComponent(relativeSourcePath), encoding: .utf8
+        )
+
+        let adoptionDeclaration = "private let adoptedLaunchPATH"
+        let appStateDeclaration = "private var appState"
+
+        // Both must be found, and found once: a renamed property would otherwise
+        // make this check pass by matching nothing.
+        #expect(source.components(separatedBy: adoptionDeclaration).count == 2, """
+        expected exactly one `\(adoptionDeclaration)` declaration in \
+        \(relativeSourcePath) — was the property renamed or removed?
+        """)
+        #expect(source.components(separatedBy: appStateDeclaration).count == 2, """
+        expected exactly one `\(appStateDeclaration)` declaration in \
+        \(relativeSourcePath) — was the property renamed or removed?
+        """)
+
+        let adoption = try #require(source.range(of: adoptionDeclaration))
+        let appState = try #require(source.range(of: appStateDeclaration))
+
+        #expect(adoption.lowerBound < appState.lowerBound, """
+        `\(adoptionDeclaration)` must be declared BEFORE `\(appStateDeclaration)` in \
+        \(relativeSourcePath). Stored-property defaults are evaluated in source \
+        order, and AppState's initializer spawns the daemon, which inherits this \
+        process's PATH. Declared after it, the setenv lands too late and a daemon \
+        started by a LaunchServices relaunch keeps launchd's bare PATH — the bug \
+        this property exists to fix.
+        """)
+    }
 }
