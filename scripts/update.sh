@@ -288,8 +288,14 @@ acquire_lock() {
             return 1
         fi
 
+        # Only the mutex holder writes a `.new.<pid>` file, so while we hold
+        # it every such file is a stray from a run killed between its write
+        # and its rename. Sweep them here rather than name a reconciler for a
+        # file that only ever exists inside this critical section.
+        for tmp_lock in "$UPDATE_LOCK".new.*; do
+            [ -e "$tmp_lock" ] && rm -f "$tmp_lock"
+        done
         tmp_lock="$UPDATE_LOCK.new.$$"
-        rm -f "$tmp_lock"
         if ! printf '%s\n' "$$" > "$tmp_lock" 2>/dev/null ||
             ! mv "$tmp_lock" "$UPDATE_LOCK" 2>/dev/null; then
             rm -f "$tmp_lock"

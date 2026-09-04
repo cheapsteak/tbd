@@ -479,6 +479,22 @@ test_stale_lock_takeover_leaves_no_debris() {
     assert_eq "and that one names the taker as well" "$$" "$(lock_holder_pid "$home/update.lock")"
 
     assert_no_lock_debris "the takeover leaves no temporary files behind" "$home"
+
+    # A run killed between writing its temp file and renaming it leaves a
+    # `.new.<pid>` beside the lock. The next takeover holds the mutex, so it
+    # is the one place that can know the file is a stray, and sweeps it.
+    printf '%s\n' "$dead" > "$home/update.lock"
+    printf '%s\n' "$dead" > "$home/update.lock.new.$dead"
+    out="$(
+        UPDATE_HOME="$home"
+        UPDATE_LOCK="$home/update.lock"
+        UPDATE_LOG="$home/update.log"
+        OPT_AUTO=true
+        acquire_lock 2>/dev/null
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "a takeover beside a stray temp file still succeeds" "rc=0" "$out"
+    assert_no_lock_debris "and sweeps the stray a killed run left behind" "$home"
 }
 
 # Every scratch name the takeover can create: the temp file it renames onto the

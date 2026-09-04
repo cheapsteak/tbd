@@ -243,6 +243,11 @@ per-request resource.
 - `update.lock` — one file naming the running update's pid. A lock left by a
   crashed run names a dead pid; the next run takes it over. Acquisition is
   atomic (a noclobber create), so two simultaneous runs cannot both hold it.
+  A takeover replaces the lock by renaming a `update.lock.new.<pid>` file
+  over it, under a `update.lock.takeover` mutex directory; a run killed
+  between the write and the rename leaves that temp file, and the next
+  takeover, which holds the mutex and so knows every such file is a stray,
+  sweeps them. A mutex abandoned by a crash is reclaimed by age.
 - `update.log` — one append-only log.
 - `wake` — one scratch directory for the wake step's per-terminal results,
   emptied at the start of every wake and removed at its end. A run killed
