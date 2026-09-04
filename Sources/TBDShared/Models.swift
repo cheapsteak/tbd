@@ -1727,9 +1727,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `updateMode`, and the single place it lives.
     /// Updating ships off; graduation to `check` — after a soak in which the
     /// notice was accurate and the hourly `ls-remote` cost nothing anyone
-    /// noticed — is a change to this constant plus a forcing `UPDATE`
-    /// migration, because a column with no SQL default only backfills the rows
-    /// that never chose.
+    /// noticed — is a change to this constant, with no forcing `UPDATE`
+    /// migration: the column carries no SQL default, so every row that never
+    /// chose is NULL and follows this constant, and every stored mode is an
+    /// explicit choice that a default change leaves alone.
     public static let updateModeDefault: UpdateMode = .off
 
     public init(defaultProfileID: UUID? = nil,

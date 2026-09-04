@@ -224,6 +224,25 @@ over. `--debug` builds the debug configuration. `--auto` is what the daemon
 passes: non-interactive, and it refuses to run if another update is in
 flight (a lock file under `~/tbd/updates/`).
 
+Everything the script leaves under `~/tbd/updates/` sits outside the three
+named reconcilers on purpose, because none of it can accumulate: each entry
+is a fixed singleton path that every run reuses or overwrites, never a
+per-request resource.
+
+- `src` — one long-lived clone that every update reuses. It appears in no
+  `git worktree list` and `scripts/reclaim-build.sh` never scans it. A run
+  that dies mid-fetch or mid-build leaves the same clone the next run fetches
+  into.
+- `update.lock` — one file naming the running update's pid. A lock left by a
+  crashed run names a dead pid; the next run takes it over. Acquisition is
+  atomic (a noclobber create), so two simultaneous runs cannot both hold it.
+- `update.log` — one append-only log.
+- `previous/TBD.app` — exactly one bundle, the one the last update replaced,
+  overwritten by the next update and kept as the no-rebuild route back.
+
+Removing any of them is an operator gesture, and the next update recreates
+it. See `docs/updating.md`.
+
 The script is written to the same conventions as `restart.sh` and gets a
 `scripts/update.test.sh` covering argument handling, the self-re-exec guard,
 the wake-candidate filter, and the batching, against a fake `tbd`.

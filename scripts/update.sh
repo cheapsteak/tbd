@@ -182,22 +182,67 @@ lock_holder_pid() {
     head -1 "${1-}" 2>/dev/null | tr -dc '0-9'
 }
 
+# The create IS the decision. Under `set -C` bash opens the redirection target
+# with O_EXCL, so of any number of runs starting at once — a manual
+# `tbd update` racing the daemon's auto-launch — exactly one create succeeds
+# and every loser sees a file that is already there. A check followed by a
+# separate write would let two callers both pass the check and the second
+# clobber the first, and both would then build and install against the same
+# clone.
+#
+# Taking over a stale lock renames it aside rather than deleting it, so a lock
+# some other run won between our read and our takeover can never be removed out
+# from under it: after the rename we re-inspect what we actually took, and put
+# it back if it turned out to name a live process.
+#
+# A lock naming THIS process is one we already hold. `exec` keeps the pid, so
+# the self-re-exec in maybe_reexec arrives here still holding it; the
+# alternative — releasing before the exec — opens a window in which a second
+# update can start against the same clone.
 acquire_lock() {
-    local holder
+    local holder attempt renamed stale_holder
     mkdir -p "$UPDATE_HOME" || return 1
-    if lock_is_live "$UPDATE_LOCK"; then
+
+    attempt=0
+    while [ "$attempt" -lt 3 ]; do
+        attempt=$((attempt + 1))
+
+        if ( set -C; printf '%s\n' "$$" > "$UPDATE_LOCK" ) 2>/dev/null; then
+            UPDATE_LOCK_HELD=true
+            return 0
+        fi
+
         holder="$(lock_holder_pid "$UPDATE_LOCK")"
-        # A lock naming THIS process is one we already hold. `exec` keeps the
-        # pid, so the self-re-exec below arrives here still holding it; the
-        # alternative — releasing before the exec — opens a window in which a
-        # second update can start against the same clone.
-        if [ "$holder" != "$$" ]; then
+        if [ "$holder" = "$$" ]; then
+            UPDATE_LOCK_HELD=true
+            return 0
+        fi
+        if lock_is_live "$UPDATE_LOCK"; then
             log_error "another update is already running (pid $holder). Its log is $UPDATE_LOG"
             return 1
         fi
-    fi
-    printf '%s\n' "$$" > "$UPDATE_LOCK" || return 1
-    UPDATE_LOCK_HELD=true
+
+        # Stale: a dead pid, or garbage with no pid in it at all.
+        renamed="$UPDATE_LOCK.stale.$$"
+        rm -f "$renamed"
+        # A failed rename means another run took the same stale lock first;
+        # go back to the create and let it decide.
+        mv "$UPDATE_LOCK" "$renamed" 2>/dev/null || continue
+        stale_holder="$(lock_holder_pid "$renamed")"
+        if [ "$stale_holder" != "$$" ] && lock_is_live "$renamed"; then
+            # We took a lock somebody wrote between our read and our rename.
+            # Put it back with a hard link, which fails rather than clobbers
+            # if a third run has created a lock in the meantime.
+            ln "$renamed" "$UPDATE_LOCK" 2>/dev/null || true
+            rm -f "$renamed"
+            log_error "another update is already running (pid $stale_holder). Its log is $UPDATE_LOG"
+            return 1
+        fi
+        rm -f "$renamed"
+    done
+
+    log_error "could not take the update lock at $UPDATE_LOCK"
+    return 1
 }
 
 release_lock() {

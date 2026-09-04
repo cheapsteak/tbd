@@ -396,6 +396,128 @@ test_a_stale_lock_is_taken_over() {
         "installing nothing" "$out"
 }
 
+# The exclusivity the noclobber create buys: many runs starting at once, one
+# winner. Each contender is a real process, because subshells of one shell all
+# share their parent's `$$` and would every one of them read the first winner's
+# lock as their own. They wait on a start file so the attempts genuinely
+# overlap, and every winner stays alive until the fan-out is over — a winner
+# that had already exited would leave a lock the next contender is right to
+# take over. A check-then-write acquire admits more than one here.
+test_simultaneous_acquire_lock_admits_exactly_one() {
+    local dir runner i winners losers lock_pid
+    dir="$TEST_TMP/lock-fanout"
+    mkdir -p "$dir/updates" "$dir/results"
+
+    runner="$dir/contend.sh"
+    cat > "$runner" << 'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+export TBD_HOME="$1"
+# shellcheck source=/dev/null
+source "$2"
+UPDATE_HOME="$3"
+UPDATE_LOCK="$3/update.lock"
+UPDATE_LOG="$3/update.log"
+OPT_AUTO=true
+until [ -f "$5" ]; do sleep 0.02; done
+acquire_lock >/dev/null 2>&1
+printf 'rc=%s pid=%s\n' "$?" "$$" > "$4"
+sleep 1
+EOF
+
+    for i in 1 2 3 4 5 6 7 8; do
+        bash "$runner" "$TEST_TMP/tbd" "$SCRIPT" "$dir/updates" \
+            "$dir/results/$i" "$dir/start" &
+    done
+    sleep 0.5
+    : > "$dir/start"
+    wait
+
+    winners="$(cat "$dir"/results/* | grep -c '^rc=0 ')"
+    losers="$(cat "$dir"/results/* | grep -c '^rc=1 ')"
+    assert_eq "exactly one of eight simultaneous acquires wins" "1" "$winners"
+    assert_eq "the other seven are refused" "7" "$losers"
+
+    lock_pid="$(lock_holder_pid "$dir/updates/update.lock")"
+    if grep -qh "^rc=0 pid=$lock_pid\$" "$dir"/results/*; then
+        pass "the lock names the process that won it"
+    else
+        fail "the lock names the process that won it: lock holds [$lock_pid]"
+    fi
+}
+
+test_stale_lock_takeover_leaves_no_debris() {
+    local home dead out
+    home="$TEST_TMP/stale-debris/updates"
+    mkdir -p "$home"
+    dead=$(( ($$ + 100000) % 60000 + 2 ))
+    while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+
+    printf '%s\n' "$dead" > "$home/update.lock"
+    out="$(
+        UPDATE_HOME="$home"
+        UPDATE_LOCK="$home/update.lock"
+        UPDATE_LOG="$home/update.log"
+        OPT_AUTO=true
+        acquire_lock 2>/dev/null
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "a dead holder's lock is taken over" "rc=0" "$out"
+    assert_eq "and the lock now names the taker" "$$" "$(lock_holder_pid "$home/update.lock")"
+
+    # A lock with no pid in it at all is stale by the same route.
+    printf 'garbage\n' > "$home/update.lock"
+    out="$(
+        UPDATE_HOME="$home"
+        UPDATE_LOCK="$home/update.lock"
+        UPDATE_LOG="$home/update.log"
+        OPT_AUTO=true
+        acquire_lock 2>/dev/null
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "a lock with no pid in it is taken over too" "rc=0" "$out"
+    assert_eq "and that one names the taker as well" "$$" "$(lock_holder_pid "$home/update.lock")"
+
+    if [ -z "$(find "$home" -name 'update.lock.stale.*' -print -quit)" ]; then
+        pass "the renamed-aside stale lock is cleaned up"
+    else
+        fail "the renamed-aside stale lock is cleaned up: $(ls "$home")"
+    fi
+}
+
+# The put-back branch: we rename a stale lock aside and discover it names a
+# live process after all, because a racer replaced the file between our read
+# and our rename. Simulated deterministically by making liveness depend on the
+# path — false for the lock we read, true for the file we took.
+test_stale_lock_takeover_restores_a_lock_that_turned_live() {
+    local home dead out
+    home="$TEST_TMP/stale-racer/updates"
+    mkdir -p "$home"
+    dead=$(( ($$ + 100000) % 60000 + 2 ))
+    while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+
+    printf '%s\n' "$dead" > "$home/update.lock"
+    out="$(
+        UPDATE_HOME="$home"
+        UPDATE_LOCK="$home/update.lock"
+        UPDATE_LOG="$home/update.log"
+        OPT_AUTO=true
+        lock_is_live() { case "${1-}" in *.stale.*) return 0 ;; *) return 1 ;; esac; }
+        acquire_lock 2>/dev/null
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "a lock that turns live under us is not stolen" "rc=1" "$out"
+    assert_contains "and the refusal names its holder" \
+        "another update is already running (pid $dead)" "$(cat "$home/update.log")"
+    assert_eq "the lock is put back exactly as it was" "$dead" \
+        "$(lock_holder_pid "$home/update.lock")"
+    if [ -z "$(find "$home" -name 'update.lock.stale.*' -print -quit)" ]; then
+        pass "and nothing is left renamed aside"
+    else
+        fail "and nothing is left renamed aside: $(ls "$home")"
+    fi
+}
+
 # MARK: - Resolving where to update from
 
 test_remote_resolution_order() {
@@ -1119,6 +1241,9 @@ test_lock_refuses_a_live_run
 test_acquire_lock_recognises_its_own_lock
 test_update_refuses_while_another_run_holds_the_lock
 test_a_stale_lock_is_taken_over
+test_simultaneous_acquire_lock_admits_exactly_one
+test_stale_lock_takeover_leaves_no_debris
+test_stale_lock_takeover_restores_a_lock_that_turned_live
 test_remote_resolution_order
 test_source_worktree_resolution
 test_json_field_reads_nested_paths
