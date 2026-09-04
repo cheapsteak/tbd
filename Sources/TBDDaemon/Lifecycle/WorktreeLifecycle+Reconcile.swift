@@ -570,14 +570,25 @@ extension WorktreeLifecycle {
         // Probe the server each worktree row actually stores, not a canonical
         // name. Promoted scratch worktrees keep their inherited scratch server.
         // Cached per server name — rows overwhelmingly share one server.
-        var serverAliveByName: [String: Bool] = [:]
+        //
+        // The probe is tri-state on purpose. A `Bool` probe reports a timed-out
+        // tmux as "gone", and both arms below destroy state on "gone", so a
+        // machine merely busy enough to blow the 15 s command ceiling used to
+        // park a live fleet — 49 of 56 lane sessions in one measured pass on
+        // 2026-09-02. `unknown` is ignorance, not evidence: it parks nothing,
+        // deletes nothing, and leaves the row for the next sweep.
+        var serverPresenceByName: [String: TmuxPresence] = [:]
         for wt in worktrees {
-            let serverAlive: Bool
-            if let cached = serverAliveByName[wt.tmuxServer] {
-                serverAlive = cached
+            let serverPresence: TmuxPresence
+            if let cached = serverPresenceByName[wt.tmuxServer] {
+                serverPresence = cached
             } else {
-                serverAlive = await tmux.serverExists(server: wt.tmuxServer)
-                serverAliveByName[wt.tmuxServer] = serverAlive
+                serverPresence = await tmux.probeServer(server: wt.tmuxServer)
+                serverPresenceByName[wt.tmuxServer] = serverPresence
+            }
+            if serverPresence == .unknown {
+                logger.warning("reconcile: skipping worktree \(wt.id, privacy: .public) — tmux server \(wt.tmuxServer, privacy: .public) gave no usable answer (probeServer: unknown); leaving its terminals alone")
+                continue
             }
             let terminals = try await db.terminals.list(worktreeID: wt.id)
             // Parked rows (`hibernatedAt` OR legacy `suspendedAt` — see
@@ -605,11 +616,19 @@ extension WorktreeLifecycle {
                 // closes it.
                 guard terminal.transport == .tmux else { continue }
 
-                var windowAlive = false
-                if serverAlive {
-                    windowAlive = await tmux.windowExists(
+                // A server that is positively absent has positively no
+                // windows on it, so the window probe is skipped rather than
+                // guessed at.
+                var windowPresence: TmuxPresence = .absent
+                if serverPresence == .alive {
+                    windowPresence = await tmux.probeWindow(
                         server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
                 }
+                if windowPresence == .unknown {
+                    logger.warning("reconcile: skipping terminal \(terminal.id, privacy: .public) in worktree \(wt.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) on server \(wt.tmuxServer, privacy: .public) gave no usable answer (probeWindow: unknown); leaving the row live")
+                    continue
+                }
+                let windowAlive = windowPresence == .alive
 
                 if windowAlive {
                     do {

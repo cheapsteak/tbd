@@ -31,4 +31,34 @@ import Testing
         let f = PIDFile(path: path)
         #expect(f.isStale(isLiveDaemon: { _ in false }) == true)
     }
+
+    // MARK: - Compare-and-delete
+
+    @Test func removeIfOwnedRemovesOurOwnPidFile() throws {
+        let path = tmpPidPath()
+        try "12345".write(toFile: path, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let f = PIDFile(path: path)
+        #expect(f.removeIfOwned(pid: 12345) == true)
+        #expect(FileManager.default.fileExists(atPath: path) == false)
+    }
+
+    // The handover case: a successor has already written its own pid over the
+    // file, and the predecessor is shutting down. An unconditional remove()
+    // here deletes the successor's claim and reopens the spawn race the
+    // successor-first write closes.
+    @Test func removeIfOwnedLeavesASuccessorsPidFile() throws {
+        let path = tmpPidPath()
+        try "999".write(toFile: path, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let f = PIDFile(path: path)
+        #expect(f.removeIfOwned(pid: 12345) == false)
+        #expect(FileManager.default.fileExists(atPath: path) == true)
+        #expect(f.read() == 999, "the successor's claim was rewritten")
+    }
+
+    @Test func removeIfOwnedOnAMissingFileIsANoOp() {
+        let f = PIDFile(path: tmpPidPath())
+        #expect(f.removeIfOwned(pid: 12345) == false)
+    }
 }
