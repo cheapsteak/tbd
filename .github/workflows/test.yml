@@ -739,17 +739,12 @@ jobs:
                 kill -KILL "$pid" 2>/dev/null || true
               done
             fi
-            # Re-walk the tree now that sampling is done. The `$kids` above is
-            # the snapshot taken before the samples were captured, and sampling
-            # several targets takes 20 s or more, so anything the pipeline
-            # spawned in the meantime would never be signalled by the sweep
-            # below. The sampled targets are then dropped from that fresh list:
-            # they were SIGKILLed the moment their stacks were captured, since
-            # they are wedged and the graceful pass below is for the plumbing
-            # that can still clean up after itself. Signalling a pid that is
-            # already gone is inert at best and reaches whatever reused the
-            # number at worst.
-            kids=$(descendants "$pipeline" || true)
+            # The sampled targets were SIGKILLed the moment their stacks were
+            # captured — they are wedged, and the sweep below is the graceful
+            # pass, for the plumbing that can still clean up after itself — so
+            # they are filtered out of every order built from here on. Even
+            # though `kill` on a dead pid is harmless, signalling one is inert at
+            # best and reaches whatever reused the number at worst.
             is_target() {
               local needle="$1" candidate
               for candidate in $targets; do
@@ -759,32 +754,6 @@ jobs:
               done
               return 1
             }
-            remaining=""
-            for pid in $kids; do
-              if is_target "$pid"; then
-                continue
-              fi
-              remaining="$remaining $pid"
-            done
-            kids="$remaining"
-            # Take the pipeline down within a bounded 30 s instead of leaving
-            # `wait` to block until `timeout-minutes` fires — the very outcome
-            # this budget exists to avoid. Killing the sampled targets is not
-            # enough on its own: with no targets found nothing has been killed
-            # at all, and even when the helper dies its parents (`script`,
-            # `swift-test`, `scripts/test.sh`) can outlive it. SIGTERM goes
-            # first so `scripts/test.sh`'s EXIT trap still runs its tmux and
-            # fence cleanup, and that trap's output has to have somewhere to go:
-            # `tee` is a direct child of the subshell and owns the far end of
-            # the log pipe, so anything still writing when `tee` dies writes to
-            # a closed pipe. The order is therefore built explicitly rather than
-            # by reversing the walk. The walk is preorder — `script`, then all
-            # of script's subtree, then the sibling `tee` — so a plain reversal
-            # would signal `tee` first, precisely backwards. Instead: everything
-            # below the direct children goes first (that subset reversed, so
-            # deepest-first), then the direct children other than `tee`, then
-            # `tee`.
-            direct_children=$(pgrep -P "$pipeline" || true)
             is_direct_child() {
               local needle="$1" child
               for child in $direct_children; do
@@ -794,23 +763,57 @@ jobs:
               done
               return 1
             }
-            deeper_first=""
-            for pid in $kids; do
-              if is_direct_child "$pid"; then
-                continue
-              fi
-              deeper_first="$pid $deeper_first"
-            done
-            direct_others=""
-            tee_pids=""
-            for pid in $direct_children; do
-              comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
-              case "${comm##*/}" in
-                tee) tee_pids="$tee_pids $pid" ;;
-                *) direct_others="$direct_others $pid" ;;
-              esac
-            done
-            kill_order="$deeper_first $direct_others $tee_pids"
+            # The order is built from a walk taken at the moment it is needed
+            # rather than from any earlier snapshot: sampling several targets
+            # takes 20 s or more and the grace window below is another 30 s, so
+            # a list captured before either would miss whatever the pipeline
+            # spawned in the meantime.
+            #
+            # `tee` is a direct child of the subshell and owns the far end of
+            # the log pipe, so anything still writing when `tee` dies writes to
+            # a closed pipe — and the EXIT trap's cleanup output is exactly what
+            # the log wants. The order is therefore built explicitly rather than
+            # by reversing the walk. The walk is preorder — `script`, then all
+            # of script's subtree, then the sibling `tee` — so a plain reversal
+            # would signal `tee` first, precisely backwards. Instead: everything
+            # below the direct children goes first (that subset reversed, so
+            # deepest-first), then the direct children other than `tee`, then
+            # `tee`.
+            build_kill_order() {
+              local pid comm remaining="" deeper_first="" direct_others="" tee_pids=""
+              kids=$(descendants "$pipeline" || true)
+              for pid in $kids; do
+                if is_target "$pid"; then
+                  continue
+                fi
+                remaining="$remaining $pid"
+              done
+              kids="$remaining"
+              direct_children=$(pgrep -P "$pipeline" || true)
+              for pid in $kids; do
+                if is_direct_child "$pid"; then
+                  continue
+                fi
+                deeper_first="$pid $deeper_first"
+              done
+              for pid in $direct_children; do
+                comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+                case "${comm##*/}" in
+                  tee) tee_pids="$tee_pids $pid" ;;
+                  *) direct_others="$direct_others $pid" ;;
+                esac
+              done
+              kill_order="$deeper_first $direct_others $tee_pids"
+            }
+            # Take the pipeline down within a bounded 30 s instead of leaving
+            # `wait` to block until `timeout-minutes` fires — the very outcome
+            # this budget exists to avoid. Killing the sampled targets is not
+            # enough on its own: with no targets found nothing has been killed
+            # at all, and even when the helper dies its parents (`script`,
+            # `swift-test`, `scripts/test.sh`) can outlive it. SIGTERM goes
+            # first so `scripts/test.sh`'s EXIT trap still runs its tmux and
+            # fence cleanup.
+            build_kill_order
             for pid in $kill_order; do
               kill -TERM "$pid" 2>/dev/null || true
             done
@@ -820,6 +823,11 @@ jobs:
               teardown_waited=$((teardown_waited + 1))
             done
             if kill -0 "$pipeline" 2>/dev/null; then
+              # The escalation rebuilds the order instead of reusing the one the
+              # SIGTERM sweep signalled: that grace window is exactly when the
+              # EXIT trap runs, and its tmux and fence cleanup spawns processes
+              # of its own that the earlier order knows nothing about.
+              build_kill_order
               for pid in $kill_order; do
                 kill -KILL "$pid" 2>/dev/null || true
               done
