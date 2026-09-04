@@ -103,10 +103,39 @@ public enum HandoverDecision: Equatable, Sendable {
 /// exercise the escalation in three polls instead of three hundred.
 public struct DaemonHandover: Sendable {
     /// How long to wait for a polite exit before escalating.
+    ///
+    /// **30 s is sized to `stop()`, and the alternative is what went wrong.**
+    /// `restart.sh` sends the daemon `SIGTERM`, sleeps **0.5 s**, and then
+    /// deletes the pid, socket and port files and starts the new daemon
+    /// regardless of whether the old one has finished — so a shutdown that
+    /// takes longer than half a second overlaps its successor and loses its own
+    /// files out from under it. Half a second is not a budget, it is a hope.
+    ///
+    /// The real shutdown is a sequence of awaits: the usage pollers and the
+    /// limit-resume scheduler stop, every holder reader is released one at a
+    /// time (`HolderReader.defaultStopTimeout` is 5 s each), the deferred
+    /// remote-backends boot task is cancelled and awaited, and both servers
+    /// stop. Every one of those is itself bounded, so the whole is bounded —
+    /// 30 s covers the ordinary case with room to spare, without being so long
+    /// that a wedged predecessor holds an operator's update open for minutes.
     public let termBudget: Duration
     /// How long to wait after `SIGKILL` before giving up.
+    ///
+    /// `SIGKILL` cannot be caught, blocked or ignored, so this is not a second
+    /// grace period — there is no cleanup left to run. The only reason a pid
+    /// outlives it is an uninterruptible wait in the kernel, and 5 s is long
+    /// enough to tell that apart from the microseconds an ordinary teardown
+    /// takes. A pid still there afterwards is `Outcome.stillAlive`, which
+    /// `Daemon.start()` treats as a reason not to start at all.
     public let killBudget: Duration
     /// Gap between liveness checks.
+    ///
+    /// The successor cannot bind until the predecessor is gone, so every
+    /// millisecond of this interval is a millisecond the socket is missing and
+    /// CLI calls fail. 100 ms keeps that tail short — a second-long poll would
+    /// add up to a second of dead socket for nothing — while 300 `kill(pid, 0)`
+    /// probes across the whole `SIGTERM` budget is far too little work to be
+    /// worth calling busy-polling.
     public let pollInterval: Duration
 
     private let sendSignal: @Sendable (pid_t, Int32) -> Void
