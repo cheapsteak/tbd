@@ -25,6 +25,21 @@ public final class SocketServer: Sendable {
     /// `unlinkOwnedSocketFile()`.
     private nonisolated(unsafe) var boundSocketIdentity: SocketFileIdentity?
 
+    /// Runs in `start()` between `bind(2)` and NIO adopting the bound
+    /// descriptor, and may throw to fail the start from inside that window.
+    /// `nil` in production, where the window holds nothing but the handover.
+    ///
+    /// The window is the one a successor daemon can bind the path in, so it is
+    /// where a failed start can be caught deleting somebody else's socket. The
+    /// failures that actually occur there are NIO refusing the descriptor —
+    /// kernel-level refusals no in-process test can provoke without either
+    /// hanging (a shut-down event loop drops the submitted task and the future
+    /// never completes) or tripping NIO's own debug assertions on a
+    /// half-constructed channel. So the seam exists to make that cleanup
+    /// reachable, and it is handed the descriptor so a caller that fails the
+    /// start can close it rather than leak it.
+    private let beforeAdoptingBoundSocket: (@Sendable (Int32) async throws -> Void)?
+
     /// Number of currently connected clients. Updated atomically.
     private let _connectedClients = ManagedAtomic<Int>(0)
 
@@ -36,11 +51,20 @@ public final class SocketServer: Sendable {
         _connectedClients.load(ordering: .relaxed)
     }
 
-    public init(router: RPCRouter, socketPath: String? = nil) {
+    public convenience init(router: RPCRouter, socketPath: String? = nil) {
+        self.init(router: router, socketPath: socketPath, beforeAdoptingBoundSocket: nil)
+    }
+
+    init(
+        router: RPCRouter,
+        socketPath: String?,
+        beforeAdoptingBoundSocket: (@Sendable (Int32) async throws -> Void)?
+    ) {
         self.router = router
         // See HookResolver — resolve here, not at the caller's site.
         self.socketPath = socketPath ?? TBDConstants.socketPath
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        self.beforeAdoptingBoundSocket = beforeAdoptingBoundSocket
     }
 
     /// Start listening on the Unix domain socket.
@@ -95,14 +119,23 @@ public final class SocketServer: Sendable {
         let identity = SocketFileIdentity(path: socketPath)
         let ch: Channel
         do {
+            try await beforeAdoptingBoundSocket?(boundFD)
             ch = try await bootstrap.withBoundSocket(boundFD).get()
         } catch {
             // Do not close `boundFD` here: NIO takes ownership of the
             // descriptor as soon as it wraps it, and closing a descriptor
             // another layer already closed can later shut down an unrelated
-            // reused one. The socket file is unambiguously ours, so reclaim
-            // that and let a failed start surface.
-            try? fm.removeItem(atPath: socketPath)
+            // reused one.
+            //
+            // Reclaim the socket file under the same ownership check the
+            // shutdown path uses. `identity` was true of the path at the
+            // instant it was read, and the `await` above is a suspension
+            // point: a successor daemon's `start()` can run inside it,
+            // unlinking our file and binding its own. Removing on existence
+            // alone here would delete the successor's live socket — the bug
+            // `unlinkOwnedSocketFile()` exists to prevent, reached through a
+            // failed start instead of a shutdown.
+            unlinkSocketFile(ifStillIdentity: identity)
             throw error
         }
 
@@ -167,8 +200,20 @@ public final class SocketServer: Sendable {
         return fd
     }
 
-    /// Reclaim the socket file **only if it is still the one this server
-    /// bound.**
+    /// Reclaim the socket file this server bound, if it is still there and
+    /// still ours. Called once, at shutdown; the identity is consumed so a
+    /// second call finds nothing to claim.
+    private func unlinkOwnedSocketFile() {
+        guard let bound = boundSocketIdentity else {
+            // Never bound, or already settled. Nothing here is ours.
+            return
+        }
+        boundSocketIdentity = nil
+        unlinkSocketFile(ifStillIdentity: bound)
+    }
+
+    /// Remove the file at `socketPath` **only if it is still the one whose
+    /// identity is `identity`.**
     ///
     /// The socket path is a rendezvous every daemon generation binds in turn,
     /// so existence at that path proves nothing about who owns it. A successor
@@ -188,12 +233,17 @@ public final class SocketServer: Sendable {
     /// inside it — darwin has no unlink-if-inode primitive to close it with. It
     /// is accepted on width; the unconditional unlink it replaces lost the same
     /// race for the whole of every shutdown.
-    private func unlinkOwnedSocketFile() {
-        guard let bound = boundSocketIdentity else {
-            // Never bound, or already settled. Nothing here is ours.
+    ///
+    /// Both places that reclaim the file come through here — the shutdown in
+    /// `stop()`, and the cleanup of a `start()` that failed after `bind(2)`.
+    /// The hazard is the same either way: between capturing the identity and
+    /// unlinking, a successor daemon may have taken the path over.
+    private func unlinkSocketFile(ifStillIdentity identity: SocketFileIdentity?) {
+        guard let bound = identity else {
+            // The `lstat(2)` after `bind(2)` found nothing, so this server can
+            // name no file as its own. Claim nothing.
             return
         }
-        boundSocketIdentity = nil
         guard let current = SocketFileIdentity(path: socketPath) else {
             // Already gone — reclaimed by a successor's `start()`, or by hand.
             return

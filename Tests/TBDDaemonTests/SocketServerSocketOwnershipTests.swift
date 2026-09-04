@@ -37,9 +37,7 @@ struct SocketServerSocketOwnershipTests {
     /// identity the fix turns on — a path check alone cannot tell one server's
     /// socket from another's.
     private func inode(of path: String) -> ino_t? {
-        var info = stat()
-        guard lstat(path, &info) == 0 else { return nil }
-        return info.st_ino
+        socketFileInode(at: path)
     }
 
     /// Open an AF_UNIX/SOCK_STREAM client and connect() to `path`. Returns the
@@ -140,5 +138,135 @@ struct SocketServerSocketOwnershipTests {
         )
 
         await incumbent.stop()
+    }
+
+    @Test("a start that fails after binding leaves a successor's socket alone")
+    func failedStartLeavesSuccessorSocketAlone() async throws {
+        let socketPath = scratchSocketPath()
+        defer { unlink(socketPath) }
+
+        // The other end of the same race, reached from startup rather than
+        // shutdown. `start()` binds the rendezvous file and then awaits NIO
+        // adopting the descriptor; that await is a suspension point, so a
+        // successor daemon can bind the path inside it. If the adoption then
+        // fails, the cleanup must not delete the file the successor now owns.
+        let successor = SuccessorSocket()
+        defer { successor.release() }
+
+        let predecessor = SocketServer(
+            router: try makeRouter(),
+            socketPath: socketPath,
+            beforeAdoptingBoundSocket: { boundFD in
+                // This descriptor never reaches NIO, so close it here rather
+                // than leak it for the life of the test process.
+                close(boundFD)
+                successor.takeOver(path: socketPath)
+                throw AdoptionRefused()
+            }
+        )
+
+        await #expect(throws: AdoptionRefused.self) {
+            try await predecessor.start()
+        }
+
+        let predecessorInode = try #require(successor.displacedInode)
+        let successorInode = try #require(successor.inode)
+        #expect(
+            successorInode != predecessorInode,
+            "the successor's bind must produce a new inode, or this test proves nothing"
+        )
+        #expect(
+            socketFileInode(at: socketPath) == successorInode,
+            "the failed start deleted the live successor's socket"
+        )
+
+        // And the successor must still be reachable through the path.
+        let clientFd = connectRawClient(to: socketPath)
+        #expect(clientFd >= 0, "clients can no longer reach the live daemon at \(socketPath)")
+        if clientFd >= 0 { close(clientFd) }
+    }
+
+    @Test("a start that fails after binding still reclaims the file it bound")
+    func failedStartReclaimsItsOwnSocket() async throws {
+        let socketPath = scratchSocketPath()
+        defer { unlink(socketPath) }
+
+        // Nobody takes the path over inside the window, so the file is this
+        // server's to clean up. The ownership check on the failure path must
+        // not degenerate into "never unlink" and strand a socket file.
+        let server = SocketServer(
+            router: try makeRouter(),
+            socketPath: socketPath,
+            beforeAdoptingBoundSocket: { boundFD in
+                close(boundFD)
+                throw AdoptionRefused()
+            }
+        )
+
+        await #expect(throws: AdoptionRefused.self) {
+            try await server.start()
+        }
+
+        #expect(
+            socketFileInode(at: socketPath) == nil,
+            "a failed start left its own socket file behind"
+        )
+    }
+}
+
+/// `st_ino` of whatever is at `path`, or nil if nothing is. `lstat` rather
+/// than `stat`, matching the production check.
+private func socketFileInode(at path: String) -> ino_t? {
+    var info = stat()
+    guard lstat(path, &info) == 0 else { return nil }
+    return info.st_ino
+}
+
+/// What NIO refusing the bound descriptor looks like to `start()`. The real
+/// refusals are kernel-level and cannot be provoked in-process, so the test
+/// injects the failure at the same point in the same window.
+private struct AdoptionRefused: Error {}
+
+/// A stand-in for a successor daemon taking the rendezvous path over: unlink
+/// whatever is there, then `bind(2)` + `listen(2)` its own socket under the
+/// same name — exactly what another daemon's `start()` leaves behind.
+private final class SuccessorSocket: @unchecked Sendable {
+    /// The inode this displaced, i.e. the predecessor's own socket file.
+    private(set) var displacedInode: ino_t?
+    /// The inode of the socket now at the path.
+    private(set) var inode: ino_t?
+    private var fd: Int32 = -1
+
+    func takeOver(path: String) {
+        displacedInode = socketFileInode(at: path)
+        unlink(path)
+
+        let newFD = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard newFD >= 0 else { return }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8)
+        withUnsafeMutableBytes(of: &addr.sun_path) { raw in
+            raw.copyBytes(from: pathBytes)
+            raw[pathBytes.count] = 0
+        }
+        let bound = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                bind(newFD, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard bound == 0, listen(newFD, 8) == 0 else {
+            close(newFD)
+            return
+        }
+        fd = newFD
+        inode = socketFileInode(at: path)
+    }
+
+    func release() {
+        if fd >= 0 {
+            close(fd)
+            fd = -1
+        }
     }
 }
