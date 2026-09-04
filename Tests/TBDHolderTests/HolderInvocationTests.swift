@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import TBDHolder
@@ -16,16 +17,45 @@ struct HolderInvocationTests {
         columns: 120,
         rows: 40)
 
+    /// A descriptor holding `bytes`, closed on the writing side so a reader
+    /// sees end of file — the shape `HolderSpawner` hands the holder. Returned
+    /// open; `HolderArguments.parse` closes it as it consumes it.
+    private static func descriptor(holding bytes: Data) throws -> Int32 {
+        var ends: [Int32] = [-1, -1]
+        try #require(pipe(&ends) == 0, "could not make a payload pipe")
+        bytes.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < raw.count {
+                let written = write(ends[1], raw.baseAddress?.advanced(by: offset), raw.count - offset)
+                guard written > 0 else { break }
+                offset += written
+            }
+        }
+        close(ends[1])
+        return ends[0]
+    }
+
+    /// The launch request travels on a descriptor, never on argv: argv is
+    /// readable with `ps` by anything running as the same user, and the request
+    /// carries the session's whole environment.
     private static func commandLine(
         session: UUID,
         lockFD: String = "9",
+        launchFD: String? = nil,
+        payload: Data? = nil,
         owner: String? = "installation-abc"
     ) throws -> [String] {
+        let resolvedFD: String
+        if let launchFD {
+            resolvedFD = launchFD
+        } else {
+            resolvedFD = String(try descriptor(holding: payload ?? JSONEncoder().encode(launch)))
+        }
         var arguments = [
             "--session", session.uuidString,
             "--socket", "/tmp/holders/session.sock",
             "--lock-fd", lockFD,
-            "--launch", try JSONEncoder().encode(launch).base64EncodedString(),
+            "--launch-fd", resolvedFD,
         ]
         if let owner { arguments += ["--owner", owner] }
         return arguments
@@ -81,13 +111,80 @@ struct HolderInvocationTests {
             _ = try HolderArguments.parse(["--socket"])
         }
         #expect(throws: HolderStartupError.invalidLaunchPayload) {
-            _ = try HolderArguments.parse([
-                "--session", UUID().uuidString,
-                "--socket", "/tmp/x.sock",
-                "--lock-fd", "9",
-                "--launch", "not-base64-json",
-            ])
+            _ = try HolderArguments.parse(try Self.commandLine(
+                session: UUID(), payload: Data("not-json".utf8)))
         }
+    }
+
+    // MARK: - The launch descriptor
+
+    /// The launch request is a DESCRIPTOR NUMBER, never the request itself. A
+    /// holder that took the bytes on its command line published the session's
+    /// entire environment — every credential in it — to the process table, where
+    /// `ps` shows argv to anything running as the same user, for as long as the
+    /// session lived.
+    @Test func refusesTheRequestItselfWhereADescriptorBelongs() throws {
+        let inlinePayload = try JSONEncoder().encode(Self.launch).base64EncodedString()
+        let arguments = try Self.commandLine(session: UUID(), launchFD: inlinePayload)
+        #expect(throws: HolderStartupError.invalidLaunchDescriptorArgument(inlinePayload)) {
+            _ = try HolderArguments.parse(arguments)
+        }
+    }
+
+    /// A descriptor the spawner never placed is a spawner bug, and must be said
+    /// so rather than surfacing as an empty request that decodes to nothing.
+    ///
+    /// `-1` rather than a large unused number: this process opens descriptors
+    /// on other threads throughout the run, so any number that merely happens
+    /// to be free right now could be taken before the read. -1 never can be.
+    @Test func refusesADescriptorNothingWasPlacedOn() throws {
+        #expect(throws: HolderStartupError.unreadableLaunchPayload(descriptor: -1, errno: EBADF)) {
+            _ = try HolderArguments.parse(try Self.commandLine(session: UUID(), launchFD: "-1"))
+        }
+    }
+
+    /// The descriptor is spent by parsing and must not still be open at
+    /// `forkpty`: a launch request is the one thing in the holder that holds the
+    /// session's secrets, and a fork would copy it into the job.
+    ///
+    /// Asserted from the far end of a socket pair rather than by asking whether
+    /// the number is still open — a closed number can be handed straight back
+    /// out to another thread, so only the peer can answer this without racing.
+    @Test func theLaunchDescriptorIsClosedOnceItIsRead() throws {
+        var ends: [Int32] = [-1, -1]
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &ends) == 0)
+        let ours = ends[0]
+        let holders = ends[1]
+        defer { close(ours) }
+
+        try JSONEncoder().encode(Self.launch).withUnsafeBytes { raw in
+            _ = write(ours, raw.baseAddress, raw.count)
+        }
+        // Half-close, not close: the holder's end must see end of file while
+        // this end stays open to watch what becomes of it.
+        shutdown(ours, SHUT_WR)
+        _ = fcntl(ours, F_SETFL, O_NONBLOCK)
+
+        var byte: UInt8 = 0
+        #expect(
+            read(ours, &byte, 1) == -1 && errno == EAGAIN,
+            "precondition: the holder's end is still open before parsing")
+
+        let parsed = try HolderArguments.parse(
+            try Self.commandLine(session: UUID(), launchFD: String(holders)))
+        #expect(parsed.launch == Self.launch)
+        #expect(read(ours, &byte, 1) == 0, "the spent descriptor must be closed, not left open")
+    }
+
+    /// A request split across reads is a stream that has not finished arriving,
+    /// not a truncated message: the frame is end of file. Forced by a request
+    /// twice the read buffer, which no single `read` can return.
+    @Test func aRequestLargerThanOneReadIsReassembled() throws {
+        var big = Self.launch
+        big.environment["BULK"] = String(repeating: "x", count: 8_000)
+        let parsed = try HolderArguments.parse(try Self.commandLine(
+            session: UUID(), payload: try JSONEncoder().encode(big)))
+        #expect(parsed.launch == big)
     }
 
     // MARK: - Framing
@@ -158,6 +255,8 @@ struct HolderInvocationTests {
             .missingArgument("session"),
             .invalidSessionID("not-a-uuid"),
             .invalidLaunchPayload,
+            .invalidLaunchDescriptorArgument("eyJleGVjdXRhYmxlIjoi"),
+            .unreadableLaunchPayload(descriptor: 10, errno: EBADF),
             .invalidLockDescriptorArgument("/tmp/holders/session.lock"),
             .invalidLockDescriptor(1),
             .socketPathTooLong(path: "/tmp/holders/session.sock", limit: 104),

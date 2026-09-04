@@ -634,6 +634,15 @@ final class Holder {
 /// could not name the inherited descriptor, and therefore could not keep it
 /// out of the job — which is the one thing about the lock that must not
 /// happen. The holder never calls `HolderLock.acquire` itself.
+///
+/// **The launch request arrives the same way, and for a security reason.** A
+/// process's argv is world-readable to every process running as the same user
+/// — `ps -ww` prints it — and a `HolderLaunchRequest` carries the session's
+/// entire environment. Carrying it on the command line published every
+/// credential in that environment to the process table for the whole life of
+/// the session. It now travels as bytes on `--launch-fd`, a descriptor the
+/// spawner placed with a `posix_spawn` file action exactly as it places the
+/// lock, and which nothing outside this process tree can name.
 struct HolderArguments: Equatable {
     var sessionID: UUID
     var socketPath: String
@@ -646,8 +655,15 @@ struct HolderArguments: Equatable {
 
     static let usage = """
         usage: TBDHolder --session <uuid> --socket <path> --lock-fd <n> \
-        --launch <base64-json> [--owner <token>]
+        --launch-fd <n> [--owner <token>]
         """
+
+    /// The most a launch request may be. A descriptor is not argv: nothing
+    /// bounds it for us, so a hostile or confused writer could otherwise make
+    /// the holder allocate without limit before it has bound anything. Sized
+    /// far above any real environment (`ARG_MAX` on darwin is a quarter of it,
+    /// and the payload used to have to fit inside that).
+    static let maximumLaunchPayloadBytes = 4 * 1024 * 1024
 
     /// `arguments` excludes argv[0].
     ///
@@ -688,11 +704,14 @@ struct HolderArguments: Equatable {
         guard let lockFD = Int32(lockText) else {
             throw HolderStartupError.invalidLockDescriptorArgument(lockText)
         }
-        let launchText = try required("launch")
-        guard let launchData = Data(base64Encoded: launchText),
-              let launch = try? JSONDecoder().decode(HolderLaunchRequest.self, from: launchData) else {
-            throw HolderStartupError.invalidLaunchPayload
+        let launchFDText = try required("launch-fd")
+        guard let launchFD = Int32(launchFDText) else {
+            throw HolderStartupError.invalidLaunchDescriptorArgument(launchFDText)
         }
+        // Read here, at the invocation boundary, rather than in `run()`: the
+        // rest of the holder is written against a `HolderLaunchRequest` it
+        // already has, and the descriptor is spent the moment it is read.
+        let launch = try readLaunchRequest(fromDescriptor: launchFD)
 
         return HolderArguments(
             sessionID: sessionID,
@@ -700,6 +719,56 @@ struct HolderArguments: Equatable {
             lockFD: lockFD,
             launch: launch,
             owner: HolderOwnerToken(rawValue: values["owner"] ?? ""))
+    }
+
+    /// Drains the launch request from the descriptor the spawner placed it on,
+    /// and closes that descriptor.
+    ///
+    /// Read to end of file rather than to a length word: the spawner writes the
+    /// whole request and then closes its end before this process is even
+    /// created, so EOF is the frame. A short read is therefore not a partial
+    /// message, it is a stream that has not finished arriving, and the loop
+    /// simply continues.
+    ///
+    /// The descriptor is closed as soon as it is spent, and always — including
+    /// on every failure path. It must not still be open at `forkpty`: the job's
+    /// descriptor sweep would close it anyway, but a launch request is the one
+    /// thing in this process that holds the session's secrets, and the window
+    /// in which a fork could copy it is worth not having. Stdio is exempt, so
+    /// that a holder driven by hand with `--launch-fd 0 < request.json` does
+    /// not close its own standard input out from under itself.
+    static func readLaunchRequest(fromDescriptor descriptor: Int32) throws -> HolderLaunchRequest {
+        func done() {
+            if descriptor > 2 { close(descriptor) }
+        }
+
+        var payload = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { raw in
+                read(descriptor, raw.baseAddress, raw.count)
+            }
+            if count > 0 {
+                guard payload.count + count <= maximumLaunchPayloadBytes else {
+                    done()
+                    throw HolderStartupError.unreadableLaunchPayload(
+                        descriptor: descriptor, errno: EFBIG)
+                }
+                payload.append(contentsOf: buffer[0..<count])
+                continue
+            }
+            if count == 0 { break }
+            let saved = errno
+            if saved == EINTR { continue }
+            done()
+            throw HolderStartupError.unreadableLaunchPayload(descriptor: descriptor, errno: saved)
+        }
+        done()
+
+        guard let launch = try? JSONDecoder().decode(HolderLaunchRequest.self, from: payload) else {
+            throw HolderStartupError.invalidLaunchPayload
+        }
+        return launch
     }
 }
 
@@ -731,6 +800,8 @@ enum HolderStartupError: LocalizedError, Equatable {
     case missingArgument(String)
     case invalidSessionID(String)
     case invalidLaunchPayload
+    case invalidLaunchDescriptorArgument(String)
+    case unreadableLaunchPayload(descriptor: Int32, errno: Int32)
     case invalidLockDescriptorArgument(String)
     case invalidLockDescriptor(Int32)
     case socketPathTooLong(path: String, limit: Int)
@@ -746,7 +817,8 @@ enum HolderStartupError: LocalizedError, Equatable {
     var exitCode: Int32 {
         switch self {
         case .unknownArgument, .missingValue, .missingArgument, .invalidSessionID,
-             .invalidLaunchPayload, .invalidLockDescriptorArgument, .invalidLockDescriptor,
+             .invalidLaunchPayload, .invalidLaunchDescriptorArgument, .unreadableLaunchPayload,
+             .invalidLockDescriptorArgument, .invalidLockDescriptor,
              .socketPathTooLong:
             return HolderExitCode.badInvocation
         case .socketDirectoryUnavailable, .cannotBind, .cannotListen, .forkFailed:
@@ -765,7 +837,13 @@ enum HolderStartupError: LocalizedError, Equatable {
         case .invalidSessionID(let text):
             return "--session must be a UUID, got \"\(text)\""
         case .invalidLaunchPayload:
-            return "--launch must be base64-encoded JSON for a HolderLaunchRequest"
+            return "the bytes on --launch-fd must be JSON for a HolderLaunchRequest"
+        case .invalidLaunchDescriptorArgument(let text):
+            return "--launch-fd must be a descriptor number, got \"\(text)\""
+        case .unreadableLaunchPayload(let descriptor, let code):
+            return "could not read the launch request from --launch-fd \(descriptor): "
+                + "\(String(cString: strerror(code))) (errno \(code)). The spawner must write "
+                + "the request to that descriptor and close its own end"
         case .invalidLockDescriptorArgument(let text):
             return "--lock-fd must be a descriptor number, got \"\(text)\""
         case .invalidLockDescriptor(let fd):

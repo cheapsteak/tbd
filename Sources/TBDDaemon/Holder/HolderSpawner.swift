@@ -50,7 +50,9 @@ struct HolderSpawnResult: Sendable {
 ///      unowned: it is probed, and only a connect that fails outright licenses
 ///      unlinking it.
 ///   4. The lock travels to the holder as a **descriptor number**, placed by a
-///      `posix_spawn` `dup2` file action.
+///      `posix_spawn` `dup2` file action — and so does the launch request,
+///      which carries the session's environment and therefore may not go on a
+///      command line that `ps` shows to every process on the machine.
 ///   5. The holder's stdio is detached, with stderr somewhere retrievable.
 ///   6. The daemon drops its own copy of the lock, so the holder alone holds it
 ///      and the kernel drops it when the holder dies.
@@ -93,6 +95,30 @@ struct HolderSpawner {
     /// the holder validates that it landed above 2.
     static let lockDescriptorNumber: Int32 = 9
 
+    /// The descriptor number the launch request is placed on in the holder.
+    ///
+    /// **The launch request is not on the command line, and must never go
+    /// back.** `HolderLaunchRequest` carries the session's entire environment,
+    /// and a process's argv is readable by every process running as the same
+    /// user — `ps -ww` prints it — so a holder launched with the request on
+    /// argv published that session's credentials to the process table for the
+    /// session's whole life. Same for the holder's own environment, which
+    /// `ps -E` prints for the same audience, so moving the payload there is not
+    /// a fix either. A descriptor is the one channel of the three that no
+    /// process outside this tree can name.
+    static let launchDescriptorNumber: Int32 = 10
+
+    /// The lowest number the spawner will relocate an inherited descriptor to.
+    ///
+    /// Above **every** target number, not merely above its own: with two dup2
+    /// file actions in play, a source parked on the *other* action's target
+    /// would be overwritten by it, and whether that mattered would depend on
+    /// the order the two actions happen to run in. Relocating both sources
+    /// above both targets removes the question.
+    private static var descriptorRelocationFloor: Int32 {
+        max(lockDescriptorNumber, launchDescriptorNumber) + 1
+    }
+
     /// How long to wait for a freshly spawned holder to bind and answer.
     /// Generous because it covers a cold `execve` of a debug binary under a
     /// loaded machine, and bounded because a holder that never binds must fail
@@ -126,6 +152,9 @@ struct HolderSpawner {
         case rendezvousDirectoryUnavailable(path: String, detail: String)
         case lockUnavailable(path: String, detail: String)
         case spawnFailed(executable: String, errno: Int32)
+        /// The launch request could not be placed on its descriptor. Raised
+        /// **before** anything is spawned, so nothing exists to reclaim.
+        case launchPayloadUndeliverable(bytes: Int, errno: Int32)
 
         var errorDescription: String? {
             switch self {
@@ -150,6 +179,9 @@ struct HolderSpawner {
             case .spawnFailed(let executable, let code):
                 return "could not spawn \(executable): "
                     + "\(String(cString: strerror(code))) (errno \(code))"
+            case .launchPayloadUndeliverable(let bytes, let code):
+                return "could not hand the holder its \(bytes)-byte launch request: "
+                    + "\(String(cString: strerror(code))) (errno \(code)); nothing was spawned"
             }
         }
     }
@@ -581,6 +613,98 @@ struct HolderSpawner {
 
     // MARK: - Launching
 
+    /// The holder's command line, in full.
+    ///
+    /// **Everything here is world-readable, so nothing secret may appear in
+    /// it.** Same-user processes read argv with `ps`, which is what made
+    /// carrying the launch request on this list a credential leak for the whole
+    /// life of every session. What remains is a session UUID, a rendezvous
+    /// path, two descriptor numbers and an installation token — public facts
+    /// about where the holder's files are, not about what the job will run.
+    /// Extracted from `launchHolder` so that stays assertable without spawning
+    /// anything: `HolderLaunchArgumentTests` pins the whole list.
+    static func commandLine(
+        executablePath: String,
+        sessionID: UUID,
+        socketPath: String,
+        owner: HolderOwnerToken
+    ) -> [String] {
+        [
+            executablePath,
+            "--session", sessionID.uuidString,
+            "--socket", socketPath,
+            "--lock-fd", String(lockDescriptorNumber),
+            "--launch-fd", String(launchDescriptorNumber),
+            "--owner", owner.rawValue,
+        ]
+    }
+
+    /// Puts the launch request somewhere only the holder can read it, and
+    /// returns the descriptor to hand it.
+    ///
+    /// A `socketpair`, rather than either of the two obvious alternatives:
+    ///
+    ///   - **A file** — even one created 0600 and unlinked after reading —
+    ///     would be a new durable on-disk resource holding the session's
+    ///     credentials, and so would owe a reclaimer for the copy left behind
+    ///     by a daemon that died between creating it and unlinking it. This
+    ///     owes none: there is no name, in any namespace, at any instant. The
+    ///     payload lives in a socket buffer that the kernel frees when the last
+    ///     descriptor closes, which happens on every path — the `defer` here, a
+    ///     holder that never starts, and a holder SIGKILLed before it reads.
+    ///   - **A pipe** cannot be resized on darwin (`F_SETPIPE_SZ` is Linux
+    ///     only), so a request larger than the pipe buffer could only be
+    ///     delivered by writing *after* the spawn and blocking until the holder
+    ///     read it — a daemon thread parked on a process that may never reach
+    ///     `main`. A unix socket's buffers take `SO_SNDBUF`/`SO_RCVBUF`, so the
+    ///     whole request is written before anything is spawned.
+    ///
+    /// The write end is non-blocking and closed here: a kernel that refused to
+    /// grow the buffer surfaces as `EAGAIN` on a spawn that has not happened
+    /// yet, rather than as a deadlock, and closing it is what gives the holder
+    /// an EOF to stop reading at. Data already queued on the peer survives that
+    /// close — it sits in the read end's receive buffer, which this process
+    /// still holds open. `EPIPE` cannot arise for the same reason.
+    static func makeLaunchPayloadChannel(_ launch: HolderLaunchRequest) throws -> Int32 {
+        let payload = try JSONEncoder().encode(launch)
+
+        var descriptors: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0 else {
+            throw Error.launchPayloadUndeliverable(bytes: payload.count, errno: errno)
+        }
+        let writeEnd = descriptors[0]
+        let readEnd = descriptors[1]
+
+        // Sized to the payload plus slack on BOTH ends: a unix stream socket
+        // queues what is sent onto the *receiver's* buffer, so the send end's
+        // capacity alone does not decide whether a write fits. Failures are
+        // ignored deliberately — the write below is the real test, and a kernel
+        // that refused to grow may still have had room.
+        var capacity = Int32(clamping: payload.count + 4096)
+        let size = socklen_t(MemoryLayout<Int32>.size)
+        _ = setsockopt(readEnd, SOL_SOCKET, SO_RCVBUF, &capacity, size)
+        _ = setsockopt(writeEnd, SOL_SOCKET, SO_SNDBUF, &capacity, size)
+        _ = fcntl(writeEnd, F_SETFL, O_NONBLOCK)
+
+        var offset = 0
+        while offset < payload.count {
+            let written = payload.withUnsafeBytes { raw -> Int in
+                write(writeEnd, raw.baseAddress?.advanced(by: offset), payload.count - offset)
+            }
+            if written > 0 {
+                offset += written
+                continue
+            }
+            let saved = errno
+            if written < 0, saved == EINTR { continue }
+            close(writeEnd)
+            close(readEnd)
+            throw Error.launchPayloadUndeliverable(bytes: payload.count, errno: saved)
+        }
+        close(writeEnd)
+        return readEnd
+    }
+
     private func launchHolder(
         sessionID: UUID,
         socketPath: String,
@@ -590,15 +714,19 @@ struct HolderSpawner {
         environment: [String: String],
         lock: HolderLock
     ) throws -> Int32 {
-        let payload = try JSONEncoder().encode(launch).base64EncodedString()
-        let arguments = [
-            executableURL.path,
-            "--session", sessionID.uuidString,
-            "--socket", socketPath,
-            "--lock-fd", String(Self.lockDescriptorNumber),
-            "--launch", payload,
-            "--owner", owner.rawValue,
-        ]
+        let arguments = Self.commandLine(
+            executablePath: executableURL.path,
+            sessionID: sessionID,
+            socketPath: socketPath,
+            owner: owner)
+
+        // Built before anything else in this function, and before any process
+        // exists: every byte of the request is in the kernel's hands by the
+        // time `posix_spawn` is called, so a payload that cannot be delivered
+        // fails a spawn that never happened rather than stranding a holder
+        // waiting on a stream nobody will finish writing.
+        let launchSource = try Self.makeLaunchPayloadChannel(launch)
+        defer { close(launchSource) }
 
         // `</dev/null` and a real file for stdout/stderr, never inherited
         // descriptors. A holder that inherits the daemon's stdout holds that
@@ -629,28 +757,41 @@ struct HolderSpawner {
         // concurrent `posix_spawn` in the daemon, and an unrelated child that
         // inherited it would hold this session UUID unreclaimable until it
         // died.
-        let lockSource = fcntl(lock.fileDescriptor, F_DUPFD_CLOEXEC, Self.lockDescriptorNumber + 1)
+        let lockSource = fcntl(
+            lock.fileDescriptor, F_DUPFD_CLOEXEC, Self.descriptorRelocationFloor)
         guard lockSource >= 0 else {
             throw Error.spawnFailed(executable: executableURL.path, errno: errno)
         }
         defer { close(lockSource) }
 
+        // The launch descriptor is relocated for the same reason and by the
+        // same call. `makeLaunchPayloadChannel` returns whatever number the
+        // kernel had free, which can be the target of either dup2 below.
+        let relocatedLaunch = fcntl(launchSource, F_DUPFD_CLOEXEC, Self.descriptorRelocationFloor)
+        guard relocatedLaunch >= 0 else {
+            throw Error.spawnFailed(executable: executableURL.path, errno: errno)
+        }
+        defer { close(relocatedLaunch) }
+
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
         // File actions run IN ORDER, and fd numbers collide. The stdio dup2s
-        // come first and the lock's dup2 last, so that if the log or /dev/null
-        // descriptor happens to land on the target number it has already been
-        // copied to its final home by the time the lock overwrites it. There
-        // are deliberately NO trailing closes: a close scheduled after the
-        // lock's dup2 would destroy the descriptor it just placed.
+        // come first and the inherited descriptors last, so that if the log or
+        // /dev/null descriptor happens to land on one of the target numbers it
+        // has already been copied to its final home by the time it is
+        // overwritten. Neither source can be a target — both were relocated
+        // above `descriptorRelocationFloor` — so the last two are independent.
+        // There are deliberately NO trailing closes: a close scheduled after a
+        // dup2 would destroy the descriptor it just placed.
         posix_spawn_file_actions_adddup2(&actions, nullFD, 0)
         posix_spawn_file_actions_adddup2(&actions, logFD, 1)
         posix_spawn_file_actions_adddup2(&actions, logFD, 2)
         posix_spawn_file_actions_adddup2(&actions, lockSource, Self.lockDescriptorNumber)
+        posix_spawn_file_actions_adddup2(&actions, relocatedLaunch, Self.launchDescriptorNumber)
 
         // Everything the daemon happens to have open without FD_CLOEXEC would
-        // otherwise arrive in a process that outlives it. The four descriptors
+        // otherwise arrive in a process that outlives it. The five descriptors
         // above are named in file actions and survive; nothing else does.
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)

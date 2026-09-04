@@ -77,14 +77,19 @@ struct HolderBinaryTests {
             environment: ["PATH": "/usr/bin:/bin"],
             columns: 80,
             rows: 24)
-        let payload = try JSONEncoder().encode(launch).base64EncodedString()
+        let launchPath = NSTemporaryDirectory() + "tbd-launch-\(UUID().uuidString.prefix(8)).json"
+        try JSONEncoder().encode(launch).write(to: URL(fileURLWithPath: launchPath))
+        defer { try? FileManager.default.removeItem(atPath: launchPath) }
+        // The request arrives on a descriptor, not on argv: `ps` shows argv to
+        // every process running as this user, and it carries the environment.
         let command = [
             "exec 9</dev/null;",
             "exec", Self.shellQuoted(executable.path),
             "--session", UUID().uuidString,
             "--socket", "/dev/null/holders/session.sock",
             "--lock-fd", "9",
-            "--launch", Self.shellQuoted(payload),
+            "--launch-fd", "3",
+            "3<", Self.shellQuoted(launchPath),
         ].joined(separator: " ")
 
         let process = Process()

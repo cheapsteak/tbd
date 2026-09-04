@@ -6,7 +6,11 @@ import Foundation
 // Invoked as:
 //
 //   TBDHolder --session <uuid> --socket <path> --lock-fd <n> \
-//             --launch <base64-json HolderLaunchRequest> [--owner <token>]
+//             --launch-fd <n> [--owner <token>]
+//
+// The `HolderLaunchRequest` arrives as JSON on `--launch-fd` rather than on
+// the command line, because a `ps` from any process running as the same user
+// reads argv and that request carries the session's whole environment.
 //
 // Argument parsing and exactly one call into `Holder`. Every decision the
 // holder makes lives in `Holder.swift`, so it can be exercised without

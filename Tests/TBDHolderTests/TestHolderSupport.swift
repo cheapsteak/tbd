@@ -174,14 +174,22 @@ final class HolderFixture {
         var lockReleased = false
         defer { if !lockReleased { lock.release() } }
 
-        let payload = try JSONEncoder().encode(launch).base64EncodedString()
+        // The launch request travels on a DESCRIPTOR, never on argv — argv is
+        // readable with `ps` by anything running as the same user, and the
+        // request carries the session's whole environment. Production places
+        // that descriptor with a `posix_spawn` file action; the bootstrap shell
+        // gets there with a redirect from a file in its own scratch home, which
+        // `teardown` removes with the rest of it.
+        let launchPath = home + "/launch.json"
+        try JSONEncoder().encode(launch).write(to: URL(fileURLWithPath: launchPath))
         let command = [
             shellQuoted(executable.path),
             "--session", shellQuoted(session.uuidString),
             "--socket", shellQuoted(socketPath),
             "--lock-fd", "9",
-            "--launch", shellQuoted(payload),
+            "--launch-fd", "3",
             "--owner", shellQuoted(owner),
+            "3<", shellQuoted(launchPath),
             "&",
             "echo $! >", shellQuoted(pidPath),
         ].joined(separator: " ")
