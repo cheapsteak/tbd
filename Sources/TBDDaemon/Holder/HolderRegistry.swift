@@ -948,16 +948,22 @@ actor HolderRegistry {
     /// Adopts rows a budgeted pass left behind, with no budget of its own.
     ///
     /// Called once the socket is bound, where a slow holder delays no RPC
-    /// caller. **It is serial, and one row really can strand the rest.** The
-    /// per-row receive timeout is not a bound on a row: `HolderClient` connects
-    /// with a blocking `Darwin.connect` and applies `SO_RCVTIMEO` only after it
-    /// returns, so a rendezvous whose listener never drains its backlog blocks
-    /// indefinitely, and the busy-retry loop can re-attempt at a receive
-    /// timeout apiece. Serial anyway, because the alternative is worse: this
-    /// client's I/O is blocking, so a task per row would park a
-    /// cooperative-pool thread per row and a wedged fleet would starve the
-    /// executor serving the socket — one stalled session becoming a daemon that
-    /// answers nobody.
+    /// caller. **It is serial, so a slow row delays the rows behind it** — but
+    /// by a bounded amount, not indefinitely. A row costs `busyRetryBudget`
+    /// plus one `adoptionReceiveTimeout`: the connect that opens it is not
+    /// covered by `SO_RCVTIMEO`, yet needs no cover, because a Darwin
+    /// `connect(2)` on an `AF_UNIX` path never waits on a listener — it is
+    /// answered or refused in microseconds
+    /// (`HolderClientTests.aSaturatedRendezvousIsRefusedImmediatelyRatherThan`
+    /// `Blocking`). The receive is the only part of a round trip that waits,
+    /// and it is bounded.
+    ///
+    /// Serial anyway, because the alternative is worse: this client's I/O is
+    /// blocking, so a task per row would park a cooperative-pool thread per row
+    /// for up to that receive timeout, and a wedged fleet would starve every
+    /// RPC *handler* — `SocketRPCHandler.channelRead` hands each request into a
+    /// `Task` on the cooperative pool — leaving a daemon that accepts
+    /// connections, reads their bytes and answers none of them.
     ///
     /// Hence the log lines. A rescue that started and never finished is the
     /// only evidence of a stranded tail, so both ends of the pass are recorded

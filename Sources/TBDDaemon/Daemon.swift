@@ -1143,10 +1143,14 @@ public final class Daemon: Sendable {
         // opted in.
         //
         // **The ordering was reconsidered and stands, because the phase is now
-        // bounded.** Adopting first costs everyone the phase's duration; that
-        // duration is `adoptAllBudget` plus the row in flight when it expired,
-        // independent of how many holders are wedged. Binding first would
-        // instead open a window in which the socket answers while holder
+        // bounded.** Adopting first costs everyone the phase's duration, and
+        // that duration is bounded outright: `adoptAllBudget` plus the row in
+        // flight when it expired, which is itself worth at most one
+        // `busyRetryBudget` plus one `adoptionReceiveTimeout`. Independent of
+        // how many holders are wedged, and — because a Darwin `connect(2)` to
+        // an `AF_UNIX` path is refused rather than queued when a listener has
+        // stopped accepting — independent of how badly any one of them is.
+        // Binding first would instead open a window in which the socket answers while holder
         // sessions have no readers — `terminal.output` fails a live session
         // with "its session is gone or was never adopted", a sentence no caller
         // can tell apart from the truth about a genuinely dead one, and the
@@ -1177,21 +1181,26 @@ public final class Daemon: Sendable {
         // sessions are rescued. Detached because nobody is waiting on it: the
         // socket is up, so no RPC caller waits on a slow holder here.
         //
-        // **The rescue is serial, so a stranded row strands the rows behind
-        // it**, and that is a deliberate trade rather than an oversight.
-        // `HolderClient` opens its connection with a blocking `Darwin.connect`
-        // and sets `SO_RCVTIMEO` only afterwards, so a rendezvous whose
-        // listener never drains its backlog is unbounded, and the busy-retry
-        // loop can re-attempt at a receive timeout apiece — one row really can
-        // park this task for the process's life. A `Task` per row would trade
-        // that head-of-line cost for a worse one: the client's I/O is
-        // deliberately blocking, so N rows in flight park N cooperative-pool
-        // threads, and a wedged fleet would starve the executor that serves the
-        // socket just bound above — turning one stalled session into a daemon
-        // that answers nobody, which is the failure the startup budget exists
-        // to prevent. Serial parks at most one thread. `adoptRemaining` logs
-        // its start and its completion, so a stranded tail is visible as a
-        // rescue that began and never finished.
+        // **The rescue is serial, so a slow row delays the rows behind it**,
+        // and that is a deliberate trade rather than an oversight. Each row is
+        // bounded — `busyRetryBudget` plus one `adoptionReceiveTimeout`, the
+        // connect that opens it being refused in microseconds rather than
+        // queued — so the tail is delayed, never stranded. A `Task` per row
+        // would trade that head-of-line cost for a worse one: the client's I/O
+        // is deliberately blocking, so N rows in flight park N cooperative-pool
+        // threads.
+        //
+        // What that starves is not the socket. `SocketServer` runs on its own
+        // `MultiThreadedEventLoopGroup`, so accept, read and write keep their
+        // dedicated threads whatever the cooperative pool is doing. It is every
+        // RPC *handler* that stops: `SocketRPCHandler.channelRead` hands each
+        // request into a `Task { … }` on the cooperative pool, so a starved
+        // pool leaves a daemon that accepts connections, reads their bytes and
+        // produces no response — which is the same "answers nobody" failure the
+        // startup budget exists to prevent, reached from the other side. Serial
+        // parks at most one thread. `adoptRemaining` logs its start and its
+        // completion, so a stalled tail is visible as a rescue that began and
+        // never finished.
         if let holderRegistry, !deferredHolderAdoptions.isEmpty {
             let remaining = deferredHolderAdoptions
             Task { await holderRegistry.adoptRemaining(remaining) }

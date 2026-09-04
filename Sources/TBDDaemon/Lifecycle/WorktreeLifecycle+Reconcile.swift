@@ -25,9 +25,11 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 /// row loses nothing but a pass.
 ///
 /// It bounds the pass, not a probe: the real cost is the budget plus the one
-/// round trip in flight when it expired, exactly as `adoptAllBudget`'s is. A
-/// blocking `Darwin.connect` against a listener whose backlog is full is
-/// unbounded on its own and no timer here can shorten it.
+/// round trip in flight when it expired, exactly as `adoptAllBudget`'s is. That
+/// round trip is bounded by its receive timeout alone, because the
+/// `Darwin.connect` opening it cannot wait on a listener — on Darwin an
+/// `AF_UNIX` connect is answered or refused outright, never queued behind a
+/// listener that has stopped accepting.
 ///
 /// An actor because one `WorktreeLifecycle` value is copied per call and every
 /// copy must read the same flag — the same reason `conflictSweepCache` is one.

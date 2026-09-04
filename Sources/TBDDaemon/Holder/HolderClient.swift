@@ -147,10 +147,23 @@ actor HolderClient {
     /// in, so `HolderRegistry.exitProbeOutcome(for:)` classifies them by the
     /// same errno rules and those rules still live in one place.
     ///
-    /// Bounded only by the kernel: `Darwin.connect` blocks while a listener's
-    /// backlog is full, and `SO_RCVTIMEO` is set after it returns, so a caller
-    /// that probes many paths in a row must bound the *phase*, not just the
-    /// probe.
+    /// Bounded by the kernel, and genuinely bounded. `SO_RCVTIMEO` is set
+    /// after `connect` returns and so does not cover it — but on Darwin a
+    /// `connect(2)` to an `AF_UNIX` path cannot wait for a listener either:
+    /// `sonewconn` refuses once the accept queue is at its limit, so a
+    /// saturated rendezvous comes back `ECONNREFUSED` in microseconds rather
+    /// than sleeping until the queue drains, which is what the same call would
+    /// do on Linux. `HolderClientTests`
+    /// `.aSaturatedRendezvousIsRefusedImmediatelyRatherThanBlocking` measures
+    /// both halves, because a platform property is exactly the kind of premise
+    /// that rots silently.
+    ///
+    /// The consequence is worth carrying rather than forgetting: a saturated
+    /// holder is *alive*, and `ECONNREFUSED` is one of the two errnos
+    /// `HolderRegistry.exitProbeOutcome(for:)` reads as absence. Nothing in the
+    /// daemon opens the concurrent connections needed to reach that state — the
+    /// holder answers each one on the same poll turn, and the only adopter is
+    /// serial — so it is a hazard of the classification, not a live bug.
     func connectOnly() throws {
         try connectIfNeeded()
     }

@@ -18,6 +18,14 @@ import Testing
 /// It deliberately does **not** spawn a `TBDHolder`: a real holder cannot be
 /// made to wedge on demand, and a fake one would be a second implementation of
 /// the protocol to keep in step with the first.
+///
+/// **What it cannot reach is the connect itself.** Because it accepts, every
+/// `connect` here returns immediately and the cost measured below is entirely
+/// the receive. A rendezvous that binds and never accepts is the other half,
+/// and it behaves nothing like this one — it is refused rather than queued, in
+/// microseconds, and lands as `ECONNREFUSED`. That half lives in
+/// `HolderClientTests`
+/// `.aSaturatedRendezvousIsRefusedImmediatelyRatherThanBlocking`.
 private final class WedgedRendezvous: @unchecked Sendable {
     let sessionID = UUID()
     let path: String

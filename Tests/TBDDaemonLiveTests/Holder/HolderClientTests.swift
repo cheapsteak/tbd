@@ -757,6 +757,100 @@ struct HolderClientTests {
         #expect(pushed?.childPID == 4242)
         await client.close()
     }
+
+    // MARK: - What a saturated rendezvous costs
+
+    /// A rendezvous whose accept queue is full is **refused immediately**, and
+    /// the refusal is `ECONNREFUSED`. Neither half is obvious, and the daemon's
+    /// bounding arguments rest on both.
+    ///
+    /// The first half contradicts what the same code would do on Linux, where
+    /// `unp_connect` sleeps until the queue drains and a `connect` against a
+    /// saturated listener really is unbounded. Darwin does not sleep:
+    /// `sonewconn` refuses once the queue is at its limit, so `connect(2)`
+    /// returns in microseconds. That is why `HolderClient` can leave its
+    /// connect blocking and still be bounded — `SO_RCVTIMEO`, which is set
+    /// after the connect and does not cover it, is bounding the only part of
+    /// the round trip that can actually wait. Pinned here rather than trusted,
+    /// because it is a platform property no code in this repo enforces: if a
+    /// future Darwin ever slept instead, every per-holder budget in the
+    /// subsystem would quietly become a fiction and this is the test that says
+    /// so.
+    ///
+    /// The second half is the one with teeth. `ECONNREFUSED` is one of exactly
+    /// two errnos `HolderRegistry.exitProbeOutcome(for:)` reads as *absence* —
+    /// `.established(.exitedStatusUnknown)`, "the session is over" — so a
+    /// holder that is alive, bound and merely saturated is indistinguishable
+    /// from one that has exited. The assertion below states that consequence
+    /// outright instead of leaving it to be rediscovered.
+    ///
+    /// It is reachable only by a holder whose poll loop has stopped: the holder
+    /// listens with a backlog of 8 and answers each connection on the same
+    /// turn, and the daemon's only adopter is serial, so nothing in production
+    /// opens the concurrent connections this test opens by hand.
+    @Test func aSaturatedRendezvousIsRefusedImmediatelyRatherThanBlocking() async throws {
+        let home = SpawnedHolderFixture.scratchHome()
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let environment = SpawnedHolderFixture.environment(home: home)
+        try FileManager.default.createDirectory(
+            atPath: TBDConstants.holdersDir(environment: environment).path,
+            withIntermediateDirectories: true)
+
+        let session = UUID()
+        let socketPath = try HolderRendezvous.socketPath(sessionID: session, environment: environment)
+        // Bound and listening, and nothing ever accepts — a holder that reached
+        // `bind` and then stopped taking its turns.
+        let listener = try bindUnixListener(at: socketPath, backlog: 1)
+        defer {
+            Darwin.close(listener)
+            unlink(socketPath)
+        }
+
+        // Fill the accept queue by hand, keeping every connection open: a
+        // closed one would be drained back out of the queue this is filling.
+        // The cap is a guard against a kernel that never refuses, so that such
+        // a change surfaces as this assertion rather than as a hung suite.
+        var queued: [Int32] = []
+        defer { for fd in queued { Darwin.close(fd) } }
+        while queued.count < 64 {
+            let fd = rawConnect(to: socketPath)
+            guard fd >= 0 else { break }
+            queued.append(fd)
+        }
+        #expect(
+            queued.count < 64,
+            "64 connections queued on a backlog of 1 without one refusal: the queue never saturated")
+
+        let client = HolderClient(socketPath: socketPath, receiveTimeout: .seconds(2))
+        let start = ContinuousClock().now
+        var thrown: Swift.Error?
+        do { try await client.connectOnly() } catch { thrown = error }
+        let elapsed = ContinuousClock().now - start
+        await client.close()
+
+        // Well inside the receive timeout, which does not cover the connect at
+        // all. Measured at ~58 microseconds; a second is four orders of
+        // magnitude of headroom and still fails outright if the connect ever
+        // starts waiting for the queue.
+        #expect(
+            elapsed < .seconds(1),
+            "the connect against a saturated rendezvous took \(elapsed); it is no longer bounded")
+
+        guard case .cannotConnect(_, let code)? = thrown as? HolderClient.Error else {
+            Issue.record("expected .cannotConnect, got \(String(describing: thrown))")
+            return
+        }
+        #expect(
+            code == ECONNREFUSED,
+            "a saturated rendezvous answered errno \(code), not ECONNREFUSED (\(ECONNREFUSED))")
+        // The consequence, stated where it can be seen: this is the classification
+        // four reconcilers act on, and for a saturated holder it is wrong in the
+        // dangerous direction — alive, and judged gone.
+        #expect(
+            HolderRegistry.exitProbeOutcome(for: try #require(thrown))
+                == .established(.exitedStatusUnknown),
+            "a saturated holder is read as absence; if that ever changes, the reconcilers change with it")
+    }
 }
 
 // MARK: - Support
@@ -864,6 +958,40 @@ private func bindUnixListener(
 /// about the code under test — the `Issue` was already recorded where it was
 /// discovered.
 private struct HolderTestSetupFailure: Swift.Error {}
+
+/// Opens one raw `AF_UNIX` connection to `socketPath`, returning the connected
+/// descriptor or `-1` with `errno` left set by `connect(2)`.
+///
+/// Raw rather than a `HolderClient` because the caller is filling a listener's
+/// accept queue, not speaking the protocol: each of these has to stay open and
+/// unaccepted, and a client that closed on the way out would drain the very
+/// queue the test is filling.
+private func rawConnect(to socketPath: String) -> Int32 {
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { return -1 }
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    let sunPathSize = MemoryLayout.size(ofValue: address.sun_path)
+    socketPath.withCString { source in
+        withUnsafeMutablePointer(to: &address.sun_path) { destination in
+            destination.withMemoryRebound(to: CChar.self, capacity: sunPathSize) { chars in
+                _ = strlcpy(chars, source, sunPathSize)
+            }
+        }
+    }
+    let connected = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+            Darwin.connect(fd, generic, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    guard connected == 0 else {
+        let saved = errno
+        Darwin.close(fd)
+        errno = saved
+        return -1
+    }
+    return fd
+}
 
 /// Takes whatever is queued on a handed-over pty master, without blocking.
 ///
