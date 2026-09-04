@@ -781,6 +781,16 @@ extension RPCRouter {
                     window first
                     """,
                 code: RPCErrorCode.terminalSessionGone.rawValue)
+        case .unverifiable(let error):
+            // Absence of evidence, not evidence of absence — the whole point of
+            // this case (see `PaneSendTarget.unverifiable`). Refusing to compose
+            // an attach command is the safe default; it must not be conflated
+            // with `.terminalSessionGone`, which asserts the pane IS gone.
+            return RPCResponse(
+                error: """
+                    could not verify tmux pane \(probedPaneID) for terminal \(terminal.id) on \
+                    server \(server) (tmux unreachable: \(error)) — no command was composed
+                    """)
         case .live(let paneTerminalID):
             if let paneTerminalID,
                paneTerminalID.caseInsensitiveCompare(terminal.id.uuidString) != .orderedSame {
@@ -3100,6 +3110,12 @@ extension RPCRouter {
                 tmux pane \(terminal.tmuxPaneID) for terminal \(terminal.id.uuidString) is \
                 dead (its process has exited) — nothing was sent; recreate the terminal's \
                 window first
+                """)
+        case .unverifiable(let error):
+            return PaneSendRefusal(outcome: .transportFailed, message: """
+                could not verify tmux pane \(terminal.tmuxPaneID) for terminal \
+                \(terminal.id.uuidString) on server \(server) (tmux unreachable: \(error)) — \
+                nothing was sent
                 """)
         case .live(let paneTerminalID):
             guard let paneTerminalID else {
