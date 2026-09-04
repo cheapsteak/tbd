@@ -2144,12 +2144,23 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// panel that never typed rather than from `send` — is
         /// compiler-checked main-actor, and so is the queue itself.
         ///
-        /// `false` from the write closure means the bytes reached nothing;
-        /// `enqueueInjection` reports that to the daemon so it can fall back
-        /// to writing directly. A dead `self` reports `false` for the same
-        /// reason.
+        /// `.unwritable` from the attempt closure means the bytes reached
+        /// nothing; `enqueueInjection` reports that to the daemon so it can
+        /// fall back to writing directly. A dead `self` is `.unwritable` for
+        /// the same reason.
+        ///
+        /// **This adapter is temporary and reports no partial writes.**
+        /// `performOutgoingWrite` still answers a `Bool`, so a short write to a
+        /// holder-backed pty is reported here as `.unwritable` — which is what
+        /// it already meant before the outbox existed. Nothing wired to this
+        /// panel therefore gets an outbox yet; giving it one means teaching
+        /// `performOutgoingWrite` and `writeToHolderPTY` to report the kernel's
+        /// cut, and passing this queue a real drain notifier.
         private lazy var outgoingQueue = OutgoingInputQueue { [weak self] data in
-            self?.performOutgoingWrite(data) ?? false
+            guard let self, self.performOutgoingWrite(data) else {
+                return .unwritable(written: 0)
+            }
+            return .accepted
         }
 
         /// Delivers one chunk `outgoingQueue` has decided may go out now, and
