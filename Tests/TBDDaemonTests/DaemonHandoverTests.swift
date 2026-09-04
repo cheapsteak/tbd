@@ -11,6 +11,10 @@ import Testing
 @Suite("Daemon handover", .clockDriven)
 struct DaemonHandoverTests {
 
+    private func tmpPidPath() -> String {
+        NSTemporaryDirectory() + "handover-\(UUID().uuidString).pid"
+    }
+
     /// A `sendSignal`/`isLive` pair a test can both program and read back.
     ///
     /// `isLive` answers `true` until it has been asked `aliveForChecks` times,
@@ -200,6 +204,120 @@ struct DaemonHandoverTests {
 
         #expect(await retirement.value == .exitedAfterKill)
         #expect(predecessor.sent == [SIGTERM, SIGKILL])
+    }
+
+    // MARK: - The pid-file choreography
+
+    /// A predecessor that reacts to `SIGTERM` by running whichever `stop()` it
+    /// was built with.
+    ///
+    /// `deletesPIDFileOnExit` is the shape of every daemon built before
+    /// `PIDFile.removeIfOwned` existed: its `stop()` ends with an
+    /// unconditional `remove()`, so it takes the successor's claim with it.
+    /// The first update on any machine hands over from exactly such a daemon.
+    private final class ExitingPredecessor: @unchecked Sendable {
+        private let lock = NSLock()
+        private var checks = 0
+        private let aliveForChecks: Int
+        private let pidFilePath: String
+        private let deletesPIDFileOnExit: Bool
+
+        init(aliveForChecks: Int, pidFilePath: String, deletesPIDFileOnExit: Bool) {
+            self.aliveForChecks = aliveForChecks
+            self.pidFilePath = pidFilePath
+            self.deletesPIDFileOnExit = deletesPIDFileOnExit
+        }
+
+        @Sendable func isLive(_ pid: pid_t) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            checks += 1
+            return checks <= aliveForChecks
+        }
+
+        @Sendable func send(_ pid: pid_t, _ signal: Int32) {
+            guard deletesPIDFileOnExit else { return }
+            try? FileManager.default.removeItem(atPath: pidFilePath)
+        }
+    }
+
+    private func runTakeOver(
+        pidFilePath: String,
+        predecessorPID: pid_t,
+        aliveForChecks: Int,
+        deletesPIDFileOnExit: Bool,
+        advances: Int
+    ) async throws -> HandoverClaim.Result {
+        let predecessor = ExitingPredecessor(
+            aliveForChecks: aliveForChecks, pidFilePath: pidFilePath,
+            deletesPIDFileOnExit: deletesPIDFileOnExit)
+        let clock = EventDrivenTestClock()
+        let claim = HandoverClaim(
+            pidFile: PIDFile(path: pidFilePath),
+            handover: DaemonHandover(
+                termBudget: .milliseconds(200), killBudget: .milliseconds(100),
+                pollInterval: .milliseconds(100),
+                sendSignal: predecessor.send, isLive: predecessor.isLive, clock: clock),
+            ownPID: 777)
+        let work = Task { try await claim.takeOver(from: predecessorPID) }
+        for _ in 0..<advances {
+            try await clock.requireAdvanceWhenArmed(by: .milliseconds(100))
+        }
+        return try await work.value
+    }
+
+    /// The first update on any machine: the running daemon predates this
+    /// change, so its `stop()` deletes the successor's pid file on the way out.
+    /// Without the re-assert the file names nobody, the app's poller sees no
+    /// socket and no live pid, and it spawns a second successor straight
+    /// through the gate.
+    @Test("a predecessor that deletes the pid file on exit does not take our claim with it")
+    func olderPredecessorDoesNotStealTheClaim() async throws {
+        let path = tmpPidPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try "4242".write(toFile: path, atomically: true, encoding: .utf8)
+
+        let result = try await runTakeOver(
+            pidFilePath: path, predecessorPID: 4242,
+            aliveForChecks: 1, deletesPIDFileOnExit: true, advances: 1)
+
+        #expect(result == .claimed(.exitedAfterTerm))
+        #expect(PIDFile(path: path).read() == 777,
+                "an older predecessor deleted the successor's claim on its way out")
+    }
+
+    /// A predecessor carrying `removeIfOwned` leaves the file alone, and the
+    /// re-assert is then a no-op write. Same end state, which is what makes it
+    /// safe to do unconditionally rather than probe the predecessor's vintage.
+    @Test("a predecessor that leaves the pid file alone ends in the same place")
+    func newerPredecessorEndsWithOurClaimToo() async throws {
+        let path = tmpPidPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try "4242".write(toFile: path, atomically: true, encoding: .utf8)
+
+        let result = try await runTakeOver(
+            pidFilePath: path, predecessorPID: 4242,
+            aliveForChecks: 1, deletesPIDFileOnExit: false, advances: 1)
+
+        #expect(result == .claimed(.exitedAfterTerm))
+        #expect(PIDFile(path: path).read() == 777)
+    }
+
+    /// The abort path still hands the claim back, and the re-assert must not
+    /// run ahead of it.
+    @Test("a predecessor that survives SIGKILL gets its claim back")
+    func survivingPredecessorGetsItsClaimBack() async throws {
+        let path = tmpPidPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try "4242".write(toFile: path, atomically: true, encoding: .utf8)
+
+        // Two polls inside the SIGTERM budget, one inside the SIGKILL one.
+        let result = try await runTakeOver(
+            pidFilePath: path, predecessorPID: 4242,
+            aliveForChecks: .max, deletesPIDFileOnExit: false, advances: 3)
+
+        #expect(result == .predecessorSurvived)
+        #expect(PIDFile(path: path).read() == 4242,
+                "the successor kept a claim on a daemon that is still serving")
     }
 
     // MARK: - Budget arithmetic

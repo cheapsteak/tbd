@@ -219,3 +219,78 @@ public struct DaemonHandover: Sendable {
         return max(1, Int((attos(budget) / intervalAttos).rounded(.down)))
     }
 }
+
+/// The pid-file choreography of a handover: claim, retire, re-assert.
+///
+/// Extracted from `Daemon.start()` so the sequence is reachable from a test.
+/// The branch it replaces sat between the single-instance gate and the socket
+/// bind, hundreds of lines apart, and could only be exercised by hand.
+public struct HandoverClaim: Sendable {
+    private let pidFile: PIDFile
+    private let handover: DaemonHandover
+    private let ownPID: pid_t
+
+    /// What the caller should do next.
+    public enum Result: Equatable, Sendable {
+        /// The predecessor is gone and the pid file names us. Carry on.
+        case claimed(DaemonHandover.Outcome)
+        /// The predecessor outlived `SIGKILL`. Its claim has been handed back
+        /// and the caller must not start.
+        case predecessorSurvived
+    }
+
+    public init(
+        pidFile: PIDFile,
+        handover: DaemonHandover = DaemonHandover(),
+        ownPID: pid_t = ProcessInfo.processInfo.processIdentifier
+    ) {
+        self.pidFile = pidFile
+        self.handover = handover
+        self.ownPID = ownPID
+    }
+
+    public func takeOver(from predecessor: pid_t) async throws -> Result {
+        // Claim first. With our pid in the file from this instant, every
+        // spurious spawn during the retirement — the app's two-second poller,
+        // a stray `restart.sh` — meets a file naming a live daemon and exits at
+        // the same gate we just came through.
+        try pidFile.write(pid: ownPID)
+        handoverLogger.info("handover: claimed the pid file from predecessor daemon \(predecessor, privacy: .public); retiring it now")
+
+        let outcome = await handover.retire(predecessor: predecessor)
+        if outcome == .stillAlive {
+            // Hand the claim back so the world is exactly as it was found: the
+            // file names the live predecessor, and nothing treats the daemon
+            // that is still serving as absent.
+            do {
+                try pidFile.write(pid: predecessor)
+            } catch {
+                handoverLogger.error("handover: could not restore predecessor daemon \(predecessor, privacy: .public)'s pid file claim: \(String(describing: error), privacy: .public)")
+            }
+            return .predecessorSurvived
+        }
+
+        // Re-assert the claim, because the predecessor may have deleted it on
+        // the way out.
+        //
+        // **This is for predecessors older than this change.** Their `stop()`
+        // ends with an unconditional `pidFile.remove()`, so a daemon built
+        // before `removeIfOwned` existed deletes OUR pid file as it exits — and
+        // the very first update on any machine is, by definition, handing over
+        // from exactly such a daemon. What follows is the failure the claim was
+        // supposed to prevent: no socket and no live pid, so the app's
+        // two-second poller spawns a daemon, which passes the gate because
+        // nothing owns the file, and now there are two successors. For a
+        // predecessor that carries `removeIfOwned` this write changes nothing —
+        // the file already names us — which is what makes it safe to do
+        // unconditionally rather than probe the predecessor's vintage.
+        //
+        // A third daemon could in principle claim the file between the
+        // predecessor's unlink and this write and have its claim overwritten
+        // here. That window is the retirement poll interval at most, against
+        // the app's two-second poll, and it is strictly narrower than the one
+        // this write closes.
+        try pidFile.write(pid: ownPID)
+        return .claimed(outcome)
+    }
+}

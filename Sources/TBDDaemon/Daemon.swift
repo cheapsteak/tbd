@@ -730,34 +730,21 @@ public final class Daemon: Sendable {
             daemonLogger.error("Another daemon is already running (PID \(existingPID, privacy: .public)). Exiting.")
             Foundation.exit(1)
         case let .takeOver(predecessor):
-            // 4. Write PID file — before the signal, not after.
-            try pidFile.write()
-            daemonLogger.info("handover: claimed the pid file from predecessor daemon \(predecessor, privacy: .public); retiring it now")
-            let outcome = await DaemonHandover().retire(predecessor: predecessor)
-            if outcome == .stillAlive {
-                // A predecessor that survived SIGKILL is not a predecessor we
-                // may start alongside. Nothing further down serves as a
-                // backstop — the socket bind is hundreds of lines away, and by
-                // then this process has already run startup reconciliation
-                // against `state.db`. Two daemons there means two writers and
-                // two reconcilers with different opinions about which sessions
-                // are alive, which is the failure the whole single-instance
-                // gate exists to prevent.
-                //
-                // Hand the pid file back before going, so the world is exactly
-                // as it was found: the file names the live predecessor, the
-                // gate stays shut for the app's poller and for any stray
-                // restart, and nothing treats the daemon that is still serving
-                // as absent.
-                do {
-                    try pidFile.write(pid: predecessor)
-                } catch {
-                    daemonLogger.error("handover: could not restore predecessor daemon \(predecessor, privacy: .public)'s pid file claim: \(String(describing: error), privacy: .public)")
-                }
+            // 4. Claim the pid file, retire the predecessor, re-assert the
+            // claim. See `HandoverClaim` for why each of the three steps is
+            // there.
+            switch try await HandoverClaim(pidFile: pidFile).takeOver(from: predecessor) {
+            case .predecessorSurvived:
+                // Nothing downstream is a backstop: the socket bind is
+                // hundreds of lines past startup reconciliation, so this
+                // process would already have run a second reconciler against
+                // `state.db`. Two writers there is the failure the whole
+                // single-instance gate exists to prevent.
                 daemonLogger.error("handover: predecessor daemon \(predecessor, privacy: .public) survived SIGKILL — restored its pid file claim and exiting rather than running a second writer on state.db")
                 Foundation.exit(1)
+            case let .claimed(outcome):
+                daemonLogger.info("handover: predecessor daemon \(predecessor, privacy: .public) retired (\(outcome.rawValue, privacy: .public)); continuing startup")
             }
-            daemonLogger.info("handover: predecessor daemon \(predecessor, privacy: .public) retired (\(outcome.rawValue, privacy: .public)); continuing startup")
         case .normal:
             // 4. Write PID file
             try pidFile.write()
