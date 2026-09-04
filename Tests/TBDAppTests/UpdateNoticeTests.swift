@@ -95,6 +95,18 @@ struct UpdateNoticeTests {
             == "A newer TBD is available. Run tbd update in a terminal.")
     }
 
+    // MARK: - The status-bar label
+
+    /// A build with no identity still shows something; one with an identity
+    /// shows the commit, which is the only part of "v0.1.0" that ever changes.
+    @Test func theStatusBarLabelCarriesTheCommitWhenThereIsOne() {
+        #expect(UpdateNotice.appVersionLabel(nil) == "v0.1.0")
+        #expect(UpdateNotice.appVersionLabel(Self.build) == "v0.1.0 (1111111)")
+        #expect(UpdateNotice.appVersionLabel(BuildIdentity(
+            commit: "d", shortCommit: "ddddddd", branch: "main", dirty: true))
+            == "v0.1.0 (ddddddd-dirty)")
+    }
+
     // MARK: - The Settings caption
 
     /// Three modes, three captions, each naming what the daemon will do. A

@@ -44,6 +44,16 @@ enum UpdateNotice {
         }
     }
 
+    /// What the status bar shows for the running app: `v0.1.0`, or
+    /// `v0.1.0 (abc1234)` once the build carries an identity.
+    ///
+    /// The commit is the version here — `TBDConstants.version` has been the
+    /// literal `0.1.0` since the first commit and says nothing on its own.
+    static func appVersionLabel(_ identity: BuildIdentity?) -> String {
+        guard let identity else { return "v\(TBDConstants.version)" }
+        return "v\(TBDConstants.version) (\(identity.displayCommit))"
+    }
+
     /// Caption under the Settings picker: what the chosen mode will actually do.
     ///
     /// A pure static presenter rather than three `.help(…)` strings inline, so

@@ -442,8 +442,21 @@ struct StatusBarView: View {
         )
     }
 
+    /// This app's own build identity, resolved once from the sidecar the
+    /// bundle assembly copies into `Contents/`, beside `SourceWorktreePath.txt`.
+    ///
+    /// Bundle-first, then the sibling of the executable, then the HEAD of the
+    /// worktree the executable sits inside — the same order every TBD binary
+    /// uses, and the reason the app can say which commit it is even though it
+    /// runs from `/Applications`.
+    static let buildIdentity: BuildIdentity? = BuildIdentityLoader.load(
+        executablePath: Bundle.main.executablePath,
+        bundleContentsPath: Bundle.main.bundleURL
+            .appendingPathComponent("Contents").path,
+        gitHead: BuildIdentityLoader.systemGitHead)
+
     private var footerLabel: (text: String, tooltip: String?) {
-        let version = "v\(TBDConstants.version)"
+        let version = UpdateNotice.appVersionLabel(Self.buildIdentity)
         guard let sourcePath = Self.sourceWorktreePath,
               let worktree = appState.worktrees.values.flatMap({ $0 }).first(where: { $0.localPath == sourcePath }) else {
             return (version, nil)
