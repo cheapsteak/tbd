@@ -389,12 +389,13 @@ struct HolderDetachHandbackTests {
         // assert nothing while looking correct.
         //
         // **Written repeatedly until it sticks**, which is a property of the
-        // view rather than a timing fudge: `TerminalView.resize(cols:rows:)`
-        // runs `terminal.softReset()`, and SwiftTerm defers a frame-driven
-        // resize to a later turn — so the view can wipe exactly this set
-        // (DECAWM, DECTCEM, IRM, the scroll region; not the mouse modes) after
-        // the session has set it. The loop is bounded and the assertion below
-        // is on the state that was actually observed.
+        // view rather than a timing fudge: SwiftTerm defers a frame-driven
+        // resize to a later turn, and `Buffer.resize` rebuilds the scroll
+        // region from the new geometry — `scrollTop = 0`, `scrollBottom =
+        // rows - 1` — so a resize landing after the session's DECSTBM wipes
+        // exactly the state the settle condition below checks for. The loop is
+        // bounded and the assertion below is on the state that was actually
+        // observed.
         var settled = false
         for _ in 0..<40 where !settled {
             fixture.sessionWrites(

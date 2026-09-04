@@ -2134,7 +2134,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             self?.performOutgoingWrite(data) ?? false
         }
 
-
         /// Delivers one chunk `outgoingQueue` has decided may go out now, and
         /// reports whether anything actually took it. Same two destinations
         /// `send(source:data:)` used before the queue existed —

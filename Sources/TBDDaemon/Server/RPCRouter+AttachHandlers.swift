@@ -405,11 +405,6 @@ extension RPCRouter {
         // the arm below with a holder row is not merely useless — it resolves
         // nothing and returns ok, which is exactly the silence that leaves a
         // closed tab's session claimed by a viewer that no longer exists.
-        // The holder branch, first and for the same reasons as on the attach:
-        // no tmux coordinates to resolve, and no tmux gate to consult. Reaching
-        // the arm below with a holder row is not merely useless — it resolves
-        // nothing and returns ok, which is exactly the silence that leaves a
-        // closed tab's session claimed by a viewer that no longer exists.
         if let terminalID = params.terminalID,
            let terminal = try? await db.terminals.get(id: terminalID),
            terminal.transport == .holder {
