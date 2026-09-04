@@ -31,7 +31,17 @@ export TBD_HOME="$TEST_TMP/tbd"
 mkdir -p "$TBD_HOME"
 # shellcheck source=/dev/null
 source "$SCRIPT"
+# main() sources this at run time; the function-level cases need it too.
+# shellcheck source=/dev/null
+source "$HERE/restart-bundle-lib.sh"
 OPT_AUTO=true   # keep the sourced log() out of the harness output
+
+# Nothing in this harness may signal a real process. The app stage resolves its
+# target from INSTALLED_BUNDLE, so point that at a scratch path for every case
+# and stub pkill/pgrep besides — a bare /Applications/TBD.app here would make
+# an anchored pkill match the developer's running app.
+INSTALLED_BUNDLE="$TEST_TMP/Applications/TBD.app"
+mkdir -p "$INSTALLED_BUNDLE/Contents/MacOS"
 
 FAIL=0
 pass() { echo "ok   - $1"; }
@@ -53,6 +63,16 @@ assert_eq() {
 
 assert_contains() {
     if printf '%s' "$3" | grep -q -- "$2"; then
+        pass "$1"
+    else
+        fail "$1: [$2] not found in output"
+    fi
+}
+
+# For output that is itself a regex — the anchored pkill pattern, say — where
+# grep's default BRE would reinterpret the very escapes under test.
+assert_contains_literal() {
+    if printf '%s' "$3" | grep -qF -- "$2"; then
         pass "$1"
     else
         fail "$1: [$2] not found in output"
@@ -160,6 +180,16 @@ EOF
     cat > "$bin/open" << 'EOF'
 #!/bin/sh
 printf 'open %s\n' "$*" >> "${FAKE_OPEN_LOG:-/dev/null}"
+EOF
+    cat > "$bin/pkill" << 'EOF'
+#!/bin/sh
+printf 'pkill %s\n' "$*" >> "${FAKE_KILL_LOG:-/dev/null}"
+exit 1
+EOF
+    cat > "$bin/pgrep" << 'EOF'
+#!/bin/sh
+printf 'pgrep %s\n' "$*" >> "${FAKE_KILL_LOG:-/dev/null}"
+exit 1
 EOF
     cat > "$bin/codesign" << 'EOF'
 #!/bin/sh
@@ -568,6 +598,44 @@ test_auto_logs_without_printing() {
 
 # Both branches of the wake opt-out, driven directly: --dry-run returns before
 # the wake stage, so a full run is not where this is observable.
+# Both branches of the app opt-out. The app stage runs after the handover, so a
+# full run is not where this is observable either.
+test_no_app_skips_the_relaunch() {
+    local bin out
+    bin="$TEST_TMP/no-app-bin"
+    mkstub_tbd "$bin"
+
+    out="$(
+        export PATH="$bin:$PATH" FAKE_OPEN_LOG="$TEST_TMP/no-app-open.log"
+        OPT_AUTO=false
+        OPT_NO_APP=true
+        run_app_stage
+    )"
+    assert_contains "--no-app says it is leaving the app alone" \
+        "leaving the running app alone" "$out"
+    if [ -f "$TEST_TMP/no-app-open.log" ]; then
+        fail "--no-app launches nothing"
+    else
+        pass "--no-app launches nothing"
+    fi
+
+    out="$(
+        export PATH="$bin:$PATH" FAKE_OPEN_LOG="$TEST_TMP/app-open.log" \
+            FAKE_KILL_LOG="$TEST_TMP/app-kill.log"
+        OPT_AUTO=false
+        OPT_NO_APP=false
+        run_app_stage
+    )"
+    assert_contains "without --no-app the app is restarted" "restarting the app" "$out"
+    assert_contains "without --no-app the bundle is launched with the PATH" \
+        "open --env PATH=" "$(cat "$TEST_TMP/app-open.log" 2>/dev/null)"
+    assert_contains "the launch targets the installed bundle" \
+        "$INSTALLED_BUNDLE" "$(cat "$TEST_TMP/app-open.log" 2>/dev/null)"
+    assert_contains_literal "the stop is anchored on the installed bundle's binary" \
+        "pkill -f ^$(escape_exec_pattern "$INSTALLED_BUNDLE/Contents/MacOS/TBDApp")\$" \
+        "$(cat "$TEST_TMP/app-kill.log" 2>/dev/null)"
+}
+
 test_no_wake_skips_the_stage() {
     local state out
     state="$TEST_TMP/no-wake-state"
@@ -880,6 +948,7 @@ test_debug_flag_selects_the_debug_configuration
 test_a_failed_build_stops_before_installing
 test_auto_logs_without_printing
 test_no_wake_skips_the_stage
+test_no_app_skips_the_relaunch
 test_wake_candidate_filter
 test_wake_batches_and_paces
 test_wake_counts_failures

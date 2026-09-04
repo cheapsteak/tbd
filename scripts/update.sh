@@ -441,6 +441,17 @@ handover() {
 
 # MARK: - The app
 
+# The app restart, with its opt-out. Separate from restart_app so both branches
+# are reachable from a test. A failed relaunch is logged, not fatal: the daemon
+# has already handed over and the app is only a viewer.
+run_app_stage() {
+    if [ "$OPT_NO_APP" = true ]; then
+        log "--no-app: leaving the running app alone"
+        return 0
+    fi
+    restart_app || true
+}
+
 restart_app() {
     local pattern pid
     pattern="$(escape_exec_pattern "$INSTALLED_BUNDLE/Contents/MacOS/TBDApp")"
@@ -806,11 +817,7 @@ main() {
 
     refresh_installed_cli "$build_dir/TBDCLI"
 
-    if [ "$OPT_NO_APP" = false ]; then
-        restart_app || true
-    else
-        log "--no-app: leaving the running app alone"
-    fi
+    run_app_stage
 
     run_wake_stage "$handover_started"
 
