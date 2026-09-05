@@ -12,6 +12,15 @@ import TBDShared
 /// transport escapes this because Claude Code can ask the tmux server whether
 /// the marker is ambient; the holder transport has no server to ask.
 ///
+/// TBD's own per-terminal exports carry the same hazard onto TBD's own
+/// surfaces: an inherited `TBD_TERMINAL_INCARNATION_ID` names the launcher's
+/// process lifetime, so the guard in `TerminalStore.applySessionStart` rejects
+/// the job's hooks and the session gets no id, no transcript path and no
+/// activity. TERM is the one name that is *pinned* rather than passed through
+/// or dropped — the tmux path gives every pane `xterm-256color`, and the holder
+/// path must hand the job the same terminal type rather than whichever emulator
+/// the daemon happened to be restarted from.
+///
 /// The composed environment is asserted as a **whole dictionary**, not searched
 /// for the absence of the names that leaked. Pinning the composition means an
 /// over-eager scrub (dropping `PATH`, `SHELL`, or a user's own Claude Code
@@ -19,17 +28,21 @@ import TBDShared
 @Suite("Holder job environment")
 struct HolderJobEnvironmentTests {
     /// Everything a job legitimately inherits: the machine's own environment,
-    /// plus Claude Code *configuration* a user may deliberately set in their
-    /// login environment. None of this describes the enclosing session.
+    /// plus Claude Code and TBD *configuration* a user or installation may
+    /// deliberately set. None of this describes the enclosing session.
     private static let kept: [String: String] = [
         "PATH": "/usr/bin:/bin",
         "HOME": "/Users/example",
         "SHELL": "/bin/zsh",
-        "TERM": "xterm-256color",
         "LANG": "en_US.UTF-8",
         "CLAUDE_CONFIG_DIR": "/tmp/example-profile/claude",
         "CLAUDE_CODE_USE_BEDROCK": "1",
+        "TBD_HOME": "/tmp/example-tbd-home",
     ]
+
+    /// Not inherited and not dropped: handed to the job outright, matching what
+    /// the tmux server's `default-terminal` gives every pane.
+    private static let pinned: [String: String] = ["TERM": "xterm-256color"]
 
     /// Every marker, given a value distinctive enough that a failure message
     /// says which one survived.
@@ -38,8 +51,12 @@ struct HolderJobEnvironmentTests {
             (name, "enclosing-session-value-for-\(name)")
         })
 
+    /// The markers, plus a TERM naming some other terminal emulator — the value
+    /// a daemon restarted outside a tmux pane would otherwise pass on.
     private static var daemonEnvironment: [String: String] {
-        kept.merging(markers) { _, marker in marker }
+        kept
+            .merging(markers) { _, marker in marker }
+            .merging(["TERM": "xterm-ghostty"]) { _, launcherTerm in launcherTerm }
     }
 
     private static func launch(sensitiveEnv: [String: String]) -> HolderLaunchRequest {
@@ -56,7 +73,7 @@ struct HolderJobEnvironmentTests {
     @Test func theJobDoesNotInheritTheEnclosingSessionsMarkers() {
         let request = Self.launch(sensitiveEnv: [:])
 
-        #expect(request.environment == Self.kept)
+        #expect(request.environment == Self.kept.merging(Self.pinned) { _, pin in pin })
 
         // The shell invocation is unchanged in shape — `SHELL` is read from the
         // same environment, so an over-broad scrub would show up here as a
@@ -75,11 +92,15 @@ struct HolderJobEnvironmentTests {
         ]
         let request = Self.launch(sensitiveEnv: sensitiveEnv)
 
-        #expect(request.environment == Self.kept.merging(sensitiveEnv) { _, decided in decided })
+        let expected = Self.kept
+            .merging(Self.pinned) { _, pin in pin }
+            .merging(sensitiveEnv) { _, decided in decided }
+        #expect(request.environment == expected)
     }
 
     @Test func anUnmarkedEnvironmentPassesThroughUnchanged() {
-        #expect(HolderJobEnvironment.inheriting(Self.kept) == Self.kept)
+        let base = Self.kept.merging(Self.pinned) { _, pin in pin }
+        #expect(HolderJobEnvironment.inheriting(base) == base)
     }
 
     /// Pinned by name so adding or removing one is a visible, reviewed change
@@ -95,8 +116,36 @@ struct HolderJobEnvironmentTests {
             "CLAUDE_CODE_BRIDGE_SESSION_ID",
             "CLAUDE_CODE_EXECPATH",
             "CLAUDE_PID",
+            "AI_AGENT",
+            "CLAUDE_EFFORT",
+            "TRACEPARENT",
+            "TBD_TERMINAL_ID",
+            "TBD_TERMINAL_INCARNATION_ID",
+            "TBD_WORKTREE_ID",
+            "TBD_CLI_PATH",
+            "TBD_EVENT",
+            "TBD_WORKTREE_NAME",
+            "TBD_WORKTREE_PATH",
+            "TBD_REPO_PATH",
+            "TBD_BRANCH",
             "TMUX",
             "TMUX_PANE",
         ])
+    }
+
+    /// A daemon the app launched itself has no TERM at all, so passing the base
+    /// through would leave the job's reader guessing.
+    @Test func aDaemonWithNoTERMStillGivesTheJobOne() {
+        #expect(
+            HolderJobEnvironment.inheriting(Self.kept)
+                == Self.kept.merging(Self.pinned) { _, pin in pin })
+    }
+
+    /// The pin is part of the inherited base, so a spawn that deliberately asks
+    /// for a different terminal type still wins.
+    @Test func aSpawnMayStillChooseItsOwnTERM() {
+        let request = Self.launch(sensitiveEnv: ["TERM": "screen-256color"])
+
+        #expect(request.environment["TERM"] == "screen-256color")
     }
 }

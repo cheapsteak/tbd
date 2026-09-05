@@ -167,16 +167,23 @@ bytes the other reader never sees).
 - **Environment and launch parameters.** The session's environment (including
   `envOverrides`) is applied at spawn by the daemon and passed through the
   holder to the child, replacing today's tmux `-e` delivery. The base it is
-  applied over is the daemon's own environment with the enclosing Claude Code
-  session's identity variables and the enclosing tmux pane's coordinates
-  removed: a daemon restarted from inside an agent session exports that
-  session's identity, and a Claude Code that inherits `CLAUDE_CODE_CHILD_SESSION`
-  reads itself as a nested child — no peer-registry row and no transcript. The
-  tmux transport escapes that because Claude Code treats a marker found in the
-  tmux server's global environment as ambient, and this transport has no tmux
-  server for that probe to ask. The holder
-  retains the launch request and replays it on demand, so a re-adopting
-  daemon can reconstruct what is running without trusting the database.
+  applied over is the daemon's own environment with the identity of whatever
+  launched it removed — the enclosing Claude Code session's variables, TBD's
+  own per-terminal exports, and the enclosing tmux pane's coordinates — while
+  installation-wide configuration such as `TBD_HOME` keeps flowing: a daemon
+  restarted from inside an agent session exports that session's identity, and
+  a Claude Code that inherits `CLAUDE_CODE_CHILD_SESSION` reads itself as a
+  nested child — no peer-registry row and no transcript. The tmux transport
+  escapes that because Claude Code treats a marker found in the tmux server's
+  global environment as ambient, and this transport has no tmux server for
+  that probe to ask. On TBD's own side the load-bearing name is the terminal
+  incarnation id: the SessionStart guard compares it against a fresh row that
+  has none, so an inherited one costs the job its session id, its transcript
+  path and its activity updates. `TERM` is pinned to the value tmux gives a
+  pane rather than inherited, since it describes the terminal the job draws
+  into and not the launcher. The holder retains the launch request and replays
+  it on demand, so a re-adopting daemon can reconstruct what is running
+  without trusting the database.
 - **Binary.** A new small SPM executable target. No copying the binary out of
   the build tree: a running holder's executable image survives rebuilds and
   build-directory reclamation (iTerm2 copies its server binary only because
