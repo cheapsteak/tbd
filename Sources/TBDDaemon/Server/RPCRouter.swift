@@ -713,6 +713,10 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetRemoteDeleteEnabled(request.paramsData)
             case RPCMethod.configSetHolderRowReconcileEnabled:
                 return try await handleConfigSetHolderRowReconcileEnabled(request.paramsData)
+            case RPCMethod.configSetProfileBalancingEnabled:
+                return try await handleConfigSetProfileBalancingEnabled(request.paramsData)
+            case RPCMethod.configSetLimitRotationEnabled:
+                return try await handleConfigSetLimitRotationEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -840,7 +844,9 @@ public final class RPCRouter: Sendable {
             claudeCloudEnabled: config.claudeCloudEnabled,
             claudeCloudLive: claudeCloudLive,
             remoteDeleteEnabled: config.remoteDeleteEnabled,
-            updateMode: config.updateMode))
+            updateMode: config.updateMode,
+            profileBalancingEnabled: config.profileBalancingEnabled,
+            limitRotationEnabled: config.limitRotationEnabled))
     }
 
     // MARK: - PR Status

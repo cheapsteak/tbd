@@ -138,6 +138,23 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.holderRowReconcileEnabledDefault`, never through
     /// `?? false`.
     var holder_row_reconcile_enabled: Bool?
+    /// Gate for profile balancing across multiple Claude accounts. When enabled,
+    /// new sessions land on the eligible profile with the most room, adjusted for
+    /// live session count (design 2026-09-05 §6). **Genuinely tri-state**, same
+    /// shape as `gc_retained_transcripts_enabled`: the
+    /// `20260905080315_config_profile_balancing` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.profileBalancingEnabledDefault`, never through
+    /// `?? false`.
+    var profile_balancing_enabled: Bool?
+    /// Gate for automatic account rotation when a session hits a hard usage
+    /// limit. When enabled, the session is resumed on another account with room,
+    /// in the same tab (design 2026-09-05 §7.2). **Genuinely tri-state**, same
+    /// shape as `gc_retained_transcripts_enabled`: the
+    /// `20260905080316_config_limit_rotation` migration carries no SQL default,
+    /// so `nil` here means "never chose" rather than "off". Resolve it through
+    /// `Config.limitRotationEnabledDefault`, never through `?? false`.
+    var limit_rotation_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -211,6 +228,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   parameter proves both properties at once: a NULL row follows a changed
     ///   shipped default, and a string this build does not recognise resolves
     ///   the same way rather than to a hardcoded `.off`.
+    /// - Parameter profileBalancingDefault: same shape again, for
+    ///   `profile_balancing_enabled` — the launch policy's soak gate.
+    /// - Parameter limitRotationDefault: same shape again, for
+    ///   `limit_rotation_enabled` — the account rotation on hard limit's soak
+    ///   gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -226,7 +248,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault,
         gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault,
         holderRowReconcileDefault: Bool = Config.holderRowReconcileEnabledDefault,
-        updateModeDefault: UpdateMode = Config.updateModeDefault
+        updateModeDefault: UpdateMode = Config.updateModeDefault,
+        profileBalancingDefault: Bool = Config.profileBalancingEnabledDefault,
+        limitRotationDefault: Bool = Config.limitRotationEnabledDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -312,6 +336,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // resolves to the shipped default rather than silently arming a
             // mode this build cannot run.
             updateMode: update_mode.flatMap(UpdateMode.init(rawValue:)) ?? updateModeDefault,
+            // Profile balancing gate — NOT `?? false`.
+            profileBalancingEnabled: profile_balancing_enabled ?? profileBalancingDefault,
+            // Limit rotation gate — NOT `?? false`.
+            limitRotationEnabled: limit_rotation_enabled ?? limitRotationDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
             // Passed straight through, NULL included: "not yet minted" is a
             // real state and has no default to resolve to.
@@ -825,6 +853,34 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET holder_row_reconcile_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the profile balancing gate (default OFF, soaking) — the launch
+    /// policy that spreads new sessions across the profiles with the most room
+    /// (design 2026-09-05 §6). The column is written on every call, because
+    /// writing either value is the explicit gesture that lifts it out of NULL
+    /// forever after.
+    public func setProfileBalancingEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET profile_balancing_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the limit rotation gate (default OFF, soaking) — automatic
+    /// account rotation when a session hits a hard usage limit (design
+    /// 2026-09-05 §7.2). The column is written on every call, because writing
+    /// either value is the explicit gesture that lifts it out of NULL forever
+    /// after.
+    public func setLimitRotationEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET limit_rotation_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

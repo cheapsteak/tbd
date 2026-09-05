@@ -1,0 +1,11 @@
+-- Gate for automatic account rotation when a session hits a hard usage limit.
+-- When enabled, the session is resumed on another account with room, in the
+-- same tab (design 2026-09-05 §7.2). Default OFF during soak.
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" (0) — which is what made auto_hibernate_enabled impossible to
+-- graduate without a forcing UPDATE that also reset deliberate opt-ins.
+-- The shipped default lives in exactly one place:
+-- Config.limitRotationEnabledDefault.
+ALTER TABLE config ADD COLUMN limit_rotation_enabled INTEGER;
