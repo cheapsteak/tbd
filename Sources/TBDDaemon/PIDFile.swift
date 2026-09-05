@@ -64,22 +64,26 @@ public struct PIDFile: Sendable {
 
     /// Remove a stale pid file. **The socket file is deliberately left alone.**
     ///
-    /// Removing it here buys nothing: the only thing that needs the rendezvous
-    /// path free is `bind(2)`, and `SocketServer.start()` clears the path
-    /// itself immediately before binding — on every path that gets that far,
-    /// including this one.
-    ///
-    /// What it can cost is a live daemon's rendezvous. A pid file reads as
-    /// stale whenever the pid it names is not a live `TBDDaemon`, and a
-    /// successor daemon writes its pid file (step 4 of `Daemon.start()`) well
+    /// What removing it here can cost is a live daemon's rendezvous. A pid file
+    /// reads as stale whenever the pid it names is not a live `TBDDaemon`, and
+    /// a successor daemon writes its pid file (step 4 of `Daemon.start()`) well
     /// before it binds the socket, so "stale pid, live socket" is a state the
     /// path really passes through. Deleting the socket there leaves the
-    /// successor accepting on a listener no client can reach, and nothing
-    /// restores the path until this daemon reaches its own bind — the whole of
-    /// a startup later, or never, if that startup throws first.
+    /// successor accepting on a listener no client can reach.
     ///
-    /// Clearing the rendezvous path is the act of whoever is about to bind it,
-    /// and of nobody else. See `SocketServer.unlinkSocketFile(ifStillIdentity:)`.
+    /// What it buys, against that, is bounded. The only thing that needs the
+    /// rendezvous path free is `bind(2)`, and `SocketServer.start()` clears the
+    /// path itself immediately before binding — but this runs at step 2 of
+    /// `Daemon.start()` and that bind is hundreds of lines later, with plenty
+    /// of `throw`s in between, so it is not true that the bind always
+    /// eventually runs. A startup that fails first can leave a stale socket
+    /// file behind.
+    ///
+    /// It is left anyway, because an unbound socket file behaves to a client
+    /// exactly like a missing one — `connect(2)` fails either way — while an
+    /// unlinked live one silently strands a working daemon. Clearing the
+    /// rendezvous path is the act of whoever is about to bind it, and of
+    /// nobody else. See `SocketServer.unlinkSocketFile(ifStillIdentity:)`.
     public func cleanupIfStale() {
         if isStale() {
             remove()

@@ -25,16 +25,20 @@ public final class SocketServer: Sendable {
     /// `unlinkOwnedSocketFile()`.
     ///
     /// Only ever read through `takeBoundSocketIdentity()`, which reads and
-    /// clears it under `identityLock`. Nothing serializes callers of `stop()`:
-    /// SIGTERM and SIGINT each fire an independent, undeduplicated
-    /// `Task { await daemon.stop() }` in `main.swift`, so two shutdowns can
-    /// overlap. A plain read-then-nil lets both see the same identity and both
-    /// reach the unlink, and the loser of that race is unlinking against a
-    /// path a successor may have taken over in between — the very thing the
-    /// identity exists to prevent. Taking it atomically means exactly one
-    /// shutdown ever holds a claim on the file.
+    /// clears it under `identityLock`. `stop()` runs its body once, so in
+    /// practice one shutdown reaches the claim — but the claim also races the
+    /// tail of `start()`, which stores the identity from whichever task ran
+    /// the bind. A plain read-then-nil would let a claimant see a half-written
+    /// claim, and a claimant that comes away with an identity goes on to
+    /// unlink against it. Reading and clearing under the lock keeps that
+    /// atomic.
     private nonisolated(unsafe) var boundSocketIdentity: SocketFileIdentity?
     private let identityLock = NSLock()
+
+    /// Keeps the shutdown to one run, however many `stop()` calls arrive. See
+    /// `ShutdownLatch` for why a second run would hang rather than merely
+    /// repeat itself.
+    private let shutdownLatch = ShutdownLatch()
 
     /// Runs in `start()` between `bind(2)` and NIO adopting the bound
     /// descriptor, and may throw to fail the start from inside that window.
@@ -52,15 +56,15 @@ public final class SocketServer: Sendable {
     private let beforeAdoptingBoundSocket: (@Sendable (Int32) async throws -> Void)?
 
     /// Runs inside `takeBoundSocketIdentity()`, after the identity is read and
-    /// before it is cleared — the window two overlapping shutdowns race for.
+    /// before it is cleared, and is handed what the claimant came away with.
     /// `nil` in production.
     ///
-    /// That window is a few instructions wide, so no test can land inside it
-    /// by timing alone; holding it open here is what makes the race
-    /// reproducible. Under `identityLock` a second claimant waits outside the
-    /// window instead of reading the same identity, which is exactly what the
-    /// test measures.
-    private let duringIdentityClaim: (@Sendable () -> Void)?
+    /// It serves two tests. Counting the non-`nil` identities it is handed is
+    /// how "the socket file was claimed exactly once" is observed from inside
+    /// a real `stop()`, which has no other outward sign. And the read-and-clear
+    /// window is a few instructions wide, so no test can land inside it by
+    /// timing alone; blocking here holds it open so contention is reproducible.
+    private let duringIdentityClaim: (@Sendable (SocketFileIdentity?) -> Void)?
 
     /// Number of currently connected clients. Updated atomically.
     private let _connectedClients = ManagedAtomic<Int>(0)
@@ -81,7 +85,7 @@ public final class SocketServer: Sendable {
         router: RPCRouter,
         socketPath: String?,
         beforeAdoptingBoundSocket: (@Sendable (Int32) async throws -> Void)?,
-        duringIdentityClaim: (@Sendable () -> Void)? = nil
+        duringIdentityClaim: (@Sendable (SocketFileIdentity?) -> Void)? = nil
     ) {
         self.router = router
         // See HookResolver — resolve here, not at the caller's site.
@@ -168,15 +172,19 @@ public final class SocketServer: Sendable {
         logger.info("Listening on \(self.socketPath, privacy: .public)")
     }
 
-    /// Stop the server and clean up.
+    /// Stop the server and clean up. Safe to call any number of times, from
+    /// any number of tasks at once: the body below runs once and every caller
+    /// returns only when it has finished. See `ShutdownLatch`.
     public func stop() async {
-        do {
-            try await channel?.close()
-        } catch {
-            // Already closed
+        await shutdownLatch.run {
+            do {
+                try await self.channel?.close()
+            } catch {
+                // Already closed
+            }
+            try? await self.group.shutdownGracefully()
+            self.unlinkOwnedSocketFile()
         }
-        try? await group.shutdownGracefully()
-        unlinkOwnedSocketFile()
     }
 
     /// Create an `AF_UNIX` stream socket and `bind(2)` it at `path`, returning
@@ -225,14 +233,9 @@ public final class SocketServer: Sendable {
     }
 
     /// Reclaim the socket file this server bound, if it is still there and
-    /// still ours. The claim is taken exactly once, so a second shutdown —
-    /// sequential or concurrent — finds nothing to claim and does nothing.
-    ///
-    /// Internal rather than private so a test can run this step twice without
-    /// running `stop()` twice: NIO's `shutdownGracefully` never completes when
-    /// the group is already shut down, so a second `stop()` suspends forever.
-    /// This is the step a second shutdown would reach.
-    func unlinkOwnedSocketFile() {
+    /// still ours. The claim is taken exactly once, so anything that reaches
+    /// this a second time finds nothing to claim and does nothing.
+    private func unlinkOwnedSocketFile() {
         guard let bound = takeBoundSocketIdentity() else {
             // Never bound, or already claimed by another shutdown. Nothing
             // here is ours.
@@ -256,12 +259,14 @@ public final class SocketServer: Sendable {
     /// Internal rather than private so a test can call it concurrently and
     /// count the claimants: "at most one" is the whole guarantee, and it is
     /// not observable from the outside once the losers have correctly done
-    /// nothing.
+    /// nothing. `stop()` no longer runs twice, so this lock is the second line
+    /// of that defence rather than the first — it still stands between a
+    /// shutdown and the `start()` that is storing the claim.
     func takeBoundSocketIdentity() -> SocketFileIdentity? {
         identityLock.lock()
         defer { identityLock.unlock() }
         let claimed = boundSocketIdentity
-        duringIdentityClaim?()
+        duringIdentityClaim?(claimed)
         boundSocketIdentity = nil
         return claimed
     }

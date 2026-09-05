@@ -163,7 +163,7 @@ struct SocketServerSocketOwnershipTests {
         let claimants = 8
         let atCallSite = DispatchSemaphore(value: 0)
         let windowIsHeld = FirstArrivalFlag()
-        let claimWindow: @Sendable () -> Void = {
+        let claimWindow: @Sendable (SocketFileIdentity?) -> Void = { _ in
             guard windowIsHeld.takeFirst() else { return }
             for _ in 0..<(claimants - 1) { atCallSite.wait() }
             usleep(50_000)
@@ -187,7 +187,7 @@ struct SocketServerSocketOwnershipTests {
             }
         }
         #expect(
-            await waitUntil({ finished.count == claimants }, timeout: .seconds(30)),
+            await waitUntil({ finished.count == claimants }, timeout: .seconds(15)),
             "the claimant threads never finished"
         )
         #expect(
@@ -198,22 +198,92 @@ struct SocketServerSocketOwnershipTests {
         await server.stop()
     }
 
-    @Test("a second reclaim after a successor took over claims nothing")
-    func repeatReclaimLeavesTheSuccessorAlone() async throws {
+    @Test("two overlapping shutdowns both finish, and the socket file is claimed once")
+    func overlappingStopsBothFinishAndClaimTheFileOnce() async throws {
         let socketPath = scratchSocketPath()
         defer { unlink(socketPath) }
 
-        // The file-level half of the claim-once guarantee: the first shutdown
-        // reclaims the file this server bound, and the reclaim step a second
-        // shutdown would run must find nothing left to claim.
-        //
-        // `unlinkOwnedSocketFile()` rather than a second `stop()`, and
-        // `takeBoundSocketIdentity()` rather than overlapping `stop()` calls in
-        // the test above, for the same reason: NIO's `shutdownGracefully` never
-        // completes when the group is already shut down, so a second `stop()`
-        // suspends its task forever with no thread left to show for it. The
-        // contested step in production is the claim, and that is what these
-        // tests contend for.
+        // The real path this branch exists to survive. SIGTERM and SIGINT each
+        // fire an independent, undeduplicated `Task { await daemon.stop() }` in
+        // main.swift, both reach `SocketServer.stop()` through `Daemon.stop()`,
+        // and a supervisor escalating signals sends both. Running the shutdown
+        // body twice hangs rather than merely repeating: `channel.close()` off
+        // the event loop is `eventLoop.execute { ... }` fulfilling a promise,
+        // and a loop whose group has shut down discards submitted work, so the
+        // promise is never fulfilled. Both `stop()` calls must return, and the
+        // socket file must be claimed once — a second claimant would go on to
+        // unlink against a path a successor may hold by then.
+        // The overlap is staged rather than hoped for, and staged at the point
+        // that is actually dangerous: the second caller enters `stop()` while
+        // the first is at its reclaim step — past `shutdownGracefully()`, so
+        // the event loop is already gone. Two `stop()` calls that merely start
+        // together are not this case, because both get their `channel.close()`
+        // in while the loop is still alive; that ordering survives even
+        // without the fix, so a test built on it proves nothing.
+        let claims = ClaimCounter()
+        let firstShutdownIsAtTheReclaimStep = DispatchSemaphore(value: 0)
+        let secondCallerHasArrived = DispatchSemaphore(value: 0)
+        let holdTheFirstShutdown = FirstArrivalFlag()
+        let claimWindow: @Sendable (SocketFileIdentity?) -> Void = { identity in
+            if identity != nil { claims.increment() }
+            guard holdTheFirstShutdown.takeFirst() else { return }
+            firstShutdownIsAtTheReclaimStep.signal()
+            _ = secondCallerHasArrived.wait(timeout: .now() + 10)
+            // Covers the hop between the second caller reaching `stop()` and
+            // `stop()` reaching the latch, so the first shutdown is still
+            // in flight when it gets there.
+            usleep(50_000)
+        }
+
+        let server = SocketServer(
+            router: try makeRouter(),
+            socketPath: socketPath,
+            beforeAdoptingBoundSocket: nil,
+            duringIdentityClaim: claimWindow
+        )
+        try await server.start()
+        #expect(inode(of: socketPath) != nil)
+
+        // Detached and waited on with a deadline rather than gathered in a
+        // task group: the failure under test is a shutdown that never returns,
+        // and a task group would wedge the whole run alongside it instead of
+        // reporting it.
+        let finished = ClaimCounter()
+        Task.detached {
+            await server.stop()
+            finished.increment()
+        }
+        // On its own thread so the bounded wait cannot occupy a cooperative
+        // pool thread the first shutdown may need.
+        Thread.detachNewThread {
+            _ = firstShutdownIsAtTheReclaimStep.wait(timeout: .now() + 10)
+            secondCallerHasArrived.signal()
+            Task.detached {
+                await server.stop()
+                finished.increment()
+            }
+        }
+
+        #expect(
+            await waitUntil({ finished.count == 2 }, timeout: .seconds(15)),
+            "only \(finished.count) of 2 overlapping stop() calls returned; a shutdown is wedged"
+        )
+        #expect(
+            claims.count == 1,
+            "\(claims.count) of the overlapping shutdowns came away owning the socket file; exactly one may"
+        )
+        #expect(inode(of: socketPath) == nil, "the overlapping shutdowns left the socket file behind")
+    }
+
+    @Test("a second shutdown after a successor took over leaves the successor alone")
+    func repeatStopLeavesTheSuccessorAlone() async throws {
+        let socketPath = scratchSocketPath()
+        defer { unlink(socketPath) }
+
+        // The sequential half of the same guarantee, and the case a signal
+        // escalation actually produces most often: SIGTERM shuts the server
+        // down, a successor daemon binds the rendezvous path, and SIGINT then
+        // runs a second `stop()`. It must return, and it must claim nothing.
         let server = SocketServer(router: try makeRouter(), socketPath: socketPath)
         try await server.start()
 
@@ -225,10 +295,18 @@ struct SocketServerSocketOwnershipTests {
         successor.takeOver(path: socketPath)
         let successorInode = try #require(successor.inode)
 
-        server.unlinkOwnedSocketFile()
+        let secondStopReturned = ClaimCounter()
+        Task.detached {
+            await server.stop()
+            secondStopReturned.increment()
+        }
+        #expect(
+            await waitUntil({ secondStopReturned.count == 1 }, timeout: .seconds(15)),
+            "the second stop() never returned"
+        )
         #expect(
             inode(of: socketPath) == successorInode,
-            "a repeat reclaim deleted the successor's socket"
+            "a repeat shutdown deleted the successor's socket"
         )
     }
 

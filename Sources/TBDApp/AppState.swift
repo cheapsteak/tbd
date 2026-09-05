@@ -2970,12 +2970,24 @@ final class AppState {
             // The socket file is deliberately left where it is. Clearing the
             // rendezvous path is the job of whoever is about to bind it, and
             // the daemon spawned below does exactly that in its own
-            // `SocketServer.start()` — so removing it here adds nothing when
-            // the pid file really is stale, and deletes a live daemon's socket
-            // when it is stale only because a successor has already bound and
-            // has not rewritten the pid file yet. That successor would keep
-            // accepting on a listener no client can reach, with nothing to
-            // restore the path if the spawn below then fails.
+            // `SocketServer.start()`.
+            //
+            // What removing it here can cost is a live daemon's rendezvous:
+            // the pid file reads as stale for as long as a successor has bound
+            // the socket without having rewritten the pid file yet, and
+            // deleting the socket there leaves that successor accepting on a
+            // listener no client can reach.
+            //
+            // What it buys, against that, is bounded. It is not true that the
+            // bind below always eventually runs: this method returns early
+            // when no TBDDaemon binary is found and when `process.run()`
+            // throws, and even on the spawned path `Daemon.start()` can throw
+            // between its own pid-file cleanup and the socket bind hundreds of
+            // lines later. So a stale socket file can outlive this branch. It
+            // is left anyway, because an unbound socket file behaves to a
+            // client exactly like a missing one — `connect(2)` fails either
+            // way — while an unlinked live one silently strands a working
+            // daemon.
             logger.warning("""
             Stale daemon pid file: pid \(pid, privacy: .public) is not a live \
             TBDDaemon — removing the pid file before spawning

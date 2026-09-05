@@ -18,6 +18,13 @@ public final class HTTPServer: Sendable {
     private let group: MultiThreadedEventLoopGroup
     private nonisolated(unsafe) var channel: Channel?
 
+    /// Keeps the shutdown to one run, however many `stop()` calls arrive.
+    /// `Daemon.stop()` is not deduplicated and this server is torn down right
+    /// after `SocketServer`, so an escalated SIGTERM-then-SIGINT reaches it
+    /// twice; a second run would wedge here instead and the shutdown would
+    /// never reach its `exit(0)`. See `ShutdownLatch`.
+    private let shutdownLatch = ShutdownLatch()
+
     /// The port the server is bound to, available after start().
     public nonisolated(unsafe) var port: Int = 0
 
@@ -60,15 +67,18 @@ public final class HTTPServer: Sendable {
         logger.info("Listening on http://127.0.0.1:\(self.port, privacy: .public)")
     }
 
-    /// Stop the server and clean up.
+    /// Stop the server and clean up. Safe to call any number of times, from
+    /// any number of tasks at once.
     public func stop() async {
-        do {
-            try await channel?.close()
-        } catch {
-            // Already closed
+        await shutdownLatch.run {
+            do {
+                try await self.channel?.close()
+            } catch {
+                // Already closed
+            }
+            try? await self.group.shutdownGracefully()
+            try? FileManager.default.removeItem(atPath: self.portFilePath)
         }
-        try? await group.shutdownGracefully()
-        try? FileManager.default.removeItem(atPath: portFilePath)
     }
 }
 
