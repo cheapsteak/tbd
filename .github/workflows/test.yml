@@ -591,13 +591,322 @@ jobs:
         # the step is not quiet at all, defeating its entire purpose. With the
         # flag they run strictly one at a time (24 s). Serial execution on an
         # idle machine IS this step; do not "optimize" the flag away.
+        #
+        # The pty (`script -q /dev/null`) is what makes this step's log arrive
+        # in real time. On the serial path SwiftPM relays the test binary's
+        # output through `print($0, terminator: "")` on its own stdout
+        # (`SwiftTestCommand.runTestProducts`). `scripts/test.sh` runs
+        # `scripts/swift-safe` with no pipe of its own and `swift-safe`
+        # `os.execv`s `swift`, so whatever this step hands the script becomes
+        # SwiftPM's stdout directly. Piping into `tee` makes that stdout a pipe,
+        # and C stdio then fully buffers it in 16 KB blocks (a pipe's
+        # `st_blksize` on macOS). This pass emits roughly 16 KB per minute, so
+        # the log lagged the run by about a minute and was cut at an arbitrary
+        # byte boundary: runs 33797806278 (stalled) and 33787142345 (green) both
+        # stopped at exactly byte 16384, mid-way through the same
+        # `keepsTheReaderForAJobThatIsStillRunning()` line. The last line a
+        # wedged step showed was the buffer boundary, not the hung test. The
+        # fast passes only look real-time because they emit 16 KB a second.
+        # A pty makes SwiftPM's stdout a terminal, so C stdio line-buffers it
+        # and every line lands as it is produced. The pty translates `\n` to
+        # `\r\n`, which is harmless both to the runner log and to the
+        # `grep -oE 'Test run with [0-9]+ tests?'` floor check below. `script`
+        # propagates the child's exit status, `< /dev/null` guarantees nothing
+        # ever waits on the pty for input, and `TERM=dumb` keeps SwiftPM's build
+        # progress line-oriented instead of cursor-rewriting animations.
+        #
+        # The watchdog exists because GitHub's step timeout leaves no evidence.
+        # A stall here is a thread blocked somewhere no Swift Testing time limit
+        # can reach, so the step timeout is the only bound, and being killed by
+        # it records nothing about which test or which frame. So the pipeline
+        # runs in the background and a loop watches it: a healthy pass takes
+        # about 2 minutes (`Test run with 179 tests in 37 suites passed after
+        # 116.847 seconds`), the budget is six times that, and it lands three
+        # minutes short of `timeout-minutes` so sampling and artifact upload
+        # have room.
+        #
+        # On expiry the whole machine's process listing is written first and
+        # unconditionally. The runner is single-tenant, so that listing is both
+        # the record of the fixture's holder, tmux and job processes and the way
+        # we learn what anything is really called. The processes to sample are
+        # then found structurally, by descending the pipeline subshell's own
+        # tree with `pgrep -P`, and never by name: a CI probe of this watchdog
+        # matched `pgrep -x TBDPackageTests` against a live pass and
+        # found nothing, because the swift-testing binary does not run under its
+        # bundle name. A name match fails silently — it samples nothing and
+        # reports success at having collected nothing — whereas a tree walk
+        # finds whatever the pipeline actually spawned. The test binary is
+        # picked out of those descendants by matching `swiftpm-testing`,
+        # `xctest` or `TBDPackageTests` anywhere in the full argv from
+        # `ps -o command=`, not against a name: SwiftPM's
+        # `TestRunner.args(forTestAt:)` runs a swift-testing bundle as
+        # `<toolchain>/swiftpm-testing-helper --test-bundle-path <bundle> …
+        # --testing-library swift-testing` and an XCTest bundle as
+        # `<toolchain>/xctest <bundle>`, so the process executing the tests is
+        # the helper and never carries the bundle's own name — and the kernel
+        # truncates `p_comm` to 15 characters, which would render the helper as
+        # `swiftpm-testing` anyway. Matching unanchored against argv — read
+        # with `-ww` so ps never clips the long toolchain path — sidesteps both
+        # the truncation and the path prefix. When no descendant matches, every
+        # descendant that is not known plumbing
+        # (`script`, the shells, `tee`, `sleep`, python, `swift-safe`) is worth
+        # a stack, and the list is short enough that sampling all of them costs
+        # nothing. `/usr/bin/sample` — part of macOS, present on the runner
+        # image — captures every thread's stack of each target, and only then
+        # are those pids killed, by the pid we captured. Five seconds of it, at
+        # sample's 1 ms interval, is what it takes to show a blocked thread's
+        # stack unambiguously: a parked thread looks identical in every sample
+        # so a longer capture buys nothing, while a shorter one risks reading a
+        # scheduler blip as the stall — and symbolicating the ~200 MB debug
+        # helper still finishes well inside the three-minute margin. The 30 s
+        # between SIGTERM and SIGKILL is likewise sized to a job: it is what
+        # `scripts/test.sh`'s EXIT trap gets to run its tmux `kill-server` sweep
+        # and fence checks, generous against the few seconds those take and
+        # still inside that same margin.
         # timeout-minutes so a wedged tmux test can't eat the job's 6 h default.
         timeout-minutes: 15
         run: |
           set -o pipefail
-          scripts/test.sh --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel \
-            --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure \
-            2>&1 | tee /tmp/quiet-pass.log
+          stall_budget_seconds=720
+          rm -f /tmp/quiet-pass.rc
+          (
+            # This subshell's only job is to run the pipeline and record its
+            # status, so errexit is wrong here: on a red run it would abort the
+            # subshell before the `echo` below and discard the very status we
+            # came to capture (a real failure, or swift-safe's 75/76).
+            set +e
+            TERM=dumb script -q /dev/null scripts/test.sh --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel \
+              --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure \
+              < /dev/null 2>&1 | tee /tmp/quiet-pass.log
+            echo "${PIPESTATUS[0]}" > /tmp/quiet-pass.rc
+          ) &
+          pipeline=$!
+          waited=0
+          while kill -0 "$pipeline" 2>/dev/null && [ "$waited" -lt "$stall_budget_seconds" ]; do
+            sleep 5
+            waited=$((waited + 5))
+          done
+          # Collect a process tree by parent pid, so targets are found by
+          # lineage from the pipeline rather than by executable name.
+          descendants() {
+            local parent="$1" child
+            for child in $(pgrep -P "$parent" || true); do
+              echo "$child"
+              descendants "$child"
+            done
+          }
+          if kill -0 "$pipeline" 2>/dev/null; then
+            echo "::error::Quiet pass has been running for ${stall_budget_seconds}s and is being sampled before it is killed."
+            {
+              echo "=== whole-machine process listing at stall (budget ${stall_budget_seconds}s) ==="
+              ps -ww -axo pid,ppid,pgid,stat,%cpu,etime,comm,command || true
+            } > /tmp/quiet-pass-stall-ps.txt
+            kids=$(descendants "$pipeline" || true)
+            {
+              echo
+              echo "=== descendants of the pipeline subshell (pid $pipeline) ==="
+            } >> /tmp/quiet-pass-stall-ps.txt
+            if [ -n "$kids" ]; then
+              kid_list=$(printf '%s\n' "$kids" | paste -sd, -)
+              ps -ww -o pid,ppid,pgid,stat,%cpu,etime,comm,command -p "$kid_list" >> /tmp/quiet-pass-stall-ps.txt || true
+            else
+              echo "(none)" >> /tmp/quiet-pass-stall-ps.txt
+            fi
+            # Both selection paths below take at most `sample_target_cap`
+            # processes, in walk order (parents before children, so SwiftPM's
+            # driver comes ahead of the compiler processes it spawns — in a stall
+            # during compilation the driver's own stack is the more informative
+            # one). A match count is not a process count: during compilation the
+            # bundle path `.build/<triple>/debug/TBDPackageTests.build/…` appears
+            # in the argv of every concurrent compiler process, so the argv match
+            # can select a dozen at once, and at ~5 s of serial sampling each
+            # that would eat the 180 s margin and leave the step to be killed by
+            # `timeout-minutes` after all. Whatever a cap drops is recorded in
+            # the ps file, and the whole-machine listing written above still
+            # names every matching process, so nothing disappears from the
+            # artifact — only from the sampling.
+            #
+            # Measured on a probe of the fallback path with the argv match
+            # disabled (run 33902144920): three of the four slots used —
+            # SwiftPM's `swift-test` driver at 87 KB, `swiftpm-testing-helper` at
+            # 796 KB symbolicated, and a fixture `TBDHolder` that exited
+            # mid-sample and was reported as failed — and the whole expiry path,
+            # from the whole-machine ps through the tree walk, the three serial
+            # samples and the SIGTERM sweep to the step exiting, took 42 s.
+            sample_target_cap=4
+            targets=""
+            primary_taken=0
+            primary_skipped=0
+            for pid in $kids; do
+              argv=$(ps -ww -o command= -p "$pid" 2>/dev/null || true)
+              case "$argv" in
+                *swiftpm-testing*|*xctest*|*TBDPackageTests*) ;;
+                *) continue ;;
+              esac
+              if [ "$primary_taken" -lt "$sample_target_cap" ]; then
+                targets="$targets $pid"
+                primary_taken=$((primary_taken + 1))
+              else
+                primary_skipped=$((primary_skipped + 1))
+              fi
+            done
+            if [ "$primary_skipped" -gt 0 ]; then
+              echo "(primary sampling capped at $sample_target_cap targets; $primary_skipped further candidates skipped)" >> /tmp/quiet-pass-stall-ps.txt
+            fi
+            if [ -z "$targets" ]; then
+              fallback_taken=0
+              fallback_skipped=0
+              for pid in $kids; do
+                comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+                case "${comm##*/}" in
+                  ""|script|bash|sh|tee|sleep|Python|python3|swift-safe) continue ;;
+                esac
+                if [ "$fallback_taken" -lt "$sample_target_cap" ]; then
+                  targets="$targets $pid"
+                  fallback_taken=$((fallback_taken + 1))
+                else
+                  fallback_skipped=$((fallback_skipped + 1))
+                fi
+              done
+              if [ "$fallback_skipped" -gt 0 ]; then
+                echo "(fallback sampling capped at $sample_target_cap targets; $fallback_skipped further candidates skipped)" >> /tmp/quiet-pass-stall-ps.txt
+              fi
+            fi
+            if [ -z "$targets" ]; then
+              echo "The pipeline has no sampleable descendants — /tmp/quiet-pass-stall-ps.txt carries the whole-machine listing instead."
+            else
+              {
+                echo
+                echo "=== sampled processes ==="
+              } >> /tmp/quiet-pass-stall-ps.txt
+              for pid in $targets; do
+                ps -ww -o pid,comm,command -p "$pid" >> /tmp/quiet-pass-stall-ps.txt || true
+                sample "$pid" 5 -mayDie -file "/tmp/quiet-pass-stall-sample-$pid.txt" || echo "sample $pid failed"
+              done
+              for pid in $targets; do
+                kill -KILL "$pid" 2>/dev/null || true
+              done
+            fi
+            # The sampled targets were SIGKILLed the moment their stacks were
+            # captured — they are wedged, and the sweep below is the graceful
+            # pass, for the plumbing that can still clean up after itself — so
+            # they are filtered out of every order built from here on. Even
+            # though `kill` on a dead pid is harmless, signalling one is inert at
+            # best and reaches whatever reused the number at worst.
+            is_target() {
+              local needle="$1" candidate
+              for candidate in $targets; do
+                if [ "$candidate" = "$needle" ]; then
+                  return 0
+                fi
+              done
+              return 1
+            }
+            is_direct_child() {
+              local needle="$1" child
+              for child in $direct_children; do
+                if [ "$child" = "$needle" ]; then
+                  return 0
+                fi
+              done
+              return 1
+            }
+            # The order is built from a walk taken at the moment it is needed
+            # rather than from any earlier snapshot: sampling several targets
+            # takes 20 s or more and the grace window below is another 30 s, so
+            # a list captured before either would miss whatever the pipeline
+            # spawned in the meantime.
+            #
+            # `tee` is a direct child of the subshell and owns the far end of
+            # the log pipe, so anything still writing when `tee` dies writes to
+            # a closed pipe — and the EXIT trap's cleanup output is exactly what
+            # the log wants. The order is therefore built explicitly rather than
+            # by reversing the walk. The walk is preorder — `script`, then all
+            # of script's subtree, then the sibling `tee` — so a plain reversal
+            # would signal `tee` first, precisely backwards. Instead: everything
+            # below the direct children goes first (that subset reversed, so
+            # deepest-first), then the direct children other than `tee`, then
+            # `tee`.
+            build_kill_order() {
+              local pid comm remaining="" deeper_first="" direct_others="" tee_pids=""
+              kids=$(descendants "$pipeline" || true)
+              for pid in $kids; do
+                if is_target "$pid"; then
+                  continue
+                fi
+                remaining="$remaining $pid"
+              done
+              kids="$remaining"
+              direct_children=$(pgrep -P "$pipeline" || true)
+              for pid in $kids; do
+                if is_direct_child "$pid"; then
+                  continue
+                fi
+                deeper_first="$pid $deeper_first"
+              done
+              for pid in $direct_children; do
+                comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+                case "${comm##*/}" in
+                  tee) tee_pids="$tee_pids $pid" ;;
+                  *) direct_others="$direct_others $pid" ;;
+                esac
+              done
+              kill_order="$deeper_first $direct_others $tee_pids"
+            }
+            # Take the pipeline down within a bounded 30 s instead of leaving
+            # `wait` to block until `timeout-minutes` fires — the very outcome
+            # this budget exists to avoid. Killing the sampled targets is not
+            # enough on its own: with no targets found nothing has been killed
+            # at all, and even when the helper dies its parents (`script`,
+            # `swift-test`, `scripts/test.sh`) can outlive it. SIGTERM goes
+            # first so `scripts/test.sh`'s EXIT trap still runs its tmux and
+            # fence cleanup.
+            build_kill_order
+            for pid in $kill_order; do
+              kill -TERM "$pid" 2>/dev/null || true
+            done
+            teardown_waited=0
+            while kill -0 "$pipeline" 2>/dev/null && [ "$teardown_waited" -lt 30 ]; do
+              sleep 1
+              teardown_waited=$((teardown_waited + 1))
+            done
+            if kill -0 "$pipeline" 2>/dev/null; then
+              # The escalation rebuilds the order instead of reusing the one the
+              # SIGTERM sweep signalled: that grace window is exactly when the
+              # EXIT trap runs, and its tmux and fence cleanup spawns processes
+              # of its own that the earlier order knows nothing about.
+              build_kill_order
+              for pid in $kill_order; do
+                kill -KILL "$pid" 2>/dev/null || true
+              done
+              kill -KILL "$pipeline" 2>/dev/null || true
+            fi
+            wait "$pipeline" || true
+            exit 1
+          fi
+          wait "$pipeline" || true
+          rc=$(cat /tmp/quiet-pass.rc 2>/dev/null || echo 1)
+          # An unreadable status fails closed, the same way the floor below
+          # guards its own empty `count`: the `|| echo 1` covers only a missing
+          # file, and a writer that died mid-write leaves an empty or
+          # non-numeric one, on which `[ "$rc" -ne 0 ]` errors — and an erroring
+          # `if` condition reads as false, letting a failed run walk on to the
+          # floor check as though it had succeeded.
+          case "$rc" in
+            ''|*[!0-9]*)
+              echo "::error::Quiet pass left no readable exit status (got '$rc'); treating the run as failed."
+              exit 1 ;;
+          esac
+          # The status comes first: it is the pipeline's own verdict and has to
+          # reach the job untouched — a build error, an early crash, or
+          # swift-safe's 75 and 76 all log fewer than 35 tests, and reporting
+          # them through the floor's message would both misdiagnose them and
+          # flatten them to a generic 1. The floor only means anything for a run
+          # that claims to have succeeded.
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Quiet pass exited $rc"
+            exit "$rc"
+          fi
           # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
           # with no summary line makes the first `grep` exit 1 and a failing
           # command substitution in an assignment kills the shell — so the
@@ -609,6 +918,18 @@ jobs:
             exit 1
           fi
           echo "Quiet pass executed $count tests."
+
+      # `ignore`, not the `warn` its neighbours use: a green run deliberately
+      # produces no stall files, so absence here is the normal case rather than
+      # a sign that the wiring broke.
+      - name: Upload quiet-pass stall diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quiet-pass-stall-diagnostics
+          path: /tmp/quiet-pass-stall-*.txt
+          if-no-files-found: ignore
+          retention-days: 14
 
       # `warn`, not `ignore`: an absent file means the metrics wiring broke, and
       # that must be visible rather than silently producing an empty dashboard.
