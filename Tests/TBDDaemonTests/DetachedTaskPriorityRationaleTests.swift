@@ -20,16 +20,26 @@ import Testing
 /// to re-examine whether executor injection was the right remedy — never to
 /// relax the assertion until it passes.
 ///
-/// No sleeps and no polls: each probe is one task creation and one `await` on
-/// its value.
+/// **Why the probes report through a continuation rather than through
+/// `await task.value`.** Awaiting a task is precisely the dependency the
+/// runtime escalates on: a lower-priority task awaited by a higher-priority one
+/// is boosted to the awaiter's priority, so a value read *inside* the awaited
+/// body can never come back lower than the awaiter's — the assertion below
+/// could not pass on any scheduler, and its red would prove nothing. So each
+/// probe records `Task.currentPriority` as its **first** statement into a
+/// lock-guarded box and resumes a continuation the test is parked on. A
+/// continuation is not a task dependency, so nothing is escalated, and the
+/// reading is the priority the task was actually created at. The probe still
+/// runs promptly because a tier-1 test creating one task at a time does not
+/// saturate the pool.
 ///
-/// **One caveat the diagnostic names too, because it changes what a red
-/// means.** Awaiting a lower-priority task escalates it, so the value read
-/// inside a probe could in principle be an escalated one rather than the
-/// priority the task was created at. That would make an equal-priority
-/// observation an artefact of the measurement rather than a refutation of the
-/// claim. It cannot make a *lower* observation spurious, which is the direction
-/// the assertion runs in.
+/// No sleeps and no polls: each probe is one task creation and one continuation
+/// resume.
+///
+/// The second test is here so the file is not one big hypothesis: it pins a
+/// relationship that is certainly true (`Task { }` inherits its creator's
+/// priority), measured through the same apparatus, so an apparatus that has
+/// silently stopped measuring anything cannot look identical to a working one.
 @Suite("Detached-task priority rationale")
 struct DetachedTaskPriorityRationaleTests {
 
@@ -49,45 +59,114 @@ struct DetachedTaskPriorityRationaleTests {
         var description: String {
             """
             a Task.detached did NOT run below the test body that created it. \
-            Observed: test body \(Self.render(body)); Task { } \(Self.render(child)); \
-            Task.detached { } \(Self.render(detached)); \
-            gateHoldingTask { } \(Self.render(gateHolding)). \
+            Observed: test body \(renderPriority(body)); Task { } \(renderPriority(child)); \
+            Task.detached { } \(renderPriority(detached)); \
+            gateHoldingTask { } \(renderPriority(gateHolding)). \
             The rationale for ShutdownLatch(executor:) — in Tests/CLAUDE.md under \
             "Thread-blocking gates run off the cooperative pool" and in gateHoldingTask's \
             doc comment in Tests/TestSupport/BoundedGateSupport.swift — asserts detached < body \
             and must be corrected around these numbers rather than this test being relaxed. \
-            Note before concluding: awaiting a task escalates its priority, so an EQUAL \
-            reading may be the measurement rather than the scheduler.
+            Each reading is the probe's first statement, reported over a continuation rather \
+            than awaited, so none of them can be an escalated value.
             """
         }
+    }
 
-        static func render(_ priority: TaskPriority) -> String {
-            "\(name(priority)) (rawValue \(priority.rawValue))"
-        }
+    /// The control measurement: a `Task { }` must run at its creator's priority.
+    private struct ChildDidNotInheritBodyPriority: Error, CustomStringConvertible {
+        let body: TaskPriority
+        let child: TaskPriority
 
-        /// `TaskPriority` prints as its raw value alone, which is unreadable in
-        /// a failure line.
-        static func name(_ priority: TaskPriority) -> String {
-            switch priority {
-            case .high: return "high/userInitiated"
-            case .medium: return "medium"
-            case .low: return "low/utility"
-            case .background: return "background"
-            default: return "unnamed"
-            }
+        var description: String {
+            """
+            a Task { } did NOT inherit the priority of the test body that created it. \
+            Observed: test body \(renderPriority(body)); Task { } \(renderPriority(child)). \
+            This is the control for the detached-priority measurement in this file: \
+            unstructured child tasks inherit their creating task's priority, so a \
+            mismatch here means the apparatus — a first-statement read reported over a \
+            continuation — is measuring something other than creation priority, and the \
+            detached reading next to it cannot be trusted either.
+            """
         }
     }
+
+    // MARK: - Apparatus
+
+    /// A one-shot rendezvous between a probe task and the parked test body.
+    ///
+    /// Deliberately a lock-guarded class rather than an actor: the probe must
+    /// report from its *first* statement, with no suspension between entering
+    /// the task and reading `Task.currentPriority`.
+    private final class PriorityProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<TaskPriority, Never>?
+
+        /// Hand over the continuation before the probe task exists, so the
+        /// probe can never find the box empty.
+        func park(_ continuation: CheckedContinuation<TaskPriority, Never>) {
+            lock.lock()
+            defer { lock.unlock() }
+            self.continuation = continuation
+        }
+
+        /// Resume the parked test exactly once; a second call is a no-op.
+        func report(_ priority: TaskPriority) {
+            lock.lock()
+            let parked = continuation
+            continuation = nil
+            lock.unlock()
+            parked?.resume(returning: priority)
+        }
+    }
+
+    /// The priority observed by a task created by `start`, which is handed the
+    /// reporting closure its task body must call as its first statement.
+    private func observedPriority(
+        startingProbe start: (@escaping @Sendable () -> Void) -> Void
+    ) async -> TaskPriority {
+        let probe = PriorityProbe()
+        return await withCheckedContinuation { continuation in
+            probe.park(continuation)
+            start { probe.report(Task.currentPriority) }
+        }
+    }
+
+    // MARK: - Tests
 
     @Test("a Task.detached runs below the test task that created it")
     func detachedRunsBelowTheCreatingTestTask() async throws {
         let body = Task.currentPriority
-        let child = await Task { Task.currentPriority }.value
-        let detached = await Task.detached { Task.currentPriority }.value
-        let gateHolding = await gateHoldingTask { Task.currentPriority }.value
+        let child = await observedPriority { report in Task { report() } }
+        let detached = await observedPriority { report in Task.detached { report() } }
+        let gateHolding = await observedPriority { report in _ = gateHoldingTask { report() } }
 
         guard detached.rawValue < body.rawValue else {
             throw DetachedPriorityNotBelowBody(
                 body: body, child: child, detached: detached, gateHolding: gateHolding)
         }
     }
+
+    @Test("a Task { } inherits the priority of the test task that created it")
+    func childInheritsTheCreatingTestTaskPriority() async throws {
+        let body = Task.currentPriority
+        let child = await observedPriority { report in Task { report() } }
+
+        guard child == body else {
+            throw ChildDidNotInheritBodyPriority(body: body, child: child)
+        }
+    }
+}
+
+/// `TaskPriority` prints as its raw value alone, which is unreadable in a
+/// failure line.
+private func renderPriority(_ priority: TaskPriority) -> String {
+    let name: String
+    switch priority {
+    case .high: name = "high/userInitiated"
+    case .medium: name = "medium"
+    case .low: name = "low/utility"
+    case .background: name = "background"
+    default: name = "unnamed"
+    }
+    return "\(name) (rawValue \(priority.rawValue))"
 }
