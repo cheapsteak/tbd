@@ -197,6 +197,18 @@ lock_holder_pid() {
 # clobber the first, and both would then build and install against the same
 # clone.
 #
+# True when a takeover mutex directory is old enough to be suspect and its
+# creator is gone. Never true for a young directory, and never true while the
+# pid in `owner` is still running.
+takeover_mutex_is_abandoned() {
+    local dir="${1-}" owner
+    [ -d "$dir" ] || return 1
+    [ -n "$(find "$dir" -maxdepth 0 -mmin +1 2>/dev/null)" ] || return 1
+    owner="$(head -1 "$dir/owner" 2>/dev/null | tr -dc '0-9')"
+    [ -z "$owner" ] && return 0
+    ! kill -0 "$owner" 2>/dev/null
+}
+
 # Taking over a stale lock has two requirements the create alone cannot meet,
 # and each gets its own atomic primitive.
 #
@@ -216,11 +228,14 @@ lock_holder_pid() {
 # inside the section, so a lock that turned live in the meantime is refused
 # rather than stolen. Runs that lose the mkdir go back to the create.
 #
-# An abandoned mutex must not deadlock every later run. The critical section is
-# a read and a rename, so it lasts milliseconds; a `<lock>.takeover` directory
-# older than a minute belonged to a run that died inside it and is removed
-# before the mkdir is attempted.
-#
+# An abandoned mutex must not deadlock every later run, and a live one must
+# never be taken from under its holder. The directory records its creator's
+# pid in `owner` the instant it exists, and is reclaimed only when it is older
+# than a minute AND that pid is gone (or was never written, which is a run
+# that died between the mkdir and the write). The critical section is a read
+# and a rename, so a minute is generous — but a holder stalled inside it by a
+# suspended machine or a hung filesystem still owns the section for as long
+# as its process lives.
 # The create itself IS the decision for the ordinary path. Under `set -C` bash
 # opens the redirection target with O_EXCL, so of any number of runs starting
 # at once — a manual `tbd update` racing the daemon's auto-launch — exactly one
@@ -258,11 +273,11 @@ acquire_lock() {
         fi
 
         # Stale: a dead pid, or garbage with no pid in it at all. Reclaim a
-        # mutex left behind by a run that died mid-takeover. `find -mmin` is
-        # the portable age test; BSD and GNU `stat` disagree on their flags.
-        if [ -d "$takeover_dir" ] &&
-            [ -n "$(find "$takeover_dir" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
-            rmdir "$takeover_dir" 2>/dev/null || true
+        # mutex left behind by a run that died mid-takeover: old by `find
+        # -mmin` (the portable age test; BSD and GNU `stat` disagree on their
+        # flags) and with a creator that is no longer running.
+        if takeover_mutex_is_abandoned "$takeover_dir"; then
+            rm -rf "$takeover_dir" 2>/dev/null || true
         fi
         # Losing the mutex means another run is replacing the lock right now.
         # Give it a moment and go back to the create, which is what decides.
@@ -270,22 +285,23 @@ acquire_lock() {
             sleep 0.1
             continue
         fi
+        printf '%s\n' "$$" > "$takeover_dir/owner" 2>/dev/null || true
 
         # Inside the critical section. Re-read: the lock we judged stale may
         # have been replaced by the run that held the mutex before us.
         holder="$(lock_holder_pid "$UPDATE_LOCK")"
         if [ ! -f "$UPDATE_LOCK" ]; then
             # Released rather than replaced. The create is the way in.
-            rmdir "$takeover_dir" 2>/dev/null || true
+            rm -rf "$takeover_dir" 2>/dev/null || true
             continue
         fi
         if [ "$holder" = "$$" ]; then
-            rmdir "$takeover_dir" 2>/dev/null || true
+            rm -rf "$takeover_dir" 2>/dev/null || true
             UPDATE_LOCK_HELD=true
             return 0
         fi
         if lock_is_live "$UPDATE_LOCK"; then
-            rmdir "$takeover_dir" 2>/dev/null || true
+            rm -rf "$takeover_dir" 2>/dev/null || true
             log_error "another update is already running (pid $holder). Its log is $UPDATE_LOG"
             return 1
         fi
@@ -301,10 +317,10 @@ acquire_lock() {
         if ! printf '%s\n' "$$" > "$tmp_lock" 2>/dev/null ||
             ! mv "$tmp_lock" "$UPDATE_LOCK" 2>/dev/null; then
             rm -f "$tmp_lock"
-            rmdir "$takeover_dir" 2>/dev/null || true
+            rm -rf "$takeover_dir" 2>/dev/null || true
             continue
         fi
-        rmdir "$takeover_dir" 2>/dev/null || true
+        rm -rf "$takeover_dir" 2>/dev/null || true
         UPDATE_LOCK_HELD=true
         return 0
     done

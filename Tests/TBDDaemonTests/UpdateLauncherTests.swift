@@ -137,11 +137,20 @@ struct UpdateLauncherTests {
         // A real script, run by a real shell: `launch` refuses a plan whose
         // script is not an executable file, and that guard is worth keeping
         // honest here rather than working around.
+        // The child waits for a go-file between its two lines rather than
+        // sleeping: the test's append has to land in that gap, and a loaded CI
+        // runner can deschedule the test for longer than any sleep. The wait
+        // is bounded so a child nobody releases still exits.
+        let goFile = temp.appendingPathComponent("go")
         let script = temp.appendingPathComponent("emit-two-lines.sh")
         try """
             #!/bin/sh
             echo 'child-line-1'
-            sleep 0.3
+            i=0
+            while [ ! -e '\(goFile.path)' ] && [ "$i" -lt 3000 ]; do
+                sleep 0.1
+                i=$((i + 1))
+            done
             echo 'child-line-2'
             """.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
@@ -166,6 +175,7 @@ struct UpdateLauncherTests {
         try appender.seekToEnd()
         try appender.write(contentsOf: Data("daemon-line\n".utf8))
         try appender.close()
+        try Data().write(to: goFile)
 
         try await waitForLog(logPath, toContain: "child-line-2")
 
@@ -179,9 +189,11 @@ struct UpdateLauncherTests {
 
     /// Bounded poll with a deadline, per the tier-2 synchronization rule. The
     /// child is detached, so its exit is not awaitable here — the log is the
-    /// observable, and it is the one under test anyway.
+    /// observable, and it is the one under test anyway. The deadline is sized
+    /// for a CI runner under load, where a child can wait tens of seconds to
+    /// be scheduled at all; it is a ceiling, not a duration the test spends.
     private func waitForLog(
-        _ path: String, toContain needle: String, within limit: Duration = .seconds(20)
+        _ path: String, toContain needle: String, within limit: Duration = .seconds(120)
     ) async throws {
         let deadline = ContinuousClock().now.advanced(by: limit)
         var observed = ""

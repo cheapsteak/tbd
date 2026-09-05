@@ -1095,7 +1095,11 @@ actor DaemonClient {
     }
 
     /// Ask the daemon to run one update check now and answer with the result.
-    /// Read-only: one `git ls-remote`. Runs whatever `update_mode` says,
+    ///
+    /// In `auto` mode this is not merely a question: a check that finds the
+    /// build behind launches the same unattended `update.sh --auto` the hourly
+    /// timer would, exactly once per newly seen commit. In `off` and `check`
+    /// it is one `git ls-remote` and nothing moves. It runs in every mode,
     /// because an explicit question is not what that flag gates.
     func checkForUpdate() async throws -> UpdateStatus {
         return try await callNoParamsAsync(

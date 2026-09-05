@@ -570,6 +570,8 @@ test_an_abandoned_takeover_mutex_is_reclaimed() {
     dead=$(( ($$ + 100000) % 60000 + 2 ))
     while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
     printf '%s\n' "$dead" > "$home/update.lock"
+    # The creator recorded itself and then died.
+    printf '%s\n' "$dead" > "$home/update.lock.takeover/owner"
 
     if ! backdate_ten_minutes "$home/update.lock.takeover"; then
         fail "backdating a path needs a date that speaks BSD or GNU relative times"
@@ -587,6 +589,72 @@ test_an_abandoned_takeover_mutex_is_reclaimed() {
     assert_contains "an abandoned takeover mutex does not block the next run" "rc=0" "$out"
     assert_eq "and the stale lock is taken over" "$$" "$(lock_holder_pid "$home/update.lock")"
     assert_no_lock_debris "and the reclaimed mutex is gone" "$home"
+}
+
+# Age alone is not abandonment. A holder stalled inside the critical section
+# by a suspended machine or a hung filesystem still owns it for as long as its
+# process lives, and taking the mutex from under it would let two runs replace
+# the lock at once — the race the mutex exists to prevent.
+test_an_old_takeover_mutex_with_a_live_owner_is_kept() {
+    local home dead out
+    home="$TEST_TMP/takeover-stalled/updates"
+    mkdir -p "$home/update.lock.takeover"
+    dead=$(( ($$ + 100000) % 60000 + 2 ))
+    while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+    printf '%s\n' "$dead" > "$home/update.lock"
+    # This very process is the stalled holder.
+    printf '%s\n' "$$" > "$home/update.lock.takeover/owner"
+
+    if ! backdate_ten_minutes "$home/update.lock.takeover"; then
+        fail "backdating a path needs a date that speaks BSD or GNU relative times"
+        return
+    fi
+
+    out="$(
+        UPDATE_HOME="$home"
+        UPDATE_LOCK="$home/update.lock"
+        UPDATE_LOG="$home/update.log"
+        OPT_AUTO=true
+        acquire_lock 2>/dev/null
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "an old mutex whose owner still runs refuses this run" "rc=1" "$out"
+    assert_eq "and the stale lock is not clobbered" "$dead" \
+        "$(lock_holder_pid "$home/update.lock")"
+    if [ -d "$home/update.lock.takeover" ]; then
+        pass "and the stalled holder keeps its mutex"
+    else
+        fail "and the stalled holder keeps its mutex"
+    fi
+    assert_eq "with its owner record intact" "$$" \
+        "$(cat "$home/update.lock.takeover/owner")"
+}
+
+# A mutex whose creator died between the mkdir and writing its pid has no
+# owner record at all; old and ownerless is abandoned.
+test_an_old_ownerless_takeover_mutex_is_reclaimed() {
+    local home dead out
+    home="$TEST_TMP/takeover-ownerless/updates"
+    mkdir -p "$home/update.lock.takeover"
+    dead=$(( ($$ + 100000) % 60000 + 2 ))
+    while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+    printf '%s\n' "$dead" > "$home/update.lock"
+
+    if ! backdate_ten_minutes "$home/update.lock.takeover"; then
+        fail "backdating a path needs a date that speaks BSD or GNU relative times"
+        return
+    fi
+
+    out="$(
+        UPDATE_HOME="$home"
+        UPDATE_LOCK="$home/update.lock"
+        UPDATE_LOG="$home/update.log"
+        OPT_AUTO=true
+        acquire_lock 2>/dev/null
+        printf 'rc=%s\n' "$?"
+    )"
+    assert_contains "an old ownerless mutex is reclaimed" "rc=0" "$out"
+    assert_no_lock_debris "and nothing of it remains" "$home"
 }
 
 # The other half of the same rule: a mutex young enough to belong to a live
@@ -1535,6 +1603,8 @@ test_simultaneous_acquire_lock_admits_exactly_one
 test_stale_lock_takeover_leaves_no_debris
 test_stale_lock_takeover_refuses_a_lock_that_turned_live
 test_an_abandoned_takeover_mutex_is_reclaimed
+test_an_old_takeover_mutex_with_a_live_owner_is_kept
+test_an_old_ownerless_takeover_mutex_is_reclaimed
 test_a_fresh_takeover_mutex_refuses_the_run
 test_remote_resolution_order
 test_source_worktree_resolution
