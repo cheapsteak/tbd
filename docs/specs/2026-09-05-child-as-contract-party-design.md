@@ -128,9 +128,15 @@ stale (`2026-08-30-pty-holder-session-transport-design.md:548-553`).
   type's construction, not by each render site remembering to — a row that
   would contain a control character is a bug in the projection, and the
   constructor refuses it rather than shipping it.
-- **`cursor: (row, column)`** – in viewport coordinates, plus whether it is
-  visible. The login driver and the pending-input rail both reason about
-  where the cursor sits.
+- **`viewportStart: Int`** – the index in `lines` of the viewport's first
+  row. Everything before it is scrollback. Carried explicitly because it
+  cannot be derived: trailing blank rows are dropped, so `lines.count` is not
+  `scrollback + size.rows`, and a consumer that subtracted would land in the
+  wrong row.
+- **`cursor: (row, column)`** – in viewport coordinates, so `lines[viewportStart
+  + cursor.row]` is the cursor's line when that row survived trimming; plus
+  whether the cursor is visible. The login driver and the pending-input rail
+  both reason about where the cursor sits.
 - **`size: (columns, rows)`** – the grid the lines were rendered from. A
   consumer that compares against the pty's own size can see a grid that
   disagrees with the child.
@@ -142,8 +148,16 @@ stale (`2026-08-30-pty-holder-session-transport-design.md:548-553`).
   pull), or `staleDaemon` (a viewer holds the pty, did not answer, and this is
   the daemon's emulator as it stood at attach). A consumer's policy is keyed
   on this field, so the policy cannot be applied by accident.
-- **`age`** – how long ago the answering store last consumed a byte from the
-  pty, so "stale" is a number rather than an adjective.
+- **`age`** – how long ago the answering store's emulator last consumed a
+  byte from the pty, so "stale" is a number rather than an adjective. One
+  rule for every source: for `daemon` and `viewer` it is the live store's
+  last byte and is ordinarily near zero; for `staleDaemon` it is the daemon
+  emulator's last byte, which is at or before the attach — not the attach
+  itself, since a session that went quiet before its viewer arrived is older
+  than the attach makes it look. A store that has never consumed a byte
+  reports the age of the store itself, counted from its adoption, so the
+  field is never absent and a fresh, silent session reads as exactly as old
+  as it is.
 - **`output: String`** – the lines joined with `\n`, kept for one reason:
   scripts and skills read `tbd terminal output` today and the CLI prints it.
   It is derived from `lines` and carries no information of its own.
@@ -165,8 +179,12 @@ design builds is the pull the model has always required.
 - **Viewer as reader** – the daemon asks the app for the screen over the FD
   sidecar, which already carries daemon-originated frames with an app answer
   (`injection` / `injectionAck`, `SidecarFraming.swift:30-31`). Two frame
-  types join them: `screenRequest`, naming the session and the line depth, and
-  `screenReply`, carrying the typed screen. Adding a case is cheap in both
+  types join them: `screenRequest`, naming the session, the line depth and a
+  fresh `requestID`, and `screenReply`, carrying the typed screen under that
+  same id. The id is what keeps a late answer from being taken for a current
+  one: a reply whose request has expired or been superseded is counted and
+  dropped, never applied to a later pull — the same late-answer discipline
+  the courier keeps for injection acks. Adding a case is cheap in both
   directions — a peer built before the case existed skips the frame and logs
   it (`SidecarFraming.swift:19-24`) — so an old app simply never answers and
   the bound below covers it. The app answers from its live SwiftTerm through
@@ -176,7 +194,7 @@ design builds is the pull the model has always required.
   identically by construction. The answer is `source: .viewer`.
 - **Viewer holds the pty and does not answer** – the pull is bounded on an
   injected clock. On expiry the daemon answers from the emulator it suspended
-  at attach, `source: .staleDaemon`, `age` counted from the attach. The
+  at attach, `source: .staleDaemon`, `age` per the one rule above. The
   emulator is retained across an attach for exactly this — it is not stopped
   at the acknowledgement, only suspended, which is what the transport spec's
   "frozen-at-attach" fallback assumed and the current release path does not
@@ -342,13 +360,16 @@ routes the same way every other send does.
   armed for observation exactly as the tmux arm arms it. Eligibility stays
   what `supportsDeliveryObservation` says (`:3453-3455`) — an agent kind with
   a transcript — and is transport-blind.
-- **Re-delivery routes by transport.** `redeliverVerifiedPayload` branches as
-  the send handler does: a holder row composes through the oracle and delivers
+- **Re-delivery routes by transport, in the same change.** `redeliverVerifiedPayload`
+  branches as the send handler does: a holder row composes through the oracle
+  — recording its mode source like any other holder send — and delivers
   through the courier; the session-id re-check that guards against typing into
   a stranger (`:3368-3370`) is already transport-independent and runs on both
   arms. The pane consultation's holder equivalent is the registry's recorded
   child status — a child the holder reports exited is refused, as a dead pane
-  is.
+  is. The holder branch lands with the lifted refusal, never after it: a
+  verification whose retry still pastes through tmux would observe a holder
+  session and then re-deliver to a pane id that is empty by construction.
 - **The daemon's own rails arm verification by default.** Sends originated by
   a daemon rail — fleet supervision nudges, queued prompts, the limit-resume
   actuator — are verify-armed on holder sessions whenever
@@ -480,6 +501,7 @@ exists, under a query-time delivery rule that leaves nothing stale.
   assertion that logs loudly on a second live drain loop; what exists is a
   test-facing counter (`HolderRegistry.swift:297-306`, `:878`) with no log at
   `> 1`. One line of code, and not this spec's.
+
 ## Sequencing against single-typist
 
 The holder `write` verb and the rest of
