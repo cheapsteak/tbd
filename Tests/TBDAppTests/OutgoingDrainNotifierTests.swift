@@ -58,9 +58,14 @@ struct OutgoingDrainNotifierTests {
     /// Poll the main actor until `condition` holds or the deadline passes.
     /// Sleeping yields the main actor, which is what lets the source's handler
     /// — dispatched to `.main` — run at all.
+    ///
+    /// The default is the shared saturated-pass budget rather than a literal:
+    /// all three call sites are hang guards on a `.main`-dispatched handler,
+    /// and five seconds is far below this pass's healthy per-test latency
+    /// (`Tests/TestSupport/BoundedGateSupport.swift`).
     private func waitUntil(
         _ condition: () -> Bool,
-        within seconds: Double = 5
+        within seconds: Double = TestDeadlines.saturatedPassSeconds
     ) async {
         let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
         while !condition(), ContinuousClock.now < deadline {

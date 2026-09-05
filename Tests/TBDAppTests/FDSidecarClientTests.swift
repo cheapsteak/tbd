@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+import TestSupport
 import TBDShared
 @testable import TBDApp
 
@@ -53,7 +54,7 @@ struct FDSidecarClientTests {
         defer { Darwin.close(writeFD) }
         try vend(readFD: readFD, worktreeID: worktreeID, paneID: "%1", attachID: attachID, over: daemonSide)
 
-        let rxFD = try await promise.value(timeout: .seconds(2))
+        let rxFD = try await promise.value(timeout: TestDeadlines.saturatedPass)
         defer { Darwin.close(rxFD) }
 
         let marker = Data("marker".utf8)
@@ -136,9 +137,9 @@ struct FDSidecarClientTests {
                      attachID: attachID, over: daemonSide)
         }
 
-        let holderFD = try await holderPromise.value(timeout: .seconds(2))
+        let holderFD = try await holderPromise.value(timeout: TestDeadlines.saturatedPass)
         defer { Darwin.close(holderFD) }
-        let controlFD = try await controlPromise.value(timeout: .seconds(2))
+        let controlFD = try await controlPromise.value(timeout: TestDeadlines.saturatedPass)
         defer { Darwin.close(controlFD) }
 
         #expect(
@@ -179,8 +180,8 @@ struct FDSidecarClientTests {
         try vend(readFD: readB, worktreeID: worktreeID, paneID: "%B", attachID: attachB, over: daemonSide)
         try vend(readFD: readA, worktreeID: worktreeID, paneID: "%A", attachID: attachA, over: daemonSide)
 
-        let rxA = try await promiseA.value(timeout: .seconds(2))
-        let rxB = try await promiseB.value(timeout: .seconds(2))
+        let rxA = try await promiseA.value(timeout: TestDeadlines.saturatedPass)
+        let rxB = try await promiseB.value(timeout: TestDeadlines.saturatedPass)
         defer { Darwin.close(rxA); Darwin.close(rxB) }
 
         var buffer = [UInt8](repeating: 0, count: 16)
@@ -216,7 +217,7 @@ struct FDSidecarClientTests {
         Darwin.close(readFD)
         try FDChannel.sendData(Data(rest), over: daemonSide)
 
-        let rxFD = try await promise.value(timeout: .seconds(2))
+        let rxFD = try await promise.value(timeout: TestDeadlines.saturatedPass)
         defer { Darwin.close(rxFD) }
         var buffer = [UInt8](repeating: 0, count: 16)
         let n = buffer.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
@@ -449,7 +450,7 @@ struct FDSidecarClientTests {
         Darwin.close(readFD)
 
         // The valid frame's fd must arrive despite the trailing desync.
-        let rxFD = try await promise.value(timeout: .seconds(2))
+        let rxFD = try await promise.value(timeout: TestDeadlines.saturatedPass)
         defer { Darwin.close(rxFD) }
         var buffer = [UInt8](repeating: 0, count: 16)
         let n = buffer.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
@@ -465,6 +466,10 @@ struct FDSidecarClientTests {
         let promise = client.expectFD(worktreeID: UUID(), paneID: "%3", attachID: UUID())
         Darwin.close(daemonSide)   // daemon goes away
 
+        // Deliberately a short literal rather than the shared saturated-pass
+        // budget: the assertion here is that EOF fails the waiter, and the
+        // deadline only caps a run in which it did not. Raising it would make
+        // an already-failing test wait 90 s to say so.
         await #expect(throws: FDSidecarError.self) {
             _ = try await promise.value(timeout: .seconds(2))
         }

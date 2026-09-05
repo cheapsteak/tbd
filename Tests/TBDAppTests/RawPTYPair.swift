@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TestSupport
 
 /// A real pty pair whose slave is in raw mode and never read, so the master
 /// refuses at `TTYHOG − 2` (measured: 1,022 bytes on arm64 macOS) exactly as a
@@ -159,11 +160,15 @@ final class RawPTYPair {
     /// process shares with the whole ~4,700-test population, where the cost of
     /// a hop is scheduling rather than work. At five seconds CI reached the
     /// deadline three rounds in (3,066 of 8,205 bytes delivered) with the drain
-    /// behaving exactly as designed. Forty-five seconds matches the house
-    /// wall-clock guards (`Tests/CLAUDE.md`, "Population is the scheduler"),
-    /// and a passing run never spends any of it.
+    /// behaving exactly as designed. The bound is therefore the shared
+    /// saturated-pass budget, `TestDeadlines.saturatedPass`, which is derived
+    /// from that pass's measured latency in one place rather than matched by
+    /// hand to a neighbouring guard (`Tests/CLAUDE.md`, "Population is the
+    /// scheduler"), and a passing run never spends any of it.
     @MainActor
-    func drainUntil(byteCount: Int, within: Duration = .seconds(45)) async throws -> Data {
+    func drainUntil(
+        byteCount: Int, within: Duration = TestDeadlines.saturatedPass
+    ) async throws -> Data {
         var out = Data()
         let deadline = ContinuousClock.now.advanced(by: within)
         while out.count < byteCount {

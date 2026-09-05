@@ -103,8 +103,14 @@ struct QuietIngestTests {
         // the fixture bytes are real. Re-fed on a loop because SwiftTerm
         // coalesces bells 100 ms apart — and the suppressed one above still
         // consumed that window, since `BellPolicy` runs before the delegate.
+        // Re-fed until the coalescing window has passed, and bounded as a
+        // whole by the shared saturated-pass budget rather than by an iteration
+        // count: 0.3 s is one re-feed interval, not a hang guard, and twenty of
+        // them is a 6 s ceiling on a positive assertion in a pass whose median
+        // per-test latency is an order of magnitude larger.
         var rang = false
-        for _ in 0..<20 where !rang {
+        let end = ContinuousClock.now + TestDeadlines.saturatedPass
+        while !rang, ContinuousClock.now < end {
             harness.terminalView.feed(text: "\u{07}")
             rang = await harness.waitUntil({ harness.beepCount >= 1 }, deadline: 0.3)
         }
@@ -319,10 +325,16 @@ final class QuietIngestHarness {
 
     /// Polls `condition` until it holds or the deadline passes. Used only by
     /// positive controls, where `false` is a real failure and not a wait.
-    /// The default deadline is generous because it is only ever *spent* by a
-    /// failing control: this suite runs in the fast parallel pass, where a test
-    /// doing 1.5 s of work has been measured taking 106 s of wall time.
-    func waitUntil(_ condition: () -> Bool, deadline: TimeInterval = 30.0) async -> Bool {
+    /// The default deadline is only ever *spent* by a failing control, and it
+    /// is the shared saturated-pass budget rather than a number chosen here:
+    /// this suite runs in the fast parallel pass, where a test doing 1.5 s of
+    /// work has been measured taking 106 s of wall time. A caller that passes
+    /// its own, shorter window is bounding one attempt of a retry loop, not
+    /// guarding a hang.
+    func waitUntil(
+        _ condition: () -> Bool,
+        deadline: TimeInterval = TestDeadlines.saturatedPassSeconds
+    ) async -> Bool {
         let end = Date().addingTimeInterval(deadline)
         while Date() < end {
             if condition() { return true }

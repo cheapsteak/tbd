@@ -167,9 +167,14 @@ private struct DeliveryCycleUnfinished: Error, CustomStringConvertible {
 ///
 /// On timeout the waiting task is left parked deliberately: nothing awaits it,
 /// so the test fails and the run proceeds.
+/// The deadline is `TestDeadlines.saturatedPass`, not a literal. The completion
+/// it polls for is set inside the `Task.detached` below, which SE-0417 leaves on
+/// the cooperative pool whatever the caller's executor preference is
+/// (`gateHoldingTask` in `Tests/TestSupport/BoundedGateSupport.swift`), so this
+/// wait queues behind the whole fast pass and only the bound is ours to size.
 func awaitDeliveryCycle(
     _ verifier: DeliveryVerifier,
-    timeout: Swift.Duration = .seconds(30),
+    timeout: Swift.Duration = TestDeadlines.saturatedPass,
     observed: @escaping @Sendable () -> String = { "nothing recorded" },
     sourceLocation: SourceLocation = #_sourceLocation
 ) async {

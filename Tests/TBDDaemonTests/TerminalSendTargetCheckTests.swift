@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -330,7 +331,11 @@ struct TerminalSendTargetCheckTests {
         // Occupy this terminal's lane the way an in-flight send would.
         async let holder: Void = fixture.router.terminalSendSerializer
             .run(terminalID: fixture.terminal.id) { await gate.wait() }
-        let deadline = ContinuousClock.now + .seconds(15)
+        // Hang guard on the serializer's lane holder reaching the gate, bounded
+        // at the shared saturated-pass budget rather than a literal: the holder
+        // is a structured child on the cooperative pool, so one hop can cost
+        // tens of seconds in this pass.
+        let deadline = ContinuousClock.now + TestDeadlines.saturatedPass
         while await !gate.hasEntered && ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
@@ -359,7 +364,11 @@ struct TerminalSendTargetCheckTests {
 
         async let holder: Void = fixture.router.terminalSendSerializer
             .run(terminalID: fixture.terminal.id) { await gate.wait() }
-        let deadline = ContinuousClock.now + .seconds(15)
+        // Hang guard on the serializer's lane holder reaching the gate, bounded
+        // at the shared saturated-pass budget rather than a literal: the holder
+        // is a structured child on the cooperative pool, so one hop can cost
+        // tens of seconds in this pass.
+        let deadline = ContinuousClock.now + TestDeadlines.saturatedPass
         while await !gate.hasEntered && ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }

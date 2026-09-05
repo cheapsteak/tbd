@@ -76,8 +76,12 @@ struct RPCRouterWorktreeCreateBroadcastTests {
     }
 
     /// Polls `condition` until it returns true or the deadline passes.
+    /// The deadline is the shared saturated-pass budget rather than a literal:
+    /// what these wait for is produced by a detached task no test owns, which
+    /// SE-0417 leaves on the cooperative pool behind the whole fast pass — see
+    /// `gateHoldingTask` in `Tests/TestSupport/BoundedGateSupport.swift`.
     private func waitUntil(
-        timeout: TimeInterval = 10,
+        timeout: TimeInterval = TestDeadlines.saturatedPassSeconds,
         _ condition: @Sendable () async throws -> Bool
     ) async throws -> Bool {
         let deadline = Date().addingTimeInterval(timeout)

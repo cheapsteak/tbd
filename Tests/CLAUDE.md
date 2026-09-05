@@ -329,6 +329,37 @@ child must outlive the limit), `GitManagerTimeoutTests` and
 `waitForSuspension`s exceed 60 s — is acceptable only because none of those
 suites chains two and a healthy handshake there returns in milliseconds.
 
+**No bounded wait in a fast-pass target carries a literal deadline, and no
+fast-pass suite carries a hand-written `.timeLimit`.** A wait takes its deadline
+from `TestDeadlines` (`saturatedPass` as a `Duration`, `saturatedPassSeconds` as
+a `TimeInterval`), and a suite or test hang guard takes `.fastPassBounded` —
+which `.clockDriven` is an alias of, so there is one dial. The evidence is what
+the pass's own numbers say about a small number: on a **green** run, fast pass 1
+(`^TBDDaemonTests\.`, ~5200 tests) reported p50 65.6 s, p99 92.1 s and max
+95.5 s per test, and fast pass 2 (everything else, ~4800 tests) reported p90
+51.4 s and max 55.3 s — reported duration being almost entirely time suspended
+behind other runnable tests. So a 2–30 s hand-rolled wait sits an order of
+magnitude below the healthy latency of the very hop it is guarding, and a
+one-minute suite limit sits below pass 1's median and five seconds above pass
+2's maximum. Both fire on healthy runs, and both did. Three exceptions, and only
+these: a **negative-assertion window** ("nothing fires within X") is the
+assertion and is never lengthened; a **discriminating threshold** that decides
+between two diagnoses (`FileWatcherTests`' `attemptWindow`) is likewise the
+assertion; and a **gate's own self-release cap** takes `TestGate.deadline`,
+which is sized to dominate `saturatedPass` so the hold cannot expire mid-
+observation. Everything else — including a wait reached only through production
+code that hands its work to `Task.detached`, where `gateHoldingTask` cannot
+follow and only the bound is yours (see "Thread-blocking gates" below) — takes
+the shared constant.
+
+One more thing a reader should not have to mine a log for: the **"71 known
+issues" pass 1 reports on every run, and the 11 in pass 2, are deliberate
+self-tests wrapped in `withKnownIssue`, not hidden failures** — almost all of
+them `EventDrivenTestClockSelfTests` driving its own hang guards to their
+diagnostics, plus `BoundedGateWaitTests`' unsignalled gate,
+`FlakyQuarantineSelfTests.retriesUntilPass`, and pass 2's
+`AppStatePublishFrequencyTests` excess-publish records.
+
 Three remedies are already refuted; don't re-litigate them.
 
 - **Per-suite `.serialized`.** "Archived search debounce" is already

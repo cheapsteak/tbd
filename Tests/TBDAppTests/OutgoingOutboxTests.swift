@@ -111,9 +111,14 @@ struct OutgoingOutboxTests {
     /// SCHEDULES that call — it does not run it. Nothing on the user side needs
     /// this: `enqueueUserBytes`, `beginUserPaste` and `endUserPaste` are
     /// synchronous.
+    /// The deadline is the shared saturated-pass budget, not a literal: the
+    /// `Task { await queue.enqueueInjection(_:) }` this waits on is
+    /// unstructured, so SE-0417 carries no executor preference into it and it
+    /// runs on the cooperative pool behind the whole fast pass — see
+    /// `gateHoldingTask` in `Tests/TestSupport/BoundedGateSupport.swift`.
     private func waitForHeldInjections(
         _ expected: Int, on queue: OutgoingInputQueue,
-        timeout: Duration = .seconds(8),
+        timeout: Duration = TestDeadlines.saturatedPass,
         sourceLocation: SourceLocation = #_sourceLocation
     ) async {
         let deadline = ContinuousClock.now.advanced(by: timeout)

@@ -41,46 +41,42 @@ import TestSupport
 ///
 /// | Guard | Value | What it waits on |
 /// |---|---|---|
-/// | `poll` / `writeUntilArmed` default | 8 s | task scheduling, `AsyncStream` delivery, `clock.sleep` entry |
-/// | `fdCloseTimeout` | 25 s | `close(fd)` in a GCD **cancel handler on a utility-QoS global queue** |
-/// | `withWatchedFile` FD quiescence | 12 s | same cancel handler, but not an assertion |
+/// | `poll` / `writeUntilArmed` default | `TestDeadlines.saturatedPass` | task scheduling, `AsyncStream` delivery, `clock.sleep` entry |
+/// | `fdCloseTimeout` | `TestDeadlines.saturatedPass` | `close(fd)` in a GCD **cancel handler on a utility-QoS global queue** |
+/// | `withWatchedFile` FD quiescence | `TestDeadlines.saturatedPass` | same cancel handler, but not an assertion |
 /// | `advanceWhenSuspended` | 45 s | fixed by `ClockTestSupport`, not ours to set |
+/// | `writeUntilArmed`'s `attemptWindow` | 4 s | **not a guard** — the threshold that decides "the event is gone" |
 ///
 /// **The criterion these are sized against** is: the FIRST guard to fire must
 /// get its named diagnostic out inside `.clockDriven`'s 240 s per-test limit,
 /// otherwise the limit kills the test and reports an unnamed "wedged" instead
 /// of observed state (rule 4). Healthy prefix ~0.6 s + the largest single
-/// deadline (45 s, the fixed handshake guard) = well under a quarter of the
-/// limit, for every test here.
+/// deadline = well under half the limit, for every test here.
 ///
 /// It is deliberately *not* "the sum of every deadline in a test stays under
 /// the limit". That framing was unachievable when the limit was 60 s and
 /// `ClockTestSupport`'s handshake guard was 15 s used 2–3× per test; it is a
 /// weak criterion rather than a wrong one, and it is not what these values are
-/// sized against. Worst-case cascades, at the current 45 s handshake guard:
+/// sized against. Several of the deeper tests here — `atomicSaveReopensAndKeepsStreamLive`
+/// chains three armed writes, three handshake guards, three polls and an FD
+/// wait — have a paper cascade well past 240 s. That is the same arithmetic
+/// `.clockDriven`'s own doc comment reports for `PaneRepairCoordinatorTests`,
+/// and it is consistent for the same reason: only a test that is *already*
+/// failing walks a full chain of timeouts, and its first guard has recorded a
+/// named diagnostic before the limit can truncate anything.
 ///
-/// | Test | Worst-case cascade (all guards fire) |
-/// |---|---|
-/// | `liveStreamCountReturnsToBaselineAfterIteratorDrops` | 8 + 25 = 33 s |
-/// | `cancellingConsumingTaskTerminatesStream` | 2×8 + 25 = 41 s |
-/// | `nonExistentPathFinishesStreamImmediately` | 8 s |
-/// | `writesWithinOneWindowCollapseToOneNotification` | 3×8 + 45 + 8 + 12 = 89 s |
-/// | `nothingFiresUntilTheFullIntervalElapsed` | 8 + 45 + 8 + 12 = 73 s |
-/// | `lateWriteRestartsTheWindow` | 2×8 + **2×45** + 8 + 12 = 126 s |
-/// | `separatedWritesNotifyTwice` | 2×8 + **2×45** + 2×8 + 12 = 134 s |
-/// | `atomicSaveReopensAndKeepsStreamLive` | 2×8 + **3×45** + 3×8 + 25 + 12 = 212 s |
-/// | `terminationWithAPendingDebounceStillClosesTheFD` | 8 + 8 + 25 + 12 = 53 s |
-/// | `defaultClockDeliversOneRealDebouncedNotification` | ~1.8 + 8 = 10 s |
-///
-/// Both inputs moved together (handshake guard 15 s → 45 s, suite limit 60 s →
-/// 240 s; see `ClockTestSupport`), and the limit outgrew the cascades: every
-/// row now fits, where three used to blow it. The docstring's own prediction —
-/// "the remaining lever, if a full cascade ever needs to fit, is the suite's
-/// time limit, not the guards" — is what happened, incidentally rather than by
-/// design. Do not start relying on it: the worst row (212 s) clears 240 s by
-/// only 28 s, so it would go back over on any further handshake-guard raise,
-/// and the first-diagnostic criterion above remains the property these values
-/// are actually sized against.
+/// **Why the three guards are one shared constant rather than three derived
+/// numbers.** They used to be 8 s, 25 s and 12 s, each fitted to a per-test sum
+/// against a 60 s limit. Every one of those was below the fast pass's healthy
+/// per-test latency: a hang guard there is not competing with the work it
+/// watches but with a scheduler running ~5000 tests on three threads, and a
+/// guard that fires on a green run reports a scheduler, not a watcher. The
+/// value is therefore `TestDeadlines.saturatedPass`, derived from that pass's
+/// measured latency in one place
+/// (`Tests/TestSupport/BoundedGateSupport.swift`) and re-derived in one place
+/// when the population moves. `attemptWindow` deliberately keeps its own 4 s:
+/// it is not a guard but the discriminator between "slow" and "lost", i.e. the
+/// assertion itself.
 @MainActor
 @Suite("FileWatcher", .clockDriven, .serialized)
 struct FileWatcherTests {
@@ -94,14 +90,16 @@ struct FileWatcherTests {
     /// is the first thing macOS starves on a saturated runner, so these
     /// assertions are load-**tolerant**, not load-**independent**.
     ///
-    /// 25 s is that tolerance, and it is derived, not tuned to green: the
-    /// tightest test carrying one of these polls
-    /// (`terminationWithAPendingDebounceStillClosesTheFD`) spends 8 + 8 + 12 s
-    /// on its other guards, leaving 32 s under the 60 s limit — 25 s takes it
-    /// to 53 s. It also clears the observed contention magnitude: in the CI run
-    /// that reddened this suite at a 4 s deadline, sibling tests that are
-    /// normally sub-second took 22.9 s each.
-    private static let fdCloseTimeout: Duration = .seconds(25)
+    /// The shared saturated-pass budget is that tolerance, and it is derived
+    /// rather than tuned to green: it comes from the fast pass's measured
+    /// per-test latency, which is the thing starving this handler. It clears
+    /// the observed contention magnitude by a wide margin — in the CI run that
+    /// reddened this suite at a 4 s deadline, sibling tests that are normally
+    /// sub-second took 22.9 s each — and it is the same number every other
+    /// bounded wait in the fast pass uses, so there is one place to re-derive.
+    /// The name is kept because the call sites read better for it, and because
+    /// it marks which polls wait on the utility-QoS handler.
+    private static let fdCloseTimeout: Duration = TestDeadlines.saturatedPass
 
     // MARK: - Lifecycle (tier 2, DEFAULT clock — but they never reach the sleep; see the suite header)
 
@@ -501,9 +499,10 @@ struct FileWatcherTests {
     /// the only assertion that fails in either case. The wait is bounded polling
     /// for an event that MUST occur (assertion-hygiene rule 3), not a timing
     /// tolerance: the retry loop below is bounded by the production debounce
-    /// itself, and the poll after it takes the suite's 8 s fast-tier hang guard
-    /// — ~53× the 150 ms it is waiting on, and the cheapest budget in the suite
-    /// (nothing else in this test can pay a deadline).
+    /// itself, and the poll after it takes the suite's shared fast-pass hang
+    /// guard — orders of magnitude above the 150 ms it is waiting on, and the
+    /// cheapest budget in the suite (nothing else in this test can pay a
+    /// deadline).
     @Test func defaultClockDeliversOneRealDebouncedNotification() async {
         let url = Self.makeTempFile()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -641,16 +640,15 @@ struct FileWatcherTests {
         // observable from out here. So: at least one close, and the count
         // unchanged across two probes.
         //
-        // 12s, not 4s: this waits on the same utility-QoS cancel handler as the
+        // This waits on the same utility-QoS cancel handler as the
         // `fdCloseTimeout` polls, so a deadline that expires under contention
         // hands the NEXT test a baseline with a close still in flight — which
         // then reddens as a doubled count there rather than as anything about
-        // this test. Not `fdCloseTimeout` itself, because this is not an
-        // assertion and it has to share a 60s test with the guards that are;
-        // 12s is what `writesWithinOneWindowCollapseToOneNotification` (3 armed
-        // writes + a 15s handshake + a poll = 47s) leaves under the limit.
-        // Costs ~20ms on the healthy path either way.
-        let settleDeadline = ContinuousClock.now.advanced(by: .seconds(12))
+        // this test. It therefore takes the same shared saturated-pass budget:
+        // the old 12 s was the leftover of a per-test sum against a 60 s limit,
+        // and 12 s is below this pass's healthy per-test latency. Costs ~20 ms
+        // on the healthy path either way.
+        let settleDeadline = ContinuousClock.now.advanced(by: TestDeadlines.saturatedPass)
         var previous = -1
         while ContinuousClock.now < settleDeadline {
             let current = FileWatcher.closedFDCount
@@ -706,12 +704,12 @@ struct FileWatcherTests {
     ///   strict reading so a new call site does not silently paper over one.
     private static func writeUntilArmed(_ f: Fixture,
                                         firstWriteAfterResume: Bool = false,
-                                        // 8s, matching `poll`'s default: the arm this waits for is
+                                        // Matches `poll`'s default: the arm this waits for is
                                         // recorded by a `Task` that the dispatch source's event
                                         // handler creates, so it inherits utility QoS and is starved
-                                        // by the same CI contention. Sized against the tightest test
-                                        // that chains three of these — see the suite header.
-                                        timeout: Duration = .seconds(8),
+                                        // by the same CI contention. Shared saturated-pass budget —
+                                        // see the suite header.
+                                        timeout: Duration = TestDeadlines.saturatedPass,
                                         pollInterval: Duration = .milliseconds(25),
                                         sourceLocation: SourceLocation = #_sourceLocation) async {
         let before = f.armed.count
@@ -786,11 +784,11 @@ struct FileWatcherTests {
     /// which *was* a tolerance window — thin enough to lose under CI load
     /// (assertion-hygiene rule 2).
     ///
-    /// The 8 s default covers the fast counters, whose producer is the consuming
+    /// The default covers the fast counters, whose producer is the consuming
     /// `Task` and the `AsyncStream` machinery. Callers waiting on `close(fd)`
     /// pass `fdCloseTimeout` instead — that one runs on a utility-QoS queue and
-    /// is starved an order of magnitude harder. Both values, and the per-test
-    /// arithmetic they come from, are in the suite header.
+    /// is starved an order of magnitude harder. Both are the shared
+    /// saturated-pass budget; the reasoning is in the suite header.
     ///
     /// Failure is recorded as an **error**, not as `#expect(cond, "…")` and not
     /// as `Issue.record("…")`: both of those render their message on a separate
@@ -805,7 +803,7 @@ struct FileWatcherTests {
     /// renders as `Caught error: <description>`, so description *and* observed
     /// value land in the primary line (rule 4, the `fileBytesUnmatched` shape).
     private static func poll(_ description: String,
-                             timeout: Duration = .seconds(8),
+                             timeout: Duration = TestDeadlines.saturatedPass,
                              pollInterval: Duration = .milliseconds(25),
                              sourceLocation: SourceLocation = #_sourceLocation,
                              observing observed: () -> Int,
