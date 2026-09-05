@@ -90,9 +90,76 @@ struct TerminalTeardownReapTests {
 
     /// Everything a one-shot test needs out of its single main-actor hop.
     private struct OneShotRun {
-        let first: pid_t
-        let probe: pid_t
+        let first: StartedChild
+        let probe: StartedChild
         let stillHeld: Bool
+    }
+
+    /// A child SwiftTerm was asked to start, plus the `errno` that was current
+    /// the instant `startProcess` returned.
+    ///
+    /// `LocalProcess.startProcess` swallows a failed `PseudoTerminalHelpers.fork`
+    /// — it leaves `shellPid` at 0 and surfaces neither an error nor an errno —
+    /// so the only place the cause is still readable is the statement right
+    /// after the call. `failureErrno` is meaningful only when `pid <= 0`; it is
+    /// 0 otherwise, because a successful start says nothing about errno.
+    private struct StartedChild {
+        let pid: pid_t
+        let failureErrno: Int32
+    }
+
+    /// Named diagnostic for "forkpty produced no pid", carrying the machine
+    /// state that decides between the plausible causes (EAGAIN/ENOMEM vs pty
+    /// exhaustion vs fd exhaustion).
+    ///
+    /// Thrown rather than `#expect`ed on purpose: assertion-hygiene rule 4 in
+    /// `Tests/CLAUDE.md` — only `Issue.record(_: some Error)`, which a thrown
+    /// error becomes, puts this text on the primary failure line; an
+    /// `#expect(_, "…")` message is demoted to a `↳` line CI summaries drop,
+    /// which is how the one field occurrence of this failure reached us as the
+    /// bare, causeless "forkpty must have produced both pids".
+    private struct ForkptyProducedNoPid: Error, CustomStringConvertible {
+        let what: String
+        let observedPIDs: [String]
+        let errnoValue: Int32
+        let ttyDeviceCount: Int
+        let openFileDescriptors: Int?
+        let ptmxMax: Int?
+
+        var description: String {
+            let fds = openFileDescriptors.map(String.init) ?? "unavailable"
+            let ptmx = ptmxMax.map(String.init) ?? "unavailable"
+            return "SwiftTerm's LocalProcess.startProcess produced no pid for \(what) — "
+                + "PseudoTerminalHelpers.fork returned nil and reports no error of its own. "
+                + "Observed pids: \(observedPIDs.joined(separator: ", ")). "
+                + "errno at the instant startProcess returned: "
+                + "\(Self.errnoName(errnoValue)) (\(errnoValue), "
+                + "\(String(cString: strerror(errnoValue)))). "
+                + "/dev/ttys* entries: \(ttyDeviceCount); kern.tty.ptmx_max: \(ptmx); "
+                + "open fds in this process (via /dev/fd, includes the probe's own): \(fds)."
+        }
+
+        /// Darwin has no `strerrorname_np`, so the handful of codes a failed
+        /// `forkpty` can plausibly return are named here; anything else prints
+        /// as its number with `strerror` text alongside.
+        static func errnoName(_ value: Int32) -> String {
+            switch value {
+            case 0: return "none"
+            case EAGAIN: return "EAGAIN"
+            case ENOMEM: return "ENOMEM"
+            case EMFILE: return "EMFILE"
+            case ENFILE: return "ENFILE"
+            case ENOENT: return "ENOENT"
+            case ENXIO: return "ENXIO"
+            case ENOSPC: return "ENOSPC"
+            case EBUSY: return "EBUSY"
+            case EINVAL: return "EINVAL"
+            case EPERM: return "EPERM"
+            case EACCES: return "EACCES"
+            case EIO: return "EIO"
+            default: return "errno \(value)"
+            }
+        }
     }
 
     private struct ChildSurvivedTeardown: Error, CustomStringConvertible {
@@ -154,14 +221,61 @@ struct TerminalTeardownReapTests {
     @MainActor
     private func startChild(
         delegate: LocalProcessDelegate, lifetime: String, assign: @MainActor (LocalProcess) -> Void
-    ) -> pid_t {
+    ) -> StartedChild {
         // Production configuration (see the suite comment): exit monitor on
         // main, data delivered inline on the IO thread.
         let process = LocalProcess(delegate: delegate, dispatchQueue: .main, directDelivery: true)
         process.startProcess(
             executable: "/bin/sleep", args: [lifetime], environment: nil, execName: nil)
+        // Read `shellPid` and `errno` before anything else can clobber the
+        // thread's errno: a nil `PseudoTerminalHelpers.fork` is the only way
+        // `shellPid` stays 0 here, and this is the last statement at which its
+        // cause is still legible. See `StartedChild`.
+        let pid = process.shellPid
+        let failureErrno = pid <= 0 ? errno : 0
         assign(process)
-        return process.shellPid
+        return StartedChild(pid: pid, failureErrno: failureErrno)
+    }
+
+    /// Throws ``ForkptyProducedNoPid`` when any of the named children came back
+    /// without a pid, sampling the machine state that names the cause.
+    ///
+    /// The probes are on the failure path only, so a healthy run pays nothing
+    /// for them; and callers place this call where their `#require(pid > 0)`
+    /// used to be, which is always *after* every probe child has been disposed
+    /// of (suite comment: a `defer` registered after a throwing `#require`
+    /// never runs).
+    private func requirePIDs(_ named: [(String, StartedChild)]) throws {
+        let missing = named.filter { $0.1.pid <= 0 }
+        guard let first = missing.first else { return }
+        throw ForkptyProducedNoPid(
+            what: missing.map(\.0).joined(separator: " and "),
+            observedPIDs: named.map { "\($0.0)=\($0.1.pid)" },
+            errnoValue: first.1.failureErrno,
+            ttyDeviceCount: Self.ttyDeviceCount(),
+            openFileDescriptors: Self.openFileDescriptorCount(),
+            ptmxMax: Self.ptmxMax())
+    }
+
+    /// How many `/dev/ttys*` slave devices exist right now — the direct read on
+    /// "the machine ran out of ptys", whose ceiling is `kern.tty.ptmx_max`.
+    private static func ttyDeviceCount() -> Int {
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? []
+        return entries.filter { $0.hasPrefix("ttys") }.count
+    }
+
+    /// Open descriptors in this process, counted through `/dev/fd`, which
+    /// darwin populates per-process. Nil when the directory cannot be read.
+    private static func openFileDescriptorCount() -> Int? {
+        try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count
+    }
+
+    /// The system-wide ptmx ceiling (511 by default on this platform).
+    private static func ptmxMax() -> Int? {
+        var value: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname("kern.tty.ptmx_max", &value, &size, nil, 0) == 0 else { return nil }
+        return Int(value)
     }
 
     /// The panel path does not itself kill the child, so this test asserts what
@@ -187,18 +301,18 @@ struct TerminalTeardownReapTests {
         // coordinator is constructed inside it too: since the SwiftTerm 2.0
         // migration, `TerminalViewDelegate` is `@MainActor` and the
         // coordinator class inherits that isolation.
-        let pid = await MainActor.run { () -> pid_t in
+        let child = await MainActor.run { () -> StartedChild in
             let coordinator = TerminalPanelRepresentable.Coordinator()
             // Outlives cleanup(), then exits on its own — see the doc comment.
-            let pid = startChild(delegate: coordinator, lifetime: "0.4") {
+            let child = startChild(delegate: coordinator, lifetime: "0.4") {
                 coordinator.localProcess = $0
             }
             coordinator.cleanup()
-            return pid
+            return child
         }
-        try #require(pid > 0, "forkpty must have produced a child pid")
+        try requirePIDs([("teardown child", child)])
 
-        try await requireDrainedAndReaped(pid)
+        try await requireDrainedAndReaped(child.pid)
     }
 
     /// Awaits the barrier, then asserts the child is gone. A barrier that did
@@ -262,17 +376,17 @@ struct TerminalTeardownReapTests {
         // Coordinator constructed inside the single main hop — MainActor
         // isolation inherited from `TerminalViewDelegate` since the SwiftTerm
         // 2.0 migration.
-        let pid = await MainActor.run { () -> pid_t in
+        let child = await MainActor.run { () -> StartedChild in
             let coordinator = LocalPTYTerminalRepresentable.Coordinator()
-            let pid = startChild(delegate: coordinator, lifetime: "120") {
+            let child = startChild(delegate: coordinator, lifetime: "120") {
                 coordinator.localProcess = $0
             }
             coordinator.cleanup()
-            return pid
+            return child
         }
-        try #require(pid > 0, "forkpty must have produced a child pid")
+        try requirePIDs([("teardown child", child)])
 
-        try await requireDrainedAndReaped(pid)
+        try await requireDrainedAndReaped(child.pid)
     }
 
     // MARK: - cleanup() is one-shot
@@ -322,18 +436,18 @@ struct TerminalTeardownReapTests {
         // can throw in between. See the suite comment: a `defer` registered
         // after a throwing `#require` never runs, and the probe is a `sleep 120`.
         let drain = await drainPendingReaps()
-        let probeAlive = processExists(run.probe)
-        disposeProbe(pid: run.probe)
-        try requireDrained(drain, teardownChild: run.first)
+        let probeAlive = processExists(run.probe.pid)
+        disposeProbe(pid: run.probe.pid)
+        try requireDrained(drain, teardownChild: run.first.pid)
 
-        try #require(run.first > 0 && run.probe > 0, "forkpty must have produced both pids")
+        try requirePIDs([("teardown child", run.first), ("probe child", run.probe)])
         #expect(run.stillHeld,
                 "a second cleanup() must not release state it never set up")
         #expect(probeAlive,
                 "a second cleanup() must not reap or signal anything")
 
         // The real teardown must still have reaped its own child.
-        try requireReaped(run.first)
+        try requireReaped(run.first.pid)
     }
 
     @Test("a second LocalPTYTerminalRepresentable cleanup() tears nothing down")
@@ -356,11 +470,11 @@ struct TerminalTeardownReapTests {
         }
         // Observe, then dispose, then assert — see the sibling test above.
         let drain = await drainPendingReaps()
-        let probeAlive = processExists(run.probe)
-        disposeProbe(pid: run.probe)
-        try requireDrained(drain, teardownChild: run.first)
+        let probeAlive = processExists(run.probe.pid)
+        disposeProbe(pid: run.probe.pid)
+        try requireDrained(drain, teardownChild: run.first.pid)
 
-        try #require(run.first > 0 && run.probe > 0, "forkpty must have produced both pids")
+        try requirePIDs([("teardown child", run.first), ("probe child", run.probe)])
         // Sharper here than on the panel path: without the guard this second
         // call reaches `localProcess?.terminate()`, so the probe would be
         // SIGTERMed as well as released.
@@ -370,6 +484,6 @@ struct TerminalTeardownReapTests {
                 "a second cleanup() must not terminate a process it never started")
 
         // The real teardown must still have killed and reaped its own child.
-        try requireReaped(run.first)
+        try requireReaped(run.first.pid)
     }
 }
