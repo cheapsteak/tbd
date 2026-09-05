@@ -1071,7 +1071,13 @@ public struct TmuxManager: Sendable {
         } catch {
             // Session does not exist, create it — capture the initial window ID
             let args = Self.newServerCommand(server: server, session: session, cwd: cwd, cols: cols, rows: rows)
-            let output = try await runTmux(args)
+            // Only this invocation's environment matters: it is the process that
+            // becomes the server, and every pane inherits from there. The other
+            // tmux calls are one-shot clients that talk to a server already
+            // holding its own environment, so they keep inheriting the daemon's.
+            let output = try await runTmux(
+                args,
+                environment: SpawnBaseEnvironment.inheriting(ProcessInfo.processInfo.environment))
             logger.info("ensureServer: created tmux server \(server, privacy: .public)")
             // Hide tmux chrome globally — TBD app provides its own UI
             _ = try? await runTmux(["-L", server, "set", "-g", "status", "off"])
@@ -1653,7 +1659,10 @@ public struct TmuxManager: Sendable {
     }
 
     @discardableResult
-    private func runTmux(_ arguments: [String]) async throws -> String {
+    private func runTmux(
+        _ arguments: [String],
+        environment: [String: String]? = nil
+    ) async throws -> String {
         guard let executable = Self.tmuxPath() else {
             throw TmuxError.commandFailed(
                 command: Self.redactedCommandDescription(label: "tmux", arguments: arguments),
@@ -1665,7 +1674,8 @@ public struct TmuxManager: Sendable {
             executable: executable,
             arguments: arguments,
             label: "tmux",
-            timeout: subprocessTimeout
+            timeout: subprocessTimeout,
+            environment: environment
         )
     }
 
@@ -1679,6 +1689,10 @@ public struct TmuxManager: Sendable {
     /// Package-internal (not `private`) so timeout tests can drive it directly
     /// against a real slow binary (`/bin/sleep`) without a tmux server.
     ///
+    /// `environment` REPLACES the child's environment wholesale when given;
+    /// `nil` lets the child inherit the daemon's, which is what every one-shot
+    /// tmux client wants.
+    ///
     /// `clock` is contract 1's shape applied to a static function rather than an
     /// initializer (last parameter, named `clock`, defaulted, existential): it
     /// arms the deadline a second time so tests can drive it in virtual time.
@@ -1689,6 +1703,7 @@ public struct TmuxManager: Sendable {
         arguments: [String],
         label: String,
         timeout: Duration,
+        environment: [String: String]? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) async throws -> String {
         // Redacted at the point argv becomes text, so the secret cannot reach
@@ -1699,6 +1714,7 @@ public struct TmuxManager: Sendable {
             executable: executable,
             arguments: arguments,
             currentDirectory: nil,
+            environment: environment,
             timeout: timeout,
             clock: clock
         ) {

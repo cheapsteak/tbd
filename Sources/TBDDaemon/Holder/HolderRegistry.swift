@@ -199,7 +199,7 @@ actor HolderRegistry {
     /// processes run under. Explicit rather than ambient so tests never reach
     /// the developer's real `~/tbd` — or the developer's real login shell. In
     /// production it *is* the daemon's own environment; the base environment of
-    /// the job a holder forks is derived from it by `HolderJobEnvironment`
+    /// the job a holder forks is derived from it by `SpawnBaseEnvironment`
     /// (see there).
     ///
     /// Immutable and `Sendable`, so a caller composing a `HolderLaunchRequest`

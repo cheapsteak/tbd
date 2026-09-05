@@ -170,20 +170,21 @@ bytes the other reader never sees).
   applied over is the daemon's own environment with the identity of whatever
   launched it removed — the enclosing Claude Code session's variables, TBD's
   own per-terminal exports, and the enclosing tmux pane's coordinates — while
-  installation-wide configuration such as `TBD_HOME` keeps flowing: a daemon
-  restarted from inside an agent session exports that session's identity, and
-  a Claude Code that inherits `CLAUDE_CODE_CHILD_SESSION` reads itself as a
-  nested child — no peer-registry row and no transcript. The tmux transport
-  escapes that because Claude Code treats a marker found in the tmux server's
-  global environment as ambient, and this transport has no tmux server for
-  that probe to ask. On TBD's own side the load-bearing name is the terminal
-  incarnation id: the SessionStart guard compares it against a fresh row that
-  has none, so an inherited one costs the job its session id, its transcript
-  path and its activity updates. `TERM` is pinned to the value tmux gives a
-  pane rather than inherited, since it describes the terminal the job draws
-  into and not the launcher. The holder retains the launch request and replays
-  it on demand, so a re-adopting daemon can reconstruct what is running
-  without trusting the database.
+  installation-wide configuration such as `TBD_HOME` keeps flowing. A daemon
+  restarted from inside an agent session exports that session's identity: a
+  Claude Code that inherits `CLAUDE_CODE_CHILD_SESSION` reads itself as a
+  nested child, with no peer-registry row and no transcript, and an inherited
+  terminal incarnation id fails TBD's SessionStart guard against a fresh row
+  that has none, costing the job its session id, its transcript path and its
+  activity updates. `CLAUDE_CONFIG_DIR` is judged by value: one under this
+  installation's profiles directory is minted by TBD per spawn and so is
+  identity, while any other value is the user's configuration and stays.
+  `TERM` is pinned to the value tmux gives a pane rather than inherited, since
+  it describes the terminal the job draws into and not the launcher. The same
+  scrub is applied to the tmux server's own spawn, which is the pane's
+  inherited base on that transport. The holder retains the launch request and
+  replays it on demand, so a re-adopting daemon can reconstruct what is
+  running without trusting the database.
 - **Binary.** A new small SPM executable target. No copying the binary out of
   the build tree: a running holder's executable image survives rebuilds and
   build-directory reclamation (iTerm2 copies its server binary only because
