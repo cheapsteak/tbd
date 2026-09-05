@@ -100,6 +100,13 @@ struct TerminalPanelView: View {
     @State private var proxyWarning: String?
     @State private var didProbe = false
     @State private var recoveryGuidanceMessage: String?
+    /// Bytes this panel's outgoing queue is holding for a pty that has stopped
+    /// accepting writes, once the stall has outlasted the queue's threshold;
+    /// `nil` whenever nothing is waiting. Panel-local `@State` rather than an
+    /// `AppState` property on purpose: a byte count that ticks once a second
+    /// during one panel's stall would otherwise emit an observation to every
+    /// reader of that object.
+    @State private var pendingOutgoingBytes: Int?
 
     /// Profile id pinned to this terminal (if any). Used as the `.task` id so
     /// the probe re-fires once AppState populates. `nil` while AppState hasn't
@@ -169,6 +176,30 @@ struct TerminalPanelView: View {
                 .padding(.vertical, 5)
                 .background(Color.orange.opacity(0.18))
             }
+            // Passive backpressure indicator: shows only while this panel's
+            // outgoing queue is holding bytes a stalled pty refused, and only
+            // once that stall has outlasted the queue's threshold. Clears
+            // itself when the outbox drains — no dismiss affordance, matching
+            // the input-health indicator above.
+            //
+            // A sibling in this VStack rather than an overlay, so it never
+            // covers the terminal: the panel's app-wide scroll/click monitors
+            // filter on `tv.bounds.contains(point)`, and a view drawn OVER the
+            // terminal would have to be told to suppress them. This one sits
+            // outside those bounds and carries no controls.
+            if let pendingOutgoingBytes {
+                HStack(spacing: 6) {
+                    Image(systemName: "hourglass")
+                        .foregroundStyle(.orange)
+                    Text(TerminalBackpressurePresentation.message(pendingBytes: pendingOutgoingBytes))
+                        .font(.caption)
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.orange.opacity(0.18))
+                .accessibilityElement(children: .combine)
+            }
             TerminalPanelRepresentable(
                 terminalID: terminalID,
                 tmuxServer: tmuxServer,
@@ -181,6 +212,7 @@ struct TerminalPanelView: View {
                 onTerminalNotification: onTerminalNotification,
                 onMissingWindow: onMissingWindow,
                 onRecoveryGuidance: { recoveryGuidanceMessage = $0 },
+                onOutgoingBackpressureChange: { pendingOutgoingBytes = $0 },
                 initialSnapshot: initialSnapshot,
                 isSuspendedSnapshot: isSuspendedSnapshot,
                 parkedNoticeMessage: parkedNoticeMessage,
@@ -264,6 +296,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     @EnvironmentObject var appearance: AppearanceSettings
     var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
     var onRecoveryGuidance: (@MainActor (String) -> Void)?
+    /// Carries this panel's queued-byte count to the parent's `@State` banner.
+    var onOutgoingBackpressureChange: (@MainActor (Int?) -> Void)?
     var initialSnapshot: String?
     var isSuspendedSnapshot: Bool = false
     var parkedNoticeMessage: String? = nil
@@ -303,6 +337,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onMissingWindow = onMissingWindow
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
+        context.coordinator.onOutgoingBackpressureChange = onOutgoingBackpressureChange
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
 
         // Feed snapshot before tmux connects so the user sees the last state
@@ -399,6 +434,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             .isCodexTerminal == true
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
+        // Re-assigned here as well as in `makeNSView`: the closure captures the
+        // parent's CURRENT `@State` setter, and a coordinator still holding the
+        // one from `makeNSView` writes into a stale view identity.
+        context.coordinator.onOutgoingBackpressureChange = onOutgoingBackpressureChange
     }
 
     static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
