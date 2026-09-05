@@ -117,6 +117,9 @@ struct HolderDetachHandbackTests {
         let worktreeID: UUID
         let terminalID: UUID
         private let sessionEnd: Int32
+        /// The end handed to the panel. Kept so a test can read the flags the
+        /// attach set on it; the panel's reader still owns the close.
+        let vendedEnd: Int32
         private let defaults: UserDefaults
         private let suiteName: String
 
@@ -124,6 +127,7 @@ struct HolderDetachHandbackTests {
             var pair: [Int32] = [-1, -1]
             #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
             let vended = pair[0]
+            vendedEnd = vended
             sessionEnd = pair[1]
             // The real vend is a `dup` of a pty the daemon opened `O_NONBLOCK`,
             // and the flag rides the dup; a reader that blocks would spin.
@@ -290,6 +294,32 @@ struct HolderDetachHandbackTests {
         #expect(detach.generation == Self.generation)
         #expect(detach.terminalID == fixture.terminalID)
         #expect(detach.worktreeID == fixture.worktreeID)
+    }
+
+    /// A session descriptor must not survive an `exec`, and the reason is the
+    /// same one the row above asserts from the other side: a child that
+    /// inherited a copy holds the session open after the handback, so the far
+    /// end never sees the close no matter how carefully this process orders
+    /// its own. That failure is invisible until some sibling suite happens to
+    /// spawn a long-lived child inside the attach window — it reached CI as
+    /// `.stillOpen` — so the flag is asserted directly rather than left to
+    /// whichever test the timing happens to redden.
+    @MainActor
+    @Test("the attach leaves nothing about the session inheritable across an exec")
+    func theVendedDescriptorIsCloseOnExec() async throws {
+        let fixture = try Fixture()
+        defer { fixture.tearDown() }
+
+        // Inheritable when it arrives — a descriptor received over `SCM_RIGHTS`
+        // is, and so is one from a `socketpair` — which is what makes the
+        // attach's own `fcntl` the thing under test rather than a tautology.
+        #expect(fcntl(fixture.vendedEnd, F_GETFD) & FD_CLOEXEC == 0,
+                "the fixture must hand over an inheritable descriptor, or this test is vacuous")
+
+        await fixture.attach()
+
+        #expect(fcntl(fixture.vendedEnd, F_GETFD) & FD_CLOEXEC != 0,
+                "the panel must not leave a session's pty inheritable by every child it spawns")
     }
 
     // MARK: - The screen, out and back

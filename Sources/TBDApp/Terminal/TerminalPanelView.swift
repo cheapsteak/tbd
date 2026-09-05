@@ -795,6 +795,19 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 _ = handleUnsupportedTransport(into: terminalView)
                 return
             }
+            // **Close-on-exec, before anything else touches it.** A descriptor
+            // that arrives over `SCM_RIGHTS` is inheritable unless somebody
+            // says otherwise, and this app spawns children — every local-PTY
+            // panel is a `forkpty`, and the tools it shells out to are more.
+            // A child that inherits a session's pty master holds that session
+            // open for as long as it lives: the daemon's reader sees no EOF
+            // after the handback, the pty is never reclaimed, and the panel
+            // that closed its tab is no longer the last writer. Nothing in
+            // this process wants a session pty across an `exec`, so neither
+            // copy is left inheritable — this one, and the write duplicate
+            // below, which is taken with `F_DUPFD_CLOEXEC` because `dup(2)`
+            // deliberately clears the flag on the copy.
+            _ = fcntl(attachment.ptyFD, F_SETFD, FD_CLOEXEC)
             // Teardown can land across any await. Nothing owns the descriptor
             // yet, so this is the one place it is closed from outside a reader.
             guard !isTornDown else {
@@ -827,7 +840,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // is not fatal to rendering — the session still paints — so it is
             // logged and the panel runs read-only, reporting every write
             // unwritten so the daemon keeps delivering.
-            holderWriteFD = Darwin.dup(attachment.ptyFD)
+            //
+            // `F_DUPFD_CLOEXEC`, never `dup(2)`: the copy would otherwise be
+            // inheritable whatever the original's flag says, and one inherited
+            // copy in one child is enough to keep the session open past this
+            // panel — see the note on the attach above.
+            holderWriteFD = fcntl(attachment.ptyFD, F_DUPFD_CLOEXEC, 0)
             if holderWriteFD < 0 {
                 logger.error("""
                     could not duplicate the pty for terminal \
