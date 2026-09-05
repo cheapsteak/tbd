@@ -1179,6 +1179,18 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the pty-holder transport gate (default OFF). Read fresh at spawn
+    /// time, so no daemon restart is needed — but it applies only to sessions
+    /// created after the call: a session records its transport at creation and
+    /// keeps it for life. Sending either value is an explicit gesture that
+    /// survives a later change to the shipped default.
+    func setPtyHolderEnabled(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetPtyHolderEnabled,
+            params: ConfigSetPtyHolderEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the Claude cloud sessions gate (default OFF). The daemon builds
     /// its provider manager only at boot, so this takes effect on the next
     /// daemon restart rather than the next gesture.

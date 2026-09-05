@@ -268,6 +268,7 @@ struct GeneralSettingsTab: View {
                 Toggle("Suspend idle Claude before sleep", isOn: $autoSuspend)
                     .help("Experimental: best-effort exit idle Claude instances when the machine is about to sleep, so a tmux server that dies during a long sleep has less to recover. Off by default — may interrupt long-running work.")
                 controlModeToggle
+                ptyHolderToggle
                 hibernateInputVetoToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
@@ -301,6 +302,28 @@ struct GeneralSettingsTab: View {
             )
             .font(.caption)
             .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Pty-holder transport opt-in. Reads the persisted flag from
+    /// `daemon.capabilities` and writes via `config.setPtyHolderEnabled`.
+    /// Disabled with an explanation when the daemon could not locate the
+    /// `TBDHolder` helper — the same second half the spawn gate asks, without
+    /// which the flag would be honored by falling back to tmux every time.
+    @ViewBuilder
+    private var ptyHolderToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        let supported = capabilities?.ptyHolderSupported ?? false
+        Toggle("Run new sessions without tmux", isOn: Binding(
+            get: { capabilities?.ptyHolderEnabled ?? false },
+            set: { newValue in Task { await appState.setPtyHolderEnabled(newValue) } }
+        ))
+        .help(AppState.ptyHolderHelp)
+        .disabled(!supported)
+        if !supported {
+            Text(AppState.ptyHolderUnsupportedCaption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
