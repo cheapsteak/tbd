@@ -105,9 +105,19 @@ unanchored against argv sidesteps both the truncation and the toolchain path.
 
 When no descendant matches, every descendant that is not known plumbing — the
 pty wrapper, the shells, `tee`, `sleep`, python, `swift-safe` — is worth a
-stack, capped at four in walk order so parents come before the children they
-spawned. The count the cap skips is written into the ps file, so the omission is
-visible in the artifact rather than silent.
+stack.
+
+Both paths take at most four processes, in walk order so parents come before the
+children they spawned. A match count is not a process count: while the package is
+compiling, the bundle path `.build/<triple>/debug/TBDPackageTests.build/…`
+appears in the argv of every concurrent compiler process, so the argv match can
+select a dozen at once, and at five seconds of serial sampling each that would
+consume the margin the budget leaves. Walk order decides which four survive the
+cap, which puts SwiftPM's driver ahead of the compiler processes it spawned — in
+a stall during compilation the driver's stack is the more informative one. The
+count each cap skips is written into the ps file, and the whole-machine listing
+still names every matching process, so a capped candidate disappears from the
+sampling and not from the artifact.
 
 Each target gets `sample <pid> 5 -mayDie`, written to its own file, and is then
 SIGKILLed immediately: it is wedged, and it has already given up everything it
@@ -165,7 +175,7 @@ files, so absence is the normal case rather than evidence of broken wiring.
 | margin left after the budget | 180 s | 42 s used at worst measurement |
 | `sample` duration per target | 5 s | ~5000 stacks at 1 ms |
 | SIGTERM → SIGKILL grace | 30 s | cleanup takes a few seconds |
-| fallback target cap | 4 | 3 used in the measured probe |
+| sample-target cap (both paths) | 4 | 3 used in the measured probe |
 
 The healthy pass reports `Test run with 179 tests in 37 suites passed after
 116.847 seconds`, so the budget is six times a normal run and still three

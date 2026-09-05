@@ -681,31 +681,48 @@ jobs:
             else
               echo "(none)" >> /tmp/quiet-pass-stall-ps.txt
             fi
+            # Both selection paths below take at most `sample_target_cap`
+            # processes, in walk order (parents before children, so SwiftPM's
+            # driver comes ahead of the compiler processes it spawns — in a stall
+            # during compilation the driver's own stack is the more informative
+            # one). A match count is not a process count: during compilation the
+            # bundle path `.build/<triple>/debug/TBDPackageTests.build/…` appears
+            # in the argv of every concurrent compiler process, so the argv match
+            # can select a dozen at once, and at ~5 s of serial sampling each
+            # that would eat the 180 s margin and leave the step to be killed by
+            # `timeout-minutes` after all. Whatever a cap drops is recorded in
+            # the ps file, and the whole-machine listing written above still
+            # names every matching process, so nothing disappears from the
+            # artifact — only from the sampling.
+            #
+            # Measured on a probe of the fallback path with the argv match
+            # disabled (run 33902144920): three of the four slots used —
+            # SwiftPM's `swift-test` driver at 87 KB, `swiftpm-testing-helper` at
+            # 796 KB symbolicated, and a fixture `TBDHolder` that exited
+            # mid-sample and was reported as failed — and the whole expiry path,
+            # from the whole-machine ps through the tree walk, the three serial
+            # samples and the SIGTERM sweep to the step exiting, took 42 s.
+            sample_target_cap=4
             targets=""
+            primary_taken=0
+            primary_skipped=0
             for pid in $kids; do
               argv=$(ps -ww -o command= -p "$pid" 2>/dev/null || true)
               case "$argv" in
-                *swiftpm-testing*|*xctest*|*TBDPackageTests*) targets="$targets $pid" ;;
+                *swiftpm-testing*|*xctest*|*TBDPackageTests*) ;;
+                *) continue ;;
               esac
+              if [ "$primary_taken" -lt "$sample_target_cap" ]; then
+                targets="$targets $pid"
+                primary_taken=$((primary_taken + 1))
+              else
+                primary_skipped=$((primary_skipped + 1))
+              fi
             done
+            if [ "$primary_skipped" -gt 0 ]; then
+              echo "(primary sampling capped at $sample_target_cap targets; $primary_skipped further candidates skipped)" >> /tmp/quiet-pass-stall-ps.txt
+            fi
             if [ -z "$targets" ]; then
-              # The fallback takes at most four targets, in walk order (parents
-              # before children, so SwiftPM's driver processes come before the
-              # compiler processes they spawn). Measured on a probe of this path
-              # with the argv match disabled (run 33902144920): three of the
-              # four slots were used — SwiftPM's `swift-test` driver at 87 KB,
-              # `swiftpm-testing-helper` at 796 KB symbolicated, and a fixture
-              # `TBDHolder` that exited mid-sample and was reported as failed —
-              # and the whole expiry path, from the whole-machine ps through the
-              # tree walk, the three serial samples and the SIGTERM sweep to the
-              # step exiting, took 42 s against the 180 s margin. An uncapped
-              # list — every non-plumbing process alive mid-compile — is what
-              # could eat that margin and leave the step to be killed by
-              # `timeout-minutes` after all. Whatever the cap drops is recorded
-              # in the ps file, so the omission is visible in the artifact. The
-              # argv-matched path above stays uncapped: it normally yields
-              # exactly one process.
-              fallback_cap=4
               fallback_taken=0
               fallback_skipped=0
               for pid in $kids; do
@@ -713,7 +730,7 @@ jobs:
                 case "${comm##*/}" in
                   ""|script|bash|sh|tee|sleep|Python|python3|swift-safe) continue ;;
                 esac
-                if [ "$fallback_taken" -lt "$fallback_cap" ]; then
+                if [ "$fallback_taken" -lt "$sample_target_cap" ]; then
                   targets="$targets $pid"
                   fallback_taken=$((fallback_taken + 1))
                 else
@@ -721,7 +738,7 @@ jobs:
                 fi
               done
               if [ "$fallback_skipped" -gt 0 ]; then
-                echo "(fallback sampling capped at $fallback_cap targets; $fallback_skipped further candidates skipped)" >> /tmp/quiet-pass-stall-ps.txt
+                echo "(fallback sampling capped at $sample_target_cap targets; $fallback_skipped further candidates skipped)" >> /tmp/quiet-pass-stall-ps.txt
               fi
             fi
             if [ -z "$targets" ]; then
