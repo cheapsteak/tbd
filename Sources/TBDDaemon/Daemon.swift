@@ -810,10 +810,18 @@ public final class Daemon: Sendable {
         let git = GitManager()
         let tmux = TmuxManager()
         let hooks = HookResolver()
+        let configDirManager = ClaudeProfileConfigDirManager()
+        let profilePoolCandidateSource = ProfilePoolCandidateSource(
+            profiles: database.modelProfiles,
+            snapshots: database.oauthUsageSnapshots,
+            terminals: database.terminals,
+            loginIdentity: { configDirManager.loginIdentity(forProfileID: $0) }
+        )
         let modelProfileResolver = ModelProfileResolver(
             profiles: database.modelProfiles,
             repos: database.repos,
-            config: database.config
+            config: database.config,
+            candidateSource: profilePoolCandidateSource
         )
         let pendingQuestions = PendingQuestionStore()
 

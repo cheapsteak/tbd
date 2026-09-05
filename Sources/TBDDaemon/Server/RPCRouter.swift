@@ -23,6 +23,7 @@ public final class RPCRouter: Sendable {
     public let actuationLog: ActuationLog
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
+    public let profilePoolCandidateSource: ProfilePoolCandidateSource?
     public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     /// Edge-triggered gate in front of the merged-PR fan-out (auto-archive,
@@ -277,6 +278,7 @@ public final class RPCRouter: Sendable {
         prManager: PRStatusManager = PRStatusManager(),
         usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher(),
         modelProfileResolver: ModelProfileResolver? = nil,
+        profilePoolCandidateSource: ProfilePoolCandidateSource? = nil,
         pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
         repoSerializer: RepoSerializer = RepoSerializer(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
@@ -312,10 +314,12 @@ public final class RPCRouter: Sendable {
         let branchCache = BranchTrackingCache()
         self.branchTrackingCache = branchCache
         self.prPoller = PRPoller()
+        self.profilePoolCandidateSource = profilePoolCandidateSource
         let resolvedModelProfileResolver = modelProfileResolver ?? ModelProfileResolver(
             profiles: db.modelProfiles,
             repos: db.repos,
-            config: db.config
+            config: db.config,
+            candidateSource: profilePoolCandidateSource
         )
         self.modelProfileResolver = resolvedModelProfileResolver
         self.hibernationCoordinator = HibernationCoordinator(
