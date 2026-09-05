@@ -163,24 +163,25 @@ struct ProfileBalancingRPCTests {
         let profileA = try await db.modelProfiles.create(name: "profileA", kind: .oauth)
         let profileB = try await db.modelProfiles.create(name: "profileB", kind: .oauth)
 
-        let worktree = try await db.worktrees.create(
-            path: "/tmp/worktree",
+        let worktree = try await db.worktrees.createScratch(
+            name: "test",
             displayName: "test",
-            repoID: nil
+            path: "/tmp/worktree",
+            tmuxServer: "@test"
         )
 
         // Two live Claude sessions on profile A
         let terminalA1 = try await db.terminals.create(
             worktreeID: worktree.id,
-            paneID: "pane1",
-            displayName: "session1",
+            tmuxWindowID: "@1",
+            tmuxPaneID: "%1",
             profileID: profileA.id,
             kind: .claude
         )
         let terminalA2 = try await db.terminals.create(
             worktreeID: worktree.id,
-            paneID: "pane2",
-            displayName: "session2",
+            tmuxWindowID: "@2",
+            tmuxPaneID: "%2",
             profileID: profileA.id,
             kind: .claude
         )
@@ -188,8 +189,8 @@ struct ProfileBalancingRPCTests {
         // One live Claude session on profile B
         let terminalB = try await db.terminals.create(
             worktreeID: worktree.id,
-            paneID: "pane3",
-            displayName: "session3",
+            tmuxWindowID: "@3",
+            tmuxPaneID: "%3",
             profileID: profileB.id,
             kind: .claude
         )
@@ -197,19 +198,19 @@ struct ProfileBalancingRPCTests {
         // One hibernated session on A (should not count as live)
         let terminalA3 = try await db.terminals.create(
             worktreeID: worktree.id,
-            paneID: "pane4",
-            displayName: "session4",
+            tmuxWindowID: "@4",
+            tmuxPaneID: "%4",
             profileID: profileA.id,
             kind: .claude
         )
-        try await db.terminals.setHibernationState(
-            terminalA3.id, suspended: true, hibernated: true)
+        try await db.terminals.setHibernated(
+            id: terminalA3.id, sessionID: "session-4", reason: .auto)
 
         // One non-Claude kind on A (should not count)
         _ = try await db.terminals.create(
             worktreeID: worktree.id,
-            paneID: "pane5",
-            displayName: "shell",
+            tmuxWindowID: "@5",
+            tmuxPaneID: "%5",
             profileID: profileA.id,
             kind: .shell
         )
@@ -225,15 +226,16 @@ struct ProfileBalancingRPCTests {
     func modelProfileListIncludesLiveSessionsAndFlags() async throws {
         let (router, db) = try makeRouterAndDB()
         let profileA = try await db.modelProfiles.create(name: "profileA", kind: .oauth)
-        let worktree = try await db.worktrees.create(
-            path: "/tmp/worktree",
+        let worktree = try await db.worktrees.createScratch(
+            name: "test",
             displayName: "test",
-            repoID: nil
+            path: "/tmp/worktree",
+            tmuxServer: "@test"
         )
         _ = try await db.terminals.create(
             worktreeID: worktree.id,
-            paneID: "pane1",
-            displayName: "session1",
+            tmuxWindowID: "@1",
+            tmuxPaneID: "%1",
             profileID: profileA.id,
             kind: .claude
         )

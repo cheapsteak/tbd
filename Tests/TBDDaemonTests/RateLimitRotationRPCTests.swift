@@ -14,13 +14,21 @@ import TestSupport
     init() async throws {
         let db = try TBDDatabase(inMemory: true)
         self.db = db
+        let candidateSource = ProfilePoolCandidateSource(
+            profiles: db.modelProfiles,
+            snapshots: db.oauthUsageSnapshots,
+            terminals: db.terminals,
+            loginIdentity: { _ in nil }
+        )
         self.router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(),
                 tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
             tmux: TmuxManager(dryRun: true),
-            startTime: Date(), actuationLog: makeTestActuationLog())
+            startTime: Date(),
+            profilePoolCandidateSource: candidateSource,
+            actuationLog: makeTestActuationLog())
         let repo = try await db.repos.create(
             path: "/tmp/lrr-repo-\(UUID().uuidString)", displayName: "R", defaultBranch: "main")
         let wt = try await db.worktrees.create(
@@ -56,10 +64,12 @@ import TestSupport
     ) async throws {
         let snapshot = ProfileUsageSnapshot(
             buckets: [
-                .init(kind: "session", percent: percent, resetsAt: Date().addingTimeInterval(3600), isActive: true),
-                .init(kind: "weekly_all", percent: percent, resetsAt: Date().addingTimeInterval(86400 * 7), isActive: true),
+                .init(kind: "session", percent: percent, severity: nil, resetsAt: Date().addingTimeInterval(3600)),
+                .init(kind: "weekly_all", percent: percent, severity: nil, resetsAt: Date().addingTimeInterval(86400 * 7)),
             ],
             fetchedAt: Date(),
+            lastAttemptAt: Date(),
+            status: "ok",
             statusKind: .ok,
             organizationID: organizationID
         )
@@ -67,21 +77,17 @@ import TestSupport
     }
 
     private func setTerminalProfile(_ profileID: UUID?) async throws {
-        var terminal = try await db.terminals.get(id: terminalID)!
-        terminal.profileID = profileID
-        try await db.terminals.update(terminal)
+        try await db.terminals.setProfileID(id: terminalID, profileID: profileID)
     }
 
     private func setTerminalSessionID(_ sessionID: UUID?) async throws {
-        var terminal = try await db.terminals.get(id: terminalID)!
-        terminal.claudeSessionID = sessionID
-        try await db.terminals.update(terminal)
+        if let sessionID = sessionID {
+            try await db.terminals.updateSessionID(id: terminalID, sessionID: sessionID.uuidString)
+        }
     }
 
     private func setTerminalParked() async throws {
-        var terminal = try await db.terminals.get(id: terminalID)!
-        terminal.hibernatedAt = Date()
-        try await db.terminals.update(terminal)
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "test-session", reason: .auto)
     }
 
     private func detect(
@@ -113,14 +119,6 @@ import TestSupport
         try await setTerminalSessionID(UUID())
 
         // Setup candidate source with the picker
-        let source = ProfilePoolCandidateSource(
-            profiles: db.modelProfiles,
-            snapshots: db.oauthUsageSnapshots,
-            terminals: db.terminals,
-            loginIdentity: { _ in nil }
-        )
-        router.profilePoolCandidateSource = source
-
         let response = await detect()
         #expect(response.success)
 
@@ -138,14 +136,6 @@ import TestSupport
 
         try await setTerminalProfile(limitedProfileID)
         try await setTerminalSessionID(UUID())
-
-        let source = ProfilePoolCandidateSource(
-            profiles: db.modelProfiles,
-            snapshots: db.oauthUsageSnapshots,
-            terminals: db.terminals,
-            loginIdentity: { _ in nil }
-        )
-        router.profilePoolCandidateSource = source
 
         let response = await detect()
         #expect(response.success)
@@ -303,14 +293,6 @@ import TestSupport
 
         try await setTerminalProfile(limitedProfileID)
         try await setTerminalSessionID(UUID())
-
-        let source = ProfilePoolCandidateSource(
-            profiles: db.modelProfiles,
-            snapshots: db.oauthUsageSnapshots,
-            terminals: db.terminals,
-            loginIdentity: { _ in nil }
-        )
-        router.profilePoolCandidateSource = source
 
         let response = await detect()
         #expect(response.success)
