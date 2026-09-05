@@ -342,17 +342,40 @@ import TestSupport
             terminals: db.terminals,
             loginIdentity: { _ in nil }
         )
-        router.profilePoolCandidateSource = source
+
+        // Construct router with the source
+        let testRouter = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(),
+                tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            profilePoolCandidateSource: source,
+            actuationLog: makeTestActuationLog())
+
+        // Setup scheduler
+        testRouter.limitResumeScheduler = LimitResumeScheduler(
+            store: db.scheduledResumes, config: db.config,
+            actuator: FakeActuator(), clock: clock,
+            jitterProvider: { 0 }, onOutcome: { _, _ in })
 
         // Setup swap seam to return success
         var receivedParams: TerminalSwapProfileParams? = nil
-        router.rotationSwapPerformer = { paramsData, actor in
+        testRouter.rotationSwapPerformer = { paramsData, actor in
             let decoder = JSONDecoder()
             receivedParams = try decoder.decode(TerminalSwapProfileParams.self, from: paramsData)
             return .ok()
         }
 
-        let response = await detect()
+        let request = try! RPCRequest(
+            method: RPCMethod.claudeRateLimitDetected,
+            params: RateLimitDetectedParams(
+                terminalID: terminalID,
+                resetsAt: Date().addingTimeInterval(3600),
+                limitType: "session",
+                rawMessage: "You've hit your session limit · resets 3pm (UTC)"))
+        let response = await testRouter.handle(request)
         #expect(response.success)
 
         // Verify seam was called with correct params
@@ -390,14 +413,37 @@ import TestSupport
             terminals: db.terminals,
             loginIdentity: { _ in nil }
         )
-        router.profilePoolCandidateSource = source
+
+        // Construct router with the source
+        let testRouter = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(),
+                tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            profilePoolCandidateSource: source,
+            actuationLog: makeTestActuationLog())
+
+        // Setup scheduler
+        testRouter.limitResumeScheduler = LimitResumeScheduler(
+            store: db.scheduledResumes, config: db.config,
+            actuator: FakeActuator(), clock: clock,
+            jitterProvider: { 0 }, onOutcome: { _, _ in })
 
         // Setup swap seam to return error
-        router.rotationSwapPerformer = { _, _ in
+        testRouter.rotationSwapPerformer = { _, _ in
             return try RPCResponse(error: "boom")
         }
 
-        let response = await detect()
+        let request = try! RPCRequest(
+            method: RPCMethod.claudeRateLimitDetected,
+            params: RateLimitDetectedParams(
+                terminalID: terminalID,
+                resetsAt: Date().addingTimeInterval(3600),
+                limitType: "session",
+                rawMessage: "You've hit your session limit · resets 3pm (UTC)"))
+        let response = await testRouter.handle(request)
         #expect(response.success)
 
         // Check no rotation pending row, but audit row present
@@ -433,14 +479,37 @@ import TestSupport
             terminals: db.terminals,
             loginIdentity: { _ in nil }
         )
-        router.profilePoolCandidateSource = source
+
+        // Construct router with the source
+        let testRouter = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(),
+                tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            profilePoolCandidateSource: source,
+            actuationLog: makeTestActuationLog())
+
+        // Setup scheduler
+        testRouter.limitResumeScheduler = LimitResumeScheduler(
+            store: db.scheduledResumes, config: db.config,
+            actuator: FakeActuator(), clock: clock,
+            jitterProvider: { 0 }, onOutcome: { _, _ in })
 
         // Setup swap seam to throw
-        router.rotationSwapPerformer = { _, _ in
+        testRouter.rotationSwapPerformer = { _, _ in
             throw NSError(domain: "test", code: 1)
         }
 
-        let response = await detect()
+        let request = try! RPCRequest(
+            method: RPCMethod.claudeRateLimitDetected,
+            params: RateLimitDetectedParams(
+                terminalID: terminalID,
+                resetsAt: Date().addingTimeInterval(3600),
+                limitType: "session",
+                rawMessage: "You've hit your session limit · resets 3pm (UTC)"))
+        let response = await testRouter.handle(request)
         #expect(response.success)
 
         // Check no rotation pending row, but audit row present (reset-time behavior)
