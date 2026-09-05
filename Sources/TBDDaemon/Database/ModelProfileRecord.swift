@@ -226,4 +226,15 @@ public struct ModelProfileStore: Sendable {
             )
         }
     }
+
+    /// Set whether this profile is excluded from the balancing pool (design
+    /// 2026-09-05 §4). Pass `true` to exclude, `false` to include.
+    public func setPoolOptOut(id: UUID, optOut: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE model_profiles SET pool_opt_out = ? WHERE id = ?",
+                arguments: [optOut ? 1 : 0, id.uuidString]
+            )
+        }
+    }
 }

@@ -2306,6 +2306,8 @@ final class AppState {
             Task { [weak self] in await self?.refreshRemote() }
         case .remoteSessionAttention(let d):
             handleRemoteSessionAttentionDelta(d)
+        case .terminalLimitHit:
+            break  // wired by the limit banner (app worker)
         default:
             break
         }

@@ -59,6 +59,7 @@ extension RPCRouter {
         let profiles = try await db.modelProfiles.list()
         let usageByID = try await db.modelProfileUsage.fetchAll()
         let oauthSnapshots = await oauthUsagePoller?.allSnapshots() ?? [:]
+        let liveSessionCounts = try await db.terminals.liveSessionCountsByProfile()
         let result = profiles.map { profile -> ModelProfileWithUsage in
             // Bedrock profiles have no isolated config dir; everything else
             // gets one at ~/tbd/profiles/<uuid>/claude. loginIdentity is only
@@ -85,7 +86,8 @@ extension RPCRouter {
                 loginIdentity: loginIdentity,
                 configDirPath: configDirPath,
                 usageSnapshot: oauthSnapshots[profile.id],
-                tokenTail: tokenTail
+                tokenTail: tokenTail,
+                liveSessions: liveSessionCounts[profile.id] ?? 0
             )
         }
         let config = try await db.config.get()
@@ -101,7 +103,9 @@ extension RPCRouter {
             autoResumeOnApiError: config.autoResumeOnApiError,
             gcEnabled: config.gcEnabled,
             autoCreateNotesEnabled: config.autoCreateNotesEnabled,
-            globalRemoteCreateDefaults: config.remoteCreateDefaults
+            globalRemoteCreateDefaults: config.remoteCreateDefaults,
+            profileBalancingEnabled: config.profileBalancingEnabled,
+            limitRotationEnabled: config.limitRotationEnabled
         ))
     }
 
@@ -660,13 +664,7 @@ extension RPCRouter {
     func handleModelProfileSetPoolOptOut(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(
             ModelProfileSetPoolOptOutParams.self, from: paramsData)
-        // Write the pool_opt_out column directly via GRDB transaction
-        try await db.writerForTests.write { db in
-            try db.execute(
-                sql: "UPDATE model_profiles SET pool_opt_out = ? WHERE id = ?",
-                arguments: [params.optOut ? 1 : 0, params.id.uuidString]
-            )
-        }
+        try await db.modelProfiles.setPoolOptOut(id: params.id, optOut: params.optOut)
         // Notify the app of the profile-list change so it reloads the detail view's toggle.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
