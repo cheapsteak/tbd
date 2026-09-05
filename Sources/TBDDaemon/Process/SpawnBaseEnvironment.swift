@@ -36,10 +36,12 @@ import TBDShared
 /// the Claude-side symptom, and the holder transport, having no tmux server for
 /// the probe to ask, showed it immediately. TBD's own incarnation guard has no
 /// such probe, so the tmux server needs the scrub too, for TBD's markers.
-/// Stripping Claude's from the server as well costs nothing: it leaves panes
-/// with no marker at all, which is what the probe was there to simulate.
-/// Removing the markers at the source is what makes the two transports behave
-/// alike.
+/// Stripping Claude's from the server as well costs nothing *on a server the
+/// daemon creates*: no pane predates that spawn, so it leaves panes with no
+/// marker at all, which is what the probe was there to simulate. It is not free
+/// on a server repaired in place, where panes already hold their own copy — see
+/// `serverRepairableMarkers`. Removing the markers at the source is what makes
+/// the two transports behave alike.
 ///
 /// **What belongs in the set.** One criterion across all four groups: the
 /// identity of the process that launched the daemon — its session, its
@@ -89,15 +91,13 @@ import TBDShared
 /// names, TERM and a profile-bound `CLAUDE_CONFIG_DIR` included, reaches the job
 /// unharmed.
 enum SpawnBaseEnvironment {
-    /// The names that describe whatever launched the daemon rather than the
-    /// machine the daemon runs on.
-    static let enclosingSessionMarkers: Set<String> = [
-        // Claude Code's per-session exports. Claude Code's own child-session
-        // env builder injects the last three alongside the first four, and its
-        // shell-snapshot list treats them as session-scoped: an inherited
-        // CLAUDE_EFFORT silently sets the new session's effort level, and an
-        // inherited TRACEPARENT parents every span into the launcher's dead
-        // trace.
+    /// Claude Code's per-session exports. Claude Code's own child-session env
+    /// builder injects the last three alongside the first four, and its
+    /// shell-snapshot list treats them as session-scoped: an inherited
+    /// CLAUDE_EFFORT silently sets the new session's effort level, and an
+    /// inherited TRACEPARENT parents every span into the launcher's dead
+    /// trace.
+    static let claudeCodeSessionMarkers: Set<String> = [
         "CLAUDECODE",
         "CLAUDE_CODE_CHILD_SESSION",
         "CLAUDE_CODE_ENTRYPOINT",
@@ -110,15 +110,18 @@ enum SpawnBaseEnvironment {
         "AI_AGENT",
         "CLAUDE_EFFORT",
         "TRACEPARENT",
-        // TBD's own per-process exports, identifying the terminal, worktree, or
-        // hook event the daemon was launched FROM. The three prompt layers are
-        // the launcher terminal's system-prompt text, composed per spawn by
-        // `SystemPromptBuilder.promptLayers`. `TBD_HANDOVER_FROM_PID` names the
-        // predecessor daemon a handover is taking over from; `Daemon.start()`
-        // reads it at the single-instance gate several steps before the startup
-        // scrub runs, so dropping it for children costs that read nothing.
-        // Installation-wide configuration (TBD_HOME, TBD_SOCKET_PATH) is
-        // deliberately not here.
+    ]
+
+    /// TBD's own per-process exports, identifying the terminal, worktree, or
+    /// hook event the daemon was launched FROM. The three prompt layers are the
+    /// launcher terminal's system-prompt text, composed per spawn by
+    /// `SystemPromptBuilder.promptLayers`. `TBD_HANDOVER_FROM_PID` names the
+    /// predecessor daemon a handover is taking over from; `Daemon.start()`
+    /// reads it at the single-instance gate several steps before the startup
+    /// scrub runs, so dropping it for children costs that read nothing.
+    /// Installation-wide configuration (TBD_HOME, TBD_SOCKET_PATH) is
+    /// deliberately not here.
+    static let tbdProcessMarkers: Set<String> = [
         "TBD_TERMINAL_ID",
         "TBD_TERMINAL_INCARNATION_ID",
         "TBD_WORKTREE_ID",
@@ -132,16 +135,46 @@ enum SpawnBaseEnvironment {
         "TBD_PROMPT_INSTRUCTIONS",
         "TBD_PROMPT_RENAME",
         "TBD_HANDOVER_FROM_PID",
-        // Codex's per-session exports. `CODEX_CI` puts a session into
-        // noninteractive mode and `CODEX_THREAD_ID` names the launcher's
-        // thread, so `CodexHomeManager` already unsets both in the shell
-        // command it builds for a Codex pane.
+    ]
+
+    /// Codex's per-session exports. `CODEX_CI` puts a session into
+    /// noninteractive mode and `CODEX_THREAD_ID` names the launcher's thread,
+    /// so `CodexHomeManager` already unsets both in the shell command it builds
+    /// for a Codex pane.
+    static let codexSessionMarkers: Set<String> = [
         "CODEX_CI",
         "CODEX_THREAD_ID",
-        // The enclosing tmux pane's coordinates.
+    ]
+
+    /// The enclosing tmux pane's coordinates.
+    static let tmuxPaneMarkers: Set<String> = [
         "TMUX",
         "TMUX_PANE",
     ]
+
+    /// The names that describe whatever launched the daemon rather than the
+    /// machine the daemon runs on.
+    static let enclosingSessionMarkers: Set<String> = claudeCodeSessionMarkers
+        .union(tbdProcessMarkers)
+        .union(codexSessionMarkers)
+        .union(tmuxPaneMarkers)
+
+    /// The subset an *existing* tmux server's global environment may have
+    /// stripped in place, rather than only on a server the daemon creates.
+    ///
+    /// Claude Code's markers are deliberately absent. A marker in the server's
+    /// global environment is what makes the copy a running pane already holds
+    /// read as ambient rather than as this session's, so removing the global
+    /// copy would make a `claude` started later in a pane that predates the
+    /// repair conclude it is a nested child — the very failure the scrub
+    /// exists to prevent. Those markers therefore stay until the server is
+    /// recycled, by which time no pane predates the scrub. `TMUX` and
+    /// `TMUX_PANE` are absent because the server sets them itself for every
+    /// pane it creates, so they are the server's own rather than a launcher's
+    /// identity baked in at spawn.
+    static var serverRepairableMarkers: Set<String> {
+        tbdProcessMarkers.union(codexSessionMarkers)
+    }
 
     /// The terminal type every pane gets on the tmux path, which
     /// `TmuxManager.ensureServer` sets as the server's `default-terminal`.

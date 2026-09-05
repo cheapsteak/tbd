@@ -114,8 +114,10 @@ struct SpawnBaseEnvironmentTests {
         #expect(SpawnBaseEnvironment.inheriting(base) == base)
     }
 
-    /// Pinned by name so adding or removing one is a visible, reviewed change
-    /// rather than a quiet widening of what a job loses.
+    /// The union of the four groups, pinned by name so adding or removing one
+    /// is a visible, reviewed change rather than a quiet widening of what a job
+    /// loses. `theGroupsPartitionTheSet` below ties the groups back to it, so a
+    /// name cannot move between them and go unnoticed here.
     @Test func theMarkerSetIsExactlyTheEnclosingSessionsIdentity() {
         #expect(SpawnBaseEnvironment.enclosingSessionMarkers == [
             "CLAUDECODE",
@@ -148,6 +150,43 @@ struct SpawnBaseEnvironmentTests {
             "TMUX",
             "TMUX_PANE",
         ])
+    }
+
+    /// The union is what every existing caller applies, so the four groups have
+    /// to account for it exactly: a name that fell out of a group while the
+    /// pinned list above stayed green would be a name nothing scrubs.
+    @Test func theGroupsPartitionTheSet() {
+        let groups: [Set<String>] = [
+            SpawnBaseEnvironment.claudeCodeSessionMarkers,
+            SpawnBaseEnvironment.tbdProcessMarkers,
+            SpawnBaseEnvironment.codexSessionMarkers,
+            SpawnBaseEnvironment.tmuxPaneMarkers,
+        ]
+
+        for (index, group) in groups.enumerated() {
+            for other in groups[(index + 1)...] {
+                #expect(group.isDisjoint(with: other))
+            }
+        }
+        #expect(groups.reduce(into: Set<String>()) { $0.formUnion($1) }
+            == SpawnBaseEnvironment.enclosingSessionMarkers)
+    }
+
+    /// What an *existing* tmux server may have stripped in place is a strict
+    /// subset. Claude Code reads a marker as ambient only while the server's
+    /// global environment carries it, so removing the global copy would make a
+    /// `claude` started later in a pane that predates the repair — a pane
+    /// holding its own copy — read itself as a nested child. `TMUX` and
+    /// `TMUX_PANE` are the server's own.
+    @Test func serverRepairSparesClaudeCodesMarkersAndTheTmuxPanes() {
+        #expect(
+            SpawnBaseEnvironment.serverRepairableMarkers
+                == SpawnBaseEnvironment.tbdProcessMarkers
+                    .union(SpawnBaseEnvironment.codexSessionMarkers))
+        #expect(SpawnBaseEnvironment.serverRepairableMarkers
+            .isDisjoint(with: SpawnBaseEnvironment.claudeCodeSessionMarkers))
+        #expect(SpawnBaseEnvironment.serverRepairableMarkers
+            .isDisjoint(with: SpawnBaseEnvironment.tmuxPaneMarkers))
     }
 
     /// An empty value is not a config dir. Every reader of the name in this

@@ -384,8 +384,9 @@ public struct TmuxManager: Sendable {
         ["-L", server, "has-session", "-t", session]
     }
 
-    /// The single tmux invocation that strips every enclosing-session marker
-    /// from an existing server's global environment.
+    /// The single tmux invocation that strips the repairable enclosing-session
+    /// markers from an existing server's global environment and then reports
+    /// what the server's global environment holds.
     ///
     /// `set-environment -gu <name>` removes a name from the server's global
     /// environment, so windows created afterwards do not inherit it. Running
@@ -393,41 +394,48 @@ public struct TmuxManager: Sendable {
     /// name the server never had is a no-op, which is what makes the whole
     /// repair safe to run unconditionally.
     ///
-    /// `TMUX` and `TMUX_PANE` are excluded: the server sets those itself for
-    /// every pane it creates, so they are the server's to manage rather than a
-    /// launcher's identity baked in at spawn.
+    /// Only TBD's own per-process exports and Codex's per-session exports are
+    /// repaired; `SpawnBaseEnvironment.serverRepairableMarkers` is the set and
+    /// carries the reason. Claude Code's markers are left alone because a pane
+    /// that predates the repair holds its own copy and reads it as ambient only
+    /// while the server's global copy is there too, and `TMUX`/`TMUX_PANE` are
+    /// the server's own.
+    ///
+    /// The trailing `show-environment -g` — the *unnamed* form, which lists
+    /// every global variable and never fails, unlike `show-environment -g NAME`
+    /// on an absent name — makes the invocation's stdout the server's full
+    /// global listing after the unsets, so the by-value `CLAUDE_CONFIG_DIR`
+    /// judgment costs no extra client call.
     ///
     /// One invocation rather than one per name. `";"` is tmux's command
     /// separator and travels as its own argv element, so the whole list runs as
     /// a single command against the server.
     public static func serverEnvironmentRepairCommand(server: String) -> [String] {
-        let names = SpawnBaseEnvironment.enclosingSessionMarkers
-            .subtracting(["TMUX", "TMUX_PANE"])
-            .sorted()
+        let names = SpawnBaseEnvironment.serverRepairableMarkers.sorted()
         var args = ["-L", server]
         for (index, name) in names.enumerated() {
             if index > 0 { args.append(";") }
             args += ["set-environment", "-gu", name]
         }
+        args += [";", "show-environment", "-g"]
         return args
-    }
-
-    /// Ask a server what one name holds in its global environment. tmux prints
-    /// `NAME=value`, or `-NAME` when the name is explicitly unset.
-    public static func showEnvironmentCommand(server: String, name: String) -> [String] {
-        ["-L", server, "show-environment", "-g", name]
     }
 
     /// Whether a server's global `CLAUDE_CONFIG_DIR` is one TBD minted for a
     /// single profile-bound spawn, and so must be removed rather than handed to
     /// every window the server creates from now on.
     ///
+    /// `showEnvironmentOutput` is the full `show-environment -g` listing — one
+    /// `NAME=value` line per global variable, or `-NAME` for a name the server
+    /// has explicitly unset — which this scans for the `CLAUDE_CONFIG_DIR=`
+    /// line.
+    ///
     /// Judged by value, exactly as `SpawnBaseEnvironment` judges it on the
     /// spawn path: a directory under this installation's profiles root is
     /// per-spawn identity, while any other value is the user's own
     /// configuration and stays. A `-CLAUDE_CONFIG_DIR` line means the server
-    /// has already unset it, and anything else tmux prints is not an answer to
-    /// the question — both read as "no repair needed".
+    /// has already unset it, and a listing with no such line means it never had
+    /// one — both read as "no repair needed".
     static func configDirRepairNeeded(
         showEnvironmentOutput: String,
         environment: [String: String]
@@ -1134,19 +1142,25 @@ public struct TmuxManager: Sendable {
             // its `new-session` already runs under the scrubbed base, so
             // nothing was ever baked in.
             //
-            // `CLAUDE_CONFIG_DIR` is judged by value, so it takes a read first;
-            // every other name is removed unconditionally in one invocation.
-            // Both are best-effort — a repair that fails must never stop a
-            // session from reaching a server that is already up.
-            let shownConfigDir = try? await runTmux(
-                Self.showEnvironmentCommand(server: server, name: "CLAUDE_CONFIG_DIR"))
-            if let shownConfigDir,
-               Self.configDirRepairNeeded(
-                   showEnvironmentOutput: shownConfigDir,
-                   environment: ProcessInfo.processInfo.environment) {
-                _ = try? await runTmux(["-L", server, "set-environment", "-gu", "CLAUDE_CONFIG_DIR"])
+            // Normally one call: the repair invocation ends in
+            // `show-environment -g`, so its output is the listing the by-value
+            // `CLAUDE_CONFIG_DIR` judgment needs. A second call follows only
+            // when the server carries a TBD-minted config dir. The repair is
+            // best-effort — it must never stop a session from reaching a server
+            // that is already up — but a failure is logged rather than
+            // swallowed: tmux stops a command list at the first command that
+            // fails, so a name it rejects would silently leave every later name
+            // still set, with no trace anywhere.
+            do {
+                let listing = try await runTmux(Self.serverEnvironmentRepairCommand(server: server))
+                if Self.configDirRepairNeeded(
+                    showEnvironmentOutput: listing,
+                    environment: ProcessInfo.processInfo.environment) {
+                    _ = try await runTmux(["-L", server, "set-environment", "-gu", "CLAUDE_CONFIG_DIR"])
+                }
+            } catch {
+                logger.warning("ensureServer: could not repair the global environment of tmux server \(server, privacy: .public): \(String(describing: error), privacy: .public)")
             }
-            _ = try? await runTmux(Self.serverEnvironmentRepairCommand(server: server))
             return nil
         } catch {
             // Session does not exist, create it — capture the initial window ID
