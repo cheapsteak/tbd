@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -45,11 +46,14 @@ final class HolderProcessFixture {
 
     private final class BundleMarker {}
 
-    /// A short scratch root. Short on purpose: the rendezvous socket lives
-    /// under it and `sun_path` is 104 bytes, so a deep `TMPDIR` would fail the
-    /// bind rather than the assertion.
+    /// A short scratch root under the run root `scripts/test.sh` reclaims.
+    /// Short on purpose: the rendezvous socket lives under it and `sun_path` is
+    /// 104 bytes, so a deeper root would fail the bind rather than the
+    /// assertion. Fenced on purpose too — `tearDown` cannot run when the test
+    /// process is killed, and the wrapper's EXIT trap is the only thing that
+    /// reclaims the root in that case. See `fencedScratchRoot(prefix:)`.
     static func scratchHome() -> String {
-        "/tmp/tbdh7-\(UUID().uuidString.prefix(8).lowercased())"
+        fencedScratchRoot(prefix: "tbdh7")
     }
 
     /// The environment the rendezvous paths are derived from *and* the holder

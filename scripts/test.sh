@@ -30,6 +30,9 @@
 #      the host Claude store a profile dir mirrors, or a tmux socket — lands
 #      there instead of in the real one. This catches leaks nobody has
 #      diagnosed yet, including ones in code that has no injection seam at all.
+#      `TBD_TEST_SCRATCH_ROOT` names that scratch dir itself, for the handful of
+#      fixtures that must mint a socket-bearing root of their own (see
+#      "NAMING THE RUN ROOT" beside the `env` prefix below).
 #   2. THE TRIPWIRE — always on. `HOME` and `CFFIXED_USER_HOME` point at a
 #      *different* directory from layer 1, and the two names a leak reaches for
 #      inside it — `tbd` and `.claude` — are pre-created mode `000`. Code that
@@ -119,12 +122,12 @@
 # `--no-fingerprint` forces it off anywhere, including CI. The fence is the layer
 # that actually *stops* leaks, and it is never optional.
 #
-# All seven FENCE vars are OVERWRITTEN, not defaulted: an inherited value is
+# All eight FENCE vars are OVERWRITTEN, not defaulted: an inherited value is
 # discarded for the duration of the run. That is the point — a fence you can
 # disable by exporting something first is not a fence — but it does mean this
 # wrapper cannot be pointed at a config dir of your own.
 #
-# `TBD_SWIFT_LOCK_PATH`, the eighth, is the deliberate exception: it is
+# `TBD_SWIFT_LOCK_PATH`, the ninth, is the deliberate exception: it is
 # admission control rather than isolation, an inherited value names a lock the
 # caller wants this run to contend on, and honouring it can only ever make the
 # run wait for more things. Nothing about the fence weakens if it is respected.
@@ -768,9 +771,23 @@ done
 #
 # `${a[@]+"${a[@]}"}` — macOS ships bash 3.2, where a bare `"${a[@]}"` on an
 # EMPTY array is an unbound-variable error under `set -u`.
+#
+# NAMING THE RUN ROOT. `TBD_TEST_SCRATCH_ROOT` is the per-run scratch dir the
+# EXIT trap above deletes. A few fixtures — the holder ones — cannot live inside
+# `TBD_HOME` and need a short root of their own, because they bind a rendezvous
+# socket at `<root>/holders/<36-char uuid>.sock` against a ~104-byte `sun_path`:
+# under `TBD_HOME` that is `/tmp/tbd-test-home.XXXXXXXX/sanctioned/tbd/<prefix>-
+# xxxxxxxx/holders/<uuid>.sock` — 107 bytes for the prefixes in use, 106 for the
+# shortest of them — and the bind fails; directly under the run root the same
+# path is 92, with headroom to spare. Before this variable existed
+# they minted `/tmp/<prefix>-xxxxxxxx` instead — outside the fence entirely, so
+# a run killed mid-flight (no in-process teardown can run then) left the
+# directory behind forever. Nesting under the root the trap deletes makes that
+# reclaim kill-proof, at the cost of one more name the fixtures have to be told.
 run_fenced_suite() {
   env \
     ${fenced_env[@]+"${fenced_env[@]}"} \
+    TBD_TEST_SCRATCH_ROOT="$scratch_home" \
     TBD_HOME="$sanctioned_home" \
     TBD_SOCKET_PATH="$sanctioned_home/sock" \
     TBD_CLAUDE_HOST_HOME="$sanctioned_home/claude-host" \
