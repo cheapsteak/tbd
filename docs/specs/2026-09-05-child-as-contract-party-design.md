@@ -157,7 +157,14 @@ stale (`2026-08-30-pty-holder-session-transport-design.md:548-553`).
   than the attach makes it look. A store that has never consumed a byte
   reports the age of the store itself, counted from its adoption, so the
   field is never absent and a fresh, silent session reads as exactly as old
-  as it is.
+  as it is. Serialized as a non-negative integer of **milliseconds**, and
+  measured on the daemon's monotonic clock (the injected `ContinuousClock`
+  every delay in this codebase already takes), never on wall time — a
+  threshold compared against wall time moves when the clock does, and a
+  stale policy that can be defeated by a clock adjustment is not a policy.
+  For `viewer`, the app reports its own monotonic interval since its last
+  byte and the daemon forwards it; the interval is a duration, so no clock
+  has to be shared.
 - **`output: String`** – the lines joined with `\n`, kept for one reason:
   scripts and skills read `tbd terminal output` today and the CLI prints it.
   It is derived from `lines` and carries no information of its own.
@@ -189,9 +196,19 @@ design builds is the pull the model has always required.
   it (`SidecarFraming.swift:19-24`) — so an old app simply never answers and
   the bound below covers it. The app answers from its live SwiftTerm through
   the same cell walk the handback preamble already uses
-  (`Sources/TBDTerminalSerialization/TerminalCellWalk.swift`, consumed by
-  `Sources/TBDApp/Terminal/HolderHandback.swift`), so the two stores project
-  identically by construction. The answer is `source: .viewer`.
+  (`Sources/TBDTerminalSerialization/TerminalCellWalk.swift`, driven by
+  `TerminalSnapshotWriter` in the same module, which the handback invokes at
+  `Sources/TBDApp/Terminal/TerminalPanelView.swift:1204-1208`), so the two
+  stores project identically by construction. The answer is
+  `source: .viewer`.
+
+  The `requestID` is a UUID minted per request and unique for the request's
+  lifetime, and the reply carries the session id beside it, because the
+  sidecar is one app-wide connection carrying frames for every session. A
+  pending request is scoped to the sidecar connection it was sent on: a
+  reconnect discards every request outstanding on the old connection, and a
+  reply arriving with a stale connection generation is dropped with the
+  late-reply accounting above, never matched by id alone.
 - **Viewer holds the pty and does not answer** – the pull is bounded on an
   injected clock. On expiry the daemon answers from the emulator it suspended
   at attach, `source: .staleDaemon`, `age` per the one rule above. The
@@ -370,6 +387,16 @@ routes the same way every other send does.
   is. The holder branch lands with the lifted refusal, never after it: a
   verification whose retry still pastes through tmux would observe a holder
   session and then re-deliver to a pane id that is empty by construction.
+- **Provenance is per dispatch, not per act.** The retry recomposes against
+  the modes as they are then, so its `modeSource` and age can differ from the
+  first dispatch's. Each dispatch already writes its own outcome row to the
+  append-only actuation log — the retry's row is what
+  `DeliveryVerifier.runReCheckCycle` appends at
+  `Sources/TBDDaemon/Actuation/DeliveryVerifier.swift:276-283` — and the
+  mode source and age ride on that row, so every attempt carries its own
+  immutable provenance and nothing is overwritten. A reader of the record
+  sees two dispatches, each with the modes it was composed against, and the
+  observation between them.
 - **The daemon's own rails arm verification by default.** Sends originated by
   a daemon rail — fleet supervision nudges, queued prompts, the limit-resume
   actuator — are verify-armed on holder sessions whenever
@@ -441,8 +468,10 @@ exists, under a query-time delivery rule that leaves nothing stale.
 - **The screen contract** is an additive change to an RPC result and a
   correction to the send composition. It ships under `pty_holder_enabled`,
   which has never shipped on and wraps the whole path it corrects, for the
-  reason the outbox spec gives: a second column would keep selectable a
-  quadrant (holder on, mode-blind composition) that is known to stall agents.
+  reason the single-typist spec gives for its own gate
+  (`2026-09-03-single-typist-injection-design.md:396-402`): a second column
+  would keep selectable a quadrant (holder on, mode-blind composition) that
+  is known to stall agents.
 - **Verification on holder sends** rides `delivery_verification_enabled`,
   the existing default-off soak flag for the observation machinery. Lifting
   the holder refusal adds no reachable behavior while that flag is off, and
