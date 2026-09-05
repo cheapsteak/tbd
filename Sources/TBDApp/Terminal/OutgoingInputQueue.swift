@@ -41,6 +41,34 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "outgoingInputQu
 /// called, and nothing can interleave between them, because there is no
 /// suspension point for anything to interleave at.
 ///
+/// ## The outbox, and what it holds behind it
+///
+/// A pty master takes 1,022 bytes in raw mode and then refuses, so a paste
+/// above a kilobyte into a child that is not reading is written short. Nothing
+/// can un-write the prefix and nothing can ask the pty how much room it has,
+/// so the only repair is to finish the write: **whoever committed the prefix
+/// owns the remainder, and nothing else may reach that pty until it has
+/// landed.**
+///
+/// The remainder goes in `outbox`, and every later chunk — the rest of the
+/// paste, the keystrokes after it, an injection released from the paste hold —
+/// is appended behind it, whole, in arrival order. `drain()` finishes it when
+/// the transport says it can take more. Two consequences worth stating
+/// outright:
+///
+/// - **Ordering is FIFO across both streams.** A keystroke typed after a short
+///   paste lands after the paste's end marker. That is what keeps a child from
+///   being left in bracketed-paste mode with the person's typing absorbed into
+///   the paste.
+/// - **Held, never dropped, and never bypassed.** Nothing the person typed is
+///   discarded while the panel owns the pty, and no byte jumps the queue —
+///   including `0x03`, which could not be written any sooner anyway, since the
+///   queue that refused everything else will refuse it too.
+///
+/// The outbox has no size cap: the paste that filled it was already accepted at
+/// the view, and the bytes are a copy in this process's memory. Its bound is
+/// the descriptor — `EIO` or `EBADF` — never a clock.
+///
 /// ## What is guaranteed, and what is not
 ///
 /// The guarantee is a **safety** guarantee, not an ordering one: **while a
@@ -83,20 +111,46 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "outgoingInputQu
 /// nothing. Reorder them only with this paragraph in hand.
 @MainActor
 final class OutgoingInputQueue {
-    /// Performs the actual write once the queue has decided a chunk may go
-    /// out now, and reports whether anything took the bytes: `false` means
-    /// the panel had no live transport to hand them to (no `localProcess`, or
-    /// a control-mode panel with no attach), so nothing was written and
-    /// nothing ever will be for this chunk.
+    /// What one attempt at the transport achieved.
     ///
-    /// **That return value is the ack.** A holder-backed panel takes the
-    /// `.localPTY` arm with a nil `localProcess` today, so a seam that could
-    /// not say "not written" would have this queue ack `written: true` for a
-    /// byte that reached nothing — the daemon would then not fall back and the
-    /// prompt would be lost invisibly, which the plan's Global Constraints
-    /// forbid. The injection path must treat `false` as "fall back and write
-    /// directly", not as an ack to log.
-    private let write: @MainActor (Data) -> Bool
+    /// Three cases, because the middle one is neither of the other two: a pty
+    /// master takes a prefix and refuses the rest while remaining perfectly
+    /// alive, and calling that a failure is what made a truncated paste look
+    /// like a dead transport.
+    enum WriteAttempt: Equatable {
+        /// Every byte was taken.
+        case accepted
+        /// The transport took `written` bytes (possibly zero) and refused the
+        /// rest. It is alive and will take more later; the remainder is this
+        /// queue's to keep and finish.
+        case refused(written: Int)
+        /// Nothing will ever land through this transport: no descriptor, a
+        /// dead child (`EIO`), a torn-down panel. `written` may be non-zero —
+        /// a prefix can be committed and the descriptor die before the rest.
+        case unwritable(written: Int)
+    }
+
+    /// Hands one chunk to the panel's transport and reports what it took.
+    ///
+    /// **This is the ack.** `.accepted` and `.refused` both mean the bytes are
+    /// with a writer that will complete or report — for `.refused` this queue
+    /// is that writer — and both are reported to the daemon as
+    /// `written: true`. Only `.unwritable` is `false`, and it means what it
+    /// says: nothing was written and nothing will be, so the daemon must fall
+    /// back rather than log an ack.
+    private let attempt: @MainActor (Data) -> WriteAttempt
+    /// Asks the host to start telling this queue when the transport can take
+    /// more (`drain()`), and to stop. Called on the edges only: armed when the
+    /// outbox becomes non-empty, disarmed when it empties. A drain notifier
+    /// left armed over an empty outbox is a main-queue spin, not a leak — see
+    /// `drain()`.
+    private let armDrain: @MainActor () -> Void
+    private let disarmDrain: @MainActor () -> Void
+    /// Publishes the panel-level backpressure indicator: a byte count while a
+    /// stall has lasted longer than `backpressureThreshold`, `nil` when it has
+    /// cleared. Never called per accepted chunk — a multi-MiB paste would
+    /// otherwise redraw the panel a few thousand times.
+    private let onBackpressureChange: @MainActor (Int?) -> Void
     private let clock: any Clock<Duration>
     /// How long a held injection waits for `endUserPaste()` before the queue
     /// stops trusting the paste to ever close and writes it anyway. An
@@ -119,6 +173,11 @@ final class OutgoingInputQueue {
     /// *default*, and every other test in the suite supplies a bound of its
     /// own to isolate the behaviour it is after.
     private let pasteHoldBound: Duration
+    /// How long an episode has to last before the panel says anything about it
+    /// to the person. A paste into a child that is reading normally drains in
+    /// a handful of main-actor turns, and a banner that flickered on every one
+    /// of those would be noise about a system working correctly.
+    private let backpressureThreshold: Duration
 
     private var isPasteOpen = false
     /// The last outcome `enqueueUserBytes` saw. Exists only to make
@@ -145,14 +204,51 @@ final class OutgoingInputQueue {
     /// would be unreachable code.
     private var pendingInjections: [PendingInjection] = []
 
+    /// The remainder of a short write, followed by every chunk that arrived
+    /// while it was outstanding — from both streams, whole, in arrival order.
+    ///
+    /// `[Data]` rather than one concatenated buffer: the FIFO already makes the
+    /// byte stream contiguous, and concatenating would copy megabytes of a
+    /// large paste on every append. Chunk boundaries are not delivery
+    /// boundaries — the kernel cuts wherever it runs out of room, including
+    /// inside a chunk — they are only how the queue stores what it owes.
+    private var outbox: [Data] = []
+    /// Maintained incrementally. Summing `outbox` per keystroke would make an
+    /// O(n) walk out of the one operation that must stay O(1).
+    private var pendingBytes = 0
+    private var isDrainArmed = false
+    /// The largest `pendingBytes` reached during the current episode, for the
+    /// one `.info` line an episode logs when it ends.
+    private var episodePeakBytes = 0
+    private var backpressureTask: Task<Void, Never>?
+    private var isBackpressureVisible = false
+
+    /// Test-only: bytes the queue owes the session right now.
+    var pendingByteCountForTesting: Int { pendingBytes }
+    /// Test-only: how many chunks are waiting, which is what discriminates a
+    /// FIFO that appends from one that coalesces.
+    var outboxChunkCountForTesting: Int { outbox.count }
+    /// Test-only: how many times a dropped outbox has been logged. The count,
+    /// not a bit, for the reason `userWriteOutcomeTransitionsForTesting`
+    /// documents: an unconditional log leaves the bit identical.
+    private(set) var outboxDropLogsForTesting = 0
+
     init(
         pasteHoldBound: Duration = HolderInputTiming.pasteHoldBound,
+        backpressureThreshold: Duration = .seconds(1),
         clock: any Clock<Duration> = ContinuousClock(),
-        write: @escaping @MainActor (Data) -> Bool
+        armDrain: @escaping @MainActor () -> Void = {},
+        disarmDrain: @escaping @MainActor () -> Void = {},
+        onBackpressureChange: @escaping @MainActor (Int?) -> Void = { _ in },
+        attempt: @escaping @MainActor (Data) -> WriteAttempt
     ) {
-        self.write = write
+        self.attempt = attempt
+        self.armDrain = armDrain
+        self.disarmDrain = disarmDrain
+        self.onBackpressureChange = onBackpressureChange
         self.clock = clock
         self.pasteHoldBound = pasteHoldBound
+        self.backpressureThreshold = backpressureThreshold
     }
 
     /// Releases any injection still waiting on a paste that never closed —
@@ -162,7 +258,7 @@ final class OutgoingInputQueue {
     ///
     /// The paste is closed as part of this, so the queue is left inert rather
     /// than half-torn-down: an injection arriving after teardown resolves
-    /// promptly on whatever `write` reports (`false`, for a panel whose
+    /// promptly on whatever the transport reports (`false`, for a panel whose
     /// transport is gone) instead of being parked behind a paste nobody will
     /// ever close.
     func shutdown() {
@@ -172,6 +268,11 @@ final class OutgoingInputQueue {
         }
         pendingInjections.removeAll()
         isPasteOpen = false
+        // The descriptor is about to close, so the remainder can never land.
+        // Dropping it here rather than in the panel keeps the byte count — the
+        // only thing worth logging — where it is known, and `transportDied`
+        // carries the disarm this teardown owes the notifier.
+        transportDied()
     }
 
     /// Test-only: how many injections are currently held behind an open
@@ -192,7 +293,8 @@ final class OutgoingInputQueue {
     /// matters: a diagnostic that logged unconditionally would leave the bit
     /// identical and this count climbing per keystroke. Zero means the panel
     /// has been in one state throughout — which for a working panel is the
-    /// expected reading.
+    /// expected reading, **and a short write must leave it there**: a held
+    /// remainder is not a panel whose keystrokes are going nowhere.
     private(set) var userWriteOutcomeTransitionsForTesting = 0
 
     /// Test-only: whether a user paste is currently open. Lets a test drive
@@ -207,19 +309,21 @@ final class OutgoingInputQueue {
 
     /// Write a chunk of user-originated bytes (a keystroke, or one of the
     /// three chunks of a bracketed paste). Goes out immediately, in this same
-    /// main-actor turn. Fire-and-forget by design: the caller is a
+    /// main-actor turn — or, if the transport is still owed bytes from an
+    /// earlier short write, joins the back of the outbox, which is an O(1)
+    /// append with no hop. Fire-and-forget by design: the caller is a
     /// synchronous SwiftTerm delegate callback with nobody to report a
     /// transport failure to, exactly as it was before this queue existed
     /// (`localProcess?.send` / `fdSidecar.sendInput` were already
     /// fire-and-forget).
     ///
-    /// Nobody to report to is not the same as nothing to say: `write` now
-    /// *knows* the bytes reached no transport, and on a holder-backed panel
-    /// that is true of every keystroke, so a human types and the only
-    /// diagnostic is absence. `noteUserWriteOutcome` turns that into one log
-    /// line per episode.
+    /// Nobody to report to is not the same as nothing to say: the transport
+    /// now *knows* when the bytes reached nothing, and on a panel whose child
+    /// has exited that is true of every keystroke, so a human types and the
+    /// only diagnostic is absence. `noteUserWriteOutcome` turns that into one
+    /// log line per episode.
     func enqueueUserBytes(_ data: Data) {
-        noteUserWriteOutcome(write(data))
+        noteUserWriteOutcome(submit(data))
     }
 
     /// Edge-triggered diagnostic for the user's stream: one line when
@@ -263,18 +367,186 @@ final class OutgoingInputQueue {
         flushPending()
     }
 
+    // MARK: - The outbox
+
+    /// The one place a chunk is either written or queued. Returns whether a
+    /// writer that will complete or report has it.
+    ///
+    /// **The order of the two branches is the ordering guarantee.** A non-empty
+    /// outbox means somebody is owed bytes, so nothing may go to the kernel
+    /// ahead of them — not a keystroke, not an injection, not `0x03`. Moving an
+    /// interrupt to the front would reorder the person's input against itself
+    /// and deliver nothing sooner, because the queue that refused the paste
+    /// will refuse the interrupt too.
+    ///
+    /// **`.unwritable` is not latched into a permanent verdict**, and that is
+    /// deliberate. It is the only answer available for two very different
+    /// states: a pty whose child has exited, which will refuse forever, and a
+    /// panel whose transport is merely absent for a moment — a sidecar between
+    /// reconnects, a `localProcess` not yet built. Short-circuiting every later
+    /// chunk on the first `.unwritable` would silently wedge the second kind
+    /// for the life of the panel, and would make `noteUserWriteOutcome`'s
+    /// "reaching a transport again" edge unreachable. Re-attempting costs one
+    /// refused `write(2)` per chunk on a genuinely dead descriptor, which is
+    /// what the panel already paid before this queue existed; the logging that
+    /// would actually be expensive is latched at both ends already.
+    @discardableResult
+    private func submit(_ data: Data) -> Bool {
+        guard outbox.isEmpty else {
+            append(data)
+            return true
+        }
+        switch attempt(data) {
+        case .accepted:
+            return true
+        case .refused(let written):
+            append(data.dropFirst(written))
+            return true
+        case .unwritable:
+            transportDied()
+            return false
+        }
+    }
+
+    private func append(_ data: some DataProtocol) {
+        guard !data.isEmpty else { return }
+        let wasEmpty = outbox.isEmpty
+        outbox.append(Data(data))
+        pendingBytes += data.count
+        episodePeakBytes = max(episodePeakBytes, pendingBytes)
+        if wasEmpty { beginEpisode() }
+    }
+
+    /// Finish what the kernel refused. Called by the drain notifier whenever
+    /// the transport can take more — never on a timer, and never speculatively.
+    ///
+    /// **Every exit from this function leaves the notifier armed if and only if
+    /// the outbox is non-empty**, and that is a correctness requirement rather
+    /// than tidiness. Readiness notification is level-triggered: an armed
+    /// source over an idle, writable pty whose handler writes nothing was
+    /// measured firing 44,486 / 182,060 / 47,845 times per second, so a path
+    /// that returns with an empty outbox still armed is the main queue at 100%
+    /// until the panel closes. There are exactly three exits — the loop's
+    /// `.accepted` fallthrough (`endEpisode()`), the `.refused` return (still
+    /// owed bytes, stays armed) and `transportDied()` (which calls
+    /// `endEpisode()`) — and adding a fourth means adding a disarm.
+    ///
+    /// **Bounded by the descriptor, not by a clock.** A child that does not
+    /// read for thirty seconds holds the outbox for thirty seconds; that is the
+    /// truth of the session, and it is what tmux does in the same state.
+    /// Expiring the hold would only convert a stall into a tear: the queue is
+    /// full, so the bytes released by an expiry could not be written either,
+    /// and the payload would be cut with somebody else's bytes in the gap.
+    func drain() {
+        while let head = outbox.first {
+            switch attempt(head) {
+            case .accepted:
+                outbox.removeFirst()
+                pendingBytes -= head.count
+            case .refused(let written):
+                if written > 0 {
+                    outbox[0] = Data(head.dropFirst(written))
+                    pendingBytes -= written
+                }
+                // Stay armed and return to the run loop: the transport has no
+                // more room this turn, and spinning here is the main-actor
+                // block this design forbids.
+                refreshBackpressure()
+                return
+            case .unwritable:
+                transportDied()
+                return
+            }
+        }
+        endEpisode()
+    }
+
+    /// The arm edge, taken exactly once per episode — when the outbox goes
+    /// from empty to non-empty.
+    private func beginEpisode() {
+        isDrainArmed = true
+        armDrain()
+        logger.info("""
+            outgoingInputQueue: the session's pty refused a write; \
+            \(self.pendingBytes, privacy: .public) bytes are queued and will be \
+            written as the child reads
+            """)
+        backpressureTask = Task { [weak self, backpressureThreshold, clock] in
+            // Inherits this main-actor context, so the wake-up lands on the
+            // same serial executor every other mutation here runs on.
+            while !Task.isCancelled {
+                try? await clock.sleep(for: backpressureThreshold)
+                guard !Task.isCancelled, let self else { return }
+                self.refreshBackpressure(force: true)
+            }
+        }
+    }
+
+    /// The disarm edge. `isDrainArmed` makes it idempotent, which matters
+    /// twice over: `drain()` and `transportDied()` and `shutdown()` can all
+    /// reach it, and the notifier behind `disarmDrain` is a counted
+    /// suspend/resume pair that traps when unbalanced.
+    private func endEpisode() {
+        guard isDrainArmed else { return }
+        isDrainArmed = false
+        disarmDrain()
+        backpressureTask?.cancel()
+        backpressureTask = nil
+        if isBackpressureVisible {
+            isBackpressureVisible = false
+            onBackpressureChange(nil)
+        }
+        logger.info("""
+            outgoingInputQueue: the session's pty is taking input again; the \
+            episode peaked at \(self.episodePeakBytes, privacy: .public) queued bytes
+            """)
+        episodePeakBytes = 0
+    }
+
+    /// Publishes the pending count when the episode has outlasted the
+    /// threshold. `force` is the timer's tick; an ordinary drain only refreshes
+    /// a banner that is already showing, so a fast episode never draws one.
+    private func refreshBackpressure(force: Bool = false) {
+        guard force || isBackpressureVisible else { return }
+        isBackpressureVisible = true
+        onBackpressureChange(pendingBytes)
+    }
+
+    /// The transport is gone for good. Everything it was owed is dropped —
+    /// there is no longer anybody to read it — and the episode ends, which is
+    /// what disarms the notifier.
+    private func transportDied() {
+        if pendingBytes > 0 {
+            outboxDropLogsForTesting += 1
+            logger.error("""
+                outgoingInputQueue: the session's pty is gone with \
+                \(self.pendingBytes, privacy: .public) bytes still unwritten; \
+                they are dropped — the child that was to read them has exited
+                """)
+        }
+        outbox.removeAll()
+        pendingBytes = 0
+        endEpisode()
+    }
+
     // MARK: - Daemon injection
 
-    /// Enqueues a daemon-originated injection. Returns whether it was
-    /// actually written — the caller (the injection-ack path) reports this
-    /// truthfully to the daemon, so ownership transfers on the write, not on
-    /// the call: the value is whatever `write` reported, and it is produced
-    /// only after `write` has run.
+    /// Enqueues a daemon-originated injection. Returns whether a writer that
+    /// will complete or report has it — the caller (the injection-ack path)
+    /// reports this truthfully to the daemon, so ownership transfers on the
+    /// submit, not on the call.
+    ///
+    /// `true` covers both "the transport took every byte" and "the transport
+    /// took a prefix, or none, and this queue owns the rest": in either case
+    /// the bytes are with a writer that will finish them, which is the meaning
+    /// `true` already carries on the `localProcess` and sidecar arms of
+    /// `performOutgoingWrite`. `false` means, and only means, that nothing was
+    /// written and nothing will be.
     ///
     /// `async` because it may have to wait for a paste to close. When no
     /// paste is open it returns without ever suspending.
     func enqueueInjection(_ data: Data) async -> Bool {
-        guard isPasteOpen else { return write(data) }
+        guard isPasteOpen else { return submit(data) }
         return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             hold(data: data, continuation: continuation)
         }
@@ -308,7 +580,7 @@ final class OutgoingInputQueue {
         let pending = pendingInjections.remove(at: index)
         logger.info(
             "outgoingInputQueue: injection held past the paste-hold bound with the paste still open; writing it anyway")
-        pending.continuation.resume(returning: write(pending.data))
+        pending.continuation.resume(returning: submit(pending.data))
     }
 
     private func flushPending() {
@@ -317,7 +589,7 @@ final class OutgoingInputQueue {
         pendingInjections.removeAll()
         for pending in toFlush {
             pending.timeoutTask.cancel()
-            pending.continuation.resume(returning: write(pending.data))
+            pending.continuation.resume(returning: submit(pending.data))
         }
     }
 }

@@ -100,6 +100,13 @@ struct TerminalPanelView: View {
     @State private var proxyWarning: String?
     @State private var didProbe = false
     @State private var recoveryGuidanceMessage: String?
+    /// Bytes this panel's outgoing queue is holding for a pty that has stopped
+    /// accepting writes, once the stall has outlasted the queue's threshold;
+    /// `nil` whenever nothing is waiting. Panel-local `@State` rather than an
+    /// `AppState` property on purpose: a byte count that ticks once a second
+    /// during one panel's stall would otherwise emit an observation to every
+    /// reader of that object.
+    @State private var pendingOutgoingBytes: Int?
 
     /// Profile id pinned to this terminal (if any). Used as the `.task` id so
     /// the probe re-fires once AppState populates. `nil` while AppState hasn't
@@ -169,6 +176,30 @@ struct TerminalPanelView: View {
                 .padding(.vertical, 5)
                 .background(Color.orange.opacity(0.18))
             }
+            // Passive backpressure indicator: shows only while this panel's
+            // outgoing queue is holding bytes a stalled pty refused, and only
+            // once that stall has outlasted the queue's threshold. Clears
+            // itself when the outbox drains — no dismiss affordance, matching
+            // the input-health indicator above.
+            //
+            // A sibling in this VStack rather than an overlay, so it never
+            // covers the terminal: the panel's app-wide scroll/click monitors
+            // filter on `tv.bounds.contains(point)`, and a view drawn OVER the
+            // terminal would have to be told to suppress them. This one sits
+            // outside those bounds and carries no controls.
+            if let pendingOutgoingBytes {
+                HStack(spacing: 6) {
+                    Image(systemName: "hourglass")
+                        .foregroundStyle(.orange)
+                    Text(TerminalBackpressurePresentation.message(pendingBytes: pendingOutgoingBytes))
+                        .font(.caption)
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.orange.opacity(0.18))
+                .accessibilityElement(children: .combine)
+            }
             TerminalPanelRepresentable(
                 terminalID: terminalID,
                 tmuxServer: tmuxServer,
@@ -181,6 +212,7 @@ struct TerminalPanelView: View {
                 onTerminalNotification: onTerminalNotification,
                 onMissingWindow: onMissingWindow,
                 onRecoveryGuidance: { recoveryGuidanceMessage = $0 },
+                onOutgoingBackpressureChange: { pendingOutgoingBytes = $0 },
                 initialSnapshot: initialSnapshot,
                 isSuspendedSnapshot: isSuspendedSnapshot,
                 parkedNoticeMessage: parkedNoticeMessage,
@@ -264,6 +296,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     @EnvironmentObject var appearance: AppearanceSettings
     var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
     var onRecoveryGuidance: (@MainActor (String) -> Void)?
+    /// Carries this panel's queued-byte count to the parent's `@State` banner.
+    var onOutgoingBackpressureChange: (@MainActor (Int?) -> Void)?
     var initialSnapshot: String?
     var isSuspendedSnapshot: Bool = false
     var parkedNoticeMessage: String? = nil
@@ -303,6 +337,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onMissingWindow = onMissingWindow
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
+        context.coordinator.onOutgoingBackpressureChange = onOutgoingBackpressureChange
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
 
         // Feed snapshot before tmux connects so the user sees the last state
@@ -399,6 +434,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             .isCodexTerminal == true
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
+        // Re-assigned here as well as in `makeNSView`: the closure captures the
+        // parent's CURRENT `@State` setter, and a coordinator still holding the
+        // one from `makeNSView` writes into a stale view identity.
+        context.coordinator.onOutgoingBackpressureChange = onOutgoingBackpressureChange
     }
 
     static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
@@ -457,11 +496,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// A write-only `dup` of this holder session's pty master, and the
         /// app's write destination for one (`performOutgoingWrite`'s
         /// `.localPTY` arm). Without it a holder-backed panel has nowhere to
-        /// put a byte: it has no `LocalProcess` and no control-mode attach, so
-        /// every keystroke and every daemon injection would report unwritten
-        /// and the daemon's fallback would become the only delivery path —
-        /// which is the opposite of the property this transport is for, that
-        /// the app is the attached session's ONLY writer.
+        /// put a byte: it has no `LocalProcess` and no control-mode attach.
+        ///
+        /// A `dup` that fails leaves the panel read-only: every write reports
+        /// `.unwritable`, the queue holds nothing, and the daemon keeps
+        /// delivering through its own descriptor — which is the opposite of
+        /// the property this transport is for, that the app is the attached
+        /// session's ONLY writer. That is distinct from a pty that merely
+        /// refuses: a refusal is held and finished, and reported accepted.
         ///
         /// A separate descriptor rather than the reader's own, because the
         /// reader closes its descriptor **on its own thread** on the way out
@@ -473,6 +515,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// and does not touch the one-reader invariant: a pty master's read and
         /// write halves are independent queues, and multiple writers to one
         /// master are ordinary.
+        ///
+        /// **A short write here is kept, not lost.** A raw-mode master takes
+        /// 1,022 bytes and then refuses, so this descriptor is the one place a
+        /// panel can be handed back a remainder; `writeToHolderPTY` reports the
+        /// kernel's cut and `OutgoingInputQueue` finishes it. That gives the
+        /// descriptor a second owner: `drainNotifier` watches **this same
+        /// number** for write-readiness, which is why it must be cancelled
+        /// before the close in `stopHolderReader` and why nothing may lower
+        /// this field without cancelling it first.
         private var holderWriteFD: Int32 = -1
 
         /// Whether the last write to `holderWriteFD` failed outright, so
@@ -852,6 +903,24 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     \(self.panelID, privacy: .public) to write to \
                     (errno \(errno, privacy: .public)); this panel is read-only
                     """)
+            } else {
+                // The outbox's other half: something has to say when the pty
+                // can take more, or a refused remainder waits for a keystroke
+                // that may never come. Built here, over the same descriptor
+                // the writes go to, and cancelled in `stopHolderReader` before
+                // that descriptor closes.
+                //
+                // It is created *disarmed*, and stays that way until the queue
+                // is actually owed bytes: a readiness source over an idle,
+                // writable pty fires tens of thousands of times a second, so
+                // the arm/disarm edges wired into `outgoingQueue` are what
+                // keep this from being the main queue at 100% for as long as
+                // the panel is open.
+                drainNotifier = WriteSourceDrainNotifier(
+                    fileDescriptor: holderWriteFD
+                ) { [weak self] in
+                    self?.outgoingQueue.drain()
+                }
             }
             let holder = viewHolder
             let reader = HolderStreamReader(
@@ -958,6 +1027,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// descriptor, not to the view. `shutdown()` is idempotent, and
         /// `cleanup()` keeps its own call for panels that never had a holder.
         ///
+        /// **A remainder outstanding here is dropped, and that is a decision.**
+        /// The handback carries the screen, not unwritten input, so a person who
+        /// closes a tab while their paste is still draining into a stalled child
+        /// loses its tail — logged with the byte count, never silently. One
+        /// hazard is named rather than solved: if the dropped remainder held a
+        /// paste's end marker, the child is left mid-paste after the handback,
+        /// and a later injection can be absorbed into it. Keeping a writer alive
+        /// past the handback to land a pending marker is possible and is
+        /// deliberately not done — it puts new state into the most delicate
+        /// teardown in this file for a case that needs a large paste, a stalled
+        /// child and a close inside the stall at once.
+        ///
         /// The view holder is deliberately **not** cleared here: on the detach
         /// path the reader's last chunk is exactly the output the handback
         /// preamble is serialized from, so the sink has to outlive the stop.
@@ -969,6 +1050,19 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 injectionRegistration = nil
                 appState?.terminalInjections.unregister(registration)
             }
+            // Cancelled before the queue drops its outbox and before the
+            // descriptor closes: a readiness callback that ran after the close
+            // would write to whatever the kernel reissued that number to. Both
+            // this call and the source's handler are on the main queue, which
+            // is serial, so a cancelled notifier cannot fire afterwards.
+            //
+            // `cancel()` and then `nil`, never `nil` alone: the notifier is
+            // usually *suspended* at this point (the ordinary state is an empty
+            // outbox), and releasing a `DispatchSource` whose suspend count is
+            // non-zero is a SIGTRAP, not a leak. `cancel()` is what rebalances
+            // the count before the release.
+            drainNotifier?.cancel()
+            drainNotifier = nil
             outgoingQueue.shutdown()
             // Closed here, unlike the reader's descriptor: this one is only
             // ever touched from the main actor, so there is no thread to hand
@@ -2144,20 +2238,54 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// panel that never typed rather than from `send` — is
         /// compiler-checked main-actor, and so is the queue itself.
         ///
-        /// `false` from the write closure means the bytes reached nothing;
-        /// `enqueueInjection` reports that to the daemon so it can fall back
-        /// to writing directly. A dead `self` reports `false` for the same
-        /// reason.
-        private lazy var outgoingQueue = OutgoingInputQueue { [weak self] data in
-            self?.performOutgoingWrite(data) ?? false
-        }
+        /// `.unwritable` from the attempt closure means the bytes reached
+        /// nothing; `enqueueInjection` reports that to the daemon so it can
+        /// fall back to writing directly. A dead `self` is `.unwritable` for
+        /// the same reason.
+        ///
+        /// The three seams below the attempt are what give this panel an
+        /// outbox rather than a truncation point. `armDrain`/`disarmDrain`
+        /// carry the queue's "the outbox owes bytes" edges to the drain
+        /// notifier — and only those edges, because a notifier left armed over
+        /// an empty outbox is the main queue at 100% (Task 1 measured 44,486 /
+        /// 182,060 / 47,845 fires per second). `onBackpressureChange` carries
+        /// the panel-level indicator's byte count, and is called on the
+        /// episode's edges and its threshold tick rather than per chunk.
+        private lazy var outgoingQueue = OutgoingInputQueue(
+            armDrain: { [weak self] in self?.drainNotifier?.arm() },
+            disarmDrain: { [weak self] in self?.drainNotifier?.disarm() },
+            onBackpressureChange: { [weak self] pending in
+                self?.onOutgoingBackpressureChange?(pending)
+            },
+            attempt: { [weak self] data in
+                self?.performOutgoingWrite(data) ?? .unwritable(written: 0)
+            })
+
+        /// Tells `outgoingQueue` when this session's pty can take more. Built
+        /// with `holderWriteFD` in `startHolderClient`, and cancelled in
+        /// `stopHolderReader` **before** that descriptor closes — a readiness
+        /// callback that ran after the close would write to whatever the
+        /// kernel reissued that number to.
+        ///
+        /// `nil` on every panel that is not holder-backed: a `LocalProcess`
+        /// panel writes through `DispatchIO`, which owns its own completion,
+        /// and a control-mode panel writes frames to the sidecar. Neither can
+        /// short-write to this actor, so neither needs a drain.
+        private var drainNotifier: (any OutgoingDrainNotifier)?
+
+        /// Publishes this panel's backpressure state: the queued byte count
+        /// once a stall has outlasted the queue's threshold, `nil` when the
+        /// outbox has emptied. A closure rather than an `AppState` property so
+        /// a per-second byte count during one panel's stall does not emit an
+        /// observation to every reader of that object.
+        var onOutgoingBackpressureChange: (@MainActor (Int?) -> Void)?
 
         /// Delivers one chunk `outgoingQueue` has decided may go out now, and
-        /// reports whether anything actually took it. Same two destinations
-        /// `send(source:data:)` used before the queue existed —
-        /// `OutgoingInputRoute.decide` is unchanged, and it still runs in the
-        /// same main-actor turn the bytes arrived in, so a tab switch cannot
-        /// nil `controlModeAttach` between the decision and the write.
+        /// reports what took it. Same two destinations `send(source:data:)`
+        /// used before the queue existed — `OutgoingInputRoute.decide` is
+        /// unchanged, and it still runs in the same main-actor turn the bytes
+        /// arrived in, so a tab switch cannot nil `controlModeAttach` between
+        /// the decision and the write.
         ///
         /// A holder-backed panel has neither `localProcess` nor
         /// `controlModeAttach`, so it falls into `.localPTY` — and there it
@@ -2165,16 +2293,19 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// (`holderWriteFD`), which is what makes the app the attached
         /// session's only writer and the daemon's injection path worth having.
         ///
-        /// `true` means *handed off*, which is the strongest claim available
-        /// synchronously: both destinations complete asynchronously
-        /// (`DispatchIO` for the pty, the sidecar client's own send queue for
-        /// the frame), so a write that fails after this returns cannot be
-        /// reported here. The daemon's fail-open deadline is what covers that
-        /// residue. Both arms report every refusal that *is* knowable at call
-        /// time, which is the whole obligation this seam can carry: a missing
-        /// or dead `localProcess`, and for the sidecar a missing attach, a
-        /// disconnected client, an over-cap payload or an encode failure.
-        private func performOutgoingWrite(_ data: Data) -> Bool {
+        /// **`.accepted` and `.refused` both mean handed off**, which is the
+        /// strongest claim available synchronously and the meaning this seam
+        /// has always carried: the `localProcess` arm hands bytes to
+        /// `DispatchIO` and the sidecar arm to the client's own send queue, and
+        /// neither can report a failure that happens after this returns — the
+        /// daemon's fail-open deadline is what covers that residue. The pty arm
+        /// now joins them: `.refused` means the kernel took a prefix (possibly
+        /// none) and `outgoingQueue` owns the rest and will finish it on
+        /// write-readiness. Only `.unwritable` is a report of loss — no
+        /// descriptor, a dead or exited child, a missing attach, a disconnected
+        /// sidecar, an over-cap payload, an encode failure — and it is the only
+        /// answer that reaches the daemon as `written: false`.
+        private func performOutgoingWrite(_ data: Data) -> OutgoingInputQueue.WriteAttempt {
             switch OutgoingInputRoute.decide(
                 controlModeAttached: controlModeAttach != nil, byteCount: data.count) {
             case .localPTY:
@@ -2186,15 +2317,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 if holderWriteFD >= 0 { return writeToHolderPTY(data) }
                 // `running` counts as much as non-nil: `LocalProcess.send`
                 // silently drops everything once the child has exited, so
-                // reporting `true` for a dead child would be the same
+                // reporting `.accepted` for a dead child would be the same
                 // fabricated ack in a different shape.
-                guard let localProcess, localProcess.running else { return false }
+                guard let localProcess, localProcess.running else {
+                    return .unwritable(written: 0)
+                }
                 localProcess.send(data: [UInt8](data)[...])
-                return true
+                return .accepted
             case .sidecarInput:
                 // `isConnected` belongs in the guard for the same reason
                 // `running` does above: the sidecar client drops an `.input`
-                // frame whose socket is gone, so a `true` here would be a
+                // frame whose socket is gone, so an `.accepted` here would be a
                 // *systematic* fabricated ack for as long as the drop lasts,
                 // not a rare one.
                 //
@@ -2221,8 +2354,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // read again on the client's own send queue, so a
                 // disconnection between this check and that read is a TOCTOU
                 // this arm cannot see. Acceptable for exactly the reason the
-                // `.localPTY` arm's residue is — `true` means handed off, and
-                // the daemon's fail-open deadline is the cover — and a
+                // `.localPTY` arm's residue is — `.accepted` means handed off,
+                // and the daemon's fail-open deadline is the cover — and a
                 // synchronous answer that waited for the queue would put a
                 // socket write in a keystroke's main-actor turn.
                 //
@@ -2233,84 +2366,68 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // for, so `OutgoingInputQueue.noteUserWriteOutcome`'s recovery
                 // line ("user input is reaching a transport again") can fire
                 // on a transport that will not deliver. It carries exactly the
-                // strength this `true` does — handed off — and no more.
+                // strength this `.accepted` does — handed off — and no more.
                 guard let attach = controlModeAttach, let appState,
                     appState.daemonClient.fdSidecar.isConnected
-                else { return false }
+                else { return .unwritable(written: 0) }
                 return appState.daemonClient.fdSidecar.sendInput(
                     worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: data)
+                    ? .accepted : .unwritable(written: 0)
             }
         }
 
-        /// Write one chunk to this holder session's pty, and report whether
-        /// all of it went.
+        /// Write one chunk to this holder session's pty, and report what the
+        /// kernel took.
         ///
-        /// **What a short write means here, and what it costs today.**
-        /// A pty master's input queue is small, so a multi-KiB injected prompt
-        /// can legitimately take only a prefix; `PTYWrite.all` waits a few
-        /// milliseconds for room and then gives up rather than parking the
-        /// main actor. A partial write is reported as a **failure**, on the
-        /// reasoning that the daemon then rewrites the whole payload on top of
-        /// the prefix — visibly doubled rather than quietly truncated.
+        /// **One attempt, no waiting.** A raw-mode pty master accepts 1,022
+        /// bytes (`TTYHOG − 2`, measured) and then refuses, so any payload
+        /// above a kilobyte into a child that is not draining at that instant
+        /// is written short. This used to spend a 20 ms `poll` budget hoping
+        /// the child would read, and then reported the whole write a failure
+        /// with the prefix already committed — a truncated fragment on the
+        /// session and an error at the caller, the loss side of a fork this
+        /// design takes on the duplicate side everywhere else.
         ///
-        /// **The daemon cannot rewrite in this state.** This panel is
-        /// attached, so the acknowledgement has already released the daemon's
-        /// reader and closed its descriptor, and `HolderInjectionCourier`'s
-        /// fail-open fallback answers `.notDelivered` instead of writing. So a
-        /// 6 KB prompt into a panel whose agent is momentarily not draining
-        /// leaves a **truncated fragment** in the composer while the caller is
-        /// told the send failed. Not silent — the caller is told and the
-        /// actuation row records it — but a loss, and the fork this design
-        /// takes everywhere resolved on the wrong side of itself.
+        /// **The remainder is now kept, not lost.** `.refused(written:)` hands
+        /// it back to `OutgoingInputQueue`, which holds every later byte from
+        /// every stream behind it and finishes it when the pty is next
+        /// writable. So a short write is no longer a failure to report; it is
+        /// the ordinary shape of writing to a busy tty, and the ack the caller
+        /// carries to the daemon means what it means on the other two arms of
+        /// `performOutgoingWrite` — accepted by a writer that will complete or
+        /// report.
         ///
-        /// It is left this way on purpose. Whether the daemon can rewrite is
-        /// the descriptor question — whether it keeps a **write-only** dup
-        /// across an attach — which is a human decision already filed;
-        /// answered one way the reasoning above becomes true as written, and
-        /// changing the retry semantics here now would pre-empt it. Reporting
-        /// `true` for a prefix is not the alternative: that is the invisible
-        /// loss this path exists to prevent, with no error anywhere.
-        ///
-        /// Only the partial case logs every time. "Nothing was written"
-        /// needs no line of its own — for user bytes `OutgoingInputQueue`
-        /// already emits one edge-triggered line per episode, and for an
-        /// injection the return value reaches the daemon, which is a stronger
-        /// channel than a log. A partial write is rare enough to be worth a
-        /// line each time, because it is what explains the truncation that
-        /// follows it, and it is per-payload rather than per-keystroke anyway.
+        /// **What is bounded by what.** The remainder is bounded by the
+        /// descriptor: it ends when the write returns `EIO` (the last slave
+        /// closed) or `EBADF` (teardown), and by nothing else. No clock
+        /// truncates it, because a clock expiring on a full queue could not
+        /// write the released bytes either — it would only cut the payload with
+        /// somebody else's bytes in the gap. What the person gets instead of a
+        /// timeout is the panel's backpressure indicator.
         ///
         /// **`.failed` is edge-triggered, and it has to be.** Once the child
         /// exits, every write to the master returns `EIO` — and nothing lowers
         /// `holderWriteFD`, because `HolderStreamReader.readLoop` closes its
         /// own descriptor on EOF and never calls `stopHolderReader`. An
         /// unconditional line there is one `.error` per keystroke for as long
-        /// as somebody keeps typing at a dead session, which is exactly the
-        /// per-keystroke logging this file warns against above and R20 built
-        /// the queue's own latch to avoid.
-        private func writeToHolderPTY(_ data: Data) -> Bool {
+        /// as somebody keeps typing at a dead session. The queue logs the
+        /// dropped byte count once for the same episode; this logs the errno
+        /// once.
+        ///
+        /// A partial write is deliberately **not** logged. It is routine —
+        /// about once per KiB of any large paste — and a line per occurrence is
+        /// exactly the per-event logging this file's hot path warns against.
+        /// The episode's start and end are logged by `OutgoingInputQueue`,
+        /// once each, with the peak byte count.
+        private func writeToHolderPTY(_ data: Data) -> OutgoingInputQueue.WriteAttempt {
             switch PTYWrite.all(data, to: holderWriteFD) {
             case .complete:
                 holderWriteIsFailing = false
-                return true
-            case .nothingWritten:
-                // A full input queue, not a dead descriptor: the write path is
-                // alive, so the next `.failed` starts a new episode and logs.
-                holderWriteIsFailing = false
-                return false
+                return .accepted
             case .partial(let written):
                 holderWriteIsFailing = false
-                logger.error("""
-                    terminal \(self.panelID, privacy: .public): only \
-                    \(written, privacy: .public) of \(data.count, privacy: .public) bytes \
-                    reached the session's pty; reporting the write unwritten — the daemon \
-                    re-sends the payload whole if it still holds a descriptor for this pty, \
-                    and otherwise the session keeps the prefix
-                    """)
-                return false
-            case .failed(let code):
-                // One line per episode, keyed on the transition rather than on
-                // the errno: a descriptor that has started failing keeps
-                // failing, and the interesting fact is when it began.
+                return .refused(written: written)
+            case .failed(let code, let written):
                 if !holderWriteIsFailing {
                     holderWriteIsFailing = true
                     holderWriteFailureLogsForTesting += 1
@@ -2320,7 +2437,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                         descriptor are not logged until a write succeeds again
                         """)
                 }
-                return false
+                return .unwritable(written: written)
             }
         }
 

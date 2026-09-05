@@ -325,6 +325,88 @@ struct HolderReclaimTests {
             """)
     }
 
+    // MARK: - An exit the holder pushed instead of answering
+
+    /// A holder that pushes its exit and winds down in the same breath has
+    /// answered, and the reclaimer must record what it said.
+    ///
+    /// This is the interleaving that put `exitedStatusUnknown` in the record
+    /// for a job that exited 7. The holder pushes the terminal status at
+    /// whichever client is connected when it reaps, and the *next* thing it
+    /// does is break its loop, close its listener and unlink its rendezvous —
+    /// so a probe that connected a moment before the reap is handed the status
+    /// and then finds nothing underneath it. The push answers no request, so
+    /// `HolderClient`'s barrier retires it rather than serving it, and the verb
+    /// fails; a reclaimer that read only the failure would ask again at a path
+    /// that is now `ENOENT`, read that as absence, and record a status nobody
+    /// collected — while holding the real one.
+    ///
+    /// Driven by hand rather than through `adopt`, because which side of the
+    /// push the probe's request lands on is decided by microseconds: the
+    /// scenario is reproducible end to end (once in 120 runs of
+    /// `drainsAFinishedJobsOutputBeforeReleasingIt` under a loaded machine) but
+    /// not schedulable. Here the connection that receives the push is the
+    /// fixture's own, so every link is deterministic — the stranding, the
+    /// unlinked rendezvous, and the classification that has to survive both.
+    @Test func recordsAnExitTheHolderPushedRatherThanAnswered() async throws {
+        let fixture = try await HolderProcessFixture.start(command: "printf 'LAST\\n'; exit 7")
+        defer { fixture.tearDown() }
+
+        // The handshake connection stays open deliberately: it is the holder's
+        // one client, and therefore the one the exit push will land on.
+        let (description, ptyFD) = try await fixture.client.handOverPTY()
+        #expect(description.status == .alive, "the job wedged in ttywait is not finished exiting")
+        defer { Darwin.close(ptyFD) }
+
+        // Draining is what lets the wedged child finish exiting at all.
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        #expect(read(ptyFD, &buffer, buffer.count) > 0)
+
+        // The wait is a `waitpid`, not a liveness probe: the holder is this
+        // process's own child, so `kill(pid, 0)` goes on answering for the
+        // corpse until somebody collects it — and collecting it is owed here
+        // anyway, since nobody else can.
+        let woundDown = await pollUntil("the holder to push its exit and wind down") {
+            var collected: Int32 = 0
+            return waitpid(fixture.handle.holderPID, &collected, WNOHANG)
+                == fixture.handle.holderPID
+        }
+        #expect(woundDown, "the holder never wound down after pushing its exit")
+        fixture.noteHolderReaped()
+
+        // The verb fails, because the holder hung up the moment it pushed.
+        var thrown: Swift.Error?
+        do { _ = try await fixture.client.describe() } catch { thrown = error }
+        let failure = try #require(thrown, "the holder answered a connection it had already closed")
+
+        // And the status it pushed is in the daemon's hands all the same.
+        let pushed = try #require(
+            await fixture.client.lastPushedDescription,
+            "the holder's pushed exit was thrown away instead of retired")
+        #expect(pushed.status == .exited(code: 7))
+
+        // The rendezvous is gone, so asking again learns nothing: this is the
+        // `ENOENT` that used to be recorded as the session's terminal status.
+        let socketPath = try HolderRendezvous.socketPath(
+            sessionID: fixture.sessionID,
+            environment: HolderProcessFixture.environment(home: fixture.home))
+        #expect(
+            !FileManager.default.fileExists(atPath: socketPath),
+            "a holder that wound down cleanly unlinks its rendezvous")
+        #expect(
+            HolderRegistry.exitProbeOutcome(
+                for: HolderClient.Error.cannotConnect(path: socketPath, errno: ENOENT))
+                == .established(.exitedStatusUnknown),
+            "the next probe's verdict, with nothing but the failure to go on")
+
+        // With the push in hand it is the exit code, not an unknown.
+        #expect(
+            HolderRegistry.exitProbeOutcome(
+                for: failure, pushedByTheHolder: pushed, expecting: fixture.owner)
+                == .established(.exited(code: 7)),
+            "the reclaimer discarded a status the holder had already given it")
+    }
+
     // MARK: - Support
 
     /// A holder-transport row; the same shape `HolderAdoptionTests` uses, and

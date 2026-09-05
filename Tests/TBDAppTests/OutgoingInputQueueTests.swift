@@ -34,6 +34,12 @@ struct OutgoingInputQueueTests {
     /// `write` was actually invoked (not the order it was enqueued — that
     /// distinction is exactly what these tests are checking), and stands in
     /// for the transport's own verdict via `result`.
+    ///
+    /// This suite's transport is all-or-nothing on purpose: it never reports
+    /// `.refused`, so the outbox stays empty throughout and every assertion
+    /// below is about the paste hold alone. The short-write behaviour has its
+    /// own suite (`OutgoingInputQueue outbox`), and keeping the two apart is
+    /// what makes a failure here mean the hold broke rather than the queue.
     @MainActor
     private final class WriteRecorder {
         private(set) var writes: [Data] = []
@@ -42,9 +48,9 @@ struct OutgoingInputQueueTests {
         /// `localProcess`, so the bytes reach nothing.
         var result = true
 
-        func write(_ data: Data) -> Bool {
+        func write(_ data: Data) -> OutgoingInputQueue.WriteAttempt {
             writes.append(data)
-            return result
+            return result ? .accepted : .unwritable(written: 0)
         }
     }
 

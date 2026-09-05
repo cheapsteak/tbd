@@ -419,19 +419,16 @@ struct HolderInjectionDeliveryTests {
         #expect(Data(buffer[0..<max(0, read)]) == Data("echo hi\r".utf8))
     }
 
-    /// The decision R24 asks for, pinned: a payload that only partly fits is a
-    /// **failure**, so the daemon rewrites the whole thing. A duplicated
-    /// prompt is visible and recoverable; a silently truncated one is not.
-    @Test("a payload that does not fit is reported as partial, never as written")
-    func oversizePayloadReportsPartialRatherThanWritten() throws {
-        let (readEnd, writeEnd) = try makeSocketPair()
-        defer { Darwin.close(readEnd); Darwin.close(writeEnd) }
-        // Nobody ever reads `readEnd`, so the socket buffer fills and stays
-        // full — the same shape as a child that has stopped reading its tty.
-        _ = fcntl(writeEnd, F_SETFL, fcntl(writeEnd, F_GETFL, 0) | O_NONBLOCK)
-        let payload = Data(repeating: 0x61, count: 8 * 1024 * 1024)
+    /// The remainder is now the caller's to keep, and the caller has to know
+    /// how much of it there is: `written` is the cut, and the outbox slices
+    /// the payload at exactly that offset.
+    @Test("a payload larger than the pty's input queue reports what the kernel took")
+    func oversizePayloadReportsWhatTheKernelTook() throws {
+        let pty = try RawPTYPair()
+        defer { pty.close() }
+        let payload = Data(repeating: 0x61, count: 4 * 1024)
 
-        let outcome = PTYWrite.all(payload, to: writeEnd, budgetMilliseconds: 5)
+        let outcome = PTYWrite.all(payload, to: pty.ptyFD)
 
         guard case .partial(let written) = outcome else {
             // Recorded as an Error, not a String: only `Issue.record(some
@@ -440,8 +437,22 @@ struct HolderInjectionDeliveryTests {
             Issue.record(UnexpectedWriteOutcome(expected: "partial", actual: outcome))
             return
         }
-        #expect(written > 0)
+        #expect(written > 0, "a raw-mode pty takes a prefix before it refuses")
         #expect(written < payload.count)
+        // The cut is where the kernel put it, and the bytes on the far side
+        // are exactly the prefix — the property the outbox's slicing rests on.
+        #expect(pty.drainSessionFully() == payload.prefix(written))
+    }
+
+    /// A queue that is already full takes nothing, and that is NOT a failure:
+    /// the transport is alive and the whole payload becomes the outbox's.
+    @Test("a full pty queue is a refusal of everything, not a failure")
+    func fullQueueRefusesEverything() throws {
+        let pty = try RawPTYPair()
+        defer { pty.close() }
+        pty.fillPTY()
+
+        #expect(PTYWrite.all(Data("x".utf8), to: pty.ptyFD) == .partial(written: 0))
     }
 
     /// The unwritable descriptor is a **live, read-only** fd this test owns,
@@ -454,18 +465,19 @@ struct HolderInjectionDeliveryTests {
     /// descriptor and read back `.complete` — a flake and a cross-test
     /// corruption source in one. An fd held open for the duration cannot be
     /// reissued, and `write(2)` against `O_RDONLY` is `EBADF` just the same.
-    @Test("an unwritable descriptor is a failure, and an absent one writes nothing")
+    @Test("an unwritable descriptor is a failure, and an absent one is EBADF")
     func deadDescriptorsAreReported() throws {
         let readOnly = Darwin.open("/dev/null", O_RDONLY)
         try #require(readOnly >= 0)
         defer { Darwin.close(readOnly) }
 
         let outcome = PTYWrite.all(Data("x".utf8), to: readOnly)
-        guard case .failed = outcome else {
+        guard case .failed(_, let written) = outcome else {
             Issue.record(UnexpectedWriteOutcome(expected: "failed", actual: outcome))
             return
         }
-        #expect(PTYWrite.all(Data("x".utf8), to: -1) == .nothingWritten)
+        #expect(written == 0, "a descriptor that refuses outright committed no prefix")
+        #expect(PTYWrite.all(Data("x".utf8), to: -1) == .failed(errno: EBADF, written: 0))
         #expect(PTYWrite.all(Data(), to: -1) == .complete, "an empty write asks nothing of the fd")
     }
 }
