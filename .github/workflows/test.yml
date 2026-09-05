@@ -127,6 +127,27 @@ jobs:
       - name: Test the test fence
         run: bash scripts/test.test.sh
 
+      # The three installer harnesses, which cannot join the Linux collection
+      # in `plans-guard`: the plist writer drives `plutil`, and the bundle
+      # assembly hard-links into a `.app` and installs it with `cp -cR`. The
+      # update harness could run on Linux for its argument, lock, re-exec and
+      # wake cases, but then its install-and-handover cases — the ones that
+      # prove a failed handover puts the previous app bundle back — would have
+      # to be dropped, and those cover the path where a wrong answer costs an
+      # operator their installation. Coverage of that beats the runner.
+      #
+      # All three build fixture repos in temp directories and put stub
+      # codesign/security/open/pkill/pgrep first on PATH, with the library's
+      # `TBD_LSREGISTER` seam pointed at a stub as well, so nothing here signs,
+      # launches, kills, registers, or writes outside its own scratch
+      # directory. The WIP guard harness needs only bash and git and stays on
+      # Linux with the rest.
+      - name: Test the restart, bundle and update helpers
+        run: |
+          bash scripts/restart-environment-lib.test.sh
+          bash scripts/restart-bundle-lib.test.sh
+          bash scripts/update.test.sh
+
   plans-guard:
     name: No committed implementation plans
     runs-on: ubuntu-latest
@@ -171,6 +192,7 @@ jobs:
           bash scripts/remote-verify.test.sh
           bash scripts/sweep-preflight-refs.test.sh
           bash scripts/nightly-flake-stress.test.sh
+          bash scripts/restart-guard-lib.test.sh
           python3 scripts/diag/daemon-footprint-watch.py --self-test
 
   review-scripts-tests:

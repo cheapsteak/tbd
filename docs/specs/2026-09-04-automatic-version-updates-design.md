@@ -117,7 +117,12 @@ A daemon actor `UpdateChecker` (new file under `Sources/TBDDaemon/Update/`,
 injected clock per the repo rule):
 
 - Runs only when `update_mode` is `check` or `auto`. Reads the setting on
-  each tick so `tbd config set` takes effect without a restart.
+  each tick, and the `config.setUpdateMode` handler starts the loop whenever
+  the new mode is not `off` — so the first opt-in on a daemon that booted in
+  the shipped default starts checking there and then, and turning the setting
+  back off quiets the next tick. Nothing about the setting waits for a
+  restart. `start()` is idempotent, so repeating the gesture never adds a
+  second loop.
 - A tick runs `git ls-remote <url> refs/heads/main` where `<url>` is the
   `upstream` remote of the daemon's source worktree, else `origin`, else
   the setting is unusable and the checker logs once and idles. `ls-remote`
@@ -126,8 +131,14 @@ injected clock per the repo rule):
   relation }` with `relation` one of `upToDate`, `behind`, `unknown`.
   `behind` is "latest differs from ours and ours is not ahead of it";
   ahead-ness is decided by `git merge-base --is-ancestor` in the source
-  worktree when the latest commit is present locally, otherwise the relation
-  is `behind` with `behindBy == nil`. When the update clone (§7) exists and
+  worktree. That question has two ways of going unanswered and they are kept
+  apart, because one is evidence and the other is not: a latest commit the
+  local object store does not hold is a commit we have never seen, so the
+  relation is `behind` with `behindBy == nil`, while a repository that could
+  not answer at all — a bad ref, an unreadable store, a timed-out subprocess —
+  yields `unknown`, which no mode ever acts on. `git rev-parse --verify
+  --quiet <latest>^{commit}` is what tells the two apart, and it runs only
+  when ancestry came back undecided. When the update clone (§7) exists and
   has fetched, `behindBy` is `rev-list --count` there.
 - Exposed as an optional `update` field on `daemon.status`, and by
   `tbd version` (which prints the cached status, or runs one check
@@ -163,8 +174,10 @@ Surfaces: `tbd config get` prints it; `tbd config set update-mode
 <off|check|auto>` writes it through a `config.setUpdateMode` RPC that writes
 the column on every call; the app's Settings shows a three-way picker fed
 from `daemon.capabilities` (which gains `updateMode`) and writes through the
-same RPC. The checker reads the setting on each tick, so no `*Live` twin is
-needed: a change takes effect at the next tick without a restart.
+same RPC. The checker reads the setting on each tick and that RPC starts its
+loop when the new mode is not `off`, so no `*Live` twin is needed: a change
+takes effect on the daemon already running, in either direction, without a
+restart.
 
 Default-off satisfies the "large or risky behavior" rule: with the default,
 the daemon runs no timer and spawns nothing. `check` is a read-only network
@@ -223,6 +236,33 @@ arguments, and inherits the user's environment. The script is the procedure:
 over. `--debug` builds the debug configuration. `--auto` is what the daemon
 passes: non-interactive, and it refuses to run if another update is in
 flight (a lock file under `~/tbd/updates/`).
+
+Everything the script leaves under `~/tbd/updates/` sits outside the three
+named reconcilers on purpose, because none of it can accumulate: each entry
+is a fixed singleton path that every run reuses or overwrites, never a
+per-request resource.
+
+- `src` — one long-lived clone that every update reuses. It appears in no
+  `git worktree list` and `scripts/reclaim-build.sh` never scans it. A run
+  that dies mid-fetch or mid-build leaves the same clone the next run fetches
+  into.
+- `update.lock` — one file naming the running update's pid. A lock left by a
+  crashed run names a dead pid; the next run takes it over. Acquisition is
+  atomic (a noclobber create), so two simultaneous runs cannot both hold it.
+  A takeover replaces the lock by renaming a `update.lock.new.<pid>` file
+  over it, under a `update.lock.takeover` mutex directory; a run killed
+  between the write and the rename leaves that temp file, and the next
+  takeover, which holds the mutex and so knows every such file is a stray,
+  sweeps them. A mutex abandoned by a crash is reclaimed by age.
+- `update.log` — one append-only log.
+- `wake` — one scratch directory for the wake step's per-terminal results,
+  emptied at the start of every wake and removed at its end. A run killed
+  mid-wake leaves it for the next run to empty.
+- `previous/TBD.app` — exactly one bundle, the one the last update replaced,
+  overwritten by the next update and kept as the no-rebuild route back.
+
+Removing any of them is an operator gesture, and the next update recreates
+it. See `docs/updating.md`.
 
 The script is written to the same conventions as `restart.sh` and gets a
 `scripts/update.test.sh` covering argument handling, the self-re-exec guard,
@@ -315,10 +355,21 @@ shortens the gap between them rather than lengthening it.
 - `BuildIdentity` loader: sidecar present; sidecar absent with a git
   worktree derivable from the path; neither.
 - `UpdateStatus` relation: equal commits, local ahead, local behind with and
-  without a count, unknown latest.
+  without a count, unknown latest, and each of the four ancestry answers.
 - `UpdateChecker` with an injected clock: `off` runs nothing; `check`
   ticks and never launches; `auto` launches once per latest commit and not
   again for the same commit; setting changes take effect on the next tick.
+- The two undecided ancestry answers, since they differ by whether `auto`
+  installs anything: a latest commit absent from the local store still
+  launches, while a repository that could not answer publishes `unknown`,
+  launches nothing, and leaves the commit free to launch on a later tick that
+  can decide it. `hasCommit` against a real repository backs both: a commit it
+  holds, a well-formed sha it has never seen, and a path that is not a
+  repository at all.
+- `config.setUpdateMode` against a live router: `check` starts the loop on a
+  checker that has none, `off` starts none and quiets a running one at its
+  next tick, and repeating the gesture leaves one loop at one tick per
+  interval.
 - Handover gate: pid file names the handover pid — successor claims the file
   and signals; pid file names a different live daemon — successor exits as
   before; pid file stale — normal path.

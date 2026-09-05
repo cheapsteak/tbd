@@ -89,6 +89,41 @@ struct GitStatusTests {
         #expect(mainIsAncestorAfterDiverge == false)
     }
 
+    /// `hasCommit` is what parts the two halves of an undecidable ancestry, so
+    /// both of its answers have to be real: a commit this repository holds, and
+    /// a well-formed sha it has never seen.
+    @Test func hasCommitDistinguishesHeldFromNeverSeen() async throws {
+        let repoDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: repoDir) }
+
+        try await runShell("git init -b main", at: repoDir)
+        try await runShell("git config commit.gpgSign false", at: repoDir)
+        try await runShell("git config user.email 'test@test.com'", at: repoDir)
+        try await runShell("git config user.name 'Test'", at: repoDir)
+        try await runShell("touch README.md && git add . && git commit -m 'initial'", at: repoDir)
+
+        let git = GitManager()
+        let repoPath = repoDir.path
+        let head = try #require(await git.revParseHead(at: repoPath))
+        #expect(await git.hasCommit(repoPath: repoPath, sha: head) == true)
+        // A syntactically valid sha that no repository has: absent, not an error.
+        #expect(
+            await git.hasCommit(
+                repoPath: repoPath, sha: "0123456789012345678901234567890123456789") == false)
+
+        // And a path that is not a repository at all cannot answer either way.
+        // This is the case that must never read as "absent": absent launches an
+        // update in `auto` mode, and a broken checkout is not evidence that
+        // `main` moved.
+        let notARepo = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: notARepo, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: notARepo) }
+        #expect(await git.hasCommit(repoPath: notARepo.path, sha: head) == nil)
+    }
+
     // MARK: - refreshGitStatuses integration tests
 
     @Test func refreshGitStatusesDetectsConflicts() async throws {

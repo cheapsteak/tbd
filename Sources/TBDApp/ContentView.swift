@@ -58,6 +58,24 @@ struct ContentView: View {
                 .background(Color.yellow.opacity(0.2))
             }
 
+            // Same slot, same contract: advisory, non-blocking, dismissible.
+            // A newer TBD exists on `main` than the one running. Dismissal is
+            // per commit, so waving it away does not hide the next one.
+            if let notice = appState.updateNoticeMessage {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundStyle(.blue)
+                    Text(notice).font(.caption)
+                    Spacer()
+                    Button("Dismiss") {
+                        appState.dismissUpdateNotice()
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(8)
+                .background(Color.blue.opacity(0.15))
+            }
+
             NavigationSplitView {
                 SidebarView()
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 400)

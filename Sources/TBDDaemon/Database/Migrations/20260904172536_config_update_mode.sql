@@ -1,0 +1,19 @@
+-- The update mode: 'off', 'check' or 'auto'
+-- (docs/specs/2026-09-04-automatic-version-updates-design.md §6).
+-- The one policy the daemon holds about updating itself, because the timer that
+-- runs the check has to live in a long-lived process. Everything else about the
+-- update path — interval defaults, wake concurrency, which configuration to
+-- build — lives in scripts/update.sh, where an operator edits it without a
+-- rebuild.
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" ('off') — which is what made auto_hibernate_enabled
+-- impossible to graduate without a forcing UPDATE that also reset deliberate
+-- opt-ins. The shipped default lives in exactly one place:
+-- Config.updateModeDefault.
+--
+-- TEXT rather than an integer: the setting has three states and a fourth is
+-- plausible, and a stored name survives a reordering of the enum's cases.
+-- An unrecognised string resolves to the shipped default and is logged once.
+ALTER TABLE config ADD COLUMN update_mode TEXT;

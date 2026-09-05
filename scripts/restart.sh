@@ -27,6 +27,11 @@ SCRIPT_DIR="$(cd "$SCRIPT_DIR" && pwd)"
 source "$SCRIPT_DIR/restart-environment-lib.sh"
 require_restart_path "${PATH-}"
 
+# Bundle assembly, signing, installation and app process control. Shared with
+# scripts/update.sh so both installers produce the same bundle.
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/restart-bundle-lib.sh"
+
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 app_only=false
@@ -155,6 +160,14 @@ MODULE_CACHE_FLAGS=(
     -Xcc -fmodules-cache-path="$SHARED_MODULE_CACHE"
 )
 
+# Stamp the build identity BEFORE the compiler runs, so the sidecar beside a
+# binary always names the tree that binary came from. A build that skips this
+# (a tree with no git HEAD) leaves no sidecar, and the loader falls back to the
+# worktree's own HEAD — see docs/updating.md.
+if ! write_build_identity "$REPO_ROOT" "$BUILD_DIR"; then
+    echo "warning: build identity not stamped — binaries will report a fallback identity" >&2
+fi
+
 if [ "$skip_build" = false ]; then
     echo "Building..."
     t0=$SECONDS
@@ -198,72 +211,20 @@ fi
 
 # MARK: - Assemble TBD.app bundle
 #
-# macOS resolves tbd:// URLs via LaunchServices, which requires a
-# CFBundleURLTypes entry in an Info.plist inside a .app bundle. We assemble
-# a minimal bundle in .build/debug/TBD.app whose binary is a symlink to
-# .build/debug/TBDApp, so the governed Swift build updates it directly.
+# The assembly, signing and installation live in scripts/restart-bundle-lib.sh
+# so scripts/update.sh produces the same bundle from the update clone. See
+# that file for why the bundle exists (LaunchServices needs a real .app to
+# deliver tbd:// URLs), why its binary is a hard link, and why installing to
+# /Applications is what makes notification permissions stick.
 
-BUNDLE_DIR="$BUILD_DIR/TBD.app"
-BUNDLE_MACOS="$BUNDLE_DIR/Contents/MacOS"
-BUNDLE_PLIST="$BUNDLE_DIR/Contents/Info.plist"
-SOURCE_PLIST="$REPO_ROOT/Resources/TBDApp.Info.plist"
-
-mkdir -p "$BUNDLE_MACOS"
-
-# Recreate the generated plist from the machine-independent source every run,
-# then embed and verify the installation's exact PATH before signing.
-write_restart_environment_plist "$SOURCE_PLIST" "$BUNDLE_PLIST" "$PATH"
-
-# Resolve the absolute real path of the swift-build output. We need this
-# first so we can pass an absolute path to `ln` below (sidesteps any
-# cwd-relative resolution issues) and so we have a stable pgrep/pkill
-# match target later.
-APP_EXEC_PATH="$(/usr/bin/readlink -f "$BUILD_DIR/TBDApp")"
-
-# Hard link (not symlink) the binary into the bundle. Required for
-# Bundle.main to resolve at runtime: open(1) resolves symlinks before
-# exec, which would otherwise leave the process appearing to run from
-# .build/.../TBDApp with no surrounding .app, so APIs that depend on
-# CFBundleIdentifier (UNUserNotificationCenter for banners, etc.) silently
-# fail. A hard link shares the same inode as the swift-build output —
-# zero extra disk and the governed Swift build updates it directly —
-# while keeping the kernel-reported exec path inside the .app bundle.
-# `ln -f` replaces any existing entry (including a stale symlink from
-# previous restart.sh versions) idempotently.
-ln -f "$APP_EXEC_PATH" "$BUNDLE_MACOS/TBDApp"
-
-# Copy the on-disk AppIcon.icns into the bundle. macOS reads this for
-# Notification Center banners, System Settings → Notifications, and Finder —
-# none of those paths look at NSApp.applicationIconImage (which still drives
-# the per-worktree Dock icon at runtime). Bake a new one with
-# `swift run IconBaker Resources/AppIcon.icns` after changing
-# Sources/TBDAppIcon/AppIcon.swift.
-BUNDLE_RESOURCES="$BUNDLE_DIR/Contents/Resources"
-SOURCE_ICON="$REPO_ROOT/Resources/AppIcon.icns"
-BUNDLE_ICON="$BUNDLE_RESOURCES/AppIcon.icns"
-mkdir -p "$BUNDLE_RESOURCES"
-if [ ! -f "$BUNDLE_ICON" ] || [ "$SOURCE_ICON" -nt "$BUNDLE_ICON" ]; then
-    cp "$SOURCE_ICON" "$BUNDLE_ICON"
+# The build may have created .build/<config> for the first time, in which case
+# the stamp above deferred. Stamp now, before the bundle copies the sidecar in.
+if [ ! -f "$BUILD_DIR/TBDBuildIdentity.json" ]; then
+    write_build_identity "$REPO_ROOT" "$BUILD_DIR" || true
 fi
 
-# Copy the TBD_TBDApp.bundle (resource bundle with localized strings and assets).
-# SPM produces it in .build/arm64-apple-macosx/debug; it must be in the .app bundle
-# or app launch fails with "could not load resource bundle".
-# NOTE: $BUILD_DIR is a symlink to arm64-apple-macosx/debug, so we reach the bundle
-# via $BUILD_DIR/TBD_TBDApp.bundle, not by composing a path with ../arm64-apple-macosx/debug.
-SOURCE_RESOURCE_BUNDLE="$BUILD_DIR/TBD_TBDApp.bundle"
-BUNDLE_RESOURCE_BUNDLE="$BUNDLE_RESOURCES/TBD_TBDApp.bundle"
-if [ -d "$SOURCE_RESOURCE_BUNDLE" ]; then
-    rm -rf "$BUNDLE_RESOURCE_BUNDLE"
-    cp -R "$SOURCE_RESOURCE_BUNDLE" "$BUNDLE_RESOURCE_BUNDLE"
-else
-    echo "warning: TBD_TBDApp.bundle not found at $SOURCE_RESOURCE_BUNDLE" >&2
-fi
-
-# Stash the source worktree path inside the bundle so the running app can
-# show it in the status bar — it can no longer infer this from its own
-# exec path now that it runs from /Applications instead of .build/.
-printf '%s' "$REPO_ROOT" > "$BUNDLE_DIR/Contents/SourceWorktreePath.txt"
+BUNDLE_DIR="$(bundle_dir_for_build "$BUILD_DIR")"
+assemble_app_bundle "$REPO_ROOT" "$BUILD_DIR" "$PATH"
 
 # Conditionally sign + install to /Applications (only if install-ready or --wip).
 # For WIP builds not install-ready, we'll skip this and launch from .build/debug instead.
@@ -276,58 +237,19 @@ APP_EXEC_PATTERN=""
 # and on the install path it identifies a leftover WIP instance launched from
 # this worktree's .build bundle before the install. Never matches sibling
 # worktrees — their bundles live under their own paths.
-WORKTREE_EXEC_PATH="$(/usr/bin/readlink -f "$BUNDLE_MACOS/TBDApp")"
-WORKTREE_EXEC_PATTERN="$(printf '%s' "$WORKTREE_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
+WORKTREE_EXEC_PATH="$(resolve_exec_path "$BUNDLE_DIR/Contents/MacOS/TBDApp")"
+WORKTREE_EXEC_PATTERN="$(escape_exec_pattern "$WORKTREE_EXEC_PATH")"
 
 if [ "$install_to_applications" = true ]; then
-    # Sign + install to /Applications to satisfy macOS UNUserNotificationCenter:
-    #  - Re-signing with --force --deep makes the codesign identifier match
-    #    CFBundleIdentifier (com.tbd.app); SPM's default ad-hoc signature uses
-    #    TBDApp-<hash>, which macOS uses for permission tracking and rejects.
-    #  - /Applications is the only path macOS 15 accepts for requestAuthorization;
-    #    bundles elsewhere return UNErrorDomain Code=1 with no permission dialog.
-    #  - cp -cR uses APFS clonefile (copy-on-write, ~zero disk cost).
-    #  - All TBD worktrees share CFBundleIdentifier=com.tbd.app, so whichever
-    #    worktree most recently ran restart.sh "wins" /Applications — same
-    #    last-restart-wins behavior already documented for tbd:// URL routing.
-    # Prefer a stable self-signed identity so TCC permission grants/denials persist
-    # across rebuilds. Ad-hoc signing (`--sign -`) gives TCC only a bare cdhash with
-    # no stable anchor, so every rebuild — and even repeated accesses within one
-    # build, when access is attributed via a spawned child like a `claude` session —
-    # fails the stored code-requirement check and re-prompts (Desktop/Documents/
-    # Downloads/Photos/etc.). A persistent leaf-cert anchor fixes that.
-    # One-time setup creates the "TBD Dev Signing" identity in a dedicated
-    # tbd-signing keychain (see docs/tcc-signing.md). If it's absent (e.g. a fresh
-    # clone or another contributor's machine), fall back to ad-hoc so restart still works.
-    SIGN_KEYCHAIN="$HOME/Library/Keychains/tbd-signing.keychain-db"
-    SIGN_IDENTITY="TBD Dev Signing"
-    if security find-identity -p codesigning "$SIGN_KEYCHAIN" 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
-        security unlock-keychain -p tbd-signing "$SIGN_KEYCHAIN" 2>/dev/null || true
-        codesign --force --deep --identifier com.github.cheapsteak.tbd \
-            --sign "$SIGN_IDENTITY" --keychain "$SIGN_KEYCHAIN" "$BUNDLE_DIR" >/dev/null
-    else
-        codesign --force --deep --sign - "$BUNDLE_DIR" >/dev/null
-    fi
-
-    rm -rf "$INSTALLED_BUNDLE"
-    cp -cR "$BUNDLE_DIR" "$INSTALLED_BUNDLE"
-
-    LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
-    if [ -x "$LSREGISTER" ]; then
-        "$LSREGISTER" -f "$INSTALLED_BUNDLE" >/dev/null 2>&1 || true
-    fi
-
-    # Bump the installed bundle's mtime so Notification Center / System Settings
-    # pick up an updated AppIcon.icns instead of serving a stale icon-cache entry.
-    # `lsregister -f` alone doesn't always invalidate those caches; `touch` does.
-    touch "$INSTALLED_BUNDLE"
+    sign_app_bundle "$BUNDLE_DIR"
+    install_app_bundle "$BUNDLE_DIR" "$INSTALLED_BUNDLE"
 
     # The running TBDApp's command line is the installed bundle's binary, since
     # we launch from /Applications below. Match against that for pgrep/pkill so
     # we only ever affect THIS worktree's running TBDApp (it's the one that most
     # recently won /Applications). Sibling worktrees launched from their own
     # .build/.../TBD.app would not match.
-    APP_EXEC_PATTERN="$(printf '%s' "$BUNDLED_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
+    APP_EXEC_PATTERN="$(escape_exec_pattern "$BUNDLED_EXEC_PATH")"
 else
     # WIP build: skip /Applications install, launch from .build/debug instead.
     # We launch via `open "$BUNDLE_DIR"` below, so the running process's
@@ -375,32 +297,29 @@ if [ "$daemon_only" = false ]; then
     # Match end-anchored against the resolved exec path so we only ever
     # affect THIS worktree's running TBDApp — never swift build subprocesses,
     # editors, or sibling worktrees whose command line contains "TBDApp".
-    if [ -n "$APP_EXEC_PATTERN" ]; then
-        pkill -f "^${APP_EXEC_PATTERN}\$" 2>/dev/null && sleep 0.3 || true
-    fi
+    stop_app_process "$APP_EXEC_PATTERN"
     # On a full install, also kill a leftover WIP instance launched from THIS
     # worktree's own .build bundle (before the install), or two TBDApp
     # processes survive. Still never touches sibling worktrees. On the WIP
     # path the patterns are identical, so this is skipped — no double-kill.
     if [ "$install_to_applications" = true ] && [ -n "$WORKTREE_EXEC_PATTERN" ] \
         && [ "$WORKTREE_EXEC_PATTERN" != "$APP_EXEC_PATTERN" ]; then
-        pkill -f "^${WORKTREE_EXEC_PATTERN}\$" 2>/dev/null && sleep 0.3 || true
+        stop_app_process "$WORKTREE_EXEC_PATTERN"
     fi
 
     echo "Starting app..."
     if [ "$install_to_applications" = true ]; then
         # Launch from /Applications (install-ready or --wip override)
-        open --env "PATH=$PATH" "$INSTALLED_BUNDLE" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
+        launch_app_bundle "$INSTALLED_BUNDLE" "$PATH" /tmp/tbdapp.log
     else
-        # Launch from .build/debug (WIP worktree, no install to /Applications)
-        open --env "PATH=$PATH" "$BUNDLE_DIR" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
+        # Launch from .build/<config> (WIP worktree, no install to /Applications)
+        launch_app_bundle "$BUNDLE_DIR" "$PATH" /tmp/tbdapp.log
     fi
 
     # `open` returns immediately after asking LaunchServices to spawn the app.
     # Give it a moment, then verify the process is alive.
     sleep 0.5
-    if [ -n "$APP_EXEC_PATTERN" ] && pgrep -f "^${APP_EXEC_PATTERN}\$" >/dev/null; then
-        APP_PID=$(pgrep -f "^${APP_EXEC_PATTERN}\$" | head -1)
+    if APP_PID="$(app_process_pid "$APP_EXEC_PATTERN")"; then
         if [ "$install_to_applications" = true ]; then
             echo "  App launched from /Applications (PID $APP_PID) — logs: /tmp/tbdapp.log"
         else

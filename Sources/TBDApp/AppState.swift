@@ -920,6 +920,19 @@ final class AppState {
     /// User dismissed the build-mismatch banner. In-memory only (advisory);
     /// reset whenever the mismatch message changes.
     var daemonBuildMismatchDismissed = false
+    /// The daemon's build identity, as of the last `daemon.status`. Feeds the
+    /// update notice's "from" commit.
+    var daemonBuildIdentity: BuildIdentity?
+    /// The daemon's last update observation, as of the last `daemon.status`.
+    /// Nil when the daemon runs no checker (`update_mode` off) or has not
+    /// finished a check.
+    var daemonUpdateStatus: UpdateStatus?
+    /// Latest commit whose update notice the user dismissed. Dismissal is
+    /// **per commit**, not per session: a notice the user waved away should not
+    /// come back for the same commit, and should come back when `main` moves.
+    /// In-memory only — the banner is advisory, and a relaunch is a cheap
+    /// second chance to notice an update worth taking.
+    var dismissedUpdateCommit: String?
     /// Panes currently rendered through a live control-mode attach, mapped to
     /// the attach GENERATION the record belongs to (`nil` when the daemon
     /// vended none). Maintained by `TerminalPanelRepresentable.Coordinator`
@@ -1395,6 +1408,14 @@ final class AppState {
     /// same reason as `controlModeSetter`.
     @ObservationIgnored lazy var autoCloseSetupSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setAutoCloseSetup(enabled: enabled) }
+    /// How `setUpdateMode` persists the setting — injectable for the same
+    /// reason as `controlModeSetter`.
+    @ObservationIgnored lazy var updateModeSetter: @MainActor (UpdateMode) async throws -> Void =
+        { [daemonClient] mode in try await daemonClient.setUpdateMode(mode) }
+    /// How `checkForUpdatesNow` asks the daemon to check — injectable for the
+    /// same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var updateCheckRunner: @MainActor () async throws -> UpdateStatus =
+        { [daemonClient] in try await daemonClient.checkForUpdate() }
     /// How `setAutoTrustWorktrees` persists the flag — injectable for the
     /// same reason as `controlModeSetter`.
     @ObservationIgnored lazy var autoTrustWorktreesSetter: @MainActor (Bool) async throws -> Void =
@@ -2843,6 +2864,13 @@ final class AppState {
                     self.pollCycle += 1
                     if self.pollCycle % 15 == 0 {
                         await self.refreshPRStatuses()
+                    }
+                    // ~every 150 executed cycles (~5 minutes at the ~2s tick).
+                    // The daemon's checker runs hourly, so polling it faster
+                    // would only re-read the same cached observation; slower
+                    // and a notice could sit unseen for most of an hour.
+                    if self.pollCycle % 150 == 0 {
+                        await self.checkDaemonBuildIdentity()
                     }
                 }
             }

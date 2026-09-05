@@ -131,6 +131,15 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.gcRetainedTranscriptsEnabledDefault`, never through
     /// `?? false`.
     var gc_retained_transcripts_enabled: Bool?
+    /// The update mode: 'off', 'check' or 'auto'
+    /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
+    /// `gc_retained_transcripts_enabled`: the
+    /// `20260904172536_config_update_mode` migration carries no SQL default, so
+    /// `nil` here means "never chose" rather than "off". Resolve it through
+    /// `Config.updateModeDefault`, never through `?? .off`. An unrecognised
+    /// string resolves the same way — a value this build does not know is not a
+    /// mode it can honor.
+    var update_mode: String?
     /// This installation's holder owner token, minted once by the first daemon
     /// that needs one and read forever after. **Not a flag**: NULL means "not
     /// yet minted", and the mint is the conditional UPDATE in
@@ -186,6 +195,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter gcRetainedTranscriptsDefault: and truly the last, for
     ///   `gc_retained_transcripts_enabled` — the retained-transcript GC leg's
     ///   soak gate.
+    /// - Parameter updateModeDefault: and truly, finally the last, for
+    ///   `update_mode` — the only one of these that is not a Bool, so the
+    ///   parameter proves both properties at once: a NULL row follows a changed
+    ///   shipped default, and a string this build does not recognise resolves
+    ///   the same way rather than to a hardcoded `.off`.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -199,7 +213,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         gcRowlessHoldersDefault: Bool = Config.gcRowlessHoldersEnabledDefault,
         reapHolderChildrenDefault: Bool = Config.reapHolderChildrenEnabledDefault,
         remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault,
-        gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault
+        gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault,
+        updateModeDefault: UpdateMode = Config.updateModeDefault
     ) -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
@@ -275,6 +290,12 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // gate — NOT `?? false`.
             gcRetainedTranscriptsEnabled:
                 gc_retained_transcripts_enabled ?? gcRetainedTranscriptsDefault,
+            // Same reasoning once more, for the update mode — NOT `?? .off`.
+            // The `flatMap` covers the second way a value can be absent: a
+            // string no `UpdateMode` case matches is as unusable as NULL, so it
+            // resolves to the shipped default rather than silently arming a
+            // mode this build cannot run.
+            updateMode: update_mode.flatMap(UpdateMode.init(rawValue:)) ?? updateModeDefault,
             remoteCreateDefaults: EnvOverridesCoding.decode(remote_create_defaults),
             // Passed straight through, NULL included: "not yet minted" is a
             // real state and has no default to resolve to.
@@ -773,6 +794,23 @@ public struct ConfigStore: Sendable {
             try db.execute(
                 sql: "UPDATE config SET gc_retained_transcripts_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the update mode (default `.off`) — whether the daemon checks for
+    /// a newer `main`, and whether it may install one.
+    ///
+    /// **Takes effect at the next checker tick**, which is at most an hour
+    /// away and needs no daemon restart: `UpdateChecker` reads this column
+    /// fresh on every tick rather than caching it at boot. The column is
+    /// written on every call, because writing any value is the explicit gesture
+    /// that lifts it out of NULL forever after.
+    public func setUpdateMode(_ mode: UpdateMode) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET update_mode = ? WHERE id = ?",
+                arguments: [mode.rawValue, Self.singletonID]
             )
         }
     }
