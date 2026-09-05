@@ -57,7 +57,9 @@ struct BoundedProcessClaudeSpawner: ClaudeCloudSpawning {
     /// pinned geometry is assertable without a spawn.
     ///
     /// `runBoundedProcess` REPLACES the child's environment wholesale, so this
-    /// starts from the caller's full login environment and overrides. Under a
+    /// starts from a full environment and overrides rather than assembling one
+    /// — `spawn(_:)` passes the daemon's own, minus the enclosing session's
+    /// identity (`SpawnBaseEnvironment.inheriting`). Under a
     /// pseudo-terminal the geometry is pinned to the runner's own 400x200:
     /// `winsize` is advisory and the kernel wraps nothing, but a child that
     /// ASKS formats to it and inserts REAL newlines at the wrap, which would
@@ -78,8 +80,10 @@ struct BoundedProcessClaudeSpawner: ClaudeCloudSpawning {
             executable: executable,
             arguments: request.arguments,
             currentDirectory: request.workingDirectory,
+            // The vendor CLI is a spawned Claude Code like any other, so it must
+            // not inherit the identity of whatever launched the daemon either.
             environment: Self.invocationEnvironment(
-                base: ProcessInfo.processInfo.environment,
+                base: SpawnBaseEnvironment.inheriting(ProcessInfo.processInfo.environment),
                 usesPseudoTerminal: request.usesPseudoTerminal),
             // None, ever: under `.pseudoTerminal` the replica is the child's
             // stdin AND stdout on one descriptor, so a payload is refused
