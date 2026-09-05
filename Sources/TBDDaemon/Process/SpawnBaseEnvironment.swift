@@ -185,10 +185,11 @@ enum SpawnBaseEnvironment {
     /// profile config dir removed, and TERM pinned to what tmux gives a pane;
     /// everything else passes through untouched.
     ///
-    /// An empty `CLAUDE_CONFIG_DIR` is dropped rather than passed on. Every
-    /// reader of that name in this tree — `TBDConstants.configDir`,
-    /// `ClaudeTrustSeeder.ensureTrusted`, `claudeProjectsRoot` — guards on
-    /// `!isEmpty` and falls back as though the name were unset, so handing a
+    /// An empty `CLAUDE_CONFIG_DIR` is dropped rather than passed on. Its
+    /// readers in this tree — `ClaudeTrustSeeder.ensureTrusted`,
+    /// `WorktreeLifecycle.claudeProjectsRoot` — guard on `!isEmpty` and fall
+    /// back as though the name were unset, the same empty-means-unset
+    /// convention `TBDConstants.configDir` applies to `TBD_HOME`, so handing a
     /// job the empty string only invites a `URL(fileURLWithPath:)` on it
     /// somewhere further down.
     static func inheriting(_ base: [String: String]) -> [String: String] {
