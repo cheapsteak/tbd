@@ -1903,6 +1903,17 @@ actor HolderRegistry {
     /// rendezvous that provably has nobody behind it, establishes that this
     /// session is over; every other way a round trip can fail is retried within
     /// the same budget and then kept. See `exitProbeOutcome`.
+    ///
+    /// **A push is an answer, even when the round trip that carried it failed.**
+    /// The holder pushes the exit at whichever client is connected and winds
+    /// down in the same breath, so a probe that connected a moment before the
+    /// child was reaped is handed the status and then finds the socket gone
+    /// underneath it. That push answers no request, so `HolderClient`'s barrier
+    /// retires it — into `lastPushedDescription`, which exists for exactly this
+    /// and is what is read here. Without it the reclaimer discards the very
+    /// fact it asked for, asks again at a rendezvous the holder has already
+    /// unlinked, reads the `ENOENT` as absence, and records
+    /// `exitedStatusUnknown` for a child that exited perfectly ordinarily.
     private static func confirmChildExit(
         socketPath: String,
         expecting owner: HolderOwnerToken,
@@ -1920,11 +1931,22 @@ actor HolderRegistry {
                 case .exited, .exitedStatusUnknown:
                     return description.status
                 case .alive:
-                    break
+                    // An exit can be pushed in the same breath as an answer
+                    // that was already on the wire; the `close()` above retires
+                    // it. It is about the same child and it is newer than the
+                    // answer it trailed, so it supersedes it.
+                    if let pushed = pushedTerminalStatus(
+                        await client.lastPushedDescription, expecting: owner) {
+                        return pushed
+                    }
                 }
             } catch {
                 await client.close()
-                switch exitProbeOutcome(for: error) {
+                switch exitProbeOutcome(
+                    for: error,
+                    pushedByTheHolder: await client.lastPushedDescription,
+                    expecting: owner
+                ) {
                 case .established(let status):
                     return status
                 case .keep:
@@ -1959,6 +1981,48 @@ actor HolderRegistry {
         case retry
         /// Nothing here says the session ended. The reader stays.
         case keep
+    }
+
+    /// What a probe knows when its round trip failed **and** the holder had
+    /// already pushed a status down that same connection.
+    ///
+    /// The push outranks the failure, and nothing else here changes. A holder
+    /// that pushes has answered: it observed its own child, said how it ended,
+    /// and then wound down — which is precisely why the connection the push
+    /// arrived on is dead by the time the caller looks at it. Reading the
+    /// failure instead would retry, find the rendezvous unlinked, and record
+    /// `exitedStatusUnknown` for a status the daemon was holding all along.
+    ///
+    /// A push from another installation's holder is ignored, on the same rule
+    /// the answered path applies to `description.owner`; so is one that says
+    /// the child is still alive, which the holder never sends but which must
+    /// not be read as a terminal status if it ever did.
+    ///
+    /// Pure, and separate from the errno classification below so that both stay
+    /// pinnable case by case without standing up a holder for each one.
+    static func exitProbeOutcome(
+        for error: Swift.Error,
+        pushedByTheHolder pushed: HolderChildDescription?,
+        expecting owner: HolderOwnerToken
+    ) -> ExitProbeOutcome {
+        if let status = pushedTerminalStatus(pushed, expecting: owner) {
+            return .established(status)
+        }
+        return exitProbeOutcome(for: error)
+    }
+
+    /// The terminal status in a holder's unsolicited push, if it carries one
+    /// this registry may act on.
+    static func pushedTerminalStatus(
+        _ pushed: HolderChildDescription?, expecting owner: HolderOwnerToken
+    ) -> HolderChildStatus? {
+        guard let pushed, pushed.owner == owner else { return nil }
+        switch pushed.status {
+        case .exited, .exitedStatusUnknown:
+            return pushed.status
+        case .alive:
+            return nil
+        }
     }
 
     /// How a thrown `describe` bears on releasing a reader.

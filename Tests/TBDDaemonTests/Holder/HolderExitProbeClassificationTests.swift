@@ -138,4 +138,104 @@ import Testing
             HolderRegistry.exitProbeOutcome(for: CancellationError()) == .keep,
             "a cancelled probe answered nothing and must not release a reader")
     }
+
+    // MARK: - A status the holder pushed before the round trip failed
+
+    /// A holder that pushed its exit has answered, whatever the connection did
+    /// afterwards.
+    ///
+    /// This is the shape the reclaimer actually meets, and the one that
+    /// recorded a wrong status: the holder pushes at whichever client is
+    /// connected and winds down in the same breath, so the probe is handed
+    /// `.exited(code: 7)` and *then* finds the socket hung up under it. The
+    /// push is retired as unsolicited — correctly, it answers no request — and
+    /// reading only the failure retries at a rendezvous the holder has already
+    /// unlinked, where `ENOENT` reads as absence and `exitedStatusUnknown` goes
+    /// into the record for a child that exited ordinarily.
+    @Test func aPushedExitOutranksTheFailureThatFollowedIt() {
+        for failure: HolderClient.Error in [
+            .peerClosed,
+            .transportFailed("Broken pipe"),
+            .cannotConnect(path: "/tmp/gone.sock", errno: ENOENT),
+            .cannotConnect(path: "/tmp/gone.sock", errno: ECONNREFUSED),
+        ] {
+            let outcome = HolderRegistry.exitProbeOutcome(
+                for: failure,
+                pushedByTheHolder: Self.description(status: .exited(code: 7)),
+                expecting: Self.owner)
+            #expect(
+                outcome == .established(.exited(code: 7)),
+                """
+                the holder said how its child ended and the daemon was holding the answer; \
+                \(failure) must not overwrite it: \(outcome)
+                """)
+        }
+    }
+
+    /// No push leaves every classification exactly as it was.
+    @Test func noPushLeavesTheErrnoRulesUntouched() {
+        #expect(
+            HolderRegistry.exitProbeOutcome(
+                for: HolderClient.Error.peerClosed,
+                pushedByTheHolder: nil,
+                expecting: Self.owner) == .retry)
+        #expect(
+            HolderRegistry.exitProbeOutcome(
+                for: HolderClient.Error.cannotConnect(path: "/tmp/gone.sock", errno: ENOENT),
+                pushedByTheHolder: nil,
+                expecting: Self.owner) == .established(.exitedStatusUnknown))
+        #expect(
+            HolderRegistry.exitProbeOutcome(
+                for: HolderClient.Error.rejected(version: 1),
+                pushedByTheHolder: nil,
+                expecting: Self.owner) == .keep)
+    }
+
+    /// A push from another installation's holder is not this registry's answer.
+    ///
+    /// The same rule the answered path applies to `description.owner`, and it
+    /// has to hold here too: a rendezvous path can be re-bound by a holder some
+    /// other TBD spawned, and its child's exit says nothing about this one's.
+    @Test func aPushFromAnotherInstallationIsIgnored() {
+        let outcome = HolderRegistry.exitProbeOutcome(
+            for: HolderClient.Error.peerClosed,
+            pushedByTheHolder: Self.description(
+                status: .exited(code: 7), owner: HolderOwnerToken(rawValue: "someone-else")),
+            expecting: Self.owner)
+        #expect(outcome == .retry, "a stranger's holder answered for its own child: \(outcome)")
+    }
+
+    /// A push that says the child is alive establishes nothing.
+    ///
+    /// The holder pushes only from its reaping branch, so it never sends this —
+    /// which is exactly why it is pinned: a status that is not terminal must
+    /// not become one by riding an unsolicited frame.
+    @Test func aPushThatSaysAliveEstablishesNothing() {
+        let outcome = HolderRegistry.exitProbeOutcome(
+            for: HolderClient.Error.peerClosed,
+            pushedByTheHolder: Self.description(status: .alive),
+            expecting: Self.owner)
+        #expect(outcome == .retry, "\"still running\" is not a terminal status: \(outcome)")
+    }
+
+    // MARK: - Support
+
+    private static let owner = HolderOwnerToken(rawValue: "acme-installation")
+
+    private static func description(
+        status: HolderChildStatus, owner: HolderOwnerToken = HolderExitProbeClassificationTests.owner
+    ) -> HolderChildDescription {
+        HolderChildDescription(
+            childPID: 4242,
+            ttyName: "/dev/ttys004",
+            status: status,
+            launch: HolderLaunchRequest(
+                executable: "/bin/sh",
+                arguments: ["-c", "exit 7"],
+                workingDirectory: "/tmp",
+                environment: [:],
+                columns: 80,
+                rows: 24),
+            owner: owner)
+    }
 }
