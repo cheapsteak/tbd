@@ -11,10 +11,15 @@ import Foundation
 /// The honest cost of the barrier is the longest-lived child in the process:
 /// every child these suites spawn is either `/bin/sleep 0`–`0.4` or a `sleep
 /// 120` that teardown SIGTERMs, so a healthy drain returns in well under a
-/// second. 30 s is ~30x that, and it must land inside the two suites' shared
-/// `.timeLimit(.minutes(1))` with room for the disposal and assertions that
-/// follow it — which it does with 2x to spare. It is a hang guard, not a timing
-/// assertion: a passing run never spends any of it.
+/// second. 30 s is ~30x that. It must also land inside the two suites' shared
+/// suite limit with room for the disposal and assertions that follow it, so
+/// that a stuck reap is reported by *this* guard, with its observed state,
+/// rather than truncated into a bare "Time limit was exceeded". That limit is
+/// `.fastPassBounded` (`Tests/TestSupport/ClockTestSupport.swift`) — 240 s, one
+/// dial derived from the fast pass's measured latency — which leaves this
+/// guard 8x of room instead of the 2x the hand-written one minute left it. It
+/// is a hang guard, not a timing assertion: a passing run never spends any
+/// of it.
 let reapDrainHangGuard: Duration = .seconds(30)
 
 /// How a bounded wait for `ChildReaper`'s queue barrier ended.

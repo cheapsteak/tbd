@@ -5,6 +5,7 @@ import SwiftTerm
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// A snapshot preamble is *replayed history*, but its bytes look live to the
 /// emulator. This suite drives `Coordinator.feedSnapshot` on the production
@@ -38,8 +39,13 @@ import TBDShared
 /// Nothing here talks to a live daemon: the interrupt path's best-effort
 /// `setTerminalActivity` RPC goes to `TBD_SOCKET_PATH`, which `scripts/test.sh`
 /// fences onto a scratch path with no listener.
+///
+/// The suite limit is a hang guard — every wait here is bounded on its own, and
+/// the limit exists so a `settle()` that never settles is a named red rather
+/// than a silent stall. It takes the shared dial rather than a number of its
+/// own: see `.fastPassBounded` in `Tests/TestSupport/ClockTestSupport.swift`.
 @MainActor
-@Suite("Quiet snapshot ingest", .timeLimit(.minutes(3)))
+@Suite("Quiet snapshot ingest", .fastPassBounded)
 struct QuietIngestTests {
 
     @Test("A terminal query inside a snapshot produces no outgoing bytes")

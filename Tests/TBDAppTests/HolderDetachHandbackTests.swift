@@ -25,7 +25,12 @@ import TestSupport
 ///
 /// Tier 2: a real `TBDTerminalView`, the real reader thread, the real
 /// serialization — no daemon, no tmux, no pty.
-@Suite("A holder panel hands its session back when it detaches", .timeLimit(.minutes(2)))
+///
+/// The suite limit is a hang guard, nothing more: a handback that never happens
+/// leaves the test parked on its socketpair read rather than failing. It
+/// therefore takes the shared dial rather than a number of its own — see
+/// `.fastPassBounded` in `Tests/TestSupport/ClockTestSupport.swift`.
+@Suite("A holder panel hands its session back when it detaches", .fastPassBounded)
 struct HolderDetachHandbackTests {
 
     private static let generation: UInt64 = 11

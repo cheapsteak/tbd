@@ -3,6 +3,7 @@ import Foundation
 import SwiftTerm
 import Testing
 @testable import TBDApp
+import TestSupport
 
 /// Tier 2: drives the two terminal coordinators' real `cleanup()` against a
 /// real SwiftTerm `LocalProcess` and a real forked child. No tmux server, no
@@ -64,12 +65,17 @@ import Testing
 /// barrier against a 30 s guard, reports a stuck reap with its observed state,
 /// and each call site SIGKILLs and reaps its own child on that path.
 ///
-/// **Why `.timeLimit(.minutes(1))`.** A coarse outer backstop for the ordinary
-/// case of a merely slow test — not the guard that catches a stuck reap, which
-/// it cannot do (above). Nothing here waits on wall time otherwise, and the
-/// honest path completes in well under a second, so a minute leaves the 30 s
-/// hang guard room to fire with its diagnostic rather than be truncated, and
-/// still spends less than four minutes of a shared box.
+/// **Why `.fastPassBounded`.** A coarse outer backstop for the ordinary case of
+/// a merely slow test — not the guard that catches a stuck reap, which it
+/// cannot do (above). What the limit has to afford is a test that fails through
+/// the 30 s barrier guard and still gets to report: the guard plus the disposal
+/// and assertions that follow it, which is ~35 s of budget. The reason that
+/// budget is not simply a written-out minute is that a minute is not a spare
+/// four minutes in this pass — it is *below* the median reported duration of a
+/// healthy test in it, because reported duration here is mostly time suspended
+/// behind ~5000 other runnable tests. So the number is the shared dial and the
+/// 30 s guard is checked against it, not against a locally-invented literal.
+/// See `.fastPassBounded` in `Tests/TestSupport/ClockTestSupport.swift`.
 ///
 /// **Probe children are disposed of before anything can fail.** Assertions run
 /// last, after every child this suite spawned has been ended and reaped,
@@ -85,7 +91,7 @@ import Testing
 /// is worth ordering correctly on its own; it is not the launchd-orphan story.
 /// (`cleanup()` also appends a line to `/tmp/tbd-bridge.log` via the
 /// production `debugLog`; no TBD-owned store is touched.)
-@Suite("Terminal teardown reaps its PTY child", .timeLimit(.minutes(1)))
+@Suite("Terminal teardown reaps its PTY child", .fastPassBounded)
 struct TerminalTeardownReapTests {
 
     /// Everything a one-shot test needs out of its single main-actor hop.

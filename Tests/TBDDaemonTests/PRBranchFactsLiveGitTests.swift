@@ -92,22 +92,21 @@ struct PRBranchFactsLiveGitTests {
             statusCheckRollupState: nil, mergeQueuePosition: nil)
     }
 
-    /// The explicit time limit — unusual in the fast parallel pass, where suites
-    /// normally take `.clockDriven`'s budget or none — is here for two reasons:
+    /// **There is a real hang to bound**, which is why this test carries a
+    /// limit at all: the hazard is a wedged git subprocess, and
+    /// `TestSupport.shell` waits on its child without a deadline, so without a
+    /// limit that wedge is an indefinite stall with no failing test to name it.
     ///
-    /// 1. **There is a real hang to bound.** This suite arms no `TestClock`, so
-    ///    `.clockDriven` would be the wrong trait; the hazard is a wedged git
-    ///    subprocess, and `TestSupport.shell` waits on its child without a
-    ///    deadline. Without a limit that wedge is an indefinite stall with no
-    ///    failing test to name it.
-    /// 2. **A minute is not tight here.** The parallel pass's guards are sized
-    ///    at 90 s / 240 s to absorb `TestClock` arming latency across a ~5000-
-    ///    test population; this suite never arms one and so never pays that
-    ///    cost. Measured runtime is ~0.4 s for both arms — roughly 130x of
-    ///    headroom, wider in proportion than `.clockDriven` leaves the suites it
-    ///    covers.
+    /// It takes the shared dial rather than the minute it used to spell out.
+    /// The old reasoning was that a minute is not tight because this test arms
+    /// no `TestClock` and so never pays arming latency — true, and beside the
+    /// point: what the limit is measured against is *reported* duration, which
+    /// in this pass is mostly time suspended behind ~5000 other runnable tests
+    /// whether or not this test arms anything. The measured ~0.4 s of real work
+    /// is not what a one-minute limit would have been compared with. See
+    /// `.fastPassBounded` in `Tests/TestSupport/ClockTestSupport.swift`.
     @Test("candidates and heal behave identically under both push.default values",
-          .timeLimit(.minutes(1)),
+          .fastPassBounded,
           arguments: ["simple", "upstream"])
     func branchFactsDriveMatchingAndHealing(pushDefault: String) async throws {
         // Registered BEFORE setup so a throwing fixture doesn't leak the dir.

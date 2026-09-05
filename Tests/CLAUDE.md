@@ -732,10 +732,15 @@ Two shapes, also not interchangeable:
 Don't roll your own test clock wrapper, advance helper, `.timeLimit` default,
 or date box. This file is the whole shared surface:
 
-- `@Suite(.clockDriven)` — a four-minute time limit (Swift Testing expresses
-  limits in whole minutes, so that is the dial). A hang-catcher, not a perf
-  budget; sized against the wall-clock waits a clock-driven test can sit on in
-  the **fast parallel pass** — see "Population is the scheduler" above for the
+- `@Suite(.fastPassBounded)` — the one suite/test hang guard for the fast
+  parallel pass: a four-minute time limit (Swift Testing expresses limits in
+  whole minutes, so that is the dial). A hang-catcher, not a perf budget; its
+  value is derived from the pass's measured per-test latency, and every
+  fast-pass suite that needs a limit takes it unless the limit is itself the
+  regression detector.
+- `@Suite(.clockDriven)` — the same value under the name a clock-driven suite
+  wants at its call site, because there the hang being caught is a `TestClock`
+  sleep nobody advances. See "Population is the scheduler" above for the
   triple, its invariant, and the three tier-3 live suites that pin their own
   `.timeLimit` instead because their limit is a regression detector.
 - `await clock.advanceWhenSuspended(by:)` — the one you want by default.

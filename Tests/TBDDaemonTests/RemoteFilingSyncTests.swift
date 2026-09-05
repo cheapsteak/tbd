@@ -18,11 +18,14 @@ import Testing
 /// The time limit is a hang-catcher, not a budget. Three of these tests drive a
 /// competing gesture into the sync's check-then-act window, and an earlier
 /// rendezvous that blocked a cooperative-pool thread there wedged a CI run for
-/// its whole 30-minute step timeout with no failing test and no output. Two
-/// minutes turns any future recurrence into a named red instead, with headroom
-/// for the scheduling latency a ~4500-test parallel pass adds to a trivial test
-/// (`Tests/CLAUDE.md`, "Population is the scheduler").
-@Suite("Remote filing sync", .timeLimit(.minutes(2)))
+/// its whole 30-minute step timeout with no failing test and no output. The
+/// limit turns any future recurrence into a named red instead. It is the shared
+/// dial rather than a number chosen here, because what it has to absorb — the
+/// scheduling latency a ~5000-test parallel pass adds to a trivial test — is a
+/// property of the pass, not of this suite (`Tests/CLAUDE.md`, "Population is
+/// the scheduler"; `.fastPassBounded` in
+/// `Tests/TestSupport/ClockTestSupport.swift`).
+@Suite("Remote filing sync", .fastPassBounded)
 struct RemoteFilingSyncTests {
     let db: TBDDatabase
     let subs: StateSubscriptionManager
