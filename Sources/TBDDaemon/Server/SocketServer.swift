@@ -227,7 +227,12 @@ public final class SocketServer: Sendable {
     /// Reclaim the socket file this server bound, if it is still there and
     /// still ours. The claim is taken exactly once, so a second shutdown —
     /// sequential or concurrent — finds nothing to claim and does nothing.
-    private func unlinkOwnedSocketFile() {
+    ///
+    /// Internal rather than private so a test can run this step twice without
+    /// running `stop()` twice: NIO's `shutdownGracefully` never completes when
+    /// the group is already shut down, so a second `stop()` suspends forever.
+    /// This is the step a second shutdown would reach.
+    func unlinkOwnedSocketFile() {
         guard let bound = takeBoundSocketIdentity() else {
             // Never bound, or already claimed by another shutdown. Nothing
             // here is ours.

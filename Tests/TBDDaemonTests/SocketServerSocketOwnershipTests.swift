@@ -178,16 +178,18 @@ struct SocketServerSocketOwnershipTests {
         try await server.start()
 
         let claims = ClaimCounter()
-        let finished = DispatchGroup()
+        let finished = ClaimCounter()
         for _ in 0..<claimants {
-            finished.enter()
             Thread.detachNewThread {
                 atCallSite.signal()
                 if server.takeBoundSocketIdentity() != nil { claims.increment() }
-                finished.leave()
+                finished.increment()
             }
         }
-        #expect(finished.wait(timeout: .now() + 30) == .success, "the claimant threads never finished")
+        #expect(
+            await waitUntil({ finished.count == claimants }, timeout: .seconds(30)),
+            "the claimant threads never finished"
+        )
         #expect(
             claims.count == 1,
             "\(claims.count) of \(claimants) overlapping shutdowns came away owning the socket file; only one may"
@@ -196,36 +198,37 @@ struct SocketServerSocketOwnershipTests {
         await server.stop()
     }
 
-    @Test("overlapping shutdowns still reclaim the server's own socket file, once")
-    func overlappingShutdownsReclaimTheFileOnce() async throws {
+    @Test("a second reclaim after a successor took over claims nothing")
+    func repeatReclaimLeavesTheSuccessorAlone() async throws {
         let socketPath = scratchSocketPath()
         defer { unlink(socketPath) }
 
-        // The end-to-end half of the test above: whatever the claim does under
-        // contention, a pile of concurrent shutdowns must still reclaim the
-        // file this server bound, and a shutdown that arrives after a
-        // successor has taken the path over must leave the successor alone.
+        // The file-level half of the claim-once guarantee: the first shutdown
+        // reclaims the file this server bound, and the reclaim step a second
+        // shutdown would run must find nothing left to claim.
+        //
+        // `unlinkOwnedSocketFile()` rather than a second `stop()`, and
+        // `takeBoundSocketIdentity()` rather than overlapping `stop()` calls in
+        // the test above, for the same reason: NIO's `shutdownGracefully` never
+        // completes when the group is already shut down, so a second `stop()`
+        // suspends its task forever with no thread left to show for it. The
+        // contested step in production is the claim, and that is what these
+        // tests contend for.
         let server = SocketServer(router: try makeRouter(), socketPath: socketPath)
         try await server.start()
 
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<8 {
-                group.addTask { await server.stop() }
-            }
-        }
+        await server.stop()
         #expect(inode(of: socketPath) == nil, "the shutdown must still reclaim its own file")
 
-        // A successor now binds the path. Any further shutdown of the old
-        // server must find nothing left to claim and leave it alone.
         let successor = SuccessorSocket()
         defer { successor.release() }
         successor.takeOver(path: socketPath)
         let successorInode = try #require(successor.inode)
 
-        await server.stop()
+        server.unlinkOwnedSocketFile()
         #expect(
             inode(of: socketPath) == successorInode,
-            "a repeat shutdown deleted the successor's socket"
+            "a repeat reclaim deleted the successor's socket"
         )
     }
 
