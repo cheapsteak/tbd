@@ -49,8 +49,15 @@ struct ServerShutdownLatchTests {
                 await latch.run {
                     runs.increment()
                     // Suspends, so a caller that failed to wait for the run
-                    // would return while this is still in flight.
-                    for _ in 0..<100 { await Task.yield() }
+                    // would return while this is still in flight. One yield
+                    // would already open that window; a few widen it without
+                    // making the test's cost depend on how loaded the machine
+                    // is. Every `Task.yield()` is a full trip to the back of
+                    // the process-wide run queue, and in the saturated pass
+                    // that queue holds thousands of runnable tasks — the
+                    // hundred yields this started out with took longer than
+                    // the whole wait below.
+                    for _ in 0..<20 { await Task.yield() }
                     bodyFinished.set()
                 }
                 if !bodyFinished.isSet { returnedBeforeTheBodyFinished.increment() }
@@ -58,10 +65,16 @@ struct ServerShutdownLatchTests {
             }
         }
 
-        #expect(
-            await waitUntil({ returned.count == callers }, timeout: .seconds(15)),
-            "only \(returned.count) of \(callers) callers returned"
-        )
+        // `waitFor` at the repo-wide saturated-pass budget rather than a snug
+        // few seconds. These callers are detached tasks, so the thing being
+        // waited on is the cooperative pool getting round to them: 5,059 tests
+        // share one process and a pool three threads wide on CI's runner, and
+        // scheduling latency there is measured in tens of seconds. A shorter
+        // bound reports queueing as a wedged latch.
+        try await waitFor(
+            "all \(callers) latch callers to return",
+            observed: { "\(returned.count) of \(callers) returned" }
+        ) { returned.count == callers }
         #expect(runs.count == 1, "the latch ran its body \(runs.count) times; exactly one may")
         #expect(
             returnedBeforeTheBodyFinished.count == 0,
@@ -89,10 +102,10 @@ struct ServerShutdownLatchTests {
             await server.stop()
             returned.increment()
         }
-        #expect(
-            await waitUntil({ returned.count == 1 }, timeout: .seconds(15)),
-            "the second stop() never returned"
-        )
+        try await waitFor(
+            "the second stop() to return",
+            observed: { "\(returned.count) of 1 returned" }
+        ) { returned.count == 1 }
     }
 }
 

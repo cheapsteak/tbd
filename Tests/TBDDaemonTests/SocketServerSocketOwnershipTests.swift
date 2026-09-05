@@ -160,12 +160,19 @@ struct SocketServerSocketOwnershipTests {
         // unsynchronized read to land in the window. Taken under a lock, the
         // others wait outside it and come away with nothing; taken with a
         // plain read-then-nil, all eight read the same identity.
+        //
+        // Every wait below is bounded and reached from a dedicated `Thread`,
+        // never from the cooperative pool: a blocked pool thread is one the
+        // work that would release it can no longer run on, and the pool is
+        // three threads wide on CI's runner.
         let claimants = 8
         let atCallSite = DispatchSemaphore(value: 0)
         let windowIsHeld = FirstArrivalFlag()
         let claimWindow: @Sendable (SocketFileIdentity?) -> Void = { _ in
             guard windowIsHeld.takeFirst() else { return }
-            for _ in 0..<(claimants - 1) { atCallSite.wait() }
+            for index in 0..<(claimants - 1) {
+                atCallSite.waitForGate("claimant \(index + 2) of \(claimants) reaching the claim call site")
+            }
             usleep(50_000)
         }
 
@@ -186,10 +193,10 @@ struct SocketServerSocketOwnershipTests {
                 finished.increment()
             }
         }
-        #expect(
-            await waitUntil({ finished.count == claimants }, timeout: .seconds(15)),
-            "the claimant threads never finished"
-        )
+        try await waitFor(
+            "all \(claimants) claimant threads to finish",
+            observed: { "\(finished.count) of \(claimants) finished" }
+        ) { finished.count == claimants }
         #expect(
             claims.count == 1,
             "\(claims.count) of \(claimants) overlapping shutdowns came away owning the socket file; only one may"
@@ -220,15 +227,31 @@ struct SocketServerSocketOwnershipTests {
         // together are not this case, because both get their `channel.close()`
         // in while the loop is still alive; that ordering survives even
         // without the fix, so a test built on it proves nothing.
+        //
+        // The staging gate blocks whichever thread runs the shutdown body, so
+        // that thread must not be a cooperative-pool one: the pool is three
+        // threads wide on CI's runner, and the statement that releases the
+        // gate needs a thread from it. Both `stop()` calls therefore start
+        // with `gateHoldingTask` — either of them may be the one that wins the
+        // latch and runs the body — and every wait is bounded through
+        // `waitForGate`, which names the gate instead of parking a thread for
+        // good. See Tests/CLAUDE.md, "Thread-blocking gates run off the
+        // cooperative pool".
         let claims = ClaimCounter()
         let firstShutdownIsAtTheReclaimStep = DispatchSemaphore(value: 0)
         let secondCallerHasArrived = DispatchSemaphore(value: 0)
         let holdTheFirstShutdown = FirstArrivalFlag()
+        // Short of the observation's own budget on purpose: if the staging
+        // never happens, this test should degrade to the weaker "both stop()
+        // calls returned" check and say why, rather than have the outer wait
+        // expire first and report a wedge that is really a lost handshake.
+        let stagingDeadline: Duration = .seconds(30)
         let claimWindow: @Sendable (SocketFileIdentity?) -> Void = { identity in
             if identity != nil { claims.increment() }
             guard holdTheFirstShutdown.takeFirst() else { return }
             firstShutdownIsAtTheReclaimStep.signal()
-            _ = secondCallerHasArrived.wait(timeout: .now() + 10)
+            secondCallerHasArrived.waitForGate(
+                "the second stop() caller to reach stop()", timeout: stagingDeadline)
             // Covers the hop between the second caller reaching `stop()` and
             // `stop()` reaching the latch, so the first shutdown is still
             // in flight when it gets there.
@@ -244,30 +267,31 @@ struct SocketServerSocketOwnershipTests {
         try await server.start()
         #expect(inode(of: socketPath) != nil)
 
-        // Detached and waited on with a deadline rather than gathered in a
-        // task group: the failure under test is a shutdown that never returns,
-        // and a task group would wedge the whole run alongside it instead of
-        // reporting it.
+        // Unstructured and waited on with a deadline rather than gathered in
+        // a task group: the failure under test is a shutdown that never
+        // returns, and a task group would wedge the whole run alongside it
+        // instead of reporting it.
         let finished = ClaimCounter()
-        Task.detached {
+        _ = gateHoldingTask {
             await server.stop()
             finished.increment()
         }
         // On its own thread so the bounded wait cannot occupy a cooperative
         // pool thread the first shutdown may need.
         Thread.detachNewThread {
-            _ = firstShutdownIsAtTheReclaimStep.wait(timeout: .now() + 10)
+            firstShutdownIsAtTheReclaimStep.waitForGate(
+                "the first shutdown to reach its reclaim step", timeout: stagingDeadline)
             secondCallerHasArrived.signal()
-            Task.detached {
+            _ = gateHoldingTask {
                 await server.stop()
                 finished.increment()
             }
         }
 
-        #expect(
-            await waitUntil({ finished.count == 2 }, timeout: .seconds(15)),
-            "only \(finished.count) of 2 overlapping stop() calls returned; a shutdown is wedged"
-        )
+        try await waitFor(
+            "both overlapping stop() calls to return",
+            observed: { "\(finished.count) of 2 returned" }
+        ) { finished.count == 2 }
         #expect(
             claims.count == 1,
             "\(claims.count) of the overlapping shutdowns came away owning the socket file; exactly one may"
@@ -300,10 +324,10 @@ struct SocketServerSocketOwnershipTests {
             await server.stop()
             secondStopReturned.increment()
         }
-        #expect(
-            await waitUntil({ secondStopReturned.count == 1 }, timeout: .seconds(15)),
-            "the second stop() never returned"
-        )
+        try await waitFor(
+            "the second stop() to return",
+            observed: { "\(secondStopReturned.count) of 1 returned" }
+        ) { secondStopReturned.count == 1 }
         #expect(
             inode(of: socketPath) == successorInode,
             "a repeat shutdown deleted the successor's socket"
