@@ -151,8 +151,22 @@ struct AutoCloseSetupTests {
         // dryRun tmux never runs the hook — stand in for its clean exit.
         // (The spawn deleted any stale marker, so write AFTER create returns.)
         try writeSetupMarker(worktreeID: wt.id, exitCode: 0)
-        try await waitFor("setup terminal auto-close") {
-            (try? await db.terminals.get(id: setup.id)) == nil
+        // Wait on the LAST write of the teardown, not the first. The watcher's
+        // `closeHookTerminal`
+        // (Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+PreSession.swift:468-474)
+        // deletes the terminal row, then the tab row, and only THEN reads and
+        // rewrites the persisted tab order — three separate awaits with
+        // suspension points between them. A wait whose condition is "the row is
+        // gone" can therefore return while the stored order still contains the
+        // setup tab, which is exactly what the assertion below checks; that
+        // intermediate state is what turned this test red in CI in 0.5 s. The
+        // condition below is the conjunction, so the wait cannot outrun the
+        // prune.
+        try await waitFor("setup tab pruned from the stored tab order") {
+            guard let order = try? await db.worktrees.getTabOrder(worktreeID: wt.id)
+            else { return false }
+            let rowGone = (try? await db.terminals.get(id: setup.id)) == nil
+            return rowGone && !order.contains(setup.id)
         }
 
         #expect(try await db.terminals.get(id: setup.id) == nil,
@@ -186,7 +200,12 @@ struct AutoCloseSetupTests {
         try writeSetupMarker(worktreeID: wt.id, exitCode: 3)
         let markerPath = WorktreeLifecycle.setupMarkerPath(worktreeID: wt.id)
         // Marker consumption is the observable signal that the watcher
-        // processed the failure outcome.
+        // processed the failure outcome — and here it is also the watcher's
+        // LAST write: `finishAutoCloseSetup`
+        // (Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+SetupAutoClose.swift:58-70)
+        // removes the marker before the switch and the nonzero-exit branch only
+        // logs, so no later write can invalidate the assertions below. (Contrast
+        // `flagOnCleanExitClosesSetupTab`, whose branch writes three more times.)
         try await waitFor("setup marker consumed") {
             !FileManager.default.fileExists(atPath: markerPath)
         }
