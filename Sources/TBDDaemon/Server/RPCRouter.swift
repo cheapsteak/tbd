@@ -797,6 +797,10 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetGCRetainedTranscriptsEnabled(request.paramsData)
             case RPCMethod.configSetRemoteDeleteEnabled:
                 return try await handleConfigSetRemoteDeleteEnabled(request.paramsData)
+            case RPCMethod.configSetProfileBalancingEnabled:
+                return try await handleConfigSetProfileBalancingEnabled(request.paramsData)
+            case RPCMethod.configSetLimitRotationEnabled:
+                return try await handleConfigSetLimitRotationEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -958,6 +962,10 @@ public final class RPCRouter: Sendable {
         result.modelProxySupported = proxy.supported
         result.modelProxyPort = proxy.port
         result.modelProxyVersion = proxy.version
+        // Assigned rather than passed, for the same budget reason as the
+        // model-proxy fields above: the two load-balancing soak gates.
+        result.profileBalancingEnabled = config.profileBalancingEnabled
+        result.limitRotationEnabled = config.limitRotationEnabled
         return try RPCResponse(result: result)
     }
 

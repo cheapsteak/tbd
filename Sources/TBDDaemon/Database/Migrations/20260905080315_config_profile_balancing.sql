@@ -1,0 +1,11 @@
+-- Gate for profile balancing across multiple Claude accounts. When enabled, new
+-- sessions land on the eligible profile with the most room, adjusted for live
+-- session count (design 2026-09-05 §6). Default OFF during soak.
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" (0) — which is what made auto_hibernate_enabled impossible to
+-- graduate without a forcing UPDATE that also reset deliberate opt-ins.
+-- The shipped default lives in exactly one place:
+-- Config.profileBalancingEnabledDefault.
+ALTER TABLE config ADD COLUMN profile_balancing_enabled INTEGER;
