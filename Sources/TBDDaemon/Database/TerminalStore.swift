@@ -1786,7 +1786,7 @@ public struct TerminalStore: Sendable {
     /// of profile_id → count. UUIDs that fail to parse are skipped silently
     /// (corrupted rows in the database; the count is conservative).
     public func liveSessionCountsByProfile() async throws -> [UUID: Int] {
-        try await reader.read { db in
+        try await writer.read { db in
             let rows = try Row.fetchAll(db, sql: """
                 SELECT profile_id, COUNT(*) as count FROM terminal
                 WHERE kind = ? AND profile_id IS NOT NULL

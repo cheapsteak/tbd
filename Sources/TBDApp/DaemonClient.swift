@@ -2214,7 +2214,6 @@ actor DaemonClient {
         defer { measured.finish() }
         return try response.decodeResult(RemoveLegacyGlobalHooksResult.self)
     }
-}
 
     /// Set whether a profile is excluded from the balancing pool (design
     /// 2026-09-05 §4).
@@ -2224,3 +2223,4 @@ actor DaemonClient {
             params: ModelProfileSetPoolOptOutParams(id: id, optOut: optOut)
         )
     }
+}
