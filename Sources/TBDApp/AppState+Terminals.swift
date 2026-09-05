@@ -590,6 +590,7 @@ extension AppState {
     func recordTerminalRemoval(terminalID: UUID, date: Date = Date()) {
         terminalPresentationOrderObservedAt.removeValue(forKey: terminalID)
         terminalSessionOrderObservedAt.removeValue(forKey: terminalID)
+        limitHits.removeValue(forKey: terminalID)
         pruneRecentTerminalDeletions(date: date)
         recentlyDeletedTerminalIDs[terminalID] = date
         if recreatingTerminalIDs.contains(terminalID) {

@@ -713,6 +713,62 @@ extension AppState {
             showAlert("Failed to set nightwatch mode: \(error.localizedDescription)", isError: true)
         }
     }
+
+    // MARK: - Account Load Balancing
+
+    /// Persist the profile-balancing soak flag and refresh daemon capabilities.
+    /// Applies to the next spawn-time resolution.
+    func setProfileBalancingEnabled(_ enabled: Bool) async {
+        do {
+            try await profileBalancingFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set profile balancing: \(error, privacy: .public)")
+            showAlert("Failed to set profile balancing: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Persist the limit-rotation soak flag and refresh daemon capabilities.
+    /// Applies to the next limit-hit detection.
+    func setLimitRotationEnabled(_ enabled: Bool) async {
+        do {
+            try await limitRotationFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set limit rotation: \(error, privacy: .public)")
+            showAlert("Failed to set limit rotation: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set or clear a profile's pool opt-out, then reload profiles.
+    func setProfilePoolOptOut(id: UUID, optOut: Bool) async {
+        do {
+            try await profilePoolOptOutSetter(id, optOut)
+            await loadModelProfiles()
+        } catch {
+            logger.error("Failed to set profile pool opt-out: \(error, privacy: .public)")
+            showAlert("Failed to set profile pool opt-out: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Count live Claude sessions running under a given profile.
+    /// Prefers the daemon's `entry.liveSessions` when non-nil, else computes from
+    /// `appState.terminals` (Claude kind, unparked, matching profileID).
+    func liveSessionCount(forProfile profileID: UUID) -> Int {
+        // If any profile has a daemon-supplied count, use it (prefer the daemon)
+        if let entry = modelProfiles.first(where: { $0.profile.id == profileID }),
+           let liveCount = entry.liveSessions {
+            return liveCount
+        }
+        // Otherwise count from local terminal state
+        return terminals.values.reduce(0) { acc, terminalList in
+            acc + terminalList.filter { terminal in
+                terminal.profileID == profileID
+                    && !terminal.isParked
+                    && terminal.kind == .claude
+            }.count
+        }
+    }
 }
 
 /// What a user-initiated, single-profile usage refresh actually did.
