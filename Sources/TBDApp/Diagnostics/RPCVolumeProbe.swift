@@ -354,6 +354,7 @@ extension StateDelta {
         case .panelSurfaceChanged: return "panelSurfaceChanged"
         case .remoteSessionsChanged: return "remoteSessionsChanged"
         case .remoteSessionAttention: return "remoteSessionAttention"
+        case .terminalLimitHit: return "terminalLimitHit"
         }
     }
 }
