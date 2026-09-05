@@ -26,36 +26,38 @@ extension RPCRouter {
 
         // §7.1: Always run — get suggested profile and build notification suffix
         var suggestedProfileID: UUID?
-        var suggestedProfileName: String?
         var usageSuffix: String?
+        var limitedProfileName: String?
 
+        // Get the limited profile's name for notification
         if let profileID = terminal.profileID {
-            // Get the limited profile's account key to exclude when picking
-            let allSnapshots = (try? await db.oauthUsageSnapshots.loadAll()) ?? [:]
-            let limitedSnapshot = allSnapshots[profileID]
-            let limitedAccountKey = limitedSnapshot?.organizationID
-                ?? (try? ClaudeProfileConfigDirManager().loginIdentity(forProfileID: profileID))
-                ?? profileID.uuidString
+            limitedProfileName = (try? await db.modelProfiles.get(id: profileID))?.name
+        }
 
-            // Run picker with excluded account key
-            if let source = profilePoolCandidateSource {
-                do {
-                    let candidates = try await source.candidates(defaultProfileID: profileID)
-                    let decision = ProfilePoolPicker.pick(
-                        candidates: candidates,
-                        excludingAccountKeys: [limitedAccountKey],
-                        now: Date()
-                    )
-                    if let chosen = decision.chosen,
-                       let chosenProfile = try await db.modelProfiles.get(id: chosen),
-                       let chosenSnapshot = allSnapshots[chosen] {
-                        suggestedProfileID = chosen
-                        suggestedProfileName = chosenProfile.name
-                        usageSuffix = formatUsageForNotification(snapshot: chosenSnapshot)
-                    }
-                } catch {
-                    logger.debug("handleRateLimitDetected: picker failed: \(String(describing: error), privacy: .public)")
+        // Run picker with excluded account key (§7.1 always runs, even for ambient)
+        if let source = profilePoolCandidateSource {
+            do {
+                // Get account key to exclude: the limited profile's account (or nil for ambient)
+                var limitedAccountKey: String? = nil
+                if let profileID = terminal.profileID {
+                    limitedAccountKey = try await source.accountKey(forProfileID: profileID)
                 }
+
+                let candidates = try await source.candidates(
+                    defaultProfileID: config?.defaultProfileID
+                )
+                let decision = ProfilePoolPicker.pick(
+                    candidates: candidates,
+                    excludingAccountKeys: limitedAccountKey.map { [$0] } ?? [],
+                    now: Date()
+                )
+                if let chosen = decision.chosen,
+                   let chosenSnapshot = try await db.oauthUsageSnapshots.get(profileID: chosen) {
+                    suggestedProfileID = chosen
+                    usageSuffix = formatUsageForNotification(snapshot: chosenSnapshot)
+                }
+            } catch {
+                logger.debug("handleRateLimitDetected: picker failed: \(String(describing: error), privacy: .public)")
             }
         }
 
@@ -63,7 +65,7 @@ extension RPCRouter {
         var rotationSucceeded = false
         if rotationEnabled, let suggested = suggestedProfileID {
             let eligibility = Self.rotationEligibility(terminal: terminal, flagOn: true, suggested: suggested)
-            logger.debug("handleRateLimitDetected rotation: \(String(describing: eligibility), privacy: .public)")
+            logger.info("handleRateLimitDetected rotation: \(String(describing: eligibility), privacy: .public)")
 
             if case .rotate(let newProfileID) = eligibility {
                 do {
@@ -74,7 +76,8 @@ extension RPCRouter {
                     )
                     let swapParamsData = try encoder.encode(swapParams)
                     let actor = ActuationActor.daemon(rail: "limit-rotation")
-                    let response = try await handleTerminalSwapProfile(swapParamsData, actor: actor)
+                    let performer = rotationSwapPerformer ?? handleTerminalSwapProfile
+                    let response = try await performer(swapParamsData, actor)
 
                     if response.success {
                         rotationSucceeded = true
@@ -97,11 +100,15 @@ extension RPCRouter {
         }
 
         // Build notification message and broadcast delta
+        let suggestedProfileName = suggestedProfileID.flatMap { try? await db.modelProfiles.get(id: $0) }?.name
         var message: String
         if rotationSucceeded {
-            message = "Session limit hit on \(suggestedProfileName ?? "Session") — switched"
-            if let suffix = usageSuffix {
-                message.append(" to \(suffix)")
+            if let limited = limitedProfileName, let suggested = suggestedProfileName, let suffix = usageSuffix {
+                message = "Session limit hit on \(limited) — switched to \(suggested) (\(suffix))"
+            } else if let limited = limitedProfileName {
+                message = "Session limit hit on \(limited) — switched"
+            } else {
+                message = "Session limit hit — switched"
             }
         } else if autoResumeEnabled, let scheduler = limitResumeScheduler {
             guard let scheduled = await scheduler.schedule(
@@ -113,6 +120,12 @@ extension RPCRouter {
                 return .ok()   // latch: already pending — no duplicate notification
             }
             message = "Session limit hit — auto-resume scheduled for \(ResumeTimeFormatter.string(from: scheduled.fireAt))"
+            // §7.1: Always append suggestion suffix to auto-resume branch too
+            if let limited = limitedProfileName, let suggested = suggestedProfileName, let suffix = usageSuffix {
+                message = "Session limit hit on \(limited) — resets \(ResumeTimeFormatter.string(from: scheduled.fireAt)). \(suggested) has room (\(suffix))"
+            } else if let limited = limitedProfileName {
+                message = "Session limit hit on \(limited) — resets \(ResumeTimeFormatter.string(from: scheduled.fireAt))"
+            }
         } else {
             // Gate off: record the detection for audit, notify with the reset time
             let audit = ScheduledResume(
@@ -127,9 +140,14 @@ extension RPCRouter {
             } catch {
                 logger.warning("handleRateLimitDetected: audit insert failed for terminal \(terminal.id.uuidString, privacy: .public): \(String(describing: error), privacy: .public)")
             }
-            message = "Session limit hit — resets \(ResumeTimeFormatter.string(from: params.resetsAt))"
-            if let pName = suggestedProfileName, let suffix = usageSuffix {
-                message.append(". \(pName) has room (\(suffix))")
+            if let limited = limitedProfileName {
+                message = "Session limit hit on \(limited) — resets \(ResumeTimeFormatter.string(from: params.resetsAt))"
+            } else {
+                message = "Session limit hit — resets \(ResumeTimeFormatter.string(from: params.resetsAt))"
+            }
+            // §7.1: Always append suggestion suffix (ambient: no limited name)
+            if let suggested = suggestedProfileName, let suffix = usageSuffix {
+                message.append(". \(suggested) has room (\(suffix))")
             }
         }
 
@@ -184,8 +202,8 @@ extension RPCRouter {
         guard !terminal.isParked else { return .parked }
         guard terminal.transport == .tmux else { return .holderTransport }
         guard terminal.claudeSessionID != nil else { return .noSession }
-        guard suggested != nil else { return .noCandidate }
-        return .rotate(suggested!)
+        guard let suggestedID = suggested else { return .noCandidate }
+        return .rotate(suggestedID)
     }
 
     /// Format a ProfileUsageSnapshot's 5h and weekly percents for notification.
