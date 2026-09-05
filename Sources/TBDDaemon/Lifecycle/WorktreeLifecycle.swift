@@ -98,6 +98,10 @@ public struct WorktreeLifecycle: Sendable {
     /// so every copy of this struct shares one registry (same rationale as
     /// `conflictSweepCache`).
     public let preSessionRuns = PreSessionRunRegistry()
+    /// The holder arm's whole-pass probe budget. An actor reference for the
+    /// same reason `conflictSweepCache` is one: one `WorktreeLifecycle` value
+    /// is copied per call site and every copy must read the same flag.
+    let holderProbeBudget = HolderProbeBudget()
     /// Where archived worktree directories go before their bytes are
     /// reclaimed. See `WorktreeDeletionQueue`.
     let deletionQueue = WorktreeDeletionQueue()
@@ -179,6 +183,9 @@ public struct WorktreeLifecycle: Sendable {
     /// would defeat the tracker's own seam and leave no way to pin the fact
     /// end to end.
     let now: @Sendable () -> Date
+    /// Behavior clock for the holder arm's phase budget. `Duration` is
+    /// behavior and `Date` is data, so this is a separate seam from `now`.
+    let clock: any Clock<Duration>
 
     public init(
         db: TBDDatabase,
@@ -196,9 +203,11 @@ public struct WorktreeLifecycle: Sendable {
         reaperPollInterval: Duration = .milliseconds(100),
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.now = now
+        self.clock = clock
         self.db = db
         self.git = git
         self.tmux = tmux
@@ -296,8 +305,12 @@ public struct WorktreeLifecycle: Sendable {
     /// construction, so `captureThenKillWindow` captures nothing, kills nothing,
     /// and reaps nothing for such a row — which makes it the leak rather than a
     /// harmless no-op, since the row about to be deleted is the only record of
-    /// the holder and child pids and no sweep covers them until Milestone B's
-    /// holder reconciler lands. Nothing is captured for Closed Terminals
+    /// the holder and child pids, and once it is gone no sweep covers them
+    /// unless the holder is still alive to answer a handshake
+    /// (`RowlessHolderCollector`). The holder inventory in
+    /// `WorktreeLifecycle+Reconcile` does not help here: it judges rows that
+    /// still exist, and `AgentReaper`'s holder leg reads the same rows.
+    /// Nothing is captured for Closed Terminals
     /// either: a holder's screen lives in the daemon's own emulator, not in a
     /// tmux pane, so there was never a capture to preserve.
     func disposeHolder(for terminal: Terminal) async -> String? {

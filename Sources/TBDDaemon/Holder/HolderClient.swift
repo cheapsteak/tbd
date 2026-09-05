@@ -130,6 +130,44 @@ actor HolderClient {
 
     // MARK: - Verbs
 
+    /// Establish the connection and ask nothing.
+    ///
+    /// **The one probe that cannot destroy what it is probing.** Every other
+    /// verb here can carry a terminal status back, and a holder winds itself
+    /// down the moment one reaches a client — so a `describe` against a holder
+    /// whose master has not been handed over ends the holder and takes down
+    /// with it everything the job wrote and nobody read.
+    /// `HolderRegistry.confirmChildExit` states that rule; this verb is what a
+    /// caller uses when it is on the wrong side of it and still needs to know
+    /// whether anybody is there.
+    ///
+    /// It establishes exactly one fact — something is bound to that path and
+    /// accepting — and asks for nothing that could be an answer. Failures come
+    /// out as the same `Error.cannotConnect` every other verb throws on the way
+    /// in, so `HolderRegistry.exitProbeOutcome(for:)` classifies them by the
+    /// same errno rules and those rules still live in one place.
+    ///
+    /// Bounded by the kernel, and genuinely bounded. `SO_RCVTIMEO` is set
+    /// after `connect` returns and so does not cover it — but on Darwin a
+    /// `connect(2)` to an `AF_UNIX` path cannot wait for a listener either:
+    /// `sonewconn` refuses once the accept queue is at its limit, so a
+    /// saturated rendezvous comes back `ECONNREFUSED` in microseconds rather
+    /// than sleeping until the queue drains, which is what the same call would
+    /// do on Linux. `HolderClientTests`
+    /// `.aSaturatedRendezvousIsRefusedImmediatelyRatherThanBlocking` measures
+    /// both halves, because a platform property is exactly the kind of premise
+    /// that rots silently.
+    ///
+    /// The consequence is worth carrying rather than forgetting: a saturated
+    /// holder is *alive*, and `ECONNREFUSED` is one of the two errnos
+    /// `HolderRegistry.exitProbeOutcome(for:)` reads as absence. Nothing in the
+    /// daemon opens the concurrent connections needed to reach that state — the
+    /// holder answers each one on the same poll turn, and the only adopter is
+    /// serial — so it is a hazard of the classification, not a live bug.
+    func connectOnly() throws {
+        try connectIfNeeded()
+    }
+
     /// Report the child without transferring anything. Doubles as the
     /// handshake: a holder that answers this is alive, speaking the protocol,
     /// and naming the installation that spawned it.
@@ -265,6 +303,14 @@ actor HolderClient {
 
         let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard socketFD >= 0 else { throw Error.cannotConnect(path: socketPath, errno: errno) }
+        // **Close-on-exec, like the descriptors that arrive on it.** This
+        // connection occupies the holder's single client slot, and the holder
+        // learns the slot is free by reading EOF — which needs every copy of
+        // this end closed. A daemon child that inherited one would hold the
+        // slot for as long as it lives, and every later verb against that
+        // holder would be answered with the busy sentinel by a holder whose
+        // real client let go minutes earlier.
+        _ = fcntl(socketFD, F_SETFD, FD_CLOEXEC)
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
@@ -479,6 +525,19 @@ actor HolderClient {
         } catch {
             throw Error.transportFailed(error.localizedDescription)
         }
+        // **Close-on-exec, the moment they arrive.** A descriptor received over
+        // `SCM_RIGHTS` is inheritable unless somebody says otherwise, and
+        // darwin has no `MSG_CMSG_CLOEXEC` to ask for anything else on the
+        // `recvmsg` itself. The descriptor that comes through here is a
+        // session's pty master, and it lives as long as the session does; the
+        // daemon meanwhile spawns children constantly — git, tmux, usage and
+        // PR-status probes, peer supervisors — nearly all of them through
+        // `Foundation.Process`, which does not close what lacks the flag. One
+        // such child inheriting a copy holds the session open for as long as it
+        // lives: the reader sees no EOF when the job exits, death-detection
+        // stops working, and the handback never completes. Nothing in this
+        // process wants a session pty across an `exec`.
+        for descriptor in message.fds { _ = fcntl(descriptor, F_SETFD, FD_CLOEXEC) }
         carriedFDs.append(contentsOf: message.fds)
         inbox.append(message.data)
         do {

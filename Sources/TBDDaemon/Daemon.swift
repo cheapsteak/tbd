@@ -875,6 +875,31 @@ public final class Daemon: Sendable {
             : nil
         self.holderRegistry = holderRegistry
 
+        // Input for a holder-backed session, routed by who is reading its pty.
+        // Built from the registry (which knows who owns each pty and holds the
+        // daemon's own reader) and the fd sidecar (the one channel to the app),
+        // so it exists exactly when a holder session can exist. Its ack sink is
+        // installed at step 9a, before the sidecar listens, for the same reason
+        // `onInput`'s is: a connection captures its sinks at adopt time.
+        let holderInjectionCourier: HolderInjectionCourier? = holderRegistry.map { registry in
+            HolderInjectionCourier(
+                sendFrame: { [fdVendingServer] frame in
+                    try await fdVendingServer.sendFrame(frame)
+                },
+                viewerAttachment: { terminalID in
+                    await registry.viewerAttachment(for: terminalID)
+                },
+                writeDirectly: { terminalID, bytes in
+                    // The daemon's own reader is the only descriptor it has,
+                    // and it has one only while nobody else owns the pty.
+                    guard let reader = await registry.reader(for: terminalID) else {
+                        throw HolderInjectionCourier.Error.noDaemonDescriptor(
+                            terminalID: terminalID)
+                    }
+                    try await reader.write(bytes)
+                })
+        }
+
         var lifecycle = WorktreeLifecycle(
             db: database, git: git, tmux: tmux, hooks: hooks,
             subscriptions: subs,
@@ -1014,6 +1039,7 @@ public final class Daemon: Sendable {
         // must hold ONE registry — two would each drain their own dup of the
         // pty master and quietly steal bytes from each other.
         rpcRouter.holderRegistry = holderRegistry
+        rpcRouter.holderInjectionCourier = holderInjectionCourier
         // The wake path recreates a terminal's tmux server/window when the
         // window is gone (e.g. post-reboot); give the recreated server the
         // same gated control-mode connection as every other ensureServer
@@ -1174,8 +1200,26 @@ public final class Daemon: Sendable {
         // With `pty_holder_enabled` off there are no such rows and this is a
         // single query — it cannot delay the socket bind for anyone who has not
         // opted in.
+        //
+        // **The ordering was reconsidered and stands, because the phase is now
+        // bounded.** Adopting first costs everyone the phase's duration, and
+        // that duration is bounded outright: `adoptAllBudget` plus the row in
+        // flight when it expired, which is itself worth at most one
+        // `busyRetryBudget` plus one `adoptionReceiveTimeout`. Independent of
+        // how many holders are wedged, and — because a Darwin `connect(2)` to
+        // an `AF_UNIX` path is refused rather than queued when a listener has
+        // stopped accepting — independent of how badly any one of them is.
+        // Binding first would instead open a window in which the socket answers while holder
+        // sessions have no readers — `terminal.output` fails a live session
+        // with "its session is gone or was never adopted", a sentence no caller
+        // can tell apart from the truth about a genuinely dead one, and the
+        // app's `attach.request` throws `noLiveReader` for the same session —
+        // and it would not even make the daemon answerable, because steps 8b-8d
+        // ahead of it are pre-bind too. The overflow, and only the overflow, is
+        // what moves past the bind: see step 9c.
+        var deferredHolderAdoptions: [Terminal] = []
         if let holderRegistry {
-            await holderRegistry.adoptAll()
+            deferredHolderAdoptions = await holderRegistry.adoptAll()
         }
 
         // 9. Start socket server
@@ -1185,6 +1229,41 @@ public final class Daemon: Sendable {
         // is built above, before the server exists, so it can't be an init dep).
         rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
         try await sock.start()
+
+        // 9c. Finish the holder sessions the startup budget did not reach.
+        //
+        // `adoptAll` is the ONLY caller of `adopt` in the daemon, so a row it
+        // walked away from would never be adopted again: its pty master would
+        // go undrained for the process's whole life, and a job cannot finish
+        // exiting while anything it wrote is still queued on its terminal. The
+        // budget therefore bounds when the *socket* is bound, not whether these
+        // sessions are rescued. Detached because nobody is waiting on it: the
+        // socket is up, so no RPC caller waits on a slow holder here.
+        //
+        // **The rescue is serial, so a slow row delays the rows behind it**,
+        // and that is a deliberate trade rather than an oversight. Each row is
+        // bounded — `busyRetryBudget` plus one `adoptionReceiveTimeout`, the
+        // connect that opens it being refused in microseconds rather than
+        // queued — so the tail is delayed, never stranded. A `Task` per row
+        // would trade that head-of-line cost for a worse one: the client's I/O
+        // is deliberately blocking, so N rows in flight park N cooperative-pool
+        // threads.
+        //
+        // What that starves is not the socket. `SocketServer` runs on its own
+        // `MultiThreadedEventLoopGroup`, so accept, read and write keep their
+        // dedicated threads whatever the cooperative pool is doing. It is every
+        // RPC *handler* that stops: `SocketRPCHandler.channelRead` hands each
+        // request into a `Task { … }` on the cooperative pool, so a starved
+        // pool leaves a daemon that accepts connections, reads their bytes and
+        // produces no response — which is the same "answers nobody" failure the
+        // startup budget exists to prevent, reached from the other side. Serial
+        // parks at most one thread. `adoptRemaining` logs its start and its
+        // completion, so a stalled tail is visible as a rescue that began and
+        // never finished.
+        if let holderRegistry, !deferredHolderAdoptions.isEmpty {
+            let remaining = deferredHolderAdoptions
+            Task { await holderRegistry.adoptRemaining(remaining) }
+        }
 
         // 9a. Install the app → daemon input sink BEFORE the sidecar listens:
         // each adopted connection captures `onInput` at adopt time (M2.1
@@ -1198,6 +1277,36 @@ public final class Daemon: Sendable {
         // a keystroke after a paste stays FIFO-behind it (the M2 paste ruling).
         await fdVendingServer.setOnPaste { [inputRouter = controlModeBridge.inputRouter] header, bytes in
             inputRouter.enqueuePaste(header: header, bytes: bytes)
+        }
+        // The app's answer to a daemon injection into a holder-backed session
+        // it has attached. Nil-safe by construction: with no courier there is
+        // no holder transport in this daemon, so no ack can arrive for it.
+        if let holderInjectionCourier {
+            await fdVendingServer.setOnInjectionAck { ack in
+                holderInjectionCourier.acknowledge(ack)
+            }
+        }
+
+        // The app's sidecar going away, arbitrated rather than acted on.
+        // **A disconnect is not a death**: the sidecar reconnects, so a socket
+        // drop can leave the app alive, holding its `dup`s and still reading
+        // them, and seizing then is the double-reader corruption this transport
+        // exists to prevent. `SidecarDisconnectArbiter` re-verifies the pid the
+        // connection was adopted under — start time and executable included,
+        // through the same `ProcessIdentityCheck` the reaper's holder leg uses
+        // before it signals anything — and only a confirmed death reverts the
+        // sessions that app was holding to daemon-read.
+        //
+        // Installed with the other sinks, before the sidecar listens, because a
+        // connection captures them at adopt time. Dispatched into a `Task`: the
+        // sink runs on the vending actor and the verdict shells out to `ps`.
+        if let holderRegistry {
+            let arbiter = SidecarDisconnectArbiter(
+                liveness: AppLivenessArbiter(signaller: ProductionProcessSignaller()),
+                reclaim: { await holderRegistry.reclaimSessionsFromADeadApp() })
+            await fdVendingServer.setOnClientDisconnect { identity in
+                Task { await arbiter.handleDisconnect(identity: identity) }
+            }
         }
 
         // 9b. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the

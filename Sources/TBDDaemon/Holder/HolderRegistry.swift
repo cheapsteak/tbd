@@ -54,6 +54,35 @@ actor HolderRegistry {
         /// minted a terminal ID that is already live — never a race to be
         /// waited out.
         case sessionAlreadyRegistered(terminalID: UUID)
+        /// A viewer owns this session's pty, so the daemon must not put a
+        /// reader on it. The fail-closed answer to every request that would
+        /// otherwise make a second reader.
+        case attachedToViewer(terminalID: UUID)
+        /// There is no reader to hand over — the session was never adopted, or
+        /// its reader has been released. An attach cannot be built out of
+        /// nothing: the pty this would vend is one only a reader holds.
+        case noLiveReader(terminalID: UUID)
+        /// The attach being acknowledged is not the one this session is
+        /// waiting on. A stale viewer's ack arriving after a successor's
+        /// attach, or an ack for one already confirmed or cancelled.
+        case attachSuperseded(terminalID: UUID, generation: UInt64)
+        /// An attach for this session is already outstanding, so a second one
+        /// is refused rather than superseding it.
+        ///
+        /// **Supersession is not available on this path, and that is the whole
+        /// reason for the case.** A superseded adoption can be undone because
+        /// everything it obtained is still inside this process; a superseded
+        /// attach cannot, because its descriptor has been handed to another
+        /// process and nothing can take it back. So the only safe posture is
+        /// not to hand out the second one.
+        case attachAlreadyPending(terminalID: UUID, generation: UInt64)
+        /// A handback names an attach this session is not held by: no viewer
+        /// claim at all, or a claim recorded for a different attach. Refused
+        /// rather than applied, for the same reason every other stale message
+        /// here is — a closing viewer's detach can arrive after a successor's
+        /// attach has taken the pty, and clearing the successor's claim would
+        /// put the daemon on a descriptor another process is reading.
+        case handbackSuperseded(terminalID: UUID, generation: UInt64)
 
         var errorDescription: String? {
             switch self {
@@ -70,6 +99,21 @@ actor HolderRegistry {
                     + "can be spawned onto the holder transport"
             case .sessionAlreadyRegistered(let terminalID):
                 return "session \(terminalID.uuidString) already has a live holder reader"
+            case .attachedToViewer(let terminalID):
+                return "a viewer owns the pty for session \(terminalID.uuidString); the daemon "
+                    + "must not read it while that is true"
+            case .noLiveReader(let terminalID):
+                return "session \(terminalID.uuidString) has no live holder reader to hand over"
+            case .attachSuperseded(let terminalID, let generation):
+                return "attach \(generation) for session \(terminalID.uuidString) is no longer "
+                    + "the one this session is waiting on"
+            case .attachAlreadyPending(let terminalID, let generation):
+                return "attach \(generation) for session \(terminalID.uuidString) has already "
+                    + "been vended and not yet acknowledged; its descriptor cannot be taken back, "
+                    + "so a second attach is refused"
+            case .handbackSuperseded(let terminalID, let generation):
+                return "attach \(generation) for session \(terminalID.uuidString) is not the one "
+                    + "holding that session's pty, so its detach hands nothing back"
             }
         }
     }
@@ -117,6 +161,37 @@ actor HolderRegistry {
     static let defaultBusyRetryBudget: Duration = .seconds(1)
     static let busyRetryInterval: Duration = .milliseconds(50)
 
+    /// How long one adoption waits for a holder to answer.
+    ///
+    /// Deliberately **not** `HolderClient.defaultReceiveTimeout`. That budget is
+    /// sized for a connection a session keeps for its whole life, where the
+    /// question is "has this holder died", and ten seconds of patience costs
+    /// nothing because nobody is waiting on the answer. An adoption is the
+    /// opposite: it is one handshake, on a local socket, on the daemon's
+    /// startup path, and every second of it is a second the daemon cannot
+    /// answer anyone. The GC collector reached the same number from the same
+    /// reasoning — a handshake is not a long operation.
+    ///
+    /// It bounds the *reachable but silent* holder specifically. A dead one
+    /// fails at `connect` with `ECONNREFUSED` and never reaches a receive.
+    static let adoptionReceiveTimeout: Duration = .seconds(2)
+
+    /// How long the whole startup adoption phase may take before it stops and
+    /// hands the rest back to its caller.
+    ///
+    /// Per-holder bounding alone is not enough: `adoptAll` is serial, so N
+    /// silent holders still cost N times the per-holder budget, and the phase
+    /// runs before the socket bind. The total budget makes the daemon's silence
+    /// independent of how many holders are wedged — worst case one budget plus
+    /// the row that was already in flight when it expired.
+    ///
+    /// Five seconds is sized against the healthy case rather than the broken
+    /// one: a reachable holder answers a local-socket handshake in
+    /// milliseconds, so a fleet of hundreds finishes far inside it and the
+    /// budget never bites. Only a holder that has stopped answering spends the
+    /// budget at all.
+    static let defaultAdoptAllBudget: Duration = .seconds(5)
+
     /// This installation's token, compared against every holder's before it is
     /// adopted.
     let owner: HolderOwnerToken
@@ -150,6 +225,48 @@ actor HolderRegistry {
     /// `nonisolated` and immutable so the gate can read it without hopping onto
     /// the actor — `spawner` is a `let`, so this is decided once, in `init`.
     nonisolated let canSpawn: Bool
+
+    /// An attach whose descriptor has been vended and whose acknowledgement has
+    /// not arrived. The reader is held rather than released because this attach
+    /// may still be cancelled, and only the reader that suspended itself can be
+    /// put back on the pty.
+    private struct PendingAttach {
+        let generation: UInt64
+        let reader: HolderReader
+    }
+
+    /// Attaches vended and not yet acknowledged, by session. At most one per
+    /// session: a second `beginAttach` supersedes the first, whose ack is then
+    /// refused by generation.
+    ///
+    /// **Invariant, jointly with `viewerAttachments`: for one session, a
+    /// pending entry and a viewer claim are never simultaneously live.** No
+    /// single line enforces it, so it is written down here rather than left to
+    /// be re-derived. `confirmAttach` clears the pending entry and then records
+    /// the claim; `cancelPendingAttach(.unacknowledged)` records the claim and
+    /// then clears the pending entry — both pairs synchronous, with no `await`
+    /// between, so neither leaves an instant in which both are set;
+    /// `beginAttach` refuses to record a pending entry over a standing claim
+    /// and re-reads the claim after its suspension.
+    ///
+    /// Unreachability arguments elsewhere in this type rest on it — notably
+    /// `confirmAttach`'s second guard, which is argued dead by enumerating the
+    /// writers of `slots`. **A new writer of `slots` or of either map has to
+    /// keep this true**, because the next reader will reach the guard long
+    /// before reaching the chain that makes it unreachable.
+    private var pendingAttaches: [UUID: PendingAttach] = [:]
+    /// Sessions whose pty a viewer owns, and the attach generation that owns
+    /// it. **The daemon reads none of these**, and `adopt` refuses them, which
+    /// is what keeps "one reader per pty" true across the app boundary rather
+    /// than only inside this process.
+    ///
+    /// Never live at the same time as this session's `pendingAttaches` entry —
+    /// the invariant is stated in full there.
+    private var viewerAttachments: [UUID: UInt64] = [:]
+    /// Mints attach generations. Monotonic for the daemon's life, so an ack or
+    /// a cancel naming an older attach can always be told from one naming the
+    /// current attach.
+    private var lastAttachGeneration: UInt64 = 0
 
     private var slots: [UUID: Slot] = [:]
     /// The last status a holder reported for a session, and the only home it
@@ -206,7 +323,17 @@ actor HolderRegistry {
     private(set) var attachRoundTripsStarted = 0
 
     private let busyRetryBudget: Duration
+    private let adoptAllBudget: Duration
     private let clock: any Clock<Duration>
+
+    /// Set by `adoptAll`'s budget timer, read by its loop between holders.
+    ///
+    /// Instance state rather than a local box because the timer has to reach it
+    /// across an actor hop, and the hop is what makes the write safe. It is
+    /// reset at the top of every pass, which is sound because `adoptAll` runs
+    /// once, at startup, from a single caller — two concurrent passes would
+    /// share one flag, and there are none.
+    private var adoptAllBudgetExpired = false
 
     /// Awaited inside `adopt` between the attach settling and the slot being
     /// published — the exact window a concurrent `release` interleaves in.
@@ -227,12 +354,32 @@ actor HolderRegistry {
     /// would pass by luck. Nil in production.
     private var releaseBarrier: (@Sendable () async -> Void)?
 
+    /// Awaited inside `beginAttach`, immediately after the drain has quiesced
+    /// and before anything is published — the window in which that call is
+    /// holding a fresh `dup` of a pty and has decided nothing about it yet.
+    ///
+    /// A seam for the same reason as the two above, and it guards the worst of
+    /// the three interleavings: a second attach, or an acknowledgement of the
+    /// first, landing while a descriptor is in flight. The real window is a
+    /// suspension inside `jiggle`, which is a deliberate 10 ms sleep — wide,
+    /// but racing it is not a test.
+    private var attachBarrier: (@Sendable () async -> Void)?
+
+    /// Awaited inside `cancelPendingAttach`, immediately before a cancelled
+    /// attach's reader is put back on its pty — the mirror of `attachBarrier`,
+    /// and the window in which that reader's drain state is mid-transition.
+    ///
+    /// A seam for the same reason as the others: reproducing this by timing
+    /// would mean racing a single `await` on an actor. Nil in production.
+    private var cancelBarrier: (@Sendable () async -> Void)?
+
     init(
         owner: HolderOwnerToken,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         listTerminals: @escaping @Sendable () async throws -> [Terminal],
         spawner: HolderSpawner? = nil,
         busyRetryBudget: Duration = HolderRegistry.defaultBusyRetryBudget,
+        adoptAllBudget: Duration = HolderRegistry.defaultAdoptAllBudget,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.owner = owner
@@ -241,6 +388,7 @@ actor HolderRegistry {
         self.spawner = spawner
         self.canSpawn = spawner != nil
         self.busyRetryBudget = busyRetryBudget
+        self.adoptAllBudget = adoptAllBudget
         self.clock = clock
     }
 
@@ -254,6 +402,18 @@ actor HolderRegistry {
     /// never calls it.
     func setReleaseBarrier(_ barrier: (@Sendable () async -> Void)?) {
         releaseBarrier = barrier
+    }
+
+    /// Installs the attach barrier described above. Test-facing; production
+    /// never calls it.
+    func setAttachBarrier(_ barrier: (@Sendable () async -> Void)?) {
+        attachBarrier = barrier
+    }
+
+    /// Installs the cancel barrier described above. Test-facing; production
+    /// never calls it.
+    func setCancelBarrier(_ barrier: (@Sendable () async -> Void)?) {
+        cancelBarrier = barrier
     }
 
     // MARK: - Reading
@@ -271,6 +431,42 @@ actor HolderRegistry {
     /// The last status a holder reported for a session, if one ever has.
     func lastKnownStatus(for terminalID: UUID) -> HolderChildStatus? {
         statuses[terminalID]
+    }
+
+    // MARK: - Sizing
+
+    /// Applies a viewer's desired size to one holder-backed session, and
+    /// decides which half of the resize is still the daemon's to make.
+    ///
+    /// **While a viewer holds the pty, the viewer owns `TIOCSWINSZ`.** It has a
+    /// writable duplicate of the master and sets the size on it as its own view
+    /// resizes — before it tells the daemon anything — so a daemon that issued
+    /// the ioctl as well would signal the child a second time for one resize,
+    /// and in the window where the two disagree would signal it to a geometry
+    /// nobody is painting at. `viewerAttachment` is the instrument for that,
+    /// deliberately: it reads true for a timed-out attach as well as a
+    /// confirmed one, and both mean the same thing here — the viewer may be
+    /// live on that descriptor.
+    ///
+    /// **The grid is not part of that trade.** The daemon's emulator is what a
+    /// re-adoption and `terminal.output` render, so it tracks the viewer either
+    /// way; a grid left at the size the viewer arrived at wraps everything the
+    /// session prints from then on at a width nobody is painting. That is the
+    /// defect the adoption path was fixed for once already, seen from the other
+    /// side.
+    ///
+    /// A session with no reader is skipped silently: there is no grid to
+    /// reshape and no descriptor to size. That is the ordinary state of a
+    /// *confirmed* attach — the daemon released its reader at the
+    /// acknowledgement — and there the viewer's own ioctl is the whole resize,
+    /// with the pty itself carrying the geometry into the next adoption.
+    func applyViewerResize(terminalID: UUID, columns: Int, rows: Int) async {
+        guard let reader = reader(for: terminalID) else { return }
+        if viewerAttachment(for: terminalID) != nil {
+            await reader.resizeGrid(columns: columns, rows: rows)
+        } else {
+            await reader.resize(columns: columns, rows: rows)
+        }
     }
 
     // MARK: - Spawning
@@ -541,6 +737,24 @@ actor HolderRegistry {
         adoptionCallsEntered += 1
 
         while true {
+            // Re-read on every pass, not once at the top: an actor's methods
+            // are not atomic across suspension, and every branch below awaits.
+            // An attach that completed while this call was parked must be seen
+            // here rather than adopted over — putting a second reader on a pty
+            // a viewer is already reading is the one failure this type exists
+            // to prevent, and it is silent.
+            guard viewerAttachments[terminalID] == nil else {
+                throw Error.attachedToViewer(terminalID: terminalID)
+            }
+            // An attach in flight has already quiesced this session's reader,
+            // so `.adopted` no longer implies "draining". Handing that reader
+            // back would answer "yes, adopted and reading" about a session
+            // nobody is reading — and, if the attach then completes, about one
+            // a viewer owns.
+            if let outstanding = pendingAttaches[terminalID] {
+                throw Error.attachAlreadyPending(
+                    terminalID: terminalID, generation: outstanding.generation)
+            }
             switch slots[terminalID] {
             case .adopted(let reader):
                 return reader
@@ -592,7 +806,9 @@ actor HolderRegistry {
     ///
     /// Reached only with the slot genuinely vacant — no reader adopted, none
     /// being adopted, and none still draining its way out of a release.
-    private func beginAdoption(of terminalID: UUID) async throws -> HolderReader {
+    private func beginAdoption(
+        of terminalID: UUID, seedingScreenWith preamble: Data = Data()
+    ) async throws -> HolderReader {
         let socketPath = try HolderRendezvous.socketPath(
             sessionID: terminalID, environment: environment)
         let expected = owner
@@ -605,8 +821,10 @@ actor HolderRegistry {
                 socketPath: socketPath,
                 expecting: expected,
                 busyRetryBudget: budget,
+                receiveTimeout: Self.adoptionReceiveTimeout,
                 clock: clock,
-                onEndOfOutput: notifyEndOfOutput)
+                onEndOfOutput: notifyEndOfOutput,
+                seedingScreenWith: preamble)
         }
         attachRoundTripsStarted += 1
         slots[terminalID] = .adopting(task)
@@ -681,12 +899,36 @@ actor HolderRegistry {
         return current == task
     }
 
-    /// Adopts every holder-backed row, once, at startup.
+    /// Adopts every holder-backed row, once, at startup, within a total budget.
     ///
     /// Failures are per-session and never propagate: one unreachable holder
     /// must not stop the daemon adopting the rest, and a startup that threw
     /// here would leave every *other* live session undrained.
-    func adoptAll() async {
+    ///
+    /// **The budget is what keeps a wedged holder from looking like a dead
+    /// daemon.** This runs before the socket bind, so its duration is the
+    /// daemon's silence; a holder that accepts a connection and then says
+    /// nothing costs `adoptionReceiveTimeout` every time, and serially that is
+    /// the whole fleet's worth of silence. The budget is checked *between*
+    /// holders — never mid-hand-over, where abandoning a call would mean
+    /// walking away from a descriptor in flight — so the phase costs at most
+    /// one budget plus the row that was already running when it expired.
+    ///
+    /// **Rows the budget did not reach are returned, not dropped**, and the
+    /// caller is obliged to finish them: nothing else in the daemon ever calls
+    /// `adopt`, so a row abandoned here would stay undrained for the process's
+    /// whole life — and an undrained pty master does not merely cost a screen,
+    /// it stops the job on it from finishing its exit. `Daemon` resumes them
+    /// immediately after the socket is bound, where the wait costs no RPC
+    /// caller — `adoptRemaining` documents what it does still cost. The result
+    /// is deliberately **not** `@discardableResult`, so the obligation is one
+    /// the compiler holds rather than one a reader has to notice.
+    ///
+    /// Nothing is recorded about a row that was not reached. A missing status
+    /// reads as `.running`, which is the honest answer for a holder nobody
+    /// asked; `exitedStatusUnknown` would be a claim about an answer that was
+    /// never sought.
+    func adoptAll() async -> [Terminal] {
         let terminals: [Terminal]
         do {
             terminals = try await listTerminals()
@@ -696,40 +938,167 @@ actor HolderRegistry {
                 could not list terminals to re-adopt holder sessions: \
                 \(error.localizedDescription, privacy: .public)
                 """)
-            return
+            return []
         }
 
-        for terminal in terminals where terminal.transport == .holder {
+        let rows = terminals.filter { $0.transport == .holder }
+        guard !rows.isEmpty else { return [] }
+
+        adoptAllBudgetExpired = false
+        let budget = adoptAllBudget
+        let budgetTimer = Task { [clock] in
             do {
-                _ = try await adopt(terminal: terminal)
-            } catch let error as Error {
-                // A holder that named another installation answered correctly;
-                // it is simply not ours. Left running, and not recorded as
-                // exited — it is somebody else's live session.
-                Self.logger.info(
-                    """
-                    skipping session \(terminal.id.uuidString, privacy: .public): \
-                    \(error.localizedDescription, privacy: .public)
-                    """)
-            } catch HolderClient.Error.rejected {
-                // Somebody else holds the holder's one client slot. That is a
-                // legitimate answer from a live holder — "not ours to adopt
-                // right now" — not a failure to retry into the ground, and
-                // certainly not evidence the job ended.
-                Self.logger.info(
-                    """
-                    the holder for session \(terminal.id.uuidString, privacy: .public) already has a \
-                    client; leaving it alone
-                    """)
+                try await clock.sleep(for: budget)
             } catch {
-                // Nothing answered at the rendezvous. The session is over, and
-                // the only honest thing to say about how it ended is that
-                // nobody collected the status.
-                statuses[terminal.id] = .exitedStatusUnknown
+                // Cancelled because the phase finished inside its budget.
+                return
+            }
+            await self.expireAdoptAllBudget()
+        }
+        defer { budgetTimer.cancel() }
+
+        var deferredRows: [Terminal] = []
+        for (index, terminal) in rows.enumerated() {
+            if adoptAllBudgetExpired {
+                deferredRows = Array(rows[index...])
+                break
+            }
+            await adoptOne(terminal)
+        }
+
+        if !deferredRows.isEmpty {
+            Self.logger.error(
+                """
+                the startup adoption budget expired with \(deferredRows.count, privacy: .public) of \
+                \(rows.count, privacy: .public) holder sessions unreached; they will be adopted \
+                once the daemon is answering
+                """)
+        }
+        return deferredRows
+    }
+
+    /// Adopts rows a budgeted pass left behind, with no budget of its own.
+    ///
+    /// Called once the socket is bound, where a slow holder delays no RPC
+    /// caller. **It is serial, so a slow row delays the rows behind it** — but
+    /// by a bounded amount, not indefinitely. A row costs `busyRetryBudget`
+    /// plus one `adoptionReceiveTimeout`: the connect that opens it is not
+    /// covered by `SO_RCVTIMEO`, yet needs no cover, because a Darwin
+    /// `connect(2)` on an `AF_UNIX` path never waits on a listener — it is
+    /// answered or refused in microseconds
+    /// (`HolderClientTests.aSaturatedRendezvousIsRefusedImmediatelyRatherThan`
+    /// `Blocking`). The receive is the only part of a round trip that waits,
+    /// and it is bounded.
+    ///
+    /// Serial anyway, because the alternative is worse: this client's I/O is
+    /// blocking, so a task per row would park a cooperative-pool thread per row
+    /// for up to that receive timeout, and a wedged fleet would starve every
+    /// RPC *handler* — `SocketRPCHandler.channelRead` hands each request into a
+    /// `Task` on the cooperative pool — leaving a daemon that accepts
+    /// connections, reads their bytes and answers none of them.
+    ///
+    /// Hence the log lines. A rescue that started and never finished is the
+    /// only evidence of a stranded tail, so both ends of the pass are recorded
+    /// at `.info`; the per-row line is `.debug` — silent until somebody streams
+    /// the subsystem — and names the row a stall stopped on.
+    func adoptRemaining(_ terminals: [Terminal]) async {
+        let rows = terminals.filter { $0.transport == .holder }
+        guard !rows.isEmpty else { return }
+        Self.logger.info(
+            """
+            finishing the startup adoption of \(rows.count, privacy: .public) holder sessions the \
+            budget did not reach
+            """)
+        for (index, terminal) in rows.enumerated() {
+            Self.logger.debug(
+                """
+                adopting deferred holder session \(terminal.id.uuidString, privacy: .public) \
+                (\(index + 1, privacy: .public) of \(rows.count, privacy: .public))
+                """)
+            await adoptOne(terminal)
+        }
+        Self.logger.info(
+            """
+            finished the deferred adoption of all \(rows.count, privacy: .public) holder sessions
+            """)
+    }
+
+    /// Marks the startup adoption budget spent. Actor-isolated so the timer's
+    /// write and the loop's read cannot race.
+    private func expireAdoptAllBudget() {
+        adoptAllBudgetExpired = true
+    }
+
+    /// One row's adoption, with every failure classified and none propagated.
+    ///
+    /// **A failure is only branded when it is evidence of absence, and that
+    /// distinction is load-bearing rather than tidy.** What is written here is
+    /// remembered as `lastKnownStatus`, and a remembered terminal status is
+    /// taken as established *without a further round trip* by two readers:
+    /// `reclaimIfSessionEnded`, which releases the reader on it, and the
+    /// reconcile arm's gate 4
+    /// (`WorktreeLifecycle.holderRowVerdict(for:)`), which deletes the row and
+    /// its tab on it — leaving a still-living holder rowless for
+    /// `RowlessHolderCollector` to SIGKILL. That deletion is itself gated on
+    /// the child's pid being unrecorded or dead, so a blanket brand would not
+    /// reach a job that is still running; what it would put on that path is a
+    /// holder that was merely *slow to answer* — a receive timeout, `EMFILE`,
+    /// a hang-up mid-frame — whose child had already exited, losing its row,
+    /// its tab, and the undrained gravestone screen. Ending a genuinely live
+    /// agent session would additionally require the childPID gate to miss —
+    /// a null `childPID`, or a liveness probe reading false — before
+    /// `RowlessHolderCollector` ever gets to describe it.
+    ///
+    /// So the classification is `exitProbeOutcome`'s, exactly as the reconcile
+    /// probe's is: only `ENOENT` and `ECONNREFUSED` at the rendezvous mean the
+    /// holder is gone. Everything else is this daemon's failure to complete a
+    /// round trip, says nothing about the child, and leaves no memory behind —
+    /// so the row is judged by a fresh probe rather than by a remembered
+    /// guess.
+    private func adoptOne(_ terminal: Terminal) async {
+        do {
+            _ = try await adopt(terminal: terminal)
+        } catch let error as Error {
+            // A holder that named another installation answered correctly;
+            // it is simply not ours. Left running, and not recorded as
+            // exited — it is somebody else's live session.
+            Self.logger.info(
+                """
+                skipping session \(terminal.id.uuidString, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+        } catch HolderClient.Error.rejected {
+            // Somebody else holds the holder's one client slot. That is a
+            // legitimate answer from a live holder — "not ours to adopt
+            // right now" — not a failure to retry into the ground, and
+            // certainly not evidence the job ended.
+            Self.logger.info(
+                """
+                the holder for session \(terminal.id.uuidString, privacy: .public) already has a \
+                client; leaving it alone
+                """)
+        } catch {
+            switch Self.exitProbeOutcome(for: error) {
+            case .established(let status):
+                // Nothing is bound at the rendezvous, so the holder is gone.
+                // The session is over, and the only honest thing to say about
+                // how it ended is that nobody collected the status.
+                statuses[terminal.id] = status
                 Self.logger.info(
                     """
                     no holder answered for session \(terminal.id.uuidString, privacy: .public), so \
                     its job ended with an unknown status: \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+            case .retry, .keep:
+                // The round trip failed; the holder may well be alive and
+                // wedged. Nothing is remembered, so the reconcile arm reaches
+                // its own probe instead of short-circuiting on this.
+                Self.logger.info(
+                    """
+                    could not complete a hand-over for session \
+                    \(terminal.id.uuidString, privacy: .public), and nothing about it says the \
+                    job ended; leaving the row unjudged: \
                     \(error.localizedDescription, privacy: .public)
                     """)
             }
@@ -766,8 +1135,10 @@ actor HolderRegistry {
         socketPath: String,
         expecting owner: HolderOwnerToken,
         busyRetryBudget: Duration,
+        receiveTimeout: Duration,
         clock: any Clock<Duration>,
-        onEndOfOutput: (@Sendable () -> Void)?
+        onEndOfOutput: (@Sendable () -> Void)?,
+        seedingScreenWith preamble: Data = Data()
     ) async throws -> Adoption {
         var waited: Duration = .zero
         while true {
@@ -776,7 +1147,9 @@ actor HolderRegistry {
                     terminalID: terminalID,
                     socketPath: socketPath,
                     expecting: owner,
-                    onEndOfOutput: onEndOfOutput)
+                    receiveTimeout: receiveTimeout,
+                    onEndOfOutput: onEndOfOutput,
+                    seedingScreenWith: preamble)
             } catch HolderClient.Error.rejected(let version) {
                 guard waited < busyRetryBudget else {
                     throw HolderClient.Error.rejected(version: version)
@@ -797,13 +1170,16 @@ actor HolderRegistry {
         terminalID: UUID,
         socketPath: String,
         expecting owner: HolderOwnerToken,
-        onEndOfOutput: (@Sendable () -> Void)?
+        receiveTimeout: Duration,
+        onEndOfOutput: (@Sendable () -> Void)?,
+        seedingScreenWith preamble: Data = Data()
     ) async throws -> Adoption {
         try await take(
             terminalID: terminalID,
-            over: HolderClient(socketPath: socketPath),
+            over: HolderClient(socketPath: socketPath, receiveTimeout: receiveTimeout),
             expecting: owner,
-            onEndOfOutput: onEndOfOutput)
+            onEndOfOutput: onEndOfOutput,
+            seedingScreenWith: preamble)
     }
 
     /// The hand-over itself, over a connection the caller supplies.
@@ -819,7 +1195,8 @@ actor HolderRegistry {
         terminalID: UUID,
         over client: HolderClient,
         expecting owner: HolderOwnerToken,
-        onEndOfOutput: (@Sendable () -> Void)? = nil
+        onEndOfOutput: (@Sendable () -> Void)? = nil,
+        seedingScreenWith preamble: Data = Data()
     ) async throws -> Adoption {
         let description: HolderChildDescription
         let ptyFD: Int32
@@ -863,6 +1240,13 @@ actor HolderRegistry {
             columns: grid.columns,
             rows: grid.rows,
             onEndOfOutput: onEndOfOutput)
+        // BEFORE the drain starts, and that ordering is the whole of the
+        // handback's fidelity: the preamble's reset prelude erases the display
+        // and the scrollback, so a live byte parsed ahead of it would be wiped
+        // — output the viewer never saw, thrown away by the screen that was
+        // meant to preserve it. Nothing is reading this descriptor yet, so
+        // there is no other feed to race.
+        await reader.ingest(preamble: preamble)
         do {
             try await reader.start()
         } catch {
@@ -873,6 +1257,523 @@ actor HolderRegistry {
             throw error
         }
         return Adoption(reader: reader, description: description)
+    }
+
+    // MARK: - Handing a session to a viewer
+
+    /// Quiesces the session's drain, serializes its screen, and hands back a
+    /// `dup` of its pty for a viewer to read.
+    ///
+    /// **The daemon stops reading here, at the vend, and not at the
+    /// acknowledgement.** From the moment the descriptor leaves this process
+    /// the app may be reading it, and two readers on one pty is silent byte
+    /// theft that nothing reports; a window in which *nobody* reads costs
+    /// queued output and delays the exit of a job that finishes inside it, and
+    /// is recoverable. The design spec's rule — "the failure direction is
+    /// always toward reading nothing until liveness says otherwise" — is this
+    /// choice, and it is why the preamble has no hole in it either: everything
+    /// up to the quiesce is in the snapshot, everything after it is still
+    /// queued on the tty for the viewer, and nothing falls between.
+    ///
+    /// What the acknowledgement decides is *ownership*, not who reads: until
+    /// `confirmAttach`, this reader is still held and can be put back on the
+    /// pty by `cancelPendingAttach` — but only for a reason that establishes
+    /// the viewer never got the descriptor.
+    ///
+    /// The returned descriptor belongs to the caller, which closes it once it
+    /// has been passed on.
+    func beginAttach(
+        terminalID: UUID, maxScrollbackLines: Int = HolderReader.scrollbackLines
+    ) async throws -> HolderAttachVend {
+        guard viewerAttachments[terminalID] == nil else {
+            throw Error.attachedToViewer(terminalID: terminalID)
+        }
+        // Refused, not superseded. Every other contested state in this type is
+        // resolved by letting the newer caller win, because everything the
+        // loser obtained is still inside this process and can be released. A
+        // vended descriptor is not: it is in another process's table and
+        // nothing here can take it back. So while one is outstanding, the only
+        // safe answer to "hand me that pty as well" is no.
+        if let outstanding = pendingAttaches[terminalID] {
+            throw Error.attachAlreadyPending(
+                terminalID: terminalID, generation: outstanding.generation)
+        }
+        guard case .adopted(let reader) = slots[terminalID] else {
+            throw Error.noLiveReader(terminalID: terminalID)
+        }
+
+        // Claimed BEFORE the first suspension, and that ordering is the guard
+        // above doing its job. An actor's methods are not atomic across
+        // `await`, so a claim recorded at the END would leave every concurrent
+        // caller looking at an empty slot and each one vending its own live
+        // `dup` — two readers on one pty, arrived at by two callers who each
+        // checked correctly.
+        lastAttachGeneration += 1
+        let generation = lastAttachGeneration
+        pendingAttaches[terminalID] = PendingAttach(generation: generation, reader: reader)
+
+        let ptyFD: Int32
+        do {
+            ptyFD = try await reader.suspendDraining()
+        } catch {
+            clearPendingAttach(terminalID: terminalID, generation: generation)
+            throw error
+        }
+        // The one suspension a test can steer. In production this is a nil
+        // check; see `attachBarrier`.
+        await attachBarrier?()
+
+        let preamble = await reader.snapshotPreamble(maxScrollbackLines: maxScrollbackLines)
+        // Re-read EVERYTHING this call decided on, after the last await and
+        // with no await before the return. Three things can have changed while
+        // it was parked, and each one makes this descriptor unfit to hand out:
+        // this attach was cancelled; a release took the slot (the reader was
+        // stopped, so this is a `dup` of a number the kernel may have
+        // reissued); or an acknowledgement landed and a viewer now owns the pty.
+        //
+        // The ownership clause is layered, not load-bearing today: while the
+        // claim above stands, an acknowledgement can only have cleared this
+        // call's own pending entry, so the middle clause catches that case
+        // first. It is kept because it is the one clause that still holds if
+        // the claim is ever relaxed — `confirmAttach` records ownership
+        // *before* it suspends in `jiggle` precisely so this can see it — and
+        // because the failure it guards against is the unrecoverable one.
+        guard viewerAttachments[terminalID] == nil,
+              pendingAttaches[terminalID]?.generation == generation,
+              case .adopted(let current) = slots[terminalID], current === reader
+        else {
+            Darwin.close(ptyFD)
+            clearPendingAttach(terminalID: terminalID, generation: generation)
+            throw Error.superseded(terminalID: terminalID)
+        }
+        Self.logger.info(
+            """
+            vended the pty for session \(terminalID.uuidString, privacy: .public) to a viewer as \
+            attach \(generation, privacy: .public); the daemon has stopped reading it and will not \
+            resume without an answer about that viewer
+            """)
+        return HolderAttachVend(
+            ptyFD: ptyFD, generation: generation, snapshotPreamble: preamble)
+    }
+
+    /// The viewer's acknowledgement: it is reading the descriptor, so this
+    /// session is now its to read and the daemon's reader is released for good.
+    ///
+    /// The jiggle goes here rather than at the vend, and that ordering is the
+    /// point of it: a program repaints on `SIGWINCH` into the tty, and the ack
+    /// is the first moment anybody is certainly there to receive the repaint.
+    /// It happens before the reader is stopped because the reader owns the
+    /// descriptor the ioctl rides on.
+    ///
+    /// Generation-checked. A stale ack — a superseded viewer's, or a duplicate
+    /// — is refused rather than allowed to release a reader a live attach is
+    /// relying on.
+    ///
+    /// **A refused ack records no claim, and that is examined rather than
+    /// assumed.** The viewer sending one has the descriptor, so a refusal that
+    /// clears the pending entry without recording a claim would leave a pty
+    /// nothing in this registry accounts for — R15's family, and the reason it
+    /// was handed to the app-death arbitration to rule on. The ruling is that
+    /// neither arm needs one:
+    ///
+    /// - The **second** guard (the slot no longer holds this attach's reader)
+    ///   is unreachable. Every writer of `slots` that can change the reader
+    ///   under a live pending entry clears `pendingAttaches` first (`release`),
+    ///   and the two that would install a different reader refuse outright
+    ///   while a pending entry exists (`adopt`, `beginAttach`).
+    /// - The **first** guard (the pending entry is already gone) is reachable
+    ///   only through a clearer that has itself settled the question:
+    ///   `cancelPendingAttach(.unacknowledged)` records the claim,
+    ///   `.descriptorNeverDelivered` is by definition an attach whose
+    ///   descriptor never left this process, and `release` is tearing the
+    ///   session down — where a claim would be the brick `release`'s own
+    ///   comment exists to prevent, refusing every later adoption of a session
+    ///   that is going away.
+    ///
+    /// So the state is bounded by who *clears*, not by what this method
+    /// records, and adding a claim here would brick sessions rather than
+    /// protect them.
+    func confirmAttach(terminalID: UUID, generation: UInt64) async throws {
+        guard let pending = pendingAttaches[terminalID], pending.generation == generation else {
+            throw Error.attachSuperseded(terminalID: terminalID, generation: generation)
+        }
+        guard case .adopted(let reader) = slots[terminalID], reader === pending.reader else {
+            clearPendingAttach(terminalID: terminalID, generation: generation)
+            throw Error.attachSuperseded(terminalID: terminalID, generation: generation)
+        }
+        clearPendingAttach(terminalID: terminalID, generation: generation)
+        // Recorded BEFORE anything that suspends — the jiggle below is a
+        // deliberate 10 ms sleep, and the stop after it is longer again. Two
+        // callers resume inside that window and both must find the session
+        // already marked as the viewer's: an `adopt` waiting on the release,
+        // and a `beginAttach` parked between its quiesce and its guard, which
+        // would otherwise hand out a second live descriptor for a pty this
+        // acknowledgement has just given away.
+        viewerAttachments[terminalID] = generation
+
+        await reader.jiggle()
+
+        let task = Task<Void, Never> { await self.stopPublished(reader) }
+        slots[terminalID] = .releasing(task)
+        await task.value
+        clearIfStillReleasing(task, for: terminalID)
+        Self.logger.info(
+            """
+            attach \(generation, privacy: .public) for session \
+            \(terminalID.uuidString, privacy: .public) was acknowledged; the daemon's reader is \
+            released and the viewer owns the pty
+            """)
+    }
+
+    /// Why an attach that was vended is being taken back.
+    ///
+    /// The two arms differ in exactly one respect, and it decides whether the
+    /// daemon may read the pty again: whether the viewer can possibly have the
+    /// descriptor. Nothing else about the failure matters.
+    enum AttachCancelReason: Sendable, Equatable {
+        /// The descriptor never reached the viewer — the vend itself failed, so
+        /// this process still holds the only copy that was ever made. Nobody
+        /// else can be reading, and the drain resumes.
+        case descriptorNeverDelivered
+        /// The viewer has the descriptor and has not acknowledged. A lost ack
+        /// and a lost app are indistinguishable on the wire, and the viewer may
+        /// already be live on its dup, so this does **not** license a resume:
+        /// the daemon stays off the pty, and hands out no further descriptor
+        /// for it, until something establishes that the viewer is gone.
+        case unacknowledged
+    }
+
+    /// Takes back an attach that was vended and never acknowledged.
+    ///
+    /// Generation-checked, and a no-op for an attach that has already been
+    /// confirmed or superseded — the ready-timeout that calls this can fire
+    /// long after either.
+    ///
+    /// **Only one reason resumes the drain**, and the enum above says why. The
+    /// other arm deliberately leaves the session unread: that is the fail-closed
+    /// direction, and it is not free, because a job that exits with unread
+    /// output cannot finish exiting. Resuming is licensed by evidence that the
+    /// viewer is gone — either its own detach (`acceptHandback`) or an
+    /// app-liveness verdict (`seizeFromDeadApp`), and by nothing weaker.
+    func cancelPendingAttach(
+        terminalID: UUID, generation: UInt64, reason: AttachCancelReason
+    ) async {
+        guard let pending = pendingAttaches[terminalID], pending.generation == generation else {
+            return
+        }
+        switch reason {
+        case .descriptorNeverDelivered:
+            guard case .adopted(let reader) = slots[terminalID], reader === pending.reader else {
+                clearPendingAttach(terminalID: terminalID, generation: generation)
+                return
+            }
+            do {
+                // The claim is HELD ACROSS THE RESUME and cleared only after it
+                // has landed — the mirror image of `beginAttach` holding it
+                // across the suspend, and the same window seen from the other
+                // end. Clearing first would open an instant in which both maps
+                // say "nobody is attaching" while this reader is mid-transition:
+                // a concurrent `beginAttach` would pass every guard, quiesce a
+                // reader that is about to be resumed, and hand out a fresh
+                // `dup` — and then the resume lands and the daemon is draining
+                // a pty the app is also on. That the descriptor from the FAILED
+                // vend never left this process is what makes resuming safe; it
+                // says nothing about the descriptor a concurrent attach makes.
+                //
+                // The invariant, stated once for all three sites: no window may
+                // exist in which the maps say nobody is attaching while a
+                // suspend or a resume is still in flight.
+                try await resumeAfterCancellation(reader)
+                clearPendingAttach(terminalID: terminalID, generation: generation)
+                Self.logger.info(
+                    """
+                    attach \(generation, privacy: .public) for session \
+                    \(terminalID.uuidString, privacy: .public) never reached a viewer, so the \
+                    daemon resumed draining its pty
+                    """)
+            } catch {
+                // The resume failed, so nothing is reading this pty — but
+                // nothing else holds a descriptor for it either (the vend never
+                // delivered one), so an attach is a legitimate recovery and the
+                // claim must not outlive the attempt.
+                clearPendingAttach(terminalID: terminalID, generation: generation)
+                Self.logger.error(
+                    """
+                    could not resume draining session \(terminalID.uuidString, privacy: .public) \
+                    after a failed vend, so its job cannot finish exiting: \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+            }
+        case .unacknowledged:
+            // The claim is KEPT, not dropped, and that is the whole of this
+            // arm. The viewer has a descriptor for this pty and may be reading
+            // it; forgetting that would leave a session which passes every
+            // guard, so the next attach hands out a second live `dup` of a pty
+            // somebody is already on — reached by a plain sequence, with no
+            // race in it at all. The map already means exactly "a viewer may
+            // hold this pty", and both `beginAttach` and `adopt` refuse on it.
+            //
+            // Refusing to read the pty while cheerfully duplicating it for
+            // somebody else would be the same evidence answered two ways.
+            // What clears it is the viewer's own detach, or the app-liveness
+            // verdict the design spec names for app death — `seizeFromDeadApp`.
+            // Recorded before the claim is dropped, so the two hand off with
+            // nothing between them — not even a synchronous instant in which
+            // both maps are empty.
+            viewerAttachments[terminalID] = generation
+            clearPendingAttach(terminalID: terminalID, generation: generation)
+            Self.logger.error(
+                """
+                attach \(generation, privacy: .public) for session \
+                \(terminalID.uuidString, privacy: .public) was never acknowledged. Its viewer has \
+                the pty and may be reading it, so the daemon stays off that descriptor and hands \
+                out no other: nothing is draining this session, and a job that exits now cannot \
+                finish exiting until that viewer detaches or is confirmed gone
+                """)
+        }
+    }
+
+    /// Puts a cancelled attach's reader back on its pty, through the one
+    /// suspension a test can steer on this path.
+    ///
+    /// Wrapped rather than inlined so the barrier travels **with** the resume.
+    /// The ordering this method's caller has to get right is "clear the claim
+    /// after the resume, never before", and a seam sitting on its own line
+    /// above the resume would still be above the clear if somebody moved it —
+    /// so the window would close in the test while staying open in production.
+    /// Inside the call, it cannot be separated from what it stands for.
+    private func resumeAfterCancellation(_ reader: HolderReader) async throws {
+        await cancelBarrier?()
+        try await reader.resumeDraining()
+    }
+
+    /// Drops a pending attach, but only while it is still the one named.
+    ///
+    /// Synchronous and generation-checked, like every other "still mine?" here:
+    /// a cancellation resuming after a suspension must not discard the claim a
+    /// later attach has since recorded, which would let a third one in beside
+    /// it.
+    private func clearPendingAttach(terminalID: UUID, generation: UInt64) {
+        guard pendingAttaches[terminalID]?.generation == generation else { return }
+        pendingAttaches[terminalID] = nil
+    }
+
+    /// Drops a viewer's claim on a pty, but only while it is still the one
+    /// named — the `clearPendingAttach` of the other map, and generation-checked
+    /// for the same reason: a clear that resumes after a suspension must not
+    /// discard a claim a later attach has since recorded.
+    private func clearViewerAttachment(terminalID: UUID, generation: UInt64) {
+        guard viewerAttachments[terminalID] == generation else { return }
+        viewerAttachments[terminalID] = nil
+    }
+
+    /// The attach generation a viewer holds this session's pty under, if one
+    /// may. Test-facing, and the honest instrument for "who owns this pty": the
+    /// absence of a reader cannot tell a vended session from a released one.
+    ///
+    /// "May" rather than "does", deliberately. It is set by an acknowledgement,
+    /// which is proof, and also by an attach that timed out, which is not — but
+    /// the two are indistinguishable from here and both mean the same thing to
+    /// every caller: the daemon neither reads this pty nor duplicates it again.
+    func viewerAttachment(for terminalID: UUID) -> UInt64? {
+        viewerAttachments[terminalID]
+    }
+
+    // MARK: - Taking a session back from a viewer
+
+    /// The viewer has stopped reading and closed its descriptor: take the
+    /// session back, with the screen it was showing.
+    ///
+    /// The mirror of `beginAttach` + `confirmAttach`, and the reason a closed
+    /// tab does not brick its session. Until this exists, `viewerAttachments`
+    /// is only ever cleared by `release`, so a viewer that goes away leaves a
+    /// claim that both `adopt` and `beginAttach` refuse on: nothing drains the
+    /// pty, no injection can be written, and reopening the tab fails too.
+    ///
+    /// **The caller must have closed its descriptor before sending this.** That
+    /// ordering is the app's to keep and cannot be checked from here — a
+    /// notify-first detach would put this drain on the fd while the viewer's
+    /// last `read()` is still outstanding, which is the double-reader
+    /// corruption in miniature.
+    ///
+    /// Two states arrive here, and they differ in what "resume" means:
+    ///
+    /// - **An acknowledged attach** released the daemon's reader for good
+    ///   (`confirmAttach`), so the slot is empty and the session is taken back
+    ///   through a fresh hand-over from its holder. The holder `dup`s on every
+    ///   `handOverPTY`, so there is always another descriptor to be had.
+    /// - **An attach that timed out unacknowledged** kept its reader, suspended
+    ///   (`AttachCancelReason.unacknowledged`) — the viewer may have been
+    ///   reading all along, and it evidently was, because it is detaching. That
+    ///   reader is put back on the pty it never let go of.
+    ///
+    /// **The claim is held across the resume and cleared only after it lands**,
+    /// the same invariant `cancelPendingAttach`'s resuming arm states: no window
+    /// may exist in which the maps say nobody is attached while a resume is
+    /// still in flight, or a concurrent `beginAttach` would pass every guard and
+    /// vend a second live descriptor for a pty this call is putting a drain
+    /// back on.
+    ///
+    /// Generation-checked, and refused rather than forced: a closing viewer's
+    /// detach can arrive after a successor's attach owns the pty.
+    func acceptHandback(
+        terminal: Terminal, generation: UInt64, preamble: Data
+    ) async throws {
+        guard terminal.transport == .holder else {
+            throw Error.notAHolderSession(terminalID: terminal.id)
+        }
+        try await takeBackFromViewer(
+            terminalID: terminal.id, generation: generation, preamble: preamble)
+    }
+
+    /// Takes a session back from a viewer, with or without the viewer's help.
+    ///
+    /// One implementation, two callers, because the two differ in exactly one
+    /// respect and share every hazard: `acceptHandback` arrives with the
+    /// viewer's screen and `seizeFromDeadApp` arrives with nothing, and
+    /// `preamble == nil` is that difference. Everything else — the generation
+    /// check, the two arms, the claim held across the resume and dropped on the
+    /// failure path, the jiggle after the resume — is identical, and a second
+    /// copy of it would be a second place for the single-reader invariant to
+    /// rot.
+    ///
+    /// With no preamble there is simply nothing to ingest: the suspended reader
+    /// still holds the screen it had before the attach, a fresh adoption seeds
+    /// from the holder's hand-over as any adoption does, and the jiggle is what
+    /// gets a repainting program to redraw the rest.
+    private func takeBackFromViewer(
+        terminalID: UUID, generation: UInt64, preamble: Data?
+    ) async throws {
+        guard viewerAttachments[terminalID] == generation else {
+            throw Error.handbackSuperseded(terminalID: terminalID, generation: generation)
+        }
+
+        let reader: HolderReader
+        do {
+            switch slots[terminalID] {
+            case .adopted(let suspended):
+                // The unacknowledged-attach arm. The reader never left the
+                // descriptor, so the screen goes in before the drain restarts
+                // and the resume is a restart of its thread.
+                if let preamble { await suspended.ingest(preamble: preamble) }
+                try await suspended.resumeDraining()
+                reader = suspended
+            case nil:
+                reader = try await beginAdoption(
+                    of: terminalID, seedingScreenWith: preamble ?? Data())
+            case .adopting, .releasing:
+                // Unreachable while the claim above stands — `adopt` and
+                // `release` are the only writers of those states and the first
+                // refuses on the claim outright, while the second clears it
+                // before it takes the slot. Refused rather than assumed away:
+                // whatever put a task in that slot owns this session now, and a
+                // resume beside it would be the second reader.
+                throw Error.superseded(terminalID: terminalID)
+            }
+        } catch {
+            // The take-back failed — a holder busy past its retry budget, an
+            // adoption that timed out, a missing rendezvous socket, a `pipe()`
+            // that would not open. The claim must not outlive the attempt, for
+            // the reason `cancelPendingAttach`'s failed-resume arm states: the
+            // app closed its descriptor before it sent this, by the contract
+            // that licenses the resume at all, so nothing else holds one and an
+            // attach is a legitimate recovery. Leaving the claim standing is
+            // the exact brick this method exists to prevent — undrained,
+            // unwritable, and refused by `beginAttach` until the session is
+            // torn down — and the app has already closed both descriptors and
+            // will never send another detach.
+            //
+            // Generation-checked like every other clear here: a `release` or a
+            // successor attach racing the failure above may already own this
+            // session, and discarding its claim would let a second reader in.
+            clearViewerAttachment(terminalID: terminalID, generation: generation)
+            throw error
+        }
+        // Cleared only now, and only while it is still this attach's to clear:
+        // a `release` racing the adoption above may already have taken the
+        // session, and re-clearing a claim a later attach has since recorded
+        // would let a third reader in beside it.
+        clearViewerAttachment(terminalID: terminalID, generation: generation)
+        // After the resume, never before: a repaint provoked while nothing is
+        // draining sits in the tty queue instead of reaching the screen it was
+        // asked for. It heals only programs that repaint, which is why the
+        // preamble carries everything else.
+        await reader.jiggle()
+        Self.logger.info(
+            """
+            attach \(generation, privacy: .public) for session \
+            \(terminalID.uuidString, privacy: .public) was taken back from its viewer; the daemon \
+            is draining the pty again and its screen carries the \
+            \(preamble?.count ?? 0, privacy: .public) bytes the viewer handed over
+            """)
+    }
+
+    // MARK: - Taking a session back from an app that died
+
+    /// Takes one session back from a viewer that is **confirmed gone**.
+    ///
+    /// The uncooperative mirror of `acceptHandback`, and the reason a crashed
+    /// app does not brick every session it had open. Where the handback is
+    /// licensed by the viewer's own detach — which proves it closed its
+    /// descriptor first — this is licensed by an app-liveness verdict reached
+    /// from the recorded pid, its start time and its executable
+    /// (`AppLivenessArbiter`). A dead process closes its descriptors as it
+    /// dies, so the same thing the detach proves is true here; nothing else in
+    /// the take-back changes.
+    ///
+    /// **Nothing in this registry establishes the death.** It is a caller's
+    /// verdict, and calling this on a live app's session is exactly the
+    /// double-reader corruption the transport exists to prevent — which is why
+    /// the arbitration is a separate, testable type rather than something this
+    /// method could be tempted to do for itself.
+    ///
+    /// Generation-checked, and that matters more here than on the handback, not
+    /// less: the arbitration is asynchronous, so a verdict about a dead app can
+    /// land after a live one has attached the same session.
+    func seizeFromDeadApp(terminalID: UUID, generation: UInt64) async throws {
+        try await takeBackFromViewer(
+            terminalID: terminalID, generation: generation, preamble: nil)
+    }
+
+    /// Reverts every session a confirmed-dead app was holding to daemon-read,
+    /// and answers with the ones it took back.
+    ///
+    /// The claims are snapshotted before the loop because each take-back
+    /// suspends, and `viewerAttachments` is written across every one of those
+    /// suspensions; iterating the live map would be iterating a collection that
+    /// mutates under it. The generation snapshotted with each session is what
+    /// makes a stale entry harmless — `takeBackFromViewer` refuses any claim
+    /// that has moved on since, so a session re-attached by a *new* app while
+    /// this loop ran is left to that app.
+    ///
+    /// A take-back that fails is logged and skipped rather than aborting the
+    /// pass: the sessions are independent, and one unreachable holder must not
+    /// strand every other session the dead app was holding. It drops its claim
+    /// on the way out regardless, so nothing stays bricked either way.
+    @discardableResult
+    func reclaimSessionsFromADeadApp() async -> [UUID] {
+        let claims = viewerAttachments
+        guard !claims.isEmpty else { return [] }
+        Self.logger.info(
+            """
+            an app that held \(claims.count, privacy: .public) session(s) is confirmed gone; \
+            taking them back
+            """)
+        var reclaimed: [UUID] = []
+        for (terminalID, generation) in claims {
+            do {
+                try await seizeFromDeadApp(terminalID: terminalID, generation: generation)
+                reclaimed.append(terminalID)
+            } catch {
+                Self.logger.error(
+                    """
+                    could not take session \(terminalID.uuidString, privacy: .public) back from a \
+                    dead app's attach \(generation, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+            }
+        }
+        return reclaimed
     }
 
     // MARK: - Reclaiming a finished session
@@ -1163,6 +2064,12 @@ actor HolderRegistry {
     /// still on the pty — is a state a concurrent `adopt` can see and wait for,
     /// rather than an absence it would read as "nobody is on this master".
     func release(terminalID: UUID) async {
+        // A viewer's claim does not outlive the session it was made against.
+        // Every caller here is tearing the session down or handing it back, and
+        // a claim left behind would refuse every later adoption of a terminal
+        // ID that no longer means anything.
+        pendingAttaches[terminalID] = nil
+        viewerAttachments[terminalID] = nil
         switch slots[terminalID] {
         case nil:
             return
@@ -1226,10 +2133,30 @@ actor HolderRegistry {
     /// Releases every reader. The holders and their jobs are untouched — that
     /// is the whole design: a session outlives the daemon that was reading it.
     func releaseAll() async {
-        for terminalID in slots.keys {
+        for terminalID in Set(slots.keys).union(viewerAttachments.keys) {
             await release(terminalID: terminalID)
         }
     }
+}
+
+// MARK: - The hand-over
+
+/// What a viewer is given when it attaches: the session's pty, the screen that
+/// was already on it, and the generation that names this attach.
+///
+/// A value type carrying a descriptor, which is the one thing in it that has to
+/// be *closed*: `ptyFD` is a fresh `dup`, and the caller owns it from the moment
+/// this is returned — through the vend, and on every failure path around it.
+struct HolderAttachVend: Sendable {
+    /// A `dup` of the session's pty master. The caller closes it once the
+    /// kernel has copied it into the viewer's descriptor table.
+    let ptyFD: Int32
+    /// Names this attach, so an acknowledgement or a cancellation arriving
+    /// late cannot act on the attach that replaced it.
+    let generation: UInt64
+    /// The escape-sequence stream that reconstructs the session's screen —
+    /// scrollback, modes, cursor — in the viewer's own terminal.
+    let snapshotPreamble: Data
 }
 
 // MARK: - Installation identity

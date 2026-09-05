@@ -157,9 +157,10 @@ bytes the other reader never sees).
   not a different convention in the same one.
 - **Protocol.** Minimal and versioned from day one. Verbs: report the child
   (pid, tty name, launch parameters, alive/exited status) and hand over a
-  master dup; report exit status; forget the child (close the master and stop
-  reporting, so a killed session cannot be resurrected — iTerm2's preemptive
-  wait). The version field is load-bearing: long-lived sessions keep running
+  master dup; write input to the master (see "Input is not arbitrated, but it
+  is serialized"); report exit status; forget the child (close the master and
+  stop reporting, so a killed session cannot be resurrected — iTerm2's
+  preemptive wait). The version field is load-bearing: long-lived sessions keep running
   old holder binaries, so the daemon must interoperate with every holder
   version that has ever shipped. This is the standing argument for keeping
   the holder near-featureless forever.
@@ -358,66 +359,74 @@ exercise it continuously.
 
 ### Input is not arbitrated, but it is serialized
 
-Reading the master is exclusive; writing is not. The daemon keeps its master
-dup for the session's whole life and injects input (`tbd terminal send`,
-queued prompts, supervision nudges) by writing to it. This retires a real bug
-class: today a daemon keystroke is addressed to a tmux pane coordinate
-resolved at send time and can hit the wrong session after pane reuse; a write
-to an fd bound to the session at spawn cannot miss.
+Reading the master is exclusive; writing is not — and a `write()` to a tty is
+not atomic, so two processes writing one pty can shear each other's bytes. The
+sharp case is bracketed paste: bytes arriving between `ESC[200~` and `ESC[201~`
+are swallowed into the pasted text, and a torn marker leaves the TUI's paste
+state desynchronized.
 
-It also introduces one, which the design must answer rather than inherit.
-Today every injection funnels through the single tmux server process, so
-tmux serializes daemon input against user keystrokes for free. Here the app
-and the daemon hold separate fds to the same master, and a `write()` to a tty
-is not atomic — so a daemon injection landing mid-keystroke can shear. The
-sharp case is bracketed paste: user bytes arriving between `ESC[200~` and
-`ESC[201~` are swallowed into the pasted text, and a torn marker leaves the
-TUI's paste state desynchronized. Rare, and recoverable by retyping, but it
-is a regression against today and it is not acceptable to leave implicit.
+Two writers exist for any session: the person at the keyboard, and the daemon
+(`tbd terminal send`, queued prompts, supervision nudges). The person writes
+directly, because routing a keystroke through a second process is the latency
+this transport exists to remove. Every daemon injection is therefore routed by
+**who is reading that session's pty right now** (`HolderInjectionCourier`):
 
-Three rules close it, in increasing order of how often they apply.
+- **Detached** — nobody else is on the pty, so the daemon writes to its own
+  dup. The ordinary case, and the only one that is not a fallback.
+- **Attached** — the daemon puts an `injection` frame on the app sidecar and
+  waits for the app's `injectionAck`. The app writes the bytes through the
+  viewer's single serialization point, so for the span of that write the app is
+  the session's only writer as well as its only reader, and the concurrency
+  does not exist.
+- **No usable answer before the ack deadline** — the daemon writes anyway.
 
-- **Every injection is one message.** The daemon completes partial writes in
-  a loop while holding that session's write lock, so a payload is never
-  interleaved with another *daemon* write. A bracketed paste is one message
-  including both markers — the framing is never split across a decision.
-- **While a viewer is attached, the daemon injects through the app**, over
-  the sidecar frames that already carry input for the control-mode path. The
-  app is then the session's only writer as well as its only reader, and the
-  concurrency simply does not exist. This is the mirror of how reads already
-  work: pull from whichever store is live rather than reaching past it.
-- **The app is not allowed to become a single point of failure for
-  injection.** If it does not acknowledge within a bounded deadline on an
-  injected clock, the daemon writes directly.
+That last rule fails **open**, and the cost is stated rather than hidden. A
+missing ack does not mean the injection was not delivered: the app may have
+written it and had the ack lost or merely delayed, which App Nap can cause by
+coalescing a backgrounded app's work far past any deadline worth waiting on. So
+the fallback can deliver an injection **twice**. That is the at-least-once
+versus at-most-once fork, taken knowingly in favour of at-least-once — a
+duplicated prompt is visible and recoverable, a silently dropped one strands an
+agent indefinitely with nothing to see. An ack arriving after its injection was
+already written directly is recorded and dropped, never used to retract or
+dedupe the write that happened; acking before writing would trade a visible
+duplicate for exactly the invisible loss this rejects.
 
-That last fallback is deliberately fail-*open*, where the read side's
-safety rail fails closed, and the asymmetry is the point: an unanswered read
-can be resolved by refusing to act on a stale screen, but an unanswered
-injection that is simply dropped leaves an agent waiting forever for a prompt
-that never arrives.
+One attached state does not fail open. Once a viewer has *acknowledged* its
+attach, the daemon has released its reader and closed its descriptor, so a
+fallback has nothing to write to and the sender is told the send did not land.
+Nothing is lost silently — the caller is told and the actuation row records a
+transport failure — but there the fallback is a report rather than a write.
+Closing it means the daemon keeping a **write-only** dup across an attach; the
+one-reader invariant is about readers, and multiple writers to a master are
+fine.
 
-Its cost is **two** failure modes, not one, and the second is the easier to
-overlook. A missing ack does not mean the injection was not delivered — the
-app may have written it and had the ack lost or merely delayed, which macOS
-App Nap can cause by coalescing a backgrounded app's work for far longer than
-any deadline worth waiting on. The policy does not rest on the exact
-magnitude — only on the ack deadline being shorter than an app can plausibly
-stall, which any usable deadline is. So the fallback can
-deliver an injection **twice**, and for a queued prompt acting twice may be
-worse than a sheared keystroke. This is the at-least-once versus at-most-once
-fork, chosen knowingly in favour of at-least-once: a duplicated prompt is
-visible and recoverable, while a silently dropped one strands an agent
-indefinitely with nothing to see. **Do not "fix" the duplicate by acking
-before writing** — that trades a visible duplicate for exactly the invisible
-loss this design rejected, and it will look like a cleanup.
+The viewer's half of the arrangement is what keeps an injection out of a
+paste's markers. Its outgoing queue is the only place that sees both the
+person's keystrokes and the daemon's injected bytes, so it holds an injection
+that arrives while a paste is open and releases it, in order, when the paste
+closes. The hold is **bounded, and its bound is strictly shorter than the
+daemon's ack deadline** — both numbers live together in `HolderInputTiming`,
+because a hold longer than the deadline would have the daemon write every held
+injection directly while the paste was still open, which is the precise harm
+the hold exists to prevent, made systematic rather than rare. A paste that
+never closes therefore ends with the injection written into it rather than held
+forever: absorbed into the person's paste is visible and recoverable, an
+injection nobody can get out is not.
 
-Rule 2 also makes a real deferral policy possible, where the daemon could
-never have one. Once the app is the sole writer it is the only process that
-sees both streams, so the serialization point is a single in-process queue —
-and that queue knows its own bracketed-paste state exactly. A daemon-originated
-frame is therefore held while a user paste is open and never lands between its
-markers, which is the strongest form of the guarantee rule 1 approximates.
-That belongs to the attach work, not here.
+An injection is one message. The caller composes everything the send means —
+envelope, body, and the carriage return that submits it — and hands it over
+whole, so a payload is never split across a routing decision, and the
+per-terminal send serializer upstream keeps two callers' messages apart.
+
+Two writers is a shape worth removing rather than arbitrating, and the design
+that removes it — every injection written by the session's own holder, from the
+loop that owns the master, with the viewer reduced to a paste lease and a
+keystroke hold — is specified in
+[`2026-09-03-single-typist-injection-design.md`](2026-09-03-single-typist-injection-design.md).
+**That is the target design, not the mechanism described above.** Until it
+lands, routing by attach state is what runs, and the ack deadline is what
+licenses a second writer.
 
 Resize follows the reader: whichever process currently reads the master owns
 `TIOCSWINSZ` — the app drives it from the view while attached, the daemon
@@ -561,8 +570,9 @@ Everything TBD does through tmux today, and its replacement:
   emulator, plus jiggle; scoped by the emulator's lifetime — after a daemon
   restart, a detached session that does not repaint on SIGWINCH (a plain
   shell, scrolled-away output) seeds blank until new output arrives.
-- **Input injection** (`tbd terminal send`, queued prompts) — daemon writes to
-  its master dup.
+- **Input injection** (`tbd terminal send`, queued prompts) — the daemon is the
+  sole injector, writing through the session's holder whether or not a viewer is
+  attached.
 - **Machine reads** (`tbd terminal read`, the interactive-login driver, the
   hibernation pending-input rail, the embedded supervision babysitter) — the
   daemon renders its own emulator when it is the reader and pulls a snapshot

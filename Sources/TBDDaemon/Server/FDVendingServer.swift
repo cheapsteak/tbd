@@ -75,6 +75,15 @@ private final class ConnectionEpochBox: @unchecked Sendable {
 actor FDVendingServer {
     private let logger = Logger(subsystem: "com.tbd.daemon", category: "fdVending")
     private var clientFD: Int32 = -1
+    /// Who was at the other end of `clientFD`, recorded at adopt time.
+    ///
+    /// Recorded rather than looked up on demand for the reason
+    /// `ProcessIdentity.ofPeer` gives: `LOCAL_PEERPID` is a property of the
+    /// **socket**, so once the connection is gone the pid is unrecoverable —
+    /// and the pid alone would not be enough anyway. The start time and command
+    /// line beside it are what let a later liveness check tell this process
+    /// from a stranger that inherited its pid.
+    private var clientIdentity: ProcessIdentity?
     /// Per-connection epoch (see `ConnectionEpochBox`): advanced by every
     /// `adoptConnection`, so a superseded receive thread detects — before each
     /// frame delivery — that a newer connection owns the sinks, and drops out.
@@ -90,6 +99,10 @@ actor FDVendingServer {
     /// is a 450 ms window — the pre-seam behaviour, unchanged.
     private let retryAttempts: Int
     private let retryInterval: Duration
+    /// Reads the identity of the process at the other end of an adopted socket.
+    /// An injection seam: tests adopt `socketpair` ends, whose peer is the test
+    /// process itself.
+    private let peerIdentity: @Sendable (Int32) -> ProcessIdentity?
     /// Delay seam (`docs/specs/2026-07-24-test-hardening-design.md` §5).
     /// Existential, not generic: this is an `actor` carrying `Sendable`
     /// conformances, and a generic parameter would infect its type.
@@ -97,9 +110,13 @@ actor FDVendingServer {
 
     init(retryAttempts: Int = 10,
          retryInterval: Duration = .milliseconds(50),
+         peerIdentity: @escaping @Sendable (Int32) -> ProcessIdentity? = {
+             ProcessIdentity.ofPeer(onSocket: $0, signaller: ProductionProcessSignaller())
+         },
          clock: any Clock<Duration> = ContinuousClock()) {
         self.retryAttempts = retryAttempts
         self.retryInterval = retryInterval
+        self.peerIdentity = peerIdentity
         self.clock = clock
     }
 
@@ -114,6 +131,30 @@ actor FDVendingServer {
     /// nil, paste frames are logged and dropped. Delivered from the SAME receive
     /// thread as `onInput`, so wire order is preserved into the sinks.
     var onPaste: (@Sendable (SidecarInputHeader, Data) -> Void)?
+
+    /// Sink for app → daemon `.injectionAck` frames: the app's answer to one
+    /// daemon injection for a holder-backed session whose pty it owns. Same
+    /// contract as `onInput` — set once by the daemon wiring BEFORE
+    /// `listen`/`adoptConnection`, captured per connection at adopt time. When
+    /// nil, acks are logged and dropped, which is survivable rather than fatal:
+    /// an unanswered injection reaches the courier's deadline and is written
+    /// directly (see `HolderInjectionCourier`).
+    var onInjectionAck: (@Sendable (SidecarInjectionAck) -> Void)?
+
+    /// Sink for "the app's connection went away", carrying the identity
+    /// recorded for it at adopt time (nil when the peer could not be
+    /// identified).
+    ///
+    /// **A disconnect is not a death**, and this sink must not be read as one:
+    /// the app reconnects, so the drop is only the prompt to ask whether that
+    /// process is still there. `SidecarDisconnectArbiter` is what answers, and
+    /// only its verdict licenses taking any pty back.
+    ///
+    /// Fired only for the connection that was still current when its receive
+    /// loop exited. A **superseded** connection's exit is the ordinary shape of
+    /// a reconnect — `adoptConnection` shut it down itself — and arbitrating on
+    /// it would ask whether an app that has just connected again is alive.
+    var onClientDisconnect: (@Sendable (ProcessIdentity?) -> Void)?
 
     /// Test seam: invoked from `receiveLoopExited` (on the actor) AFTER `clientFD`
     /// is cleared and the fd closed, so once it fires the stale fd is fully gone —
@@ -132,6 +173,19 @@ actor FDVendingServer {
         onPaste = handler
     }
 
+    /// Install the injection-ack sink. Must be called BEFORE
+    /// `listen`/`adoptConnection` — each connection captures the current sink
+    /// at adopt time.
+    func setOnInjectionAck(_ handler: (@Sendable (SidecarInjectionAck) -> Void)?) {
+        onInjectionAck = handler
+    }
+
+    /// Install the disconnect sink (see `onClientDisconnect`). Like the other
+    /// sinks, install it before `listen`/`adoptConnection`.
+    func setOnClientDisconnect(_ handler: (@Sendable (ProcessIdentity?) -> Void)?) {
+        onClientDisconnect = handler
+    }
+
     /// Install the receive-loop-exit test hook (see `onReceiveLoopExit`).
     func setOnReceiveLoopExit(_ handler: (@Sendable () -> Void)?) {
         onReceiveLoopExit = handler
@@ -146,6 +200,13 @@ actor FDVendingServer {
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         if fd < 0 { throw FDVendingServerError.bindFailed(errno) }
+        // Close-on-exec, here and on every connection accepted below. This is
+        // the channel session ptys are vended over and it lives as long as the
+        // daemon does, while nearly every child the daemon spawns goes out
+        // through `Foundation.Process`, which closes nothing that lacks the
+        // flag. Nothing downstream of an `exec` has any business holding the
+        // sidecar.
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -185,6 +246,9 @@ actor FDVendingServer {
                 var len = socklen_t(MemoryLayout<sockaddr>.size)
                 let accepted = accept(listener, &peer, &len)
                 guard accepted >= 0 else { return }   // listener closed (stop) or fatal
+                // Darwin has no `accept4`, so the flag is set the moment the
+                // descriptor exists — see the note on the listener above.
+                _ = fcntl(accepted, F_SETFD, FD_CLOEXEC)
                 Task { [weak self] in await self?.adoptConnection(fd: accepted) }
             }
         }
@@ -202,6 +266,9 @@ actor FDVendingServer {
             clientFD = -1
         }
         clientFD = fd
+        // Read here, while the socket exists: `LOCAL_PEERPID` is a property of
+        // the connection, so after it closes there is nothing left to ask.
+        clientIdentity = peerIdentity(fd)
         // The old reader will later call `receiveLoopExited(oldFD)`; its
         // `clientFD == fd` guard ensures that stale signal does NOT clear this
         // freshly-adopted `clientFD` (different fd number). Advancing the epoch
@@ -209,7 +276,9 @@ actor FDVendingServer {
         // even if it is past its read() with frames still buffered, its next
         // per-frame epoch check fails and it drops out (R5-M2).
         let epoch = epochBox.advance()
-        startReceiveThread(fd: fd, epoch: epoch, inputSink: onInput, pasteSink: onPaste)
+        startReceiveThread(
+            fd: fd, epoch: epoch, inputSink: onInput, pasteSink: onPaste,
+            injectionAckSink: onInjectionAck)
         logger.info("FD vending client connected (fd \(fd, privacy: .public))")
     }
 
@@ -218,18 +287,34 @@ actor FDVendingServer {
     /// closing here is safe. Clearing `clientFD` first is what stops a later
     /// `send()` from writing a vend frame into a recycled fd number.
     func receiveLoopExited(fd: Int32) {
-        if clientFD == fd { clientFD = -1 }   // guard: a newer adopt may own a different fd now
+        // A newer adopt may own a different fd now, in which case this thread
+        // belongs to a superseded connection: its exit is a reconnect's
+        // ordinary teardown, not the app going away, and the identity in
+        // `clientIdentity` belongs to the connection that replaced it.
+        let wasCurrent = clientFD == fd
+        var departed: ProcessIdentity?
+        if wasCurrent {
+            clientFD = -1
+            departed = clientIdentity
+            clientIdentity = nil
+        }
         Darwin.close(fd)
+        if wasCurrent { onClientDisconnect?(departed) }
         onReceiveLoopExit?()
     }
 
     /// Close the current client connection (if any) without stopping the
     /// listener. Signals the reader, which performs the actual `close()`.
+    /// Deliberately does **not** fire `onClientDisconnect`: this is the daemon
+    /// dropping the app, not the app going away, and its only caller is `stop`.
+    /// Clearing `clientFD` here also means the woken reader sees itself as
+    /// superseded and stays quiet too.
     func disconnect() {
         if clientFD >= 0 {
             shutdown(clientFD, SHUT_RDWR)
             clientFD = -1
         }
+        clientIdentity = nil
     }
 
     /// Stop the listener and drop any active client. Idempotent. Closing the
@@ -273,6 +358,20 @@ actor FDVendingServer {
         throw FDVendingServerError.notConnected
     }
 
+    /// Send one already-encoded frame to the connected app client, with no
+    /// descriptor attached and no retry.
+    ///
+    /// No retry, unlike `send(fd:header:)`, and the difference is deliberate:
+    /// that one papers over a connect-vs-accept race at app startup, while this
+    /// one is only ever called for a session a viewer is already attached to —
+    /// which means the app connected long ago. A throw here says the sidecar is
+    /// gone, and the caller (`HolderInjectionCourier`) answers it by writing
+    /// the bytes itself rather than by waiting.
+    func sendFrame(_ frame: Data) throws {
+        guard clientFD >= 0 else { throw FDVendingServerError.notConnected }
+        try FDChannel.sendData(frame, over: clientFD)
+    }
+
     /// Spawn the receive thread for one connection. The thread reads framed
     /// bytes, decodes `.input` frames to `inputSink` and `.paste` frames to
     /// `pasteSink`, and on exit (EOF, read error, scanner desync, or a stale
@@ -286,7 +385,8 @@ actor FDVendingServer {
         fd: Int32,
         epoch: UInt64,
         inputSink: (@Sendable (SidecarInputHeader, Data) -> Void)?,
-        pasteSink: (@Sendable (SidecarInputHeader, Data) -> Void)?
+        pasteSink: (@Sendable (SidecarInputHeader, Data) -> Void)?,
+        injectionAckSink: (@Sendable (SidecarInjectionAck) -> Void)?
     ) {
         let logger = self.logger
         let epochBox = self.epochBox
@@ -334,10 +434,21 @@ actor FDVendingServer {
                         } else {
                             logger.debug("sidecar: paste frame with no onPaste handler, dropping \(bytes.count, privacy: .public) bytes")
                         }
-                    case .fdVend:
-                        // The app must never send fd vends — that direction is
-                        // daemon → app only.
-                        logger.error("sidecar: received fdVend frame from app (protocol violation), dropping")
+                    case .injectionAck:
+                        guard let ack = try? SidecarFrameCodec.decodeInjectionAck(
+                            payload: frame.payload) else {
+                            logger.error("sidecar: undecodable injection ack, dropping")
+                            continue
+                        }
+                        if let injectionAckSink {
+                            injectionAckSink(ack)
+                        } else {
+                            logger.debug("sidecar: injection ack with no handler, dropping")
+                        }
+                    case .fdVend, .injection:
+                        // The app must never send fd vends or injections —
+                        // both directions are daemon → app only.
+                        logger.error("sidecar: received \(frame.type, privacy: .public) frame from app (protocol violation), dropping")
                     }
                 }
                 if scanner.isDesynced {

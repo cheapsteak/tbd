@@ -457,7 +457,7 @@ struct HolderTmuxAssumptionGateTests {
         // at the derived rendezvous, so the startup sweep records the session as
         // having ended with an unknown status — and that recorded status is what
         // separates "the row went away" from "the holder was disposed of".
-        await registry.adoptAll()
+        _ = await registry.adoptAll()
         let armed = await registry.lastKnownStatus(for: terminal.id)
         #expect(armed == .exitedStatusUnknown, "the fixture never armed the observable")
 
@@ -555,7 +555,7 @@ struct HolderTmuxAssumptionGateTests {
         let registry = holderRegistry(listing: [busy])
         // Nothing answers at the derived rendezvous, so the startup sweep
         // records the session as ended with an unknown status.
-        await registry.adoptAll()
+        _ = await registry.adoptAll()
         let ended = await registry.lastKnownStatus(for: terminal.id)
         #expect(ended == .exitedStatusUnknown, "the fixture never armed the unknown status")
 
@@ -598,7 +598,7 @@ struct HolderTmuxAssumptionGateTests {
         let busy = try #require(try await db.terminals.get(id: terminal.id))
 
         let registry = holderRegistry(listing: [busy])
-        await registry.adoptAll()
+        _ = await registry.adoptAll()
         #expect(await registry.lastKnownStatus(for: terminal.id) == .exitedStatusUnknown,
                 "the fixture never armed the unknown status")
 
@@ -808,14 +808,37 @@ struct HolderTmuxAssumptionGateTests {
     /// said it under the `terminalSessionGone` code the app reads as a window
     /// worth recovering.
     ///
-    /// These gates therefore change no outcome. They replace a safe lie with an
-    /// accurate refusal, so the message, the error code and the actuation record
-    /// name the transport rather than blaming a coordinate that was never stale.
-    /// Both refuse rather than serve: Milestone A wires no input path for the
-    /// holder transport — `HolderReader.write` has no caller outside the
-    /// registry — and gives a holder session no tmux session to attach to.
-    @Test("terminal.send refuses a holder row by name and types nothing")
-    func sendRefusesHolderRow() async throws {
+    /// `attachCommand` therefore changes no outcome: it replaces a safe lie
+    /// with an accurate refusal, so the message, the error code and the
+    /// actuation record name the transport rather than blaming a coordinate
+    /// that was never stale. A holder session has no tmux session to attach to.
+    ///
+    /// `terminal.send` no longer refuses at all. It delivers, by writing the
+    /// session's pty rather than a pane — the tests below are what the old
+    /// refusal test became — and it keeps a refusal only for the two shapes
+    /// this transport genuinely cannot serve, each naming its own missing
+    /// capability instead of the transport.
+
+    /// Records the bytes a holder send reached the pty with, standing in for
+    /// the daemon's own descriptor. `viewerAttachment` answers nil, so these
+    /// tests exercise the detached route: nobody is attached to a session
+    /// seeded straight into the database.
+    private final class HolderWrites: @unchecked Sendable {
+        private let lock = NSLock()
+        private var written: [Data] = []
+        var all: [Data] { lock.withLock { written } }
+        func courier() -> HolderInjectionCourier {
+            HolderInjectionCourier(
+                sendFrame: { _ in Issue.record("a detached session must not reach the app") },
+                viewerAttachment: { _ in nil },
+                writeDirectly: { [self] _, bytes in
+                    lock.withLock { written.append(bytes) }
+                })
+        }
+    }
+
+    @Test("terminal.send types into a holder row without touching tmux")
+    func sendDeliversToHolderRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -824,20 +847,103 @@ struct HolderTmuxAssumptionGateTests {
         let terminal = try await seedClaudeTerminal(
             db, worktreeID: wt.id, transport: .holder)
         let before = RowFingerprint(terminal)
+        let writes = HolderWrites()
 
+        let rpc = router(db, tmux: tmux)
+        rpc.holderInjectionCourier = writes.courier()
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        // Asserted on the COMPOSED output, not on a spot check: one message
+        // carrying the dispatch envelope, the caller's text verbatim, and the
+        // carriage return that submits it — in that order and with nothing
+        // else in it.
+        let message = try #require(writes.all.first)
+        let text = try #require(String(data: message, encoding: .utf8))
+        #expect(writes.all.count == 1, "the whole send must be one write, not two")
+        #expect(text.hasPrefix("<tbd-dispatch id="))
+        #expect(text.hasSuffix("/>\nhello\r"))
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+        // The strongest half: delivery sits ahead of the whole tmux mechanic,
+        // so nothing about the send is addressed to a pane that never existed.
+        #expect(recorded.snapshot().isEmpty,
+                "terminal.send reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    @Test("terminal.send --verify refuses a holder row by naming verification")
+    func sendVerifyRefusesHolderRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: tmux)
+        rpc.holderInjectionCourier = writes.courier()
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true, verify: true)))
+
+        #expect(!response.success)
+        #expect(response.error == RPCRouter.holderVerifyRefusal(terminalID: terminal.id))
+        // What is missing is the OBSERVATION, not the transport — a caller told
+        // "this transport cannot be typed into" would stop trying.
+        #expect(response.error?.contains("delivery observation") == true)
+        #expect(writes.all.isEmpty, "a refused verify must type nothing")
+        #expect(recorded.snapshot().isEmpty)
+    }
+
+    @Test("terminal.send --keys refuses a holder row by naming the missing key mapping")
+    func sendKeysRefusesHolderRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: tmux)
+        rpc.holderInjectionCourier = writes.courier()
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(terminalID: terminal.id, keys: "Escape Enter")))
+
+        #expect(!response.success)
+        #expect(response.error == RPCRouter.holderKeysRefusal(terminalID: terminal.id))
+        #expect(writes.all.isEmpty, "a refused key send must type nothing")
+        #expect(recorded.snapshot().isEmpty)
+    }
+
+    @Test("terminal.send tells a caller when this daemon has no holder input path")
+    func sendWithoutCourierSaysSo() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+
+        // No courier wired — mock mode, and every test that never exercises the
+        // transport. The send must name that rather than appear to succeed.
         let response = await router(db, tmux: tmux).handle(try RPCRequest(
             method: RPCMethod.terminalSend,
             params: TerminalSendParams(
                 terminalID: terminal.id, text: "hello", submit: true)))
 
         #expect(!response.success)
-        #expect(response.error == RPCRouter.holderSendRefusal(terminalID: terminal.id))
-        let after = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(RowFingerprint(after) == before)
-        // The strongest half: the refusal sits ahead of the whole tmux
-        // mechanic, not merely ahead of the paste.
-        #expect(recorded.snapshot().isEmpty,
-                "terminal.send reached tmux for a holder row: \(recorded.snapshot())")
+        #expect(response.error == RPCRouter.holderInputUnavailable(terminalID: terminal.id))
+        #expect(recorded.snapshot().isEmpty)
     }
 
     @Test("terminal.send still types into an identical tmux row")
@@ -928,7 +1034,7 @@ struct HolderTmuxAssumptionGateTests {
         listing terminals: [Terminal], for terminalID: UUID
     ) async throws -> HolderRegistry {
         let registry = holderRegistry(listing: terminals)
-        await registry.adoptAll()
+        _ = await registry.adoptAll()
         let armed = await registry.lastKnownStatus(for: terminalID)
         #expect(armed == .exitedStatusUnknown, "the fixture never armed the observable")
         return registry

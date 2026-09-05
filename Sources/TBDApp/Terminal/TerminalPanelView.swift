@@ -1,7 +1,9 @@
 import SwiftUI
 import SwiftTerm
 import AppKit
+import Darwin
 import TBDShared
+import TBDTerminalSerialization
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "TerminalPanel")
@@ -446,6 +448,99 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// `terminalView` weak var. Written before `startProcess`, cleared by
         /// `cleanup()` before the `LocalProcess` is released.
         private let viewHolder = TerminalViewHolder()
+        /// Drains the vended pty for a holder-backed panel. Held here rather
+        /// than in the app-scoped `ControlModeReaderRegistry` because a holder
+        /// reader has nothing to outlive the view for: it feeds THIS view, and
+        /// there is no EOF to end it, so `cleanup()` stopping it is the only
+        /// thing that ever releases the descriptor.
+        private var holderReader: HolderStreamReader?
+        /// A write-only `dup` of this holder session's pty master, and the
+        /// app's write destination for one (`performOutgoingWrite`'s
+        /// `.localPTY` arm). Without it a holder-backed panel has nowhere to
+        /// put a byte: it has no `LocalProcess` and no control-mode attach, so
+        /// every keystroke and every daemon injection would report unwritten
+        /// and the daemon's fallback would become the only delivery path —
+        /// which is the opposite of the property this transport is for, that
+        /// the app is the attached session's ONLY writer.
+        ///
+        /// A separate descriptor rather than the reader's own, because the
+        /// reader closes its descriptor **on its own thread** on the way out
+        /// (`HolderStreamReader.stop`); writing to that number from the main
+        /// actor would be a use-after-close the moment the kernel reissues it.
+        /// This one is closed here, and `-1` from then on.
+        ///
+        /// Writing while the reader reads the same pty is not a second reader
+        /// and does not touch the one-reader invariant: a pty master's read and
+        /// write halves are independent queues, and multiple writers to one
+        /// master are ordinary.
+        private var holderWriteFD: Int32 = -1
+
+        /// Whether the last write to `holderWriteFD` failed outright, so
+        /// `writeToHolderPTY`'s `.failed` diagnostic can be edge-triggered.
+        ///
+        /// The same shape, and for the same reason, as
+        /// `OutgoingInputQueue`'s `lastUserWriteReachedTransport` (R20): after
+        /// the session's child exits, every write returns `EIO` and nothing
+        /// lowers `holderWriteFD`, so an unconditional line is one `.error`
+        /// per keystroke. Starts `false` rather than optimistic-true because
+        /// the first failure on a fresh panel is genuinely news.
+        private var holderWriteIsFailing = false
+
+        /// Test-only: how many times `writeToHolderPTY` has *logged* a
+        /// `.failed` write.
+        ///
+        /// The count, not the bit, for the reason R20 established for
+        /// `userWriteOutcomeTransitionsForTesting`: an unconditional log
+        /// leaves `holderWriteIsFailing` looking identical while this climbs
+        /// once per keystroke, so the bit cannot discriminate the mutation
+        /// that matters. It is incremented inside the same guarded
+        /// straight-line region as the log, with no early return between them
+        /// — that co-location is what makes "logs" and "counts" the same
+        /// number, and moving either out of it silently stops this
+        /// discriminating.
+        private(set) var holderWriteFailureLogsForTesting = 0
+        /// This panel's claim on its session's daemon injections, held for as
+        /// long as it owns the pty.
+        private var injectionRegistration: TerminalInjectionRouter.Registration?
+        /// The live holder attach this panel owns, and everything its detach
+        /// needs to name itself: a holder row has no pane, so the session is
+        /// named by `panelID` and the attach by the generation the daemon
+        /// minted. Nil until `attach.ready` has been accepted, because before
+        /// that the daemon has not handed the pty over and there is nothing to
+        /// hand back.
+        private var holderAttach: (worktreeID: UUID, generation: UInt64)?
+        /// While non-nil, terminal replies are collected here instead of being
+        /// routed to the session.
+        ///
+        /// Raised only around the handback's `DECRQM` probe, which is the one
+        /// place this app has to *read* what its terminal says rather than
+        /// forward it. It is checked before the ingest guard below because the
+        /// two mean opposite things: the ingest guard drops replies, and this
+        /// one is here to keep them.
+        private var modeReplyCollector: [UInt8]?
+        /// Whether a handback task owns `viewHolder` and will clear it itself.
+        ///
+        /// Raised by `detachHolderSession` for the span between the reader's
+        /// stop and its descriptor's close, so `cleanup()`'s own clear does not
+        /// silence the sink during exactly the window whose bytes the handback
+        /// preamble has to carry.
+        private var holderHandbackInFlight = false
+        /// Seam for the holder attach RPCs. Nil means "build the real client
+        /// from the daemon client", which is what production always does; a
+        /// test injects a stub so the panel path can be driven without a
+        /// daemon.
+        var holderAttachClient: (any HolderAttaching)?
+        /// Called on the main actor immediately before the holder reader is
+        /// started, so the attach's one ordering invariant — the reader is
+        /// wired only after the snapshot ingest window has closed — can be
+        /// observed. Unset in production.
+        ///
+        /// A seam rather than something a test could see from outside, because
+        /// this window is closed by a block on the main queue: every probe
+        /// reachable through the attach RPCs sits behind an actor hop that has
+        /// already run that block, so it reads `false` whether the ordering is
+        /// right or wrong. Without this the invariant has no failing test.
+        var onHolderReaderWillStart: (@MainActor () -> Void)?
         private var groupedViewerProcessRunning = false
         private var groupedViewerProcessGeneration: UInt64 = 0
         private var groupedViewerConfirmationStarted = false
@@ -492,6 +587,84 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// from `dismantleNSView` and every reader is a `@MainActor` method,
         /// so plain-var access is race-free.
         private var isTornDown = false
+
+        /// How the bell rings. Injectable because `NSSound.beep()` is
+        /// unobservable from a test — it is a pure Swift shim in the AppKit
+        /// overlay, with no `+[NSSound beep]` in the Objective-C runtime and no
+        /// `NSBeep()` interposition available in-process — so without this seam
+        /// the ingest guard in `bell(source:)` has no way to fail a test, which
+        /// is the same as having no evidence at all.
+        var ringBell: () -> Void = { NSSound.beep() }
+
+        /// Depth of the snapshot-preamble feeds currently in flight; > 0 while
+        /// `isIngestingSnapshot` is raised. A counter rather than a Bool so two
+        /// overlapping feeds cannot have the first one's restore lower the flag
+        /// out from under the second. MainActor-confined like `isTornDown`.
+        private var snapshotIngestDepth = 0
+
+        /// True only while a snapshot preamble is being fed.
+        ///
+        /// A preamble is replayed history, not live output. Its bytes still
+        /// *look* live to the emulator, so every query in it produces a reply
+        /// and every BEL rings — and the reply path here does not merely echo,
+        /// it types into the child's stdin. Feeding a snapshot without this
+        /// raised is how a cursor-report ends up as input to somebody's agent.
+        var isIngestingSnapshot: Bool { snapshotIngestDepth > 0 }
+
+        /// Feeds a snapshot preamble into `terminalView` with every side effect
+        /// its bytes imply suppressed: the delegate callbacks TBD owns return
+        /// early while `isIngestingSnapshot` is up, and the OSC 777 observer —
+        /// which is not a delegate callback and so is not covered by the flag —
+        /// is suspended for the duration.
+        ///
+        /// The flag is lowered a main-queue turn later, not on return, and that
+        /// is load-bearing. SwiftTerm hops every delegate callback through
+        /// `TerminalView.onMain`, an **unconditional** `DispatchQueue.main.async`
+        /// even when the parse already runs on main, so the replies this feed
+        /// provokes are queued behind us rather than delivered yet; lowering on
+        /// return would leave every one of them unguarded. The parse itself is
+        /// synchronous, so everything it enqueued is already on the main queue
+        /// by the time this block is appended, and a serial FIFO queue runs all
+        /// of it first.
+        ///
+        /// **Precondition: feed the preamble BEFORE live output is wired to
+        /// this view.** The mute is a property of the window, not of the bytes:
+        /// nothing here can tell a preamble-provoked callback from a live one,
+        /// so *everything* delivered while the flag is up is dropped regardless
+        /// of origin — including a batch already parsing on the IO thread when
+        /// the flag went up. `dataReceived` feeds synchronously off main, and
+        /// SwiftTerm's terminal lock serialises the two parses but not the
+        /// order their `onMain` blocks land in, so a live batch's callbacks can
+        /// be queued ahead of the restore and swallowed with the rest.
+        ///
+        /// What that costs if a caller ignores it: a live DA1, DSR or DECRQM
+        /// the agent is waiting on is answered by nobody, and the agent waits
+        /// forever for a reply that was silently dropped. A live OSC 777 in the
+        /// same window is worse than deferred — the observation is nil for the
+        /// whole ingest, so the notification is lost outright. Live keystrokes
+        /// land in the same hole.
+        ///
+        /// The window is **not** negligible: it is the preamble parse plus one
+        /// main-queue turn, and it is largest exactly when the preamble is a
+        /// full scrollback replay, which is the normal case. Order the attach
+        /// so the preamble goes in first and the live feed is connected after.
+        @MainActor
+        func feedSnapshot(_ data: Data, into terminalView: TerminalView) {
+            snapshotIngestDepth += 1
+            let observation = (terminalView as? TBDTerminalView)?.suspendOscObservation()
+            terminalView.feed(byteArray: [UInt8](data)[...])
+            // NOT a `defer`, however much more obviously correct that reads:
+            // the parse returns before SwiftTerm has delivered a single one of
+            // the callbacks it queued, so a synchronous restore lowers the flag
+            // while every reply is still in flight. Measured against the
+            // `defer` shape, 5 of the 7 tests in `QuietIngestTests` go red —
+            // including the replies escaping into the child's stdin, which is
+            // the hazard this whole method exists to prevent.
+            DispatchQueue.main.async { [weak self] in
+                observation?.resume()
+                self?.snapshotIngestDepth -= 1
+            }
+        }
 
         @MainActor
         func syncTabCloseContext(_ context: TabCloseContext?, for terminalID: UUID) {
@@ -559,6 +732,393 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             )
             feedPreparationMessage(notice, into: terminalView)
             return true
+        }
+
+        /// The holder arm of the transport branch both attach entry points
+        /// share. Returns `true` when it took over — the caller must then
+        /// prepare and attach nothing.
+        ///
+        /// The tmux and control-mode paths are the other two arms; each keeps
+        /// its own body. Only the "is this even a tmux session" question is
+        /// common, and it is answered here.
+        @MainActor
+        private func handleHolderTransport(into terminalView: TerminalView) async -> Bool {
+            guard panelTransport() == .holder else { return false }
+            await startHolderClient(terminalView: terminalView)
+            return true
+        }
+
+        /// Render a holder-backed session: take a `dup` of its pty and the
+        /// screen that was already on it, paint the screen, then start reading.
+        ///
+        /// The order below is the whole point of the function, and two steps of
+        /// it are not interchangeable with anything:
+        ///
+        /// - **The preamble is fed before live output is wired.** That is a
+        ///   documented precondition on `feedSnapshot`, whose mute is a
+        ///   property of the window rather than of the bytes: while the ingest
+        ///   flag is up, every delegate callback is dropped *regardless of
+        ///   origin*. A live DA1/DSR the agent is waiting on, answered by
+        ///   nobody, is an agent that waits forever. The window is the preamble
+        ///   parse plus one main-queue turn, so this function does not merely
+        ///   feed first — it waits out that turn before starting the reader.
+        /// - **The reader is wired before the ack.** `attach.ready` is what
+        ///   releases the daemon's own drain and jiggles the tty, so acking
+        ///   before a reader exists leaves the session with nobody on it and a
+        ///   repaint landing in a pty buffer.
+        ///
+        /// A failure anywhere falls back to the placard, unlike the
+        /// control-mode path's fallback to grouped sessions: there is no second
+        /// way to render a holder-backed session, so an attach that could not
+        /// happen has to say so.
+        @MainActor
+        func startHolderClient(terminalView: TerminalView) async {
+            guard !isTornDown else { return }
+            guard let appState, let worktreeID = worktreeIDForDiagnostics() else {
+                _ = handleUnsupportedTransport(into: terminalView)
+                return
+            }
+            // Empty by construction on a holder row, and passed anyway: it is
+            // half of the sidecar's routing key, and the daemon echoes it in
+            // the vend header. `terminalID` is what actually names the session.
+            let paneID = ""
+            let client = holderAttachClient ?? HolderAttachClient(daemonClient: appState.daemonClient)
+            let attachment: HolderAttachment
+            do {
+                attachment = try await client.attach(
+                    worktreeID: worktreeID, paneID: paneID, terminalID: panelID)
+            } catch {
+                logger.warning("""
+                    holder attach failed for terminal \(self.panelID, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                _ = handleUnsupportedTransport(into: terminalView)
+                return
+            }
+            // **Close-on-exec, before anything else touches it.** A descriptor
+            // that arrives over `SCM_RIGHTS` is inheritable unless somebody
+            // says otherwise, and this app spawns children — every local-PTY
+            // panel is a `forkpty`, and the tools it shells out to are more.
+            // A child that inherits a session's pty master holds that session
+            // open for as long as it lives: the daemon's reader sees no EOF
+            // after the handback, the pty is never reclaimed, and the panel
+            // that closed its tab is no longer the last writer. Nothing in
+            // this process wants a session pty across an `exec`, so neither
+            // copy is left inheritable — this one, and the write duplicate
+            // below, which is taken with `F_DUPFD_CLOEXEC` because `dup(2)`
+            // deliberately clears the flag on the copy.
+            _ = fcntl(attachment.ptyFD, F_SETFD, FD_CLOEXEC)
+            // Teardown can land across any await. Nothing owns the descriptor
+            // yet, so this is the one place it is closed from outside a reader.
+            guard !isTornDown else {
+                Darwin.close(attachment.ptyFD)
+                return
+            }
+            if !attachment.snapshotPreamble.isEmpty {
+                feedSnapshot(attachment.snapshotPreamble, into: terminalView)
+            }
+            // `feedSnapshot` lowers its flag one main-queue turn later, not on
+            // return. Hop through the same queue so this resumes strictly after
+            // that restore block: a serial FIFO queue runs what was enqueued
+            // first, first. Without this the reader could feed live bytes into
+            // a still-muted window and their replies would be swallowed.
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+            guard !isTornDown else {
+                Darwin.close(attachment.ptyFD)
+                return
+            }
+            // Feed OFF-MAIN, through the view holder, exactly as the local-PTY
+            // path does — deliberately NOT the control-mode path's
+            // `DispatchQueue.main.async` per chunk. That hop is the shape the
+            // terminal-lag investigation implicates in paint starvation; do not
+            // "tidy" this into looking like its neighbour.
+            viewHolder.set(terminalView)
+            // Taken BEFORE the reader owns the descriptor, because the reader
+            // is the only thing allowed to close it afterwards. `dup` failing
+            // is not fatal to rendering — the session still paints — so it is
+            // logged and the panel runs read-only, reporting every write
+            // unwritten so the daemon keeps delivering.
+            //
+            // `F_DUPFD_CLOEXEC`, never `dup(2)`: the copy would otherwise be
+            // inheritable whatever the original's flag says, and one inherited
+            // copy in one child is enough to keep the session open past this
+            // panel — see the note on the attach above.
+            holderWriteFD = fcntl(attachment.ptyFD, F_DUPFD_CLOEXEC, 0)
+            if holderWriteFD < 0 {
+                logger.error("""
+                    could not duplicate the pty for terminal \
+                    \(self.panelID, privacy: .public) to write to \
+                    (errno \(errno, privacy: .public)); this panel is read-only
+                    """)
+            }
+            let holder = viewHolder
+            let reader = HolderStreamReader(
+                label: panelID.uuidString, fd: attachment.ptyFD
+            ) { chunk in
+                let bytes = [UInt8](chunk)
+                holder.withView { $0.feed(byteArray: bytes[...]) }
+            }
+            holderReader = reader
+            onHolderReaderWillStart?()
+            reader.start()
+            do {
+                try await client.ready(
+                    worktreeID: worktreeID, paneID: paneID, terminalID: panelID,
+                    generation: attachment.generation)
+            } catch {
+                logger.error("""
+                    holder attach.ready refused for terminal \(self.panelID, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                // A refused ack means the daemon has not accounted for this
+                // descriptor — stop reading it and say so on the panel. No
+                // detach goes with it: this panel never owned the session, and
+                // a handback naming an attach the daemon refused would be
+                // refused again by its generation check.
+                stopHolderReader()
+                viewHolder.clear()
+                _ = handleUnsupportedTransport(into: terminalView)
+                return
+            }
+            guard !isTornDown else {
+                stopHolderReader()
+                viewHolder.clear()
+                return
+            }
+            // Recorded with the injection claim below and for the same reason:
+            // both are true exactly while this panel owns the pty. The detach
+            // reads it to decide whether there is a session to hand back, so a
+            // panel whose ack was refused sends none — it never took ownership,
+            // and a handback naming an attach the daemon did not confirm would
+            // be refused by its generation check anyway.
+            holderAttach = (worktreeID: worktreeID, generation: attachment.generation)
+            // Claimed only once the attach is live: before the ack the daemon
+            // is still the session's writer, and an injection routed here in
+            // that window would be written to a pty the daemon has not yet
+            // handed over.
+            //
+            // The frame's own target is passed to the closure and checked
+            // against `panelID` rather than assumed. Nothing enforces that a
+            // coordinator's routing state matches the session it was built
+            // for — `panelID` is assigned once in `makeNSView` and every
+            // attach is derived from it, an invariant held by construction and
+            // by nothing else — so an injection, which carries its own
+            // address, verifies it instead of inheriting that coupling.
+            injectionRegistration = appState.terminalInjections.register(
+                terminalID: panelID
+            ) { [weak self] target, bytes in
+                guard let self else { return false }
+                guard target == self.panelID else {
+                    // `.fault`, and the level is the finding: a mismatch is an
+                    // INVARIANT violation — the daemon addressed a frame to a
+                    // session this panel does not own — while every other
+                    // refusal on this path ("written but nothing took it") is
+                    // an environment fact. At `.error` the two are one
+                    // undifferentiated stream in the log.
+                    logger.fault("""
+                        terminal \(self.panelID, privacy: .public) was handed an injection \
+                        addressed to \(target.uuidString, privacy: .public); refusing it — a \
+                        panel's registration and the session it attached to have diverged
+                        """)
+                    return false
+                }
+                return await self.outgoingQueue.enqueueInjection(bytes)
+            }
+            // One resize at the view's real size, now that this panel owns the
+            // pty — the holder twin of the control-mode path's initial resize,
+            // and for the same reason. Nothing has told this session that its
+            // viewer moved: it is at whatever geometry it was spawned or last
+            // resized at, so a viewport that differs from it paints mis-wrapped
+            // until the user happens to drag the window. `sizeChanged` cannot
+            // be relied on to cover it — it fires when SwiftTerm's own size
+            // changes, and attaching to an already-correctly-sized view changes
+            // nothing.
+            let dimensions = terminalView.terminalDimensions
+            setHolderWindowSize(cols: dimensions.cols, rows: dimensions.rows)
+            scheduleDaemonResize(cols: dimensions.cols, rows: dimensions.rows)
+            logger.info("holder attach live for terminal \(self.panelID, privacy: .public)")
+        }
+
+        /// Stop the holder reader and release every claim this panel held on
+        /// the session. Returns the reader, so a caller that must observe the
+        /// descriptor's close can await it; the reader thread does the `close`
+        /// on its way out, and closing it here would race fd-number reuse
+        /// against a thread still polling it.
+        ///
+        /// **This is where the viewer's input state is released**, rather than
+        /// in `cleanup()` alone, and the two are genuinely different edges. The
+        /// paste lease and the injections parked behind it are claims about a
+        /// pty *this panel can write to*; the moment it stops owning one they
+        /// are stale, and a lease that outlived its panel would leave the
+        /// daemon waiting on a paste nobody can ever close. Teardown is only
+        /// one of the ways ownership ends — a refused `attach.ready` ends it
+        /// too, with the panel very much alive — so the release belongs to the
+        /// descriptor, not to the view. `shutdown()` is idempotent, and
+        /// `cleanup()` keeps its own call for panels that never had a holder.
+        ///
+        /// The view holder is deliberately **not** cleared here: on the detach
+        /// path the reader's last chunk is exactly the output the handback
+        /// preamble is serialized from, so the sink has to outlive the stop.
+        /// Callers that are not handing back clear it themselves.
+        @MainActor
+        @discardableResult
+        private func stopHolderReader() -> HolderStreamReader? {
+            if let registration = injectionRegistration {
+                injectionRegistration = nil
+                appState?.terminalInjections.unregister(registration)
+            }
+            outgoingQueue.shutdown()
+            // Closed here, unlike the reader's descriptor: this one is only
+            // ever touched from the main actor, so there is no thread to hand
+            // the close to and no window in which somebody could be mid-write
+            // on it.
+            if holderWriteFD >= 0 {
+                Darwin.close(holderWriteFD)
+                holderWriteFD = -1
+            }
+            guard let reader = holderReader else { return nil }
+            holderReader = nil
+            reader.stop()
+            return reader
+        }
+
+        /// Give the session back to the daemon: stop reading, close this
+        /// process's descriptors, and only then tell the daemon — carrying the
+        /// screen this panel was showing.
+        ///
+        /// **The order is the whole function**, and it is the attach's run
+        /// backwards:
+        ///
+        /// 1. The reader stops and its thread closes the `dup`; the write `dup`
+        ///    is closed on this actor. `awaitClosed()` is what makes step 3
+        ///    strictly later, because `stop()` only raises a flag.
+        /// 2. The screen is serialized *after* the close, which is the same
+        ///    reason the daemon quiesces before it snapshots on the way in:
+        ///    everything this panel consumed is in its terminal, everything
+        ///    after the close is still queued on the tty for the daemon, and
+        ///    nothing falls between the two.
+        /// 3. `pane.detach` goes out, and the daemon resumes its drain on
+        ///    receipt. A notify-first detach would put that drain on the fd
+        ///    while this process's last `read()` was still outstanding — two
+        ///    readers on one pty, which is silent byte theft.
+        ///
+        /// An app that dies mid-detach needs nothing here: its descriptors close
+        /// with the process, which is the same evidence a completed detach
+        /// carries, and reclaiming the session on that evidence is app-liveness
+        /// arbitration rather than anything a teardown can do.
+        @MainActor
+        private func detachHolderSession() {
+            let attach = holderAttach
+            holderAttach = nil
+            let reader = stopHolderReader()
+            guard let attach, let appState else {
+                viewHolder.clear()
+                return
+            }
+            // The view is captured, but its absence does **not** cancel the
+            // detach. `terminalView` is weak, so a panel whose view AppKit has
+            // already released would otherwise skip the handback entirely —
+            // and with it the release of the daemon's viewer claim, which is
+            // the bricked session this whole path exists to prevent. Losing
+            // the screen costs a repaint; losing the release costs the session.
+            let view = terminalView
+            if view == nil {
+                logger.error("""
+                    terminal \(self.panelID, privacy: .public) is handing its session back with \
+                    no screen: its view was released before the detach, so the daemon resumes \
+                    from whatever it last saw
+                    """)
+            }
+            let client = holderAttachClient ?? HolderAttachClient(daemonClient: appState.daemonClient)
+            let panelID = self.panelID
+            holderHandbackInFlight = true
+            // `self` is captured STRONGLY, unlike every other teardown hop in
+            // this file. The handback is the last thing this coordinator owes
+            // the session and it outlives the view by design: a `[weak self]`
+            // here would drop the preamble — and, worse, the detach — whenever
+            // SwiftUI released the coordinator inside the poll interval, which
+            // is exactly the tab-close case. It is bounded: one poll interval,
+            // one main-queue turn, one RPC.
+            Task { @MainActor in
+                await reader?.awaitClosed()
+                var preamble = Data()
+                if let view { preamble = await self.captureHandbackPreamble(from: view) }
+                self.viewHolder.clear()
+                self.holderHandbackInFlight = false
+                do {
+                    try await client.detach(
+                        worktreeID: attach.worktreeID, paneID: "", terminalID: panelID,
+                        generation: attach.generation, snapshotPreamble: preamble)
+                } catch {
+                    // Logged and dropped: there is no retry that helps. The
+                    // daemon still holds this session's viewer claim, and what
+                    // releases it then is the app-liveness verdict that covers
+                    // an app which died mid-detach — the same path, reached by
+                    // a different failure.
+                    logger.error("""
+                        holder pane.detach failed for terminal \(panelID, privacy: .public): \
+                        \(error.localizedDescription, privacy: .public)
+                        """)
+                }
+            }
+        }
+
+        /// Serialize this panel's terminal as the byte stream that reconstructs
+        /// it — `HolderReader.snapshotPreamble` in the other direction, through
+        /// the same `TerminalSnapshotWriter`.
+        ///
+        /// Two phases, and the hop between them is what makes the first one
+        /// work at all:
+        ///
+        /// 1. **Ask.** `TerminalModeCapture` needs a `DECRQM` answer for every
+        ///    mode SwiftTerm keeps private. A view delivers those answers
+        ///    through `onMain`, an unconditional `DispatchQueue.main.async`, so
+        ///    they have not arrived when `feed` returns. The whole batch goes
+        ///    out at once and the answers are read one main-queue turn later:
+        ///    main is serial FIFO, the parse enqueued every reply during the
+        ///    feed, and a block appended afterwards runs behind all of them.
+        ///    This is R16's shape, in the direction R16 said it would also be
+        ///    needed. Without the hop every mode reads "reset" — and wraparound
+        ///    and cursor-visible are *on* by default, so the daemon would be
+        ///    handed a screen with autowrap off and the cursor hidden.
+        /// 2. **Walk.** The serialization itself is synchronous inside the
+        ///    terminal's own lock, and it must be: the caller has already closed
+        ///    the descriptor, so nothing else is feeding this terminal.
+        ///
+        /// The ingest flag is raised for the second phase because the writer
+        /// **feeds this terminal** — the alt-screen toggle, and the queries the
+        /// capture would have made — and those callbacks are replies to
+        /// questions nobody asked. On a panel being torn down the toggle itself
+        /// is harmless (nobody paints it again) and the writer restores what it
+        /// can behind a `defer`; the residue it cannot restore — the selected
+        /// character set, kitty graphics on the alt buffer, two spurious
+        /// `bufferActivated` rounds — is the loss this snapshot path accepted on
+        /// the way in as well.
+        @MainActor
+        private func captureHandbackPreamble(from terminalView: TerminalView) async -> Data {
+            modeReplyCollector = []
+            terminalView.withTerminal { $0.feed(text: HolderHandback.modeProbe) }
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+            let replies = RecordedModeReplies(bytes: modeReplyCollector ?? [])
+            modeReplyCollector = nil
+
+            snapshotIngestDepth += 1
+            let preamble = terminalView.withTerminal { terminal in
+                TerminalSnapshotWriter.snapshot(
+                    of: terminal, reply: replies,
+                    maxScrollbackLines: HolderHandback.handbackScrollbackLines)
+            }
+            // Lowered a turn later, never on return, for `feedSnapshot`'s
+            // reason: the callbacks the walk provoked are queued behind us and
+            // a synchronous restore would leave every one of them unguarded.
+            DispatchQueue.main.async { [weak self] in
+                self?.snapshotIngestDepth -= 1
+            }
+            return preamble
         }
 
         nonisolated static func preparationAction(
@@ -770,10 +1330,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // already ran; only deinit would remove the monitors, nothing
             // would terminate the process).
             guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else { return }
-            // A session this app cannot carry through tmux is settled here,
-            // before any tmux subprocess runs and before any classification —
-            // see `transportPreparationNotice(for:)`.
-            if handleUnsupportedTransport(into: terminalView) { return }
+            // A session that is not carried by tmux is settled here, before any
+            // tmux subprocess runs and before any classification — see
+            // `transportPreparationNotice(for:)`.
+            if await handleHolderTransport(into: terminalView) { return }
             // `prepareSession` is non-isolated and awaits tmux subprocesses
             // off the main actor — Swift releases main while we suspend here,
             // so SwiftUI's render loop is no longer blocked while tmux runs.
@@ -1047,6 +1607,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
             resizeDebounceTask?.cancel()
             resizeDebounceTask = nil
+            // Releases any injection still parked behind an open paste
+            // (Task 10). Safe to call even if `send(source:data:)` never ran —
+            // the lazy queue is simply constructed here for the first time and
+            // immediately torn down.
+            outgoingQueue.shutdown()
+            // Release the vended pty AND hand the session back: the daemon
+            // takes it over again, with the screen this panel was showing.
+            // Without the handback half, closing a tab left the session claimed
+            // by a viewer that no longer exists — nothing draining it, no
+            // injection deliverable, and every later attach refused.
+            detachHolderSession()
             (terminalView as? TBDTerminalView)?.onControlModePaste = nil
             if let attach = controlModeAttach, let appState {
                 controlModeAttach = nil
@@ -1094,7 +1665,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // Clear the holder BEFORE releasing the process: a late IO batch
             // then reads nil and drops instead of feeding a view whose
             // session is being torn down.
-            viewHolder.clear()
+            //
+            // **Except while a holder handback is in flight**, where dropping a
+            // late batch is exactly the wrong thing: those bytes have been taken
+            // off the pty, so nobody else will ever see them, and the preamble
+            // this panel is about to serialize is where they belong. The detach
+            // task clears the holder itself, once the descriptor is closed and
+            // the screen has been read.
+            if !holderHandbackInFlight { viewHolder.clear() }
             localProcess = nil
             ChildReaper.reap(pid: ptyChildPid, unless: childExitObservation)
         }
@@ -1115,11 +1693,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             windowID: String,
             panelID: UUID
         ) async {
-            // Same gate as the grouped-sessions path: a holder-backed session
-            // has no pane for control mode to attach to either, and falling
-            // through to the fallback would only reach the tmux classifier by a
-            // longer route.
-            if handleUnsupportedTransport(into: terminalView) { return }
+            // Same branch as the grouped-sessions path: a holder-backed session
+            // has no pane for control mode to attach to, and falling through to
+            // the fallback would only reach the tmux classifier by a longer
+            // route. It attaches to its own pty instead.
+            if await handleHolderTransport(into: terminalView) { return }
             // Reader-registry key: one reader per PANE (worktree/pane), not per
             // attach — a re-attach replaces the pane's reader. Distinct from
             // the sidecar's per-request demux key, which also carries the
@@ -1175,7 +1753,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // drags, so fullscreen Claude would render at the wrong width.
                 // Same debounced path as live resizes.
                 let dims = terminalView.terminalDimensions
-                scheduleControlModeResize(cols: dims.cols, rows: dims.rows)
+                scheduleDaemonResize(cols: dims.cols, rows: dims.rows)
                 // Intercept ALL pastes at the view level while attached (the
                 // paste ruling v2) and ship them as a `.paste` sidecar frame.
                 // Interception happens BEFORE SwiftTerm brackets the content,
@@ -1205,6 +1783,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                         // nothing to paste and zero-byte `.paste` frames are
                         // never sent — but SwiftTerm must not run either.
                         if !data.isEmpty {
+                            // The one write that does NOT go through
+                            // `outgoingQueue` (Task 10). Defensible: in
+                            // control mode the daemon injects into tmux
+                            // rather than through the app, so the two writers
+                            // this queue serializes never coexist on this
+                            // path — but it is a second writer on paper, and
+                            // worth naming as one.
                             self.appState?.daemonClient.fdSidecar.sendPaste(
                                 worktreeID: worktreeID, paneID: paneID, bytes: data)
                         }
@@ -1483,25 +2068,267 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // MARK: - TerminalViewDelegate
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
+            // The handback's mode probe, and it comes first because it is the
+            // one window where a reply is wanted rather than suppressed: these
+            // bytes are the terminal answering questions this panel asked about
+            // itself, on their way to `RecordedModeReplies`. They are never
+            // input for the child — the same rule the ingest guard below
+            // enforces for replayed history — so they stop here either way.
+            if modeReplyCollector != nil {
+                modeReplyCollector?.append(contentsOf: data)
+                return
+            }
+            // Ordering matters: `handleOutgoingInput` scans for 0x03/0x1b and
+            // raises a user interrupt, so this guard must precede it, not
+            // merely the routing beneath it. Anything arriving while a snapshot
+            // preamble is in flight is replayed history or a keystroke aimed at
+            // history — neither is input for the live child.
+            guard !isIngestingSnapshot else { return }
             // Interrupt detection (Ctrl-C / Esc) must keep working in every
             // path, so run it FIRST regardless of where the bytes go next.
             handleOutgoingInput(data)
+            // Everything this panel writes goes through one queue (Task 10),
+            // so a daemon injection — once one can arrive, over the fd
+            // sidecar while a holder-backed session is attached — can never
+            // land inside a user paste's ESC[200~/ESC[201~ brackets.
+            //
+            // Pastes NEVER reach here while control-mode attached: every
+            // paste, any size, is intercepted at the view level and shipped
+            // as a `.paste` frame (or refused when oversize) BEFORE SwiftTerm
+            // brackets it (see TBDTerminalView.paste + the
+            // `onControlModePaste` wiring in startControlModeClient). So the
+            // marker detection below only ever fires for the local-PTY /
+            // holder passthrough path, which is exactly the path where the
+            // app itself can write an injection to the same fd — the case
+            // this queue exists for.
+            //
+            // Whole-payload equality, not a prefix or a search: a chunk IS a
+            // marker or it is not. SwiftTerm hands the marker to
+            // `send(source:data:)` as its own chunk (`MacTerminalView`'s paste
+            // path makes three separate calls and the main-actor delivery
+            // buffer preserves each boundary), so the exact match is the right
+            // test. Two consequences worth knowing: a payload whose bytes are
+            // exactly `ESC[201~` is misread as the end marker — absurdly
+            // narrow, and the only cost is that a concurrent injection stops
+            // being held one chunk early; and if a fork bump ever coalesced
+            // the marker with the payload, no paste would be detected at all,
+            // which is harmless because one `enqueueUserBytes` call is one
+            // atomic write that an injection lands wholly before or after.
+            // That second shape is deliberately not covered by a test: it
+            // cannot arise on this fork, and no assertion could tell a
+            // coalescing fork from a chunking one, since the classifier
+            // behaves identically either way. This comment is the record.
+            //
+            // The order of these three calls is what makes the span airtight:
+            // the paste is opened BEFORE its own first byte goes out and
+            // closed AFTER its last one.
+            let payload = Data(data)
+            if payload.elementsEqual(EscapeSequences.bracketedPasteStart) {
+                outgoingQueue.beginUserPaste()
+            }
+            outgoingQueue.enqueueUserBytes(payload)
+            if payload.elementsEqual(EscapeSequences.bracketedPasteEnd) {
+                outgoingQueue.endUserPaste()
+            }
+        }
+
+        /// The single serialization point for everything this panel writes to
+        /// its session (Task 10). Lazy because its write closure captures
+        /// `self` weakly and this class has no designated initializer of its
+        /// own to do that capture in.
+        ///
+        /// Reaching it needs no synchronization of its own: this Coordinator
+        /// is `@MainActor` by inference through its `TerminalViewDelegate`
+        /// conformance (see the `LocalProcessDelegate` note above), so every
+        /// access — including the first, which may come from `cleanup()` on a
+        /// panel that never typed rather than from `send` — is
+        /// compiler-checked main-actor, and so is the queue itself.
+        ///
+        /// `false` from the write closure means the bytes reached nothing;
+        /// `enqueueInjection` reports that to the daemon so it can fall back
+        /// to writing directly. A dead `self` reports `false` for the same
+        /// reason.
+        private lazy var outgoingQueue = OutgoingInputQueue { [weak self] data in
+            self?.performOutgoingWrite(data) ?? false
+        }
+
+        /// Delivers one chunk `outgoingQueue` has decided may go out now, and
+        /// reports whether anything actually took it. Same two destinations
+        /// `send(source:data:)` used before the queue existed —
+        /// `OutgoingInputRoute.decide` is unchanged, and it still runs in the
+        /// same main-actor turn the bytes arrived in, so a tab switch cannot
+        /// nil `controlModeAttach` between the decision and the write.
+        ///
+        /// A holder-backed panel has neither `localProcess` nor
+        /// `controlModeAttach`, so it falls into `.localPTY` — and there it
+        /// writes to its own `dup` of the session's pty master
+        /// (`holderWriteFD`), which is what makes the app the attached
+        /// session's only writer and the daemon's injection path worth having.
+        ///
+        /// `true` means *handed off*, which is the strongest claim available
+        /// synchronously: both destinations complete asynchronously
+        /// (`DispatchIO` for the pty, the sidecar client's own send queue for
+        /// the frame), so a write that fails after this returns cannot be
+        /// reported here. The daemon's fail-open deadline is what covers that
+        /// residue. Both arms report every refusal that *is* knowable at call
+        /// time, which is the whole obligation this seam can carry: a missing
+        /// or dead `localProcess`, and for the sidecar a missing attach, a
+        /// disconnected client, an over-cap payload or an encode failure.
+        private func performOutgoingWrite(_ data: Data) -> Bool {
             switch OutgoingInputRoute.decide(
                 controlModeAttached: controlModeAttach != nil, byteCount: data.count) {
             case .localPTY:
-                localProcess?.send(data: data)
+                // The holder arm first, and it is exclusive by construction: a
+                // holder-backed panel never builds a `LocalProcess`, and a
+                // local-PTY panel never attaches a holder. Reading it first
+                // keeps the shape "one destination per panel" rather than a
+                // fallthrough whose order matters.
+                if holderWriteFD >= 0 { return writeToHolderPTY(data) }
+                // `running` counts as much as non-nil: `LocalProcess.send`
+                // silently drops everything once the child has exited, so
+                // reporting `true` for a dead child would be the same
+                // fabricated ack in a different shape.
+                guard let localProcess, localProcess.running else { return false }
+                localProcess.send(data: [UInt8](data)[...])
+                return true
             case .sidecarInput:
-                // Keystrokes ride the sidecar. Pastes NEVER reach here while
-                // attached — every paste, any size, is intercepted at the view
-                // level and shipped as a `.paste` frame (or refused when
-                // oversize) BEFORE SwiftTerm brackets it (see
-                // TBDTerminalView.paste + the `onControlModePaste` wiring in
-                // startControlModeClient).
-                guard let attach = controlModeAttach else { return }
-                appState?.daemonClient.fdSidecar.sendInput(
-                    worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: Data(data))
+                // `isConnected` belongs in the guard for the same reason
+                // `running` does above: the sidecar client drops an `.input`
+                // frame whose socket is gone, so a `true` here would be a
+                // *systematic* fabricated ack for as long as the drop lasts,
+                // not a rare one.
+                //
+                // How long that is depends on which socket died. For the
+                // common failure — the daemon dying or being restarted — the
+                // sidecar does come back on its own, within about a poll:
+                // the next RPC throws `.daemonNotRunning`/`.connectionFailed`,
+                // `AppState.handleConnectionError` clears `isConnected`
+                // (`AppState+Notifications.swift:87`), the 2-second poll calls
+                // `daemonClient.connect()` (`AppState.swift:2779`), that calls
+                // `connectSidecar()` (`DaemonClient.swift:105`/`121`), and
+                // `FDSidecarClient.connect` proceeds rather than no-opping
+                // because the receive loop already set `socketFD = -1` on EOF
+                // (`FDSidecarClient.swift:264`). What has no recovery is a
+                // *sidecar-only* death with the RPC socket intact — the frame
+                // scanner desyncing, or the protocol-violation `break` — since
+                // nothing clears `isConnected` for those. So the drop is an
+                // episode of a few seconds in the common case and permanent
+                // only in the narrow one; either way it is an episode the app
+                // cannot see the end of from in here, which is why the ack
+                // must not be fabricated.
+                //
+                // It narrows the window without closing it: the socket is
+                // read again on the client's own send queue, so a
+                // disconnection between this check and that read is a TOCTOU
+                // this arm cannot see. Acceptable for exactly the reason the
+                // `.localPTY` arm's residue is — `true` means handed off, and
+                // the daemon's fail-open deadline is the cover — and a
+                // synchronous answer that waited for the queue would put a
+                // socket write in a keystroke's main-actor turn.
+                //
+                // Corollary for whoever reads the queue's diagnostic:
+                // `isConnected` is a *socket* fact, not an *attach* fact. A
+                // reconnected sidecar satisfies it even when this panel's
+                // `controlModeAttach` names a pane the daemon no longer vends
+                // for, so `OutgoingInputQueue.noteUserWriteOutcome`'s recovery
+                // line ("user input is reaching a transport again") can fire
+                // on a transport that will not deliver. It carries exactly the
+                // strength this `true` does — handed off — and no more.
+                guard let attach = controlModeAttach, let appState,
+                    appState.daemonClient.fdSidecar.isConnected
+                else { return false }
+                return appState.daemonClient.fdSidecar.sendInput(
+                    worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: data)
             }
         }
+
+        /// Write one chunk to this holder session's pty, and report whether
+        /// all of it went.
+        ///
+        /// **What a short write means here, and what it costs today.**
+        /// A pty master's input queue is small, so a multi-KiB injected prompt
+        /// can legitimately take only a prefix; `PTYWrite.all` waits a few
+        /// milliseconds for room and then gives up rather than parking the
+        /// main actor. A partial write is reported as a **failure**, on the
+        /// reasoning that the daemon then rewrites the whole payload on top of
+        /// the prefix — visibly doubled rather than quietly truncated.
+        ///
+        /// **The daemon cannot rewrite in this state.** This panel is
+        /// attached, so the acknowledgement has already released the daemon's
+        /// reader and closed its descriptor, and `HolderInjectionCourier`'s
+        /// fail-open fallback answers `.notDelivered` instead of writing. So a
+        /// 6 KB prompt into a panel whose agent is momentarily not draining
+        /// leaves a **truncated fragment** in the composer while the caller is
+        /// told the send failed. Not silent — the caller is told and the
+        /// actuation row records it — but a loss, and the fork this design
+        /// takes everywhere resolved on the wrong side of itself.
+        ///
+        /// It is left this way on purpose. Whether the daemon can rewrite is
+        /// the descriptor question — whether it keeps a **write-only** dup
+        /// across an attach — which is a human decision already filed;
+        /// answered one way the reasoning above becomes true as written, and
+        /// changing the retry semantics here now would pre-empt it. Reporting
+        /// `true` for a prefix is not the alternative: that is the invisible
+        /// loss this path exists to prevent, with no error anywhere.
+        ///
+        /// Only the partial case logs every time. "Nothing was written"
+        /// needs no line of its own — for user bytes `OutgoingInputQueue`
+        /// already emits one edge-triggered line per episode, and for an
+        /// injection the return value reaches the daemon, which is a stronger
+        /// channel than a log. A partial write is rare enough to be worth a
+        /// line each time, because it is what explains the truncation that
+        /// follows it, and it is per-payload rather than per-keystroke anyway.
+        ///
+        /// **`.failed` is edge-triggered, and it has to be.** Once the child
+        /// exits, every write to the master returns `EIO` — and nothing lowers
+        /// `holderWriteFD`, because `HolderStreamReader.readLoop` closes its
+        /// own descriptor on EOF and never calls `stopHolderReader`. An
+        /// unconditional line there is one `.error` per keystroke for as long
+        /// as somebody keeps typing at a dead session, which is exactly the
+        /// per-keystroke logging this file warns against above and R20 built
+        /// the queue's own latch to avoid.
+        private func writeToHolderPTY(_ data: Data) -> Bool {
+            switch PTYWrite.all(data, to: holderWriteFD) {
+            case .complete:
+                holderWriteIsFailing = false
+                return true
+            case .nothingWritten:
+                // A full input queue, not a dead descriptor: the write path is
+                // alive, so the next `.failed` starts a new episode and logs.
+                holderWriteIsFailing = false
+                return false
+            case .partial(let written):
+                holderWriteIsFailing = false
+                logger.error("""
+                    terminal \(self.panelID, privacy: .public): only \
+                    \(written, privacy: .public) of \(data.count, privacy: .public) bytes \
+                    reached the session's pty; reporting the write unwritten — the daemon \
+                    re-sends the payload whole if it still holds a descriptor for this pty, \
+                    and otherwise the session keeps the prefix
+                    """)
+                return false
+            case .failed(let code):
+                // One line per episode, keyed on the transition rather than on
+                // the errno: a descriptor that has started failing keeps
+                // failing, and the interesting fact is when it began.
+                if !holderWriteIsFailing {
+                    holderWriteIsFailing = true
+                    holderWriteFailureLogsForTesting += 1
+                    logger.error("""
+                        terminal \(self.panelID, privacy: .public): writing to the session's \
+                        pty failed (errno \(code, privacy: .public)); further failures on this \
+                        descriptor are not logged until a write succeeds again
+                        """)
+                }
+                return false
+            }
+        }
+
+        /// Test-only: lets a test drive the production marker-detection path
+        /// in `send(source:data:)` and then observe what the queue decided,
+        /// rather than calling `beginUserPaste()`/`endUserPaste()` directly
+        /// and bypassing the classification the detection actually performs.
+        var outgoingQueueForTesting: OutgoingInputQueue { outgoingQueue }
 
         func handleOutgoingInput(_ data: ArraySlice<UInt8>) {
             let isCtrlC = data.contains(0x03)
@@ -1518,6 +2345,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+            // A replayed DECCOLM (or any other size-changing sequence in a
+            // preamble) must not reach the child's `TIOCSWINSZ` or the daemon's
+            // `pane.resize`: the pane's real size is whatever the live view
+            // already has.
+            guard !isIngestingSnapshot else { return }
             // SwiftTerm delivers delegate callbacks on the main thread; the
             // resize/debounce state (`resizeDebounceTask`, `resizeSerializer`,
             // `controlModeAttach`) is MainActor-confined like the rest of the
@@ -1531,14 +2363,51 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     _ = ioctl(fd, TIOCSWINSZ, &size)
                     debugLog("PANEL: resize -> \(newCols)x\(newRows)")
                 }
-                // Control-mode path (M3.2): the daemon is the sole size authority
-                // (addendum §4). Debounced so only the tail of a drag flurry lands.
-                scheduleControlModeResize(cols: newCols, rows: newRows)
+                // Holder path: **this panel owns `TIOCSWINSZ` for as long as it
+                // owns the pty**, and makes the same ioctl the arm above makes,
+                // on the write-only duplicate it took at attach. It is not left
+                // to the daemon because the daemon has no descriptor to make it
+                // on — it released its reader when it handed the pty over — so
+                // a resize routed only through the RPC below would reach the
+                // emulator and never the child.
+                setHolderWindowSize(cols: newCols, rows: newRows)
+                // The daemon is told either way, and for a different reason per
+                // transport: for a control-mode window it is the sole size
+                // authority (M3.2, addendum §4); for a holder session it is the
+                // emulator behind `terminal.output` and the next re-adoption,
+                // which must not be left at the size the viewer arrived at.
+                // Debounced so only the tail of a drag flurry lands.
+                scheduleDaemonResize(cols: newCols, rows: newRows)
             }
         }
 
-        /// Debounced `pane.resize` for the control-mode window. No-op unless this
-        /// panel is control-mode attached. Cancel-and-replace ~100ms debounce so a
+        /// Sets the size of the pty this panel owns, when it owns one.
+        ///
+        /// The holder transport's half of `sizeChanged`. A panel whose duplicate
+        /// could not be taken is read-only and silently makes no claim here, the
+        /// same degradation already accepted for its writes.
+        @MainActor
+        private func setHolderWindowSize(cols: Int, rows: Int) {
+            guard cols > 0, rows > 0, holderWriteFD >= 0 else { return }
+            var size = winsize(
+                ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+            guard ioctl(holderWriteFD, TIOCSWINSZ, &size) == 0 else {
+                // Reported rather than dropped: the child keeps laying itself
+                // out at a size nobody is painting, and nothing else in the app
+                // can see that it did.
+                logger.error("""
+                    could not set the window size of terminal \
+                    \(self.panelID, privacy: .public) to \(cols, privacy: .public)x\
+                    \(rows, privacy: .public) (errno \(errno, privacy: .public))
+                    """)
+                return
+            }
+            debugLog("PANEL: holder resize -> \(cols)x\(rows)")
+        }
+
+        /// Debounced `pane.resize` for whichever daemon-side size authority this
+        /// panel has — a control-mode window, or a holder session by name.
+        /// No-op unless it has one. Cancel-and-replace ~100ms debounce so a
         /// window-drag flurry collapses to one RPC. Errors are dropped: the resize
         /// is re-sent on the next tick and self-heals (the daemon is authoritative).
         ///
@@ -1549,8 +2418,20 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// fires meanwhile stashes its size, and the in-flight sender drains
         /// the stash on completion (looping until quiescent).
         @MainActor
-        private func scheduleControlModeResize(cols: Int, rows: Int) {
-            guard let attach = controlModeAttach,
+        private func scheduleDaemonResize(cols: Int, rows: Int) {
+            // The floor is the same for both transports and exists for the same
+            // reason: SwiftTerm emits transient 0/1-cell sizes mid-layout that
+            // must reach neither a daemon nor a child. `controlModeAttached` is
+            // passed as `true` because the question it stands for — is there a
+            // daemon-side authority at all — is what `resolve` has just
+            // answered.
+            guard let target = TerminalResizeTarget.resolve(
+                    holderPTYIsOwned: holderWriteFD >= 0,
+                    worktreeID: worktreeIDForDiagnostics(),
+                    terminalID: panelID,
+                    controlMode: controlModeAttach.map {
+                        (worktreeID: $0.worktreeID, windowID: $0.windowID)
+                    }),
                   ControlModeResizeGate.shouldSend(
                     controlModeAttached: true, cols: cols, rows: rows)
             else { return }
@@ -1575,9 +2456,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // dead view must stop draining (its stash is irrelevant; the
                 // next live view sends its own initial resize).
                 while ControlModeResizeSerializer.shouldContinueDraining(tornDown: self.isTornDown) {
-                    try? await daemonClient?.paneResize(
-                        worktreeID: attach.worktreeID, windowID: attach.windowID,
-                        cols: size.cols, rows: size.rows)
+                    switch target {
+                    case .controlModeWindow(let worktreeID, let windowID):
+                        try? await daemonClient?.paneResize(
+                            worktreeID: worktreeID, windowID: windowID,
+                            cols: size.cols, rows: size.rows)
+                    case .holderSession(let worktreeID, let terminalID):
+                        // `windowID` is the empty string a holder row carries;
+                        // `terminalID` is what the daemon resolves.
+                        try? await daemonClient?.paneResize(
+                            worktreeID: worktreeID, windowID: "",
+                            cols: size.cols, rows: size.rows, terminalID: terminalID)
+                    }
                     guard let next = self.resizeSerializer.completedInFlight() else { return }
                     size = next
                 }
@@ -1605,9 +2495,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
         }
 
-        func bell(source: TerminalView) { NSSound.beep() }
+        func bell(source: TerminalView) {
+            // A BEL in replayed history rang minutes ago; ringing it again on
+            // restore is noise the user cannot act on.
+            guard !isIngestingSnapshot else { return }
+            ringBell()
+        }
 
         func clipboardCopy(source: TerminalView, content: Data) {
+            // An OSC 52 in replayed history would silently overwrite whatever
+            // the user has on the pasteboard right now.
+            guard !isIngestingSnapshot else { return }
             if let text = String(data: content, encoding: .utf8) {
                 let pb = NSPasteboard.general
                 pb.clearContents()

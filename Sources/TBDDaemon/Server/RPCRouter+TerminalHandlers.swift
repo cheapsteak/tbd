@@ -1044,8 +1044,8 @@ extension RPCRouter {
     }
 
     /// The refusal `terminal.delete`'s activity rails return for a busy row
-    /// they will not close. Named beside its verb, like `holderSendRefusal` and
-    /// its siblings, so the CLI, the app and this handler's tests name the same
+    /// they will not close. Named beside its verb, like `holderVerifyRefusal`
+    /// and its siblings, so the CLI, the app and this handler's tests name the same
     /// reason rather than three near-misses.
     ///
     /// The `.unknown` wording is not decoration. A user whose holder is gone
@@ -1147,9 +1147,11 @@ extension RPCRouter {
     /// step talks to something that may already be gone — so the only failures
     /// nameable are the ones that stop it being *attempted*: no registry wired
     /// into this daemon, an unrepresentable rendezvous path, or a row that never
-    /// recorded the child pid. Each one leaks a live process, and until the
-    /// Milestone B holder reconciler lands nothing else will ever find it, so
-    /// each is reported rather than swallowed.
+    /// recorded the child pid. Each one leaks a live process that nothing else
+    /// will find once this row is gone — the holder inventory sweep and
+    /// `AgentReaper`'s holder leg both read session rows, and
+    /// `RowlessHolderCollector` reaches only a holder still alive enough to
+    /// handshake — so each is reported rather than swallowed.
     ///
     /// Not `private`: `closeScratchTerminals` tears down rows the same way and
     /// must reclaim the same holders. The teardown itself lives on the registry
@@ -2820,12 +2822,40 @@ extension RPCRouter {
         case suppressed
     }
 
-    /// The refusal `terminal.send` returns for a holder-backed row. Named
-    /// beside its verb so the CLI, the app, the actuation record and this
-    /// handler's tests all name the same reason.
-    static func holderSendRefusal(terminalID: UUID) -> String {
-        "Terminal \(terminalID) runs on the pty-holder transport, which has no "
-            + "key-send path yet. Nothing was typed and its session is unchanged."
+    /// The refusal `terminal.send --verify` returns for a holder-backed row.
+    ///
+    /// It names *verification*, not the transport, and the distinction is the
+    /// whole point: typing into a holder session works, and a caller told
+    /// otherwise would stop trying. What has no holder implementation is the
+    /// delivery *observation* — the verifier re-reads the pane through tmux
+    /// (`redeliverVerifiedPayload` and `consultPaneBeforeTyping` both speak
+    /// tmux), and a holder session has no pane to re-read. Refused rather than
+    /// downgraded to an unverified send, per the rule that a request for
+    /// evidence is never answered with a silence that reads like confirmation.
+    static func holderVerifyRefusal(terminalID: UUID) -> String {
+        "terminal.send --verify was refused: terminal \(terminalID) runs on the pty-holder "
+            + "transport, which has no delivery observation — nothing was sent. Resend without "
+            + "--verify."
+    }
+
+    /// The refusal `terminal.send --keys` returns for a holder-backed row.
+    ///
+    /// Named keys are tmux key names (`Escape`, `C-c`, `Enter`), resolved by
+    /// tmux itself into the bytes a terminal expects. Writing them to a pty
+    /// master needs that table on this side, and there is no holder mapping
+    /// yet — so this refuses rather than guessing at bytes, which would type
+    /// something nobody asked for into a live session.
+    static func holderKeysRefusal(terminalID: UUID) -> String {
+        "terminal.send --keys was refused: terminal \(terminalID) runs on the pty-holder "
+            + "transport, which has no named-key mapping yet — nothing was sent. Send the "
+            + "literal text instead (--text, with --submit for Enter)."
+    }
+
+    /// The refusal `terminal.send` returns for a holder-backed row in a daemon
+    /// with no injection courier — mock mode, and tests that wire no transport.
+    static func holderInputUnavailable(terminalID: UUID) -> String {
+        "Terminal \(terminalID) runs on the pty-holder transport, and this daemon has no "
+            + "input path wired for it. Nothing was typed and its session is unchanged."
     }
 
     func handleTerminalSend(
@@ -2926,31 +2956,24 @@ extension RPCRouter {
 
         // ─── The transport, ahead of every other declining rail ───
         //
-        // A holder row's `tmuxPaneID` is the empty string by construction, so
-        // `consultPaneBeforeTyping` below classifies it `.missing` and refuses
-        // with "tmux pane  for terminal <id> no longer exists" — about a
-        // session that is perfectly alive. Nothing was ever typed, so this
-        // replaces a safe lie with an accurate refusal rather than changing
-        // what the handler does; what it buys is that the actuation record and
-        // the caller both name the transport instead of blaming a stale
-        // coordinate that was never stale.
+        // A holder-backed session has no tmux pane: its `tmuxPaneID` is the
+        // empty string by construction, so every tmux mechanic below — the
+        // pane consultation, the paste, the Enter — is addressed to a
+        // coordinate that names nothing. It gets its own delivery path
+        // instead, which writes to the session's pty rather than to a pane
+        // (see `performHolderSend`).
         //
-        // It sits ahead of the `--verify` rails deliberately: those decline an
-        // act that is otherwise possible, and on this transport no send is
-        // possible at all, so the transport is the reason the caller needs. It
-        // sits AFTER `beginActuation` for the reason the first refusal line
-        // above gives — a well-formed act the daemon declined gets a row and a
-        // refusal outcome, unlike a malformed payload that names no act.
-        //
-        // Refused rather than served: Milestone A wires no input path for the
-        // holder transport. `HolderReader.write` exists and has no caller
-        // outside the registry; the daemon can render a holder session's screen
-        // and report its child's last known status, and it cannot type into
-        // one.
+        // It sits ahead of the `--verify` rails because the holder path
+        // declines `--verify` for a *different* reason than they do — no
+        // delivery observation exists for this transport at all, rather than a
+        // flag being off — and a caller needs to be told which. It sits AFTER
+        // `beginActuation` for the reason the first refusal line above gives:
+        // a well-formed act the daemon declined gets a row and a refusal
+        // outcome, unlike a malformed payload that names no act.
         if terminal.transport == .holder {
-            let message = Self.holderSendRefusal(terminalID: terminal.id)
-            await finishActuation(actuationID, .refused(.notEligible), error: message)
-            return RPCResponse(error: message)
+            return await performHolderSend(
+                payload: payload, terminal: terminal, actuationID: actuationID,
+                actor: actor, envelope: envelope)
         }
 
         // ─── The second refusal line: a well-formed act the daemon declines ───
@@ -3136,6 +3159,106 @@ extension RPCRouter {
                 submit: payload.recordedSubmit ?? false)
         }
         return .ok()
+    }
+
+    /// Deliver a `terminal.send` to a holder-backed session, by writing to the
+    /// session's pty rather than to a tmux pane.
+    ///
+    /// The tmux arm above and this one differ in every mechanic and agree on
+    /// everything the caller can see: the same shape validation, the same
+    /// actuation row, the same dispatch envelope, the same per-terminal
+    /// serializer lane (this runs inside it). What changes is the destination —
+    /// `HolderInjectionCourier` routes by whether a viewer owns the pty — and
+    /// three things this transport cannot do yet, each refused by name rather
+    /// than by "the holder transport", so a caller learns which capability is
+    /// missing:
+    ///
+    /// - `--verify` has no delivery observation here (the verifier re-reads a
+    ///   tmux pane, and there is none).
+    /// - `--keys` has no named-key → bytes mapping here (tmux owns that table).
+    /// - A daemon with no courier has no input path at all.
+    ///
+    /// **The whole send is one message.** The body, its envelope and the
+    /// carriage return that submits it are composed here and handed to the
+    /// courier in a single call, because a payload split across two writes can
+    /// be split across a routing decision — and because `HolderReader.write`
+    /// completes partial writes in a loop, so one call is one uninterrupted
+    /// write. That is a deliberate divergence from the tmux arm, which pastes
+    /// the body and presses Enter as two separate acts.
+    ///
+    /// The cost of that divergence is worth naming: the tmux arm wraps the
+    /// body in an *explicit* bracketed paste so a payload larger than the pty
+    /// buffer cannot have its trailing Enter absorbed by a TUI's paste-burst
+    /// detection. This arm cannot do the same, because the wrappers are correct
+    /// only when the child has bracketed-paste mode on and the daemon's holder
+    /// emulator does not expose that mode to callers. So a very large `--text
+    /// --submit` here can leave its Enter unpressed. Exposing the mode from the
+    /// emulator is what closes it.
+    private func performHolderSend(
+        payload: TerminalSendPayload, terminal: Terminal, actuationID: String,
+        actor: ActuationActor?, envelope: DispatchEnvelopeDisposition
+    ) async -> RPCResponse {
+        guard let courier = holderInjectionCourier else {
+            return await refuseHolderSend(
+                actuationID, Self.holderInputUnavailable(terminalID: terminal.id))
+        }
+        if payload.isVerifyArmed {
+            return await refuseHolderSend(
+                actuationID, Self.holderVerifyRefusal(terminalID: terminal.id))
+        }
+        let text: String
+        let submit: Bool
+        switch payload {
+        case .text(let body, let submitting, _):
+            text = body
+            submit = submitting
+        case .keys:
+            return await refuseHolderSend(
+                actuationID, Self.holderKeysRefusal(terminalID: terminal.id))
+        }
+
+        // Same envelope rule as the tmux arm, and for the same reasons — see
+        // the long comment there. Empty text stays empty: `--text "" --submit`
+        // is a real way to press Enter and must not start pasting a tag.
+        var message = Data()
+        if !text.isEmpty {
+            let composed = envelope == .attached && Self.carriesDispatchEnvelope(terminal)
+                ? Self.dispatchEnvelope(
+                    id: actuationID, from: (actor ?? .anonymous).dispatchLabel) + "\n" + text
+                : text
+            message.append(Data(composed.utf8))
+        }
+        // Carriage return, not newline: this is what a terminal delivers when
+        // Return is pressed, and what tmux's `send-keys Enter` sends.
+        if submit { message.append(0x0d) }
+
+        guard !message.isEmpty else {
+            // `--text ""` with no `--submit`: a well-formed act that names
+            // nothing to write. The tmux arm reaches the same outcome by
+            // skipping both of its sub-steps.
+            await finishActuation(actuationID, .dispatched)
+            return .ok()
+        }
+
+        switch await courier.deliver(terminalID: terminal.id, bytes: message) {
+        case .viewerWrote, .daemonWrote:
+            await finishActuation(actuationID, .dispatched)
+            return .ok()
+        case .notDelivered(let reason):
+            // The transport, not a decision: the daemon tried to write and
+            // could not. Classified as such so the record does not read like a
+            // rail that declined.
+            await finishActuation(actuationID, .transportFailed, error: reason)
+            return RPCResponse(error: reason)
+        }
+    }
+
+    /// Close a holder send that never touched the transport. One helper because
+    /// all three refusals are the same act: record a refusal against the row
+    /// this send opened, and hand the caller the same words.
+    private func refuseHolderSend(_ actuationID: String, _ message: String) async -> RPCResponse {
+        await finishActuation(actuationID, .refused(.notEligible), error: message)
+        return RPCResponse(error: message)
     }
 
     // MARK: - The pane consultation, and the verifier's re-delivery
@@ -3445,8 +3568,12 @@ extension RPCRouter {
             // this is a fan-out over every terminal on a resize-debounce tick,
             // and a session nothing has adopted has no grid to reshape.
             if terminal.transport == .holder {
-                await holderRegistry?.reader(for: terminal.id)?
-                    .resize(columns: params.cols, rows: params.rows)
+                // Through the same rule as `pane.resize`, not straight to the
+                // reader: a session whose descriptor has been vended to a viewer
+                // is the viewer's to size, and this fan-out reaches one in the
+                // state where the daemon still holds a suspended reader for it.
+                await holderRegistry?.applyViewerResize(
+                    terminalID: terminal.id, columns: params.cols, rows: params.rows)
                 continue
             }
             try? await tmux.resizeWindow(

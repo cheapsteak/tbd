@@ -131,6 +131,13 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.gcRetainedTranscriptsEnabledDefault`, never through
     /// `?? false`.
     var gc_retained_transcripts_enabled: Bool?
+    /// Gate for the reconcile arm that judges holder-backed session rows.
+    /// **Genuinely tri-state**, same shape as `gc_holder_rendezvous_enabled`:
+    /// the `20260903193500_config_holder_row_reconcile` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.holderRowReconcileEnabledDefault`, never through
+    /// `?? false`.
+    var holder_row_reconcile_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -195,6 +202,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter gcRetainedTranscriptsDefault: and truly the last, for
     ///   `gc_retained_transcripts_enabled` — the retained-transcript GC leg's
     ///   soak gate.
+    /// - Parameter holderRowReconcileDefault: same shape again, for
+    ///   `holder_row_reconcile_enabled` — the holder row sweep's soak gate,
+    ///   which is a separate opt-in from both because it deletes database rows
+    ///   rather than files or processes.
     /// - Parameter updateModeDefault: and truly, finally the last, for
     ///   `update_mode` — the only one of these that is not a Bool, so the
     ///   parameter proves both properties at once: a NULL row follows a changed
@@ -214,6 +225,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         reapHolderChildrenDefault: Bool = Config.reapHolderChildrenEnabledDefault,
         remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault,
         gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault,
+        holderRowReconcileDefault: Bool = Config.holderRowReconcileEnabledDefault,
         updateModeDefault: UpdateMode = Config.updateModeDefault
     ) -> Config {
         Config(
@@ -290,6 +302,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // gate — NOT `?? false`.
             gcRetainedTranscriptsEnabled:
                 gc_retained_transcripts_enabled ?? gcRetainedTranscriptsDefault,
+            // Once more, for the holder row sweep's gate —
+            // NOT `?? false`.
+            holderRowReconcileEnabled:
+                holder_row_reconcile_enabled ?? holderRowReconcileDefault,
             // Same reasoning once more, for the update mode — NOT `?? .off`.
             // The `flatMap` covers the second way a value can be absent: a
             // string no `UpdateMode` case matches is as unusable as NULL, so it
@@ -793,6 +809,22 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_retained_transcripts_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the holder row sweep's gate (default OFF, soaking) — the
+    /// reconcile arm that deletes a session row whose holder is gone. Separate
+    /// from `setReapHolderChildrenEnabled` and `setGCRowlessHoldersEnabled` on
+    /// purpose: those signal processes, this one destroys database rows, and
+    /// enabling one must never silently enable another. The column is written
+    /// on every call, because writing either value is the explicit gesture that
+    /// lifts it out of NULL forever after.
+    public func setHolderRowReconcileEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET holder_row_reconcile_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

@@ -67,14 +67,22 @@ struct HolderSpawnResult: Sendable {
 /// **Who reclaims a holder is not answered here.** The holder is spawned as a
 /// direct child of the daemon, so a daemon that outlives it must reap its exit
 /// status, and a holder orphaned by a daemon crash is reclaimed by nothing
-/// today. Both belong to the reconcilers Milestone B adds. Two of the three now
+/// today. Both belong to the reconcilers Milestone B adds, and all three now
 /// exist — the `OrphanGC` rendezvous sweep (`HolderRendezvousCollector`, gated
 /// on `gcHolderRendezvousEnabled`) unlinks the files a dead holder left behind,
-/// and `AgentReaper.sweepHolderChildren` (gated on `reapHolderChildrenEnabled`)
-/// kills the **job** a dead holder left running. The third, the
-/// `WorktreeLifecycle+Reconcile` holder inventory that reconciles the *rows*
-/// themselves, is still outstanding; until it lands the flag stays off outside
-/// a development machine.
+/// `AgentReaper.sweepHolderChildren` (gated on `reapHolderChildrenEnabled`)
+/// kills the **job** a dead holder left running, and the
+/// `WorktreeLifecycle+Reconcile` holder inventory
+/// (`holderRowVerdict(for:)`) parks or deletes the *row* whose holder is gone.
+/// What none of them reclaims is a row-less holder's job after the holder has
+/// died. `RowlessHolderCollector` recovers the child pid from the holder's own
+/// handshake, so it reaches only a holder still alive enough to answer one;
+/// `HolderRendezvousCollector` unlinks that dead holder's files and signals
+/// nothing; and both `AgentReaper.sweepHolderChildren` and the reconcile arm
+/// read session rows, which is the half by definition missing. The job
+/// re-parents to launchd and no reconciler can name it. This is a disclosed
+/// gap, stated the same way in `AgentReaper.sweepHolderChildren`; the two must
+/// stay in agreement.
 struct HolderSpawner {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "holder")
 

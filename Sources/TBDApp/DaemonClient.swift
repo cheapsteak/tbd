@@ -198,7 +198,11 @@ actor DaemonClient {
 
     /// Create a connected Unix domain socket to the daemon.
     /// Caller is responsible for closing the returned file descriptor.
-    private nonisolated func makeConnectedSocket() throws -> Int32 {
+    ///
+    /// Internal rather than private so `DaemonClientSocketTests` can call it
+    /// against a listener of its own and read the flags back off the returned
+    /// descriptor. The fd otherwise never escapes this file.
+    nonisolated func makeConnectedSocket() throws -> Int32 {
         guard FileManager.default.fileExists(atPath: socketPath) else {
             throw DaemonClientError.daemonNotRunning
         }
@@ -207,6 +211,17 @@ actor DaemonClient {
         guard fd >= 0 else {
             throw DaemonClientError.connectionFailed("Could not create socket")
         }
+        // Close-on-exec, set here rather than after `connect` because `connect`
+        // can block and this app forks throughout: every local-PTY panel is a
+        // SwiftTerm `forkpty` whose child path is `chdir` then `execve` with no
+        // close sweep, and the git and PR-status tools the app shells out to
+        // are more. A child that inherits this socket holds the daemon's end of
+        // it open for as long as it lives, and the daemon's only app-death
+        // trigger is EOF on the app's sidecar connection — there is no periodic
+        // liveness sweep — so an inherited copy delays seizing a crashed app's
+        // sessions until the last one exits. The same defect was fixed on the
+        // daemon's end of this connection; this is the app's end of it.
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -242,6 +257,25 @@ actor DaemonClient {
         // can re-check Task cancellation and overall deadlines.
         var recvTimeout = timeval(tv_sec: 1, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, socklen_t(MemoryLayout<timeval>.size))
+
+        // A daemon that dies (or is restarted) between this `connect` and the
+        // `Darwin.send` every caller does next leaves the write landing on a
+        // closed peer, which raises a process-killing SIGPIPE instead of the
+        // `EPIPE`/short-send that `sendRaw` and `subscribe` already report as
+        // `sendFailed`. Per-socket, not the daemon's process-wide
+        // `signal(SIGPIPE, SIG_IGN)`: see `SocketSIGPIPE` for why the app in
+        // particular must not set that disposition (SwiftTerm's `forkpty`
+        // children would inherit it).
+        //
+        // Covered by `DaemonClientSocketTests.connectedSocketSuppressesSIGPIPE`,
+        // which stands up a listener on a socket path of its own and reads the
+        // option back off the descriptor this returns. Deleting this line
+        // reddens that row.
+        //
+        // So if you are refactoring this function: the symptom of losing this
+        // line is TBDApp vanishing on every `scripts/restart.sh`, which will
+        // read as an unrelated crash. Keep it.
+        SocketSIGPIPE.suppress(on: fd)
 
         return fd
     }
@@ -1380,15 +1414,22 @@ actor DaemonClient {
         )
     }
 
-    /// Request a control-mode attach for one pane; the fd arrives separately
-    /// on the sidecar (see `openAttach`).
+    /// Request an attach for one pane or one holder-backed session; the fd
+    /// arrives separately on the sidecar (see `openAttach`).
+    ///
+    /// `terminalID` is what names a HOLDER session: its `paneID`, `windowID`
+    /// and server are the empty string by construction, so nothing else in
+    /// these params can identify the row the daemon must branch on. Nil (the
+    /// default) is the control-mode caller, which names its pane.
     func attachRequest(
-        worktreeID: UUID, paneID: String, windowID: String, attachID: UUID
+        worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
+        terminalID: UUID? = nil
     ) async throws -> AttachRequestResult {
         try await callAsync(
             method: RPCMethod.attachRequest,
             params: AttachRequestParams(
-                worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID),
+                worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID,
+                terminalID: terminalID),
             resultType: AttachRequestResult.self
         )
     }
@@ -1442,11 +1483,19 @@ actor DaemonClient {
     /// pane — a stale ready (superseded by a faster re-attach) must not
     /// pause/unpause the pane out from under the successor's sequence; nil
     /// (unknown generation) acks unchecked, as before.
-    func attachReady(worktreeID: UUID, paneID: String, generation: UInt64? = nil) async throws {
+    ///
+    /// `terminalID` names a holder-backed session the way it does on
+    /// `attachRequest`, and a holder ack is REFUSED without a generation —
+    /// there would be nothing to check the ack against, and confirming the
+    /// wrong attach would release a reader a live attach depends on.
+    func attachReady(
+        worktreeID: UUID, paneID: String, generation: UInt64? = nil, terminalID: UUID? = nil
+    ) async throws {
         try await callVoidAsync(
             method: RPCMethod.attachReady,
             params: AttachReadyParams(
-                worktreeID: worktreeID, paneID: paneID, generation: generation)
+                worktreeID: worktreeID, paneID: paneID, generation: generation,
+                terminalID: terminalID)
         )
     }
 
@@ -1455,10 +1504,21 @@ actor DaemonClient {
     /// from `openAttach` so the daemon detaches generation-checked — a stale
     /// detach from a closing view must not kill a newer attach's sink; nil
     /// (unknown generation) detaches unconditionally, as before.
-    func paneDetach(worktreeID: UUID, paneID: String, generation: UInt64? = nil) async throws {
+    ///
+    /// `terminalID` names a holder-backed session, which has no pipe and no
+    /// pane: there the detach is a *handback* — the daemon takes the pty back
+    /// and puts a drain on it — and `snapshotPreamble` is the screen the viewer
+    /// was showing, so the session's model is not left frozen at the instant
+    /// the viewer arrived. Both are nil on the control-mode path.
+    func paneDetach(
+        worktreeID: UUID, paneID: String, generation: UInt64? = nil,
+        terminalID: UUID? = nil, snapshotPreamble: Data? = nil
+    ) async throws {
         try await callVoidAsync(
             method: RPCMethod.paneDetach,
-            params: PaneDetachParams(worktreeID: worktreeID, paneID: paneID, generation: generation)
+            params: PaneDetachParams(
+                worktreeID: worktreeID, paneID: paneID, generation: generation,
+                terminalID: terminalID, snapshotPreamble: snapshotPreamble)
         )
     }
 
@@ -1467,11 +1527,16 @@ actor DaemonClient {
     /// suppression (addendum §4). Fire-and-forget from the app's view: errors
     /// are dropped because the resize is re-fired repeatedly and the next tick
     /// self-heals.
-    func paneResize(worktreeID: UUID, windowID: String, cols: Int, rows: Int) async throws {
+    /// `terminalID` names a holder-backed session, which has no window to key
+    /// on; it is nil for the control-mode path, which does.
+    func paneResize(
+        worktreeID: UUID, windowID: String, cols: Int, rows: Int, terminalID: UUID? = nil
+    ) async throws {
         try await callVoidAsync(
             method: RPCMethod.paneResize,
             params: PaneResizeParams(
-                worktreeID: worktreeID, windowID: windowID, cols: cols, rows: rows)
+                worktreeID: worktreeID, windowID: windowID, cols: cols, rows: rows,
+                terminalID: terminalID)
         )
     }
 

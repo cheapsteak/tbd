@@ -41,8 +41,25 @@ final class FDSidecarClient: @unchecked Sendable {
     /// caller's thread (SwiftTerm calls it on the main thread) and serializes
     /// writes so two frames never interleave on the socket.
     private let sendQueue = DispatchQueue(label: "fd-sidecar-send")
+    /// Sink for daemon → app `.injection` frames: a daemon-originated write
+    /// for a holder-backed session whose pty this app owns. Guarded by `lock`
+    /// because the receive thread reads it per frame while the main actor
+    /// installs it.
+    ///
+    /// When nil, an injection is answered `written: false` rather than
+    /// dropped — an app with no handler is one that will never write those
+    /// bytes, and saying so immediately is what lets the daemon write them
+    /// itself instead of waiting out its deadline.
+    private var injectionHandler: (@Sendable (SidecarInjectionHeader, Data) -> Void)?
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return socketFD >= 0 }
+
+    /// Install the daemon → app injection handler. The handler is read per
+    /// frame rather than captured per connection, so installing it once at
+    /// startup survives every sidecar reconnect.
+    func setOnInjection(_ handler: (@Sendable (SidecarInjectionHeader, Data) -> Void)?) {
+        lock.lock(); injectionHandler = handler; lock.unlock()
+    }
 
     /// Connect to `path` and start the receive thread. Idempotent.
     func connect(path: String) throws {
@@ -51,6 +68,11 @@ final class FDSidecarClient: @unchecked Sendable {
         lock.unlock()
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         if fd < 0 { throw FDSidecarError.connectFailed(errno) }
+        // Close-on-exec twice over: here, because `connect` below can block and
+        // this app forks throughout that window, and again in `adopt` for every
+        // socket that arrives already connected. See `adopt` for what an
+        // inherited copy costs.
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let sunPathSize = MemoryLayout.size(ofValue: addr.sun_path)
@@ -79,6 +101,29 @@ final class FDSidecarClient: @unchecked Sendable {
             Darwin.close(fd)
             return
         }
+        // Every `FDChannel.sendData` in this file writes to this fd, and the
+        // daemon can hang up while a frame is still queued on `sendQueue` —
+        // the `fd >= 0` guard passes because the receive loop has not torn
+        // down yet, and the write lands on a closed peer. `SO_NOSIGPIPE` is
+        // what turns that into the `EPIPE` those `catch` blocks log instead of
+        // a signal that kills the app. Set here rather than in `connect(path:)`
+        // because `adopt` is the one funnel every socket passes through
+        // (`connect` calls it, and so do the tests' `socketpair` ends), and
+        // per-socket rather than process-wide for the fork-inheritance reason
+        // spelled out on `SocketSIGPIPE`.
+        SocketSIGPIPE.suppress(on: fd)
+        // Close-on-exec, at the same funnel and for a failure with the same
+        // shape. This is the connection whose EOF is the **only** thing that
+        // tells the daemon this app died — there is no periodic liveness sweep
+        // — so every copy of it has to be gone before a crashed app's sessions
+        // can be seized. The app forks constantly and closes nothing on the
+        // way: SwiftTerm's `forkpty` path is `chdir` then `execve` with no
+        // close sweep, and one is started for every tmux-backed panel, so
+        // without the flag each viewer holds a copy of this socket and the
+        // daemon's death notice waits on the last of them. The daemon already
+        // sets it on its end of this same connection
+        // (`FDVendingServer`); this is the app's end.
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         socketFD = fd
         lock.unlock()
 
@@ -114,7 +159,21 @@ final class FDSidecarClient: @unchecked Sendable {
     /// write on `sendQueue`. Errors — including a disconnected socket — are
     /// logged and dropped; the receive loop's EOF path handles daemon death and
     /// Phase B owns reconnect.
-    func sendInput(worktreeID: UUID, paneID: String, bytes: Data) {
+    ///
+    /// Returns whether the frame was **handed to `sendQueue`** — `false` for
+    /// either refusal that is knowable at call time (over-cap payload, encode
+    /// failure). It is deliberately not a delivery receipt: the socket write
+    /// happens later on `sendQueue`, so a disconnected socket or a
+    /// `FDChannel.sendData` throw is logged there and cannot be reported to
+    /// this caller. `TerminalPanelView.performOutgoingWrite` narrows that
+    /// residue by checking `isConnected` before calling, and the daemon's
+    /// fail-open injection deadline is what covers the rest — see the
+    /// `.sidecarInput` arm's comment for the whole argument.
+    ///
+    /// `@discardableResult` because the keystroke path is fire-and-forget by
+    /// design and the tests that exercise the side effect ignore the value.
+    @discardableResult
+    func sendInput(worktreeID: UUID, paneID: String, bytes: Data) -> Bool {
         // Defense-in-depth cap (R6-H3), mirroring `sendPaste`'s guard: a
         // single `.input` frame that couldn't fit the daemon scanner's 4 MiB
         // hard cap would desync the ONE app-wide sidecar connection and kill
@@ -127,7 +186,7 @@ final class FDSidecarClient: @unchecked Sendable {
                 sidecar: sendInput payload \(bytes.count, privacy: .public) bytes exceeds cap \
                 \(SidecarFrameCodec.maxPasteBytes, privacy: .public), dropping (input this large is a routing bug)
                 """)
-            return
+            return false
         }
         let frame: Data
         do {
@@ -135,7 +194,7 @@ final class FDSidecarClient: @unchecked Sendable {
                 header: SidecarInputHeader(worktreeID: worktreeID, paneID: paneID), bytes: bytes)
         } catch {
             logger.error("sidecar: failed to encode input frame, dropping \(bytes.count, privacy: .public) bytes")
-            return
+            return false
         }
         sendQueue.async { [weak self] in
             guard let self else { return }
@@ -150,6 +209,7 @@ final class FDSidecarClient: @unchecked Sendable {
                 self.logger.error("sidecar: input send failed: \(String(describing: error), privacy: .public)")
             }
         }
+        return true
     }
 
     /// Send bulk paste `bytes` for a pane to the daemon as a `.paste` frame (the
@@ -189,6 +249,52 @@ final class FDSidecarClient: @unchecked Sendable {
         }
     }
 
+    /// Answer one daemon injection: whether this app wrote its bytes.
+    ///
+    /// Same inline-encode + `sendQueue` shape as `sendInput`, so an ack and a
+    /// keystroke stay FIFO-ordered on the wire. Deliberately **not** gated on
+    /// `isConnected`: an ack is a report the daemon is already waiting on with
+    /// a deadline, so the cheapest correct thing to do with a dead socket is
+    /// try and let the write block log its own failure — refusing early would
+    /// only reach the same outcome (the daemon's fallback) one main-actor
+    /// frame sooner, and there is no caller here to act on the difference.
+    ///
+    /// Returns whether the frame was handed to `sendQueue`; `false` only for an
+    /// encode failure, which cannot happen for two UUIDs and a Bool and is
+    /// reported rather than swallowed on principle.
+    @discardableResult
+    func sendInjectionAck(injectionID: UUID, written: Bool) -> Bool {
+        let frame: Data
+        do {
+            frame = try SidecarFrameCodec.encodeInjectionAck(
+                SidecarInjectionAck(injectionID: injectionID, written: written))
+        } catch {
+            logger.error("""
+                sidecar: failed to encode injection ack for \
+                \(injectionID.uuidString, privacy: .public), dropping
+                """)
+            return false
+        }
+        sendQueue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let fd = self.socketFD; self.lock.unlock()
+            guard fd >= 0 else {
+                self.logger.error("""
+                    sidecar: injection ack for \
+                    \(injectionID.uuidString, privacy: .public) while disconnected, dropping
+                    """)
+                return
+            }
+            do {
+                try FDChannel.sendData(frame, over: fd)
+            } catch {
+                self.logger.error(
+                    "sidecar: injection ack send failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+        return true
+    }
+
     private func receiveLoop(_ fd: Int32) {
         let scanner = SidecarFrameScanner()
         // FDs arrive in frame order (SCM_RIGHTS ancillary is delivered with the
@@ -203,6 +309,28 @@ final class FDSidecarClient: @unchecked Sendable {
             } catch {
                 break   // EOF or read error
             }
+            // **Close-on-exec, the moment they arrive** — here, not in the
+            // waiter, and not in `FDChannel`. A descriptor received over
+            // `SCM_RIGHTS` is inheritable unless somebody says otherwise, and
+            // darwin has no `MSG_CMSG_CLOEXEC` to ask for anything else on the
+            // `recvmsg` itself. What comes through here is a session's pty
+            // master — vended for a holder attach (`HolderAttachClient`) or a
+            // control-mode attach (`DaemonClient.openAttach`), both of which
+            // register through `expectFD` and are settled by this one loop —
+            // and it lives as long as the session does. This app spawns
+            // children constantly: every local-PTY panel is a `forkpty`, and
+            // the git and PR-status tools it shells out to are more. One such
+            // child inheriting a copy holds the session open for as long as it
+            // lives: the far end never sees EOF, death detection stops working,
+            // and the handback never completes.
+            //
+            // Stamping it in the receive loop rather than at each waiter is
+            // what makes the guarantee structural: it covers the routing-key
+            // demux, the stale-vend path that just closes the fd, the leftovers
+            // drained on disconnect, and any waiter added later — none of which
+            // can forget. `HolderClient.readMoreFrames` does the same at the
+            // daemon's receive chokepoint, for the same reason.
+            for descriptor in message.fds { _ = fcntl(descriptor, F_SETFD, FD_CLOEXEC) }
             pendingFDs.append(contentsOf: message.fds)
             // Process the frames `append` returned FIRST, THEN check isDesynced
             // and break. A desync-tripping tail can arrive in the same read as
@@ -220,9 +348,11 @@ final class FDSidecarClient: @unchecked Sendable {
                 case .fdVend:
                     let rxFD: Int32? = pendingFDs.isEmpty ? nil : pendingFDs.removeFirst()
                     handleFDVend(headerPayload: frame.payload, fd: rxFD)
-                case .input, .paste:
-                    // The daemon must never send input/paste frames — those
-                    // directions are app → daemon only.
+                case .injection:
+                    handleInjection(payload: frame.payload)
+                case .input, .paste, .injectionAck:
+                    // The daemon must never send input, paste or ack frames —
+                    // those directions are app → daemon only.
                     logger.error("sidecar: received \(frame.type, privacy: .public) frame from daemon (protocol violation), dropping")
                 }
             }
@@ -247,6 +377,31 @@ final class FDSidecarClient: @unchecked Sendable {
         for leftover in pendingFDs { Darwin.close(leftover) }   // fds with no completed frame
         for (_, waiter) in pending { waiter(nil, FDSidecarError.disconnected) }
         logger.info("sidecar receive loop exited")
+    }
+
+    /// Hand a completed `.injection` frame to the installed handler, or answer
+    /// it `written: false` when there is none.
+    ///
+    /// The answer for a missing handler is sent from here rather than left to
+    /// the deadline on purpose: "no handler" is a *knowable, synchronous*
+    /// refusal, and reporting those truthfully is what makes `false`
+    /// trustworthy enough for the daemon to act on immediately.
+    private func handleInjection(payload: Data) {
+        guard let (header, bytes) = try? SidecarFrameCodec.decodeInjection(payload: payload) else {
+            logger.error("sidecar: undecodable injection frame, dropping")
+            return
+        }
+        lock.lock(); let handler = injectionHandler; lock.unlock()
+        guard let handler else {
+            logger.error("""
+                sidecar: injection for terminal \
+                \(header.terminalID.uuidString, privacy: .public) arrived with no handler \
+                installed; answering it unwritten
+                """)
+            sendInjectionAck(injectionID: header.injectionID, written: false)
+            return
+        }
+        handler(header, bytes)
     }
 
     /// Route a completed `.fdVend` frame's paired fd to its waiter, or close it.

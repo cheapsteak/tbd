@@ -310,6 +310,7 @@ public enum RPCMethod {
     /// opt-in, and the supported way to turn the soak on. Reading needs no
     /// method of its own: `config.get` already carries the resolved value.
     public static let configSetRemoteDeleteEnabled = "config.setRemoteDeleteEnabled"
+    public static let configSetHolderRowReconcileEnabled = "config.setHolderRowReconcileEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -3251,6 +3252,17 @@ public struct ConfigSetRemoteDeleteEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setHolderRowReconcileEnabled` — the gate on the reconcile
+/// arm that judges holder-backed session rows and deletes the ones nothing can
+/// reach any more (default OFF during soak). This is how the soak is turned on:
+/// the arm destroys database rows without a user gesture, so leaving it
+/// reachable only by editing the database by hand would make it un-soakable.
+/// Design: `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
+public struct ConfigSetHolderRowReconcileEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setGCOrphanProcessesEnabled` — the gate for the
 /// orphaned-process collector, which reclaims processes that outlived the
 /// worktree they were rooted in (default OFF during soak, on top of the GC
@@ -3317,11 +3329,25 @@ public struct AttachRequestParams: Codable, Sendable {
     /// without the nonce, the superseded attach's dead fd could be delivered
     /// to the fresh attach's waiter if it arrived first).
     public let attachID: UUID
-    public init(worktreeID: UUID, paneID: String, windowID: String, attachID: UUID) {
+    /// The terminal being attached, when the caller knows it.
+    ///
+    /// Load-bearing only for the holder transport, and the reason it exists:
+    /// a holder-backed row has no tmux coordinates at all — its `tmuxServer`,
+    /// `tmuxWindowID` and `tmuxPaneID` are the empty string by construction —
+    /// so `paneID` cannot name the session the way it does on the control-mode
+    /// path. The daemon resolves the row from this and branches on its
+    /// transport. Optional so an older app, which only ever attaches panes,
+    /// still encodes and decodes.
+    public let terminalID: UUID?
+    public init(
+        worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
+        terminalID: UUID? = nil
+    ) {
         self.worktreeID = worktreeID
         self.paneID = paneID
         self.windowID = windowID
         self.attachID = attachID
+        self.terminalID = terminalID
     }
 }
 
@@ -3335,9 +3361,20 @@ public struct AttachRequestResult: Codable, Sendable {
     /// view racing a fresh attach for the same pane — cannot kill the newer
     /// attach's sink. Optional for wire back-compat with older daemons.
     public let generation: UInt64?
-    public init(status: String, generation: UInt64? = nil) {
+    /// The screen that was already on the session, as the escape-sequence
+    /// stream that reconstructs it ("pending" holder attaches only).
+    ///
+    /// It rides the RPC result rather than the vended descriptor because it
+    /// must be fed to the terminal *before* the viewer goes live on that
+    /// descriptor: a preamble interleaved with live output would paint the
+    /// session's past over its present. Nil on every control-mode attach,
+    /// which replays through tmux instead, and defaulted so those callers
+    /// decode a daemon that has never heard of it.
+    public let snapshotPreamble: Data?
+    public init(status: String, generation: UInt64? = nil, snapshotPreamble: Data? = nil) {
         self.status = status
         self.generation = generation
+        self.snapshotPreamble = snapshotPreamble
     }
 }
 
@@ -3355,10 +3392,17 @@ public struct AttachReadyParams: Codable, Sendable {
     /// freeze the pane or resume output into the successor's closed gate.
     /// Optional for wire back-compat; absent → behave as before.
     public let generation: UInt64?
-    public init(worktreeID: UUID, paneID: String, generation: UInt64? = nil) {
+    /// The terminal being acknowledged, when the caller knows it. Present for
+    /// the same reason as on `AttachRequestParams`: a holder row carries no
+    /// pane coordinates, so nothing else in these params names the session.
+    public let terminalID: UUID?
+    public init(
+        worktreeID: UUID, paneID: String, generation: UInt64? = nil, terminalID: UUID? = nil
+    ) {
         self.worktreeID = worktreeID
         self.paneID = paneID
         self.generation = generation
+        self.terminalID = terminalID
     }
 }
 
@@ -3372,10 +3416,30 @@ public struct PaneDetachParams: Codable, Sendable {
     /// generation-checked — a stale detach from a closing view no-ops against
     /// a newer attach's sink. Absent (older app) → unconditional detach.
     public let generation: UInt64?
-    public init(worktreeID: UUID, paneID: String, generation: UInt64? = nil) {
+    /// Present when the panel is holder-backed, and then it — not
+    /// `worktreeID`/`paneID` — is the key the daemon resolves. A holder row
+    /// carries no tmux coordinates at all, so the transport on the row this
+    /// names is the only thing that can discriminate the two paths.
+    public let terminalID: UUID?
+    /// The screen the viewer is handing back, as the byte stream that
+    /// reconstructs it — the mirror of `AttachRequestResult.snapshotPreamble`,
+    /// produced by the same `TerminalSnapshotWriter` in the other direction.
+    ///
+    /// Holder transport only, and it is what keeps the daemon's model of the
+    /// session from being frozen at the instant the viewer arrived: the jiggle
+    /// that follows heals only programs that repaint, so a plain shell would
+    /// otherwise hand back nothing at all. Absent or empty is tolerated — the
+    /// detach still releases the session — and costs exactly the screen.
+    public let snapshotPreamble: Data?
+    public init(
+        worktreeID: UUID, paneID: String, generation: UInt64? = nil,
+        terminalID: UUID? = nil, snapshotPreamble: Data? = nil
+    ) {
         self.worktreeID = worktreeID
         self.paneID = paneID
         self.generation = generation
+        self.terminalID = terminalID
+        self.snapshotPreamble = snapshotPreamble
     }
 }
 
@@ -3388,11 +3452,22 @@ public struct PaneResizeParams: Codable, Sendable {
     public let windowID: String
     public let cols: Int
     public let rows: Int
-    public init(worktreeID: UUID, windowID: String, cols: Int, rows: Int) {
+    /// Present when the panel is holder-backed, and then it — not `windowID` —
+    /// is the key the daemon resolves.
+    ///
+    /// A holder row has no tmux coordinates at all: its `windowID` is the empty
+    /// string, so the window lookup this method was built around resolves
+    /// nothing and the resize is silently dropped. Optional and defaulted so an
+    /// older app's params, which carry no such field, still decode.
+    public let terminalID: UUID?
+    public init(
+        worktreeID: UUID, windowID: String, cols: Int, rows: Int, terminalID: UUID? = nil
+    ) {
         self.worktreeID = worktreeID
         self.windowID = windowID
         self.cols = cols
         self.rows = rows
+        self.terminalID = terminalID
     }
 }
 

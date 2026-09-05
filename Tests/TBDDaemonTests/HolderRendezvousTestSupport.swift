@@ -17,7 +17,13 @@ enum HolderRendezvousFixture {
     /// Returns `nil` on any failure — most often a path over darwin's 104-byte
     /// `sun_path` limit, which is why every suite here roots its sandbox
     /// directly under `/tmp` rather than under `NSTemporaryDirectory()`.
-    static func bind(at path: String, listening: Bool) -> Int32? {
+    ///
+    /// **`backlog` is not decoration.** Nothing here ever calls `accept`, so
+    /// every connection a test opens stays queued, and a queue that fills makes
+    /// the *next* connect fail with `ECONNREFUSED` — which every probe in this
+    /// codebase reads as "the holder is gone". A fixture standing in for a live
+    /// holder therefore needs room for every connection its test will open.
+    static func bind(at path: String, listening: Bool, backlog: Int32 = 1) -> Int32? {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         var addr = sockaddr_un()
@@ -38,7 +44,7 @@ enum HolderRendezvousFixture {
             }
         }
         guard bound == 0 else { close(fd); return nil }
-        if listening { _ = listen(fd, 1) }
+        if listening { _ = listen(fd, backlog) }
         return fd
     }
 

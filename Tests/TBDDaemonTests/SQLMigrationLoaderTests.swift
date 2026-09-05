@@ -502,6 +502,7 @@ import Testing
             "20260902120000_retained_transcript",
             "20260902130000_config_remote_delete",
             "20260902140000_config_gc_retained_transcripts",
+            "20260903193500_config_holder_row_reconcile",
             "20260904172536_config_update_mode",
         ]
         let found = try SQLMigrationLoader.bundled.get()

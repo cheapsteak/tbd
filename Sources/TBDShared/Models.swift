@@ -1572,6 +1572,26 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcRetainedTranscriptsEnabled: Bool
+    /// Gate for the reconcile arm that judges holder-backed session rows — the
+    /// inventory half of
+    /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+    /// "Reconciliation": the holder is gone and the session row is still there.
+    ///
+    /// **Deliberately its own opt-in, not `ptyHolderEnabled`.** That gate must
+    /// be ON for any holder row to exist, so it cannot express the soak
+    /// protocol its two siblings were given one for — transport on, one
+    /// destructive reclaimer on at a time. And it is deliberately neither
+    /// `gcHolderRendezvousEnabled` (which unlinks files) nor
+    /// `reapHolderChildrenEnabled` (which signals processes): this arm deletes
+    /// terminal and tab rows, in a background sweep, with no user gesture.
+    ///
+    /// **Resolved, not stored**, like `gcHolderRendezvousEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `holder_row_reconcile_enabled ?? Config.holderRowReconcileEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var holderRowReconcileEnabled: Bool
     /// The single opt-in for remote peer messaging
     /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
     /// rollout"): publishing a shadow peer for each remote session and carrying
@@ -1724,6 +1744,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// claim — is a change to this constant, with no forcing `UPDATE` migration
     /// and every explicit opt-out left alone.
     public static let gcRetainedTranscriptsEnabledDefault = false
+    /// The shipped default for `holderRowReconcileEnabled`, and the single
+    /// place it lives. The holder row sweep ships off; graduation — after a
+    /// soak in which it never deletes a row whose session turned out to be
+    /// reachable — is a change to this constant, with no forcing `UPDATE`
+    /// migration and every explicit opt-out left alone.
+    public static let holderRowReconcileEnabledDefault = false
     /// The shipped default for `updateMode`, and the single place it lives.
     /// Updating ships off; graduation to `check` — after a soak in which the
     /// notice was accurate and the hourly `ls-remote` cost nothing anyone
@@ -1772,6 +1798,7 @@ public struct Config: Codable, Sendable, Equatable {
                 remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
                 gcRetainedTranscriptsEnabled: Bool =
                     Config.gcRetainedTranscriptsEnabledDefault,
+                holderRowReconcileEnabled: Bool = Config.holderRowReconcileEnabledDefault,
                 updateMode: UpdateMode = Config.updateModeDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
@@ -1813,6 +1840,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.reapHolderChildrenEnabled = reapHolderChildrenEnabled
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
+        self.holderRowReconcileEnabled = holderRowReconcileEnabled
         self.updateMode = updateMode
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
@@ -1931,6 +1959,10 @@ public struct Config: Codable, Sendable, Equatable {
         gcRetainedTranscriptsEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcRetainedTranscriptsEnabled)
             ?? Config.gcRetainedTranscriptsEnabledDefault
+        // And once more, for the holder row sweep's gate.
+        holderRowReconcileEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .holderRowReconcileEnabled)
+            ?? Config.holderRowReconcileEnabledDefault
         // Same shape for the update mode, with one addition: an unrecognised
         // NAME from a newer daemon (a fourth mode) is as unusable as an absent
         // key, so it resolves to the shipped default instead of failing the
