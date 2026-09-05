@@ -305,11 +305,17 @@ enum CodexProfileWriter {
     }
 }
 
-enum CodexExecutableResolutionError: LocalizedError, Equatable {
+// Conforms to `CustomStringConvertible` as well as `LocalizedError`: the RPC
+// router renders thrown errors with `"\(error)"`, which ignores
+// `errorDescription`. Without this, a missing Codex CLI reaches the user as
+// `notFound(searchPath: "…", fallbackPath: "…")` and the remediation steps
+// below are never shown.
+enum CodexExecutableResolutionError: Error, CustomStringConvertible,
+    LocalizedError, Equatable {
     case invalidOverride(environmentKey: String, value: String, reason: String)
     case notFound(searchPath: String, fallbackPath: String)
 
-    var errorDescription: String? {
+    var description: String {
         switch self {
         case .invalidOverride(let environmentKey, let value, let reason):
             return """
@@ -328,6 +334,8 @@ enum CodexExecutableResolutionError: LocalizedError, Equatable {
                 """
         }
     }
+
+    var errorDescription: String? { description }
 }
 
 /// Resolves the Codex CLI before TBD creates a tmux window or terminal row.

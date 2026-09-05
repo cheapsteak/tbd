@@ -4,13 +4,19 @@ import os
 private let codexImportLogger = Logger(
     subsystem: "com.tbd.daemon", category: "codex-session-import")
 
-enum CodexSessionImportError: LocalizedError, Equatable {
+// `RPCRouter.handle` renders a thrown error with `"\(error)"`, which uses
+// `CustomStringConvertible` and ignores `LocalizedError`. A LocalizedError-only
+// enum therefore reaches the user as `appServer("…")` instead of its authored
+// message, so every error type on this path conforms to both — matching
+// `WorktreeLifecycleError`.
+enum CodexSessionImportError: Error, CustomStringConvertible, LocalizedError,
+    Equatable {
     case appServer(String)
     case malformedResponse(String)
     case processExited(Int32)
     case timedOut
 
-    var errorDescription: String? {
+    var description: String {
         switch self {
         case .appServer(let message):
             return "Codex could not import this session: \(message)"
@@ -22,6 +28,8 @@ enum CodexSessionImportError: LocalizedError, Equatable {
             return "Codex did not finish importing the session before the deadline."
         }
     }
+
+    var errorDescription: String? { description }
 }
 
 protocol CodexAppServerConnection: Sendable {
@@ -296,33 +304,64 @@ struct ProcessCodexAppServerTransport: CodexAppServerTransport {
     }
 }
 
-private actor CodexAppServerLineInbox {
+/// Ordered hand-off of app-server lines from the pipe's readability queue to
+/// the awaiting import task.
+///
+/// Lock-guarded rather than an actor on purpose. `yield` must be callable
+/// synchronously from `consume`, because one `availableData` chunk routinely
+/// carries several protocol lines — the import response, `…/import/progress`,
+/// and `…/import/completed` land within roughly 60 ms of each other. Handing
+/// each line to an actor through its own unstructured `Task` imposes no
+/// ordering between those tasks, so under load the `completed` notification
+/// can be delivered ahead of the id-2 response. `expectImportResponse` drops
+/// any line without id 2, so that reordering silently discards the only
+/// notification carrying the thread id and the import can then only time out.
+/// (Measured out of order in roughly 0.5% of 3-line batches under contention.)
+private final class CodexAppServerLineInbox: @unchecked Sendable {
+    private let lock = NSLock()
     private var lines: [Data] = []
     private var waiter: CheckedContinuation<Data, any Error>?
     private var terminalError: (any Error)?
 
     func yield(_ line: Data) {
+        lock.lock()
         if let waiter {
             self.waiter = nil
+            lock.unlock()
             waiter.resume(returning: line)
         } else {
             lines.append(line)
+            lock.unlock()
         }
     }
 
+    /// Keeps the first terminal error: process exit carries a status the
+    /// later `close()` cancellation would otherwise overwrite.
     func finish(_ error: any Error) {
-        terminalError = error
-        if let waiter {
-            self.waiter = nil
-            waiter.resume(throwing: error)
-        }
+        lock.lock()
+        if terminalError == nil { terminalError = error }
+        let waiter = self.waiter
+        self.waiter = nil
+        lock.unlock()
+        waiter?.resume(throwing: error)
     }
 
     func next() async throws -> Data {
-        if !lines.isEmpty { return lines.removeFirst() }
-        if let terminalError { throw terminalError }
-        return try await withCheckedThrowingContinuation { continuation in
-            waiter = continuation
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            // Buffered lines drain before the terminal error, so a response
+            // already on the wire when the server exits is still read.
+            if !lines.isEmpty {
+                let line = lines.removeFirst()
+                lock.unlock()
+                continuation.resume(returning: line)
+            } else if let terminalError {
+                lock.unlock()
+                continuation.resume(throwing: terminalError)
+            } else {
+                waiter = continuation
+                lock.unlock()
+            }
         }
     }
 }
@@ -420,7 +459,7 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
         try? stdinPipe.fileHandleForWriting.close()
-        Task { await inbox.finish(CancellationError()) }
+        inbox.finish(CancellationError())
         if process.isRunning { process.terminate() }
     }
 
@@ -437,8 +476,10 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
             }
             return complete
         }
+        // Yield synchronously and in order. The readability handler is serial,
+        // so this preserves wire order end to end.
         for line in lines {
-            Task { await inbox.yield(line) }
+            inbox.yield(line)
         }
     }
 
@@ -449,6 +490,6 @@ private final class ProcessCodexAppServerConnection: CodexAppServerConnection,
             return previous
         }
         guard !wasClosed else { return }
-        Task { await inbox.finish(CodexSessionImportError.processExited(status)) }
+        inbox.finish(CodexSessionImportError.processExited(status))
     }
 }
