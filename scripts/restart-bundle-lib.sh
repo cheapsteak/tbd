@@ -59,6 +59,16 @@ BUILD_IDENTITY_PATHSPECS=(
 #                  (ShadowPeerHelperProcessSpawner). Missing, a remote lane
 #                  fails to arm with executableMissing.
 #
+# Every product here is all-or-nothing: a helper that fails to compile stops
+# the restart or update the same way a daemon that fails to compile does. That
+# is deliberate. Each helper degrades gracefully at runtime when it is ABSENT,
+# and that graceful path is exactly how a never-built helper went unnoticed;
+# building it as a warning would put the same silent degradation one scroll
+# above the "Daemon ready" line. The holder and peer helper depend on
+# TBDShared and nothing else, and the CLI on TBDShared plus packages the
+# daemon also links, so a helper that fails while the daemon builds is a
+# broken tree, and a broken tree is what a restart should refuse.
+#
 # scripts/restart-bundle-lib.test.sh checks that each name is an executable
 # target in Package.swift, so a rename or typo fails there and not on the next
 # restart.
