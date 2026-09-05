@@ -151,8 +151,15 @@ struct HolderWriteOutboxTests {
         #expect(queue.pendingByteCountForTesting > 0)
 
         // The last slave closes: every further write to the master is EIO,
-        // which is the child having exited.
+        // which is the child having exited. Required rather than assumed —
+        // "dead" and "merely full" are one answer from the panel's side, and
+        // only the first is what the three assertions below are about.
         panel.pty.closeSessionEnd()
+        try #require(panel.pty.ptyRejectsWrites(), """
+            the fixture must actually have produced EIO, or this row is about a \
+            pty that is only full: a session end this process closed stays open \
+            in any child that inherited the descriptor
+            """)
         queue.drain()
 
         #expect(queue.pendingByteCountForTesting == 0)

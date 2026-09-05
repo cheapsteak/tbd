@@ -41,8 +41,25 @@ final class RawPTYPair {
         guard m >= 0, grantpt(m) == 0, unlockpt(m) == 0,
               let name = ptsname(m)
         else { throw Failure.openFailed(errno) }
-        let s = Darwin.open(name, O_RDWR | O_NOCTTY)
+        let s = Darwin.open(name, O_RDWR | O_NOCTTY | O_CLOEXEC)
         guard s >= 0 else { Darwin.close(m); throw Failure.openFailed(errno) }
+        // **Close-on-exec, and the session end is where it is load-bearing.**
+        // Sibling suites in this same process keep long-lived children alive
+        // for the whole run — `QuietIngestTests` holds a `/bin/sleep 120`,
+        // `TerminalTeardownReapTests` its own — and a `fork`/`posix_spawn`
+        // hands a child every descriptor that is not `FD_CLOEXEC`. A child
+        // holding an inherited copy of the session end keeps the line
+        // discipline connected, so `closeSessionEnd()` stops making the master
+        // `EIO`: on a full queue it answers `EAGAIN` instead, which the panel
+        // correctly reads as "refused, still alive", and the EIO row fails with
+        // its remainder still held. Measured against a `/bin/sleep` child
+        // holding the session end: errno 35, and errno 5 on the same write the
+        // moment the child exits. `lsof` on a failing run named eight `sleep`
+        // processes on this pty's slave, all on the fixture's own fd number.
+        // `posix_openpt` takes no `O_CLOEXEC`, so the master needs the `fcntl`;
+        // it matters less (a child holding only the master still sees `EIO`)
+        // but a session pty leaking into every child is worth not doing.
+        _ = fcntl(m, F_SETFD, FD_CLOEXEC)
         // Raw mode is the whole point: the 1,022-byte ceiling binds only with
         // ICANON off. In canonical mode a MiB goes through with no short write
         // and every assertion below passes vacuously.
@@ -134,8 +151,19 @@ final class RawPTYPair {
     /// A deadline that passes throws `DrainTimeout` carrying what was expected
     /// and what actually arrived, so "the remainder never landed" is a named
     /// failure with the observed prefix length in it rather than a hang.
+    ///
+    /// **The default is a hang bound, not a latency budget**, and it is sized
+    /// for the fast parallel pass rather than for an idle machine. A payload
+    /// takes one write-readiness round trip per 1,022 bytes — eight of them for
+    /// an 8 KiB paste — and every one of those goes through a main queue this
+    /// process shares with the whole ~4,700-test population, where the cost of
+    /// a hop is scheduling rather than work. At five seconds CI reached the
+    /// deadline three rounds in (3,066 of 8,205 bytes delivered) with the drain
+    /// behaving exactly as designed. Forty-five seconds matches the house
+    /// wall-clock guards (`Tests/CLAUDE.md`, "Population is the scheduler"),
+    /// and a passing run never spends any of it.
     @MainActor
-    func drainUntil(byteCount: Int, within: Duration = .seconds(5)) async throws -> Data {
+    func drainUntil(byteCount: Int, within: Duration = .seconds(45)) async throws -> Data {
         var out = Data()
         let deadline = ContinuousClock.now.advanced(by: within)
         while out.count < byteCount {
@@ -159,6 +187,27 @@ final class RawPTYPair {
         guard sessionEndIsOpen else { return }
         sessionEndIsOpen = false
         Darwin.close(sessionEnd)
+    }
+
+    /// Whether the pty now rejects writes **outright** — `EIO`, the line
+    /// discipline's report that the last session end is gone — rather than
+    /// merely refusing them for want of room.
+    ///
+    /// A row that closes the session end and then asserts on `EIO` behaviour
+    /// should require this first, because the two states are indistinguishable
+    /// from the panel's side of the queue and only one of them is what such a
+    /// row is about: a session end this process closed can still be open in
+    /// another process — a child that inherited the descriptor — and the tty
+    /// stays connected until that copy goes too. `O_CLOEXEC` above is what
+    /// stops that happening; this is the tripwire if it ever does again.
+    ///
+    /// **Call it only with the queue full**, which is the state every such row
+    /// is already in: the probe is a real one-byte write, and into a live pty
+    /// with room it would land.
+    func ptyRejectsWrites() -> Bool {
+        var probe: UInt8 = 0
+        let written = Darwin.write(ptyFD, &probe, 1)
+        return written < 0 && errno != EAGAIN && errno != EWOULDBLOCK
     }
 
     func close() {
