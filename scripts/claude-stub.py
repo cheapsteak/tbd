@@ -226,8 +226,9 @@ def report(lines: list[str]) -> None:
 class Terminated(Exception):
     """A stop signal arrived with nothing else to hand it to.
 
-    Raised out of the signal handler so the signal unwinds through `main`'s
-    cleanup instead of the interpreter dying where it stands.
+    Raised by `raise_if_stopped` so the signal unwinds through `main`'s
+    cleanup instead of the interpreter dying where it stands. Never raised by
+    the handler itself — see `raise_if_stopped` for why.
     """
 
     def __init__(self, signum: int) -> None:
@@ -244,7 +245,8 @@ class SignalTargets:
     be handed over the same way once the child has a name), because the
     fork may already exist under a name nothing has been handed yet; a
     `--print-env` server stops serving; otherwise nothing is running that can
-    take it, so the signal becomes a `Terminated`.
+    take it, so it is recorded in `unowned_signum` for the next
+    `raise_if_stopped` to turn into a `Terminated`.
     """
 
     def __init__(self) -> None:
@@ -258,13 +260,17 @@ class SignalTargets:
         self.finishing = False
         # A stop signal that arrived during that unwind, kept for the summary.
         self.late_signum: int | None = None
+        # A stop signal that arrived with nothing running that could take it.
+        # The handler only records it; `raise_if_stopped` is what unwinds.
+        self.unowned_signum: int | None = None
 
 
 SIGNAL_TARGETS = SignalTargets()
 # SIGINT is one of these rather than being left to Python's default
 # `KeyboardInterrupt`, so a Ctrl-C gets the same phase-aware treatment as the
-# other two: held off across `mkdtemp`, queued across the spawn, turned into a
-# clean stop while `--print-env` is serving, and swallowed while finishing.
+# other two: recorded and unwound by `raise_if_stopped` before anything is
+# spawned, queued across the spawn, turned into a clean stop while
+# `--print-env` is serving, and swallowed while finishing.
 # Under the default disposition it could land between `mkdtemp` creating the
 # directory and the name reaching `sandbox` (the sandbox then leaks), or
 # between the fork inside `Popen` and the child reaching `SIGNAL_TARGETS`
@@ -316,6 +322,24 @@ def deliver(child: subprocess.Popen, signum: int) -> None:
 
 
 def handle_stop_signal(signum: int, _frame: Any) -> None:
+    """Hand the signal to whatever owns it, and never raise doing it.
+
+    A Python signal handler runs at whatever bytecode boundary the interpreter
+    reaches next, and that boundary is not always a place an exception can
+    travel from. Land it in a weakref callback, a `__del__`, an import lock's
+    release callback — anywhere CPython invokes Python and discards the error
+    — and the exception is printed as an `Exception ignored …` line and
+    dropped: the stop signal is then gone for good, and the wrapper goes on
+    to spawn `claude` and wait on it forever. Land it inside `threading`'s
+    own locking and it corrupts the lock's bookkeeping instead
+    (`RuntimeError: release unlocked lock` out of `Thread.start`). Both were
+    observed under load.
+
+    So every branch here records or forwards and returns. A signal nobody can
+    take is parked in `unowned_signum`, and `raise_if_stopped` — called from
+    the main path, where an exception is a normal unwind — is what turns it
+    into a `Terminated`.
+    """
     if SIGNAL_TARGETS.finishing:
         # The child has already been waited for and the wrapper is at most a
         # few milliseconds from returning through its own cleanup, so nothing
@@ -338,7 +362,29 @@ def handle_stop_signal(signum: int, _frame: Any) -> None:
     if event is not None:
         event.set()
         return
-    raise Terminated(signum)
+    SIGNAL_TARGETS.unowned_signum = signum
+
+
+def raise_if_stopped() -> None:
+    """Unwind if a stop signal arrived with nothing running that could take it.
+
+    The counterpart to the handler's last branch, and the only place a
+    `Terminated` is born: called between the steps of the run — before the
+    sandbox exists, after it does, once the stub server is up, and under the
+    mask that arms the spawn — so the signal unwinds through `main`'s cleanup
+    from a point the exception can actually leave. See `handle_stop_signal`
+    for what raising from the handler itself costs.
+
+    Nothing between two of these calls blocks for longer than a local file
+    write or a socket bind, so recording rather than raising delays the exit
+    by microseconds; the phases that really do wait — `claude` running, the
+    `--print-env` server serving — each own the signal themselves and never
+    reach here.
+    """
+    signum = SIGNAL_TARGETS.unowned_signum
+    if signum is not None:
+        SIGNAL_TARGETS.unowned_signum = None
+        raise Terminated(signum)
 
 
 def install_signal_handlers() -> dict[int, Any]:
@@ -411,8 +457,20 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
     name — unconditionally, through `forward`, without the foreground-group
     check `deliver` applies to a live child.
     """
-    SIGNAL_TARGETS.pending_signum = None
-    SIGNAL_TARGETS.spawning = True
+    # Arming the queue is atomic against the handler. A signal recorded as
+    # unowned before this point has to unwind here — past it, `spawning` is
+    # set and nothing would ever look at the record again — and a signal
+    # arriving after it has to be queued, not recorded. Held off across the
+    # pair there is no instant that is neither: it lands before the check and
+    # unwinds, or after `spawning` and is queued. The mask is dropped again
+    # well before the fork, so `claude` never inherits a blocked SIGTERM.
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+    try:
+        raise_if_stopped()
+        SIGNAL_TARGETS.pending_signum = None
+        SIGNAL_TARGETS.spawning = True
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
     child: subprocess.Popen | None = None
     try:
         child = subprocess.Popen([binary, *claude_args], env=env)
@@ -492,10 +550,14 @@ def serve_until_signalled(
     stop = threading.Event()
     # Published before the line that announces it, never after: the `serving`
     # line is what a caller waits on to know the server is up, and a signal
-    # arriving between the line and the event would find no target and raise
-    # `Terminated` instead of stopping the server cleanly.
+    # arriving between the line and the event would find no target and be
+    # recorded as unowned, which the check below turns into a `Terminated`
+    # rather than a clean stop.
     SIGNAL_TARGETS.serving_event = stop
     try:
+        # A signal that landed before the event was published was recorded
+        # instead, and `stop.wait()` would wait for one that already came.
+        raise_if_stopped()
         report(["serving; Ctrl-C (or SIGTERM) to stop"])
         stop.wait()
     finally:
@@ -545,7 +607,10 @@ def main(argv: list[str]) -> int:
     The stop-signal handlers go on first, before a single resource exists, so
     any of SIGTERM, SIGHUP and SIGINT arriving anywhere below — building the
     sandbox, binding the stub server, spawning claude — unwinds through the
-    cleanup instead of taking the interpreter's default disposition. Once the
+    cleanup instead of taking the interpreter's default disposition. The
+    handler itself never raises; a signal no phase owns is recorded and the
+    next `raise_if_stopped` below unwinds it, which is what keeps a signal
+    that lands where CPython discards exceptions from being lost. Once the
     run is finishing — the child waited for, the `--print-env` server stopped,
     or the run failing its way into the cleanup below — a stop signal is
     instead recorded and swallowed, so the last few milliseconds of summary and
@@ -579,12 +644,17 @@ def main(argv: list[str]) -> int:
         # a signal would otherwise fail between creation and the `finally`,
         # stranding a fresh temp dir that nothing ever removes.
         try:
+            # Nothing exists yet, so a signal from before this point costs
+            # only the exit status it is about to produce.
+            raise_if_stopped()
             # The one gap a stop signal must not land in: `tempfile.mkdtemp`
-            # creates the directory and only then returns its name, and a
-            # handler runs between the two, so a `Terminated` raised there
-            # would unwind past a sandbox nobody can name, let alone remove.
-            # Held off across the assignment the signal merely stays pending,
-            # and lands the moment the sandbox is reachable by the `finally`.
+            # creates the directory and only then returns its name, so a stop
+            # signal that unwound between the two would leave a sandbox nobody
+            # can name, let alone remove. Held off across the assignment the
+            # signal merely stays pending, and lands the moment the sandbox is
+            # reachable by the `finally` — the same shape as the mask that
+            # arms the spawn in `run_claude`, and belt to the handler's own
+            # rule that it never raises where it stands.
             blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
             try:
                 sandbox = (
@@ -594,10 +664,18 @@ def main(argv: list[str]) -> int:
                 )
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+            # The sandbox is now nameable and the `finally` below will remove
+            # it, so this is the first point a signal can safely unwind from.
+            raise_if_stopped()
             sandbox.mkdir(parents=True, exist_ok=True)
             (sandbox / "tmp").mkdir(exist_ok=True)
             write_config(sandbox, Path.cwd())
+            raise_if_stopped()
             with StubServer(turns, role_turns=routes) as server:
+                # Inside the `with`, so a signal that landed while the server
+                # was binding its socket or starting its thread unwinds
+                # through `__exit__` and stops it.
+                raise_if_stopped()
                 base_url = server.base_url
                 extra_env = parse_env_assignments(args.env)
                 env = build_env(sandbox, base_url, dict(os.environ), extra_env)
@@ -619,6 +697,16 @@ def main(argv: list[str]) -> int:
             # their own way out — that covers the window between the child
             # exiting and control reaching this line.
             SIGNAL_TARGETS.finishing = True
+            # A signal recorded as unowned but never unwound — one that landed
+            # in the instant between a `raise_if_stopped` and the latch that
+            # gives the next phase an owner — is reported with the late ones
+            # rather than vanishing. On the `Terminated` route there is
+            # nothing here to promote: raising cleared the record. Cleared
+            # either way, so a signal this run already answered cannot unwind
+            # the next one in a process that calls `main` more than once.
+            if SIGNAL_TARGETS.late_signum is None:
+                SIGNAL_TARGETS.late_signum = SIGNAL_TARGETS.unowned_signum
+            SIGNAL_TARGETS.unowned_signum = None
             if sandbox is not None:
                 if keep:
                     report([f"sandbox kept at {sandbox}"])

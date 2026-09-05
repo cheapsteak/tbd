@@ -30,6 +30,7 @@ import tempfile
 import time
 import unittest
 from unittest import mock
+import weakref
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -363,6 +364,48 @@ class ConfigTests(unittest.TestCase):
             self.assertTrue(config["projects"][str(project)]["hasTrustDialogAccepted"])
 
 
+def signal_from_a_context_that_ignores_exceptions(signum: int) -> None:
+    """Deliver `signum` to this process from inside a weakref callback.
+
+    The shape the flake takes, made deterministic. A Python signal handler
+    runs at whatever bytecode boundary the interpreter reaches next, and CPython
+    invokes some Python from places that print any exception as an
+    `Exception ignored …` line and carry on — a weakref callback here, an
+    import-lock release callback in the run that was captured off CI. A
+    handler that answers a stop signal by raising is silently disarmed there:
+    the signal is neither delivered nor recorded, and the wrapper walks on to
+    spawn `claude` and wait on it forever.
+
+    A self-directed `os.kill` is delivered before it returns, so the pending
+    handler runs at the loop that follows it — inside the callback, which is
+    the whole point.
+    """
+    class Carrier:
+        pass
+
+    carrier = Carrier()
+
+    def ignored_context(_ref):
+        os.kill(os.getpid(), signum)
+        # A backward jump, so the interpreter certainly reaches a point where
+        # it runs the pending handler before this callback returns.
+        for _ in range(64):
+            pass
+
+    keep_alive = weakref.ref(carrier, ignored_context)
+    # The wrapper's own handlers, so the signal takes the route it takes in a
+    # real run. Installing them is idempotent — inside `main` they are already
+    # on, and restoring puts back exactly what was there — and without them a
+    # unit test that drives the handler directly would be killed by the
+    # default disposition instead.
+    previous = claude_stub.install_signal_handlers()
+    try:
+        del carrier
+    finally:
+        claude_stub.restore_signal_handlers(previous)
+    assert keep_alive() is None, "the weakref callback did not run"
+
+
 class FakeChild:
     """Stands in for `subprocess.Popen`, recording what was sent to it."""
 
@@ -407,11 +450,21 @@ class SignalHandlerStateTests(SignalTargetsFixture):
 
     def test_a_stop_signal_with_nothing_finishing_still_terminates(self):
         # The discriminator for the test above: without `finishing`, a signal
-        # nobody owns is still the `Terminated` that unwinds through cleanup.
-        with self.assertRaises(claude_stub.Terminated) as raised:
-            claude_stub.handle_stop_signal(signal.SIGHUP, None)
-        self.assertEqual(int(signal.SIGHUP), raised.exception.signum)
+        # nobody owns is still the `Terminated` that unwinds through cleanup —
+        # recorded by the handler, raised by the next `raise_if_stopped`,
+        # because a handler that raises where it stands can have its exception
+        # thrown away by the context it landed in.
+        self.assertIsNone(claude_stub.handle_stop_signal(signal.SIGHUP, None))
+        self.assertEqual(int(signal.SIGHUP), self.targets.unowned_signum)
         self.assertIsNone(self.targets.late_signum)
+
+        with self.assertRaises(claude_stub.Terminated) as raised:
+            claude_stub.raise_if_stopped()
+        self.assertEqual(int(signal.SIGHUP), raised.exception.signum)
+        # Consumed: the same signal must not unwind a second run of the
+        # cleanup it already unwound.
+        self.assertIsNone(self.targets.unowned_signum)
+        claude_stub.raise_if_stopped()
 
     def test_a_live_child_is_still_sent_the_signal(self):
         child = FakeChild()
@@ -484,14 +537,79 @@ class SignalHandlerStateTests(SignalTargetsFixture):
     def test_the_old_gap_between_finishing_and_serving_event_would_terminate(self):
         # The discriminator for the test above: with `finishing` still False
         # and `serving_event` already cleared — the reversed order the bug
-        # produced — the handler has nothing to hand the signal to and raises
-        # `Terminated` instead of swallowing it.
+        # produced — the handler has nothing to hand the signal to, so it is
+        # recorded and unwound as `Terminated` rather than swallowed.
         self.targets.serving_event = None
         self.targets.finishing = False
 
+        self.assertIsNone(claude_stub.handle_stop_signal(signal.SIGTERM, None))
+        self.assertIsNone(self.targets.late_signum, "swallowed while running")
         with self.assertRaises(claude_stub.Terminated) as raised:
-            claude_stub.handle_stop_signal(signal.SIGTERM, None)
+            claude_stub.raise_if_stopped()
         self.assertEqual(int(signal.SIGTERM), raised.exception.signum)
+
+    def test_a_stop_signal_is_never_lost_where_exceptions_are_ignored(self):
+        # The flake this file is armed against: on a loaded runner the signal
+        # lands somewhere CPython throws the handler's exception away. Every
+        # branch of the handler has to answer by recording or forwarding and
+        # returning, so none of them can be disarmed that way.
+        for owner, expect in (
+            ("nothing", "unowned"),
+            ("child", "forwarded"),
+            ("spawning", "queued"),
+            ("serving", "event"),
+            ("finishing", "late"),
+        ):
+            with self.subTest(owner=owner):
+                targets = claude_stub.SignalTargets()
+                child = FakeChild()
+                event = claude_stub.threading.Event()
+                if owner == "child":
+                    targets.child = child
+                elif owner == "spawning":
+                    targets.spawning = True
+                elif owner == "serving":
+                    targets.serving_event = event
+                elif owner == "finishing":
+                    targets.finishing = True
+                with mock.patch.object(claude_stub, "SIGNAL_TARGETS", targets), \
+                     mock.patch.object(
+                         claude_stub, "sigint_reached_child_already", return_value=False
+                     ):
+                    signal_from_a_context_that_ignores_exceptions(signal.SIGTERM)
+
+                answered = {
+                    "unowned": targets.unowned_signum == int(signal.SIGTERM),
+                    "forwarded": child.sent == [int(signal.SIGTERM)],
+                    "queued": targets.pending_signum == int(signal.SIGTERM),
+                    "event": event.is_set(),
+                    "late": targets.late_signum == int(signal.SIGTERM),
+                }
+                # The whole shape, not just the expected key: exactly one
+                # branch answers, and none of the others is quietly firing too.
+                self.assertEqual(
+                    {key: key == expect for key in answered},
+                    answered,
+                    f"the {owner} branch answered a signal raised into an "
+                    "exception-ignoring context wrongly",
+                )
+
+    def test_a_recorded_stop_signal_unwinds_instead_of_spawning_claude(self):
+        # The arming in `run_claude` is where a recorded signal stops being
+        # anybody's: past it, `spawning` is set and the record is never read
+        # again. So the check and the latch are one atomic step, and a signal
+        # already recorded must unwind rather than spawn a child that the
+        # wrapper would then wait on forever.
+        self.targets.unowned_signum = int(signal.SIGTERM)
+
+        def popen(*_args, **_kwargs):
+            self.fail("spawned claude with a stop signal already recorded")
+
+        with mock.patch.object(claude_stub.subprocess, "Popen", popen):
+            with self.assertRaises(claude_stub.Terminated) as raised:
+                claude_stub.run_claude("claude", [], {})
+        self.assertEqual(int(signal.SIGTERM), raised.exception.signum)
+        self.assertFalse(self.targets.spawning, "the spawn stayed armed")
 
 
 class LateSignalExitStatusTests(SignalTargetsFixture):
@@ -521,6 +639,95 @@ class LateSignalExitStatusTests(SignalTargetsFixture):
         self.assertEqual(7, status)
         self.assertEqual(int(signal.SIGTERM), self.targets.late_signum)
         self.assertEqual(1, len(created), "the wrapper did not create a temp sandbox")
+        self.assertFalse(Path(created[0]).exists(), "the temp sandbox leaked")
+
+
+class StopSignalDroppedByAnIgnoredContextTests(SignalTargetsFixture):
+    """The window the ubuntu harness job kept failing in, made deterministic.
+
+    On a loaded runner a stop signal sent the instant the sandbox appears can
+    be handled at a bytecode boundary CPython discards exceptions from. A
+    handler that answered by raising was disarmed there: the signal vanished
+    with an `Exception ignored …` line, `main` walked on to spawn `claude`
+    and blocked in `child.wait()` for as long as the child lived — which the
+    five-shot subprocess tests below caught as "the wrapper did not finish
+    30.0s after signal 15" a few percent of the time.
+
+    Nothing here races: the signal is fired from inside a weakref callback at
+    a named point in the run, so the drop is reproduced on every run rather
+    than on a slow one.
+    """
+
+    def _main_with_the_signal_fired_inside(self, target: str, signum: int):
+        """Run `main` with `target` firing a self-signal from an ignored context."""
+        root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        marker = root / "claude-ran.txt"
+        binary = root / "fake-claude.sh"
+        binary.write_text(
+            f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\n", encoding="utf-8"
+        )
+        binary.chmod(0o755)
+        created: list[str] = []
+        real = getattr(claude_stub, target)
+
+        def fire(*args, **kwargs):
+            result = real(*args, **kwargs)
+            signal_from_a_context_that_ignores_exceptions(signum)
+            return result
+
+        # A `SignalTargets` per run, not the fixture's: `main` latches
+        # `finishing` on its way out, and a second run sharing that latch
+        # would have its signal swallowed for a reason this test is not about.
+        with mock.patch.object(
+            claude_stub, "SIGNAL_TARGETS", claude_stub.SignalTargets()
+        ), mock.patch.object(
+            claude_stub.tempfile, "mkdtemp", recording_mkdtemp(created, root)
+        ), mock.patch.object(claude_stub, target, fire):
+            status = claude_stub.main(
+                ["--text", "x", "--claude-binary", str(binary), "--", "-p", "hi"]
+            )
+        self.assertEqual(1, len(created), "the wrapper did not create a temp sandbox")
+        return status, Path(created[0]), marker
+
+    def test_a_dropped_stop_signal_still_stops_the_run(self):
+        # `write_config` puts the signal between the sandbox existing and the
+        # stub server binding; `build_env` puts it after the server is up and
+        # inside the `with`, the last stretch before the spawn is armed. Both
+        # are points the wrapper passes on every run, and neither has anything
+        # that can take a signal, so both are the flake's window.
+        for target in ("write_config", "build_env"):
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                with self.subTest(target=target, signum=int(signum)):
+                    status, sandbox, marker = self._main_with_the_signal_fired_inside(
+                        target, signum
+                    )
+                    self.assertEqual(128 + int(signum), status)
+                    self.assertFalse(sandbox.exists(), "the temp sandbox leaked")
+                    self.assertFalse(
+                        marker.exists(), "claude was spawned after the stop signal"
+                    )
+
+    def test_a_signal_recorded_in_the_last_gap_is_reported_rather_than_lost(self):
+        # The backstop for the instants between a `raise_if_stopped` and the
+        # latch that gives the next phase an owner: nothing will unwind such a
+        # record, so `main`'s cleanup reports it with the late signals instead
+        # of dropping it, and the status stays the one the run produced.
+        root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        created: list[str] = []
+
+        def recorded_then_returned(binary, claude_args, env):
+            claude_stub.SIGNAL_TARGETS.unowned_signum = int(signal.SIGHUP)
+            return 3
+
+        with mock.patch.object(
+            claude_stub.tempfile, "mkdtemp", recording_mkdtemp(created, root)
+        ), mock.patch.object(claude_stub, "run_claude", recorded_then_returned):
+            status = claude_stub.main(["--text", "x", "--", "-p", "hi"])
+
+        self.assertEqual(3, status)
+        self.assertEqual(int(signal.SIGHUP), self.targets.late_signum)
         self.assertFalse(Path(created[0]).exists(), "the temp sandbox leaked")
 
 
