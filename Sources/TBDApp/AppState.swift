@@ -2572,7 +2572,7 @@ final class AppState {
         // Clear any limit hit when the terminal transitions to working
         // (design 2026-09-05 §7.1)
         if delta.activityState == .working {
-            limitHits.removeValue(forKey: delta.terminalID)
+            if limitHits[delta.terminalID] != nil { limitHits.removeValue(forKey: delta.terminalID) }
         }
         guard terminals[delta.worktreeID]![idx].isCodexTerminal else {
             // Claude and shell activity deltas remain raw last-arrival state;
@@ -2657,7 +2657,7 @@ final class AppState {
         }
         terminals[delta.worktreeID]?[idx].profileID = delta.newProfileID
         // Clear any limit hit when the profile changes (design 2026-09-05 §7.1)
-        limitHits.removeValue(forKey: delta.terminalID)
+        if limitHits[delta.terminalID] != nil { limitHits.removeValue(forKey: delta.terminalID) }
     }
 
     /// Hibernate / wake / keep-warm change: update `hibernatedAt`, `keepWarm`,

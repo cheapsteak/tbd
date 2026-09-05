@@ -247,7 +247,7 @@ struct ProfileBalancingRPCTests {
         let response = await router.handle(request)
         let result = try #require(
             response.result.flatMap { try JSONDecoder().decode(
-                ModelProfileListResult.self, from: $0) }
+                ModelProfileListResult.self, from: Data($0.utf8)) }
         )
 
         #expect(result.profileBalancingEnabled == true)
@@ -265,7 +265,7 @@ struct ProfileBalancingRPCTests {
         let response = await router.handle(request)
         let capabilities = try #require(
             response.result.flatMap { try JSONDecoder().decode(
-                DaemonCapabilitiesResult.self, from: $0) }
+                DaemonCapabilitiesResult.self, from: Data($0.utf8)) }
         )
 
         #expect(capabilities.profileBalancingEnabled == true)

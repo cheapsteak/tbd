@@ -26,20 +26,20 @@ struct LimitBannerModelTests {
             profile: ModelProfile(id: limitHit.suggestedProfileID!, name: "Available", kind: .oauth),
             loginIdentity: "user2@example.com",
             usageSnapshot: ProfileUsageSnapshot(
-                organizationID: nil,
-                statusKind: .ok,
-                isOK: true,
                 buckets: [
                     ClaudeUsageLimitBucket(
                         kind: "session",
                         percent: 30,
-                        resetsAt: resetTime,
                         severity: nil,
+                        resetsAt: resetTime,
                         modelDisplayName: nil
                     )
                 ],
                 fetchedAt: now,
-                lastAttemptAt: now
+                lastAttemptAt: now,
+                status: "ok",
+                statusKind: .ok,
+                organizationID: nil
             ),
             liveSessions: 2
         )

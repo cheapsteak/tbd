@@ -18,7 +18,7 @@ import TestSupport
             profiles: db.modelProfiles,
             snapshots: db.oauthUsageSnapshots,
             terminals: db.terminals,
-            loginIdentity: { _ in nil }
+            loginIdentity: { id in "\(id.uuidString)@example.com" }
         )
         self.router = RPCRouter(
             db: db,
@@ -163,7 +163,7 @@ import TestSupport
             profiles: db.modelProfiles,
             snapshots: db.oauthUsageSnapshots,
             terminals: db.terminals,
-            loginIdentity: { _ in nil }
+            loginIdentity: { id in "\(id.uuidString)@example.com" }
         )
         router.profilePoolCandidateSource = source
 
@@ -177,9 +177,8 @@ import TestSupport
     @Test func rotationEligibilityFlagOff() {
         let terminal = Terminal(
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-            kind: .claude, profileID: UUID(), claudeSessionID: UUID(),
-            transport: .tmux, isParked: false, hibernatedAt: nil, suspendedAt: nil,
-            sortOrder: 0, pendingResumeAt: nil)
+            claudeSessionID: UUID().uuidString, suspendedAt: nil, profileID: UUID(),
+            kind: .claude, hibernatedAt: nil, transport: .tmux)
 
         let verdict = RPCRouter.rotationEligibility(terminal: terminal, flagOn: false, suggested: UUID())
         #expect(verdict == .flagOff)
@@ -188,9 +187,8 @@ import TestSupport
     @Test func rotationEligibilityAmbientSession() {
         let terminal = Terminal(
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-            kind: .claude, profileID: nil, claudeSessionID: UUID(),
-            transport: .tmux, isParked: false, hibernatedAt: nil, suspendedAt: nil,
-            sortOrder: 0, pendingResumeAt: nil)
+            claudeSessionID: UUID().uuidString, suspendedAt: nil, profileID: nil,
+            kind: .claude, hibernatedAt: nil, transport: .tmux)
 
         let verdict = RPCRouter.rotationEligibility(terminal: terminal, flagOn: true, suggested: UUID())
         #expect(verdict == .ambient)
@@ -199,9 +197,8 @@ import TestSupport
     @Test func rotationEligibilityParkedSession() {
         let terminal = Terminal(
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-            kind: .claude, profileID: UUID(), claudeSessionID: UUID(),
-            transport: .tmux, isParked: true, hibernatedAt: Date(), suspendedAt: nil,
-            sortOrder: 0, pendingResumeAt: nil)
+            claudeSessionID: UUID().uuidString, suspendedAt: nil, profileID: UUID(),
+            kind: .claude, hibernatedAt: Date(), transport: .tmux)
 
         let verdict = RPCRouter.rotationEligibility(terminal: terminal, flagOn: true, suggested: UUID())
         #expect(verdict == .parked)
@@ -210,9 +207,8 @@ import TestSupport
     @Test func rotationEligibilityHolderTransport() {
         let terminal = Terminal(
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-            kind: .claude, profileID: UUID(), claudeSessionID: UUID(),
-            transport: .holder, isParked: false, hibernatedAt: nil, suspendedAt: nil,
-            sortOrder: 0, pendingResumeAt: nil)
+            claudeSessionID: UUID().uuidString, suspendedAt: nil, profileID: UUID(),
+            kind: .claude, hibernatedAt: nil, transport: .holder)
 
         let verdict = RPCRouter.rotationEligibility(terminal: terminal, flagOn: true, suggested: UUID())
         #expect(verdict == .holderTransport)
@@ -221,9 +217,8 @@ import TestSupport
     @Test func rotationEligibilityNoSessionID() {
         let terminal = Terminal(
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-            kind: .claude, profileID: UUID(), claudeSessionID: nil,
-            transport: .tmux, isParked: false, hibernatedAt: nil, suspendedAt: nil,
-            sortOrder: 0, pendingResumeAt: nil)
+            claudeSessionID: nil, suspendedAt: nil, profileID: UUID(),
+            kind: .claude, hibernatedAt: nil, transport: .tmux)
 
         let verdict = RPCRouter.rotationEligibility(terminal: terminal, flagOn: true, suggested: UUID())
         #expect(verdict == .noSession)
@@ -232,9 +227,8 @@ import TestSupport
     @Test func rotationEligibilityNoCandidate() {
         let terminal = Terminal(
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-            kind: .claude, profileID: UUID(), claudeSessionID: UUID(),
-            transport: .tmux, isParked: false, hibernatedAt: nil, suspendedAt: nil,
-            sortOrder: 0, pendingResumeAt: nil)
+            claudeSessionID: UUID().uuidString, suspendedAt: nil, profileID: UUID(),
+            kind: .claude, hibernatedAt: nil, transport: .tmux)
 
         let verdict = RPCRouter.rotationEligibility(terminal: terminal, flagOn: true, suggested: nil)
         #expect(verdict == .noCandidate)
@@ -244,9 +238,8 @@ import TestSupport
         let suggestedID = UUID()
         let terminal = Terminal(
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-            kind: .claude, profileID: UUID(), claudeSessionID: UUID(),
-            transport: .tmux, isParked: false, hibernatedAt: nil, suspendedAt: nil,
-            sortOrder: 0, pendingResumeAt: nil)
+            claudeSessionID: UUID().uuidString, suspendedAt: nil, profileID: UUID(),
+            kind: .claude, hibernatedAt: nil, transport: .tmux)
 
         let verdict = RPCRouter.rotationEligibility(terminal: terminal, flagOn: true, suggested: suggestedID)
         #expect(verdict == .rotate(suggestedID))
@@ -267,7 +260,7 @@ import TestSupport
             profiles: db.modelProfiles,
             snapshots: db.oauthUsageSnapshots,
             terminals: db.terminals,
-            loginIdentity: { _ in nil }
+            loginIdentity: { id in "\(id.uuidString)@example.com" }
         )
         router.profilePoolCandidateSource = source
 
@@ -322,7 +315,7 @@ import TestSupport
             profiles: db.modelProfiles,
             snapshots: db.oauthUsageSnapshots,
             terminals: db.terminals,
-            loginIdentity: { _ in nil }
+            loginIdentity: { id in "\(id.uuidString)@example.com" }
         )
 
         // Construct router with the source
@@ -343,10 +336,10 @@ import TestSupport
             jitterProvider: { 0 }, onOutcome: { _, _ in })
 
         // Setup swap seam to return success
-        var receivedParams: TerminalSwapProfileParams? = nil
+        let receivedParams = SwapParamsBox()
         testRouter.rotationSwapPerformer = { paramsData, actor in
             let decoder = JSONDecoder()
-            receivedParams = try decoder.decode(TerminalSwapProfileParams.self, from: paramsData)
+            receivedParams.value = try decoder.decode(TerminalSwapProfileParams.self, from: paramsData)
             return .ok()
         }
 
@@ -361,9 +354,9 @@ import TestSupport
         #expect(response.success)
 
         // Verify seam was called with correct params
-        #expect(receivedParams?.terminalID == terminalID)
-        #expect(receivedParams?.newProfileID == eligibleProfileID)
-        #expect(receivedParams?.mode == .inPlace)
+        #expect(receivedParams.value?.terminalID == terminalID)
+        #expect(receivedParams.value?.newProfileID == eligibleProfileID)
+        #expect(receivedParams.value?.mode == .inPlace)
 
         // Check for rotation pending row, no reset-time row
         let pending = try await db.scheduledResumes.pending(terminalID: terminalID)
@@ -393,7 +386,7 @@ import TestSupport
             profiles: db.modelProfiles,
             snapshots: db.oauthUsageSnapshots,
             terminals: db.terminals,
-            loginIdentity: { _ in nil }
+            loginIdentity: { id in "\(id.uuidString)@example.com" }
         )
 
         // Construct router with the source
@@ -459,7 +452,7 @@ import TestSupport
             profiles: db.modelProfiles,
             snapshots: db.oauthUsageSnapshots,
             terminals: db.terminals,
-            loginIdentity: { _ in nil }
+            loginIdentity: { id in "\(id.uuidString)@example.com" }
         )
 
         // Construct router with the source
@@ -507,4 +500,10 @@ import TestSupport
         #expect(notifs.count == 1)
         #expect(notifs[0].message?.contains("has room") == true)
     }
+}
+
+/// Single-writer box so the swap seam (a `@Sendable` closure) can hand the
+/// decoded params back to the test without a captured-var mutation.
+private final class SwapParamsBox: @unchecked Sendable {
+    var value: TerminalSwapProfileParams?
 }
