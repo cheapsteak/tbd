@@ -150,6 +150,12 @@ public enum RPCMethod {
     public static let terminalSetPin = "terminal.setPin"
     public static let notify = "notify"
     public static let daemonStatus = "daemon.status"
+    /// Run one update check synchronously and answer with the fresh
+    /// `UpdateStatus`. The explicit gesture behind `tbd version --check` and
+    /// the app's "Check for Updates…" item; it runs whatever `update_mode`
+    /// says, because that flag gates the timer and the launch rather than a
+    /// question the user just asked. Read-only: one `git ls-remote`.
+    public static let daemonCheckForUpdate = "daemon.checkForUpdate"
     public static let stateSubscribe = "state.subscribe"
     public static let resolvePath = "resolve.path"
     public static let notificationsList = "notifications.list"
@@ -380,6 +386,11 @@ public enum RPCMethod {
     /// opt-in. Reading needs no method of its own: `config.get` already carries
     /// the resolved value.
     public static let configSetPtyHolderEnabled = "config.setPtyHolderEnabled"
+    /// The update mode (`update_mode`) — `off`, `check` or `auto`. The one
+    /// policy the daemon holds about updating itself. Reading needs no method
+    /// of its own: `config.get` and `daemon.capabilities` both carry the
+    /// resolved value.
+    public static let configSetUpdateMode = "config.setUpdateMode"
     /// Everything TBD knows about the peer-messaging bridge, for `tbd peer list`.
     /// Read-only and unaddressed: it takes no params and never actuates.
     public static let peerStatus = "peer.status"
@@ -1863,6 +1874,14 @@ public struct ConfigSetPeerMessagingEnabledParams: Codable, Sendable {
 public struct ConfigSetPtyHolderEnabledParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setUpdateMode`. A named mode rather than a Bool: the
+/// setting has three states, and the middle one — observe but do not install —
+/// is the one an operator soaks in.
+public struct ConfigSetUpdateModeParams: Codable, Sendable {
+    public let mode: UpdateMode
+    public init(mode: UpdateMode) { self.mode = mode }
 }
 
 /// Result of a `gc.sweepNow` sweep (dry-run or real). Also the direct return
@@ -3533,6 +3552,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// an install that never touched the toggle reports whatever the shipped
     /// default currently is.
     public let remoteDeleteEnabled: Bool
+    /// The daemon's `update_mode` — `off`, `check` or `auto`. Default `off`
+    /// while it soaks. The app's Settings picker reads this rather than
+    /// `config.get` so the toggle and the daemon can never disagree about which
+    /// of them last wrote the column.
+    public let updateMode: UpdateMode
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -3547,7 +3571,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
                 claudeCloudLive: Bool = false,
-                remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault) {
+                remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
+                updateMode: UpdateMode = Config.updateModeDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -3562,6 +3587,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.claudeCloudEnabled = claudeCloudEnabled
         self.claudeCloudLive = claudeCloudLive
         self.remoteDeleteEnabled = remoteDeleteEnabled
+        self.updateMode = updateMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -3603,6 +3629,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // rather than offering a destructive action nothing can carry out.
         remoteDeleteEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .remoteDeleteEnabled) ?? Config.remoteDeleteEnabledDefault
+        // New field for the update mode. A daemon that does not send it runs no
+        // checker either, so fall through to the shipped default rather than
+        // showing a picker on a mode nothing will act on. An unrecognised name
+        // from a newer daemon resolves the same way instead of failing the
+        // whole decode.
+        updateMode = (try? c.decode(UpdateMode.self, forKey: .updateMode))
+            ?? Config.updateModeDefault
     }
 }
 
@@ -3689,16 +3722,29 @@ public struct DaemonStatusResult: Codable, Sendable {
     /// Absolute path to the running daemon's executable. Optional for backward
     /// compatibility — older daemons won't include this field.
     public let executablePath: String?
+    /// What commit this daemon was built from, when it could be learned.
+    /// Optional for the same reason as `executablePath`, and additionally nil
+    /// on a daemon whose build left no sidecar and whose executable path is not
+    /// inside a git worktree.
+    public let buildIdentity: BuildIdentity?
+    /// The daemon's last observation of the remote's `main`. Nil when the
+    /// update checker is not running (`update_mode` is `off`) or has not
+    /// completed a check yet.
+    public let update: UpdateStatus?
     public init(
         version: String,
         uptime: TimeInterval,
         connectedClients: Int,
-        executablePath: String? = nil
+        executablePath: String? = nil,
+        buildIdentity: BuildIdentity? = nil,
+        update: UpdateStatus? = nil
     ) {
         self.version = version
         self.uptime = uptime
         self.connectedClients = connectedClients
         self.executablePath = executablePath
+        self.buildIdentity = buildIdentity
+        self.update = update
     }
 }
 

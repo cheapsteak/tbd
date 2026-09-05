@@ -1626,6 +1626,23 @@ public struct Config: Codable, Sendable, Equatable {
     /// and follows the shipped default wherever it goes; `0`/`1` is an explicit
     /// gesture and is honored forever.
     public var ptyHolderEnabled: Bool
+    /// Whether the daemon watches for a newer `main`, and whether it may
+    /// install one
+    /// (`docs/specs/2026-09-04-automatic-version-updates-design.md` §6).
+    ///
+    /// The one policy about updating that lives in the daemon rather than in
+    /// `scripts/update.sh`, because the timer that runs the check has to live
+    /// in a long-lived process. It ships `.off`: `check` makes a periodic
+    /// network call, and `auto` spawns a process that rebuilds and replaces the
+    /// whole installation.
+    ///
+    /// **Resolved, not stored**, like `gcRetainedTranscriptsEnabled`: the
+    /// backing column carries no SQL default and stays NULL until somebody
+    /// chooses, so this property is
+    /// `update_mode ?? Config.updateModeDefault`. NULL means "never chose" and
+    /// follows the shipped default wherever it goes; a stored name is an
+    /// explicit gesture and is honored forever.
+    public var updateMode: UpdateMode
     /// Machine-wide remote create-param defaults, keyed by the **provider's
     /// own** `create_params` field names — the fall-through level beneath
     /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
@@ -1733,6 +1750,14 @@ public struct Config: Codable, Sendable, Equatable {
     /// reachable — is a change to this constant, with no forcing `UPDATE`
     /// migration and every explicit opt-out left alone.
     public static let holderRowReconcileEnabledDefault = false
+    /// The shipped default for `updateMode`, and the single place it lives.
+    /// Updating ships off; graduation to `check` — after a soak in which the
+    /// notice was accurate and the hourly `ls-remote` cost nothing anyone
+    /// noticed — is a change to this constant, with no forcing `UPDATE`
+    /// migration: the column carries no SQL default, so every row that never
+    /// chose is NULL and follows this constant, and every stored mode is an
+    /// explicit choice that a default change leaves alone.
+    public static let updateModeDefault: UpdateMode = .off
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1774,6 +1799,7 @@ public struct Config: Codable, Sendable, Equatable {
                 gcRetainedTranscriptsEnabled: Bool =
                     Config.gcRetainedTranscriptsEnabledDefault,
                 holderRowReconcileEnabled: Bool = Config.holderRowReconcileEnabledDefault,
+                updateMode: UpdateMode = Config.updateModeDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1815,6 +1841,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
         self.holderRowReconcileEnabled = holderRowReconcileEnabled
+        self.updateMode = updateMode
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -1936,6 +1963,12 @@ public struct Config: Codable, Sendable, Equatable {
         holderRowReconcileEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .holderRowReconcileEnabled)
             ?? Config.holderRowReconcileEnabledDefault
+        // Same shape for the update mode, with one addition: an unrecognised
+        // NAME from a newer daemon (a fourth mode) is as unusable as an absent
+        // key, so it resolves to the shipped default instead of failing the
+        // whole decode and losing every other field.
+        updateMode = (try? c.decode(UpdateMode.self, forKey: .updateMode))
+            ?? Config.updateModeDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.

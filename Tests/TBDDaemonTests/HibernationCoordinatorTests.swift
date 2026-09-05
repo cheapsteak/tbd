@@ -2181,6 +2181,42 @@ struct HibernationCoordinatorTests {
         #expect(after?.hibernatedAt == nil)
     }
 
+    // MARK: - Wake and an unanswered window probe
+
+    /// The wake path's recreate arm `killWindow`s the old window once the
+    /// replacement exists — its own comment names "a transient windowExists
+    /// misclassification" as the thing that must not leak a live window, and a
+    /// timed-out probe is exactly such a misclassification. Acting on it
+    /// destroys a window on ignorance, so an unanswerable probe now fails the
+    /// wake and leaves the row parked for the next retry. A server that is
+    /// genuinely gone still answers `absent`, so reboot recovery is unchanged.
+    @Test func wakeRefusesToRecreateWhenTheWindowProbeGoesUnanswered() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: recorded.append,
+            dryRunWindowPresence: { _, _ in .unknown })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            actuationLog: makeTestActuationLog())
+
+        let result = await coord.wake(terminalID: terminalID)
+
+        guard case let .respawnFailed(reason) = result else {
+            Issue.record("an unanswered window probe produced \(result) instead of a retryable failure")
+            return
+        }
+        #expect(reason.contains("retry"), "the failure must read as retryable: \(reason)")
+        let after = try #require(try await db.terminals.get(id: terminalID))
+        #expect(after.isParked,
+                "an unanswered window probe un-parked a row it could not establish anything about")
+        #expect(!recorded.snapshot().contains { $0.contains("kill-window") },
+                "an unanswered window probe killed a window: \(recorded.snapshot())")
+    }
+
     // MARK: - Startup reconciliation
 
     /// `reconcileOnStartup` clears a stale parked timestamp for a terminal whose

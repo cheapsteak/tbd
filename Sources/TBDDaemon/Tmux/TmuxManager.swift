@@ -202,6 +202,21 @@ public struct TmuxManager: Sendable {
     /// `paneCurrentCommand(server:paneID:)`. Allows tests to return a specific
     /// command string without relying on tmux's actual pane_current_command.
     public let realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)?
+    /// Optional test hook consulted by `probeServer` in dryRun mode: `server` →
+    /// the tri-state answer. Without it dryRun reports `.alive`, matching
+    /// `serverExists`'s unconditional dryRun `true`, so existing fixtures are
+    /// unchanged. Tests that need the `unknown` arm — a probe that never got an
+    /// answer — inject it here.
+    public let dryRunServerPresence: (@Sendable (String) -> TmuxPresence)?
+    /// Optional test hook consulted by `probeWindow` in dryRun mode:
+    /// `(server, windowID)` → the tri-state answer. Without it dryRun falls
+    /// back to `dryRunWindowIsDead` (dead → `.absent`, else `.alive`), so every
+    /// fixture written against the `Bool` probe keeps its meaning.
+    public let dryRunWindowPresence: (@Sendable (String, String) -> TmuxPresence)?
+    /// Optional test hook for real (non-dryRun) mode: override `probeServer`.
+    public let realModeServerPresenceOverride: (@Sendable (String) -> TmuxPresence?)?
+    /// Optional test hook for real (non-dryRun) mode: override `probeWindow`.
+    public let realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxPresence?)?
 
     /// Whether callers should treat `paneCurrentCommand` as a meaningful
     /// process-liveness signal. Plain dry-run fixtures intentionally return a
@@ -224,7 +239,7 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunListSessions: (@Sendable (String) -> [TmuxSessionInfo])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunSessionSpared: (@Sendable (String, String) -> Bool)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunListSessions: (@Sendable (String) -> [TmuxSessionInfo])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunSessionSpared: (@Sendable (String, String) -> Bool)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, dryRunServerPresence: (@Sendable (String) -> TmuxPresence)? = nil, dryRunWindowPresence: (@Sendable (String, String) -> TmuxPresence)? = nil, realModeServerPresenceOverride: (@Sendable (String) -> TmuxPresence?)? = nil, realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxPresence?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
@@ -244,6 +259,10 @@ public struct TmuxManager: Sendable {
         self.dryRunPasteBytes = dryRunPasteBytes
         self.realModeWindowExistsOverride = realModeWindowExistsOverride
         self.realModePaneCurrentCommandOverride = realModePaneCurrentCommandOverride
+        self.dryRunServerPresence = dryRunServerPresence
+        self.dryRunWindowPresence = dryRunWindowPresence
+        self.realModeServerPresenceOverride = realModeServerPresenceOverride
+        self.realModeWindowPresenceOverride = realModeWindowPresenceOverride
     }
 
     /// Runs one ownership transition while exclusively holding `server`.
@@ -1563,6 +1582,54 @@ public struct TmuxManager: Sendable {
             return true
         } catch {
             return false
+        }
+    }
+
+    /// Whether a tmux window exists, keeping "tmux says no" apart from "tmux
+    /// never answered".
+    ///
+    /// Prefer this over `windowExists` anywhere a `false` would destroy state.
+    /// `windowExists` answers `false` for a timeout, which is how a busy
+    /// machine gets its live sessions parked; `probeWindow` answers `.unknown`
+    /// there and lets the caller leave the row alone.
+    public func probeWindow(server: String, windowID: String) async -> TmuxPresence {
+        if dryRun {
+            if let hook = dryRunWindowPresence { return hook(server, windowID) }
+            return (dryRunWindowIsDead?(windowID) ?? false) ? .absent : .alive
+        }
+        if let override = realModeWindowPresenceOverride?(server, windowID) {
+            return override
+        }
+        do {
+            _ = try await runTmux(["-L", server, "list-panes", "-t", windowID])
+            return .alive
+        } catch {
+            let presence = TmuxPresenceClassifier.windowPresence(for: error)
+            if presence == .unknown {
+                logger.warning("probeWindow could not classify tmux failure for window \(windowID, privacy: .public) on server \(server, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
+            return presence
+        }
+    }
+
+    /// Whether a tmux server is running, keeping "tmux says no" apart from
+    /// "tmux never answered". See `probeWindow` for why the distinction exists.
+    public func probeServer(server: String) async -> TmuxPresence {
+        if dryRun {
+            return dryRunServerPresence?(server) ?? .alive
+        }
+        if let override = realModeServerPresenceOverride?(server) {
+            return override
+        }
+        do {
+            _ = try await runTmux(["-L", server, "list-sessions"])
+            return .alive
+        } catch {
+            let presence = TmuxPresenceClassifier.serverPresence(for: error)
+            if presence == .unknown {
+                logger.warning("probeServer could not classify tmux failure for server \(server, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
+            return presence
         }
     }
 

@@ -66,6 +66,28 @@ public enum TBDConstants {
         configDir(environment: environment).appendingPathComponent("holders")
     }
 
+    /// Directory the update path owns: `~/tbd/updates`. Honors TBD_HOME.
+    ///
+    /// Holds the dedicated update clone (`src`), the append-only `update.log`
+    /// every run writes to, and the lock file `--auto` takes. Deliberately
+    /// outside `worktreesDir`: nothing that scans TBD worktrees — `git worktree
+    /// list`, `scripts/reclaim-build.sh`, the orphan GC — may see or reclaim
+    /// the clone the update procedure builds from.
+    public static func updatesDir(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        configDir(environment: environment).appendingPathComponent("updates")
+    }
+
+    /// Log every update run appends to: `~/tbd/updates/update.log`. The
+    /// daemon's `auto` mode redirects the launched script's stdout and stderr
+    /// here, so an unattended update leaves a durable record.
+    public static func updateLogPath(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
+        updatesDir(environment: environment).appendingPathComponent("update.log").path
+    }
+
     public static func databasePath(environment: [String: String]) -> String {
         configDir(environment: environment).appendingPathComponent("state.db").path
     }

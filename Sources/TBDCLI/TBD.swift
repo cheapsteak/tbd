@@ -6,7 +6,10 @@ struct TBDCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "tbd",
         abstract: "TBD workspace manager CLI",
-        version: TBDConstants.version,
+        // Carries the build's short commit when this binary has a sidecar
+        // beside it. Sidecar-only by design — `--version` and `--help` must not
+        // spawn a subprocess, and hooks invoke this CLI many times a minute.
+        version: CLIBuildIdentity.versionString,
         subcommands: [
             RepoCommand.self,
             WorktreeCommand.self,
@@ -23,6 +26,8 @@ struct TBDCommand: AsyncParsableCommand {
             SessionEndCommand.self,
             AskUserQuestionEventCommand.self,
             DaemonCommand.self,
+            VersionCommand.self,
+            UpdateCommand.self,
             HooksCommand.self,
             SetupHooksCommand.self,
             CleanupCommand.self,

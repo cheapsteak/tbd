@@ -31,16 +31,36 @@ struct DaemonStatus: AsyncParsableCommand {
         if json {
             printJSON(status)
         } else {
-            print("TBD Daemon Status")
-            print("  Version:           \(status.version)")
-            print("  Uptime:            \(formatUptime(status.uptime))")
-            print("  Connected clients: \(status.connectedClients)")
+            print(DaemonStatusReport.render(status))
         }
     }
 }
 
+/// The text form of `tbd daemon status`.
+///
+/// Pure so the two conditional lines — a daemon whose build identity could not
+/// be learned, and one that has never checked for an update — are assertable
+/// without a running daemon.
+enum DaemonStatusReport {
+    static func render(_ status: DaemonStatusResult) -> String {
+        var lines = [
+            "TBD Daemon Status",
+            "  Version:           \(status.version)",
+            "  Uptime:            \(formatUptime(status.uptime))",
+            "  Connected clients: \(status.connectedClients)",
+        ]
+        if let identity = status.buildIdentity {
+            lines.append("  Build:             \(VersionReport.describe(identity))")
+        }
+        if let update = status.update {
+            lines.append("  Update:            \(VersionReport.verdict(daemon: status.buildIdentity, update: update))")
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
 /// Format a TimeInterval as a human-readable uptime string.
-private func formatUptime(_ seconds: TimeInterval) -> String {
+func formatUptime(_ seconds: TimeInterval) -> String {
     let totalSeconds = Int(seconds)
     let days = totalSeconds / 86400
     let hours = (totalSeconds % 86400) / 3600

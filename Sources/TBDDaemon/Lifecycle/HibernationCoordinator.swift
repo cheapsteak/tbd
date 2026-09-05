@@ -1120,7 +1120,24 @@ public actor HibernationCoordinator {
             logger.info("wake: window \(windowID, privacy: .public) on \(server, privacy: .public) is claimed by another terminal — recreating instead of respawning in place for terminal \(terminal.id, privacy: .public)")
         }
 
-        if !claimedByOther, await tmux.windowExists(server: server, windowID: windowID) {
+        // Tri-state, because the `else` arm below `killWindow`s the old window
+        // once its replacement exists — its own comment calls that out as "a
+        // transient windowExists misclassification must not leak a live
+        // window", and a timed-out probe is exactly such a misclassification.
+        // Acting on it destroys a window on ignorance. A server that is
+        // genuinely gone (the reboot case this recreate path exists for) still
+        // answers `.absent`, so only the unanswerable case changes: the wake
+        // fails and the row stays parked for the next focus or menu retry,
+        // which is what every other tmux failure on this path already does.
+        let windowPresence = claimedByOther
+            ? TmuxPresence.absent
+            : await tmux.probeWindow(server: server, windowID: windowID)
+        if windowPresence == .unknown {
+            logger.warning("wake: tmux gave no usable answer about window \(windowID, privacy: .public) on \(server, privacy: .public) for terminal \(terminal.id, privacy: .public) — leaving the row parked rather than recreating and killing on ignorance")
+            return .failed(.respawnFailed(
+                reason: "tmux did not answer whether window \(windowID) is still there; the row is unchanged — retry"))
+        }
+        if !claimedByOther, windowPresence == .alive {
             do {
                 guard let incarnationID = try await db.terminals.prepareHibernatedAgentRespawn(
                     id: terminal.id,

@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "GitManager")
@@ -259,6 +260,71 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["fetch", "origin"], at: repoPath, timeout: timeout)
     }
 
+    /// The commit a ref points at on a remote, without fetching anything.
+    ///
+    /// `ls-remote` asks the remote for its ref advertisement and exits. It
+    /// moves no objects, writes nothing into any worktree, and needs no local
+    /// clone of the remote's history — which is exactly why the update check
+    /// uses it rather than a periodic `fetch` against an operator's tree.
+    ///
+    /// - Parameters:
+    ///   - url: the remote URL (or a remote name resolvable in `repoPath`).
+    ///   - ref: fully-qualified, e.g. `refs/heads/main`.
+    ///   - repoPath: directory to run in. Only matters for credential helpers
+    ///     and remote-name resolution; the query itself is about `url`.
+    /// - Returns: the 40-character SHA, or nil when the remote answered but
+    ///   advertised no such ref.
+    public func lsRemoteHead(
+        url: String, ref: String, repoPath: String, timeout: Duration? = nil
+    ) async throws -> String? {
+        let output = try await run(
+            arguments: ["ls-remote", url, ref], at: repoPath, timeout: timeout)
+        // "<sha>\t<ref>" per line. Take the first line's SHA; a ref pattern that
+        // matches nothing produces empty output and exit 0.
+        for line in output.split(whereSeparator: \.isNewline) {
+            let sha = line.split(separator: "\t").first.map(String.init) ?? ""
+            let trimmed = sha.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
+    }
+
+    /// The commit `HEAD` resolves to in `repoPath`, or nil when the directory
+    /// is not a git worktree (or git could not answer).
+    ///
+    /// Non-throwing: every caller so far treats "cannot tell" and "not a repo"
+    /// the same way, and an update check must never fail a whole tick because
+    /// one path stopped being a checkout.
+    public func revParseHead(at repoPath: String) async -> String? {
+        guard let output = try? await run(arguments: ["rev-parse", "HEAD"], at: repoPath)
+        else { return nil }
+        let sha = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return sha.isEmpty ? nil : sha
+    }
+
+    /// The URL configured for `remote` in `repoPath`, or nil when there is no
+    /// such remote. Non-throwing for the same reason as `revParseHead`: the
+    /// update check tries `upstream`, then `origin`, and a missing remote is
+    /// the ordinary answer to the first of those, not an error.
+    public func remoteURL(_ remote: String, at repoPath: String) async -> String? {
+        guard let output = try? await run(
+            arguments: ["remote", "get-url", remote], at: repoPath)
+        else { return nil }
+        let url = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return url.isEmpty ? nil : url
+    }
+
+    /// How many commits `head` is ahead of `base` in `repoPath`, or nil when
+    /// either commit is absent from the local object store. Non-throwing: on a
+    /// machine that has never fetched the newer commit the answer is genuinely
+    /// unavailable, and the update check reports "behind, count unknown".
+    public func commitCount(from base: String, to head: String, at repoPath: String) async -> Int? {
+        guard let output = try? await run(
+            arguments: ["rev-list", "--count", "\(base)..\(head)"], at: repoPath)
+        else { return nil }
+        return Int(output.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     /// True if `refs/heads/<name>` exists locally. Used to pick a
     /// non-clobbering local branch name before fetching a pull ref into it.
     ///
@@ -389,6 +455,38 @@ public struct GitManager: Sendable {
             return false  // exit code 1 means it's NOT an ancestor
         } catch {
             return nil  // real error (bad ref, corrupt repo, etc.)
+        }
+    }
+
+    /// Whether `sha` names a commit present in this repository's object store.
+    ///
+    /// Exists to part the two halves of `isMergeBaseAncestor`'s `nil`: a commit
+    /// this machine has never fetched, and a repository that could not answer.
+    /// The update checker treats the first as evidence of being behind and the
+    /// second as evidence of nothing, and cannot tell them apart otherwise.
+    ///
+    /// Only the benign "cannot resolve that name here" exit is read as absent,
+    /// in the same spirit as `localBranchExists`. Any other failure — a
+    /// timeout, a spawn failure, a directory that is not a repository, an
+    /// unreadable object store — answers `nil` rather than `false`, because "I
+    /// could not look" is not "it is not there".
+    ///
+    /// `rev-parse --verify --quiet` rather than `cat-file -e` because only the
+    /// former draws that line where this caller needs it: `cat-file -e
+    /// <sha>^{commit}` exits 128 for a commit the store does not have, the same
+    /// code it uses for a broken repository, which is precisely the distinction
+    /// being made here. `--verify` requires the name to resolve to an object;
+    /// `^{commit}` requires that object to be a commit; `--quiet` turns the
+    /// "no" into a silent exit 1.
+    public func hasCommit(repoPath: String, sha: String) async -> Bool? {
+        do {
+            _ = try await run(
+                arguments: ["rev-parse", "--verify", "--quiet", "\(sha)^{commit}"], at: repoPath)
+            return true
+        } catch let error as GitError where error.exitCode == 1 {
+            return false
+        } catch {
+            return nil
         }
     }
 
@@ -800,7 +898,8 @@ public struct GitManager: Sendable {
     // MARK: - Private
 
     /// The environment every git subprocess runs with: the daemon's own
-    /// environment, with the locale pinned to `C`.
+    /// environment, with the locale pinned to `C` and `PATH` floored with the
+    /// usual package-manager directories.
     ///
     /// Git's stderr is the only signal several callers have for *why* a command
     /// failed, and one of those decisions is destructive: `WorktreeLifecycle`'s
@@ -815,12 +914,26 @@ public struct GitManager: Sendable {
     /// bare dict would drop `PATH`, `HOME`, `SSH_AUTH_SOCK` and friends from
     /// every git call the daemon makes. (Same mistake, different subsystem:
     /// commit 56fa912f had to restore the launch `PATH` for tmux.)
+    ///
+    /// Inheriting `PATH` is necessary but not sufficient, because the daemon's
+    /// own `PATH` can be launchd's bare `/usr/bin:/bin:/usr/sbin:/sbin` — the
+    /// app is spawned that way whenever LaunchServices relaunches the bundle
+    /// without applying its `LSEnvironment`, and the daemon inherits it. Git
+    /// hands that environment to its filters and hooks, so an LFS repo with
+    /// `filter.lfs.required` then fails every `worktree add` with "git-lfs:
+    /// command not found" and exit 128. Appending the fallback directories
+    /// gives those children a floor without ever demoting a real launch `PATH`.
     static func gitEnvironment(
         inheriting base: [String: String] = ProcessInfo.processInfo.environment
     ) -> [String: String] {
         // `LC_ALL` is the one git actually obeys last; `LANG` is pinned too so
         // the child's own subprocesses don't see a mixed locale.
-        return base.merging(["LC_ALL": "C", "LANG": "C"]) { _, pinned in pinned }
+        let home = base["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+        return base.merging([
+            "LC_ALL": "C",
+            "LANG": "C",
+            "PATH": ExecutableSearchPath.augmented(base["PATH"], homeDirectory: home),
+        ]) { _, pinned in pinned }
     }
 
     /// Runs a git command with the given arguments at the given directory and returns stdout.

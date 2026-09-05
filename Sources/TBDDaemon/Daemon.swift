@@ -236,6 +236,11 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var archivedBackfillTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
+    /// Compares this build against the head of `main` on the remote, and — in
+    /// `auto` mode only — launches `scripts/update.sh`. Constructed at every
+    /// boot; its loop is started only when `update_mode` is not `off`, so the
+    /// shipped default costs one config read and nothing else.
+    public nonisolated(unsafe) var updateChecker: UpdateChecker?
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
     /// on shutdown; `nil` in mock mode.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
@@ -271,7 +276,13 @@ public final class Daemon: Sendable {
     /// `TBD_WORKTREE_ID=<main-uuid>` or `CODEX_CI=1` from a managed launcher
     /// shell, every recreated pane would inherit stale routing/noninteractive
     /// state.
+    /// `TBD_HANDOVER_FROM_PID` is scrubbed here too, and the ordering matters:
+    /// `start()` reads it at the single-instance gate, several steps before
+    /// this runs. A tmux server bakes its spawn environment into every window
+    /// it later creates, so a variable left set would be handed to every pane
+    /// and to whatever those panes launch — including another daemon.
     public static func scrubInheritedTBDEnv() {
+        unsetenv(handoverFromPIDEnvVar)
         unsetenv("TBD_WORKTREE_ID")
         unsetenv("TBD_PROMPT_CONTEXT")
         unsetenv("TBD_PROMPT_INSTRUCTIONS")
@@ -702,14 +713,50 @@ public final class Daemon: Sendable {
         // would make this fresh daemon abort forever until that pid frees —
         // exactly the multi-minute "disconnected on restart" gap. cleanupIfStale
         // above already removed the pid/socket in that case, so read() is nil.
-        if let existingPID = pidFile.read(),
-           ProcessLiveness.isLiveNamedProcess(pid: existingPID, name: ProcessLiveness.daemonExecutableName) {
+        //
+        // 3a. `TBD_HANDOVER_FROM_PID` is the one way past that gate. When an
+        // update starts a successor with the running daemon's pid in that
+        // variable, the successor claims the pid file FIRST and then retires
+        // the predecessor. Claiming first is what closes the window a plain
+        // kill-then-start opens: the app polls every two seconds and spawns a
+        // daemon whenever the socket is missing *and* the pid file names no
+        // live daemon, so with the successor's pid in the file from the first
+        // instant, every spurious spawn exits at this same gate.
+        let handoverDecision = HandoverDecision.decide(
+            pidFileContents: pidFile.read(),
+            handoverEnv: ProcessInfo.processInfo.environment[handoverFromPIDEnvVar],
+            isLiveDaemon: {
+                ProcessLiveness.isLiveNamedProcess(
+                    pid: $0, name: ProcessLiveness.daemonExecutableName)
+            })
+
+        switch handoverDecision {
+        case let .refuse(existingPID):
             daemonLogger.error("Another daemon is already running (PID \(existingPID, privacy: .public)). Exiting.")
             Foundation.exit(1)
+        case let .takeOver(predecessor):
+            // 4. Claim the pid file, retire the predecessor, re-assert the
+            // claim. See `HandoverClaim` for why each of the three steps is
+            // there.
+            switch try await HandoverClaim(pidFile: pidFile).takeOver(from: predecessor) {
+            case let .predecessorSurvived(claimRestored):
+                if !claimRestored {
+                    daemonLogger.error("handover: the pid file still names this exiting process — the next daemon start will clear it as stale")
+                }
+                // Nothing downstream is a backstop: the socket bind is
+                // hundreds of lines past startup reconciliation, so this
+                // process would already have run a second reconciler against
+                // `state.db`. Two writers there is the failure the whole
+                // single-instance gate exists to prevent.
+                daemonLogger.error("handover: predecessor daemon \(predecessor, privacy: .public) survived SIGKILL — restored its pid file claim and exiting rather than running a second writer on state.db")
+                Foundation.exit(1)
+            case let .claimed(outcome):
+                daemonLogger.info("handover: predecessor daemon \(predecessor, privacy: .public) retired (\(outcome.rawValue, privacy: .public)); continuing startup")
+            }
+        case .normal:
+            // 4. Write PID file
+            try pidFile.write()
         }
-
-        // 4. Write PID file
-        try pidFile.write()
 
         // Refresh the agent runtime integration assets up front so both
         // Claude and Codex sessions pick up the current TBD hook/plugin state
@@ -1129,6 +1176,18 @@ public final class Daemon: Sendable {
             mockMode: mockMode, database: database, git: git, lifecycle: lifecycle,
             actuationLog: actuationLog)
 
+        // 8d-ii. Un-park a second time, AFTER the reconcile pass. The first run
+        // has to precede reconcile so the destructive scratch-server reaping
+        // works from a consistent view, but that ordering also means it cannot
+        // repair anything the same boot parks. This run can: it re-examines the
+        // parked rows and clears every one whose pane demonstrably still runs
+        // Claude. Cheap — it only looks at parked rows — and it is the repair
+        // half of the tri-state reconcile probes, which stop the parks that are
+        // pure guesswork rather than the ones that merely raced.
+        if mockMode == nil {
+            await rpcRouter.hibernationCoordinator.reconcileOnStartup()
+        }
+
         // 8e. Re-adopt holder-backed sessions. A `HolderReader` lives only in
         // the memory of the daemon that made it, so after a restart every live
         // holder session has nobody draining its pty master — and an undrained
@@ -1458,6 +1517,82 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 12a-bis. Wire the update checker. Always constructed so
+            // `daemon.checkForUpdate` can answer an explicit question, and so a
+            // later `tbd config set update-mode` has something to start; its
+            // periodic loop starts here only when the boot-time mode is not
+            // `off`, which is what makes the shipped default cost nothing but
+            // this one read. An opt-in arriving afterwards starts the loop from
+            // `handleConfigSetUpdateMode`, so neither direction needs a restart.
+            let buildIdentity = RPCRouter.resolvedBuildIdentity
+            let updateSourceWorktree = buildIdentity?.sourceWorktree
+                ?? BuildIdentityLoader.sourceWorktree(
+                    fromExecutablePath: CommandLine.arguments.first)
+            let checkerGit = git
+            let checker = UpdateChecker(
+                ourCommit: buildIdentity?.commit,
+                sourceWorktree: updateSourceWorktree,
+                readMode: { [database] in
+                    // Read fresh every tick so `tbd config set update-mode`
+                    // takes effect without a restart. A database that cannot
+                    // answer is treated as the shipped default rather than as
+                    // permission to act.
+                    (try? await database.config.get().updateMode) ?? Config.updateModeDefault
+                },
+                resolveRemote: { worktree in
+                    // `upstream` first: on a fork checkout that is the tree
+                    // everyone's `main` actually comes from, and `origin` is
+                    // the fork, which lags.
+                    if let upstream = await checkerGit.remoteURL("upstream", at: worktree) {
+                        return upstream
+                    }
+                    return await checkerGit.remoteURL("origin", at: worktree)
+                },
+                remoteHead: { url, worktree in
+                    try? await checkerGit.lsRemoteHead(
+                        url: url, ref: UpdateChecker.mainRef, repoPath: worktree)
+                },
+                isAncestor: { ours, latest, worktree in
+                    // Ask the cheap question first: a decided ancestry is the
+                    // common case and costs one process. Only an undecided one
+                    // pays for the second, and its whole job is to tell "we
+                    // have never fetched that commit" — evidence of being
+                    // behind — apart from "this repository could not answer",
+                    // which is evidence of nothing and must not install
+                    // anything in `auto` mode.
+                    switch await checkerGit.isMergeBaseAncestor(
+                        repoPath: worktree, base: ours, branch: latest) {
+                    case true: return .contains
+                    case false: return .doesNotContain
+                    case nil:
+                        switch await checkerGit.hasCommit(repoPath: worktree, sha: latest) {
+                        case false: return .latestAbsentLocally
+                        // Present, or unlookable: either way this worktree
+                        // holds the objects or cannot say, and neither is
+                        // grounds to move the installation forward.
+                        case true, nil: return .undecided
+                        }
+                    }
+                },
+                behindCount: { ours, latest, worktree in
+                    await checkerGit.commitCount(from: ours, to: latest, at: worktree)
+                },
+                launch: { worktree in
+                    UpdateLauncher.launch(UpdateLauncher.plan(sourceWorktree: worktree))
+                },
+                interval: UpdateChecker.interval(
+                    from: ProcessInfo.processInfo.environment)
+            )
+            self.updateChecker = checker
+            rpcRouter.updateChecker = checker
+            let updateMode = (try? await database.config.get().updateMode)
+                ?? Config.updateModeDefault
+            if updateMode.runsChecks {
+                await checker.start()
+                daemonLogger.info(
+                    "Update checker started in mode \(updateMode.rawValue, privacy: .public)")
+            }
+
             // 12b. Start Claude OAuth usage poller (30-min cadence, 30s stagger).
             let poller = ClaudeUsagePoller(
                 profiles: database.modelProfiles,
@@ -1720,6 +1855,11 @@ public final class Daemon: Sendable {
         if let poller = oauthUsagePoller {
             await poller.stop()
         }
+        // Stops the timer only. An update this daemon already launched is
+        // detached on purpose and must outlive the shutdown that installs it.
+        if let checker = updateChecker {
+            await checker.stop()
+        }
 
         if let resumeScheduler = limitResumeScheduler {
             await resumeScheduler.stop()
@@ -1826,11 +1966,26 @@ public final class Daemon: Sendable {
             await http.stop()
         }
 
-        // Remove PID file
-        pidFile.remove()
+        // Remove the PID file only if it still names this process. During a
+        // handover the successor has already written its own pid over it, and
+        // deleting that claim would reopen the spawn race the successor-first
+        // write exists to close.
+        let ownedPIDFile = pidFile.removeIfOwned()
 
-        // Remove port file
-        try? FileManager.default.removeItem(atPath: TBDConstants.portFilePath)
+        // The port file holds a port, not a pid, so it cannot answer "is this
+        // mine?" on its own. The pid file is the proxy for it: one daemon
+        // writes both and one daemon removes both, so a pid file that was still
+        // ours means the port file beside it was ours too.
+        //
+        // When the pid file has already been claimed by a successor, this
+        // leaves a port file naming a port nobody is listening on — for the few
+        // moments until the successor binds and overwrites it. That stale
+        // window is the deliberately cheaper failure: deleting the file instead
+        // would race the successor's own write and could leave the app with no
+        // address at all for a daemon that is up and serving.
+        if ownedPIDFile {
+            try? FileManager.default.removeItem(atPath: TBDConstants.portFilePath)
+        }
 
         daemonLogger.info("Stopped.")
         Foundation.exit(0)

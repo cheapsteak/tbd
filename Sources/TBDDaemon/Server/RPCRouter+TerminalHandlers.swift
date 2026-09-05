@@ -100,6 +100,27 @@ struct PaneSendRefusal: Sendable {
     let message: String
 }
 
+/// What the locked re-park closure in `handleTerminalRecreateWindow` concluded.
+///
+/// Three outcomes rather than the `didPark` flag this replaces, because the
+/// window probe is tri-state and each answer means something different to the
+/// caller: the row was parked, the window turned out to be alive so the request
+/// was stale, or tmux never answered and nothing was touched. Collapsing the
+/// last two would report a transport that could not be reached as a healthy
+/// window, which is the direction that loses a session.
+enum RecreateReparkOutcome: Sendable {
+    case parked(Terminal?)
+    case windowAlive(Terminal?)
+    case probeUnanswered(Terminal?)
+
+    var terminal: Terminal? {
+        switch self {
+        case let .parked(terminal), let .windowAlive(terminal), let .probeUnanswered(terminal):
+            return terminal
+        }
+    }
+}
+
 extension RPCRouter {
 
     // MARK: - Terminal Handlers
@@ -1099,9 +1120,22 @@ extension RPCRouter {
             try await db.worktrees.getLocal(id: terminal.worktreeID)
         }
         guard let railWorktree else { return .stopped }
-        return await tmux.windowExists(
-            server: railWorktree.tmuxServer, windowID: terminal.tmuxWindowID)
-            ? .running : .stopped
+        // Tri-state, and the type has said so all along: `ActivityRailLiveness`
+        // carries `.unknown` for exactly this, and the holder leg above already
+        // returns it. The tmux leg was the one collapsing "tmux says the window
+        // is gone" into the same answer as "tmux never answered" — and only
+        // `.stopped` lifts the rail, so a probe that timed out during a busy
+        // moment read as an observed exit and let a `--respectActivityRails`
+        // close delete the row and kill the window of a session that was
+        // mid-turn. A rail that cannot establish the session ended has to fail
+        // closed.
+        switch await tmux.probeWindow(
+            server: railWorktree.tmuxServer, windowID: terminal.tmuxWindowID
+        ) {
+        case .alive: return .running
+        case .absent: return .stopped
+        case .unknown: return .unknown
+        }
     }
 
     /// Tears down the holder behind a row that is about to be deleted: stops
@@ -1419,6 +1453,20 @@ extension RPCRouter {
             + "— fork the session instead."
     }
 
+    /// The refusal `terminal.recreateWindow` returns when tmux gave no usable
+    /// answer about the window.
+    ///
+    /// A sibling of `holderRecreateRefusal` and `holderInPlaceSwapRefusal` for
+    /// the same reason: one named factory per refusal, so the app, the CLI and
+    /// the tests assert the same text. This one is not about a transport that
+    /// has no window — it is about a window whose state could not be
+    /// established, which is a retry rather than a category error.
+    static func unansweredWindowProbeRefusal(terminalID: UUID) -> String {
+        "tmux did not answer whether terminal \(terminalID)'s window is still "
+            + "there within \(TmuxManager.commandTimeout). The window was left "
+            + "alone and the session is unchanged — retry once tmux responds."
+    }
+
     func handleTerminalRecreateWindow(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -1471,7 +1519,7 @@ extension RPCRouter {
                 try await tmux.withWorktreeServerLock(
                     db: db, worktreeID: worktree.id,
                     allowedStatuses: [worktree.status]
-                ) { currentWorktree -> (terminal: Terminal?, didPark: Bool) in
+                ) { currentWorktree -> RecreateReparkOutcome in
                     guard let currentTerminal = try await self.db.terminals.get(
                         id: terminal.id),
                           expectedReplacementState.matches(currentTerminal),
@@ -1483,12 +1531,27 @@ extension RPCRouter {
                     // The liveness decision and every following process mutation
                     // share the server lock with wake and profile replacement.
                     // A queued stale re-park therefore cannot kill their new pane.
-                    if await self.tmux.windowExists(
+                    //
+                    // Tri-state, because both arms below act: a `false` here
+                    // parks a resumable row and then `killWindow`s it. The
+                    // `Bool` probe answers `false` on a timeout, so a recreate
+                    // arriving while the machine is busy would park and kill a
+                    // session that is alive and working — on a user's gesture,
+                    // which makes it worse than the startup sweep's version of
+                    // the same bug. Ignorance is reported back to the caller
+                    // instead, and nothing is touched.
+                    switch await self.tmux.probeWindow(
                         server: currentWorktree.tmuxServer,
                         windowID: currentTerminal.tmuxWindowID
                     ) {
+                    case .alive:
                         logger.info("recreateWindow: window \(currentTerminal.tmuxWindowID, privacy: .public) for claude terminal \(currentTerminal.id, privacy: .public) is alive — ignoring stale recreate request")
-                        return (currentTerminal, false)
+                        return .windowAlive(currentTerminal)
+                    case .unknown:
+                        logger.warning("recreateWindow: tmux gave no usable answer about window \(currentTerminal.tmuxWindowID, privacy: .public) for claude terminal \(currentTerminal.id, privacy: .public) — refusing rather than parking and killing on ignorance")
+                        return .probeUnanswered(currentTerminal)
+                    case .absent:
+                        break
                     }
 
                     let currentState = TerminalHibernationSnapshot(terminal: currentTerminal)
@@ -1514,15 +1577,22 @@ extension RPCRouter {
                     }
                     await self.pendingQuestions.clear(terminalID: currentTerminal.id)
                     await self.broadcastPendingQuestions(terminalID: currentTerminal.id)
-                    return (try await self.db.terminals.get(id: currentTerminal.id), true)
+                    return .parked(try await self.db.terminals.get(id: currentTerminal.id))
                 }
+            }
+            if case .probeUnanswered = repark {
+                let refusal = Self.unansweredWindowProbeRefusal(terminalID: terminal.id)
+                // `transportFailed`, not a refusal: the daemon did not decline
+                // this act, it could not reach the transport to perform it.
+                await finishActuation(reparkID, .transportFailed, error: refusal)
+                return RPCResponse(error: refusal)
             }
             guard let updated = repark.terminal else {
                 await finishActuation(
                     reparkID, .refused(.notFound), error: "Terminal not found after suspend")
                 return RPCResponse(error: "Terminal not found after suspend")
             }
-            guard repark.didPark else {
+            guard case .parked = repark else {
                 await finishActuation(
                     reparkID, .refused(.notEligible), error: "Terminal window is alive")
                 return try RPCResponse(result: updated)
@@ -3633,16 +3703,42 @@ extension RPCRouter {
 
     // MARK: - Daemon Status
 
-    func handleDaemonStatus() throws -> RPCResponse {
+    func handleDaemonStatus() async throws -> RPCResponse {
         let uptime = Date().timeIntervalSince(startTime)
         let status = DaemonStatusResult(
             version: TBDConstants.version,
             uptime: uptime,
             connectedClients: connectedClientsProvider?() ?? 0,
-            executablePath: Self.resolvedExecutablePath
+            executablePath: Self.resolvedExecutablePath,
+            buildIdentity: Self.resolvedBuildIdentity,
+            update: await updateChecker?.currentStatus()
         )
         return try RPCResponse(result: status)
     }
+
+    /// Run one update check synchronously and return the fresh status.
+    ///
+    /// The `--check` path of `tbd version` and the app's "Check for Updates…"
+    /// item. Deliberately does the work even when `update_mode` is `off`: a
+    /// user who just asked has made the gesture the flag exists to require, and
+    /// the check itself is one read-only `ls-remote`. The flag gates the
+    /// *timer* and the *launch*, not an explicit question.
+    func handleDaemonCheckForUpdate() async throws -> RPCResponse {
+        guard let updateChecker else {
+            // No checker wired (a daemon built without one, or a test router).
+            return try RPCResponse(result: UpdateStatus.unobserved)
+        }
+        return try RPCResponse(result: await updateChecker.checkNow())
+    }
+
+    /// This daemon's build identity, resolved once at first use.
+    ///
+    /// Memoized for the same reason as `resolvedExecutablePath`: the answer
+    /// cannot change while the process lives, and the `.worktreeHead` fallback
+    /// spawns a `git rev-parse` that must not run per RPC.
+    static let resolvedBuildIdentity: BuildIdentity? = BuildIdentityLoader.load(
+        executablePath: resolvedExecutablePath,
+        gitHead: BuildIdentityLoader.systemGitHead)
 
     /// Daemon's own executable path, resolved once at module load. Captures
     /// CWD at startup (rather than at each `daemon.status` RPC) so a later

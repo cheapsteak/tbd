@@ -68,6 +68,11 @@ struct TBDCommands: Commands {
                     await appState.migrateClaudeHooks()
                 }
             }
+            Button("Check for Updates…") {
+                Task { @MainActor in
+                    await appState.checkForUpdatesNow()
+                }
+            }
         }
 
         CommandGroup(after: .pasteboard) {
