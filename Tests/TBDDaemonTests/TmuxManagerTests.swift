@@ -740,3 +740,55 @@ final class LockedCommandRecorder: @unchecked Sendable {
         #expect(error.localizedDescription.contains("CLAUDE_CODE_OAUTH_TOKEN=<redacted>"))
     }
 }
+
+/// Repairing an existing server's global environment.
+///
+/// A tmux server bakes its spawn environment into its global environment and
+/// hands that to every window it creates afterwards, and servers outlive daemon
+/// restarts — so scrubbing the daemon's own environment fixes new servers only.
+/// A server created by a daemon that carried its launcher's identity has to be
+/// repaired where it stands, which is what these two shapes do.
+@Suite("tmux server environment repair")
+struct TmuxServerEnvironmentRepairTests {
+    @Test func serverEnvironmentRepairUnsetsEveryMarkerTheServerDoesNotOwn() {
+        let names = SpawnBaseEnvironment.enclosingSessionMarkers
+            .subtracting(["TMUX", "TMUX_PANE"])
+            .sorted()
+        var expected = ["-L", "tbd-a1b2c3d4"]
+        for (index, name) in names.enumerated() {
+            if index > 0 { expected.append(";") }
+            expected += ["set-environment", "-gu", name]
+        }
+
+        let args = TmuxManager.serverEnvironmentRepairCommand(server: "tbd-a1b2c3d4")
+
+        #expect(args == expected)
+        // The server sets these itself for every pane it creates, so they are
+        // not a launcher's identity baked in at spawn and must not be unset.
+        #expect(args.contains("TMUX") == false)
+        #expect(args.contains("TMUX_PANE") == false)
+        // One invocation, so tmux's command separator sits between consecutive
+        // triples and nowhere else.
+        #expect(args.filter { $0 == ";" }.count == names.count - 1)
+    }
+
+    @Test func configDirRepairIsNeededOnlyForATBDMintedValue() {
+        let installation = ["TBD_HOME": "/tmp/example-tbd-home"]
+
+        // Under this installation's profiles root: minted by TBD for one
+        // profile-bound spawn, so no window created from now on may inherit it.
+        #expect(TmuxManager.configDirRepairNeeded(
+            showEnvironmentOutput: "CLAUDE_CONFIG_DIR=/tmp/example-tbd-home/profiles/x/claude",
+            environment: installation))
+
+        // The user's own configuration, which TBD honours.
+        #expect(TmuxManager.configDirRepairNeeded(
+            showEnvironmentOutput: "CLAUDE_CONFIG_DIR=/Users/example/.claude-work",
+            environment: installation) == false)
+
+        // tmux prints `-NAME` for a name the server has explicitly unset.
+        #expect(TmuxManager.configDirRepairNeeded(
+            showEnvironmentOutput: "-CLAUDE_CONFIG_DIR",
+            environment: installation) == false)
+    }
+}

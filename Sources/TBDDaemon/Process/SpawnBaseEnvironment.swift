@@ -41,12 +41,16 @@ import TBDShared
 /// Removing the markers at the source is what makes the two transports behave
 /// alike.
 ///
-/// **What belongs in the set.** One criterion across all three groups: the
+/// **What belongs in the set.** One criterion across all four groups: the
 /// identity of the process that launched the daemon — its session, its
 /// terminal, its pane, its trace. Never machine, user, or installation
-/// configuration. Claude Code configuration a user may deliberately set in
-/// their login environment (`CLAUDE_CODE_USE_BEDROCK` and anything like it) is
-/// not identity, and neither is TBD's own installation configuration.
+/// configuration. The set is the whole list, not half of one:
+/// `Daemon.scrubInheritedTBDEnv` applies it to the daemon's own environment at
+/// startup, so every child the daemon spawns through plain inheritance loses
+/// the same names these two spawn seams strip explicitly. Claude Code
+/// configuration a user may deliberately set in their login environment
+/// (`CLAUDE_CODE_USE_BEDROCK` and anything like it) is not identity, and
+/// neither is TBD's own installation configuration.
 /// `TBD_HOME` and `TBD_SOCKET_PATH` name *which installation* everything
 /// belongs to — the holder rendezvous directory derives from `TBD_HOME`, and so
 /// does the socket a `tbd` invocation inside the job reaches for — so a job that
@@ -107,8 +111,14 @@ enum SpawnBaseEnvironment {
         "CLAUDE_EFFORT",
         "TRACEPARENT",
         // TBD's own per-process exports, identifying the terminal, worktree, or
-        // hook event the daemon was launched FROM. Installation-wide
-        // configuration (TBD_HOME, TBD_SOCKET_PATH) is deliberately not here.
+        // hook event the daemon was launched FROM. The three prompt layers are
+        // the launcher terminal's system-prompt text, composed per spawn by
+        // `SystemPromptBuilder.promptLayers`. `TBD_HANDOVER_FROM_PID` names the
+        // predecessor daemon a handover is taking over from; `Daemon.start()`
+        // reads it at the single-instance gate several steps before the startup
+        // scrub runs, so dropping it for children costs that read nothing.
+        // Installation-wide configuration (TBD_HOME, TBD_SOCKET_PATH) is
+        // deliberately not here.
         "TBD_TERMINAL_ID",
         "TBD_TERMINAL_INCARNATION_ID",
         "TBD_WORKTREE_ID",
@@ -118,6 +128,16 @@ enum SpawnBaseEnvironment {
         "TBD_WORKTREE_PATH",
         "TBD_REPO_PATH",
         "TBD_BRANCH",
+        "TBD_PROMPT_CONTEXT",
+        "TBD_PROMPT_INSTRUCTIONS",
+        "TBD_PROMPT_RENAME",
+        "TBD_HANDOVER_FROM_PID",
+        // Codex's per-session exports. `CODEX_CI` puts a session into
+        // noninteractive mode and `CODEX_THREAD_ID` names the launcher's
+        // thread, so `CodexHomeManager` already unsets both in the shell
+        // command it builds for a Codex pane.
+        "CODEX_CI",
+        "CODEX_THREAD_ID",
         // The enclosing tmux pane's coordinates.
         "TMUX",
         "TMUX_PANE",
@@ -130,10 +150,17 @@ enum SpawnBaseEnvironment {
     /// `base` with the enclosing session's markers removed, a TBD-minted
     /// profile config dir removed, and TERM pinned to what tmux gives a pane;
     /// everything else passes through untouched.
+    ///
+    /// An empty `CLAUDE_CONFIG_DIR` is dropped rather than passed on. Every
+    /// reader of that name in this tree — `TBDConstants.configDir`,
+    /// `ClaudeTrustSeeder.ensureTrusted`, `claudeProjectsRoot` — guards on
+    /// `!isEmpty` and falls back as though the name were unset, so handing a
+    /// job the empty string only invites a `URL(fileURLWithPath:)` on it
+    /// somewhere further down.
     static func inheriting(_ base: [String: String]) -> [String: String] {
         var environment = base.filter { !enclosingSessionMarkers.contains($0.key) }
         if let configDir = environment["CLAUDE_CONFIG_DIR"],
-           isTBDMintedProfileDir(configDir, base: base) {
+           configDir.isEmpty || isTBDMintedProfileDir(configDir, base: base) {
             environment.removeValue(forKey: "CLAUDE_CONFIG_DIR")
         }
         environment["TERM"] = pinnedTerm
@@ -146,7 +173,13 @@ enum SpawnBaseEnvironment {
     /// rather than the developer's real one. Pure string comparison on
     /// standardized paths; the filesystem is never consulted, since the
     /// directory may not exist yet and a spawn must not wait on a stat.
-    private static func isTBDMintedProfileDir(_ value: String, base: [String: String]) -> Bool {
+    ///
+    /// Internal rather than private because the same by-value judgment is made
+    /// in two other places: `Daemon.scrubInheritedTBDEnv` against the daemon's
+    /// own environment, and `TmuxManager.configDirRepairNeeded` against what an
+    /// existing tmux server reports for its global environment.
+    static func isTBDMintedProfileDir(_ value: String, base: [String: String]) -> Bool {
+        guard !value.isEmpty else { return false }
         let profilesRoot = TBDConstants.configDir(environment: base)
             .appendingPathComponent("profiles", isDirectory: true)
             .standardizedFileURL.path

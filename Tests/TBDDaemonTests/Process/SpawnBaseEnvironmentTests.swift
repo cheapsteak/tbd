@@ -139,9 +139,33 @@ struct SpawnBaseEnvironmentTests {
             "TBD_WORKTREE_PATH",
             "TBD_REPO_PATH",
             "TBD_BRANCH",
+            "TBD_PROMPT_CONTEXT",
+            "TBD_PROMPT_INSTRUCTIONS",
+            "TBD_PROMPT_RENAME",
+            "TBD_HANDOVER_FROM_PID",
+            "CODEX_CI",
+            "CODEX_THREAD_ID",
             "TMUX",
             "TMUX_PANE",
         ])
+    }
+
+    /// An empty value is not a config dir. Every reader of the name in this
+    /// tree guards on `!isEmpty` and falls back as though it were unset, so a
+    /// job is better served by the name being absent than by an empty string it
+    /// would have to guard for itself — and nothing downstream then hands the
+    /// empty string to `URL(fileURLWithPath:)`.
+    @Test func anEmptyConfigDirIsDroppedRatherThanHandedToTheJob() {
+        var base = Self.kept
+        base["CLAUDE_CONFIG_DIR"] = ""
+
+        let inherited = SpawnBaseEnvironment.inheriting(base)
+        let expected = Self.kept
+            .merging(Self.pinned) { _, pin in pin }
+            .filter { $0.key != "CLAUDE_CONFIG_DIR" }
+
+        #expect(inherited["CLAUDE_CONFIG_DIR"] == nil)
+        #expect(inherited == expected)
     }
 
     /// A daemon the app launched itself has no TERM at all, so passing the base

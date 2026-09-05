@@ -267,8 +267,18 @@ public final class Daemon: Sendable {
         self.startTime = Date()
     }
 
-    /// Remove inherited agent-routing environment variables from the daemon's
+    /// Remove the identity of whatever launched the daemon from the daemon's
     /// own process environment. Called at startup before any tmux server is spawned.
+    ///
+    /// This is the daemon-level layer of the scrub `SpawnBaseEnvironment`
+    /// defines — one list, two layers. Here, `unsetenv` covers every child the
+    /// daemon ever spawns through plain inheritance (git, hooks, one-shot tmux
+    /// clients): a name that is no longer in the daemon's environment cannot
+    /// reach any of them. `SpawnBaseEnvironment.inheriting` covers the two
+    /// long-lived spawn seams explicitly — the holder job and the tmux server —
+    /// so they stay correct even when handed an environment that was injected
+    /// rather than inherited, and can be tested without touching the test
+    /// process's environment.
     ///
     /// Rationale: tmux servers persist the env they were spawned with as their
     /// global environment, and that env is then injected into every new window
@@ -282,13 +292,20 @@ public final class Daemon: Sendable {
     /// it later creates, so a variable left set would be handed to every pane
     /// and to whatever those panes launch — including another daemon.
     public static func scrubInheritedTBDEnv() {
-        unsetenv(handoverFromPIDEnvVar)
-        unsetenv("TBD_WORKTREE_ID")
-        unsetenv("TBD_PROMPT_CONTEXT")
-        unsetenv("TBD_PROMPT_INSTRUCTIONS")
-        unsetenv("TBD_PROMPT_RENAME")
-        unsetenv("CODEX_CI")
-        unsetenv("CODEX_THREAD_ID")
+        // Sorted so the sequence of calls is determined by the set's contents
+        // rather than by a hash ordering that varies run to run.
+        for name in SpawnBaseEnvironment.enclosingSessionMarkers.sorted() {
+            unsetenv(name)
+        }
+        // `CLAUDE_CONFIG_DIR` is the one name judged by value: a directory under
+        // this installation's profiles root is one TBD minted for a single
+        // profile-bound spawn, while any other value is the user's own
+        // configuration and must survive.
+        let environment = ProcessInfo.processInfo.environment
+        if let configDir = environment["CLAUDE_CONFIG_DIR"],
+           SpawnBaseEnvironment.isTBDMintedProfileDir(configDir, base: environment) {
+            unsetenv("CLAUDE_CONFIG_DIR")
+        }
     }
 
     /// Raise the process's `RLIMIT_NOFILE` soft limit so every tmux server the
