@@ -84,9 +84,10 @@ actor HolderInjectionCourier {
         /// The ordinary case, and the only one that is not a fallback.
         case detached
         /// The app answered, and its answer was that nothing took the bytes.
-        /// Trustworthy — every refusal the app can know synchronously reports
-        /// `false` — so this is the one fallback that is certain not to
-        /// duplicate.
+        /// Trustworthy — the app answers `false` only when it has no writer at
+        /// all, never when the session's pty merely refused a payload the app
+        /// is still holding and will finish — so this is the one fallback that
+        /// is certain not to duplicate.
         case viewerReportedNothingWritten
         /// The injection frame could not be put on the sidecar at all, so the
         /// app never saw it.

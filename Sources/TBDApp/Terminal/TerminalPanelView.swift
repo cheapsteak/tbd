@@ -496,11 +496,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// A write-only `dup` of this holder session's pty master, and the
         /// app's write destination for one (`performOutgoingWrite`'s
         /// `.localPTY` arm). Without it a holder-backed panel has nowhere to
-        /// put a byte: it has no `LocalProcess` and no control-mode attach, so
-        /// every keystroke and every daemon injection would report unwritten
-        /// and the daemon's fallback would become the only delivery path —
-        /// which is the opposite of the property this transport is for, that
-        /// the app is the attached session's ONLY writer.
+        /// put a byte: it has no `LocalProcess` and no control-mode attach.
+        ///
+        /// A `dup` that fails leaves the panel read-only: every write reports
+        /// `.unwritable`, the queue holds nothing, and the daemon keeps
+        /// delivering through its own descriptor — which is the opposite of
+        /// the property this transport is for, that the app is the attached
+        /// session's ONLY writer. That is distinct from a pty that merely
+        /// refuses: a refusal is held and finished, and reported accepted.
         ///
         /// A separate descriptor rather than the reader's own, because the
         /// reader closes its descriptor **on its own thread** on the way out

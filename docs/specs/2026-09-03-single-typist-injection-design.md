@@ -86,10 +86,15 @@ open, so only the viewer can say when it is safe.
   you are not mid-paste, and hold the person's keystrokes until I say I am
   done.
 - **`injectionClear` (viewer → daemon)** answers one intent by its id. The
-  viewer answers immediately when no paste is open, and otherwise on
-  `endUserPaste` — the hold-and-release machinery `OutgoingInputQueue` already
-  has (`OutgoingInputQueue.swift:243-251`, `:264-292`), holding its own answer
-  instead of somebody else's bytes. Answering starts the keystroke hold.
+  viewer answers immediately when no paste is open, and otherwise when the
+  paste's end marker has been **accepted by the kernel** — which is
+  `endUserPaste` plus however long the viewer's outbox takes to land the
+  marker, since a stalled child can leave the marker queued for as long as it
+  stalls ([`2026-09-04-pty-write-completion-design.md`](2026-09-04-pty-write-completion-design.md)).
+  The machinery is the hold-and-release `OutgoingInputQueue` already has
+  (`beginUserPaste`/`endUserPaste`, and the outbox behind them), holding its
+  own answer instead of somebody else's bytes. Answering starts the keystroke
+  hold.
 - **`injectionDone` (daemon → viewer)** ends the hold, whatever the write's
   outcome.
 
@@ -101,24 +106,40 @@ each receive loop rather than desyncing the stream
 `FDVendingServer.swift:345-348`). A viewer built before the lease existed
 simply never answers, and the daemon's bound covers it.
 
-**What bounds the wait, and what expiry means.** The viewer bounds its own hold
-at `pasteHoldBound` (two seconds, `HolderInputTiming.pasteHoldBound` in
-TBDShared): a paste
-still open at that point gets the answer anyway. The daemon's lease bound must
-therefore be strictly *longer* than the viewer's hold bound — three seconds
-against two. That ordering is load-bearing in the same way its predecessor was,
-and in mirror image: were the daemon's bound the shorter one, every injection
-the viewer legitimately held would be written while the paste was still open,
-making the between-markers collision systematic instead of rare.
+**What bounds the wait, and what expiry means.** The viewer bounds at
+`pasteHoldBound` (two seconds, `HolderInputTiming.pasteHoldBound` in TBDShared)
+how long an open paste may defer its answer: a paste still open at that point
+gets the answer anyway. That clock covers the paste being open; it does not
+cover the end marker's journey into the kernel, which is bounded by the
+descriptor instead. The daemon's lease bound must therefore be strictly
+*longer* than the viewer's hold bound — three seconds against two. That
+ordering is load-bearing in the same way its predecessor was, and in mirror
+image: were the daemon's bound the shorter one, every injection the viewer
+legitimately held would be written while the paste was still open, making the
+between-markers collision systematic instead of rare.
 
-With that ordering, an expired lease means exactly one thing: **the viewer is
-not running its main actor at all.** A paste is three synchronous main-actor
-delegate calls with no suspension point between them, so a live app answers
-within a turn. The daemon writes when the bound expires, and the worst case is
-that the injection is absorbed into a person's paste — visible in the composer,
-the trailing `\r` rendered as a newline rather than a submit, and observable as
-not-landed. It is a paste collision, and it can never be a duplicate, because
-nobody else writes.
+With that ordering, an expired lease has two readings. The first, and the one
+the bound is sized for: **the viewer is not running its main actor at all.** A
+paste is three synchronous main-actor delegate calls with no suspension point
+between them, so a live app answers within a turn. The daemon writes when the
+bound expires, and the worst case is that the injection is absorbed into a
+person's paste — visible in the composer, the trailing `\r` rendered as a
+newline rather than a submit, and observable as not-landed. It is a paste
+collision, and it can never be a duplicate, because nobody else writes.
+
+The second reading is the rarer of the two, and it resolves the same way: the
+viewer is alive and a large paste is still draining into a stalled child, so
+the end marker has not been accepted yet. Both readings end with the daemon
+writing on its bound, the injection absorbed into the person's paste, visible
+in the composer and never doubled. An explicit "still draining" answer that
+extends the lease is the obvious refinement, and it waits on a soak showing
+the residue is felt.
+
+**The two kinds of bound stay distinct.** The keystroke hold that waits on
+another process's `injectionDone` is bounded by a clock, because that process
+can die silently. The viewer's own remainder is bounded by the descriptor —
+`EIO` or `EBADF` — and by nothing else; the hold's clock bound does not apply
+to it.
 
 A stale viewer claim — a session whose viewer record outlives its panel —
 degrades to exactly that bounded wait per injection, rather than to a send path
@@ -271,12 +292,14 @@ sidecar is, and the difference decides the design:
 
 ## Finishing the write
 
-Both writers give up today: the daemon's own path after a 250 ms budget
-(`HolderReader.swift:965`, `:1062-1088`), and the viewer's after roughly 20 ms,
-reporting a partial write as unwritten and keeping the prefix
-(`TerminalPanelView.swift:2065-2085`). Above a kilobyte into a raw-mode pty
-that is the *ordinary* path, not an edge — so a writer that gives up after one
-attempt truncates by default.
+Above a kilobyte into a raw-mode pty a short write is the *ordinary* path, not
+an edge, so a writer that gives up after one attempt truncates by default. The
+viewer already finishes what it starts: it keeps the remainder the kernel
+refused and drains it on write-readiness, bounded by the descriptor
+([`2026-09-04-pty-write-completion-design.md`](2026-09-04-pty-write-completion-design.md)).
+The daemon's own path still gives up, after a 250 ms budget
+(`HolderReader.swift:965`, `:1062-1088`) — and under single typist that is the
+path every injection takes.
 
 - **The process that started a write finishes it.** The holder finishes
   injections; the viewer finishes the person's own pastes, resuming from
@@ -372,9 +395,10 @@ entire path, which has no users to protect.
 
 A second column would also have a broken quadrant. Holder on, single-typist
 off is the arrangement this design replaces, and it is known-defective in ways
-already recorded: an injection above a kilobyte into an attached panel leaves a
-truncated fragment in the composer, and a viewer claim outliving its panel
-stops sends working for the daemon's lifetime. Keeping it selectable would
+already recorded: the ack deadline resolves a writer's silence with a timer, so
+an app that is alive but slow gets written over and the injection doubled, and
+a viewer claim outliving its panel stops sends working for the daemon's
+lifetime. Keeping it selectable would
 preserve a path we have decided is wrong and would double every soak.
 
 Both branches of the gate remain testable, because both still exist: a tmux
