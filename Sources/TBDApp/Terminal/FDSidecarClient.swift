@@ -292,6 +292,28 @@ final class FDSidecarClient: @unchecked Sendable {
             } catch {
                 break   // EOF or read error
             }
+            // **Close-on-exec, the moment they arrive** — here, not in the
+            // waiter, and not in `FDChannel`. A descriptor received over
+            // `SCM_RIGHTS` is inheritable unless somebody says otherwise, and
+            // darwin has no `MSG_CMSG_CLOEXEC` to ask for anything else on the
+            // `recvmsg` itself. What comes through here is a session's pty
+            // master — vended for a holder attach (`HolderAttachClient`) or a
+            // control-mode attach (`DaemonClient.openAttach`), both of which
+            // register through `expectFD` and are settled by this one loop —
+            // and it lives as long as the session does. This app spawns
+            // children constantly: every local-PTY panel is a `forkpty`, and
+            // the git and PR-status tools it shells out to are more. One such
+            // child inheriting a copy holds the session open for as long as it
+            // lives: the far end never sees EOF, death detection stops working,
+            // and the handback never completes.
+            //
+            // Stamping it in the receive loop rather than at each waiter is
+            // what makes the guarantee structural: it covers the routing-key
+            // demux, the stale-vend path that just closes the fd, the leftovers
+            // drained on disconnect, and any waiter added later — none of which
+            // can forget. `HolderClient.readMoreFrames` does the same at the
+            // daemon's receive chokepoint, for the same reason.
+            for descriptor in message.fds { _ = fcntl(descriptor, F_SETFD, FD_CLOEXEC) }
             pendingFDs.append(contentsOf: message.fds)
             // Process the frames `append` returned FIRST, THEN check isDesynced
             // and break. A desync-tripping tail can arrive in the same read as

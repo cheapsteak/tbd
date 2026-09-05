@@ -63,6 +63,98 @@ struct FDSidecarClientTests {
         #expect(Data(buffer[0..<Int(n)]) == marker)
     }
 
+    private static func isCloseOnExec(_ fd: Int32) -> Bool {
+        let flags = fcntl(fd, F_GETFD)
+        return flags >= 0 && (flags & FD_CLOEXEC) != 0
+    }
+
+    /// The discriminator for the test below it. `FD_CLOEXEC` is a property of a
+    /// descriptor, not of the open file, and `SCM_RIGHTS` does not carry it —
+    /// so the receiving side's descriptor arrives inheritable however loudly
+    /// the sender flagged its own copy. Should this ever stop being true, the
+    /// assertion below would pass without `FDSidecarClient` doing anything, and
+    /// this row is what says so.
+    @Test("the transport delivers what it was handed, inheritable")
+    func transportDeliversInheritableDescriptors() throws {
+        let (senderSide, receiverSide) = try makeSocketPair()
+        defer { Darwin.close(senderSide); Darwin.close(receiverSide) }
+
+        let (readFD, writeFD) = try makePipe()
+        defer { Darwin.close(readFD); Darwin.close(writeFD) }
+        // The sender's copy says close-on-exec as loudly as it can.
+        #expect(fcntl(readFD, F_SETFD, FD_CLOEXEC) == 0)
+        #expect(Self.isCloseOnExec(readFD))
+
+        try FDChannel.sendFDMinimal(readFD, over: senderSide, payload: Data("x".utf8))
+        let received = try FDChannel.receiveMessage(from: receiverSide, capacity: 4096)
+        defer { received.fds.forEach { Darwin.close($0) } }
+
+        let arrived = try #require(received.fds.first)
+        #expect(
+            !Self.isCloseOnExec(arrived),
+            """
+            the transport now delivers close-on-exec descriptors on its own, so the assertion \
+            that FDSidecarClient sets the flag is vacuous and must be rewritten
+            """)
+    }
+
+    /// A vended descriptor is a session's pty master and outlives every child
+    /// this app spawns — a `forkpty` panel, a shelled-out git or PR-status
+    /// probe. One inherited copy holds the session open past the panel that
+    /// closed: no EOF at the far end, no death detection, no clean handback.
+    /// The flag is therefore set in the receive loop, so it is already on by
+    /// the time any waiter is resumed — not later, on the main actor, after an
+    /// async return.
+    ///
+    /// Both production callers register through `expectFD` and are settled by
+    /// that one loop — `HolderAttachClient.attach` (a holder session, empty
+    /// `windowID`) and `DaemonClient.openAttach` (a control-mode pane) — so
+    /// both key shapes are driven here.
+    @Test("a vended descriptor is close-on-exec by the time its waiter sees it")
+    func vendedDescriptorIsCloseOnExec() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let worktreeID = UUID()
+        let holderAttach = UUID()
+        let controlAttach = UUID()
+        let holderPromise = client.expectFD(
+            worktreeID: worktreeID, paneID: "holder-pane", attachID: holderAttach)
+        let controlPromise = client.expectFD(
+            worktreeID: worktreeID, paneID: "%7", attachID: controlAttach)
+
+        for (paneID, attachID) in [("holder-pane", holderAttach), ("%7", controlAttach)] {
+            let (readFD, writeFD) = try makePipe()
+            defer { Darwin.close(writeFD) }
+            // Clear it on the sender's side, so "the flag rode across" is not
+            // an available reading of a pass — the row above shows it cannot.
+            #expect(fcntl(readFD, F_SETFD, 0) == 0)
+            #expect(!Self.isCloseOnExec(readFD))
+            try vend(readFD: readFD, worktreeID: worktreeID, paneID: paneID,
+                     attachID: attachID, over: daemonSide)
+        }
+
+        let holderFD = try await holderPromise.value(timeout: .seconds(2))
+        defer { Darwin.close(holderFD) }
+        let controlFD = try await controlPromise.value(timeout: .seconds(2))
+        defer { Darwin.close(controlFD) }
+
+        #expect(
+            Self.isCloseOnExec(holderFD),
+            """
+            a holder session's pty reached its waiter inheritable, so any child this app spawns \
+            holds that session open for as long as it lives
+            """)
+        #expect(
+            Self.isCloseOnExec(controlFD),
+            """
+            a control-mode attach's pty reached its waiter inheritable — the same window, on the \
+            path that shares this receive loop
+            """)
+    }
+
     @Test("interleaved vends for two panes route by header, not arrival order")
     func interleavedVendsRouteByHeader() async throws {
         let (daemonSide, appSide) = try makeSocketPair()
