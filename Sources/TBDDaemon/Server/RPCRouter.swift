@@ -321,12 +321,25 @@ public final class RPCRouter: Sendable {
         let branchCache = BranchTrackingCache()
         self.branchTrackingCache = branchCache
         self.prPoller = PRPoller()
-        self.profilePoolCandidateSource = profilePoolCandidateSource
+        // Default the candidate source from the router's own stores rather
+        // than leaving it nil: the rate-limit handler's suggestion and the
+        // gated rotation both read it, and a caller that forgets to pass one
+        // would otherwise disable both silently (the AI review caught exactly
+        // that gap in the daemon's wiring). Callers that pass one — the
+        // daemon, so the resolver and the handler share it, and tests that
+        // inject fakes — still win.
+        let resolvedCandidateSource = profilePoolCandidateSource ?? ProfilePoolCandidateSource(
+            profiles: db.modelProfiles,
+            snapshots: db.oauthUsageSnapshots,
+            terminals: db.terminals,
+            loginIdentity: { [configDirManager] in configDirManager.loginIdentity(forProfileID: $0) }
+        )
+        self.profilePoolCandidateSource = resolvedCandidateSource
         let resolvedModelProfileResolver = modelProfileResolver ?? ModelProfileResolver(
             profiles: db.modelProfiles,
             repos: db.repos,
             config: db.config,
-            candidateSource: profilePoolCandidateSource
+            candidateSource: resolvedCandidateSource
         )
         self.modelProfileResolver = resolvedModelProfileResolver
         self.hibernationCoordinator = HibernationCoordinator(
