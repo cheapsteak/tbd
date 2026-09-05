@@ -1280,16 +1280,22 @@ public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
     /// `Token •••• <tail>` so two token profiles can be told apart, and that is
     /// all it is ever given.
     public let tokenTail: String?
+    /// Count of live Claude sessions on this profile (unparked, not hibernated).
+    /// Computed by the daemon at list time (never persisted). Non-nil only on
+    /// daemons that implement the load-balancing feature (design 2026-09-05);
+    /// nil on older daemons.
+    public let liveSessions: Int?
     public init(profile: ModelProfile, usage: ModelProfileUsage? = nil,
                 loginIdentity: String? = nil, configDirPath: String? = nil,
                 usageSnapshot: ProfileUsageSnapshot? = nil,
-                tokenTail: String? = nil) {
+                tokenTail: String? = nil, liveSessions: Int? = nil) {
         self.profile = profile
         self.usage = usage
         self.loginIdentity = loginIdentity
         self.configDirPath = configDirPath
         self.usageSnapshot = usageSnapshot
         self.tokenTail = tokenTail
+        self.liveSessions = liveSessions
     }
 }
 

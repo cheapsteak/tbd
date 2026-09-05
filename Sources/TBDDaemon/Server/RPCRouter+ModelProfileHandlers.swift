@@ -651,4 +651,24 @@ extension RPCRouter {
         let dir = try configDirManager.ensureOAuthDir(forProfileID: profile.id)
         return try RPCResponse(result: ModelProfilePrepareConfigDirResult(configDirPath: dir.path))
     }
+
+    // MARK: - Pool Opt-Out
+
+    /// Set whether this profile is excluded from the balancing pool (design
+    /// 2026-09-05 §4). Not a feature flag — all profiles start in the pool, and
+    /// `optOut = true` means "never choose this one for me".
+    func handleModelProfileSetPoolOptOut(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ModelProfileSetPoolOptOutParams.self, from: paramsData)
+        // Write the pool_opt_out column directly via GRDB transaction
+        try await db.writerForTests.write { db in
+            try db.execute(
+                sql: "UPDATE model_profiles SET pool_opt_out = ? WHERE id = ?",
+                arguments: [params.optOut ? 1 : 0, params.id.uuidString]
+            )
+        }
+        // Notify the app of the profile-list change so it reloads the detail view's toggle.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
 }

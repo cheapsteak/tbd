@@ -1780,4 +1780,28 @@ public struct TerminalStore: Sendable {
             try record.update(db)
         }
     }
+
+    /// Count live Claude sessions per profile. Live = kind is 'claude', profile_id
+    /// is not NULL, and the session is not hibernated or suspended. Returns a map
+    /// of profile_id → count. UUIDs that fail to parse are skipped silently
+    /// (corrupted rows in the database; the count is conservative).
+    public func liveSessionCountsByProfile() async throws -> [UUID: Int] {
+        try await reader.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT profile_id, COUNT(*) as count FROM terminal
+                WHERE kind = ? AND profile_id IS NOT NULL
+                  AND hibernatedAt IS NULL AND suspendedAt IS NULL
+                GROUP BY profile_id
+                """, arguments: ["claude"])
+            var result: [UUID: Int] = [:]
+            for row in rows {
+                if let profileIDStr: String = row["profile_id"],
+                   let profileUUID = UUID(uuidString: profileIDStr),
+                   let count: Int = row["count"] {
+                    result[profileUUID] = count
+                }
+            }
+            return result
+        }
+    }
 }

@@ -321,6 +321,10 @@ public enum RPCMethod {
     /// method of its own: `config.get` already carries the resolved value, as
     /// does `daemon.capabilities`.
     public static let configSetLimitRotationEnabled = "config.setLimitRotationEnabled"
+    /// Per-profile opt-out from the balancing pool. Reading needs no method of
+    /// its own: the opt-out is already carried in `model.profiles` as
+    /// `ModelProfile.poolOptOut`.
+    public static let modelProfileSetPoolOptOut = "modelProfile.setPoolOptOut"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -865,6 +869,12 @@ public struct ModelProfileListResult: Codable, Sendable {
     /// the provider's own `create_params` field names. Carried alongside the
     /// other config-derived fields so the app loads it in one round-trip.
     public let globalRemoteCreateDefaults: [String: String]
+    /// Whether profile balancing is enabled. Absent on older daemons (fall
+    /// through to the shipped default on the app side).
+    public let profileBalancingEnabled: Bool?
+    /// Whether account rotation on hard limit is enabled. Absent on older
+    /// daemons (fall through to the shipped default on the app side).
+    public let limitRotationEnabled: Bool?
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
@@ -877,7 +887,9 @@ public struct ModelProfileListResult: Codable, Sendable {
         autoResumeOnApiError: Bool = false,
         gcEnabled: Bool = true,
         autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
-        globalRemoteCreateDefaults: [String: String] = [:]
+        globalRemoteCreateDefaults: [String: String] = [:],
+        profileBalancingEnabled: Bool? = nil,
+        limitRotationEnabled: Bool? = nil
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -891,6 +903,8 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.gcEnabled = gcEnabled
         self.autoCreateNotesEnabled = autoCreateNotesEnabled
         self.globalRemoteCreateDefaults = globalRemoteCreateDefaults
+        self.profileBalancingEnabled = profileBalancingEnabled
+        self.limitRotationEnabled = limitRotationEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -925,6 +939,12 @@ public struct ModelProfileListResult: Codable, Sendable {
             [String: String].self,
             forKey: .globalRemoteCreateDefaults
         ) ?? [:]
+        // New fields for the profile balancing gates. Absent on older daemons —
+        // the app falls through to the shipped defaults on the Config side.
+        profileBalancingEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .profileBalancingEnabled)
+        limitRotationEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .limitRotationEnabled)
     }
 }
 
@@ -3288,6 +3308,17 @@ public struct ConfigSetProfileBalancingEnabledParams: Codable, Sendable {
 public struct ConfigSetLimitRotationEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `modelProfile.setPoolOptOut` — the per-profile opt-out from the
+/// balancing pool (design 2026-09-05 §4). Not a feature flag; no graduation.
+public struct ModelProfileSetPoolOptOutParams: Codable, Sendable {
+    public var id: UUID
+    public var optOut: Bool
+    public init(id: UUID, optOut: Bool) {
+        self.id = id
+        self.optOut = optOut
+    }
 }
 
 /// Params for `config.setGCOrphanProcessesEnabled` — the gate for the

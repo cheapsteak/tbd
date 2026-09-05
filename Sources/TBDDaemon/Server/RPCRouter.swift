@@ -604,6 +604,8 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileHealthCheck(request.paramsData)
             case RPCMethod.modelProfilePrepareConfigDir:
                 return try await handleModelProfilePrepareConfigDir(request.paramsData)
+            case RPCMethod.modelProfileSetPoolOptOut:
+                return try await handleModelProfileSetPoolOptOut(request.paramsData)
             case RPCMethod.appSetForegroundState:
                 let params = try decoder.decode(AppSetForegroundStateParams.self, from: request.paramsData)
                 await claudeUsagePoller?.onFocusChanged(isForeground: params.isForeground)
