@@ -16,6 +16,12 @@ struct ScratchRootSupportTests {
     /// budget case below measures the real layout rather than a shorter stand-in.
     private static let runRoot = "/tmp/tbd-test-home.aBcDeFgH"
 
+    /// Every fixture prefix in the tree, longest included. The budget case
+    /// measures all of them: testing only a short one would let a one-byte
+    /// growth in the layout break the longest prefix's bind while the
+    /// assertion stayed green.
+    private static let prefixesInUse = ["tbdh", "tbdh6", "tbdh7", "tbdg10"]
+
     @Test func nestsDirectlyUnderTheRunRootWhenTheFenceNamesOne() {
         let path = fencedScratchRoot(
             prefix: "tbdh7", environment: ["TBD_TEST_SCRATCH_ROOT": Self.runRoot])
@@ -40,6 +46,16 @@ struct ScratchRootSupportTests {
         #expect((path as NSString).lastPathComponent.hasPrefix("tbdh7-"))
     }
 
+    /// An empty `TBD_TEST_SCRATCH_ROOT` is nobody's fence either. Read
+    /// literally it would put the root at `/<prefix>-xxxxxxxx`, in the root of
+    /// the volume, so it takes the same `/tmp` fallback as a missing one.
+    @Test func fallsBackToTmpWhenTheFenceIsEmpty() {
+        let path = fencedScratchRoot(
+            prefix: "tbdh7", environment: ["TBD_TEST_SCRATCH_ROOT": ""])
+        #expect((path as NSString).deletingLastPathComponent == "/tmp")
+        #expect((path as NSString).lastPathComponent.hasPrefix("tbdh7-"))
+    }
+
     /// THE BUDGET. This is why the root goes under the run root and not under
     /// the fenced `TBD_HOME`, which is `<run root>/sanctioned/tbd`: the
     /// rendezvous socket is `<root>/holders/<36-char uuid>.sock`, and the two
@@ -51,10 +67,14 @@ struct ScratchRootSupportTests {
     /// one honest measurement of the layout actually shipped is the thing that
     /// has to keep holding.
     @Test func aSocketUnderTheRunRootFitsSunPath() throws {
-        let home = fencedScratchRoot(
-            prefix: "tbdh7", environment: ["TBD_TEST_SCRATCH_ROOT": Self.runRoot])
-        let socket = try HolderRendezvous.socketPath(
-            sessionID: UUID(), environment: ["TBD_HOME": home])
-        #expect(socket.utf8.count < HolderRendezvous.sunPathLimit)
+        for prefix in Self.prefixesInUse {
+            let home = fencedScratchRoot(
+                prefix: prefix, environment: ["TBD_TEST_SCRATCH_ROOT": Self.runRoot])
+            let socket = try HolderRendezvous.socketPath(
+                sessionID: UUID(), environment: ["TBD_HOME": home])
+            #expect(
+                socket.utf8.count < HolderRendezvous.sunPathLimit,
+                "prefix \(prefix) overshoots sun_path at \(socket.utf8.count) bytes")
+        }
     }
 }

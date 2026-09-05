@@ -642,6 +642,11 @@ test_scratch_root_names_the_directory_the_trap_deletes() {
   home="$(fenced_tbd_home "$fix")"
   assert_contains "the scratch root is a run-scoped /tmp dir" "$root" "/tmp/tbd-test-home."
   assert_eq "and TBD_HOME sits inside it" "$root" "${home%/sanctioned/tbd}"
+  # Naming the trapped directory is only half of it: the trap has to have
+  # actually removed it. The run above is a command substitution, so it has
+  # exited and its EXIT trap has run by the time this reads the path.
+  assert_eq "and the trap deleted it" "false" \
+    "$([ -e "$root" ] && echo true || echo false)"
   rmfix "$fix"
 }
 

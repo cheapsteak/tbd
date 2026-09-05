@@ -26,7 +26,9 @@ import Foundation
 /// **The `/tmp` fallback** covers a run that is not fenced at all — SwiftPM
 /// invoked directly rather than through `scripts/test.sh`. That is the
 /// pre-existing behavior, leak included; the fence is what fixes it, not this
-/// default.
+/// default. An empty `TBD_TEST_SCRATCH_ROOT` is no more a fence than a missing
+/// one and takes the same fallback: read literally it would mint the root in
+/// the root of the volume.
 ///
 /// The environment is an injection seam rather than a `setenv`: test targets
 /// compile into one process and Swift Testing runs their suites in parallel,
@@ -41,6 +43,7 @@ public func fencedScratchRoot(
     prefix: String,
     environment: [String: String] = ProcessInfo.processInfo.environment
 ) -> String {
-    let root = environment["TBD_TEST_SCRATCH_ROOT"] ?? "/tmp"
+    let fenced = environment["TBD_TEST_SCRATCH_ROOT"] ?? ""
+    let root = fenced.isEmpty ? "/tmp" : fenced
     return "\(root)/\(prefix)-\(UUID().uuidString.prefix(8).lowercased())"
 }
