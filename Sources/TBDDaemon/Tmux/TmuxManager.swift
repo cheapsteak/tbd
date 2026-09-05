@@ -384,6 +384,72 @@ public struct TmuxManager: Sendable {
         ["-L", server, "has-session", "-t", session]
     }
 
+    /// The single tmux invocation that strips the repairable enclosing-session
+    /// markers from an existing server's global environment and then reports
+    /// what the server's global environment holds.
+    ///
+    /// `set-environment -gu <name>` removes a name from the server's global
+    /// environment, so windows created afterwards do not inherit it. Running
+    /// panes are untouched — they already hold their own copy — and unsetting a
+    /// name the server never had is a no-op, which is what makes the whole
+    /// repair safe to run unconditionally.
+    ///
+    /// Only TBD's own per-process exports and Codex's per-session exports are
+    /// repaired; `SpawnBaseEnvironment.serverRepairableMarkers` is the set and
+    /// carries the reason. Claude Code's markers are left alone because a pane
+    /// that predates the repair holds its own copy and reads it as ambient only
+    /// while the server's global copy is there too, and `TMUX`/`TMUX_PANE` are
+    /// the server's own.
+    ///
+    /// The trailing `show-environment -g` — the *unnamed* form, which lists
+    /// every global variable and never fails, unlike `show-environment -g NAME`
+    /// on an absent name — makes the invocation's stdout the server's full
+    /// global listing after the unsets, so the by-value `CLAUDE_CONFIG_DIR`
+    /// judgment costs no extra client call.
+    ///
+    /// One invocation rather than one per name. `";"` is tmux's command
+    /// separator and travels as its own argv element, so the whole list runs as
+    /// a single command against the server.
+    public static func serverEnvironmentRepairCommand(server: String) -> [String] {
+        let names = SpawnBaseEnvironment.serverRepairableMarkers.sorted()
+        var args = ["-L", server]
+        for (index, name) in names.enumerated() {
+            if index > 0 { args.append(";") }
+            args += ["set-environment", "-gu", name]
+        }
+        args += [";", "show-environment", "-g"]
+        return args
+    }
+
+    /// Whether a server's global `CLAUDE_CONFIG_DIR` is one TBD minted for a
+    /// single profile-bound spawn, and so must be removed rather than handed to
+    /// every window the server creates from now on.
+    ///
+    /// `showEnvironmentOutput` is the full `show-environment -g` listing — one
+    /// `NAME=value` line per global variable, or `-NAME` for a name the server
+    /// has explicitly unset — which this scans for the `CLAUDE_CONFIG_DIR=`
+    /// line.
+    ///
+    /// Judged by value, exactly as `SpawnBaseEnvironment` judges it on the
+    /// spawn path: a directory under this installation's profiles root is
+    /// per-spawn identity, while any other value is the user's own
+    /// configuration and stays. A `-CLAUDE_CONFIG_DIR` line means the server
+    /// has already unset it, and a listing with no such line means it never had
+    /// one — both read as "no repair needed".
+    static func configDirRepairNeeded(
+        showEnvironmentOutput: String,
+        environment: [String: String]
+    ) -> Bool {
+        let prefix = "CLAUDE_CONFIG_DIR="
+        for rawLine in showEnvironmentOutput.split(whereSeparator: \.isNewline) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix(prefix) else { continue }
+            return SpawnBaseEnvironment.isTBDMintedProfileDir(
+                String(line.dropFirst(prefix.count)), base: environment)
+        }
+        return false
+    }
+
     /// Prefix `shellCommand` with one `export KEY='value'; ` per `env` entry,
     /// sorted by key, single-quoting each value with the standard `'\''`
     /// escape for an embedded quote.
@@ -1067,11 +1133,45 @@ public struct TmuxManager: Sendable {
             // features (clipboard, focus, title, etc.) are preserved; OSC 8
             // hyperlinks are stripped for a normal-attach client unless advertised.
             _ = try? await runTmux(Self.terminalFeaturesHyperlinksCommand(server: server))
+            // Repair the server's global environment in place. A tmux server
+            // bakes its spawn environment into its global environment and hands
+            // that to every window it creates afterwards, and servers outlive
+            // daemon restarts — so a server created by a daemon that carried
+            // its launcher's identity keeps handing that identity to new panes
+            // for as long as it lives. The create branch below needs no repair:
+            // its `new-session` already runs under the scrubbed base, so
+            // nothing was ever baked in.
+            //
+            // Normally one call: the repair invocation ends in
+            // `show-environment -g`, so its output is the listing the by-value
+            // `CLAUDE_CONFIG_DIR` judgment needs. A second call follows only
+            // when the server carries a TBD-minted config dir. The repair is
+            // best-effort — it must never stop a session from reaching a server
+            // that is already up — but a failure is logged rather than
+            // swallowed: tmux stops a command list at the first command that
+            // fails, so a name it rejects would silently leave every later name
+            // still set, with no trace anywhere.
+            do {
+                let listing = try await runTmux(Self.serverEnvironmentRepairCommand(server: server))
+                if Self.configDirRepairNeeded(
+                    showEnvironmentOutput: listing,
+                    environment: ProcessInfo.processInfo.environment) {
+                    _ = try await runTmux(["-L", server, "set-environment", "-gu", "CLAUDE_CONFIG_DIR"])
+                }
+            } catch {
+                logger.warning("ensureServer: could not repair the global environment of tmux server \(server, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
             return nil
         } catch {
             // Session does not exist, create it — capture the initial window ID
             let args = Self.newServerCommand(server: server, session: session, cwd: cwd, cols: cols, rows: rows)
-            let output = try await runTmux(args)
+            // Only this invocation's environment matters: it is the process that
+            // becomes the server, and every pane inherits from there. The other
+            // tmux calls are one-shot clients that talk to a server already
+            // holding its own environment, so they keep inheriting the daemon's.
+            let output = try await runTmux(
+                args,
+                environment: SpawnBaseEnvironment.inheriting(ProcessInfo.processInfo.environment))
             logger.info("ensureServer: created tmux server \(server, privacy: .public)")
             // Hide tmux chrome globally — TBD app provides its own UI
             _ = try? await runTmux(["-L", server, "set", "-g", "status", "off"])
@@ -1653,7 +1753,10 @@ public struct TmuxManager: Sendable {
     }
 
     @discardableResult
-    private func runTmux(_ arguments: [String]) async throws -> String {
+    private func runTmux(
+        _ arguments: [String],
+        environment: [String: String]? = nil
+    ) async throws -> String {
         guard let executable = Self.tmuxPath() else {
             throw TmuxError.commandFailed(
                 command: Self.redactedCommandDescription(label: "tmux", arguments: arguments),
@@ -1665,7 +1768,8 @@ public struct TmuxManager: Sendable {
             executable: executable,
             arguments: arguments,
             label: "tmux",
-            timeout: subprocessTimeout
+            timeout: subprocessTimeout,
+            environment: environment
         )
     }
 
@@ -1679,6 +1783,10 @@ public struct TmuxManager: Sendable {
     /// Package-internal (not `private`) so timeout tests can drive it directly
     /// against a real slow binary (`/bin/sleep`) without a tmux server.
     ///
+    /// `environment` REPLACES the child's environment wholesale when given;
+    /// `nil` lets the child inherit the daemon's, which is what every one-shot
+    /// tmux client wants.
+    ///
     /// `clock` is contract 1's shape applied to a static function rather than an
     /// initializer (last parameter, named `clock`, defaulted, existential): it
     /// arms the deadline a second time so tests can drive it in virtual time.
@@ -1689,6 +1797,7 @@ public struct TmuxManager: Sendable {
         arguments: [String],
         label: String,
         timeout: Duration,
+        environment: [String: String]? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) async throws -> String {
         // Redacted at the point argv becomes text, so the secret cannot reach
@@ -1699,6 +1808,7 @@ public struct TmuxManager: Sendable {
             executable: executable,
             arguments: arguments,
             currentDirectory: nil,
+            environment: environment,
             timeout: timeout,
             clock: clock
         ) {
