@@ -55,6 +55,15 @@ an oracle without verification fixes the two shapes that are known and says
 nothing about the next one, while verification without the oracle makes every
 stall loud and leaves every stall a stall.
 
+**Both halves land before the holder `write` verb.** That sequencing is the
+one constraint this design places on work already specified. Single-typist
+moves the injection writer into the holder — the one process that never
+reads the master and so knows nothing about modes
+(`Sources/TBDHolder/Holder.swift:9-13`). Shipping the verb first would give
+every injection a faster path to the same stall; shipping the oracle first
+means the verb inherits finished bytes from a composition step that already
+knows what the child is in. See "Sequencing against single-typist" below.
+
 ## The evidence
 
 Field measurements on one machine running a live fleet, all on the holder
@@ -139,6 +148,12 @@ stale (`2026-08-30-pty-holder-session-transport-design.md:548-553`).
   scripts and skills read `tbd terminal output` today and the CLI prints it.
   It is derived from `lines` and carries no information of its own.
 
+The typed screen is the answer of the existing `terminal.output` method, not
+a sibling method beside it. A second method would leave the first one
+answering wrongly — an error that names the wrong cause — for every attached
+session until the last consumer migrated, and the derived `output` field is
+what lets every existing consumer keep reading without noticing the change.
+
 ### Two stores, and the pull that reaches the live one
 
 The two-store model stands: the daemon's emulator is authoritative while
@@ -174,11 +189,9 @@ design builds is the pull the model has always required.
 Each consumer declares what it does with `.staleDaemon`, and the declaration
 is in the consumer, where a reviewer can see it:
 
-- **The input-path oracle (below)** – uses the stale modes and records that it
-  did on the actuation row. Modes flip rarely; a wrong guess produces the
-  visible, recoverable outcome the transport spec already accepts for a lost
-  ack, and a refusal would stall every supervision send whenever the app is
-  napping — the moment supervision most needs to send.
+- **The input-path oracle** – proceeds on the stale modes and records the
+  source on the actuation row. This is the one place the design knowingly
+  acts on possibly-stale information, and it gets its own section below.
 - **The hibernation pending-input check** – fails closed, as the transport
   spec rules: a stale screen cannot prove the composer is empty.
 - **Fleet supervision, `tbd terminal output`** – accept, and surface the
@@ -200,21 +213,89 @@ consults the screen contract first, and the modes decide the bytes:
 - **Bracketed paste off** – bare bytes, as today. A shell at its prompt, or a
   program that never asked for bracketing, must not receive markers it will
   print.
-- **Named keys** – `--keys` gains a table on the holder transport, keyed on
-  the modes: `Enter`, `Escape`, `Tab`, `BSpace`, `C-<x>` and the function of
-  Space are mode-independent; the arrow and navigation keys select the
-  application or normal sequence on `applicationCursor`. Keys are paced
-  through the existing `PacedKeySender`, for the reason its tmux use records:
-  a redrawing TUI drops back-to-back keys.
-- **The refusal stops.** `holderKeysRefusal` (`:2848-2852`) is retired with
-  the table; a key the table does not name is refused by name, as a tmux key
-  the daemon cannot map is today.
-
 The oracle is consulted at composition time, which is a moment, and the child
 can change a mode between that moment and the write. That window exists on
 tmux too — the server reads the pane's mode when it pastes, not when the
 bytes land — and it is accepted here for the same reason: a mode that flips
 mid-send produces a visible mis-paste, not a silent one.
+
+### Named keys are supported, and they lean on the oracle
+
+`--keys` works on the holder transport. The refusal that stands today
+(`holderKeysRefusal`, `:2848-2852`) exists because the daemon had no way to
+choose bytes for a key whose encoding depends on the child's mode; the oracle
+is that way, and the table is built on it rather than deferred to the holder
+`write` verb. The documented remedy for a stuck composer — `--keys "Escape
+Enter"` — has to work on the transport where composers get stuck.
+
+- **Mode-independent keys** – `Enter`, `Escape`, `Tab`, `BSpace`, `Space`,
+  and `C-<x>` for the control characters. These encode the same way in every
+  mode and the table carries them as fixed bytes.
+- **Mode-dependent keys** – the arrows and the navigation keys (`Home`,
+  `End`, `PageUp`, `PageDown`) select the application sequence (`ESCOA`) or
+  the normal one (`ESC[A`) on the oracle's `applicationCursor`.
+- **Pacing** – keys go one at a time through the existing `PacedKeySender`,
+  for the reason its tmux use records: a redrawing TUI drops back-to-back
+  keys.
+- **Unknown keys** – a name the table does not carry is refused by name, as a
+  tmux key the daemon cannot map is refused today. The table is small on
+  purpose; it grows by evidence of a key somebody needed.
+
+This restores a capability, and it also creates a dependency that a reader
+must not miss: **the named-key table is load-bearing on the oracle's
+accuracy.** A wrong `applicationCursor` sends `ESC[A` to a program waiting for
+`ESCOA`, which the program reads as Escape followed by two printable
+characters — a silently wrong keystroke, which is precisely the failure class
+this design exists to end. The oracle's provenance is the guard: a key
+composed against `staleDaemon` modes is recorded as such on the actuation row
+(next section), so a mis-sent key is diagnosable afterwards even though it is
+not detectable at the moment it is sent. Verification does not cover keys —
+they reach no transcript — so for named keys the recorded source is the only
+witness there is.
+
+### Proceeding on stale modes
+
+When a viewer holds the pty and does not answer the pull, the oracle composes
+against the modes the daemon's emulator held when the viewer attached, and
+records `modeSource: staleDaemon` with the age on the actuation row. This is
+the residue of the design: the one place it knowingly proceeds on
+information that may be wrong, and it should be read as one.
+
+What a stale-mode send can get wrong, exactly:
+
+- **Bracketed paste read as on when it is off** – the child receives
+  `ESC[200~` and `ESC[201~` as bytes it never asked for. A program that does
+  not understand them prints them, so the composer shows the markers around
+  the text and the `\r` still submits whatever the program made of it. A
+  shell at its prompt executes a line that begins with a marker.
+- **Bracketed paste read as off when it is on** – the send goes as bare
+  bytes, and the receiver's burst heuristic can absorb the `\r`. This is the
+  defect the oracle exists to end, reappearing only on the stale path, and
+  only when the child changed its paste mode during the attach.
+- **`applicationCursor` wrong in either direction** – a named arrow key
+  arrives as the wrong sequence, as the previous section describes.
+
+Every one of those is a wrong *composition*, and a wrong composition is
+visible in the composer or diagnosable from the row; none of them is a send
+that vanishes with a `dispatched` record and nothing else. That is the
+difference between this residue and the defects above.
+
+Proceeding beats refusing for a reason specific to who sends when. A viewer
+that does not answer is an app that is napping, wedged, or busy — and the
+transport spec already observes that those states correlate with exactly the
+moments supervision most wants to act. A refusal would make the daemon's
+rails fail closed at those moments, every time, which turns a rare mis-paste
+into a systematic stall of unattended work. Modes flip rarely — an agent TUI
+sets bracketed paste once at startup and leaves it — so the stale answer is
+usually the right one, and when it is not, the outcome is a visible
+mis-paste rather than a silent loss.
+
+The recorded source is what makes this honest rather than merely optimistic.
+A row reading `dispatched, modeSource: staleDaemon (age 41 min)` tells a
+person reading the record afterwards that the composition was a guess and
+how old the guess was; the verifier's observation on the same row then says
+whether the guess landed. A refusal would have carried the same honesty at
+the price of the stall; a silent fallback would have carried neither.
 
 ### What this does not change
 
@@ -276,6 +357,12 @@ routes the same way every other send does.
   senders whose silence costs hours: nobody is looking at the screen when a
   desk nudges an agent at three in the morning, and the record is the only
   witness.
+- **Default arming is a holder-transport rule.** Rails sending to a tmux
+  session keep today's per-send opt-in. The tmux arm already delivers with
+  explicit bracketing and a separate Enter, so it lacks the failure shape that
+  motivates the default, and widening the soak to both transports at once
+  widens the blast radius of any re-delivery bug to the whole fleet. Extending
+  the default to tmux is cheap to do later on evidence and is not done here.
 - **Nothing about the ladder changes.** Requested, dispatched, landed
   (`2026-07-26-fleet-supervision-design.md` §12) stays the record's shape; the
   third rung simply becomes reachable on the transport where it is needed
@@ -301,8 +388,13 @@ emit.
   shell in canonical mode never met the input-queue ceiling in the first
   place. The residue is a shell that received a send and did nothing, which
   is what a shell does with a command it does not understand.
+- **A send composed against stale modes** can mis-paste or mis-key, as
+  "Proceeding on stale modes" states. Visible in the composer, recorded on
+  the row, and never a vanished send.
 - **A mode that flips between query and write** produces a visible mis-paste.
   Accepted, as above.
+- **Named keys reach no transcript**, so verification cannot observe them.
+  The recorded mode source is their only witness.
 - **A viewer that never answers a pull** yields `staleDaemon` for as long as
   it holds the pty. That is the transport spec's alive-but-silent arm, and it
   is now a labeled answer with an age instead of an error that names the
@@ -360,7 +452,12 @@ exists, under a query-time delivery rule that leaves nothing stale.
   not through tmux; a daemon-rail send is armed without `--verify` when the
   flag is on and not when it is off.
 - **The stale-source policies.** The hibernation check refuses on
-  `staleDaemon`; the oracle proceeds and records the source.
+  `staleDaemon`; the oracle proceeds, and the actuation row carries
+  `modeSource: staleDaemon` with an age, asserted on the row rather than on a
+  log line.
+- **Named keys.** `Escape Enter` produces the fixed bytes in every mode; an
+  unknown key name is refused by name and writes nothing; keys are paced
+  through `PacedKeySender` with the same interval the tmux arm uses.
 
 ## Out of scope, named so nobody re-derives them
 
@@ -383,10 +480,31 @@ exists, under a query-time delivery rule that leaves nothing stale.
   assertion that logs loudly on a second live drain loop; what exists is a
   test-facing counter (`HolderRegistry.swift:297-306`, `:878`) with no log at
   `> 1`. One line of code, and not this spec's.
-- **The holder `write` verb** and the rest of single-typist. This design
-  sequences ahead of it: the verb moves the injection writer into the one
-  process that knows nothing about modes, so the oracle must be in the
-  daemon's composition step before the verb makes that step the only one.
+## Sequencing against single-typist
+
+The holder `write` verb and the rest of
+[`2026-09-03-single-typist-injection-design.md`](2026-09-03-single-typist-injection-design.md)
+are untouched in substance and **land after this design.** The reasons are
+the two boundaries this document is about:
+
+- **The verb moves the writer away from the modes.** Under single-typist the
+  holder finishes every injection from its own outbox, and the holder is the
+  process that structurally never reads the master and so has no emulator to
+  ask. The daemon's composition step is the only place a mode-aware
+  composition can live on either side of that change. Building the oracle
+  into that step first means the verb, when it lands, receives bytes that are
+  already right; building the verb first means every injection reaches the
+  child faster and lands inside the same paste burst.
+- **Verification is what proves the verb works.** A holder outbox that
+  completes a 4 KB prompt is only known to have worked if something observes
+  the prompt in the transcript. With verification on the holder transport
+  before the verb, the verb's soak has a witness from its first send.
+
+Nothing in single-typist's contract changes: one injection writer, a paste
+lease, a keystroke hold, completion bounded by the child's death. Its
+"Named-key sends" and "trailing Enter absorbed" residues are closed by this
+design rather than carried forward, and its text should be read with those
+two entries struck.
 
 ## Rejected alternatives
 
@@ -415,54 +533,39 @@ exists, under a query-time delivery rule that leaves nothing stale.
   `tbd terminal send` at a session they are watching does not need a
   transcript read a minute later, and at-least-once re-delivery is a decision
   a person should make per send. Rails have no person; they get the default.
-- **Refuse a send when the oracle cannot answer.** Turns a silent stall into
-  a loud refusal, at the price of every supervision send failing whenever the
-  app naps. The recorded `staleDaemon` provenance keeps the refusal's honesty
-  without its cost.
-
-## Decisions for a human
-
-Each carries a recommendation and the cost of the other answer. None is
-settled by the prose above.
-
-1. **Result shape.** Replace `TerminalOutputResult`'s string with the typed
-   screen, keeping `output` as a derived joined-lines field so existing
-   scripts and the CLI keep working. *Recommended: yes.* The alternative — a
-   new RPC method beside the old one — leaves the old one answering wrongly
-   for attached sessions until every consumer migrates.
-2. **Pull transport.** Two sidecar frame types, `screenRequest` /
-   `screenReply`, beside `injection` / `injectionAck`. *Recommended: yes.*
-   The alternative, a daemon-to-app request over the RPC subscription channel,
-   is a new direction on a channel that only pushes today.
-3. **Retain the daemon's emulator across an attach**, suspended rather than
-   stopped, so `staleDaemon` has content. *Recommended: yes.* The alternative
-   keeps today's release and makes `staleDaemon` an empty screen with an age,
-   which is honest but useless.
-4. **The oracle's stale-source policy.** Proceed on `staleDaemon` modes and
-   record the source on the actuation row. *Recommended: proceed.* The
-   alternative — refuse — is genuinely arguable: it never mis-pastes, and it
-   fails every supervision send while the app naps. This one is open.
-5. **Composition rule with bracketed paste on.** Wrap the body in explicit
-   markers with `\r` after the end marker, in one write. *Recommended: yes.*
-   The alternative keeps bare bytes and depends on the receiver's heuristic,
-   which is the defect.
-6. **Build the named-key table now**, mode-aware and paced, rather than
-   keeping the refusal until single-typist lands. *Recommended: now.* The
-   alternative leaves the documented remedy for a stuck composer refused on
-   the transport where composers get stuck.
-7. **Lift the holder `--verify` refusal** and route re-delivery by transport.
-   *Recommended: yes.* The alternative keeps the third rung unreachable on
-   the transport that needs it, on the strength of a comment that is wrong.
-8. **Default arming for daemon rails** — supervision nudges, queued prompts,
-   limit-resume — on holder sessions while `delivery_verification_enabled`
-   is on. *Recommended: yes.* The alternative lifts the refusal only, and the
-   rails that stalled for hours keep sending unverified unless somebody
-   remembers a flag.
-9. **Whether default arming applies to tmux sessions too**, for symmetry.
-   *Recommended: not in this change* — the tmux arm already has explicit
-   bracketing and a separate Enter, and widening the soak widens the blast
-   radius of a re-delivery bug. Open, and cheap to revisit.
-10. **Sequencing against single-typist.** Oracle and verification land before
-    the holder `write` verb. *Recommended: yes.* The alternative ships a
-    faster path to the same stall and moves the composer further from the
-    modes it needs.
+- **Refuse a send when the oracle cannot answer.** Never mis-pastes, and
+  that is its whole case. Its cost is that every supervision send fails
+  closed whenever the app naps, wedges or is busy — the moments that
+  correlate with supervision needing to send — so a rare visible mis-paste is
+  traded for a systematic stall of unattended work. The recorded
+  `staleDaemon` provenance keeps the refusal's honesty without that cost.
+- **A new RPC method beside `terminal.output`.** Leaves the old method
+  answering wrongly for every attached session until the last consumer
+  migrates; the derived `output` field makes the in-place change invisible to
+  consumers that have not.
+- **A daemon-to-app pull over the RPC subscription channel.** That channel
+  only pushes deltas today; a request-reply pair on it is a new direction on
+  a channel with no reply discipline, where the sidecar already has one
+  (`injection` / `injectionAck`).
+- **Stop the daemon's emulator at attach, as today.** Makes `staleDaemon` an
+  empty screen with an age — honest and useless. Suspending it costs one
+  emulator per attached session, which the transport spec budgets for every
+  session regardless.
+- **Keep refusing `--keys` until the holder `write` verb lands.** Leaves the
+  documented remedy for a stuck composer refused on the transport where
+  composers get stuck, and the verb changes nothing about where the key
+  table's mode knowledge has to come from.
+- **Keep the holder `--verify` refusal.** Keeps the record's third rung
+  unreachable on the transport that needs it most, on the strength of a
+  comment that misdescribes what the verifier reads.
+- **Lift the refusal but leave rails on per-send opt-in.** The rails that
+  stall for hours keep sending unverified unless every rail author remembers
+  a flag; the whole point of the default is that a rail has no person to
+  remember it.
+- **Default arming on tmux sessions too, for symmetry.** The tmux arm lacks
+  the failure shape that motivates the default, and widening a soak to both
+  transports at once doubles the blast radius of any re-delivery bug.
+  Cheap to revisit on evidence.
+- **Ship the holder `write` verb first.** A faster path to the same stall,
+  with the composer moved further from the modes it needs and no witness for
+  the verb's own soak. See "Sequencing against single-typist".
