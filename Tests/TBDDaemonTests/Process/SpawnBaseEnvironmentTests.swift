@@ -144,6 +144,7 @@ struct SpawnBaseEnvironmentTests {
             "TBD_PROMPT_CONTEXT",
             "TBD_PROMPT_INSTRUCTIONS",
             "TBD_PROMPT_RENAME",
+            "TBD_PROMPT_SCRATCH",
             "TBD_HANDOVER_FROM_PID",
             "CODEX_CI",
             "CODEX_THREAD_ID",

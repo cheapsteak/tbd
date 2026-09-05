@@ -802,6 +802,18 @@ struct TmuxServerEnvironmentRepairTests {
                 """,
             environment: installation) == false)
 
+        // An empty value: every reader in this tree treats it as unset, so a
+        // server handing it out to new panes needs repair just as much as one
+        // handing out a stale profile directory.
+        #expect(TmuxManager.configDirRepairNeeded(
+            showEnvironmentOutput: """
+                PATH=/usr/bin
+                CLAUDE_CONFIG_DIR=
+                TERM=xterm-256color
+
+                """,
+            environment: installation))
+
         // tmux prints `-NAME` for a name the server has explicitly unset.
         #expect(TmuxManager.configDirRepairNeeded(
             showEnvironmentOutput: """

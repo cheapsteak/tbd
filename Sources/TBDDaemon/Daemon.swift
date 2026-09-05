@@ -300,10 +300,12 @@ public final class Daemon: Sendable {
         // `CLAUDE_CONFIG_DIR` is the one name judged by value: a directory under
         // this installation's profiles root is one TBD minted for a single
         // profile-bound spawn, while any other value is the user's own
-        // configuration and must survive.
+        // configuration and must survive. An empty value is dropped too, same
+        // as `SpawnBaseEnvironment.inheriting` — every reader of the name
+        // treats the empty string as unset.
         let environment = ProcessInfo.processInfo.environment
         if let configDir = environment["CLAUDE_CONFIG_DIR"],
-           SpawnBaseEnvironment.isTBDMintedProfileDir(configDir, base: environment) {
+           configDir.isEmpty || SpawnBaseEnvironment.isTBDMintedProfileDir(configDir, base: environment) {
             unsetenv("CLAUDE_CONFIG_DIR")
         }
     }

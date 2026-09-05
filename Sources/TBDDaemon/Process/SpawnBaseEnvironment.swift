@@ -113,7 +113,7 @@ enum SpawnBaseEnvironment {
     ]
 
     /// TBD's own per-process exports, identifying the terminal, worktree, or
-    /// hook event the daemon was launched FROM. The three prompt layers are the
+    /// hook event the daemon was launched FROM. The four prompt layers are the
     /// launcher terminal's system-prompt text, composed per spawn by
     /// `SystemPromptBuilder.promptLayers`. `TBD_HANDOVER_FROM_PID` names the
     /// predecessor daemon a handover is taking over from; `Daemon.start()`
@@ -134,6 +134,7 @@ enum SpawnBaseEnvironment {
         "TBD_PROMPT_CONTEXT",
         "TBD_PROMPT_INSTRUCTIONS",
         "TBD_PROMPT_RENAME",
+        "TBD_PROMPT_SCRATCH",
         "TBD_HANDOVER_FROM_PID",
     ]
 

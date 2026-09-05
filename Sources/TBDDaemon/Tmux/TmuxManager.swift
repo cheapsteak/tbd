@@ -433,9 +433,12 @@ public struct TmuxManager: Sendable {
     /// Judged by value, exactly as `SpawnBaseEnvironment` judges it on the
     /// spawn path: a directory under this installation's profiles root is
     /// per-spawn identity, while any other value is the user's own
-    /// configuration and stays. A `-CLAUDE_CONFIG_DIR` line means the server
-    /// has already unset it, and a listing with no such line means it never had
-    /// one — both read as "no repair needed".
+    /// configuration and stays. An empty value also needs repair — every
+    /// reader of `CLAUDE_CONFIG_DIR` in this tree treats the empty string as
+    /// unset, so a server handing it to new panes is as broken as one handing
+    /// out a stale profile directory. A `-CLAUDE_CONFIG_DIR` line means the
+    /// server has already unset it, and a listing with no such line means it
+    /// never had one — both read as "no repair needed".
     static func configDirRepairNeeded(
         showEnvironmentOutput: String,
         environment: [String: String]
@@ -444,8 +447,8 @@ public struct TmuxManager: Sendable {
         for rawLine in showEnvironmentOutput.split(whereSeparator: \.isNewline) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             guard line.hasPrefix(prefix) else { continue }
-            return SpawnBaseEnvironment.isTBDMintedProfileDir(
-                String(line.dropFirst(prefix.count)), base: environment)
+            let value = String(line.dropFirst(prefix.count))
+            return value.isEmpty || SpawnBaseEnvironment.isTBDMintedProfileDir(value, base: environment)
         }
         return false
     }
