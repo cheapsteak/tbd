@@ -76,6 +76,8 @@ or **Balance new Claude sessions across accounts** in Settings → Model Profile
 tbd profile rotation on
 ```
 
+The `continue` TBD types after a hand-over belongs to this flag alone. It does not need the older "auto-resume when the limit resets" toggle to be on, and turning rotation off cancels only the continues a rotation armed, never a reset-time resume.
+
 Each flag is tri-state: `NULL` (never chosen), `0` (explicit off), or `1` (explicit on). The shipped default is `NULL` on every install. Flipping the source default graduates the flag to everyone who hasn't explicitly chosen, while preserving every intentional opt-out. The per-profile pool opt-out is a setting, not a flag, with no graduation.
 
 ## Seeing the load

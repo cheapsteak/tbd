@@ -106,7 +106,7 @@ extension RPCRouter {
                             armed = await scheduler.schedule(
                                 terminalID: terminal.id, worktreeID: terminal.worktreeID,
                                 claudeSessionID: terminal.claudeSessionID,
-                                resetsAt: Date(), limitType: "rotation",
+                                resetsAt: Date(), limitType: ScheduledResume.rotationLimitType,
                                 rawMessage: params.rawMessage
                             ) != nil
                         }

@@ -2049,7 +2049,15 @@ public extension Config {
     /// transient-API-error gate for `ScheduledResume.apiErrorLimitType` rows,
     /// or the hard usage-limit gate for everything else (session/debug/weekly).
     func autoResumeEnabled(forLimitType limitType: String) -> Bool {
-        limitType == ScheduledResume.apiErrorLimitType ? autoResumeOnApiError : autoResumeOnLimitReset
+        switch limitType {
+        case ScheduledResume.apiErrorLimitType: return autoResumeOnApiError
+        // The `continue` a rotation arms belongs to the rotation feature: it is
+        // authorized by `limitRotationEnabled` alone, so a person who turns
+        // rotation on without the older reset-time toggle still gets the turn
+        // resumed on the new account (docs/specs/2026-09-05-account-load-balancing-design.md §7.2).
+        case ScheduledResume.rotationLimitType: return limitRotationEnabled
+        default: return autoResumeOnLimitReset
+        }
     }
 }
 
@@ -2102,6 +2110,10 @@ extension ScheduledResume {
     /// classification (as opposed to a hard usage-limit hit) — distinguishes
     /// the two in the scheduler/actuator's gating logic.
     public static let apiErrorLimitType = "api_error"
+    /// `limitType` of the `continue` a successful limit rotation arms on the
+    /// new account. Governed by `Config.limitRotationEnabled`, not by the
+    /// reset-time toggle — see `Config.autoResumeEnabled(forLimitType:)`.
+    public static let rotationLimitType = "rotation"
 }
 
 public struct Note: Codable, Sendable, Identifiable, Equatable {
