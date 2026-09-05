@@ -258,8 +258,11 @@ class SignalTargets:
         # stopped, or `main` has reached its cleanup by any route at all:
         # from there on the wrapper is only unwinding.
         self.finishing = False
-        # A stop signal that arrived during that unwind, kept for the summary.
-        self.late_signum: int | None = None
+        # Every stop signal that arrived during that unwind, kept for the
+        # summary. A list rather than one slot: a run can end holding both a
+        # signal that landed while finishing and one recorded as unowned that
+        # nothing unwound, and reporting one of the two is a silent drop.
+        self.late_signums: list[int] = []
         # A stop signal that arrived with nothing running that could take it.
         # The handler only records it; `raise_if_stopped` is what unwinds.
         self.unowned_signum: int | None = None
@@ -347,7 +350,7 @@ def handle_stop_signal(signum: int, _frame: Any) -> None:
         # instead would clobber the status the child actually exited with, and
         # could unwind out of `shutil.rmtree` mid-walk and strand half a
         # sandbox. Record it for the summary and swallow it.
-        SIGNAL_TARGETS.late_signum = signum
+        SIGNAL_TARGETS.late_signums.append(signum)
         return
     child = SIGNAL_TARGETS.child
     if child is not None:
@@ -488,7 +491,24 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
             raise Terminated(queued)
         # Nothing was spawned and nothing else will be, so the same rule as
         # below applies: a stop signal from here on has nothing to act on.
-        SIGNAL_TARGETS.finishing = True
+        #
+        # But the instant before that latch is the one window on this path
+        # where a signal has no owner at all — `spawning` was cleared by the
+        # `finally` above and no child was ever published — so the handler
+        # records it as unowned and nothing would ever read the record: `main`
+        # promotes it to a late signal and the wrapper exits 127 with "nothing
+        # left to stop", swallowing a stop that should have answered
+        # 128 + signum. Unwind it here instead, the same way every other
+        # ownerless stop unwinds. Check and latch are held off from the signals
+        # together, for the reason the spawn arming above gives: apart, a
+        # signal landing between the two is recorded and then swallowed by the
+        # latch, which is the same bug one bytecode narrower.
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+        try:
+            raise_if_stopped()
+            SIGNAL_TARGETS.finishing = True
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
         return 127
 
     try:
@@ -704,21 +724,26 @@ def main(argv: list[str]) -> int:
             # nothing here to promote: raising cleared the record. Cleared
             # either way, so a signal this run already answered cannot unwind
             # the next one in a process that calls `main` more than once.
-            if SIGNAL_TARGETS.late_signum is None:
-                SIGNAL_TARGETS.late_signum = SIGNAL_TARGETS.unowned_signum
+            #
+            # Prepended, not appended: such a record was made while `finishing`
+            # was still unset, so it predates every signal the handler took
+            # during the unwind, and the summary reads in arrival order.
+            if SIGNAL_TARGETS.unowned_signum is not None:
+                SIGNAL_TARGETS.late_signums.insert(0, SIGNAL_TARGETS.unowned_signum)
             SIGNAL_TARGETS.unowned_signum = None
             if sandbox is not None:
                 if keep:
                     report([f"sandbox kept at {sandbox}"])
                 else:
                     shutil.rmtree(sandbox, ignore_errors=True)
-        if SIGNAL_TARGETS.late_signum is not None:
-            report(
-                [
-                    f"signal {SIGNAL_TARGETS.late_signum} arrived while exiting; "
-                    "nothing left to stop"
-                ]
-            )
+        if SIGNAL_TARGETS.late_signums:
+            # Every one of them, not the last: two stop signals in this window
+            # are two facts about the run, and a summary that reports one is
+            # indistinguishable from a run that only got one.
+            late = SIGNAL_TARGETS.late_signums
+            noun = "signal" if len(late) == 1 else "signals"
+            rendered = ", ".join(str(signum) for signum in late)
+            report([f"{noun} {rendered} arrived while exiting; nothing left to stop"])
         return status
     except Terminated as terminated:
         report([f"stopped by signal {terminated.signum}"])
