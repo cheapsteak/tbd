@@ -1186,7 +1186,7 @@ private final class HolderEmulator: @unchecked Sendable {
             var lines: [String] = []
             lines.reserveCapacity(terminal.rows)
             for row in 0..<terminal.rows {
-                lines.append(terminal.getLine(row: row)?.translateToString(trimRight: true) ?? "")
+                lines.append(terminal.getLine(row: row).map(Self.rowText) ?? "")
             }
             return Self.joined(lines)
         }
@@ -1203,7 +1203,7 @@ private final class HolderEmulator: @unchecked Sendable {
             var lines: [String] = []
             var row = terminal.buffer.totalLinesTrimmed
             while let line = terminal.getScrollInvariantLine(row: row) {
-                lines.append(line.translateToString(trimRight: true))
+                lines.append(Self.rowText(line))
                 row += 1
             }
             if lines.count > maxLines {
@@ -1250,6 +1250,38 @@ private final class HolderEmulator: @unchecked Sendable {
     /// The grid's dimensions, read under the same lock as everything else here.
     var size: (columns: Int, rows: Int) {
         terminal.terminalLock.withLock { (terminal.cols, terminal.rows) }
+    }
+
+    /// One row of the grid as text, the way a reader of `terminal.output`
+    /// needs it: **a cell nobody ever wrote projects as a space, never as
+    /// `U+0000`.**
+    ///
+    /// A never-written or erased cell holds `CharData.Null`, whose code is 0,
+    /// and `translateToString`'s default path renders that literally. The
+    /// result looks right and is not: a TUI paints differentially, positioning
+    /// the cursor past the cells it is leaving alone rather than overwriting
+    /// them with blanks, so the skipped cells become invisible NULs scattered
+    /// through the line — and which cells get skipped changes with every
+    /// repaint, so the holes appear to move. Every consumer of this string
+    /// matches on text (fleet supervision, the pending-input rail, the login
+    /// driver), and a NUL is a missing character nothing displays. `tmux
+    /// capture-pane`, which this replaces for machine reads, returns spaces;
+    /// so does the app-side serializer in `TerminalCellWalk`.
+    ///
+    /// `skipNullCellsFollowingWide` is the other half and not optional: the
+    /// trailing cell of a two-column glyph carries code 0 as well, and padding
+    /// *it* to a space would put a stray blank after every CJK character and
+    /// every emoji. Trimming is unaffected — `trimRight` is computed from
+    /// `getTrimmedLength()` before the projection runs, so a row nobody wrote
+    /// still renders empty rather than as a row of spaces.
+    private static func rowText(_ line: BufferLine) -> String {
+        line.translateToString(
+            trimRight: true,
+            skipNullCellsFollowingWide: true,
+            characterProvider: { cell in
+                let character = cell.getCharacter()
+                return character == Character(Unicode.Scalar(0)) ? " " : character
+            })
     }
 
     /// Trailing blank lines are dropped — a screen is 24 rows whether or not
