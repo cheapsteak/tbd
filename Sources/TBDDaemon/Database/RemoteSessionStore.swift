@@ -103,8 +103,25 @@ public struct RemoteSessionStore: Sendable {
         _ session: RemoteSessionPayload, provider: String, existing: RemoteSessionRow?,
         now: Date, encoder: JSONEncoder, db: Database, repoCache: RepoCache
     ) throws -> (changed: Bool, attention: RemoteSessionPayload?) {
-        let payloadString = String(data: try encoder.encode(session), encoding: .utf8) ?? "{}"
         if var row = existing {
+            // Nothing serializes the `list` poll against the `events` stream
+            // against a one-off verb response, so a sighting can arrive after
+            // one that observed the same session LATER. Taking its agent
+            // state would reinstate a state the provider has moved on from —
+            // putting the attention hand back on a session that has been
+            // working for minutes, where only the next genuine transition
+            // could clear it again.
+            //
+            // Only the AGENT axis is withheld, because `agent_state_at` is
+            // the only thing the contract timestamps: it says when the agent
+            // state was determined and nothing about when the title, terminal
+            // state, or `meta` were. Withholding those too would drop a
+            // rename that arrived in the same response. Presence is never
+            // withheld either — the session was there to be reported,
+            // whenever the report was taken.
+            let session = Self.withFreshestAgentAxis(
+                incoming: session, storedPayload: row.payload, provider: provider, now: now)
+            let payloadString = String(data: try encoder.encode(session), encoding: .utf8) ?? "{}"
             let previousAgentState = row.agentState
             var changed = row.payload != payloadString || row.missingCount != 0 || row.gone
             var attention: RemoteSessionPayload?
@@ -135,6 +152,7 @@ public struct RemoteSessionStore: Sendable {
             // First sighting never notifies — otherwise the daemon would
             // fire a banner storm for every pre-existing session on startup.
             let resolvedRepoID = try self.resolveRepoID(metaRepo: session.meta?["repo"], repoCache: repoCache)
+            let payloadString = String(data: try encoder.encode(session), encoding: .utf8) ?? "{}"
             try RemoteSessionRow(
                 provider: provider, sessionID: session.id,
                 payload: payloadString, state: session.state.rawValue,
@@ -148,6 +166,78 @@ public struct RemoteSessionStore: Sendable {
                 pinnedAt: nil
             ).insert(db)
             return (true, nil)
+        }
+    }
+
+    /// `incoming`, with its agent axis replaced by the mirrored one whenever
+    /// the mirrored one is demonstrably newer.
+    ///
+    /// Returns `incoming` untouched in every other case, which is every case
+    /// for a provider that does not send `agent_state_at` — the ordering
+    /// check can only fire where the provider gave TBD something to order by.
+    ///
+    /// The whole payload is re-encoded from the result, so the mirror never
+    /// holds a payload whose `agent_state` and `agent_state_at` disagree:
+    /// both fields move together or neither does.
+    static func withFreshestAgentAxis(
+        incoming: RemoteSessionPayload, storedPayload: String, provider: String, now: Date
+    ) -> RemoteSessionPayload {
+        guard RemoteSnapshotOrdering.decide(
+            incomingAgentStateAt: incoming.agentStateAt,
+            storedAgentStateAt: storedAgentStateAt(storedPayload),
+            now: now) == .presenceOnly,
+            let stored = decodeStoredPayload(storedPayload)
+        else { return incoming }
+
+        remoteSessionStoreLogger.debug(
+            """
+            out-of-order sighting for \(provider, privacy: .public)/\
+            \(incoming.id, privacy: .public): agent_state \
+            \(incoming.agentState.rawValue, privacy: .public) at \
+            \(incoming.agentStateAt ?? "nil", privacy: .public) predates the mirrored \
+            \(stored.agentState.rawValue, privacy: .public) at \
+            \(stored.agentStateAt ?? "nil", privacy: .public); agent axis kept, rest applied
+            """)
+
+        return RemoteSessionPayload(
+            id: incoming.id, title: incoming.title, createdAt: incoming.createdAt,
+            state: incoming.state, exitCode: incoming.exitCode,
+            agentState: stored.agentState,
+            agentStateReason: stored.agentStateReason,
+            agentStateAt: stored.agentStateAt,
+            meta: incoming.meta, archived: incoming.archived)
+    }
+
+    /// The `agent_state_at` inside a mirrored payload string.
+    ///
+    /// Read back out of the stored JSON rather than kept in its own column:
+    /// the payload is already the mirror's record of what the provider last
+    /// said, and a column would be a second copy of one fact that a future
+    /// write path could forget to keep in step. Nil for a payload that
+    /// predates the field, is unparseable, or simply omitted it — all of
+    /// which mean the same thing here, which is that there is no ordering
+    /// information and the sighting applies.
+    ///
+    /// Decodes one field rather than the whole `RemoteSessionPayload`: this
+    /// runs once per session per sighting, and the full decode — with every
+    /// leniency rule and diagnostic in it — is paid only on the rare path
+    /// where a sighting actually is out of order.
+    static func storedAgentStateAt(_ payload: String) -> String? {
+        guard let data = payload.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(StoredAgentStateStamp.self, from: data).agentStateAt
+    }
+
+    private static func decodeStoredPayload(_ payload: String) -> RemoteSessionPayload? {
+        guard let data = payload.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(RemoteSessionPayload.self, from: data)
+    }
+
+    /// Just enough of the Session object to read one field back.
+    private struct StoredAgentStateStamp: Decodable {
+        let agentStateAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case agentStateAt = "agent_state_at"
         }
     }
 
