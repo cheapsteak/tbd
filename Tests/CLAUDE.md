@@ -63,7 +63,10 @@ invalidates any measurement they are midway through.
 Every invocation in this file, in `test.yml` and in the pre-push hook goes
 through `scripts/test.sh`, which forwards its arguments to `swift test` behind a
 scratch `TBD_HOME` / `TBD_SOCKET_PATH` / `TBD_CLAUDE_HOST_HOME` /
-`TBD_TEST_CODEX_HOME` / `TMUX_TMPDIR`. Bare `swift test` writes into the
+`TBD_TEST_CODEX_HOME` / `TMUX_TMPDIR`, plus a `TBD_TEST_SCRATCH_ROOT` naming
+that scratch dir itself — the one the EXIT trap deletes — for the few fixtures
+that must mint a short socket-bearing root of their own and need it reclaimed
+even on a killed run. Bare `swift test` writes into the
 developer's real `~/tbd`, `~/.claude`, `~/.codex` and `/tmp/tmux-<uid>` — 18k
 orphan profile dirs, ~2.9k fake worktrees and ~7,100 dead tmux sockets
 accumulated that way before anyone noticed. Read `swift test …` below
@@ -79,7 +82,7 @@ through a `Process` whose `environment` you build from scratch, propagate
 `TMUX_TMPDIR` into it or every socket that run creates lands outside the fence,
 permanently; `TestSupport.shell(_:at:)` already does.
 
-Four of those five variables only fence code that *asks* where home is, and
+Four of those first five variables only fence code that *asks* where home is, and
 `TMUX_TMPDIR` is the odd one out — it fences a store that has nothing to do
 with `$HOME`, and tmux consults it without anyone in this tree asking. The
 wrapper also sets `HOME` and `CFFIXED_USER_HOME` at a **separate** scratch home

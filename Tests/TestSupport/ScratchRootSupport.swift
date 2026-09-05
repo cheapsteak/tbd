@@ -17,9 +17,10 @@ import Foundation
 /// `HolderRendezvous.sunPathLimit` bytes. The fenced `TBD_HOME` is
 /// `<run root>/sanctioned/tbd`, and nesting there spends the budget:
 /// `/tmp/tbd-test-home.XXXXXXXX/sanctioned/tbd/<prefix>-xxxxxxxx/holders/<uuid>.sock`
-/// is 107 bytes for the prefixes in use (106 for the shortest) and fails the
-/// bind. Directly under the run root the same path is 92 bytes, leaving
-/// headroom. So the root is short on purpose, and it is short *and* fenced
+/// is 106 to 108 bytes across the four prefixes in use — 106 for `tbdh`, 107
+/// for `tbdh6` and `tbdh7`, 108 for `tbdg10` — and fails the bind at every one
+/// of them. Directly under the run root the same path is 91 to 93 bytes,
+/// leaving headroom. So the root is short on purpose, and it is short *and* fenced
 /// only because the wrapper names the run root separately.
 ///
 /// **The `/tmp` fallback** covers a run that is not fenced at all — SwiftPM

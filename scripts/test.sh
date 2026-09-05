@@ -777,9 +777,10 @@ done
 # `TBD_HOME` and need a short root of their own, because they bind a rendezvous
 # socket at `<root>/holders/<36-char uuid>.sock` against a ~104-byte `sun_path`:
 # under `TBD_HOME` that is `/tmp/tbd-test-home.XXXXXXXX/sanctioned/tbd/<prefix>-
-# xxxxxxxx/holders/<uuid>.sock` — 107 bytes for the prefixes in use, 106 for the
-# shortest of them — and the bind fails; directly under the run root the same
-# path is 92, with headroom to spare. Before this variable existed
+# xxxxxxxx/holders/<uuid>.sock` — 106 to 108 bytes across the four prefixes in
+# use, 106 for `tbdh`, 107 for `tbdh6` and `tbdh7`, 108 for `tbdg10` — and the
+# bind fails for every one of them; directly under the run root the same path is
+# 91 to 93, with headroom to spare. Before this variable existed
 # they minted `/tmp/<prefix>-xxxxxxxx` instead — outside the fence entirely, so
 # a run killed mid-flight (no in-process teardown can run then) left the
 # directory behind forever. Nesting under the root the trap deletes makes that

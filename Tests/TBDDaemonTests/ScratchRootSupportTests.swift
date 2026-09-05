@@ -43,9 +43,11 @@ struct ScratchRootSupportTests {
     /// THE BUDGET. This is why the root goes under the run root and not under
     /// the fenced `TBD_HOME`, which is `<run root>/sanctioned/tbd`: the
     /// rendezvous socket is `<root>/holders/<36-char uuid>.sock`, and the two
-    /// candidate layouts come out at 107 bytes under `TBD_HOME` — 106 for the
-    /// shortest prefix in use — against 92 under the run root, for a `sun_path`
-    /// that must stay below 104. The rejected layout is not asserted on here:
+    /// candidate layouts come out at 106 to 108 bytes under `TBD_HOME` — 106
+    /// for `tbdh`, 107 for `tbdh6` and `tbdh7`, 108 for `tbdg10` — against 91
+    /// to 93 under the run root, for a `sun_path` that must stay below 104.
+    /// Every prefix busts the cap under `TBD_HOME` and every one clears it
+    /// under the run root. The rejected layout is not asserted on here:
     /// one honest measurement of the layout actually shipped is the thing that
     /// has to keep holding.
     @Test func aSocketUnderTheRunRootFitsSunPath() throws {
