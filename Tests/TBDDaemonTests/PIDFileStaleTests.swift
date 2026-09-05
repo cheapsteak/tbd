@@ -32,6 +32,21 @@ import Testing
         #expect(f.isStale(isLiveDaemon: { _ in false }) == true)
     }
 
+    // The cleanup still cleans: a pid file naming this very process is stale
+    // (alive, but not a TBDDaemon) and must go. The socket file it used to
+    // remove alongside is now left to whoever binds it — pinned by
+    // `SocketServerSocketOwnershipTests.onlyTheBinderClearsTheRendezvousPath`.
+    @Test func cleanupRemovesAStalePidFile() throws {
+        let path = tmpPidPath()
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        try "\(selfPID)".write(toFile: path, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        PIDFile(path: path).cleanupIfStale()
+
+        #expect(FileManager.default.fileExists(atPath: path) == false)
+    }
+
     // MARK: - Compare-and-delete
 
     @Test func removeIfOwnedRemovesOurOwnPidFile() throws {

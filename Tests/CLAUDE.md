@@ -376,6 +376,30 @@ instead of leaving an anonymous job timeout. `BoundedGateWaitTests` reproduces
 the wedge on any machine by deriving its holder count from
 `activeProcessorCount`.
 
+**The preference stops at an unstructured task, and that changes the bound,
+not the call site.** SE-0417 carries a task executor preference into child
+tasks and default actors and *not* into `Task {}` or `Task.detached`. Several
+production seams hand their work to an unstructured task on purpose —
+`ShutdownLatch` does, so a cancelled signal handler cannot abandon a shutdown
+other callers await — and that work is then scheduled on the cooperative pool
+however the test started the call. It is not pinning a thread, and no
+`gateHoldingTask` can move it, so the only correct response is to bound a gate
+released from beyond such a hop at `TestDeadlines.saturatedPass` (90 s) and
+give the outer observation a strictly larger budget, so a genuinely lost
+handshake still reports before the wedge does. A snappier inner bound reports
+starvation the outer bound was sized to tolerate — which is exactly how
+`SocketServerSocketOwnershipTests` went red on a 30 s staging gate while every
+assertion in the test passed.
+
+**Wait on a gate from a task, not a bare `Thread`, whenever the test owns the
+thread.** `Test.current` and `Configuration.current` are task-locals; without
+them Swift Testing names an expired gate «unknown» and, rather than lose an
+event it cannot route, posts it to every registered event handler — so one
+expiry prints as several identical lines and names no test. `gateHoldingTask`
+is still off the cooperative pool and carries both, so it costs nothing to
+prefer. Where production code owns the thread, «unknown» is unavoidable and
+the test's own downstream assertions are what name the failure.
+
 ## Quarantine — `.flaky(issue:)`
 
 There is no blanket retry policy, in any tier, and there will not be one:
