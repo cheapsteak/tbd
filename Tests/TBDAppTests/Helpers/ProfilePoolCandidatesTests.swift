@@ -20,12 +20,12 @@ struct ProfilePoolCandidatesTests {
         )
 
         let snapshot1 = ProfileUsageSnapshot(
-            organizationID: "org1",
-            statusKind: .ok,
-            isOK: true,
             buckets: [],
             fetchedAt: Date(),
-            lastAttemptAt: Date()
+            lastAttemptAt: Date(),
+            status: "ok",
+            statusKind: .ok,
+            organizationID: "org1"
         )
 
         let entry1 = ModelProfileWithUsage(
@@ -81,12 +81,12 @@ struct ProfilePoolCandidatesTests {
 
         // With OK snapshot: has credential
         let okSnapshot = ProfileUsageSnapshot(
-            organizationID: nil,
-            statusKind: .ok,
-            isOK: true,
             buckets: [],
             fetchedAt: Date(),
-            lastAttemptAt: Date()
+            lastAttemptAt: Date(),
+            status: "ok",
+            statusKind: .ok,
+            organizationID: nil
         )
         let entryOK = ModelProfileWithUsage(profile: profile, usageSnapshot: okSnapshot)
 
@@ -100,12 +100,12 @@ struct ProfilePoolCandidatesTests {
 
         // With needsLogin snapshot: no credential
         let needsLoginSnapshot = ProfileUsageSnapshot(
-            organizationID: nil,
-            statusKind: .needsLogin,
-            isOK: false,
             buckets: [],
             fetchedAt: Date(),
-            lastAttemptAt: Date()
+            lastAttemptAt: Date(),
+            status: "needs login",
+            statusKind: .needsLogin,
+            organizationID: nil
         )
         let entryNeedsLogin = ModelProfileWithUsage(profile: profile, usageSnapshot: needsLoginSnapshot)
 
