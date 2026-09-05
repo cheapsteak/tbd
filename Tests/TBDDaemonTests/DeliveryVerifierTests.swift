@@ -183,6 +183,11 @@ func awaitDeliveryCycle(
         if completion.isDone { return }
         try? await Task.sleep(for: .milliseconds(10))
     }
+    // Fresh read before the verdict: the loop tests the deadline *after* the
+    // poll sleep, so its last `isDone` read is already stale when the loop
+    // exits, and a cycle that completed during that sleep would be reported as
+    // never having finished. Same re-read as `SidecarTestSupport.waitUntil`.
+    if completion.isDone { return }
     Issue.record(
         DeliveryCycleUnfinished(timeout: timeout, observed: observed()),
         sourceLocation: sourceLocation)

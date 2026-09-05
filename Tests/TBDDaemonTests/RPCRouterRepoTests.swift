@@ -187,6 +187,9 @@ extension RPCRouterTests {
             if await condition() { return }
             try await Task.sleep(for: .milliseconds(10))
         }
+        // Fresh read before giving up, for the reason `RepoRemoveCascadeTests`
+        // documents: the loop's last sample is up to `timeout` old.
+        if await condition() { return }
         throw RepoRemoveWaitTimeout(what: what, seconds: timeout)
     }
 
