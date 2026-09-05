@@ -125,6 +125,35 @@ struct BoundedGateWaitTests {
         #expect(dispatchRan, "gate holders must not consume the workers needed by unrelated dispatch work")
     }
 
+    @Test("the executor preference does not survive an unstructured Task")
+    func unstructuredTaskLeavesTheGateExecutor() async {
+        // SE-0417's inheritance rule decides how much a `gateHoldingTask` at a
+        // call site actually covers: the preference reaches child tasks and
+        // default actors, and NOT `Task {}` or `Task.detached`. So a callee
+        // that hands its work to an unstructured task — `ShutdownLatch` does,
+        // deliberately — runs that work on the cooperative pool however its
+        // caller was started, and a gate released from beyond that hop is
+        // subject to the pass's scheduling latency rather than to any thread
+        // this executor owns.
+        //
+        // Every gate bound in the repo rests on that split, so it is pinned
+        // here rather than remembered. If the second expectation ever fails,
+        // the language changed and those bounds are re-derivable, not broken.
+        let (sameTask, unstructured) = await gateHoldingTask { () -> (String?, String?) in
+            let onOurThread = runningThreadName()
+            let afterUnstructuredHop = await Task { runningThreadName() }.value
+            return (onOurThread, afterUnstructuredHop)
+        }.value
+        #expect(
+            sameTask == GateExecutor.threadName,
+            "gateHoldingTask must run the operation's own frames on a thread the tests own"
+        )
+        #expect(
+            unstructured != GateExecutor.threadName,
+            "an unstructured Task must not inherit the preference; if it now does, re-derive every gate bound sized for the cooperative pool"
+        )
+    }
+
     @Test("the timeout diagnostic names the gate and the deadline")
     func timeoutDescriptionCarriesTheDiagnostic() {
         let description = String(
@@ -134,6 +163,16 @@ struct BoundedGateWaitTests {
     }
 }
 
+
+/// Which thread is running this continuation.
+///
+/// Synchronous on purpose: `Thread.current` is unavailable from an async
+/// context precisely because the answer changes across a suspension point —
+/// and that change is the thing under test here, so the read is deliberate
+/// rather than an oversight.
+private func runningThreadName() -> String? {
+    Thread.current.name
+}
 
 /// Minimal thread-safe counter — the holders increment from threads that are
 /// about to block, so this cannot be an actor.

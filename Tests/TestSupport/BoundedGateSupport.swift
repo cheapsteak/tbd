@@ -79,6 +79,11 @@ public final class GateExecutor: TaskExecutor, @unchecked Sendable {
     /// exists so `gateHoldingTask` does not mint a queue per call site.
     public static let shared = GateExecutor()
 
+    /// The name every job thread carries. Exposed so a test can tell "on a
+    /// thread these tests own" from "on the cooperative pool" — which is the
+    /// only way to pin SE-0417's inheritance rule rather than remember it.
+    public static let threadName = "com.tbd.tests.gate-executor"
+
     private init() {}
 
     public func enqueue(_ job: consuming ExecutorJob) {
@@ -87,7 +92,7 @@ public final class GateExecutor: TaskExecutor, @unchecked Sendable {
         let thread = Thread {
             job.runSynchronously(on: executor)
         }
-        thread.name = "com.tbd.tests.gate-executor"
+        thread.name = Self.threadName
         thread.qualityOfService = .userInitiated
         thread.start()
     }
@@ -100,6 +105,19 @@ public final class GateExecutor: TaskExecutor, @unchecked Sendable {
 /// test runs while the gate is closed, and the `signal()` that releases it —
 /// stays on the pool, which is the point: it needs a thread, and this call is
 /// what guarantees one is left.
+///
+/// **The preference stops at an unstructured task.** SE-0417 carries a task
+/// executor preference into child tasks (`async let`, task groups) and into
+/// default actors, and *not* into `Task {}` or `Task.detached`. So this call
+/// covers the operation's own frames and the actors it hops through, but not
+/// work a callee hands to an unstructured task — `ShutdownLatch` does exactly
+/// that, deliberately, so a cancelled signal handler cannot abandon a shutdown
+/// other callers are awaiting. Work beyond such a hop is scheduled on the
+/// cooperative pool however its caller was started, so a gate released from
+/// there is subject to the pass's scheduling latency and must be bounded by
+/// ``TestDeadlines/saturatedPass`` rather than by a snappier number. It is not
+/// pinning a thread, and no call-site change can move it; only the bound is
+/// yours to get right. `BoundedGateWaitTests` pins the rule.
 public func gateHoldingTask<Success: Sendable>(
     _ operation: @escaping @Sendable () async -> Success
 ) -> Task<Success, Never> {
@@ -244,10 +262,15 @@ public struct TestGateTimeout: Error, CustomStringConvertible {
     public var description: String {
         """
         test gate "\(gate)" was never signalled within \(after) — the releasing \
-        statement never ran. If the holding side was started with a plain \
-        `Task` rather than `gateHoldingTask`, it blocked a cooperative-pool \
-        thread and starved the work that would have released it. See \
-        Tests/TestSupport/BoundedGateSupport.swift.
+        statement did not run in time. Two causes, and they need different \
+        fixes. (1) The holding side was started with a plain `Task` rather than \
+        `gateHoldingTask`, so it blocked a cooperative-pool thread the release \
+        needed: move it. (2) The release itself runs on the pool and was merely \
+        starved — which an unstructured `Task` anywhere on its path guarantees, \
+        because SE-0417 does not carry an executor preference into `Task {}`, \
+        so `gateHoldingTask` at the call site does not cover work a callee \
+        hands to one: size the bound at `TestDeadlines.saturatedPass` instead. \
+        See Tests/TestSupport/BoundedGateSupport.swift.
         """
     }
 }
@@ -270,10 +293,17 @@ extension DispatchSemaphore {
     ///   Ignorable — the recorded issue is the report — but returned so a
     ///   caller that can act on the distinction may.
     ///
-    /// Note: a gate reached from a plain dispatch queue or `Thread` has no
-    /// task-local test context, so its issue may be reported against the run
-    /// rather than attributed to one test. The process unwedging is the point;
-    /// the test's own downstream assertions then fail with their own names.
+    /// Note: a gate reached from a plain dispatch queue or `Thread` has
+    /// neither `Test.current` nor `Configuration.current` — both are
+    /// task-locals. Swift Testing then names the failure «unknown» and, rather
+    /// than lose an event it cannot route, posts it to *every* registered
+    /// event handler, so one expiry prints as several identical lines. Where
+    /// the test owns the thread, reach the gate from `gateHoldingTask`
+    /// instead: it is still off the cooperative pool, and being a task it
+    /// carries the context that attributes the failure to the test. Where
+    /// production code owns the thread — a receive loop, a dispatch callback —
+    /// «unknown» is the price. The process unwedging is the point; the test's
+    /// own downstream assertions then fail with their own names.
     @discardableResult
     public func waitForGate(
         _ name: String,

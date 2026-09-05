@@ -161,10 +161,13 @@ struct SocketServerSocketOwnershipTests {
         // others wait outside it and come away with nothing; taken with a
         // plain read-then-nil, all eight read the same identity.
         //
-        // Every wait below is bounded and reached from a dedicated `Thread`,
+        // Every wait below is bounded and reached from a `gateHoldingTask`,
         // never from the cooperative pool: a blocked pool thread is one the
         // work that would release it can no longer run on, and the pool is
-        // three threads wide on CI's runner.
+        // three threads wide on CI's runner. A task rather than a bare
+        // `Thread` because the two things Swift Testing needs to attribute an
+        // expired gate — `Test.current` and `Configuration.current` — are
+        // task-locals, and a bare `Thread` has neither.
         let claimants = 8
         let atCallSite = DispatchSemaphore(value: 0)
         let windowIsHeld = FirstArrivalFlag()
@@ -187,7 +190,7 @@ struct SocketServerSocketOwnershipTests {
         let claims = ClaimCounter()
         let finished = ClaimCounter()
         for _ in 0..<claimants {
-            Thread.detachNewThread {
+            _ = gateHoldingTask {
                 atCallSite.signal()
                 if server.takeBoundSocketIdentity() != nil { claims.increment() }
                 finished.increment()
@@ -228,24 +231,38 @@ struct SocketServerSocketOwnershipTests {
         // in while the loop is still alive; that ordering survives even
         // without the fix, so a test built on it proves nothing.
         //
-        // The staging gate blocks whichever thread runs the shutdown body, so
-        // that thread must not be a cooperative-pool one: the pool is three
-        // threads wide on CI's runner, and the statement that releases the
-        // gate needs a thread from it. Both `stop()` calls therefore start
-        // with `gateHoldingTask` — either of them may be the one that wins the
-        // latch and runs the body — and every wait is bounded through
-        // `waitForGate`, which names the gate instead of parking a thread for
-        // good. See Tests/CLAUDE.md, "Thread-blocking gates run off the
-        // cooperative pool".
+        // Nothing this test starts parks a cooperative-pool thread: both
+        // `stop()` calls and the thread that waits on the staging gate go
+        // through `gateHoldingTask`, and every wait is bounded through
+        // `waitForGate`. See Tests/CLAUDE.md, "Thread-blocking gates run off
+        // the cooperative pool".
+        //
+        // **`gateHoldingTask` cannot reach the shutdown body, though.**
+        // `SocketServer.stop()` hands that body to `ShutdownLatch`, which runs
+        // it in an unstructured `Task` so a cancelled signal handler cannot
+        // abandon a shutdown other callers await — and SE-0417 carries a task
+        // executor preference into child tasks and default actors but *not*
+        // into `Task {}`. So the work that signals the gate below is scheduled
+        // on the cooperative pool however this test starts `stop()`,
+        // competing with a parallel pass that admits all ~5,000 tests at once
+        // against a 3-thread runner.
+        //
+        // That is a scheduling cost, not a wedge, and the gate's bound has to
+        // absorb it.
         let claims = ClaimCounter()
         let firstShutdownIsAtTheReclaimStep = DispatchSemaphore(value: 0)
         let secondCallerHasArrived = DispatchSemaphore(value: 0)
         let holdTheFirstShutdown = FirstArrivalFlag()
-        // Short of the observation's own budget on purpose: if the staging
-        // never happens, this test should degrade to the weaker "both stop()
-        // calls returned" check and say why, rather than have the outer wait
-        // expire first and report a wedge that is really a lost handshake.
-        let stagingDeadline: Duration = .seconds(30)
+        // The saturated-pass budget the rest of the repo derives its waits
+        // from, and the observation below gets a strictly larger one. That
+        // ordering is what makes a genuinely lost handshake report itself as a
+        // lost handshake and degrade to the weaker "both stop() calls
+        // returned" check, rather than surface as a wedge. A snappier bound
+        // here reports starvation the outer bound was sized to tolerate:
+        // measured on CI at 30 s, where the handshake was merely late and
+        // every other assertion in this test still passed.
+        let stagingDeadline: Duration = TestDeadlines.saturatedPass
+        let bothStopsReturnedDeadline: Duration = TestGate.deadline
         let claimWindow: @Sendable (SocketFileIdentity?) -> Void = { identity in
             if identity != nil { claims.increment() }
             guard holdTheFirstShutdown.takeFirst() else { return }
@@ -276,9 +293,14 @@ struct SocketServerSocketOwnershipTests {
             await server.stop()
             finished.increment()
         }
-        // On its own thread so the bounded wait cannot occupy a cooperative
-        // pool thread the first shutdown may need.
-        Thread.detachNewThread {
+        // Off the cooperative pool so the bounded wait cannot occupy a thread
+        // the first shutdown may need, and a task rather than a bare `Thread`
+        // so an expired gate is attributed to this test: Swift Testing reads
+        // `Test.current` and `Configuration.current` from task-locals, and
+        // with neither it names the failure «unknown» and posts it to every
+        // registered event handler rather than lose it — one expiry, several
+        // identical lines.
+        _ = gateHoldingTask {
             firstShutdownIsAtTheReclaimStep.waitForGate(
                 "the first shutdown to reach its reclaim step", timeout: stagingDeadline)
             secondCallerHasArrived.signal()
@@ -290,6 +312,7 @@ struct SocketServerSocketOwnershipTests {
 
         try await waitFor(
             "both overlapping stop() calls to return",
+            deadline: bothStopsReturnedDeadline,
             observed: { "\(finished.count) of 2 returned" }
         ) { finished.count == 2 }
         #expect(
