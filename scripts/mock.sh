@@ -52,6 +52,8 @@ up() {
     # Both halves matter: `swift-safe` holds the machine-global admission lock
     # (#576) so parallel worktrees can't start competing compiler swarms, and
     # naming the two products keeps the mock from building the whole package.
+    # Deliberately not RUNTIME_PRODUCTS (restart-bundle-lib.sh): a mock daemon
+    # wires no holder registry and no peer bridge, so it needs no sibling helper.
     echo "Building mock products..."
     (cd "$REPO_ROOT" \
         && scripts/swift-safe build --product TBDApp \

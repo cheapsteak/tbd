@@ -65,7 +65,6 @@ PREVIOUS_BUNDLE="$UPDATE_HOME/previous/TBD.app"
 CLI_INSTALL_PATH="$HOME/.local/bin/tbd"
 
 UPDATE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UPDATE_SCRIPT_PATH="$UPDATE_SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 
 # MARK: - Options (set by parse_args)
 
@@ -467,15 +466,22 @@ should_reexec() {
 }
 
 maybe_reexec() {
-    local fetched="$UPDATE_SRC/scripts/update.sh"
-    if should_reexec "$fetched" "$UPDATE_SCRIPT_PATH"; then
-        log "re-exec: the fetched update.sh differs from the running one"
-        # Carry the lock across. `exec` replaces the image but keeps the pid,
-        # so the file already names the process that is about to run; clearing
-        # the trap stops the outgoing image from deleting it on the way out.
-        trap - EXIT
-        TBD_UPDATE_REEXEC=1 exec bash "$fetched" "$@"
-    fi
+    # The libraries this script sources count as much as the script: main
+    # reads them from the RUNNING tree, so a change that lands only in one of
+    # them — the product list in restart-bundle-lib.sh, say — would otherwise
+    # run the old copy against the new sources with nothing to trigger the hop.
+    local name
+    for name in update.sh restart-bundle-lib.sh restart-environment-lib.sh; do
+        if should_reexec "$UPDATE_SRC/scripts/$name" "$UPDATE_SCRIPT_DIR/$name"; then
+            log "re-exec: the fetched $name differs from the running one"
+            # Carry the lock across. `exec` replaces the image but keeps the
+            # pid, so the file already names the process that is about to run;
+            # clearing the trap stops the outgoing image from deleting it on
+            # the way out.
+            trap - EXIT
+            TBD_UPDATE_REEXEC=1 exec bash "$UPDATE_SRC/scripts/update.sh" "$@"
+        fi
+    done
 }
 
 # MARK: - Build
@@ -494,9 +500,11 @@ build_products() {
     )
 
     # SwiftPM honors only the last --product, so these are separate
-    # invocations. TBDCLI is built too: `tbd update` is run through that binary,
-    # and an update that leaves the CLI behind reports a version it is not.
-    for product in TBDDaemon TBDApp TBDCLI; do
+    # invocations. The list is RUNTIME_PRODUCTS in restart-bundle-lib.sh, shared
+    # with scripts/restart.sh; it includes TBDCLI because `tbd update` is run
+    # through that binary, and an update that leaves the CLI behind reports a
+    # version it is not.
+    for product in "${RUNTIME_PRODUCTS[@]}"; do
         log "building $product ($BUILD_CONFIG)"
         # Capture the status, THEN print. Piping the build into `tail` would
         # make the pipeline's status tail's, which is always zero.
