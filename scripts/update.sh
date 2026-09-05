@@ -161,11 +161,13 @@ log() {
 # A failure is a log line plus a non-zero status. Named log_error rather than
 # `fail` so a test harness that sources this file can keep its own assertion
 # helpers without shadowing it.
+#
+# Nothing is written to stderr under --auto: the daemon points our stdout and
+# stderr at the same log file `log` appends to, so a second copy through that
+# inherited descriptor would duplicate the line, and a descriptor opened
+# without O_APPEND writes at its own offset rather than the file's end.
 log_error() {
     log "ERROR: $*"
-    if [ "$OPT_AUTO" = true ]; then
-        printf 'error: %s\n' "$*" >&2
-    fi
     return 1
 }
 
@@ -984,11 +986,7 @@ run_check() {
             head="$(git ls-remote "$remote_url" refs/heads/main 2>/dev/null | awk '{print $1}')"
             if [ -n "$head" ]; then
                 latest="$head"
-                if [ -n "$running" ] && [ "$running" = "$head" ]; then
-                    relation="upToDate"
-                else
-                    relation="behind"
-                fi
+                relation="$(local_relation "$worktree" "$running" "$head")"
             fi
         fi
     fi
@@ -1004,8 +1002,60 @@ run_check() {
                 log "Update available: $(short_commit "$running") to $(short_commit "$latest"). Run: tbd update"
             fi
             ;;
-        *) log "Unknown — the daemon has not compared itself to main yet." ;;
+        *)
+            if [ -n "$latest" ]; then
+                log "Unknown — could not decide how ${running:-this build} relates to main from here. Run tbd version --check, or tbd update from a checkout that has both commits."
+            else
+                log "Unknown — the daemon has not compared itself to main yet."
+            fi
+            ;;
     esac
+}
+
+# How the running commit relates to main's head, decided in the source
+# worktree. Mirrors `UpdateRelation.compute` in TBDShared, and for the same
+# reason: equality is not the only way to be up to date. A build ahead of or
+# diverged from main holds commits main does not, and telling it to update
+# would replace those with plain main. So:
+#
+#   running == head                      upToDate
+#   running is an ancestor of head       behind
+#   running is not an ancestor           upToDate (ahead or diverged)
+#   git could not decide, head unknown   behind   (never fetched = do not have)
+#   git could not decide otherwise       unknown  (a bad ref or a broken
+#                                                 store is evidence of nothing)
+#
+# Prints one of upToDate, behind, unknown.
+local_relation() {
+    local worktree="${1-}" running="${2-}" head="${3-}" rc
+    if [ -z "$running" ] || [ -z "$head" ]; then
+        printf 'unknown\n'
+        return 0
+    fi
+    if [ "$running" = "$head" ]; then
+        printf 'upToDate\n'
+        return 0
+    fi
+    if [ -z "$worktree" ] || [ ! -d "$worktree" ]; then
+        printf 'unknown\n'
+        return 0
+    fi
+    rc=0
+    git -C "$worktree" merge-base --is-ancestor "$running" "$head" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+        0) printf 'behind\n'; return 0 ;;
+        1) printf 'upToDate\n'; return 0 ;;
+    esac
+    # `rev-parse --verify --quiet` exits 1 for a commit this store does not
+    # hold and 128 for a store that cannot answer; `cat-file -e` uses 128 for
+    # both and cannot draw the line.
+    rc=0
+    git -C "$worktree" rev-parse --verify --quiet "$head^{commit}" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -eq 1 ]; then
+        printf 'behind\n'
+    else
+        printf 'unknown\n'
+    fi
 }
 
 # MARK: - main

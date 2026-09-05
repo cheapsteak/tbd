@@ -786,6 +786,57 @@ EOF
         "Run: tbd update" "$out"
 }
 
+# The fallback used whenever the daemon has not compared itself to main — the
+# normal state under the shipped `off` — must decide ancestry, not equality. A
+# developer running a build ahead of main must not be told to replace it.
+test_check_fallback_decides_ancestry_like_the_daemon() {
+    local case_dir out remote_head local_head
+    case_dir="$(mkcase check-ancestry-case)"
+    remote_head="$(git -C "$case_dir/remote" rev-parse HEAD)"
+
+    # Ahead: main plus one local commit the remote does not have.
+    git -C "$case_dir/worktree" fetch -q upstream main
+    git -C "$case_dir/worktree" checkout -q -b main FETCH_HEAD
+    git -C "$case_dir/worktree" -c user.name=t -c user.email=t@example \
+        commit -q --allow-empty -m "local work"
+    local_head="$(git -C "$case_dir/worktree" rev-parse HEAD)"
+    cat > "$case_dir/state/status.json" << EOF
+{
+  "executablePath": "$case_dir/worktree/.build/debug/TBDDaemon",
+  "buildIdentity": {"commit": "$local_head", "sourceWorktree": "$case_dir/worktree"}
+}
+EOF
+    out="$(run_update "$case_dir" --check)"
+    assert_contains "a build ahead of main is up to date" "Up to date." "$out"
+    assert_not_contains "and is not told to replace itself" "Run: tbd update" "$out"
+
+    # Behind, with the objects local: the fetched main head is an ancestor's
+    # descendant of the running commit.
+    git -C "$case_dir/remote" -c user.name=t -c user.email=t@example \
+        commit -q --allow-empty -m "main moved"
+    git -C "$case_dir/worktree" fetch -q upstream main
+    cat > "$case_dir/state/status.json" << EOF
+{
+  "executablePath": "$case_dir/worktree/.build/debug/TBDDaemon",
+  "buildIdentity": {"commit": "$remote_head", "sourceWorktree": "$case_dir/worktree"}
+}
+EOF
+    out="$(run_update "$case_dir" --check)"
+    assert_contains "a build behind main with the objects local is told to update" \
+        "Run: tbd update" "$out"
+
+    # Undecidable: the source worktree is not a repository at all.
+    rm -rf "$case_dir/worktree/.git"
+    out="$(run_update "$case_dir" --check)"
+    assert_contains "a worktree that cannot answer reports unknown" "Unknown" "$out"
+    assert_not_contains "and does not invent an update" "Run: tbd update" "$out"
+
+    assert_eq "local_relation: equal commits are up to date" "upToDate" \
+        "$(local_relation "$case_dir/worktree" "$remote_head" "$remote_head")"
+    assert_eq "local_relation: no running commit is unknown" "unknown" \
+        "$(local_relation "$case_dir/worktree" "" "$remote_head")"
+}
+
 # MARK: - The full dry run
 #
 # One fetch-and-build, asserted from every angle: what it built, what it wrote,
@@ -1491,6 +1542,7 @@ test_json_field_reads_nested_paths
 test_reexec_predicate
 test_reexec_happens_once_and_passes_arguments
 test_check_reports_without_changing_anything
+test_check_fallback_decides_ancestry_like_the_daemon
 test_dry_run_builds_but_installs_nothing
 test_debug_flag_selects_the_debug_configuration
 test_a_failed_build_stops_before_installing
