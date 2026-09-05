@@ -200,6 +200,13 @@ actor FDVendingServer {
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         if fd < 0 { throw FDVendingServerError.bindFailed(errno) }
+        // Close-on-exec, here and on every connection accepted below. This is
+        // the channel session ptys are vended over and it lives as long as the
+        // daemon does, while nearly every child the daemon spawns goes out
+        // through `Foundation.Process`, which closes nothing that lacks the
+        // flag. Nothing downstream of an `exec` has any business holding the
+        // sidecar.
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -239,6 +246,9 @@ actor FDVendingServer {
                 var len = socklen_t(MemoryLayout<sockaddr>.size)
                 let accepted = accept(listener, &peer, &len)
                 guard accepted >= 0 else { return }   // listener closed (stop) or fatal
+                // Darwin has no `accept4`, so the flag is set the moment the
+                // descriptor exists — see the note on the listener above.
+                _ = fcntl(accepted, F_SETFD, FD_CLOEXEC)
                 Task { [weak self] in await self?.adoptConnection(fd: accepted) }
             }
         }

@@ -303,6 +303,14 @@ actor HolderClient {
 
         let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard socketFD >= 0 else { throw Error.cannotConnect(path: socketPath, errno: errno) }
+        // **Close-on-exec, like the descriptors that arrive on it.** This
+        // connection occupies the holder's single client slot, and the holder
+        // learns the slot is free by reading EOF — which needs every copy of
+        // this end closed. A daemon child that inherited one would hold the
+        // slot for as long as it lives, and every later verb against that
+        // holder would be answered with the busy sentinel by a holder whose
+        // real client let go minutes earlier.
+        _ = fcntl(socketFD, F_SETFD, FD_CLOEXEC)
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
@@ -517,6 +525,19 @@ actor HolderClient {
         } catch {
             throw Error.transportFailed(error.localizedDescription)
         }
+        // **Close-on-exec, the moment they arrive.** A descriptor received over
+        // `SCM_RIGHTS` is inheritable unless somebody says otherwise, and
+        // darwin has no `MSG_CMSG_CLOEXEC` to ask for anything else on the
+        // `recvmsg` itself. The descriptor that comes through here is a
+        // session's pty master, and it lives as long as the session does; the
+        // daemon meanwhile spawns children constantly — git, tmux, usage and
+        // PR-status probes, peer supervisors — nearly all of them through
+        // `Foundation.Process`, which does not close what lacks the flag. One
+        // such child inheriting a copy holds the session open for as long as it
+        // lives: the reader sees no EOF when the job exits, death-detection
+        // stops working, and the handback never completes. Nothing in this
+        // process wants a session pty across an `exec`.
+        for descriptor in message.fds { _ = fcntl(descriptor, F_SETFD, FD_CLOEXEC) }
         carriedFDs.append(contentsOf: message.fds)
         inbox.append(message.data)
         do {

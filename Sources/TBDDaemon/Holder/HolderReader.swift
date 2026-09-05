@@ -1018,10 +1018,19 @@ private final class PTYDescriptor: @unchecked Sendable {
         return fd
     }
 
-    /// A `dup` of the pty master for somebody else to read, or -1 with `errno`
-    /// set. Taken under the lock so it cannot race the close: a `dup` of a
-    /// number the kernel has already handed to something else is how a viewer
-    /// ends up reading an unrelated descriptor.
+    /// A close-on-exec copy of the pty master for somebody else to read, or -1
+    /// with `errno` set. Taken under the lock so it cannot race the close: a
+    /// duplicate of a number the kernel has already handed to something else is
+    /// how a viewer ends up reading an unrelated descriptor.
+    ///
+    /// `F_DUPFD_CLOEXEC`, never `dup(2)`: `dup` deliberately clears
+    /// `FD_CLOEXEC` on the copy whatever the original carries, and this copy
+    /// sits in the daemon's table from here until the vend hands it to the app.
+    /// The daemon spawns children throughout that window — git, tmux, usage and
+    /// PR-status probes, peer supervisors, nearly all through
+    /// `Foundation.Process`, which closes nothing that lacks the flag — and one
+    /// that inherited a copy would hold the session open for as long as it
+    /// lives, well past the attach it borrowed the pty for.
     func duplicate() -> Int32 {
         lock.lock()
         defer { lock.unlock() }
@@ -1029,7 +1038,7 @@ private final class PTYDescriptor: @unchecked Sendable {
             errno = EBADF
             return -1
         }
-        return Darwin.dup(fd)
+        return fcntl(fd, F_DUPFD_CLOEXEC, 0)
     }
 
     func read(into buffer: inout [UInt8]) -> ReadOutcome {
