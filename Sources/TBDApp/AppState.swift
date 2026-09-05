@@ -2963,15 +2963,24 @@ final class AppState {
                 await connectAndLoadInitialState()
                 return
             }
-            // Stale artifacts — dead pid, or pid recycled by another process
-            // (e.g. after a reboot). Remove them so the spawn below starts
-            // from a clean slate instead of tripping over a dead socket.
+            // Stale pid file — dead pid, or pid recycled by another process
+            // (e.g. after a reboot). Remove it so the spawn below starts from
+            // a clean slate.
+            //
+            // The socket file is deliberately left where it is. Clearing the
+            // rendezvous path is the job of whoever is about to bind it, and
+            // the daemon spawned below does exactly that in its own
+            // `SocketServer.start()` — so removing it here adds nothing when
+            // the pid file really is stale, and deletes a live daemon's socket
+            // when it is stale only because a successor has already bound and
+            // has not rewritten the pid file yet. That successor would keep
+            // accepting on a listener no client can reach, with nothing to
+            // restore the path if the spawn below then fails.
             logger.warning("""
             Stale daemon pid file: pid \(pid, privacy: .public) is not a live \
-            TBDDaemon — removing pid file and socket before spawning
+            TBDDaemon — removing the pid file before spawning
             """)
             try? FileManager.default.removeItem(atPath: pidPath)
-            try? FileManager.default.removeItem(atPath: TBDConstants.socketPath)
         }
 
         // Find TBDDaemon binary using sibling and source-worktree candidates

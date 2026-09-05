@@ -23,7 +23,18 @@ public final class SocketServer: Sendable {
     ///
     /// This is what licenses the unlink in `stop()`. See
     /// `unlinkOwnedSocketFile()`.
+    ///
+    /// Only ever read through `takeBoundSocketIdentity()`, which reads and
+    /// clears it under `identityLock`. Nothing serializes callers of `stop()`:
+    /// SIGTERM and SIGINT each fire an independent, undeduplicated
+    /// `Task { await daemon.stop() }` in `main.swift`, so two shutdowns can
+    /// overlap. A plain read-then-nil lets both see the same identity and both
+    /// reach the unlink, and the loser of that race is unlinking against a
+    /// path a successor may have taken over in between — the very thing the
+    /// identity exists to prevent. Taking it atomically means exactly one
+    /// shutdown ever holds a claim on the file.
     private nonisolated(unsafe) var boundSocketIdentity: SocketFileIdentity?
+    private let identityLock = NSLock()
 
     /// Runs in `start()` between `bind(2)` and NIO adopting the bound
     /// descriptor, and may throw to fail the start from inside that window.
@@ -39,6 +50,17 @@ public final class SocketServer: Sendable {
     /// reachable, and it is handed the descriptor so a caller that fails the
     /// start can close it rather than leak it.
     private let beforeAdoptingBoundSocket: (@Sendable (Int32) async throws -> Void)?
+
+    /// Runs inside `takeBoundSocketIdentity()`, after the identity is read and
+    /// before it is cleared — the window two overlapping shutdowns race for.
+    /// `nil` in production.
+    ///
+    /// That window is a few instructions wide, so no test can land inside it
+    /// by timing alone; holding it open here is what makes the race
+    /// reproducible. Under `identityLock` a second claimant waits outside the
+    /// window instead of reading the same identity, which is exactly what the
+    /// test measures.
+    private let duringIdentityClaim: (@Sendable () -> Void)?
 
     /// Number of currently connected clients. Updated atomically.
     private let _connectedClients = ManagedAtomic<Int>(0)
@@ -58,13 +80,15 @@ public final class SocketServer: Sendable {
     init(
         router: RPCRouter,
         socketPath: String?,
-        beforeAdoptingBoundSocket: (@Sendable (Int32) async throws -> Void)?
+        beforeAdoptingBoundSocket: (@Sendable (Int32) async throws -> Void)?,
+        duringIdentityClaim: (@Sendable () -> Void)? = nil
     ) {
         self.router = router
         // See HookResolver — resolve here, not at the caller's site.
         self.socketPath = socketPath ?? TBDConstants.socketPath
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         self.beforeAdoptingBoundSocket = beforeAdoptingBoundSocket
+        self.duringIdentityClaim = duringIdentityClaim
     }
 
     /// Start listening on the Unix domain socket.
@@ -140,7 +164,7 @@ public final class SocketServer: Sendable {
         }
 
         self.channel = ch
-        self.boundSocketIdentity = identity
+        storeBoundSocketIdentity(identity)
         logger.info("Listening on \(self.socketPath, privacy: .public)")
     }
 
@@ -201,15 +225,40 @@ public final class SocketServer: Sendable {
     }
 
     /// Reclaim the socket file this server bound, if it is still there and
-    /// still ours. Called once, at shutdown; the identity is consumed so a
-    /// second call finds nothing to claim.
+    /// still ours. The claim is taken exactly once, so a second shutdown —
+    /// sequential or concurrent — finds nothing to claim and does nothing.
     private func unlinkOwnedSocketFile() {
-        guard let bound = boundSocketIdentity else {
-            // Never bound, or already settled. Nothing here is ours.
+        guard let bound = takeBoundSocketIdentity() else {
+            // Never bound, or already claimed by another shutdown. Nothing
+            // here is ours.
             return
         }
-        boundSocketIdentity = nil
         unlinkSocketFile(ifStillIdentity: bound)
+    }
+
+    /// Record the identity of the file this server just bound. Held under
+    /// `identityLock` so a shutdown racing the tail of `start()` sees either
+    /// the whole claim or none of it.
+    private func storeBoundSocketIdentity(_ identity: SocketFileIdentity?) {
+        identityLock.lock()
+        defer { identityLock.unlock() }
+        boundSocketIdentity = identity
+    }
+
+    /// Read and clear `boundSocketIdentity` in one step, so overlapping
+    /// shutdowns cannot both come away holding the claim.
+    ///
+    /// Internal rather than private so a test can call it concurrently and
+    /// count the claimants: "at most one" is the whole guarantee, and it is
+    /// not observable from the outside once the losers have correctly done
+    /// nothing.
+    func takeBoundSocketIdentity() -> SocketFileIdentity? {
+        identityLock.lock()
+        defer { identityLock.unlock() }
+        let claimed = boundSocketIdentity
+        duringIdentityClaim?()
+        boundSocketIdentity = nil
+        return claimed
     }
 
     /// Remove the file at `socketPath` **only if it is still the one whose
@@ -296,6 +345,17 @@ struct SocketFileIdentity: Equatable {
     ///
     /// `lstat` rather than `stat`: a symlink swapped in at the path is not the
     /// socket we bound, and must not be mistaken for it.
+    ///
+    /// By the path, and not by `fstat(2)` on the bound descriptor, however
+    /// tempting the tighter window looks: on darwin the two do not name the
+    /// same thing. `fstat(2)` on a bound `AF_UNIX` descriptor reports the
+    /// socket's own in-kernel vnode — a different inode, with `st_dev` of -1 —
+    /// not the filesystem entry `bind(2)` created. Measured on darwin 25.1:
+    /// `fstat` answered `dev=-1 ino=15302332` for a socket whose path
+    /// `lstat`ed as `dev=16777235 ino=863366896`. An identity captured that
+    /// way could never equal the one read back from the path, so every
+    /// ownership check would fail closed and the socket file would never be
+    /// reclaimed at all.
     init?(path: String) {
         var info = stat()
         guard lstat(path, &info) == 0 else { return nil }

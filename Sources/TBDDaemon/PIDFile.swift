@@ -62,10 +62,27 @@ public struct PIDFile: Sendable {
         return true
     }
 
+    /// Remove a stale pid file. **The socket file is deliberately left alone.**
+    ///
+    /// Removing it here buys nothing: the only thing that needs the rendezvous
+    /// path free is `bind(2)`, and `SocketServer.start()` clears the path
+    /// itself immediately before binding — on every path that gets that far,
+    /// including this one.
+    ///
+    /// What it can cost is a live daemon's rendezvous. A pid file reads as
+    /// stale whenever the pid it names is not a live `TBDDaemon`, and a
+    /// successor daemon writes its pid file (step 4 of `Daemon.start()`) well
+    /// before it binds the socket, so "stale pid, live socket" is a state the
+    /// path really passes through. Deleting the socket there leaves the
+    /// successor accepting on a listener no client can reach, and nothing
+    /// restores the path until this daemon reaches its own bind — the whole of
+    /// a startup later, or never, if that startup throws first.
+    ///
+    /// Clearing the rendezvous path is the act of whoever is about to bind it,
+    /// and of nobody else. See `SocketServer.unlinkSocketFile(ifStillIdentity:)`.
     public func cleanupIfStale() {
         if isStale() {
             remove()
-            try? FileManager.default.removeItem(atPath: TBDConstants.socketPath)
         }
     }
 }

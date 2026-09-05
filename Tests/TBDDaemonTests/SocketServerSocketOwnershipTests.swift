@@ -140,6 +140,149 @@ struct SocketServerSocketOwnershipTests {
         await incumbent.stop()
     }
 
+    @Test("only one of many overlapping shutdowns claims the socket file")
+    func onlyOneOverlappingShutdownClaimsTheFile() async throws {
+        let socketPath = scratchSocketPath()
+        defer { unlink(socketPath) }
+
+        // Nothing serializes `stop()`: SIGTERM and SIGINT each fire their own
+        // undeduplicated `Task { await daemon.stop() }` in main.swift, so a
+        // supervisor escalating signals can run two shutdowns at once. Every
+        // claimant goes on to unlink against the identity it came away with,
+        // so a second claimant is a second unlink — aimed at a path a
+        // successor may have taken over by then, which is the one thing the
+        // identity exists to prevent. At most one claim, always.
+        //
+        // The read-and-clear window is a few instructions wide, so no amount
+        // of starting threads and hoping will land inside it. `claimWindow`
+        // holds it open instead: the first claimant waits until every other
+        // thread has reached the call site, then lingers long enough for an
+        // unsynchronized read to land in the window. Taken under a lock, the
+        // others wait outside it and come away with nothing; taken with a
+        // plain read-then-nil, all eight read the same identity.
+        let claimants = 8
+        let atCallSite = DispatchSemaphore(value: 0)
+        let windowIsHeld = FirstArrivalFlag()
+        let claimWindow: @Sendable () -> Void = {
+            guard windowIsHeld.takeFirst() else { return }
+            for _ in 0..<(claimants - 1) { atCallSite.wait() }
+            usleep(50_000)
+        }
+
+        let server = SocketServer(
+            router: try makeRouter(),
+            socketPath: socketPath,
+            beforeAdoptingBoundSocket: nil,
+            duringIdentityClaim: claimWindow
+        )
+        try await server.start()
+
+        let claims = ClaimCounter()
+        let finished = DispatchGroup()
+        for _ in 0..<claimants {
+            finished.enter()
+            Thread.detachNewThread {
+                atCallSite.signal()
+                if server.takeBoundSocketIdentity() != nil { claims.increment() }
+                finished.leave()
+            }
+        }
+        #expect(finished.wait(timeout: .now() + 30) == .success, "the claimant threads never finished")
+        #expect(
+            claims.count == 1,
+            "\(claims.count) of \(claimants) overlapping shutdowns came away owning the socket file; only one may"
+        )
+
+        await server.stop()
+    }
+
+    @Test("overlapping shutdowns still reclaim the server's own socket file, once")
+    func overlappingShutdownsReclaimTheFileOnce() async throws {
+        let socketPath = scratchSocketPath()
+        defer { unlink(socketPath) }
+
+        // The end-to-end half of the test above: whatever the claim does under
+        // contention, a pile of concurrent shutdowns must still reclaim the
+        // file this server bound, and a shutdown that arrives after a
+        // successor has taken the path over must leave the successor alone.
+        let server = SocketServer(router: try makeRouter(), socketPath: socketPath)
+        try await server.start()
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask { await server.stop() }
+            }
+        }
+        #expect(inode(of: socketPath) == nil, "the shutdown must still reclaim its own file")
+
+        // A successor now binds the path. Any further shutdown of the old
+        // server must find nothing left to claim and leave it alone.
+        let successor = SuccessorSocket()
+        defer { successor.release() }
+        successor.takeOver(path: socketPath)
+        let successorInode = try #require(successor.inode)
+
+        await server.stop()
+        #expect(
+            inode(of: socketPath) == successorInode,
+            "a repeat shutdown deleted the successor's socket"
+        )
+    }
+
+    /// The rendezvous path is cleared by whoever is about to bind it, and by
+    /// nobody else. `SocketServer` is that code: `start()` clears the path
+    /// immediately before `bind(2)`, and `stop()` reclaims the file only while
+    /// the path still resolves to the inode it bound.
+    ///
+    /// Two startup paths used to remove it on the strength of a stale pid file
+    /// — `PIDFile.cleanupIfStale()` and `AppState.startDaemonAndConnect()` —
+    /// and a pid file reads as stale for as long as a successor has bound the
+    /// socket without having rewritten it yet. Removing it there deletes a
+    /// live daemon's socket and puts nothing in its place: the path stays
+    /// empty for the whole of the next daemon's startup, and for good if that
+    /// startup throws first.
+    ///
+    /// Pinned against the source text because those removals resolve
+    /// `TBDConstants.socketPath` from the process environment, and the only
+    /// runtime seam for that is a process-global this target must not mutate:
+    /// `ConstantsTests` pins that no suite in this process sets
+    /// `TBD_SOCKET_PATH`, and `scripts/test.sh` sets it for the whole run. A
+    /// source pin is a weak instrument in general; here it is the available
+    /// one.
+    @Test("nothing outside SocketServer removes the rendezvous socket file")
+    func onlyTheBinderClearsTheRendezvousPath() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Tests/TBDDaemonTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // repo root
+        let fm = FileManager.default
+        var offenders: [String] = []
+        var scanned = 0
+
+        for module in ["Sources/TBDDaemon", "Sources/TBDApp"] {
+            let dir = root.appendingPathComponent(module)
+            let files = fm.enumerator(at: dir, includingPropertiesForKeys: nil)?
+                .compactMap { $0 as? URL }
+                .filter { $0.pathExtension == "swift" } ?? []
+            for file in files where file.lastPathComponent != "SocketServer.swift" {
+                guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+                scanned += 1
+                for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                    let code = line.trimmingCharacters(in: .whitespaces)
+                    guard !code.hasPrefix("//"), code.contains("TBDConstants.socketPath") else { continue }
+                    guard code.contains("removeItem") || code.contains("unlink(") else { continue }
+                    offenders.append("\(file.lastPathComponent):\(index + 1): \(code)")
+                }
+            }
+        }
+
+        #expect(scanned > 100, "the source scan found almost nothing to read — it is passing vacuously")
+        #expect(
+            offenders.isEmpty,
+            "these remove the rendezvous socket without binding it: \(offenders.joined(separator: "; "))"
+        )
+    }
+
     @Test("a start that fails after binding leaves a successor's socket alone")
     func failedStartLeavesSuccessorSocketAlone() async throws {
         let socketPath = scratchSocketPath()
@@ -279,5 +422,39 @@ private final class SuccessorSocket: @unchecked Sendable {
             close(fd)
             fd = -1
         }
+    }
+}
+
+/// Lets exactly one caller through — the first claimant, which is the one that
+/// holds the read-and-clear window open for everybody else.
+private final class FirstArrivalFlag: @unchecked Sendable {
+    private var taken = false
+    private let lock = NSLock()
+
+    func takeFirst() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if taken { return false }
+        taken = true
+        return true
+    }
+}
+
+/// Counts how many concurrent callers came away holding the socket file's
+/// identity. The guarantee under test is that the answer is one.
+private final class ClaimCounter: @unchecked Sendable {
+    private var value = 0
+    private let lock = NSLock()
+
+    func increment() {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }
