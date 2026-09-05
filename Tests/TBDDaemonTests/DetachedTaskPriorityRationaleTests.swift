@@ -5,20 +5,19 @@ import Testing
 /// Tier 1. Pins the one unmeasured claim the `ShutdownLatch(executor:)` fix
 /// rests on, so that the claim cannot quietly become false.
 ///
-/// The rationale — written into `Tests/CLAUDE.md` ("Thread-blocking gates run
-/// off the cooperative pool") and into `gateHoldingTask`'s doc comment in
-/// `Tests/TestSupport/BoundedGateSupport.swift` — is that **a `Task.detached`
-/// runs at default priority, behind every higher-priority test task the pass
-/// keeps runnable**. That is what explains CI measuring 0 of 8 detached callers
+/// The rationale — written into `Tests/CLAUDE.md`, in the section
+/// "Thread-blocking gates run off the cooperative pool" — is that **a
+/// `Task.detached` runs at default priority, behind every higher-priority test
+/// task the pass keeps runnable**. That is what explains CI measuring 0 of 8 detached callers
 /// back after 90 s while the test's own polling task ran on time, and it is why
 /// the remedy was to inject an executor into the callee rather than to raise a
 /// bound. The claim was reasoned, not measured.
 ///
 /// **A red here is a defect in that documentation, not in this test.** If the
 /// observed relationship is not the documented one, the fix is to rewrite the
-/// rationale in both places around the numbers this failure prints — and then
-/// to re-examine whether executor injection was the right remedy — never to
-/// relax the assertion until it passes.
+/// rationale there around the numbers this failure prints — and then to
+/// re-examine whether executor injection was the right remedy — never to relax
+/// the assertion until it passes.
 ///
 /// **Why the probes report through a continuation rather than through
 /// `await task.value`.** Awaiting a task is precisely the dependency the
@@ -29,9 +28,12 @@ import Testing
 /// probe records `Task.currentPriority` as its **first** statement into a
 /// lock-guarded box and resumes a continuation the test is parked on. A
 /// continuation is not a task dependency, so nothing is escalated, and the
-/// reading is the priority the task was actually created at. The probe still
-/// runs promptly because a tier-1 test creating one task at a time does not
-/// saturate the pool.
+/// reading is the priority the task was actually created at. The probe is
+/// subject to the pass's scheduling latency like every other hop — the pool is
+/// saturated by the other ~5,000 tests of the pass, not by this test, and a
+/// starved probe would sit on the continuation for as long as that takes. That
+/// is why the suite carries the shared hang guard: a wedge here reports as a
+/// named suite rather than as the step's `timeout-minutes`.
 ///
 /// No sleeps and no polls: each probe is one task creation and one continuation
 /// resume.
@@ -40,7 +42,7 @@ import Testing
 /// relationship that is certainly true (`Task { }` inherits its creator's
 /// priority), measured through the same apparatus, so an apparatus that has
 /// silently stopped measuring anything cannot look identical to a working one.
-@Suite("Detached-task priority rationale")
+@Suite("Detached-task priority rationale", .fastPassBounded)
 struct DetachedTaskPriorityRationaleTests {
 
     /// Every priority the probe observed, on the primary failure line.
@@ -63,8 +65,7 @@ struct DetachedTaskPriorityRationaleTests {
             Task.detached { } \(renderPriority(detached)); \
             gateHoldingTask { } \(renderPriority(gateHolding)). \
             The rationale for ShutdownLatch(executor:) — in Tests/CLAUDE.md under \
-            "Thread-blocking gates run off the cooperative pool" and in gateHoldingTask's \
-            doc comment in Tests/TestSupport/BoundedGateSupport.swift — asserts detached < body \
+            "Thread-blocking gates run off the cooperative pool" — asserts detached < body \
             and must be corrected around these numbers rather than this test being relaxed. \
             Each reading is the probe's first statement, reported over a continuation rather \
             than awaited, so none of them can be an escalated value.
