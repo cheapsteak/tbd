@@ -26,17 +26,23 @@ public struct ModelProfileResolver: Sendable {
     let repos: RepoStore
     let config: ConfigStore
     let keychain: @Sendable (String) throws -> String?
+    let candidateSource: ProfilePoolCandidateSource?
+    let now: @Sendable () -> Date
 
     public init(
         profiles: ModelProfileStore,
         repos: RepoStore,
         config: ConfigStore,
-        keychain: @Sendable @escaping (String) throws -> String? = { try ModelProfileKeychain.load(id: $0) }
+        keychain: @Sendable @escaping (String) throws -> String? = { try ModelProfileKeychain.load(id: $0) },
+        candidateSource: ProfilePoolCandidateSource? = nil,
+        now: @Sendable @escaping () -> Date = { Date() }
     ) {
         self.profiles = profiles
         self.repos = repos
         self.config = config
         self.keychain = keychain
+        self.candidateSource = candidateSource
+        self.now = now
     }
 
     /// Load a profile by explicit ID, bypassing the precedence chain.
@@ -133,7 +139,72 @@ public struct ModelProfileResolver: Sendable {
             logger.warning("scratch profile override \(scratchOverrideID, privacy: .public) is missing; falling back to global default")
         }
 
-        // Step 2: global default.
+        // Step 2: global default, or balanced pick if enabled.
+        if cfg.profileBalancingEnabled, let source = candidateSource {
+            // Balancing is enabled and we have a source: build candidates and ask the picker.
+            do {
+                let candidates = try await source.candidates(defaultProfileID: cfg.defaultProfileID)
+                let decision = ProfilePoolPicker.pick(
+                    candidates: candidates,
+                    excludingAccountKeys: [],
+                    now: now()
+                )
+
+                if let chosenID = decision.chosen {
+                    if let resolved = try await loadResolved(id: chosenID) {
+                        // Log the balanced decision.
+                        let chosenCandidate = candidates.first(where: { $0.profileID == chosenID })
+                        let headroom = chosenCandidate.flatMap { candidate in
+                            decision.verdicts[candidate.profileID]
+                                .flatMap { verdict in
+                                    if case let .eligible(_, hr, accountLoad) = verdict {
+                                        return (hr, accountLoad)
+                                    }
+                                    return nil
+                                }
+                        }
+
+                        if let (hr, accountLoad) = headroom {
+                            logger.info("balanced pick: profile \(chosenID, privacy: .public), headroom \(String(format: "%.1f%%", hr * 100)), account live sessions \(accountLoad)")
+                        } else {
+                            logger.info("balanced pick: profile \(chosenID, privacy: .public)")
+                        }
+
+                        // Log rejected candidates.
+                        for candidate in candidates where candidate.profileID != chosenID {
+                            if let verdict = decision.verdicts[candidate.profileID] {
+                                let reason: String
+                                switch verdict {
+                                case .eligible:
+                                    reason = "eligible but lower rank"
+                                case .wrongKind:
+                                    reason = "wrongKind"
+                                case .noCredential:
+                                    reason = "noCredential"
+                                case .optedOut:
+                                    reason = "optedOut"
+                                case .sameAccount:
+                                    reason = "sameAccount"
+                                case .noFreshReading:
+                                    reason = "noFreshReading"
+                                case .exhausted:
+                                    reason = "exhausted"
+                                }
+                                logger.debug("rejected candidate \(candidate.profileID, privacy: .public): \(reason)")
+                            }
+                        }
+
+                        return resolved
+                    }
+                } else {
+                    logger.info("balancing found no eligible candidate; falling back to default")
+                }
+            } catch {
+                logger.error("candidate source threw; falling back to default: \(error, privacy: .public)")
+            }
+        }
+
+        // Fallback to step 2 / step 3: global default or nothing.
         if let defaultID = cfg.defaultProfileID {
             if let resolved = try await loadResolved(id: defaultID) {
                 return resolved
