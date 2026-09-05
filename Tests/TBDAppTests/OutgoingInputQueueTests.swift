@@ -1,6 +1,7 @@
 import Clocks
 import Foundation
 import SwiftTerm
+import TBDShared
 import Testing
 
 @testable import TBDApp
@@ -215,12 +216,37 @@ struct OutgoingInputQueueTests {
         #expect(recorder.writes == ["u0", "u1", "u2", "i0", "i1"].map { Data($0.utf8) })
     }
 
+    /// Two jobs, and the second is why this test omits `pasteHoldBound`
+    /// instead of supplying one.
+    ///
+    /// The first is the behaviour in the name: an unclosed paste must not
+    /// strand an injection forever.
+    ///
+    /// The second is to **pin the production default to
+    /// `HolderInputTiming.pasteHoldBound`**, from both sides. That constant is
+    /// required to stay strictly shorter than the daemon's
+    /// `injectionAckDeadline` (see `HolderInputTiming`, and
+    /// `HolderInputTimingTests` for the ordering itself), and sharing the
+    /// constant only removes the chance of two literals drifting — it does not
+    /// stop this call site from going back to a literal of its own. So the
+    /// queue below is **default-constructed**, and the clock is advanced by the
+    /// shared constant:
+    ///
+    /// - a default longer than the constant leaves the injection held after the
+    ///   full advance, and the awaited `enqueueInjection` hangs out to the
+    ///   suite's `.clockDriven` bound — which is the unsafe direction, the one
+    ///   that pushes the hold past the daemon's deadline;
+    /// - a default shorter than the constant releases it during the first,
+    ///   short-of-the-bound advance, and the two assertions there fail.
+    ///
+    /// Every other test in this suite supplies its own bound, because each is
+    /// isolating a different mechanism; this one is the seam's own coverage.
     @Test("A paste that never closes does not strand an injection forever")
     func unclosedPasteDoesNotStrandInjectionForever() async {
         let recorder = WriteRecorder()
-        let bound = Duration.seconds(5)
+        let bound = HolderInputTiming.pasteHoldBound
         let clock = TestClock()
-        let queue = OutgoingInputQueue(pasteHoldBound: bound, clock: clock) { data in
+        let queue = OutgoingInputQueue(clock: clock) { data in
             recorder.write(data)
         }
 

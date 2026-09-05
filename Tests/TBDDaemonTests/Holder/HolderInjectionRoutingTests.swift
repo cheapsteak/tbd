@@ -43,21 +43,48 @@ struct HolderInjectionRoutingTests {
         var frames: [Data] { lock.withLock { sentFrames } }
         var directWrites: [Data] { lock.withLock { writes } }
 
+        /// Builds a courier on the **production** ack deadline: the
+        /// `ackDeadline` argument is *omitted*, not passed, so
+        /// `HolderInputTiming.injectionAckDeadline` is what the deadline tests
+        /// below actually exercise. A harness default of its own would make
+        /// those tests prove nothing about the shipped value.
+        func makeCourier(clock: any Clock<Duration>) -> HolderInjectionCourier {
+            HolderInjectionCourier(
+                sendFrame: sendFrame,
+                viewerAttachment: viewerAttachment,
+                writeDirectly: writeDirectly,
+                clock: clock)
+        }
+
+        /// For tests about something other than the deadline, which want a
+        /// value chosen to make their own mechanism obvious.
         func makeCourier(
-            ackDeadline: Duration = .seconds(5), clock: any Clock<Duration>
+            ackDeadline: Duration, clock: any Clock<Duration>
         ) -> HolderInjectionCourier {
             HolderInjectionCourier(
-                sendFrame: { [self] frame in
-                    if let sendFrameError { throw sendFrameError }
-                    lock.withLock { sentFrames.append(frame) }
-                },
-                viewerAttachment: { [self] _ in attachment },
-                writeDirectly: { [self] _, bytes in
-                    if let directWriteError { throw directWriteError }
-                    lock.withLock { writes.append(bytes) }
-                },
+                sendFrame: sendFrame,
+                viewerAttachment: viewerAttachment,
+                writeDirectly: writeDirectly,
                 ackDeadline: ackDeadline,
                 clock: clock)
+        }
+
+        private var sendFrame: @Sendable (Data) async throws -> Void {
+            { [self] frame in
+                if let sendFrameError { throw sendFrameError }
+                lock.withLock { sentFrames.append(frame) }
+            }
+        }
+
+        private var viewerAttachment: @Sendable (UUID) async -> UInt64? {
+            { [self] _ in attachment }
+        }
+
+        private var writeDirectly: @Sendable (UUID, Data) async throws -> Void {
+            { [self] _, bytes in
+                if let directWriteError { throw directWriteError }
+                lock.withLock { writes.append(bytes) }
+            }
         }
 
         /// The injection the courier put on the wire, parsed back off it.
@@ -130,21 +157,68 @@ struct HolderInjectionRoutingTests {
     }
 
     /// Fail-open, and the branch that can deliver twice. It is meant to.
+    /// Also the upper half of the pin on the production deadline: the courier
+    /// is default-constructed and the clock advanced by exactly
+    /// `HolderInputTiming.injectionAckDeadline`, so a shipped deadline *longer*
+    /// than that constant leaves the delivery unresolved and this test hangs
+    /// out to the suite's `.clockDriven` bound instead of passing.
+    /// `deadlineIsNotReachedEarly` below is the other half. Together they say
+    /// the shipped deadline IS the shared constant, which is what makes
+    /// `HolderInputTimingTests`' ordering assertion bind this code.
     @Test("A missing ack falls back to a direct write")
     func missingAckFallsBackToADirectWrite() async throws {
         let harness = Harness()
         harness.attachment = 7
         let clock = TestClock<Duration>()
-        let courier = harness.makeCourier(ackDeadline: .seconds(5), clock: clock)
+        let courier = harness.makeCourier(clock: clock)
 
         let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
 
-        await clock.advanceWhenSuspended(by: .seconds(5))
+        await clock.advanceWhenSuspended(by: HolderInputTiming.injectionAckDeadline)
 
         #expect(await delivery.value == .daemonWrote(.ackDeadlineElapsed))
         #expect(harness.directWrites == [Data("prompt".utf8)],
                 "an unanswered injection must still reach the child")
+    }
+
+    /// The half of the deadline pin that catches the drift direction that is
+    /// actually dangerous: a deadline **shorter** than
+    /// `HolderInputTiming.injectionAckDeadline`.
+    ///
+    /// The app parks an injection that arrives mid-paste for
+    /// `HolderInputTiming.pasteHoldBound` and answers when the paste closes. If
+    /// the daemon gave up first, every parked injection would be written by the
+    /// daemon straight into the open paste, between its `ESC[200~`/`ESC[201~`
+    /// markers — the harm the app-side hold exists to prevent, made systematic.
+    /// `HolderInputTimingTests` asserts the ordering of the two constants; this
+    /// asserts the courier actually waits the one it is given.
+    ///
+    /// An absence, asserted positively: virtual time stops one instant short of
+    /// the deadline and the app answers there. A courier that had already given
+    /// up would report `.daemonWrote(.ackDeadlineElapsed)` and count the ack as
+    /// late, so both readings discriminate — neither can pass by accident.
+    @Test("The ack deadline is not reached early")
+    func deadlineIsNotReachedEarly() async throws {
+        let harness = Harness()
+        harness.attachment = 7
+        let clock = TestClock<Duration>()
+        let courier = harness.makeCourier(clock: clock)
+
+        let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
+        try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
+        let injection = try harness.decodeOnlyInjection()
+
+        await clock.advanceWhenSuspended(
+            by: HolderInputTiming.injectionAckDeadline - .milliseconds(1))
+        courier.acknowledge(
+            SidecarInjectionAck(injectionID: injection.header.injectionID, written: true))
+
+        #expect(await delivery.value == .viewerWrote)
+        #expect(await courier.lateAcksObserved == 0,
+                "the courier gave up before its deadline, so the app's answer arrived late")
+        #expect(harness.directWrites.isEmpty,
+                "an injection the app acknowledged must not also be written by the daemon")
     }
 
     /// The plan has only the missing-ack test, and the two are different
@@ -160,7 +234,7 @@ struct HolderInjectionRoutingTests {
         // A clock that is never advanced: if this path waited for the deadline
         // instead of acting on the ack, the test would hang out to
         // `.clockDriven` rather than pass for the wrong reason.
-        let courier = harness.makeCourier(ackDeadline: .seconds(5), clock: TestClock())
+        let courier = harness.makeCourier(clock: TestClock())
 
         let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
@@ -181,13 +255,13 @@ struct HolderInjectionRoutingTests {
         let harness = Harness()
         harness.attachment = 7
         let clock = TestClock<Duration>()
-        let courier = harness.makeCourier(ackDeadline: .seconds(5), clock: clock)
+        let courier = harness.makeCourier(clock: clock)
 
         let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
         let injection = try harness.decodeOnlyInjection()
 
-        await clock.advanceWhenSuspended(by: .seconds(5))
+        await clock.advanceWhenSuspended(by: HolderInputTiming.injectionAckDeadline)
         #expect(await delivery.value == .daemonWrote(.ackDeadlineElapsed))
         #expect(harness.directWrites.count == 1)
 
@@ -244,11 +318,11 @@ struct HolderInjectionRoutingTests {
         harness.attachment = 7
         harness.directWriteError = NoDescriptor()
         let clock = TestClock<Duration>()
-        let courier = harness.makeCourier(ackDeadline: .seconds(5), clock: clock)
+        let courier = harness.makeCourier(clock: clock)
 
         let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
-        await clock.advanceWhenSuspended(by: .seconds(5))
+        await clock.advanceWhenSuspended(by: HolderInputTiming.injectionAckDeadline)
 
         guard case .notDelivered(let reason) = await delivery.value else {
             Issue.record(

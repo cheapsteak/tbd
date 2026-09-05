@@ -102,7 +102,8 @@ each receive loop rather than desyncing the stream
 simply never answers, and the daemon's bound covers it.
 
 **What bounds the wait, and what expiry means.** The viewer bounds its own hold
-at `pasteHoldBound` (two seconds, `OutgoingInputQueue.swift:109`): a paste
+at `pasteHoldBound` (two seconds, `HolderInputTiming.pasteHoldBound` in
+TBDShared): a paste
 still open at that point gets the answer anyway. The daemon's lease bound must
 therefore be strictly *longer* than the viewer's hold bound — three seconds
 against two. That ordering is load-bearing in the same way its predecessor was,

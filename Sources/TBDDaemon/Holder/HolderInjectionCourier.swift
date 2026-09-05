@@ -42,16 +42,22 @@ import os
 /// after its injection has already been written directly — is *recorded and
 /// dropped*, never used to retract or dedupe the write that already happened.
 ///
-/// ## What the deadline may be, and what it must be shorter than
+/// ## What the deadline may be, and what it must be longer than
 ///
-/// `ackDeadline` is five seconds, matching the attach handshake's
-/// `readyTimeout`. The number is not the point; its *relationship* to the
-/// app-side hold is. `OutgoingInputQueue.pasteHoldBound` (2 s) parks an
-/// injection that arrives while a user paste is open, and it must stay
-/// strictly shorter than this deadline — otherwise every held injection would
-/// be written directly by the daemon while the paste is still open, landing
-/// between the markers, which is the precise harm the app-side queue exists to
-/// prevent, made systematic rather than rare.
+/// The number is not the point; its *relationship* to the app-side hold is.
+/// `OutgoingInputQueue` (TBDApp) parks an injection that arrives while a user
+/// paste is open, and that hold must stay strictly shorter than this deadline
+/// — otherwise every held injection would be written directly by the daemon
+/// while the paste is still open, landing between the markers, which is the
+/// precise harm the app-side queue exists to prevent, made systematic rather
+/// than rare.
+///
+/// Neither side can see the other's literal, so both live together in
+/// `HolderInputTiming` (TBDShared): `injectionAckDeadline` is the default for
+/// `ackDeadline` below, `pasteHoldBound` is the default for the app's hold, and
+/// that one type carries the full statement of the invariant along with the
+/// tests that enforce it. `ackDeadline` stays a defaulted parameter so a test
+/// can still inject a deadline of its own.
 actor HolderInjectionCourier {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "holderInjection")
 
@@ -148,7 +154,7 @@ actor HolderInjectionCourier {
         sendFrame: @escaping @Sendable (Data) async throws -> Void,
         viewerAttachment: @escaping @Sendable (UUID) async -> UInt64?,
         writeDirectly: @escaping @Sendable (UUID, Data) async throws -> Void,
-        ackDeadline: Duration = .seconds(5),
+        ackDeadline: Duration = HolderInputTiming.injectionAckDeadline,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.sendFrame = sendFrame

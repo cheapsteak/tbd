@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "outgoingInputQueue")
@@ -87,25 +88,19 @@ final class OutgoingInputQueue {
     /// surfacing it, so this bound exists to fail SAFE, not to be tuned for
     /// latency.
     ///
-    /// **The invariant that actually binds this value: `pasteHoldBound` must
-    /// be strictly SHORTER than the daemon's `injectionAck` deadline.** The
-    /// daemon's injection path fails open — if the app does not acknowledge
-    /// an injection within its deadline, the daemon writes to its own pty dup
-    /// directly. If that deadline were the shorter of the two, then every
+    /// **The invariant that actually binds this value: it must be strictly
+    /// SHORTER than the daemon's injection-ack deadline** — otherwise every
     /// injection this queue holds would be written directly by the daemon
-    /// **while the paste is still open**, landing between the markers: the
-    /// precise harm this queue exists to prevent, and made systematic rather
-    /// than rare. The daemon's deadline is therefore **5 seconds** (matching
-    /// the `readyTimeout` precedent elsewhere in this subsystem) against this
-    /// 2-second hold.
+    /// while the paste is still open, landing between the markers, which is
+    /// the precise harm this queue exists to prevent. Both halves of that
+    /// ordering therefore live together in `HolderInputTiming` (TBDShared),
+    /// which carries the full statement of the invariant and names the tests
+    /// that enforce it; the default below is that constant, and neither value
+    /// is a literal in a module the other cannot see.
     ///
-    /// Shortening the hold bound is not an alternative way to satisfy the
-    /// invariant: `forceDeliver` writing on expiry is itself a controlled
-    /// instance of the between-markers write, chosen over stranding the
-    /// injection forever, so a shorter bound only commits that harm sooner on
-    /// a merely-slow paste. Two seconds is already an enormous margin — a
-    /// legitimate paste closes within one or a few main-actor turns, because
-    /// SwiftTerm emits all three chunks back-to-back.
+    /// Still a parameter, and still injectable: the pinning test drives the
+    /// *default*, and every other test in the suite supplies a bound of its
+    /// own to isolate the behaviour it is after.
     private let pasteHoldBound: Duration
 
     private var isPasteOpen = false
@@ -134,7 +129,7 @@ final class OutgoingInputQueue {
     private var pendingInjections: [PendingInjection] = []
 
     init(
-        pasteHoldBound: Duration = .seconds(2),
+        pasteHoldBound: Duration = HolderInputTiming.pasteHoldBound,
         clock: any Clock<Duration> = ContinuousClock(),
         write: @escaping @MainActor (Data) -> Bool
     ) {
