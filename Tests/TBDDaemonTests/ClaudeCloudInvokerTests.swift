@@ -131,6 +131,45 @@ struct ClaudeCloudInvokerTests {
         #expect(!output.contains("LINES=200"))
     }
 
+    /// The vendor CLI is a spawned Claude Code like any other, so the daemon
+    /// must not hand it the identity of whatever launched the daemon: a
+    /// `claude` that finds `CLAUDE_CODE_CHILD_SESSION` reads itself as a nested
+    /// child and writes neither a peer-registry row nor a transcript, and TBD's
+    /// own markers mis-route its hooks the same way.
+    ///
+    /// Asserted against a REAL child's environment because `spawn(_:)` reads
+    /// the base from `ProcessInfo` and no injected dictionary can reach it. No
+    /// `setenv` to plant a marker first — see the file's note above: it is a
+    /// process-wide mutation that would race every concurrently running suite,
+    /// including the one that scrubs these exact names. So this discriminates
+    /// exactly when the run's own environment already carries a marker — which
+    /// it does whenever the suite is started from a TBD- or Claude-managed
+    /// terminal, and does not on a bare CI runner — and can never fail
+    /// spuriously.
+    @Test func spawnStripsTheLaunchersIdentityFromTheChildEnvironment() async throws {
+        let tmp = FileManager.default.temporaryDirectory.path
+        let spawner = BoundedProcessClaudeSpawner(executable: "/usr/bin/env")
+        let outcome = try await spawner.spawn(
+            ClaudeCloudSpawnRequest(
+                arguments: [],
+                workingDirectory: tmp,
+                usesPseudoTerminal: false,
+                timeout: 5))
+        guard case let .completed(status, output, _) = outcome else {
+            Issue.record("expected .completed, got \(outcome)")
+            return
+        }
+        #expect(status == 0)
+        // `env` prints one `NAME=value` line per variable; a value's own
+        // newlines produce continuation lines with no `=`, which are skipped.
+        let names = Set(output.split(whereSeparator: \.isNewline).compactMap { line -> String? in
+            guard let separator = line.firstIndex(of: "=") else { return nil }
+            return String(line[line.startIndex..<separator])
+        })
+        let leaked = names.intersection(SpawnBaseEnvironment.enclosingSessionMarkers)
+        #expect(leaked.isEmpty, "the launcher's identity reached the vendor CLI: \(leaked.sorted())")
+    }
+
     /// The discriminating case named in `ClaudeCloudSpawnOutcome`'s own doc
     /// comment: on a plain pipe stdout and stderr are genuinely separate
     /// descriptors, so `output` must carry stdout ALONE — stderr chatter on

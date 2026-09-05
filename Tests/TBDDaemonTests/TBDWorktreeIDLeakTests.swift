@@ -137,39 +137,51 @@ private func ensureWorktreeDir(_ path: String) throws {
 
 // MARK: - Fix 1: Daemon scrubInheritedTBDEnv
 
-@Test("Daemon.scrubInheritedTBDEnv clears inherited routing vars")
+@Test("Daemon.scrubInheritedTBDEnv clears every enclosing-session marker")
 func testScrubInheritedTBDEnv() {
+    // The whole marker set, minus the two names this in-process test must not
+    // touch — the startup scrub's scope is the set, so pinning a hand-written
+    // subset here would let a name added to `SpawnBaseEnvironment` go
+    // unexercised on the daemon's own environment.
+    //
+    // `TMUX` and `TMUX_PANE` are excluded because `setenv` mutates the whole
+    // test BINARY's environment while every other suite runs concurrently in
+    // it, and a tmux client that finds `TMUX` set concludes it is already
+    // inside a session and refuses to nest. A transient `TMUX` here would make
+    // any tmux client a concurrently running live suite spawns fail. Their
+    // membership in the set is covered without a process-wide mutation by
+    // `SpawnBaseEnvironmentTests`, over an injected dictionary.
+    //
+    // `CLAUDE_CONFIG_DIR` is absent for a different reason: it is not a marker,
+    // it is the one name the scrub judges by VALUE, and setting it in-process
+    // would hand every concurrent suite that resolves the ambient Claude config
+    // dir a sentinel path. That by-value rule is covered over injected
+    // dictionaries by `SpawnBaseEnvironmentTests` and
+    // `TmuxServerEnvironmentRepairTests`.
+    let names = SpawnBaseEnvironment.enclosingSessionMarkers
+        .subtracting(SpawnBaseEnvironment.tmuxPaneMarkers)
+        .sorted()
+
     // setenv/unsetenv mutate the shared process environ. Guarantee cleanup
     // even if #expect failures or future edits cause us to skip the scrub
     // call below — Swift Testing runs tests concurrently by default and any
     // future test that reads these vars must not see leaked sentinels.
     defer {
-        unsetenv("TBD_WORKTREE_ID")
-        unsetenv("TBD_PROMPT_CONTEXT")
-        unsetenv("TBD_PROMPT_INSTRUCTIONS")
-        unsetenv("TBD_PROMPT_RENAME")
-        unsetenv("CODEX_CI")
-        unsetenv("CODEX_THREAD_ID")
+        for name in names { unsetenv(name) }
     }
 
-    setenv("TBD_WORKTREE_ID", "leaked-worktree-id", 1)
-    setenv("TBD_PROMPT_CONTEXT", "leaked-context", 1)
-    setenv("TBD_PROMPT_INSTRUCTIONS", "leaked-instructions", 1)
-    setenv("TBD_PROMPT_RENAME", "leaked-rename", 1)
-    setenv("CODEX_CI", "1", 1)
-    setenv("CODEX_THREAD_ID", "leaked-thread-id", 1)
+    for name in names { setenv(name, "leaked-\(name)", 1) }
 
     // Sanity: setenv worked.
-    #expect(ProcessInfo.processInfo.environment["TBD_WORKTREE_ID"] == "leaked-worktree-id")
+    #expect(ProcessInfo.processInfo.environment["TBD_WORKTREE_ID"] == "leaked-TBD_WORKTREE_ID")
 
     Daemon.scrubInheritedTBDEnv()
 
-    #expect(ProcessInfo.processInfo.environment["TBD_WORKTREE_ID"] == nil)
-    #expect(ProcessInfo.processInfo.environment["TBD_PROMPT_CONTEXT"] == nil)
-    #expect(ProcessInfo.processInfo.environment["TBD_PROMPT_INSTRUCTIONS"] == nil)
-    #expect(ProcessInfo.processInfo.environment["TBD_PROMPT_RENAME"] == nil)
-    #expect(ProcessInfo.processInfo.environment["CODEX_CI"] == nil)
-    #expect(ProcessInfo.processInfo.environment["CODEX_THREAD_ID"] == nil)
+    for name in names {
+        #expect(
+            ProcessInfo.processInfo.environment[name] == nil,
+            "\(name) survived the startup scrub")
+    }
 }
 
 // NOTE: The `recreateAfterReboot` env-injection tests were removed alongside the

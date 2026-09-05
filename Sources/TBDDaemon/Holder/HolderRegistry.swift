@@ -195,12 +195,12 @@ actor HolderRegistry {
     /// This installation's token, compared against every holder's before it is
     /// adopted.
     let owner: HolderOwnerToken
-    /// The environment the rendezvous paths are derived from, the holder
-    /// processes run under, and the jobs they fork inherit. Explicit rather
-    /// than ambient so tests never reach the developer's real `~/tbd` — or the
-    /// developer's real login shell. In production it *is* the daemon's own
-    /// environment, which is also what a tmux pane inherits from the server the
-    /// daemon started, so the two transports launch a job into the same place.
+    /// The environment the rendezvous paths are derived from and the holder
+    /// processes run under. Explicit rather than ambient so tests never reach
+    /// the developer's real `~/tbd` — or the developer's real login shell. In
+    /// production it *is* the daemon's own environment; the base environment of
+    /// the job a holder forks is derived from it by `SpawnBaseEnvironment`
+    /// (see there).
     ///
     /// Immutable and `Sendable`, so a caller composing a `HolderLaunchRequest`
     /// can read it without hopping onto the actor.

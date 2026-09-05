@@ -166,8 +166,31 @@ bytes the other reader never sees).
   the holder near-featureless forever.
 - **Environment and launch parameters.** The session's environment (including
   `envOverrides`) is applied at spawn by the daemon and passed through the
-  holder to the child, replacing today's tmux `-e` delivery. The holder
-  retains the launch request and replays it on demand, so a re-adopting
+  holder to the child, replacing today's tmux `-e` delivery. The base it is
+  applied over is the daemon's own environment with the identity of whatever
+  launched it removed — the enclosing Claude Code session's variables, TBD's
+  own per-terminal exports, and the enclosing tmux pane's coordinates — while
+  installation-wide configuration such as `TBD_HOME` keeps flowing. A daemon
+  restarted from inside an agent session exports that session's identity: a
+  Claude Code that inherits `CLAUDE_CODE_CHILD_SESSION` reads itself as a
+  nested child, with no peer-registry row and no transcript, and an inherited
+  terminal incarnation id fails TBD's SessionStart guard against a fresh row
+  that has none, costing the job its session id, its transcript path and its
+  activity updates. `CLAUDE_CONFIG_DIR` is judged by value: one under this
+  installation's profiles directory is minted by TBD per spawn and so is
+  identity, while any other value is the user's configuration and stays.
+  `TERM` is pinned to the value tmux gives a pane rather than inherited, since
+  it describes the terminal the job draws into and not the launcher. The same
+  scrub is applied to the tmux server's own spawn, which is the pane's
+  inherited base on that transport; to the daemon's own environment at startup,
+  covering every child it spawns by plain inheritance; and — since a server
+  outlives daemon restarts and hands its baked-in environment to every new
+  window — to an existing server in place when the daemon next ensures it. That
+  in-place repair covers TBD's own exports and Codex's, and leaves Claude
+  Code's: a running pane holds its own copy and reads it as ambient only while
+  the server's global copy is there too, so the panes that already depend on it
+  keep it until the server is recycled. The
+  holder retains the launch request and replays it on demand, so a re-adopting
   daemon can reconstruct what is running without trusting the database.
 - **Binary.** A new small SPM executable target. No copying the binary out of
   the build tree: a running holder's executable image survives rebuilds and
