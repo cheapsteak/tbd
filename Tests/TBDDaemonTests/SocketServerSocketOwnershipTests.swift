@@ -248,7 +248,9 @@ struct SocketServerSocketOwnershipTests {
         // against a 3-thread runner.
         //
         // That is a scheduling cost, not a wedge, and the gate's bound has to
-        // absorb it.
+        // absorb it. (`ShutdownLatch(executor:)` would pin the run, but the
+        // server builds its own latch with the default; only a test that
+        // holds a latch directly — `ServerShutdownLatchTests` — can inject.)
         let claims = ClaimCounter()
         let firstShutdownIsAtTheReclaimStep = DispatchSemaphore(value: 0)
         let secondCallerHasArrived = DispatchSemaphore(value: 0)

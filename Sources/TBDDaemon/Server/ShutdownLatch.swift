@@ -32,9 +32,25 @@ import Foundation
 /// unstructured on purpose: it does not inherit its creator's cancellation, so
 /// a cancelled signal handler cannot abandon a shutdown other callers are
 /// waiting on.
+///
+/// Being unstructured also means it inherits no task-executor preference
+/// (SE-0417 carries one into child tasks and default actors, not into
+/// `Task {}`), so by default the run lands on the cooperative pool however the
+/// caller was started. `executor` exists for tests and nothing else: a test
+/// that exercises the latch directly injects `GateExecutor` so the run cannot
+/// starve behind a saturated parallel pass. Production constructs every latch
+/// with the default, and the daemon declares no task executor of its own.
 final class ShutdownLatch: Sendable {
     private nonisolated(unsafe) var task: Task<Void, Never>?
     private let lock = NSLock()
+    private let executor: (any TaskExecutor)?
+
+    /// - Parameter executor: Where the single run is scheduled. `nil` — the
+    ///   production value — means the cooperative pool. Tests that drive the
+    ///   latch directly pass an executor they own; see the type comment.
+    init(executor: (any TaskExecutor)? = nil) {
+        self.executor = executor
+    }
 
     /// Run `body` if this is the first call; otherwise await the run the first
     /// call started. Later `body` arguments are never invoked — every caller of
@@ -50,7 +66,7 @@ final class ShutdownLatch: Sendable {
         lock.lock()
         defer { lock.unlock() }
         if let task { return task }
-        let created = Task { await body() }
+        let created = Task(executorPreference: executor) { await body() }
         task = created
         return created
     }
