@@ -21,23 +21,22 @@ struct AccountPickerSheet: View {
 
     @State private var isRefreshing = false
 
+    private var orderingResult: AccountPickerOrdering.Result {
+        AccountPickerOrdering.order(
+            entries: appState.modelProfiles,
+            balancingOn: appState.daemonCapabilities?.profileBalancingEnabled ?? false,
+            liveCount: { profileID in appState.liveSessionCount(forProfile: profileID) },
+            defaultProfileID: appState.defaultProfileID,
+            now: Date()
+        )
+    }
+
     private var sortedEntries: [ModelProfileWithUsage] {
-        // When profile balancing is on, use the picker's ranking; otherwise use the
-        // display-only sortedForPicker order (design 2026-09-05 §8.2).
-        let balancingEnabled = appState.daemonCapabilities?.profileBalancingEnabled ?? false
-        if balancingEnabled {
-            let candidates = ProfilePoolCandidates.fromApp(
-                entries: appState.modelProfiles,
-                liveCounts: { profileID in appState.liveSessionCount(forProfile: profileID) },
-                defaultProfileID: appState.defaultProfileID
-            )
-            let ranked = ProfilePoolPicker.ranked(candidates: candidates, excludingAccountKeys: [], now: Date())
-            return ranked.compactMap { rankedID in
-                appState.modelProfiles.first { $0.profile.id == rankedID }
-            }
-        } else {
-            return ProfileUsagePresentation.sortedForPicker(appState.modelProfiles)
-        }
+        orderingResult.ordered
+    }
+
+    private var balancedPickID: UUID? {
+        orderingResult.balancedPickID
     }
 
     private var isBalancingOn: Bool {
@@ -57,11 +56,11 @@ struct AccountPickerSheet: View {
             } else {
                 ScrollView {
                     VStack(spacing: 4) {
-                        ForEach(Array(sortedEntries.enumerated()), id: \.element.profile.id) { index, entry in
+                        ForEach(sortedEntries, id: \.profile.id) { entry in
                             AccountPickerRow(
                                 entry: entry,
                                 isDefault: entry.profile.id == appState.defaultProfileID,
-                                isBalancedPick: isBalancingOn && index == 0 && ProfileUsagePresentation.isSelectable(entry),
+                                isBalancedPick: entry.profile.id == balancedPickID,
                                 onPick: {
                                     onPick(entry.profile.id)
                                     dismiss()
