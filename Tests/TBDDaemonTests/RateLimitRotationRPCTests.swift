@@ -500,6 +500,35 @@ import TestSupport
         #expect(notifs.count == 1)
         #expect(notifs[0].message?.contains("has room") == true)
     }
+
+    // MARK: - Wiring regression
+
+    /// The daemon once built the router without a candidate source, which left
+    /// both rotation behaviors unreachable in production while every test —
+    /// each wiring its own source — stayed green. The router now defaults the
+    /// source from its own stores, so a router constructed without one must
+    /// still suggest a profile. A setup-token profile is used because its
+    /// credential is read from the snapshot, not from a login file on disk.
+    @Test func aRouterConstructedWithoutASourceStillSuggests() async throws {
+        try await db.config.setLimitRotationEnabled(false)
+        #expect(router.profilePoolCandidateSource != nil,
+                "RPCRouter.init must default profilePoolCandidateSource — see Daemon.swift wiring")
+
+        let limitedProfileID = try await makeProfile(name: "Limited", kind: .oauthToken)
+        let roomyProfileID = try await makeProfile(name: "Roomy", kind: .oauthToken)
+        try await makeSnapshot(for: limitedProfileID, percent: 90, organizationID: "org-limited")
+        try await makeSnapshot(for: roomyProfileID, percent: 20, organizationID: "org-roomy")
+        try await setTerminalProfile(limitedProfileID)
+        try await setTerminalSessionID(UUID())
+
+        let response = await detect()
+        #expect(response.success)
+
+        let notifs = try await db.notifications.unread(worktreeID: worktreeID)
+        #expect(notifs.count == 1)
+        #expect(notifs[0].message?.contains("Roomy has room") == true,
+                "got: \(notifs[0].message ?? "nil")")
+    }
 }
 
 /// Single-writer box so the swap seam (a `@Sendable` closure) can hand the
