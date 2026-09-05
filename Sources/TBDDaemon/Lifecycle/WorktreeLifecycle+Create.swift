@@ -1196,9 +1196,9 @@ extension WorktreeLifecycle {
     ///     from the daemon; the holder path reads the same daemon environment,
     ///     passed in explicitly so tests are not at the mercy of `$SHELL`.
     ///
-    /// The job inherits `environment` as its base for the same reason: a tmux
-    /// pane inherits the server's environment, and the server inherited the
-    /// daemon's.
+    /// The job's base is the daemon environment minus the markers of whatever
+    /// launched the daemon — see `HolderJobEnvironment` for why a job that
+    /// inherits them is not the same job the tmux path starts.
     static func holderLaunch(
         shellCommand: String,
         env: [String: String],
@@ -1214,7 +1214,8 @@ extension WorktreeLifecycle {
             executable: argv[0],
             arguments: Array(argv.dropFirst()),
             workingDirectory: workingDirectory,
-            environment: environment.merging(sensitiveEnv) { _, sensitive in sensitive },
+            environment: HolderJobEnvironment.inheriting(environment)
+                .merging(sensitiveEnv) { _, sensitive in sensitive },
             // Clamped into `UInt16` the same way the pty's `winsize` is: a
             // caller-supplied size that could not fit would otherwise wrap to a
             // one-column terminal rather than fail.
