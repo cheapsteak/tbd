@@ -128,14 +128,26 @@ final class HolderFixture {
         return nil
     }
 
-    /// A short scratch root. Short on purpose: the rendezvous socket lives
-    /// under it and `sun_path` is 104 bytes, so a deep `TMPDIR` would push the
-    /// path over the limit and fail the bind rather than the assertion.
+    /// A short scratch root under the run root `scripts/test.sh` reclaims.
+    /// Short on purpose: the rendezvous socket lives under it and `sun_path` is
+    /// 104 bytes, so a deeper root would push the path over the limit and fail
+    /// the bind rather than the assertion. Fenced on purpose too — `tearDown`
+    /// cannot run when the test process is killed, and the wrapper's EXIT trap
+    /// is the only thing that reclaims the root in that case.
     ///
     /// Exposed so a test can name paths inside it — a marker file the job
     /// writes — while building the launch request, before the fixture exists.
+    ///
+    /// This duplicates `fencedScratchRoot(prefix:)` in `TestSupport` rather
+    /// than calling it: `TestSupport` pulls in `TBDDaemonLib`, and this target
+    /// deliberately links only the holder and `TBDShared`. Keep the two reading
+    /// the same variable, empty-value fallback included — an empty
+    /// `TBD_TEST_SCRATCH_ROOT` is no more a fence than a missing one, and taken
+    /// literally it would mint the root in the root of the volume.
     static func scratchHome() -> String {
-        "/tmp/tbdh-\(UUID().uuidString.prefix(8).lowercased())"
+        let fenced = ProcessInfo.processInfo.environment["TBD_TEST_SCRATCH_ROOT"] ?? ""
+        let root = fenced.isEmpty ? "/tmp" : fenced
+        return "\(root)/tbdh-\(UUID().uuidString.prefix(8).lowercased())"
     }
 
     /// The descriptor number `strayDescriptorProbe` plants a leaked fd on.

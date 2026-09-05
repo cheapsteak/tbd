@@ -427,11 +427,13 @@ private final class GateFixture {
         }
     }
 
-    /// A short scratch root: the rendezvous socket lives under it and
-    /// `sun_path` is 104 bytes, so a deep `TMPDIR` fails the bind rather than
-    /// the assertion.
+    /// A short scratch root under the run root `scripts/test.sh` reclaims: the
+    /// rendezvous socket lives under it and `sun_path` is 104 bytes, so a
+    /// deeper root fails the bind rather than the assertion — and a root
+    /// outside the run's scratch dir survives a killed test process forever.
+    /// See `fencedScratchRoot(prefix:)`.
     private static func scratchHome() -> String {
-        "/tmp/tbdg10-\(UUID().uuidString.prefix(8).lowercased())"
+        fencedScratchRoot(prefix: "tbdg10")
     }
 
     /// The stand-in login shell. It ignores the `-i -l -c <command>` argv the
