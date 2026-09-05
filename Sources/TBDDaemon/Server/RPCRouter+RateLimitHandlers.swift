@@ -25,8 +25,12 @@ extension RPCRouter {
         // rotation armed — must not swap the session a second time or notify
         // twice. `schedule` enforces the same latch for the reset-time path;
         // this covers the rotation path, which acts before it schedules.
-        if (try? await db.scheduledResumes.pending(terminalID: terminal.id)) != nil {
-            logger.info("rateLimitDetected: terminal \(terminal.id.uuidString, privacy: .public) already has a pending resume — latched")
+        // Scoped to limit-shaped rows: a pending `api_error` auto-continue is
+        // the transient-error feature's own row and says nothing about this
+        // hard limit, so it must not swallow the report.
+        if let pendingRow = try? await db.scheduledResumes.pending(terminalID: terminal.id),
+           pendingRow.limitType != ScheduledResume.apiErrorLimitType {
+            logger.info("rateLimitDetected: terminal \(terminal.id.uuidString, privacy: .public) already has a pending \(pendingRow.limitType, privacy: .public) resume — latched")
             return .ok()
         }
         let config = try? await db.config.get()
@@ -61,9 +65,11 @@ extension RPCRouter {
                     now: Date()
                 )
                 if let chosen = decision.chosen {
-                    let allSnapshots = (try? await db.oauthUsageSnapshots.loadAll()) ?? [:]
-                    if let chosenSnapshot = allSnapshots[chosen] {
-                        suggestedProfileID = chosen
+                    // The winning candidate carries the very snapshot the picker
+                    // judged; re-reading the store here could race a poller write
+                    // and drop a decision already made.
+                    suggestedProfileID = chosen
+                    if let chosenSnapshot = candidates.first(where: { $0.profileID == chosen })?.snapshot {
                         usageSuffix = formatUsageForNotification(snapshot: chosenSnapshot)
                     }
                 }

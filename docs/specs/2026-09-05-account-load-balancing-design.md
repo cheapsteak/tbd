@@ -437,8 +437,8 @@ Both branches of every flag, per the repo rule.
   the transient exclusions. This adds the cases the rotation newly depends
   on: a structured `rejected` record carries its `rateLimitType` through as
   the `limitType` the handler reports; a structured record whose `resetsAt`
-  is not a number falls back to the text rules rather than being dropped;
-  and a rejected record with no usable reset and no parseable text detects
+  is not a number keeps that structured type when the reset instant comes
+  from the text rules; and a rejected record with no usable reset and no parseable text detects
   nothing, so no rotation can fire on a message the detector could not
   place in time.
 - **App** – the live count counts unparked Claude terminals for the profile
