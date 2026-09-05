@@ -1149,6 +1149,26 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the profile balancing gate (default OFF, soaking) — the launch
+    /// policy that spreads new sessions across the profiles with the most room
+    /// (design 2026-09-05 §6).
+    func setProfileBalancing(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetProfileBalancingEnabled,
+            params: ConfigSetProfileBalancingEnabledParams(enabled: enabled)
+        )
+    }
+
+    /// Persist the limit rotation gate (default OFF, soaking) — automatic
+    /// account rotation when a session hits a hard usage limit (design
+    /// 2026-09-05 §7.2).
+    func setLimitRotation(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetLimitRotationEnabled,
+            params: ConfigSetLimitRotationEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the pending-input veto for auto-hibernate (machine-interface
     /// guard that prevents hibernation of sessions with typed-but-unsent input).
     /// Applies on the next hibernation sweep.
@@ -2193,5 +2213,14 @@ actor DaemonClient {
         }
         defer { measured.finish() }
         return try response.decodeResult(RemoveLegacyGlobalHooksResult.self)
+    }
+
+    /// Set whether a profile is excluded from the balancing pool (design
+    /// 2026-09-05 §4).
+    func setProfilePoolOptOut(id: UUID, optOut: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.modelProfileSetPoolOptOut,
+            params: ModelProfileSetPoolOptOutParams(id: id, optOut: optOut)
+        )
     }
 }

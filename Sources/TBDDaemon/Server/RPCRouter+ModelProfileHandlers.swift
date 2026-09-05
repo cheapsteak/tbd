@@ -59,6 +59,7 @@ extension RPCRouter {
         let profiles = try await db.modelProfiles.list()
         let usageByID = try await db.modelProfileUsage.fetchAll()
         let oauthSnapshots = await oauthUsagePoller?.allSnapshots() ?? [:]
+        let liveSessionCounts = try await db.terminals.liveSessionCountsByProfile()
         let result = profiles.map { profile -> ModelProfileWithUsage in
             // Bedrock profiles have no isolated config dir; everything else
             // gets one at ~/tbd/profiles/<uuid>/claude. loginIdentity is only
@@ -85,7 +86,8 @@ extension RPCRouter {
                 loginIdentity: loginIdentity,
                 configDirPath: configDirPath,
                 usageSnapshot: oauthSnapshots[profile.id],
-                tokenTail: tokenTail
+                tokenTail: tokenTail,
+                liveSessions: liveSessionCounts[profile.id] ?? 0
             )
         }
         let config = try await db.config.get()
@@ -101,7 +103,9 @@ extension RPCRouter {
             autoResumeOnApiError: config.autoResumeOnApiError,
             gcEnabled: config.gcEnabled,
             autoCreateNotesEnabled: config.autoCreateNotesEnabled,
-            globalRemoteCreateDefaults: config.remoteCreateDefaults
+            globalRemoteCreateDefaults: config.remoteCreateDefaults,
+            profileBalancingEnabled: config.profileBalancingEnabled,
+            limitRotationEnabled: config.limitRotationEnabled
         ))
     }
 
@@ -650,5 +654,19 @@ extension RPCRouter {
         }
         let dir = try configDirManager.ensureOAuthDir(forProfileID: profile.id)
         return try RPCResponse(result: ModelProfilePrepareConfigDirResult(configDirPath: dir.path))
+    }
+
+    // MARK: - Pool Opt-Out
+
+    /// Set whether this profile is excluded from the balancing pool (design
+    /// 2026-09-05 §4). Not a feature flag — all profiles start in the pool, and
+    /// `optOut = true` means "never choose this one for me".
+    func handleModelProfileSetPoolOptOut(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ModelProfileSetPoolOptOutParams.self, from: paramsData)
+        try await db.modelProfiles.setPoolOptOut(id: params.id, optOut: params.optOut)
+        // Notify the app of the profile-list change so it reloads the detail view's toggle.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
     }
 }

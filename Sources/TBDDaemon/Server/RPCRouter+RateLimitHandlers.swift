@@ -7,8 +7,8 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "limitResume"
 extension RPCRouter {
 
     /// A hard usage limit was detected by the StopFailure hook. Detection and
-    /// notification always run; only the scheduled send is gated on
-    /// `autoResumeOnLimitReset` (spec §Constraints "Gated, default OFF").
+    /// notification always run; rotation and reset-time scheduling are gated.
+    /// Spec §7: rotation on hard limit.
     ///
     /// Latch: when the terminal already has a pending resume (a repeat
     /// StopFailure while parked), do nothing — no duplicate notification.
@@ -20,10 +20,134 @@ extension RPCRouter {
             return .ok()
         }
 
-        let enabled = (try? await db.config.get())?.autoResumeOnLimitReset ?? false
-        let message: String
+        // Latch, before any side effect: a repeat StopFailure for a limit that
+        // already has a pending resume — reset-time or the `continue` a
+        // rotation armed — must not swap the session a second time or notify
+        // twice. `schedule` enforces the same latch for the reset-time path;
+        // this covers the rotation path, which acts before it schedules.
+        // Scoped to limit-shaped rows: a pending `api_error` auto-continue is
+        // the transient-error feature's own row and says nothing about this
+        // hard limit, so it must not swallow the report.
+        if let pendingRow = try? await db.scheduledResumes.pending(terminalID: terminal.id),
+           pendingRow.limitType != ScheduledResume.apiErrorLimitType {
+            logger.info("rateLimitDetected: terminal \(terminal.id.uuidString, privacy: .public) already has a pending \(pendingRow.limitType, privacy: .public) resume — latched")
+            return .ok()
+        }
+        let config = try? await db.config.get()
+        let autoResumeEnabled = config?.autoResumeOnLimitReset ?? false
+        let rotationEnabled = config?.limitRotationEnabled ?? false
 
-        if enabled, let scheduler = limitResumeScheduler {
+        // §7.1: Always run — get suggested profile and build notification suffix
+        var suggestedProfileID: UUID?
+        var usageSuffix: String?
+        var limitedProfileName: String?
+
+        // Get the limited profile's name for notification
+        if let profileID = terminal.profileID {
+            limitedProfileName = (try? await db.modelProfiles.get(id: profileID))?.name
+        }
+
+        // Run picker with excluded account key (§7.1 always runs, even for ambient)
+        if let source = profilePoolCandidateSource {
+            do {
+                // Get account key to exclude: the limited profile's account (or nil for ambient)
+                var limitedAccountKey: String? = nil
+                if let profileID = terminal.profileID {
+                    limitedAccountKey = try await source.accountKey(forProfileID: profileID)
+                }
+
+                let candidates = try await source.candidates(
+                    defaultProfileID: config?.defaultProfileID
+                )
+                let decision = ProfilePoolPicker.pick(
+                    candidates: candidates,
+                    excludingAccountKeys: limitedAccountKey.map { [$0] } ?? [],
+                    now: Date()
+                )
+                if let chosen = decision.chosen {
+                    // The winning candidate carries the very snapshot the picker
+                    // judged; re-reading the store here could race a poller write
+                    // and drop a decision already made.
+                    suggestedProfileID = chosen
+                    if let chosenSnapshot = candidates.first(where: { $0.profileID == chosen })?.snapshot {
+                        usageSuffix = formatUsageForNotification(snapshot: chosenSnapshot)
+                    }
+                }
+            } catch {
+                logger.debug("handleRateLimitDetected: picker failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+
+        // §7.2: Gated — attempt automatic rotation if all conditions hold
+        var rotationSucceeded = false
+        /// True only when the post-swap `continue` was actually scheduled.
+        var continueArmed = false
+        if rotationEnabled, let suggested = suggestedProfileID {
+            let eligibility = Self.rotationEligibility(terminal: terminal, flagOn: true, suggested: suggested)
+            logger.info("handleRateLimitDetected rotation: \(String(describing: eligibility), privacy: .public)")
+
+            if case .rotate(let newProfileID) = eligibility {
+                do {
+                    let swapParams = TerminalSwapProfileParams(
+                        terminalID: terminal.id,
+                        newProfileID: newProfileID,
+                        mode: .inPlace
+                    )
+                    let swapParamsData = try encoder.encode(swapParams)
+                    let actor = ActuationActor.daemon(rail: "limit-rotation")
+                    let performer = rotationSwapPerformer ?? handleTerminalSwapProfile
+                    let response = try await performer(swapParamsData, actor)
+
+                    if response.success {
+                        rotationSucceeded = true
+                        // Arm the `continue` at now with limitType "rotation".
+                        // The swap has already happened, so the delta and the
+                        // notification report the new profile either way; what
+                        // they must not do is claim the turn will resume when
+                        // nothing was armed — `schedule` returns nil when a
+                        // pending row already exists (a concurrent duplicate
+                        // report), and there may be no scheduler at all.
+                        var armed = false
+                        if let scheduler = limitResumeScheduler {
+                            armed = await scheduler.schedule(
+                                terminalID: terminal.id, worktreeID: terminal.worktreeID,
+                                claudeSessionID: terminal.claudeSessionID,
+                                resetsAt: Date(), limitType: ScheduledResume.rotationLimitType,
+                                rawMessage: params.rawMessage
+                            ) != nil
+                        }
+                        continueArmed = armed
+                        if !armed {
+                            let why = limitResumeScheduler == nil ? "no scheduler" : "a resume is already pending"
+                            logger.warning("handleRateLimitDetected: rotated terminal \(terminal.id.uuidString, privacy: .public) but could not arm the continue: \(why, privacy: .public)")
+                        }
+                    } else {
+                        logger.warning("handleRateLimitDetected: swap failed: \(response.error ?? "unknown", privacy: .public)")
+                    }
+                } catch {
+                    logger.warning("handleRateLimitDetected: swap error: \(String(describing: error), privacy: .public)")
+                }
+            }
+        }
+
+        // Build notification message and broadcast delta
+        var suggestedProfileName: String? = nil
+        if let suggestedID = suggestedProfileID {
+            suggestedProfileName = (try? await db.modelProfiles.get(id: suggestedID))?.name
+        }
+        var message: String
+        if rotationSucceeded {
+            if let limited = limitedProfileName, let suggested = suggestedProfileName, let suffix = usageSuffix {
+                message = "Session limit hit on \(limited) — switched to \(suggested) (\(suffix))"
+            } else if let limited = limitedProfileName {
+                message = "Session limit hit on \(limited) — switched"
+            } else {
+                message = "Session limit hit — switched"
+            }
+            if !continueArmed {
+                message.append(" — the turn was not resumed automatically; send a message to continue")
+            }
+        } else if autoResumeEnabled, let scheduler = limitResumeScheduler {
             guard let scheduled = await scheduler.schedule(
                 terminalID: terminal.id, worktreeID: terminal.worktreeID,
                 claudeSessionID: terminal.claudeSessionID,
@@ -32,11 +156,14 @@ extension RPCRouter {
             else {
                 return .ok()   // latch: already pending — no duplicate notification
             }
-            message = "Session limit hit — auto-resume scheduled for \(ResumeTimeFormatter.string(from: scheduled.fireAt))"
+            let onAccount = limitedProfileName.map { " on \($0)" } ?? ""
+            message = "Session limit hit\(onAccount) — auto-resume scheduled for \(ResumeTimeFormatter.string(from: scheduled.fireAt))"
+            // §7.1 is "always": the suggestion rides along with the schedule.
+            if let suggested = suggestedProfileName, let suffix = usageSuffix {
+                message.append(". \(suggested) has room (\(suffix))")
+            }
         } else {
-            // Gate off: record the detection for audit, notify with the reset
-            // time, schedule nothing (spec Testing→Gate: "row recorded +
-            // notification, no send scheduled").
+            // Gate off: record the detection for audit, notify with the reset time
             let audit = ScheduledResume(
                 terminalID: terminal.id, worktreeID: terminal.worktreeID,
                 claudeSessionID: terminal.claudeSessionID,
@@ -49,11 +176,82 @@ extension RPCRouter {
             } catch {
                 logger.warning("handleRateLimitDetected: audit insert failed for terminal \(terminal.id.uuidString, privacy: .public): \(String(describing: error), privacy: .public)")
             }
-            message = "Session limit hit — resets \(ResumeTimeFormatter.string(from: params.resetsAt))"
+            if let limited = limitedProfileName {
+                message = "Session limit hit on \(limited) — resets \(ResumeTimeFormatter.string(from: params.resetsAt))"
+            } else {
+                message = "Session limit hit — resets \(ResumeTimeFormatter.string(from: params.resetsAt))"
+            }
+            // §7.1: Always append suggestion suffix (ambient: no limited name)
+            if let suggested = suggestedProfileName, let suffix = usageSuffix {
+                message.append(". \(suggested) has room (\(suffix))")
+            }
         }
+
+        // Broadcast terminalLimitHit delta
+        let delta = StateDelta.terminalLimitHit(TerminalLimitHitDelta(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            profileID: terminal.profileID,
+            resetsAt: params.resetsAt,
+            limitType: params.limitType,
+            suggestedProfileID: suggestedProfileID,
+            rotatedToProfileID: rotationSucceeded ? suggestedProfileID : nil
+        ))
+        subscriptions.broadcast(delta: delta)
 
         try await notify(terminal: terminal, type: .limitReached, message: message)
         return .ok()
+    }
+
+    /// Eligibility verdict for attempting a profile rotation on limit hit.
+    enum RotationVerdict: Sendable, Equatable, CustomStringConvertible {
+        case rotate(UUID)
+        case flagOff
+        case ambient
+        case parked
+        case holderTransport
+        case noSession
+        case noCandidate
+
+        var description: String {
+            switch self {
+            case .rotate(let id): return "rotate(\(id.uuidString))"
+            case .flagOff: return "flagOff"
+            case .ambient: return "ambient"
+            case .parked: return "parked"
+            case .holderTransport: return "holderTransport"
+            case .noSession: return "noSession"
+            case .noCandidate: return "noCandidate"
+            }
+        }
+    }
+
+    /// Check whether a terminal is eligible for automatic profile rotation.
+    /// Pure function: testable without tmux or database.
+    static func rotationEligibility(
+        terminal: Terminal,
+        flagOn: Bool,
+        suggested: UUID?
+    ) -> RotationVerdict {
+        guard flagOn else { return .flagOff }
+        guard terminal.profileID != nil else { return .ambient }
+        guard !terminal.isParked else { return .parked }
+        guard terminal.transport == .tmux else { return .holderTransport }
+        guard terminal.claudeSessionID != nil else { return .noSession }
+        guard let suggestedID = suggested else { return .noCandidate }
+        return .rotate(suggestedID)
+    }
+
+    /// Format a ProfileUsageSnapshot's 5h and weekly percents for notification.
+    private func formatUsageForNotification(snapshot: ProfileUsageSnapshot) -> String? {
+        var parts: [String] = []
+        if let sessionBucket = snapshot.buckets.first(where: { $0.kind == "session" }) {
+            parts.append("5h \(Int(sessionBucket.percent))%")
+        }
+        if let weeklyBucket = snapshot.buckets.first(where: { $0.kind == "weekly_all" }) {
+            parts.append("week \(Int(weeklyBucket.percent))%")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     /// A transient API error killed a turn (spec 2026-07-08). Gate OFF → not

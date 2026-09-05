@@ -468,4 +468,42 @@ extension RPCRouter {
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
+
+    /// Persist the profile balancing gate (default OFF, soaking) — the launch
+    /// policy that spreads new sessions across the profiles with the most room
+    /// (design 2026-09-05 §6). The column is written on every call, because
+    /// writing either value is the explicit gesture that lifts it out of NULL
+    /// forever after.
+    func handleConfigSetProfileBalancingEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetProfileBalancingEnabledParams.self, from: paramsData)
+        try await db.config.setProfileBalancingEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the limit rotation gate (default OFF, soaking) — automatic
+    /// account rotation when a session hits a hard usage limit (design
+    /// 2026-09-05 §7.2). The column is written on every call, because writing
+    /// either value is the explicit gesture that lifts it out of NULL forever
+    /// after.
+    /// Persist the limit-rotation gate. Turning it OFF cancels only the
+    /// `rotation`-scoped pending continues (`.rotationOnly`) — the reset-time
+    /// and api-error toggles own their own rows — and wakes the scheduler so an
+    /// in-flight sleep re-evaluates. Same shape as the two toggles above.
+    func handleConfigSetLimitRotationEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetLimitRotationEnabledParams.self, from: paramsData)
+        if !params.enabled {
+            // Cancel before persisting the off-state so a cancel failure can never
+            // leave the gate off with live pending rows.
+            _ = try await db.scheduledResumes.cancelAllPending(scope: .rotationOnly)
+        }
+        try await db.config.setLimitRotationEnabled(params.enabled)
+        await limitResumeScheduler?.wake()
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
 }

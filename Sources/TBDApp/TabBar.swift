@@ -487,20 +487,28 @@ enum SwapProfileMenu {
 
     /// Formats a swap-profile menu item label with compact usage stats appended.
     /// Examples: "Gmail", "Gmail — 5h 40% · wk 16%", "Gmail — no data".
+    /// Appends live session count when present (design 2026-09-05 §8.2).
     /// The usage suffix is sourced from the same per-profile snapshots the
     /// hover cards and account picker use.
     static func menuLabel(
         for profile: ModelProfile,
-        usage: ProfileUsageSnapshot?
+        usage: ProfileUsageSnapshot?,
+        liveSessions: Int? = nil
     ) -> String {
         let baseName = profile.name
-        guard let snapshot = usage, !snapshot.buckets.isEmpty else {
-            return baseName
+        var parts: [String] = [baseName]
+
+        if let snapshot = usage, !snapshot.buckets.isEmpty,
+           let summary = ProfileUsagePresentation.usageSummary(for: snapshot) {
+            parts.append(summary)
         }
-        guard let summary = ProfileUsagePresentation.usageSummary(for: snapshot) else {
-            return baseName
+
+        if let liveSessions, liveSessions > 0 {
+            parts.append("\(liveSessions) live")
         }
-        return "\(baseName) — \(summary)"
+
+        guard parts.count > 1 else { return baseName }
+        return parts.joined(separator: " — ")
     }
 }
 

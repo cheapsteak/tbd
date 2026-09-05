@@ -200,6 +200,58 @@ struct TerminalPanelView: View {
                 .background(Color.orange.opacity(0.18))
                 .accessibilityElement(children: .combine)
             }
+            // Limit-hit banner (design 2026-09-05 §7.1)
+            if let limitHit = appState.limitHits[terminalID] {
+                let limitedProfile = appState.modelProfiles.first { $0.profile.id == limitHit.profileID }
+                let suggestedProfile = limitHit.suggestedProfileID.flatMap { suggestedID in
+                    appState.modelProfiles.first { $0.profile.id == suggestedID }
+                }
+                let suggestedLiveCount = limitHit.suggestedProfileID.map { suggestedID in
+                    appState.liveSessionCount(forProfile: suggestedID)
+                }
+                let model = LimitBannerModel.build(
+                    limitHit: limitHit,
+                    limitedProfile: limitedProfile,
+                    suggestedProfile: suggestedProfile,
+                    suggestedLiveCount: suggestedLiveCount
+                )
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 8) {
+                            Text("⚠ Session limit hit on \(model.limitedProfileName) · \(model.resetsText)")
+                                .font(.caption)
+                            Spacer()
+                        }
+                        if model.isRotated, let rotatedName = model.suggestedProfileName {
+                            Text("— switched to \(rotatedName)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    if !model.isRotated, let suggestedName = model.suggestedProfileName, let suggestedSummary = model.suggestedUsageSummary {
+                        Button("Switch to \(suggestedName) — \(suggestedSummary)") {
+                            Task {
+                                if let suggestedID = limitHit.suggestedProfileID {
+                                    await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: suggestedID, mode: .inPlace)
+                                    appState.limitHits.removeValue(forKey: terminalID)
+                                }
+                            }
+                        }
+                        .controlSize(.small)
+                    }
+                    Button("Dismiss") {
+                        appState.limitHits.removeValue(forKey: terminalID)
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.15))
+            }
             TerminalPanelRepresentable(
                 terminalID: terminalID,
                 tmuxServer: tmuxServer,
