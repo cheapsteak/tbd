@@ -379,17 +379,25 @@ instead of leaving an anonymous job timeout. `BoundedGateWaitTests` reproduces
 the wedge on any machine by deriving its holder count from
 `activeProcessorCount`.
 
-**The preference stops at an unstructured task, and that changes the bound,
-not the call site.** SE-0417 carries a task executor preference into child
+**The preference stops at an unstructured task; what moves it is the callee,
+not the call site, and where the test does not own the callee only the bound
+is left.** SE-0417 carries a task executor preference into child
 tasks and default actors and *not* into `Task {}` or `Task.detached`. Several
 production seams hand their work to an unstructured task on purpose —
 `ShutdownLatch` does, so a cancelled signal handler cannot abandon a shutdown
 other callers await — and that work is then scheduled on the cooperative pool
 however the test started the call. It is not pinning a thread, and no
-`gateHoldingTask` can move it, so the only correct response is to bound a gate
-released from beyond such a hop at `TestDeadlines.saturatedPass` (90 s) and
-give the outer observation a strictly larger budget, so a genuinely lost
-handshake still reports before the wedge does. A snappier inner bound reports
+`gateHoldingTask` can move it. Where the test owns the callee, inject the
+executor into the callee instead: `ShutdownLatch(executor:)` is that seam,
+and `ServerShutdownLatchTests` builds its latch on `GateExecutor.shared` so
+its run cannot queue behind the pass at all — a bound cannot fix a queue that
+never drains, and CI measured 0 of 8 detached callers back after 90 s while
+the test's own polling task ran on time: a detached task runs at default
+priority, behind every higher-priority test task the pass keeps runnable. Where the test reaches the hop through production
+code it does not construct — a server's `stop()` — bound a gate released from
+beyond it at `TestDeadlines.saturatedPass` (90 s) and give the outer
+observation a strictly larger budget, so a genuinely lost handshake still
+reports before the wedge does. A snappier inner bound reports
 starvation the outer bound was sized to tolerate — which is exactly how
 `SocketServerSocketOwnershipTests` went red on a 30 s staging gate while every
 assertion in the test passed.
