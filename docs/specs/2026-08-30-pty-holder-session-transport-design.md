@@ -365,51 +365,68 @@ sharp case is bracketed paste: bytes arriving between `ESC[200~` and `ESC[201~`
 are swallowed into the pasted text, and a torn marker leaves the TUI's paste
 state desynchronized.
 
-The design closes that by having **one injector**, rather than by arbitrating
-between two. Every injection — `tbd terminal send`, queued prompts, supervision
-nudges — is written by the daemon, attached or detached, and it is written
-*through the session's holder*: a `write` request the holder serves from its
-own single-threaded loop, on the master it owns and structurally never reads.
-The daemon therefore needs no descriptor of its own for an attached session,
-and the single-reader invariant stays enforced by shape. This also retires a
-real bug class: today a daemon keystroke is addressed to a tmux pane coordinate
-resolved at send time and can hit the wrong session after pane reuse; a write
-bound to the session at spawn cannot miss.
+Two writers exist for any session: the person at the keyboard, and the daemon
+(`tbd terminal send`, queued prompts, supervision nudges). The person writes
+directly, because routing a keystroke through a second process is the latency
+this transport exists to remove. Every daemon injection is therefore routed by
+**who is reading that session's pty right now** (`HolderInjectionCourier`):
 
-The person at the keyboard still writes directly to the pty, because routing a
-keystroke through a second process is the latency this transport exists to
-remove. Two rules keep that stream and the injector out of each other's bytes,
-and both belong to the viewer, which is the only process that sees both:
+- **Detached** — nobody else is on the pty, so the daemon writes to its own
+  dup. The ordinary case, and the only one that is not a fallback.
+- **Attached** — the daemon puts an `injection` frame on the app sidecar and
+  waits for the app's `injectionAck`. The app writes the bytes through the
+  viewer's single serialization point, so for the span of that write the app is
+  the session's only writer as well as its only reader, and the concurrency
+  does not exist.
+- **No usable answer before the ack deadline** — the daemon writes anyway.
 
-- **The viewer grants a paste lease.** The daemon announces an injection and
-  waits, bounded, for the viewer to answer that no paste is open — immediately
-  in the ordinary case, or when an open paste closes. An injection therefore
-  never lands between a paste's markers. The viewer bounds its own hold more
-  tightly than the daemon bounds its wait, so an expired wait means one thing:
-  the viewer is not running its main actor at all. The daemon writes, and the
-  worst case is an injection absorbed into a person's paste — visible, and
-  never a duplicate, because nobody else writes.
-- **The viewer holds the person's keystrokes** for the span of an injection.
-  Mandatory rather than an optimisation: a raw-mode pty accepts about a
-  kilobyte before it refuses, so any prompt worth queueing spans several write
-  turns, and a keystroke landing between two of them splits it. Held
-  keystrokes are queued in order and flushed, never dropped, and the hold is
-  bounded so a wedged child can never freeze the keyboard.
+That last rule fails **open**, and the cost is stated rather than hidden. A
+missing ack does not mean the injection was not delivered: the app may have
+written it and had the ack lost or merely delayed, which App Nap can cause by
+coalescing a backgrounded app's work far past any deadline worth waiting on. So
+the fallback can deliver an injection **twice**. That is the at-least-once
+versus at-most-once fork, taken knowingly in favour of at-least-once — a
+duplicated prompt is visible and recoverable, a silently dropped one strands an
+agent indefinitely with nothing to see. An ack arriving after its injection was
+already written directly is recorded and dropped, never used to retract or
+dedupe the write that happened; acking before writing would trade a visible
+duplicate for exactly the invisible loss this rejects.
 
-Every injection is one message, completed rather than abandoned: the writer
-loops until every byte is accepted or the child is gone (`EIO` on the master),
-so a payload above the input-queue ceiling is finished, not truncated. Because
-exactly one process injects, a message can be neither doubled nor interleaved
-with another injection — no acknowledgement, deadline, or fallback writer is
-needed to make that true, and none exists. What the sender learns is
-correspondingly honest: bytes accepted by the process that owns the pty, with
-completion reported separately, since a child that has stopped draining makes
-the finish open-ended.
+One attached state does not fail open. Once a viewer has *acknowledged* its
+attach, the daemon has released its reader and closed its descriptor, so a
+fallback has nothing to write to and the sender is told the send did not land.
+Nothing is lost silently — the caller is told and the actuation row records a
+transport failure — but there the fallback is a report rather than a write.
+Closing it means the daemon keeping a **write-only** dup across an attach; the
+one-reader invariant is about readers, and multiple writers to a master are
+fine.
 
-The full contract — the sidecar frames and their bounds, the holder `write`
-verb and its version skew, the completed-write semantics and the sender
-outcomes they force — is
+The viewer's half of the arrangement is what keeps an injection out of a
+paste's markers. Its outgoing queue is the only place that sees both the
+person's keystrokes and the daemon's injected bytes, so it holds an injection
+that arrives while a paste is open and releases it, in order, when the paste
+closes. The hold is **bounded, and its bound is strictly shorter than the
+daemon's ack deadline** — both numbers live together in `HolderInputTiming`,
+because a hold longer than the deadline would have the daemon write every held
+injection directly while the paste was still open, which is the precise harm
+the hold exists to prevent, made systematic rather than rare. A paste that
+never closes therefore ends with the injection written into it rather than held
+forever: absorbed into the person's paste is visible and recoverable, an
+injection nobody can get out is not.
+
+An injection is one message. The caller composes everything the send means —
+envelope, body, and the carriage return that submits it — and hands it over
+whole, so a payload is never split across a routing decision, and the
+per-terminal send serializer upstream keeps two callers' messages apart.
+
+Two writers is a shape worth removing rather than arbitrating, and the design
+that removes it — every injection written by the session's own holder, from the
+loop that owns the master, with the viewer reduced to a paste lease and a
+keystroke hold — is specified in
 [`2026-09-03-single-typist-injection-design.md`](2026-09-03-single-typist-injection-design.md).
+**That is the target design, not the mechanism described above.** Until it
+lands, routing by attach state is what runs, and the ack deadline is what
+licenses a second writer.
 
 Resize follows the reader: whichever process currently reads the master owns
 `TIOCSWINSZ` — the app drives it from the view while attached, the daemon

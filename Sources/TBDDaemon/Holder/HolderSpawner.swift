@@ -75,8 +75,14 @@ struct HolderSpawnResult: Sendable {
 /// `WorktreeLifecycle+Reconcile` holder inventory
 /// (`holderRowVerdict(for:)`) parks or deletes the *row* whose holder is gone.
 /// What none of them reclaims is a row-less holder's job after the holder has
-/// died: `RowlessHolderCollector` reaches only a holder still alive enough to
-/// handshake, and the reaper's leg reads session rows.
+/// died. `RowlessHolderCollector` recovers the child pid from the holder's own
+/// handshake, so it reaches only a holder still alive enough to answer one;
+/// `HolderRendezvousCollector` unlinks that dead holder's files and signals
+/// nothing; and both `AgentReaper.sweepHolderChildren` and the reconcile arm
+/// read session rows, which is the half by definition missing. The job
+/// re-parents to launchd and no reconciler can name it. This is a disclosed
+/// gap, stated the same way in `AgentReaper.sweepHolderChildren`; the two must
+/// stay in agreement.
 struct HolderSpawner {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "holder")
 

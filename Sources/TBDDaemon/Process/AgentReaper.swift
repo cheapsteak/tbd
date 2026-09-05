@@ -274,10 +274,23 @@ public struct AgentReaper: Sendable {
     ///
     /// **Scope: rows that still exist.** A row deleted while the daemon was
     /// down took its recorded child pid with it, so a row-less holder's job is
-    /// unreachable from here by construction; that case is the
-    /// holder-versus-database check the design gives to `OrphanGC`, which
-    /// recovers the pid from the holder's own handshake. This leg covers the
-    /// half the database can still name.
+    /// unreachable from here by construction. What covers that half depends on
+    /// whether the holder is still alive, and only one of the two answers is a
+    /// reconciler:
+    ///
+    /// - **Holder alive** — `RowlessHolderCollector` (`OrphanGC`, gated on
+    ///   `gcRowlessHoldersEnabled`) recovers the child pid from the holder's
+    ///   own handshake and kills the job and then the holder.
+    /// - **Holder dead** — nothing reclaims the job. The handshake that would
+    ///   name the pid is the thing that is gone: `RowlessHolderCollector` reads
+    ///   `.noListener` and keeps, `HolderRendezvousCollector` unlinks the dead
+    ///   holder's files and signals nothing, and this leg and the reconcile
+    ///   arm both read session rows. The job re-parented to launchd with no
+    ///   record of it anywhere, and it is a real, disclosed gap rather than
+    ///   somebody else's job.
+    ///
+    /// `HolderSpawner`'s type comment states the same gap from the creation
+    /// side; the two must stay in agreement.
     ///
     /// Gated: `enabled` is `Config.reapHolderChildrenEnabled`, read by the
     /// caller once per sweep. Off, this walks nothing and signals nothing —

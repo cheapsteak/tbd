@@ -43,15 +43,32 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "outgoingInputQu
 ///
 /// ## What is guaranteed, and what is not
 ///
-/// The guarantee is a **safety** guarantee, not an ordering one: **an
-/// injection is never written between a paste's markers.** Whether an
-/// injection that genuinely races the start marker is held or written first is
-/// **unspecified**, and both outcomes are correct — an injection reaches this
-/// queue through an `await` (`enqueueInjection` is `async`, because it must
-/// report whether the byte reached the wire), while the paste markers arrive
-/// synchronously, so the relative order of a true race is not determined and
-/// no caller may depend on it. What matters is that whichever order the two
-/// land in, the injection is written wholly outside the marker span.
+/// The guarantee is a **safety** guarantee, not an ordering one: **while a
+/// paste is open, an injection is held rather than written — for up to
+/// `pasteHoldBound`.** A paste that closes within that bound therefore never
+/// has an injection written between its markers, and that is every paste a
+/// working viewer produces, because the markers are enqueued from three
+/// synchronous delegate calls in one main-actor turn.
+///
+/// The bound is not a weakening of that; it is what the guarantee is traded
+/// against. A paste that never closes — a wedged panel, a torn-down transport,
+/// a `beginUserPaste` whose `endUserPaste` never runs — would otherwise hold
+/// an injection forever, and `forceDeliver` writes it instead, logging that it
+/// did. An injection absorbed into a person's paste is visible and
+/// recoverable; one nobody can ever get out is not. `HolderInputTiming` keeps
+/// this bound strictly shorter than the daemon's ack deadline for the same
+/// reason in the other direction: a hold that outlasted the deadline would
+/// have the daemon write every held injection into the open paste itself, so
+/// the rare bad outcome would become the systematic one.
+///
+/// Whether an injection that genuinely races the start marker is held or
+/// written first is **unspecified**, and both outcomes are correct — an
+/// injection reaches this queue through an `await` (`enqueueInjection` is
+/// `async`, because it must report whether the byte reached the wire), while
+/// the paste markers arrive synchronously, so the relative order of a true
+/// race is not determined and no caller may depend on it. What matters is that
+/// whichever order the two land in, the injection is written wholly outside
+/// the marker span.
 ///
 /// That span is airtight because of the call order in
 /// `Coordinator.send(source:data:)`: `beginUserPaste()` runs **before** the

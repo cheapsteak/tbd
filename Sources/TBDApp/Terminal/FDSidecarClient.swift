@@ -68,6 +68,11 @@ final class FDSidecarClient: @unchecked Sendable {
         lock.unlock()
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         if fd < 0 { throw FDSidecarError.connectFailed(errno) }
+        // Close-on-exec twice over: here, because `connect` below can block and
+        // this app forks throughout that window, and again in `adopt` for every
+        // socket that arrives already connected. See `adopt` for what an
+        // inherited copy costs.
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let sunPathSize = MemoryLayout.size(ofValue: addr.sun_path)
@@ -107,6 +112,18 @@ final class FDSidecarClient: @unchecked Sendable {
         // per-socket rather than process-wide for the fork-inheritance reason
         // spelled out on `SocketSIGPIPE`.
         SocketSIGPIPE.suppress(on: fd)
+        // Close-on-exec, at the same funnel and for a failure with the same
+        // shape. This is the connection whose EOF is the **only** thing that
+        // tells the daemon this app died — there is no periodic liveness sweep
+        // — so every copy of it has to be gone before a crashed app's sessions
+        // can be seized. The app forks constantly and closes nothing on the
+        // way: SwiftTerm's `forkpty` path is `chdir` then `execve` with no
+        // close sweep, and one is started for every tmux-backed panel, so
+        // without the flag each viewer holds a copy of this socket and the
+        // daemon's death notice waits on the last of them. The daemon already
+        // sets it on its end of this same connection
+        // (`FDVendingServer`); this is the app's end.
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         socketFD = fd
         lock.unlock()
 

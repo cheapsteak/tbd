@@ -198,7 +198,11 @@ actor DaemonClient {
 
     /// Create a connected Unix domain socket to the daemon.
     /// Caller is responsible for closing the returned file descriptor.
-    private nonisolated func makeConnectedSocket() throws -> Int32 {
+    ///
+    /// Internal rather than private so `DaemonClientSocketTests` can call it
+    /// against a listener of its own and read the flags back off the returned
+    /// descriptor. The fd otherwise never escapes this file.
+    nonisolated func makeConnectedSocket() throws -> Int32 {
         guard FileManager.default.fileExists(atPath: socketPath) else {
             throw DaemonClientError.daemonNotRunning
         }
@@ -207,6 +211,17 @@ actor DaemonClient {
         guard fd >= 0 else {
             throw DaemonClientError.connectionFailed("Could not create socket")
         }
+        // Close-on-exec, set here rather than after `connect` because `connect`
+        // can block and this app forks throughout: every local-PTY panel is a
+        // SwiftTerm `forkpty` whose child path is `chdir` then `execve` with no
+        // close sweep, and the git and PR-status tools the app shells out to
+        // are more. A child that inherits this socket holds the daemon's end of
+        // it open for as long as it lives, and the daemon's only app-death
+        // trigger is EOF on the app's sidecar connection — there is no periodic
+        // liveness sweep — so an inherited copy delays seizing a crashed app's
+        // sessions until the last one exits. The same defect was fixed on the
+        // daemon's end of this connection; this is the app's end of it.
+        _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -252,17 +267,10 @@ actor DaemonClient {
         // particular must not set that disposition (SwiftTerm's `forkpty`
         // children would inherit it).
         //
-        // **Deliberately untested, unlike the sidecar leg.** Deleting this
-        // line reddens nothing — the sidecar's equivalent is covered by
-        // `SocketSIGPIPETests.adoptedSidecarSocketIsProtected` because
-        // `FDSidecarClient.adopt` takes an fd a test can hand it, whereas this
-        // fd never escapes this private function and only exists once a peer
-        // is accepting on the real socket path. A test would therefore have to
-        // be either an integration fixture out of all proportion to one line,
-        // or an assertion about this file's source text, which is worse than
-        // no test at all. The accepted mitigation is the one-shot `.fault` in
-        // `SocketSIGPIPE.suppress`: it catches the option being *refused*, not
-        // this call being *removed*.
+        // Covered by `DaemonClientSocketTests.connectedSocketSuppressesSIGPIPE`,
+        // which stands up a listener on a socket path of its own and reads the
+        // option back off the descriptor this returns. Deleting this line
+        // reddens that row.
         //
         // So if you are refactoring this function: the symptom of losing this
         // line is TBDApp vanishing on every `scripts/restart.sh`, which will
