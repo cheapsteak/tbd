@@ -131,8 +131,14 @@ injected clock per the repo rule):
   relation }` with `relation` one of `upToDate`, `behind`, `unknown`.
   `behind` is "latest differs from ours and ours is not ahead of it";
   ahead-ness is decided by `git merge-base --is-ancestor` in the source
-  worktree when the latest commit is present locally, otherwise the relation
-  is `behind` with `behindBy == nil`. When the update clone (§7) exists and
+  worktree. That question has two ways of going unanswered and they are kept
+  apart, because one is evidence and the other is not: a latest commit the
+  local object store does not hold is a commit we have never seen, so the
+  relation is `behind` with `behindBy == nil`, while a repository that could
+  not answer at all — a bad ref, an unreadable store, a timed-out subprocess —
+  yields `unknown`, which no mode ever acts on. `git rev-parse --verify
+  --quiet <latest>^{commit}` is what tells the two apart, and it runs only
+  when ancestry came back undecided. When the update clone (§7) exists and
   has fetched, `behindBy` is `rev-list --count` there.
 - Exposed as an optional `update` field on `daemon.status`, and by
   `tbd version` (which prints the cached status, or runs one check
@@ -349,10 +355,17 @@ shortens the gap between them rather than lengthening it.
 - `BuildIdentity` loader: sidecar present; sidecar absent with a git
   worktree derivable from the path; neither.
 - `UpdateStatus` relation: equal commits, local ahead, local behind with and
-  without a count, unknown latest.
+  without a count, unknown latest, and each of the four ancestry answers.
 - `UpdateChecker` with an injected clock: `off` runs nothing; `check`
   ticks and never launches; `auto` launches once per latest commit and not
   again for the same commit; setting changes take effect on the next tick.
+- The two undecided ancestry answers, since they differ by whether `auto`
+  installs anything: a latest commit absent from the local store still
+  launches, while a repository that could not answer publishes `unknown`,
+  launches nothing, and leaves the commit free to launch on a later tick that
+  can decide it. `hasCommit` against a real repository backs both: a commit it
+  holds, a well-formed sha it has never seen, and a path that is not a
+  repository at all.
 - `config.setUpdateMode` against a live router: `check` starts the loop on a
   checker that has none, `off` starts none and quiets a running one at its
   next tick, and repeating the gesture leaves one loop at one tick per

@@ -127,7 +127,7 @@ struct UpdateModeRPCTests {
             readMode: { .check },
             resolveRemote: { _ in "git@github.com:acme/tbd.git" },
             remoteHead: { _, _ in latest },
-            isAncestor: { _, _, _ in true },
+            isAncestor: { _, _, _ in .contains },
             behindCount: { _, _, _ in 3 },
             launch: { _ in
                 Issue.record("check mode must never launch")
@@ -176,7 +176,7 @@ struct UpdateModeRPCTests {
                 spy.note()
                 return "2222222222222222222222222222222222222222"
             },
-            isAncestor: { _, _, _ in true },
+            isAncestor: { _, _, _ in .contains },
             behindCount: { _, _, _ in 3 },
             launch: { _ in
                 Issue.record("check mode must never launch")

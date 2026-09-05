@@ -46,11 +46,13 @@ struct UpdateCheckerTests {
         private let lock = NSLock()
         private var _mode: UpdateMode
         private var _head: String?
+        private var _ancestry: AncestryAnswer
         private var _launchSucceeds = true
 
-        init(mode: UpdateMode, head: String?) {
+        init(mode: UpdateMode, head: String?, ancestry: AncestryAnswer = .contains) {
             _mode = mode
             _head = head
+            _ancestry = ancestry
         }
 
         var mode: UpdateMode {
@@ -60,6 +62,12 @@ struct UpdateCheckerTests {
         var head: String? {
             get { lock.withLock { _head } }
             set { lock.withLock { _head = newValue } }
+        }
+        /// Mutable so a test can prove that an answer which decided nothing
+        /// leaves the checker free to act on a later one for the same commit.
+        var ancestry: AncestryAnswer {
+            get { lock.withLock { _ancestry } }
+            set { lock.withLock { _ancestry = newValue } }
         }
         var launchSucceeds: Bool {
             get { lock.withLock { _launchSucceeds } }
@@ -73,7 +81,6 @@ struct UpdateCheckerTests {
         ourCommit: String? = UpdateCheckerTests.ours,
         sourceWorktree: String? = UpdateCheckerTests.worktree,
         remoteURL: String? = "git@github.com:acme/tbd.git",
-        ancestry: Bool? = true,
         behindBy: Int? = nil,
         interval: Duration = .seconds(3600),
         clock: any Clock<Duration> = ContinuousClock()
@@ -90,7 +97,7 @@ struct UpdateCheckerTests {
                 spy.noteHeadRead()
                 return fixture.head
             },
-            isAncestor: { _, _, _ in ancestry },
+            isAncestor: { _, _, _ in fixture.ancestry },
             behindCount: { _, _, _ in behindBy },
             launch: { worktree in
                 spy.noteLaunch(worktree)
@@ -201,10 +208,60 @@ struct UpdateCheckerTests {
     @Test func autoDoesNotLaunchWhenNotBehind() async {
         let spy = Spy()
         let checker = makeChecker(
-            fixture: Fixture(mode: .auto, head: Self.latest), spy: spy, ancestry: false)
+            fixture: Fixture(mode: .auto, head: Self.latest, ancestry: .doesNotContain),
+            spy: spy)
         await checker.runOnce()
         #expect(await checker.currentStatus()?.relation == .upToDate)
         #expect(spy.launches.isEmpty)
+    }
+
+    // MARK: - The two undecided ancestry answers part company
+
+    /// A repository that could not answer is evidence of nothing. Reporting
+    /// `behind` here would let one bad ref or a moment of git trouble install a
+    /// build in `auto` mode, which is the whole reason the answer is not a
+    /// `Bool?`.
+    @Test func anUndecidedAncestryIsUnknownAndLaunchesNothing() async {
+        let spy = Spy()
+        let fixture = Fixture(mode: .auto, head: Self.latest, ancestry: .undecided)
+        let checker = makeChecker(fixture: fixture, spy: spy)
+
+        await checker.runOnce()
+        #expect(await checker.currentStatus()?.relation == .unknown)
+        #expect(spy.launches.isEmpty)
+
+        // And the refusal costs nothing later: the commit was never recorded as
+        // attempted, so the first tick that can decide ancestry acts on it.
+        fixture.ancestry = .contains
+        await checker.runOnce()
+        #expect(await checker.currentStatus()?.relation == .behind)
+        #expect(spy.launches == [Self.worktree])
+    }
+
+    /// The other undecided answer keeps its old meaning: a commit this machine
+    /// has never fetched is one it does not hold, so `auto` installs it.
+    @Test func aLatestCommitAbsentLocallyStillLaunches() async {
+        let spy = Spy()
+        let checker = makeChecker(
+            fixture: Fixture(mode: .auto, head: Self.latest, ancestry: .latestAbsentLocally),
+            spy: spy)
+        await checker.runOnce()
+        #expect(await checker.currentStatus()?.relation == .behind)
+        #expect(spy.launches == [Self.worktree])
+    }
+
+    /// In `check` mode the distinction is still visible, without any act to
+    /// gate: the published status says `unknown` rather than claiming an
+    /// update the daemon cannot substantiate.
+    @Test func checkModePublishesUnknownForAnUndecidedAncestry() async {
+        let spy = Spy()
+        let checker = makeChecker(
+            fixture: Fixture(mode: .check, head: Self.latest, ancestry: .undecided),
+            spy: spy)
+        await checker.runOnce()
+        #expect(await checker.currentStatus()?.relation == .unknown)
+        // No count is fetched for a relation that is not `behind`.
+        #expect(await checker.currentStatus()?.behindBy == nil)
     }
 
     // MARK: - The mode is read per tick

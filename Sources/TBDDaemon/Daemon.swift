@@ -1444,8 +1444,26 @@ public final class Daemon: Sendable {
                         url: url, ref: UpdateChecker.mainRef, repoPath: worktree)
                 },
                 isAncestor: { ours, latest, worktree in
-                    await checkerGit.isMergeBaseAncestor(
-                        repoPath: worktree, base: ours, branch: latest)
+                    // Ask the cheap question first: a decided ancestry is the
+                    // common case and costs one process. Only an undecided one
+                    // pays for the second, and its whole job is to tell "we
+                    // have never fetched that commit" — evidence of being
+                    // behind — apart from "this repository could not answer",
+                    // which is evidence of nothing and must not install
+                    // anything in `auto` mode.
+                    switch await checkerGit.isMergeBaseAncestor(
+                        repoPath: worktree, base: ours, branch: latest) {
+                    case true: return .contains
+                    case false: return .doesNotContain
+                    case nil:
+                        switch await checkerGit.hasCommit(repoPath: worktree, sha: latest) {
+                        case false: return .latestAbsentLocally
+                        // Present, or unlookable: either way this worktree
+                        // holds the objects or cannot say, and neither is
+                        // grounds to move the installation forward.
+                        case true, nil: return .undecided
+                        }
+                    }
                 },
                 behindCount: { ours, latest, worktree in
                     await checkerGit.commitCount(from: ours, to: latest, at: worktree)

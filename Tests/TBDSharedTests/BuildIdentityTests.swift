@@ -185,35 +185,60 @@ struct UpdateRelationTests {
 
     @Test func equalCommitsAreUpToDate() {
         #expect(UpdateRelation.compute(
-            ours: Self.ours, latest: Self.ours, oursIsAncestorOfLatest: true) == .upToDate)
+            ours: Self.ours, latest: Self.ours, ancestry: .contains) == .upToDate)
     }
 
     @Test func containedByLatestMeansBehind() {
         #expect(UpdateRelation.compute(
-            ours: Self.ours, latest: Self.latest, oursIsAncestorOfLatest: true) == .behind)
+            ours: Self.ours, latest: Self.latest, ancestry: .contains) == .behind)
     }
 
     /// A build with commits `main` does not have — a feature branch, or one
     /// ahead of the remote. There is nothing to install.
     @Test func notContainedByLatestMeansNothingToInstall() {
         #expect(UpdateRelation.compute(
-            ours: Self.ours, latest: Self.latest, oursIsAncestorOfLatest: false) == .upToDate)
+            ours: Self.ours, latest: Self.latest, ancestry: .doesNotContain) == .upToDate)
     }
 
     /// The commit is not in the local object store, so ancestry is undecidable.
     /// A commit never seen is a commit not held.
-    @Test func undecidableAncestryMeansBehind() {
+    @Test func aLatestCommitWeHaveNeverSeenMeansBehind() {
         #expect(UpdateRelation.compute(
-            ours: Self.ours, latest: Self.latest, oursIsAncestorOfLatest: nil) == .behind)
+            ours: Self.ours, latest: Self.latest, ancestry: .latestAbsentLocally) == .behind)
+    }
+
+    /// The other undecided answer, and the reason the two are not one case: a
+    /// repository that could not answer is evidence in no direction, and
+    /// `unknown` is the only relation `auto` never acts on.
+    @Test func aRepositoryThatCouldNotAnswerMeansUnknown() {
+        #expect(UpdateRelation.compute(
+            ours: Self.ours, latest: Self.latest, ancestry: .undecided) == .unknown)
+    }
+
+    /// Every answer, in one place: the table is small enough to state whole, and
+    /// a fifth case added without a mapping would fail to compile here.
+    @Test func everyAncestryAnswerHasARelation() {
+        let expected: [AncestryAnswer: UpdateRelation] = [
+            .contains: .behind,
+            .doesNotContain: .upToDate,
+            .latestAbsentLocally: .behind,
+            .undecided: .unknown,
+        ]
+        for answer in AncestryAnswer.allCases {
+            #expect(
+                UpdateRelation.compute(ours: Self.ours, latest: Self.latest, ancestry: answer)
+                    == expected[answer],
+                "\(answer.rawValue) must map to \(String(describing: expected[answer]))")
+        }
     }
 
     @Test func missingEitherCommitIsUnknown() {
         #expect(UpdateRelation.compute(
-            ours: nil, latest: Self.latest, oursIsAncestorOfLatest: true) == .unknown)
+            ours: nil, latest: Self.latest, ancestry: .contains) == .unknown)
         #expect(UpdateRelation.compute(
-            ours: Self.ours, latest: nil, oursIsAncestorOfLatest: true) == .unknown)
+            ours: Self.ours, latest: nil, ancestry: .contains) == .unknown)
         #expect(UpdateRelation.compute(
-            ours: "", latest: Self.latest, oursIsAncestorOfLatest: nil) == .unknown)
+            ours: "", latest: Self.latest, ancestry: .latestAbsentLocally) == .unknown)
     }
 
     @Test func statusRoundTrips() throws {

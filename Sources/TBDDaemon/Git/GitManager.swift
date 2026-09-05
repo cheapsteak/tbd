@@ -458,6 +458,38 @@ public struct GitManager: Sendable {
         }
     }
 
+    /// Whether `sha` names a commit present in this repository's object store.
+    ///
+    /// Exists to part the two halves of `isMergeBaseAncestor`'s `nil`: a commit
+    /// this machine has never fetched, and a repository that could not answer.
+    /// The update checker treats the first as evidence of being behind and the
+    /// second as evidence of nothing, and cannot tell them apart otherwise.
+    ///
+    /// Only the benign "cannot resolve that name here" exit is read as absent,
+    /// in the same spirit as `localBranchExists`. Any other failure — a
+    /// timeout, a spawn failure, a directory that is not a repository, an
+    /// unreadable object store — answers `nil` rather than `false`, because "I
+    /// could not look" is not "it is not there".
+    ///
+    /// `rev-parse --verify --quiet` rather than `cat-file -e` because only the
+    /// former draws that line where this caller needs it: `cat-file -e
+    /// <sha>^{commit}` exits 128 for a commit the store does not have, the same
+    /// code it uses for a broken repository, which is precisely the distinction
+    /// being made here. `--verify` requires the name to resolve to an object;
+    /// `^{commit}` requires that object to be a commit; `--quiet` turns the
+    /// "no" into a silent exit 1.
+    public func hasCommit(repoPath: String, sha: String) async -> Bool? {
+        do {
+            _ = try await run(
+                arguments: ["rev-parse", "--verify", "--quiet", "\(sha)^{commit}"], at: repoPath)
+            return true
+        } catch let error as GitError where error.exitCode == 1 {
+            return false
+        } catch {
+            return nil
+        }
+    }
+
     /// Creates a new worktree at `worktreePath` on a new branch based on `baseBranch`
     /// without configuring that base as the new branch's upstream.
     /// Enables parallel checkout for faster working-tree setup.

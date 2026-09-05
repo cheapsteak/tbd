@@ -52,9 +52,11 @@ public actor UpdateChecker {
     public typealias RemoteResolver = @Sendable (String) async -> String?
     /// `(remote URL, worktree)` to the commit `refs/heads/main` points at.
     public typealias RemoteHeadReader = @Sendable (String, String) async -> String?
-    /// `(ours, latest, worktree)` to whether `latest` contains `ours`. Nil when
-    /// the objects are not present locally and ancestry cannot be decided.
-    public typealias AncestryProbe = @Sendable (String, String, String) async -> Bool?
+    /// `(ours, latest, worktree)` to whether `latest` contains `ours`. The
+    /// answer separates the two ways the question goes undecided — a latest
+    /// commit absent from the local object store, and a repository that could
+    /// not answer — because only the first is evidence of being behind.
+    public typealias AncestryProbe = @Sendable (String, String, String) async -> AncestryAnswer
     /// `(ours, latest, worktree)` to how many commits separate them, or nil.
     public typealias BehindCounter = @Sendable (String, String, String) async -> Int?
     /// Launches the update for a build rooted at the given worktree. Returns
@@ -217,14 +219,29 @@ public actor UpdateChecker {
             return
         }
 
-        let ancestry: Bool?
+        let ancestry: AncestryAnswer
         if let ours = ourCommit, ours != latest {
             ancestry = await isAncestor(ours, latest, worktree)
+            if ancestry == .undecided {
+                // Once per tick, and only on the path that actually asked. The
+                // relation goes `unknown`, so `auto` installs nothing while
+                // this persists — which is worth saying out loud, since the
+                // symptom is a checker that has quietly stopped offering an
+                // update it can see on the remote.
+                updateLogger.warning(
+                    """
+                    update: could not decide whether \(latest, privacy: .public) contains \
+                    \(ours, privacy: .public) in \(worktree, privacy: .public); \
+                    reporting unknown rather than assuming behind
+                    """)
+            }
         } else {
-            ancestry = nil
+            // Not consulted: `compute` answers from the commits alone when they
+            // are equal or when this build has no identity.
+            ancestry = .undecided
         }
         let relation = UpdateRelation.compute(
-            ours: ourCommit, latest: latest, oursIsAncestorOfLatest: ancestry)
+            ours: ourCommit, latest: latest, ancestry: ancestry)
         var count: Int?
         if relation == .behind, let ours = ourCommit {
             count = await behindCount(ours, latest, worktree)

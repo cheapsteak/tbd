@@ -28,6 +28,31 @@ public enum UpdateMode: String, Codable, Sendable, CaseIterable {
     public var displayName: String { rawValue }
 }
 
+/// Whether the latest commit on `main` contains the running build's commit.
+///
+/// Four cases rather than an optional `Bool`, because the two ways an ancestry
+/// question goes unanswered call for opposite conclusions and an optional
+/// cannot tell them apart. `git merge-base --is-ancestor` reports both "the
+/// commit you named is not in this object store" and "this repository could not
+/// answer" as a non-zero exit that is not 1, and in `auto` mode the difference
+/// is whether a transient git failure installs a new build.
+public enum AncestryAnswer: String, Codable, Sendable, CaseIterable {
+    /// `latest` contains `ours`: the running build is on the same line and
+    /// behind it.
+    case contains
+    /// `latest` does not contain `ours`: the running build holds commits `main`
+    /// does not.
+    case doesNotContain
+    /// Ancestry is undecidable because `latest` is not in the local object
+    /// store. A commit we have never seen is one we do not have, so this is
+    /// evidence of being behind rather than an absence of evidence.
+    case latestAbsentLocally
+    /// Ancestry is undecidable because the repository did not answer — a bad
+    /// ref, a corrupt or missing object store, a timed-out subprocess. Evidence
+    /// in no direction at all.
+    case undecided
+}
+
 /// How the running build relates to the latest commit on `main`.
 ///
 /// Three cases, deliberately — a fourth ("diverged") would describe a state the
@@ -37,11 +62,11 @@ public enum UpdateRelation: String, Codable, Sendable, CaseIterable {
     /// The running build already contains the latest commit — either it *is*
     /// that commit, or it carries commits `main` does not. Nothing to install.
     case upToDate
-    /// The latest commit contains the running build's commit, or contains-ness
-    /// could not be decided locally. An update would move forward.
+    /// The latest commit contains the running build's commit, or names a commit
+    /// this machine has never seen. An update would move forward.
     case behind
-    /// Not enough is known to say: no build identity, or no answer from the
-    /// remote yet.
+    /// Not enough is known to say: no build identity, no answer from the remote
+    /// yet, or a local repository that could not decide ancestry.
     case unknown
 
     /// Decide the relation from the two commits and one ancestry answer.
@@ -49,30 +74,35 @@ public enum UpdateRelation: String, Codable, Sendable, CaseIterable {
     /// - Parameters:
     ///   - ours: the running build's commit, or nil when its identity is unknown.
     ///   - latest: the remote's `main` head, or nil when no check has succeeded.
-    ///   - oursIsAncestorOfLatest: whether `latest` contains `ours`, as decided
-    ///     by `git merge-base --is-ancestor` in the source worktree. **`nil`
-    ///     means undecidable** — usually because the latest commit is not
-    ///     present locally, which is itself evidence of being behind, so it
-    ///     resolves to `.behind` (with no count).
+    ///   - ancestry: whether `latest` contains `ours`, as decided in the source
+    ///     worktree. Its two undecided cases part company here: a latest commit
+    ///     absent from the local object store is evidence of being behind, while
+    ///     a repository that could not answer is evidence of nothing and
+    ///     resolves to `.unknown`, which never launches an update.
     public static func compute(
         ours: String?,
         latest: String?,
-        oursIsAncestorOfLatest: Bool?
+        ancestry: AncestryAnswer
     ) -> UpdateRelation {
         guard let ours, !ours.isEmpty, let latest, !latest.isEmpty else { return .unknown }
         if ours == latest { return .upToDate }
-        switch oursIsAncestorOfLatest {
-        case true:
+        switch ancestry {
+        case .contains:
             return .behind
-        case false:
+        case .doesNotContain:
             // We hold commits `main` does not. A feature-branch build, or one
             // ahead of the remote. Nothing to install.
             return .upToDate
-        case nil:
+        case .latestAbsentLocally:
             // The latest commit is not in this worktree's object store, so
             // ancestry cannot be decided here. A commit we have never seen is
             // one we do not have.
             return .behind
+        case .undecided:
+            // The repository could not answer. Saying `behind` here would let a
+            // bad ref or a corrupt object store install a build in `auto` mode
+            // on no evidence at all.
+            return .unknown
         }
     }
 }
