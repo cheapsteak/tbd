@@ -2,6 +2,12 @@ import Foundation
 import os
 import TBDShared
 
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
+
 private let launcherLogger = Logger(subsystem: "com.tbd.daemon", category: "update")
 
 /// Everything needed to start `scripts/update.sh --auto`, decided without
@@ -115,15 +121,24 @@ public enum UpdateLauncher {
                 "update: cannot create \(logURL.deletingLastPathComponent().path, privacy: .public): \(error, privacy: .public)")
             return false
         }
-        if !fileManager.fileExists(atPath: plan.logPath) {
-            fileManager.createFile(atPath: plan.logPath, contents: nil)
-        }
-        guard let handle = FileHandle(forWritingAtPath: plan.logPath) else {
+        // `O_APPEND`, not a seek to the end. The child and its subprocesses
+        // inherit this descriptor for their whole run, while the script's own
+        // `log()` appends through a separate open on every line. A descriptor
+        // positioned once at spawn writes at that frozen offset forever, so
+        // anything `log()` wrote in between gets overwritten — corrupting the
+        // record exactly when an unattended update went wrong and the log is
+        // the only witness. Append mode makes every write seek to the current
+        // end atomically: the offset follows the file, not the moment of the
+        // spawn. `O_CREAT` also covers the file's first creation, so no
+        // separate `createFile` step is needed.
+        let fd = open(plan.logPath, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        guard fd >= 0 else {
+            let reason = String(cString: strerror(errno))
             launcherLogger.error(
-                "update: cannot open \(plan.logPath, privacy: .public) for append")
+                "update: cannot open \(plan.logPath, privacy: .public) for append: \(reason, privacy: .public)")
             return false
         }
-        handle.seekToEndOfFile()
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: plan.executablePath)
