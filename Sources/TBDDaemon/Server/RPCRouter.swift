@@ -840,7 +840,14 @@ public final class RPCRouter: Sendable {
             claudeCloudEnabled: config.claudeCloudEnabled,
             claudeCloudLive: claudeCloudLive,
             remoteDeleteEnabled: config.remoteDeleteEnabled,
-            updateMode: config.updateMode))
+            updateMode: config.updateMode,
+            ptyHolderEnabled: config.ptyHolderEnabled,
+            // The same second half the spawn gate asks
+            // (`WorktreeLifecycle+Create`): a registry can exist and still be
+            // unable to start a holder, and with the flag on that combination
+            // falls back to tmux silently. Reported so Settings can say so
+            // instead of offering a switch that would change nothing.
+            ptyHolderSupported: holderRegistry?.canSpawn == true))
     }
 
     // MARK: - PR Status

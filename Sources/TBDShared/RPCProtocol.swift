@@ -3557,6 +3557,20 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// `config.get` so the toggle and the daemon can never disagree about which
     /// of them last wrote the column.
     public let updateMode: UpdateMode
+    /// Whether the pty-holder transport gate (`pty_holder_enabled`) is set.
+    /// Default OFF while it soaks. Read at spawn time, so the Settings toggle
+    /// reads it back from here rather than from a local guess — and a session
+    /// already running keeps the transport it was created on either way.
+    public let ptyHolderEnabled: Bool
+    /// Whether this daemon could actually put a new session on a holder — that
+    /// is, whether it located the `TBDHolder` helper beside its own binary
+    /// (`HolderRegistry.canSpawn`). Computed daemon-side, exactly as
+    /// `controlModeSupported` is, so the app never inspects the filesystem.
+    ///
+    /// With the flag on and this false, every create silently falls back to
+    /// tmux — so Settings disables the toggle and says why rather than offering
+    /// a switch that would change nothing.
+    public let ptyHolderSupported: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -3572,7 +3586,9 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
                 claudeCloudLive: Bool = false,
                 remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
-                updateMode: UpdateMode = Config.updateModeDefault) {
+                updateMode: UpdateMode = Config.updateModeDefault,
+                ptyHolderEnabled: Bool = Config.ptyHolderDefault,
+                ptyHolderSupported: Bool = false) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -3588,6 +3604,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.claudeCloudLive = claudeCloudLive
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.updateMode = updateMode
+        self.ptyHolderEnabled = ptyHolderEnabled
+        self.ptyHolderSupported = ptyHolderSupported
     }
 
     public init(from decoder: Decoder) throws {
@@ -3636,6 +3654,16 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // whole decode.
         updateMode = (try? c.decode(UpdateMode.self, forKey: .updateMode))
             ?? Config.updateModeDefault
+        // New fields for the pty-holder transport gate. A daemon that does not
+        // send `ptyHolderEnabled` has no holder path at all, so fall through to
+        // the shipped default rather than assuming the transport is live.
+        // `supported` is a fact about THIS daemon's own installation, so an
+        // absent value is honestly false — which greys the toggle out on an
+        // older daemon instead of offering a switch it would ignore.
+        ptyHolderEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .ptyHolderEnabled) ?? Config.ptyHolderDefault
+        ptyHolderSupported = try c.decodeIfPresent(
+            Bool.self, forKey: .ptyHolderSupported) ?? false
     }
 }
 

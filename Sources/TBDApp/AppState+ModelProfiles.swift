@@ -382,6 +382,48 @@ extension AppState {
         }
     }
 
+    /// Help text for the pty-holder transport toggle.
+    ///
+    /// A stored constant rather than a literal in the view so it is assertable:
+    /// it must describe what changes and when, and it must **not** promise
+    /// speed. The design spec is explicit that the justification is scaling
+    /// headroom rather than current latency — there is no measured latency win
+    /// on a quiet machine — so a rewrite that added one would be telling the
+    /// operator something untrue about their own machine.
+    static let ptyHolderHelp = """
+        Each new session runs on its own terminal rather than inside a tmux \
+        window. Sessions already running stay on tmux; the change takes effect \
+        as they end and respawn. Attached sessions keep running uninterrupted \
+        across daemon restarts. Less scrollback is kept than tmux retains. Off \
+        by default (soaking).
+        """
+
+    /// Why the pty-holder toggle is inert on this daemon. Shown only when
+    /// `ptyHolderSupported` is false, mirroring the control-mode toggle's
+    /// "Requires tmux 3.2 or later" caption: with the flag on and no way to
+    /// start a holder, every create falls back to tmux silently, so the switch
+    /// would change nothing at all.
+    static let ptyHolderUnsupportedCaption =
+        "Requires the TBDHolder helper beside the daemon binary; this daemon could not find it."
+
+    /// Persist the pty-holder transport gate, then re-fetch capabilities so the
+    /// Settings toggle reflects the daemon's persisted state.
+    ///
+    /// **Applies to sessions created after the call, and to no others.** A
+    /// session records its transport at creation and keeps it for life, so
+    /// turning this on never moves a running tmux session onto a holder, and
+    /// turning it off never takes a live holder session away.
+    func setPtyHolderEnabled(_ enabled: Bool) async {
+        do {
+            try await ptyHolderFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set pty holder transport: \(error, privacy: .public)")
+            showAlert(
+                "Failed to set the session transport: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Persist the worktree auto-trust switch, then re-fetch capabilities so
     /// the Settings toggle reflects the daemon's persisted state. Applies to
     /// the next Claude spawn or wake; never un-trusts an already-seeded path.
