@@ -6,7 +6,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal",
         abstract: "Manage terminals",
-        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self, TerminalContinueInCodex.self, TerminalAttach.self]
+        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self, TerminalContinueInCodex.self, TerminalAttach.self, TerminalCompletions.self]
     )
 }
 
@@ -964,5 +964,73 @@ struct TerminalAttach: AsyncParsableCommand {
             executablePath: invocation.executable,
             arguments: invocation.arguments,
             environment: ProcessInfo.processInfo.environment)
+    }
+}
+
+// MARK: - terminal completions
+
+struct TerminalCompletions: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "completions",
+        abstract: "Show the slash commands, skills and subagents this session knows",
+        discussion: """
+            Asks the session's OWN Claude Code binary, so a command that binary \
+            has and another version does not is listed correctly. Requires the \
+            transcript composer to be enabled (Settings → General, next to \
+            "Live transcript pane").
+
+            `source` says which mechanism answered: `probe` means the binary \
+            itself, `scan` means a filesystem read of the same directories, \
+            which lists everything except built-ins. `freshness` says whether \
+            this request produced the answer (`fresh`), served a cache \
+            (`stale`), or degraded to the scan (`fallback`).
+            """
+    )
+
+    @Option(name: .long, help: "Terminal ID")
+    var terminal: String
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+        let client = SocketClient()
+        let result: TerminalCompletionsResult = try client.call(
+            method: RPCMethod.terminalCompletions,
+            params: TerminalCompletionsParams(terminalID: terminalID),
+            resultType: TerminalCompletionsResult.self
+        )
+
+        if json {
+            guard let output = jsonString(result) else {
+                FileHandle.standardError.write(Data(
+                    "Error: could not encode the completions result as JSON\n".utf8))
+                throw ExitCode.failure
+            }
+            print(output)
+            return
+        }
+
+        print("source: \(result.source.rawValue)  freshness: \(result.freshness.rawValue)")
+        print("\(result.commands.count) command(s), \(result.agents.count) agent(s)")
+        print("")
+        for command in result.commands {
+            let alias = command.aliases.isEmpty
+                ? "" : " (\(command.aliases.joined(separator: ", ")))"
+            let hint = command.argumentHint.map { " \($0)" } ?? ""
+            print("/\(command.name)\(alias)\(hint)")
+            if !command.description.isEmpty {
+                print("    \(command.description)")
+            }
+        }
+        for agent in result.agents {
+            print("@\(agent.name)")
+            if !agent.description.isEmpty {
+                print("    \(agent.description)")
+            }
+        }
     }
 }
