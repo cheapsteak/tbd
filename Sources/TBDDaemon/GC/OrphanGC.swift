@@ -63,6 +63,7 @@ public actor OrphanGC {
     private let deletionQueueCollector: DeletionQueueCollector
     private let profileDirCollector: ProfileDirCollector
     private let holderRendezvousCollector: HolderRendezvousCollector
+    private let attachmentsCollector: AttachmentsCollector
     private let rowlessHolderCollector: RowlessHolderCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
@@ -148,6 +149,7 @@ public actor OrphanGC {
         orphanProcessPollInterval: Duration = .milliseconds(100),
         clock: any Clock<Duration> = ContinuousClock(),
         holdersBase: URL? = nil,
+        attachmentsBase: URL? = nil,
         holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
         rowlessHolderHandshake: (@Sendable (String) async -> RowlessHolderHandshake)? = nil,
         rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil
@@ -186,6 +188,9 @@ public actor OrphanGC {
             now: resolvedNow,
             handshake: rowlessHolderHandshake,
             reclaimer: rowlessHolderReclaimer)
+        let resolvedAttachmentsBase = attachmentsBase ?? TBDConstants.attachmentsDir
+        self.attachmentsCollector = AttachmentsCollector(
+            base: resolvedAttachmentsBase, now: resolvedNow)
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -293,6 +298,10 @@ public actor OrphanGC {
         )
 
         await reclaimRetainedTranscripts(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
+        await reclaimAttachments(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
@@ -908,6 +917,88 @@ public actor OrphanGC {
                 logger.warning("""
                 gc: could not unlink \(file.path, privacy: .public): \
                 \(error.localizedDescription, privacy: .public)
+                """)
+            }
+        }
+    }
+
+    // MARK: - Composer attachments
+
+    /// Reclaims `~/tbd/attachments/<worktreeID>/` directories whose worktree is
+    /// gone — the named periodic reconciler for the composer's attachment files
+    /// (`docs/specs/2026-09-05-transcript-composer-design.md`, "Reclaim").
+    ///
+    /// Its event-driven sibling is `removedWorktreeCleanup`, which unlinks a
+    /// worktree's directory the moment the worktree is archived. That path is
+    /// best effort by construction — a crash between the archive's commit point
+    /// and the callback, or a worktree removed outside TBD, leaves a directory
+    /// nobody unlinked — and this is the standing guarantee behind it. That
+    /// division is the doctrine the whole codebase uses: creation against the
+    /// filesystem cannot be transactional, so the sweep is the mechanism and
+    /// create-time cleanup is the optimisation.
+    ///
+    /// Gated by `transcriptComposerEnabled` on top of `gcEnabled`, because the
+    /// feature that writes these files is itself behind that flag — a machine
+    /// that has never opened the composer has nothing here for this phase to be
+    /// right or wrong about. `dryRun` bypasses the flag exactly as `sweep` lets
+    /// it bypass `gcEnabled`: planning is read-only, and someone deciding whether
+    /// to enable a default-off flag needs to see what enabling it would reclaim.
+    /// A NON-dry run still requires the flag.
+    ///
+    /// **An unreadable worktree list skips the whole leg**, rather than reading
+    /// an empty list as "no worktree is live" and reaping every directory.
+    ///
+    /// The row read is unfiltered on purpose: an archived row is still a row, and
+    /// the archive path's own unlink is what handles its directory. Filtering to
+    /// `.active` here would let this leg reap out from under a worktree somebody
+    /// can still revive.
+    ///
+    /// No `ReapRecord` is written. The record type is keyed by the worktree a
+    /// reap removed and carries a restorability pointer; there is nothing a
+    /// `tbd gc restore` could put back here, because the image was staged for a
+    /// message in a worktree that no longer exists.
+    private func reclaimAttachments(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        guard config.transcriptComposerEnabled || dryRun else { return }
+
+        let live: Set<UUID>
+        do {
+            live = Set(try await db.worktrees.list().map(\.id))
+        } catch {
+            logger.error("""
+            gc: worktree rows unreadable this sweep \
+            (\(error.localizedDescription, privacy: .public)) — skipping the attachments phase
+            """)
+            planned.append("KEEP rows-unreadable attachments")
+            return
+        }
+
+        for candidate in attachmentsCollector.candidates() {
+            switch attachmentsCollector.decide(
+                candidate, liveWorktreeIDs: live,
+                floorDays: AttachmentsCollector.defaultFloorDays
+            ) {
+            case .keep(let reason):
+                planned.append("KEEP \(reason) \(candidate.path)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) \(candidate.path, privacy: .public)
+                """)
+            case .reap:
+                planned.append("REAP attachments \(candidate.path)")
+                // This leg's guard is `transcriptComposerEnabled || dryRun`, so
+                // every line below runs only with the flag actually on.
+                guard !dryRun else { continue }
+                guard attachmentsCollector.reap(candidate) else {
+                    planned.append("KEEP unlink-failed \(candidate.path)")
+                    logger.warning("""
+                    gc: could not unlink \(candidate.path, privacy: .public)
+                    """)
+                    continue
+                }
+                reaped += 1
+                logger.info("""
+                gc: reclaimed composer attachments \(candidate.path, privacy: .public)
                 """)
             }
         }
