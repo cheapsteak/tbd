@@ -2189,8 +2189,7 @@ struct HolderTmuxAssumptionGateTests {
         await coord.sweep()
         let afterASecondPass = try logRows(at: logPath)
         #expect(afterASecondPass.count == 2,
-                "the refusal left its markers armed, so the next sweep re-fired it: "
-                    + "\(afterASecondPass)")
+                "the refusal left its markers armed, so the next sweep re-fired it: \(afterASecondPass)")
         #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
     }
 
