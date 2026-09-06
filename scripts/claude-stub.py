@@ -702,22 +702,46 @@ def main(argv: list[str]) -> int:
     run already `finishing` from the previous one's own cleanup — swallowing
     every stop signal instead of unwinding or forwarding it — and would report
     a `late_signums` entry that a *previous* run answered as this run's own.
-    Resetting the three fields below, before a single handler is installed,
-    closes both: nothing can race the reset, because the handler is not
-    hooked up until `install_signal_handlers` returns just after it.
+    Resetting the three fields below closes both.
+
+    The reset and the handler installation are one step with respect to a stop
+    signal, held off across the pair by the mask, because a second-or-later
+    call to `main` starts with whatever disposition the process was left
+    holding — and every one of them mishandles a signal landing mid-reset. If
+    an earlier caller left `handle_stop_signal` installed, the handler reads
+    the half-reset state: `finishing` is still `True` from the previous run,
+    so the signal is swallowed onto a `late_signums` the very next statement
+    replaces, and `raise_if_stopped` — which only ever consults
+    `unowned_signums` — never sees it, so the run spawns `claude` and waits on
+    it. If instead the default disposition is back (what
+    `restore_signal_handlers` leaves at the end of the previous call), SIGTERM
+    and SIGHUP kill the interpreter where it stands and SIGINT raises a
+    `KeyboardInterrupt` from outside the `try` that would have answered it.
+    Masked, the signal merely stays pending across both, and is delivered on
+    unmask to a handler reading a fully reset state: nothing owns it, so it is
+    recorded as unowned and the first `raise_if_stopped` below — reached
+    before the sandbox exists — unwinds it into the 128 + signum exit.
     """
-    SIGNAL_TARGETS.late_signums = []
-    SIGNAL_TARGETS.unowned_signums = []
-    SIGNAL_TARGETS.finishing = False
-    # `child`, `spawning`, `pending_signum` and `serving_event` need no reset
-    # here: each already returns to its rest value (`None`/`False`) on every
-    # exit from the run that sets it — `run_claude`'s and
-    # `serve_until_signalled`'s own `finally` blocks — so a previous run never
-    # leaves one of them in a state this run could misread. `pending_signum`
-    # is the partial exception: it is only ever consulted inside `run_claude`,
-    # immediately after that same function clears it, so a stale value between
-    # runs is never read.
-    previous_handlers = install_signal_handlers()
+    # The mask goes back in a `finally`, so an exception raised out of the
+    # reset or the install cannot leave the rest of the run — and every child
+    # it goes on to spawn, since a mask is inherited across `fork` — deaf to
+    # every stop signal.
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+    try:
+        SIGNAL_TARGETS.late_signums = []
+        SIGNAL_TARGETS.unowned_signums = []
+        SIGNAL_TARGETS.finishing = False
+        # `child`, `spawning`, `pending_signum` and `serving_event` need no
+        # reset here: each already returns to its rest value (`None`/`False`)
+        # on every exit from the run that sets it — `run_claude`'s and
+        # `serve_until_signalled`'s own `finally` blocks — so a previous run
+        # never leaves one of them in a state this run could misread.
+        # `pending_signum` is the partial exception: it is only ever consulted
+        # inside `run_claude`, immediately after that same function clears it,
+        # so a stale value between runs is never read.
+        previous_handlers = install_signal_handlers()
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
     try:
         if "--" in argv:
             split = argv.index("--")

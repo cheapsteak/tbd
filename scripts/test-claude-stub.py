@@ -710,6 +710,104 @@ class CrossCallSignalBookkeepingTests(SignalTargetsFixture):
         )
 
 
+class SignalTargetsFiringWhenTheResetBegins(claude_stub.SignalTargets):
+    """A `SignalTargets` that self-signals at the first statement of the reset.
+
+    `main` clears `late_signums`, `unowned_signums` and `finishing` at the top
+    of every run. Those are three plain assignments with no call between them,
+    so — as with `SignalTargetsFiringWhenTheSpawnDisarms` — the state
+    transition itself is the only clock a test can hang a signal off: the
+    setter fires while `finishing` is still `True` from the previous run and
+    `_late_signums` is still the previous run's list, which is exactly the
+    window the mask around the reset exists to close.
+    """
+
+    def __init__(self, signum: int) -> None:
+        self._signum = signum
+        self._armed = False
+        # Sets `late_signums`, hence the setter, hence `_armed` first.
+        super().__init__()
+
+    def arm(self) -> None:
+        """Fire on the next reset — the second `main` call, not the first."""
+        self._armed = True
+
+    @property
+    def late_signums(self) -> list[int]:
+        return self._late_signums
+
+    @late_signums.setter
+    def late_signums(self, value: list[int]) -> None:
+        if self._armed:
+            self._armed = False
+            signal_from_a_context_that_ignores_exceptions(self._signum)
+        self._late_signums = value
+
+
+class ResetWindowSignalTests(unittest.TestCase):
+    """A stop signal landing inside `main`'s own per-run reset.
+
+    The reset is not reached with the handler in a known state: `main` calls
+    `restore_signal_handlers` on its way out, so by the second call the
+    process holds whatever disposition it had before the first — the default
+    one in this harness, and `handle_stop_signal` itself for any embedder that
+    shares the wrapper's handler machinery. This exercises the second: the
+    same function is installed across the reset as after it, so what
+    discriminates is purely *when* it runs relative to the three assignments.
+    Run unmasked it reads `finishing == True` left by the first run and
+    swallows the signal onto a `late_signums` the next statement throws away —
+    `raise_if_stopped` only ever consults `unowned_signums`, so the run walks
+    on and spawns `claude`. Held off across the reset it lands on a fully reset
+    state, is recorded as unowned, and the first checkpoint — before the
+    sandbox exists — unwinds it.
+    """
+
+    def test_a_stop_signal_inside_the_reset_stops_the_second_run(self):
+        for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            with self.subTest(signum=int(signum)):
+                self._assert_the_reset_window_signal_stops_the_run(int(signum))
+
+    def _assert_the_reset_window_signal_stops_the_run(self, signum: int) -> None:
+        root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        marker = root / "claude-ran.txt"
+        binary = root / "fake-claude.sh"
+        binary.write_text(
+            f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\n", encoding="utf-8"
+        )
+        binary.chmod(0o755)
+        created: list[str] = []
+        targets = SignalTargetsFiringWhenTheResetBegins(signum)
+        argv = ["--text", "x", "--claude-binary", str(binary), "--", "-p", "hi"]
+
+        with contextlib.redirect_stderr(io.StringIO()), mock.patch.object(
+            claude_stub, "SIGNAL_TARGETS", targets
+        ), mock.patch.object(
+            claude_stub.tempfile, "mkdtemp", recording_mkdtemp(created, root)
+        ):
+            # A first, unsignalled run purely to leave the latch set: `main`'s
+            # cleanup sets `finishing` on every exit, and that leftover `True`
+            # is what makes the half-reset state misread a signal.
+            self.assertEqual(0, claude_stub.main(argv))
+            self.assertTrue(targets.finishing, "the first run left no latch to race")
+            self.assertTrue(marker.exists(), "the first run never spawned claude")
+            marker.unlink()
+
+            # The state the finding describes: an embedder that left the
+            # wrapper's own handler installed between the two calls, so the
+            # reset-window signal is recorded rather than taking the default
+            # disposition and killing this test process.
+            previous = claude_stub.install_signal_handlers()
+            self.addCleanup(claude_stub.restore_signal_handlers, previous)
+            targets.arm()
+            status = claude_stub.main(argv)
+
+        self.assertEqual(128 + signum, status, "the reset-window signal was lost")
+        self.assertFalse(marker.exists(), "claude was spawned after the stop signal")
+        for path in created:
+            self.assertFalse(Path(path).exists(), "a temp sandbox leaked")
+
+
 class SignalTargetsFiringWhenTheSpawnDisarms(claude_stub.SignalTargets):
     """A `SignalTargets` that self-signals the instant `spawning` clears.
 
