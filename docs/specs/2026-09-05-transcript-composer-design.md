@@ -8,7 +8,7 @@ to the terminal pane, and when the terminal is slow the reply lags behind the
 conversation. This design adds a composer under the live transcript: a
 multi-line text field that sends a message into the running session, offers
 completion for Claude Code's slash commands, skills, and subagents, and accepts
-pasted or dropped images.
+pasted or dropped images placed inline in the text.
 
 Three constraints shape it. The message must arrive in the session exactly as
 if typed, so the composer reuses the daemon's existing send path and adds
@@ -28,20 +28,30 @@ session workbench beside the index rail, wherever a live Claude Code transcript
 renders. A send button names the target terminal so the injection is never
 anonymous.
 
-- **Enabled** while Claude is working, idle, or in an informational state. A
-  message sent mid-turn queues inside Claude Code, as it does when typed.
-- **Disabled with a reason** when the session is hibernated, with a Wake
-  action, and when the session has a dialog on screen or an unrecognized
-  awaiting-input reason, showing the notification message the daemon carries
-  and a Reveal Terminal action.
+- **Running.** Enabled while Claude is working, idle, or in an informational
+  state. A message sent mid-turn queues inside Claude Code, as it does when
+  typed.
+- **Not running.** Enabled, with a note that Claude is not running and that
+  sending will resume it, and the send button labeled accordingly. This covers
+  a hibernated session and a session whose Claude process exited. Sending wakes
+  the session with the message as its first prompt. While the wake is in
+  flight the text stays in the field, shown as sending, until the woken
+  session's SessionStart hook arrives. On a timeout the text is restored
+  editable with the error line.
+- **Blocked.** Disabled when the session has a dialog on screen or an
+  unrecognized awaiting-input reason, showing the notification message the
+  daemon carries and a Reveal Terminal action. Answering in the terminal is the
+  correct resolution.
 - **Hidden** for terminals whose worktree is remote, and for Codex and shell
   terminals.
 
 Keys: Enter sends, Shift+Enter inserts a newline, Cmd+Enter always sends,
-Cmd+/ focuses the composer from anywhere in the pane, Escape returns focus to
-the transcript. Drafts are kept per terminal in memory and restored when the
-pane is shown again. Sending clears the field and its attachment chips on a
-successful response, and leaves them in place with an error banner on failure.
+Cmd+/ focuses the composer from anywhere, Escape returns focus to the
+transcript. Cmd+/ is unbound in the app, unclaimed by the terminal view, inert
+in SwiftTerm, and not a system default. Drafts are kept per terminal in memory
+and restored when the pane is shown again. A send to a running session clears
+the field on a successful response and leaves it in place with an error banner
+on failure.
 
 Text sitting unsent in the terminal's own input box is invisible to the
 composer, and a message sent from the composer appends to it. No signal exists
@@ -53,58 +63,121 @@ wrong in both directions.
 
 ## Send pipeline
 
-The app composes one payload: the message text, then for each attachment a
-space and the quoted absolute path of its PNG. It calls the existing
-`terminal.send` RPC with `text`, `submit`, and a new optional field
-`envelope: "suppressed"`. The daemon then reuses the seam the queued-prompt path
-already uses and injects nothing but the message. Old daemons ignore the unknown
-field. The composer never uses the keys path and never asks for verification.
+### Payload
+
+The app splits the composer text at its image tokens into an ordered list of
+parts, each either text or an image path. Empty text parts are skipped. It
+calls the existing `terminal.send` RPC with two new optional fields: `parts`
+and `envelope: "suppressed"`, plus `submit`. Old daemons ignore unknown fields
+and treat the request as text-only, which the app avoids by checking the
+capability before sending parts. The composer never uses the keys path and
+never asks for verification.
+
+The daemon delivers each part as its own bracketed paste, in order, then
+Enter. A text part is pasted as text. An image part is pasted as the bare
+quoted absolute path and nothing else, because Claude Code's paste handler
+turns a paste into an image attachment only when the whole paste is one quoted
+path with an image extension. Measured on 2.1.261: a bare quoted path pasted
+alone became a base64 image block in the user message, while the same path
+inside a sentence, and any path given as a command-line argument, stayed
+literal text. Pasting the parts in order reproduces what drag-and-drop
+produces: an `[Image #N]` placeholder at the caret between the words around it.
+
+### Envelope
 
 Every other text send to an agent carries a `<tbd-dispatch>` line naming the
 actuation and actor. The composer suppresses it because the person is speaking
 in their own voice, exactly as at the keyboard, and Claude should see only the
-message.
+message. The daemon honors suppression only when the request's declared actor
+is the app acting for a human. A CLI or agent caller that asks for suppression
+gets the envelope anyway, so agent-to-agent dispatches stay attributed.
 
-Inside the per-terminal send serializer, the daemon applies two refusals before
+### Refusals and the gate
+
+Inside the per-terminal send serializer, the daemon applies these before
 dispatching to either transport:
 
-- **Hibernated terminal.** Refused with a named reason. Today a send to a parked
-  tmux session finds the window alive with a shell prompt in it, pastes the
-  message, presses Enter, and executes the message as a shell command while
-  reporting success. This refusal ships as its own fix ahead of the composer.
-- **Awaiting-input gate.** If the terminal's latest state has a prompt on screen
-  or an unrecognized awaiting-input reason, and the transcript-supersession
-  check does not show the session has moved on, the send is refused with the
-  carried notification message. A pasted body plus Enter into a permission
-  dialog commits whichever option is highlighted, so the gate fails toward
-  refusing, and an unknown reason is treated as a dialog because that is what a
-  newer Claude Code's new dialog type looks like to this build. Informational
-  reasons and the idle prompt are allowed. The gate is evaluated at send time
-  in the daemon, not only at render time in the app, so the CLI benefits too.
+- **Not-running terminal.** A text send to a terminal whose Claude process is
+  gone is refused with a named reason. Today a send to a parked tmux session
+  finds the window alive with a shell prompt in it, pastes the message, presses
+  Enter, and executes the message as a shell command while reporting success.
+  The same happens after Claude exits on its own, because the daemon records
+  nothing on SessionEnd and the pane check sees a live pane with a matching id.
+  Two facts make the refusal possible. The SessionEnd hook stamps the terminal
+  as hibernated with an exited reason, cleared by the next SessionStart, which
+  gives the app a machine-readable not-running state. The stamp applies only to
+  SessionEnd reasons that mean the process is leaving; a `/clear`, which ends
+  one session and starts another inside the same process, does not stamp. And because a hook can be
+  missed on a crash, the send path also asks the daemon's existing
+  foreground-process inspector, used today by the limit-resume path, whether
+  Claude is the pane's foreground process, and refuses when it is not. Both are
+  process-table facts, not screen text. This refusal and the exit stamp ship as
+  their own fix ahead of the composer, since they also protect the CLI.
+- **Awaiting-input gate.** When the request opts in, and the terminal's latest
+  state has a prompt on screen or an unrecognized awaiting-input reason, and
+  the transcript-supersession check does not show the session has moved on, the
+  send is refused with the carried notification message. A pasted body plus
+  Enter into a permission dialog commits whichever option is highlighted, so
+  the gate fails toward refusing, and an unknown reason is treated as a dialog
+  because that is what a newer Claude Code's new dialog type looks like to this
+  build. Informational reasons and the idle prompt are allowed. The composer
+  always opts in. Existing CLI sends do not, because agents use them to answer
+  dialogs deliberately.
+
+### Not-running delivery
+
+When the terminal is not running, the app does not call send. It calls the
+existing `terminal.wake` RPC with the message in its `prompt` field, which the
+daemon already passes to the spawn builder as a trailing argument on `claude
+--resume <sessionID>`. Measured on 2.1.261: the resumed TUI submits that
+argument as a user turn with no keystrokes, reusing the session id. The daemon,
+the coordinator, the builder, and the CLI already carry this parameter; only
+the app has never passed it.
+
+Because Claude has exited, the hibernation state is the same shape as a
+deliberate hibernation: process gone, terminal alive, session id known. Stamping
+an exit as hibernation means one state, one wake path, and one UI.
+
+An argument prompt cannot carry image attachments, so for a not-running target
+each image token is replaced inline with the quoted path as plain text. The
+sentence reads the same, and Claude reads the files with its Read tool, whose
+image reads are capped near 500 KB. The composer says so on the send button,
+because the transcript then shows a tool read after the message rather than an
+image inside it. TBD spawns sessions with permissions skipped, so a read outside
+the worktree raises no prompt.
+
+A wake whose session id no longer resolves makes Claude print one line and exit
+1 with the prompt lost, while tmux reports the respawn as a success. The app
+therefore holds the text as sending until the woken session's SessionStart hook
+arrives, and restores it on timeout. The wake RPC already returns `woken:
+false` when the terminal was not hibernated and an error when the session is
+gone, and the app surfaces both.
 
 ### Transport behavior and the holder dependency
 
-The tmux arm delivers text as an explicit bracketed paste followed by a
-separate Enter, so multi-line messages are safe there.
+The tmux arm delivers each part as an explicit bracketed paste followed by a
+separate Enter, so multi-line and multi-part messages are safe there.
 
 The holder arm writes body and carriage return in one delivery with no
-bracketed-paste wrapping. Measured against the installed Claude Code 2.1.261
-under a real pty with the zero-token stub: a single unwrapped write of 63 bytes
-submits, and a write of 64 bytes or more does not. The tokenizer splits control
-bytes into key events only while the pending chunk is under 64 bytes, so past
-that the carriage return is swallowed into the text and the whole string sits
-in Claude's composer unsent. The same body wrapped in bracketed paste submits
-regardless of size, whether the carriage return arrives in the same write or
-10 milliseconds later. The dispatch envelope line alone is 68 bytes, so every
-envelope-carrying send to a holder session today fails to submit.
+bracketed-paste wrapping. Measured against 2.1.261 under a real pty with the
+zero-token stub: a single unwrapped write of 63 bytes submits, and a write of
+64 bytes or more does not. The tokenizer splits control bytes into key events
+only while the pending chunk is under 64 bytes, so past that the carriage
+return is swallowed into the text and the whole string sits in Claude's
+composer unsent. The same body wrapped in bracketed paste submits regardless of
+size, whether the carriage return arrives in the same write or 10 milliseconds
+later. The dispatch envelope line alone is 68 bytes, so every envelope-carrying
+send to a holder session today fails to submit.
 
 The fix is wrapping when the child has bracketed-paste mode on, in one write,
 and it belongs to the child-as-contract-party design (PR #816, decision 5),
 which also gives the holder a typed screen carrying the child's modes. This
 design takes that as a dependency and builds no second mode oracle. Until it
-lands, the composer refuses to send a multi-line message to a holder-backed
-session and says why. Holder delivery is at-least-once by design, so a rare
-duplicate message there is a documented property, not a composer defect.
+lands, the composer refuses to send a multi-line or multi-part message to a
+holder-backed session and says why, because several deliveries there reopen the
+at-least-once and routing questions that one delivery avoids. Holder delivery is
+at-least-once by design, so a rare duplicate message there is a documented
+property, not a composer defect.
 
 ## Command inventory
 
@@ -122,11 +195,14 @@ reads the one response line, closes stdin, and waits. Measured on this machine
 against a real logged-in profile: about half a second wall time, 209 commands,
 zero tokens, and no credentials required. The init frame that headless mode
 also emits is not used, because it appears only after a real, billed message
-and carries names without descriptions.
+and carries names without descriptions. Project trust does not gate the probe:
+a project with no trust record, one with trust recorded, and an empty config
+directory all returned the project's commands, skills, and agents identically.
 
 The probe passes a settings overlay of `{"disableAllHooks": true,
-"disableClaudeAiConnectors": true}`, a strict empty MCP configuration, and no
-API key in the environment. Each of those closes a measured side effect:
+"disableClaudeAiConnectors": true}` and a strict empty MCP configuration, and
+runs in the session's own spawn environment unmodified, adding no credentials
+of its own. Each of those closes a measured side effect:
 
 - Without the hooks setting, every SessionStart and SessionEnd hook in the
   profile, the project, and enabled plugins runs on every probe, and each probe
@@ -139,14 +215,23 @@ API key in the environment. Each of those closes a measured side effect:
   nonessential-traffic switch does not stop it.
 - Starting the profile's real MCP servers leaked orphaned processes and wrote
   logs into the person's Library folder.
-- An API key in the environment changes the auth path and loses three
-  subscription-gated commands.
+- Adding an API key to an OAuth profile's environment changes the auth path
+  and loses three subscription-gated commands. Profiles whose own environment
+  carries a key or an endpoint keep it, because that is the environment the
+  session runs in.
 
 The probe reads the Keychain twice per run through `security
 find-generic-password`, keyed on the config directory's hash. The reads
 complete in about ten milliseconds with no authorization activity, because the
 item was created by the same tool and its access list trusts it. No prompt
 appears.
+
+The probe is not read-only against Claude Code's `.claude.json`. In a fresh
+config directory it writes first-run metadata and a backup file. Against an
+existing project entry it rewrote the entry, keeping the trust key and dropping
+an onboarding key. TBD's trust seeder does an actor-serialized read-merge-write
+of the same file when a worktree is created, so every probe runs through that
+same actor and never overlaps a seed on the same config directory.
 
 ### Which executable
 
@@ -216,9 +301,10 @@ inside its plugin namespace and `sup:br` matches segment by segment.
 
 Order is exact name, exact alias, name prefix with the shortest first, alias
 prefix, fuzzy score, then frecency as a tiebreak. Frecency is usage count
-decayed with a seven-day half-life and floored at ten percent, kept in app
-defaults. A bare slash shows the top five by frecency, then built-ins, user
-commands, project commands, and plugin skills, each group alphabetical.
+decayed with a seven-day half-life and floored at ten percent, kept in one
+global store in app defaults keyed by command name. A bare slash shows the top
+five by frecency, then built-ins, user commands, project commands, and plugin
+skills, each group alphabetical.
 
 The fuzzy score is a greedy leftmost subsequence match: sixteen points per
 query character, four for each adjacent pair, minus three plus the gap length
@@ -235,7 +321,9 @@ Each row shows the name with a matched alias in parentheses, a source badge for
 built-in, user, project, or plugin, the one-line description, and the argument
 hint. Matched characters are highlighted. Eight rows are visible in a list with
 a fixed maximum height and a scroller, so a change in row count never shifts
-layout. The list opens upward from the composer.
+layout. The list opens upward from the composer. Every row carries an
+accessibility label, and the highlighted row is announced as the selection
+moves.
 
 - **Tab** accepts the highlighted row, or the first row when none is
   highlighted, and inserts the token with a trailing space. Tab is the accept
@@ -279,7 +367,9 @@ stays literal.
   writes that editor's one-way contract forbids: restore a draft, replace a
   token on accept, and clear on send. They arrive as one-shot token commands,
   the idiom the transcript pane uses for scroll-to-bottom. Height grows to
-  about six lines, then scrolls. SwiftUI's TextEditor is rejected because Apple
+  about six lines, then scrolls. The text view stays plain: image tokens are
+  plain text styled through the layout manager's temporary attributes, which
+  never touch the storage. SwiftUI's TextEditor is rejected because Apple
   documents neither whether its key handler runs before insertion nor its
   behavior during composition, and it has no fit-to-content sizing on macOS.
   The text input suggestions modifier is rejected because it replaces the whole
@@ -303,12 +393,10 @@ stays literal.
   menu's view model: query, selected index, rows, move up and down, a row cap,
   with rows memoized by query. It lives in the app target with its tests, like
   both existing palette precedents.
-- **Chips.** Attachments render as a strip of chips above the text view, never
-  as inline text attachments. The text view stays plain, which keeps the
-  substitution and paste-formatting hazards the submitting editor closed.
 - **Drafts.** A per-terminal observable object held by the app state, placed
   outside the session-identity reset so a session rollover rebuilds the
-  transcript without touching the draft.
+  transcript without touching the draft. The draft holds the text and the
+  attachment map.
 - **Theme.** The transcript text theme, not the terminal theme, because the
   composer sits under the transcript.
 
@@ -318,22 +406,44 @@ mid-sentence, and file paths and MCP resources under the at-sign.
 
 ## Attachments
 
-A pasted or dropped image is prepared in the app through ImageIO: decode,
-downscale to at most 2000 pixels on the long edge with orientation applied,
-encode as PNG, and re-encode smaller if the result would exceed Claude Code's 5
-MiB base64 cap. The thumbnail call passes the always-from-image option, because
-the if-absent variant can return a stale embedded EXIF thumbnail. Clipboard
-TIFF, clipboard PNG, and file drops share the path. The paste override reads the
-pasteboard itself and does not add image types to the readable types, so
-NSTextView's default pipeline never inserts an inline attachment, the shape the
-terminal view's paste override already uses. The original bytes are never
-passed through unexamined. An image that fails to decode is refused with a
-message. A write that fails prevents the send.
+### Inline tokens and the strip
+
+Pasting or dropping an image inserts a placeholder token at the caret,
+`[Image #1]`, `[Image #2]`, rendered in a distinct color with a thumbnail on
+hover. The token is the anchor: it decides whether the image is sent and where
+it sits among the words. A side map in the draft holds token to staged file. At
+send time the text is scanned for tokens in order, and a token that was deleted
+or edited so it no longer matches drops its image, the rule Claude Code's own
+composer applies to the same placeholders.
+
+A strip above the text field shows every staged image as a thumbnail, hidden
+when there are none. It is a view of the same map. An image whose token is
+gone from the text shows as detached, greyed and marked "not in message", so
+nothing is dropped silently. Clicking a detached thumbnail re-inserts its token
+at the caret; clicking an attached one moves the caret to its token. Hovering a
+token highlights its thumbnail and hovering a thumbnail highlights its token.
+The x on a thumbnail removes the token and the image from the send. The text
+decides what is sent; the strip shows what is available.
+
+### Preparation and storage
+
+Each image is prepared in the app through ImageIO: decode, downscale to at most
+2000 pixels on the long edge with orientation applied, encode as PNG, and
+re-encode smaller if the result would exceed Claude Code's 5 MiB base64 cap.
+The thumbnail call passes the always-from-image option, because the if-absent
+variant can return a stale embedded EXIF thumbnail. Clipboard TIFF, clipboard
+PNG, and file drops share the path. The paste override reads the pasteboard
+itself and does not add image types to the readable types, so NSTextView's
+default pipeline never inserts an inline attachment, the shape the terminal
+view's paste override already uses. The original bytes are never passed through
+unexamined. An image that fails to decode is refused with a message. A write
+that fails prevents the send.
 
 Files are written to `~/tbd/attachments/<worktreeID>/<uuid>.png`, derived from
 `TBDConstants` so `TBD_HOME` and the test fence apply, following the notes and
-terminal-history precedents. The send payload appends each file's quoted
-absolute path, which Claude Code's paste handler turns into an image attachment.
+terminal-history precedents.
+
+### Reclaim
 
 This is a new kind of durable resource, so it names its reconcilers:
 
@@ -347,15 +457,17 @@ This is a new kind of durable resource, so it names its reconcilers:
   remove the directory when empty. It follows the existing leg shape: skip the
   whole leg on a failed database read, emit keep and reap lines into the plan,
   record each reclaim. Fourteen days is a soak knob, not a load-bearing number.
-  A file whose send fails stays on disk for this sweep.
+  A file whose token was deleted, or whose send failed, stays on disk for this
+  sweep.
 
 ## Flag
 
 One flag, `transcript_composer_enabled`, a `config` column added by a new SQL
 migration with no DEFAULT clause, resolved in the record's model conversion
-through `?? Config.transcriptComposerEnabledDefault`, default false. NULL means nobody chose, so graduation is a change to that constant that
-preserves every explicit opt-out. Migration, GRDB record, Codable model, and
-the migration manifest test land in one commit.
+through `?? Config.transcriptComposerEnabledDefault`, default false. NULL means
+nobody chose, so graduation is a change to that constant that preserves every
+explicit opt-out. Migration, GRDB record, Codable model, and the migration
+manifest test land in one commit.
 
 The daemon exposes it through `daemon.capabilities`, and Settings shows a
 toggle beside the live transcript pane toggle, the way the queued-prompt flag
@@ -367,24 +479,36 @@ GC leg lives in the daemon and cannot read the app's defaults. The probe needs
 no flag of its own: with hooks and connectors disabled it has no visible side
 effect, and it runs only when a composer is shown.
 
-Two daemon changes ship ahead of the composer with no flag, as bug fixes: the
-hibernated-terminal refusal and the `envelope` option on the send params. The
-awaiting-input gate lands with the composer.
+Two changes ship ahead of the composer with no flag, as bug fixes: the daemon's
+not-running refusal with its exit stamp and inspector rail, and the app passing
+the wake prompt it has never passed. The envelope option, the parts list, and
+the opt-in gate land with the composer.
 
 Graduation: after a soak with the toggle on, flip the default constant.
 
 ## Testing
 
-- Send params decode with and without the envelope field, and the suppressed
-  path injects no dispatch line.
-- The hibernation refusal fires for a hibernated row and not for a live one, on
-  both transports.
-- The awaiting-input gate: one case per awaiting-input class, plus a superseded
-  prompt that is allowed through.
+- Send params decode with and without the new fields; the suppressed path
+  injects no dispatch line for an app actor and injects it for a CLI actor.
+- Parts delivery on the tmux arm: text, image, text pastes in order, then one
+  Enter; empty text parts skipped.
+- The not-running refusal: a hibernated row, an exit-stamped row, and a live
+  row whose inspector says Claude is not foreground are refused; a live row
+  with Claude foreground is not.
+- SessionEnd stamps the terminal hibernated with an exited reason; SessionStart
+  clears it.
+- The awaiting-input gate: one case per awaiting-input class with the opt-in
+  set, a superseded prompt that is allowed through, and an opted-out request
+  that is never gated.
+- Wake with prompt from the app: the parameter reaches the spawn command;
+  `woken: false` and the session-gone error are both surfaced; the sending hold
+  clears on SessionStart and restores on timeout.
+- Not-running attachment fallback: tokens replaced inline with quoted paths.
 - The probe runner against a fake executable that emits a canned initialize
-  response: cache hit, fingerprint invalidation, timeout kill, and fallback to
-  the filesystem scan. The scan against fixture command, skill, agent, and
-  plugin directories, including a disabled plugin.
+  response: cache hit, fingerprint invalidation, timeout kill, fallback to the
+  filesystem scan, and serialization behind the trust seeder's actor. The scan
+  against fixture command, skill, agent, and plugin directories, including a
+  disabled plugin.
 - Executable pinning: holder child pid, tmux pane child, shell not yet exec'd,
   and versioned path gone.
 - The key router: every selector with the menu closed yields submit or pass
@@ -395,6 +519,8 @@ Graduation: after a soak with the toggle on, flip the default constant.
   a word, inside a URL, after Escape suppression, after backspace.
 - Ranking: prefix beats fuzzy, `brain` finds the namespaced skill, `sup:br`
   matches by segment, frecency breaks ties only.
+- Tokens: insert at caret, split into parts, deleted token drops its image,
+  edited token drops its image, detached thumbnail re-inserts, x removes both.
 - Image preparation: TIFF in, PNG out, downscale, orientation, oversize
   re-encode, undecodable input refused.
 - The GC leg with dry-run plans: live worktree kept, non-UUID kept, orphan older
@@ -413,6 +539,23 @@ Graduation: after a soak with the toggle on, flip the default constant.
 - **Keep the dispatch envelope.** Rejected because the composer is the person
   speaking in their own voice, and the envelope is noise to Claude and in the
   transcript.
+- **Let any caller suppress the envelope.** Rejected because the envelope is
+  how an agent-to-agent dispatch stays attributed inside the receiving session,
+  and a public suppression switch would let any agent inject unattributed text.
+- **Gate every send on awaiting-input state.** Rejected because agents use the
+  send RPC to answer permission dialogs deliberately, and a daemon-wide gate
+  would refuse exactly those sends.
+- **Disable the composer for a hibernated session.** Rejected because the wake
+  path already accepts a prompt and delivers it atomically with the respawn, so
+  the extra click bought nothing.
+- **A separate exited state beside hibernation.** Rejected because the two are
+  the same shape, process gone with a known session id, and one state gives
+  one wake path and one UI.
+- **Wake with the text, then paste the images.** Rejected because the images
+  would arrive as a second turn. **Wake without a prompt and paste the whole
+  message after the SessionStart settle** was deferred, not rejected: it is
+  correct but reintroduces the paste-readiness dependence the argument path
+  exists to avoid, and the model-read fallback covers the case.
 - **A compiled-in list of built-in commands.** Rejected because it is stale the
   day Claude Code ships, and the requirement is that new commands appear
   without a TBD update.
@@ -449,10 +592,13 @@ Graduation: after a soak with the toggle on, flip the default constant.
   keystroke. Rejected because, with hooks and connectors disabled, it has no
   visible side effect, it runs only when a composer is shown, and a second
   toggle would leave the composer half-working in one of its four states.
-- **Wake a hibernated session and deliver.** Rejected for the first version
-  because waking is a state-changing act that needs its own soak, and
-  wake-then-deliver has an ordering hazard the injection design does not
-  answer.
+- **A chip strip with no inline anchors.** Rejected because it gives no way to
+  refer to an image at a point in the sentence, which the terminal composer and
+  Claude Desktop both allow.
+- **Images as inline text attachments.** Rejected because enabling rich text in
+  the view reopens the substitution and paste-formatting hazards the submitting
+  editor closed, and a plain-text token with temporary attributes gives the
+  same anchor.
 - **A SwiftUI-only composer.** Rejected because no SwiftUI text API exposes
   marked-text state, which is the single fact the Enter-versus-IME decision
   depends on, and because the multi-line case takes Up and Down away from the
@@ -462,11 +608,19 @@ Graduation: after a soak with the toggle on, flip the default constant.
 
 - PR #816, child-as-contract-party: bracketed-paste wrapping on the holder arm
   when the child's mode is on, in one write, and the typed screen that exposes
-  the mode. The composer's holder multi-line refusal lifts when it lands. The
-  64-byte measurement and its harness were handed to that work.
-- The two ahead-of-composer fixes: hibernated-terminal refusal and the envelope
-  option.
-- Deferred autocomplete features: the all-commands dialog, ghost-text
-  completion mid-sentence, file paths under the at-sign.
+  the mode. The composer's holder multi-line and multi-part refusal lifts when
+  it lands. The 64-byte measurement and its harness were handed to that work.
+- The hibernation subsystem: hibernation and wake must treat holder-backed
+  terminals the same as tmux-backed ones. The gate today refuses holder
+  transports, which is a defect in the gate, not a property this design may
+  rely on. Wake for a holder terminal, whose Claude process is the whole job,
+  is that subsystem's work and a dependency of the not-running state here. A
+  code comment in the coordinator claiming resume is cwd-scoped is false on
+  2.1.261, where a full session id resumes from any directory.
+- The two ahead-of-composer fixes: the not-running refusal with its exit stamp
+  and inspector rail, and passing the wake prompt from the app.
+- Deferred: paste-after-settle delivery of attachments to a not-running
+  session; the all-commands dialog; ghost-text completion mid-sentence; file
+  paths under the at-sign.
 - Not confirmed: whether the connectors setting leaves strictly no outbound
   socket. The debug log shows the fetch skipped; no packet capture was taken.
