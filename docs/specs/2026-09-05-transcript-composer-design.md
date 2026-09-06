@@ -35,9 +35,9 @@ anonymous.
   sending will resume it, and the send button labeled accordingly. This covers
   a hibernated session and a session whose Claude process exited. Sending wakes
   the session with the message as its first prompt. While the wake is in
-  flight the text stays in the field, shown as sending, until the woken
-  session's SessionStart hook arrives. On a timeout the text is restored
-  editable with the error line.
+  flight the text stays in the field, shown as sending, until the session that
+  wake started reports in. On a timeout the text is restored editable with the
+  error line.
 - **Blocked.** Disabled when the session has a dialog on screen or an
   unrecognized awaiting-input reason, showing the notification message the
   daemon carries and a Reveal Terminal action. Answering in the terminal is the
@@ -88,9 +88,47 @@ produces: an `[Image #N]` placeholder at the caret between the words around it.
 Every other text send to an agent carries a `<tbd-dispatch>` line naming the
 actuation and actor. The composer suppresses it because the person is speaking
 in their own voice, exactly as at the keyboard, and Claude should see only the
-message. The daemon honors suppression only when the request's declared actor
-is the app acting for a human. A CLI or agent caller that asks for suppression
-gets the envelope anyway, so agent-to-agent dispatches stay attributed.
+message.
+
+Suppression is authority, not preference, so it rests on nothing the request
+says about itself. `ActuationActor` is an ambient declaration: any process on
+the daemon socket can stamp `{"kind":"app"}`, and the CLI, the app, and every
+agent share one socket. Honoring suppression on that field would hand every
+local caller the ability to type as a human, which is the one property the
+envelope exists to deny.
+
+The daemon authenticates the connection instead. `LOCAL_PEERPID` is a property
+of an `AF_UNIX` socket rather than of the bytes on it, so the kernel names the
+process that actually connected and no peer can claim another's pid. At accept,
+the RPC connection reads that option through NIO's socket-option provider — one
+`getsockopt`, and the app opens a fresh connection per request — and the
+connection is provisionally the app's when the pid equals the pid the FD-vending
+sidecar recorded for its current client. The sidecar has exactly one client, the
+app, which connects it eagerly and unconditionally as soon as the RPC socket
+answers, and the daemon already treats that recorded identity as load-bearing:
+the app-liveness arbiter decides on it whether the daemon may read a pty again.
+
+A pid is a number the kernel reissues, so a request that actually asks for
+suppression pays for the rest of the identity: the daemon re-verifies the
+sidecar's recorded identity against the pid through the same start-time and
+command-line check every other pid-reuse guard in the daemon uses, and only a
+`.same` verdict authenticates the connection. That second half costs two process
+reads and runs only on a composer send, never on the request stream.
+
+Suppression is honored only on an app-authenticated connection, whatever the
+request's actor field says; the CLI, agents, and any other local process get the
+envelope, so agent-to-agent dispatches stay attributed. The declared actor keeps
+its existing job of recording which door an act came through, and gains no
+authority. The check fails closed: an unreadable peer pid, no recorded sidecar
+client, a pid mismatch, or any verdict but `.same` attaches the envelope. The
+cost of failing closed is a visible dispatch line on a human's message, never a
+lost message.
+
+Suppression is a daemon-internal disposition today, reachable only from inside
+the send core because no RPC field could be trusted to ask for it. This is the
+one route that opens it to a caller, and what it turns on is the connection, not
+the field: the request still cannot assert its way to suppression, it can only
+ask on a socket the daemon has already established belongs to the app.
 
 ### Refusals and the gate
 
@@ -148,10 +186,22 @@ the worktree raises no prompt.
 
 A wake whose session id no longer resolves makes Claude print one line and exit
 1 with the prompt lost, while tmux reports the respawn as a success. The app
-therefore holds the text as sending until the woken session's SessionStart hook
-arrives, and restores it on timeout. The wake RPC already returns `woken:
-false` when the terminal was not hibernated and an error when the session is
-gone, and the app surfaces both.
+therefore holds the text as sending until the session its own wake started
+reports in, and restores it on timeout. The hold is scoped to that one spawn,
+because a SessionStart on the same terminal is not evidence the composer's wake
+succeeded: a competing wake, a post-`--fork-session` recapture, and a person
+typing `claude --resume` in the pane all produce one. Every agent spawn already
+mints a session incarnation id, plants it in the spawned process's environment
+as `TBD_TERMINAL_INCARNATION_ID`, and gets it back on the hooks that process
+fires, so the discriminator exists and only needs returning: `terminal.wake`
+gains one additive optional field on its result, the incarnation id it minted,
+populated only on the `woken: true` path where a spawn actually happened. The
+app releases the hold on the SessionStart carrying that id and on no other. A
+manual `claude --resume` inside the pane the wake created inherits that spawn's
+environment and so carries the same id, which is the composer's own incarnation
+continuing and correctly releases. The wake RPC already returns `woken: false`
+when the terminal was not hibernated and an error when the session is gone, and
+the app surfaces both without ever entering the hold.
 
 ### Transport behavior and the holder dependency
 
@@ -302,9 +352,16 @@ inside its plugin namespace and `sup:br` matches segment by segment.
 Order is exact name, exact alias, name prefix with the shortest first, alias
 prefix, fuzzy score, then frecency as a tiebreak. Frecency is usage count
 decayed with a seven-day half-life and floored at ten percent, kept in one
-global store in app defaults keyed by command name. A bare slash shows the top
-five by frecency, then built-ins, user commands, project commands, and plugin
-skills, each group alphabetical.
+global store in app defaults keyed by command name. Those two constants are
+Claude Code's own, read from its binary during this design's research — it
+scores a command as usage count times the larger of 0.5 raised to
+days-since-last-use over 7, and 0.1 — and copying them is the point: the same
+commands rise to the same places in the transcript composer as in the terminal,
+so muscle memory carries across the two. The floor is what keeps a
+once-favored command from decaying to nothing and vanishing from the list.
+
+A bare slash shows the top five by frecency, then built-ins, user commands,
+project commands, and plugin skills, each group alphabetical.
 
 The fuzzy score is a greedy leftmost subsequence match: sixteen points per
 query character, four for each adjacent pair, minus three plus the gap length
@@ -488,8 +545,14 @@ Graduation: after a soak with the toggle on, flip the default constant.
 
 ## Testing
 
-- Send params decode with and without the new fields; the suppressed path
-  injects no dispatch line for an app actor and injects it for a CLI actor.
+- Send params decode with and without the new fields.
+- Connection authentication, over a `socketpair` whose peer is the test process
+  itself, with the sidecar identity injected: a connection whose peer pid
+  matches the recorded app and verifies `.same` suppresses the envelope; a
+  connection from any other pid gets the envelope however it declares its
+  actor, including `{"kind":"app"}`; an unreadable peer pid, an absent sidecar
+  client, and each non-`.same` verdict all keep the envelope. The declared
+  actor never changes the outcome in any of these rows.
 - Parts delivery on the tmux arm: text, image, text pastes in order, then one
   Enter; empty text parts skipped.
 - The not-running refusal: a hibernated row, an exit-stamped row, and a live
@@ -501,8 +564,12 @@ Graduation: after a soak with the toggle on, flip the default constant.
   set, a superseded prompt that is allowed through, and an opted-out request
   that is never gated.
 - Wake with prompt from the app: the parameter reaches the spawn command;
-  `woken: false` and the session-gone error are both surfaced; the sending hold
-  clears on SessionStart and restores on timeout.
+  `woken: false` and the session-gone error are both surfaced without entering
+  the hold; the wake result carries the incarnation id it minted on the woken
+  path and none on the no-op paths.
+- The sending hold: a SessionStart carrying the wake's own incarnation id
+  releases it; one carrying a different id, and one carrying none, both leave
+  it held; the timeout restores the text editable.
 - Not-running attachment fallback: tokens replaced inline with quoted paths.
 - The probe runner against a fake executable that emits a canned initialize
   response: cache hit, fingerprint invalidation, timeout kill, fallback to the
@@ -542,6 +609,27 @@ Graduation: after a soak with the toggle on, flip the default constant.
 - **Let any caller suppress the envelope.** Rejected because the envelope is
   how an agent-to-agent dispatch stays attributed inside the receiving session,
   and a public suppression switch would let any agent inject unattributed text.
+- **Trust the declared actor field.** Reading suppression off
+  `{"kind":"app"}` needs no new mechanism at all. Rejected because that field
+  is a self-declaration the daemon has never verified and deliberately does not
+  verify — it records which door an act came through — and the CLI, the app,
+  and every agent reach the daemon through one socket. A caller that wanted
+  unattributed injection would only have to type the field, which is the
+  previous alternative wearing a different hat.
+- **Check the peer's executable name.** Read the peer pid and accept any
+  process whose executable is named `TBDApp`. Rejected because the name proves
+  nothing — a same-user process can call its binary anything — and doing better
+  by path means guessing the install location, which is `/Applications/TBD.app`
+  for an installed build and a worktree's own `.build` bundle for a work-in-
+  progress one. Matching against the sidecar's recorded client needs no guess.
+- **A nonce the app registers at startup.** Rejected because it authenticates a
+  secret rather than a process: anything that read the nonce would inherit the
+  authority, and it adds a handshake to keep in sync with the app's lifecycle.
+  The peer pid is supplied by the kernel and needs no secret.
+- **A second, app-only RPC socket.** Genuinely stronger in that the CLI could
+  not reach it at all, and rejected only on cost: it would duplicate the whole
+  RPC surface, or split it, to carry one bit that a socket option already
+  carries on the socket the app is using.
 - **Gate every send on awaiting-input state.** Rejected because agents use the
   send RPC to answer permission dialogs deliberately, and a daemon-wide gate
   would refuse exactly those sends.
