@@ -993,14 +993,18 @@ extension HibernationCoordinator {
     /// Two independent facts count as "already running", because they answer
     /// from opposite ends and either one alone is enough:
     ///
-    /// - **The registry still holds a reader for the session.** That reader
-    ///   exists only because a `spawn` on this daemon adopted the holder it
-    ///   started, which makes it first-hand evidence rather than an inference
-    ///   about a number. It is also what makes this a guard rather than a
-    ///   nicety: `HolderRegistry.spawn` refuses a session that already occupies
-    ///   a slot (`sessionAlreadyRegistered`), so without the guard the retry's
-    ///   spawn throws and the row stays parked forever — the guard is what turns
-    ///   that throw into a heal.
+    /// - **The registry still holds a reader for the session.** That means this
+    ///   daemon is draining that session's pty right now — whichever daemon
+    ///   started the holder, since `adoptAll` adopts rows this one never
+    ///   spawned — which is first-hand evidence that the holder is alive rather
+    ///   than an inference about a number. A re-adopted row may carry no pids
+    ///   at all, so this leg restores them from what the registry itself
+    ///   observed before the park marker is cleared; that is what
+    ///   `restoreHolderPIDsFromRegistry` is doing here. It is also what makes
+    ///   this a guard rather than a nicety: `HolderRegistry.spawn` refuses a
+    ///   session that already occupies a slot (`sessionAlreadyRegistered`), so
+    ///   without the guard the retry's spawn throws and the row stays parked
+    ///   forever — the guard is what turns that throw into a heal.
     /// - **The recorded child pid is identity-verified alive**, through the same
     ///   `ProcessIdentityCheck` the reaper's holder leg consults before it
     ///   signals anything: alive, started within
