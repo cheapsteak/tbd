@@ -141,26 +141,26 @@ enum ClaudeSpawnCommandBuilder {
             return Result(command: shellFallback, sensitiveEnv: [:])
         }
 
-        var env: [String: String] = [:]
-        // Profile routing env assigned below is ALSO re-exported inline in
-        // the returned command (see `inlineExports`); track its keys here.
-        var routingKeys: Set<String> = []
-        if profileKind == .bedrock {
-            env["CLAUDE_CODE_USE_BEDROCK"] = "1"
-            if let r = profileAwsRegion { env["AWS_REGION"] = r }
-            if let p = profileAwsProfile { env["AWS_PROFILE"] = p }
-            if let m = profileModel { env["ANTHROPIC_MODEL"] = m }
-            routingKeys.formUnion(["CLAUDE_CODE_USE_BEDROCK", "AWS_REGION", "AWS_PROFILE", "ANTHROPIC_MODEL"])
-            // Intentionally no ANTHROPIC_API_KEY / CLAUDE_CONFIG_DIR /
-            // ANTHROPIC_BASE_URL for bedrock.
-        } else {
+        // Profile routing env. Non-secret, and ALSO re-exported inline in the
+        // returned command (see `inlineExports`), so its keys are tracked here.
+        var env: [String: String] = routingEnv(
+            profileKind: profileKind,
+            profileBaseURL: profileBaseURL,
+            profileModel: profileModel,
+            profileAwsRegion: profileAwsRegion,
+            profileAwsProfile: profileAwsProfile,
+            profileConfigDir: profileConfigDir
+        )
+        let routingKeys = Set(env.keys)
+        if profileKind != .bedrock {
             // Inject the profile's stored secret under the env var its kind
             // uses. Secrets flow through tmux's `-e KEY=VALUE` (argv, no shell
             // parsing), so we don't need shell-escape allowlists here.
             // Storage-time validation rejects newlines / NULL bytes that would
             // break tmux's single-line arg parsing.
             // NEVER a routing key — secrets must not be inlined into the
-            // command string (visible in `ps` for the pane's lifetime).
+            // command string (visible in `ps` for the pane's lifetime), which
+            // is why they are assigned HERE and not in `routingEnv`.
             if let secret = profileSecret, let kind = profileKind {
                 switch kind {
                 case .apiKey:
@@ -177,17 +177,6 @@ enum ClaudeSpawnCommandBuilder {
                     break
                 }
             }
-            // For oauth profiles, no auth token — they use the isolated
-            // CLAUDE_CONFIG_DIR to maintain an independent /login credential.
-            if let baseURL = profileBaseURL { env["ANTHROPIC_BASE_URL"] = baseURL }
-            if let model = profileModel { env["ANTHROPIC_MODEL"] = model }
-            // Inject CLAUDE_CONFIG_DIR for all non-bedrock profiles that have
-            // a config dir. The caller (resolveConfigDir) decides which kinds get
-            // a dir, so if profileConfigDir is non-nil, inject it.
-            if let configDir = profileConfigDir {
-                env["CLAUDE_CONFIG_DIR"] = configDir
-            }
-            routingKeys.formUnion(["ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "CLAUDE_CONFIG_DIR"])
         }
         // Suppress oh-my-zsh's interactive "Would you like to update?" prompt.
         // It fires from .zshrc and would block the claude command until the
@@ -234,6 +223,54 @@ enum ClaudeSpawnCommandBuilder {
             .joined(separator: " ")
         let command = inlineExports.isEmpty ? base : "\(inlineExports) \(base)"
         return Result(command: command, sensitiveEnv: env)
+    }
+
+    /// The **non-secret** routing environment a profile implies — which
+    /// endpoint, account store and model a `claude` invocation runs against.
+    /// Pure: a function of the profile fields alone, no DB, no filesystem.
+    ///
+    /// These are exactly the keys `build` re-exports inline into the command
+    /// string (`inlineExports`), and they are safe there precisely because none
+    /// of them is a credential: `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN`
+    /// are assigned by `build` itself and never returned here, so nothing this
+    /// function produces can leak a secret into `ps`.
+    ///
+    /// Extracted from `build` because the spawn path is no longer the only
+    /// caller that has to run a session's `claude` binary the way the session
+    /// runs it: `terminal.completions` probes it for the command list, and a
+    /// probe that skipped these keys would run a Bedrock or custom-base-URL
+    /// profile in first-party mode and answer with a list the real session does
+    /// not have. The parameters mirror `build`'s, so both callers pass the same
+    /// `resolvedProfile?.<field>` expressions.
+    static func routingEnv(
+        profileKind: CredentialKind?,
+        profileBaseURL: String? = nil,
+        profileModel: String? = nil,
+        profileAwsRegion: String? = nil,
+        profileAwsProfile: String? = nil,
+        profileConfigDir: String? = nil
+    ) -> [String: String] {
+        var env: [String: String] = [:]
+        if profileKind == .bedrock {
+            env["CLAUDE_CODE_USE_BEDROCK"] = "1"
+            if let r = profileAwsRegion { env["AWS_REGION"] = r }
+            if let p = profileAwsProfile { env["AWS_PROFILE"] = p }
+            if let m = profileModel { env["ANTHROPIC_MODEL"] = m }
+            // Intentionally no ANTHROPIC_API_KEY / CLAUDE_CONFIG_DIR /
+            // ANTHROPIC_BASE_URL for bedrock.
+        } else {
+            // For oauth profiles, no auth token — they use the isolated
+            // CLAUDE_CONFIG_DIR to maintain an independent /login credential.
+            if let baseURL = profileBaseURL { env["ANTHROPIC_BASE_URL"] = baseURL }
+            if let model = profileModel { env["ANTHROPIC_MODEL"] = model }
+            // Inject CLAUDE_CONFIG_DIR for all non-bedrock profiles that have
+            // a config dir. The caller (resolveConfigDir) decides which kinds get
+            // a dir, so if profileConfigDir is non-nil, inject it.
+            if let configDir = profileConfigDir {
+                env["CLAUDE_CONFIG_DIR"] = configDir
+            }
+        }
+        return env
     }
 
     /// Longest `--name` value TBD will emit. Display names are free text with

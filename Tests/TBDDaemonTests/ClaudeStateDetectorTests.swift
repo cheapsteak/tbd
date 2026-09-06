@@ -76,7 +76,7 @@ struct ClaudeStateDetectorSessionPathTests {
     /// depends on that, so deleting the mirror slot must red this test rather
     /// than silently regress recapture.
     @Test("a profile session's row is readable through the mirrored host registry")
-    func profileSessionRowIsReadableThroughTheHostMirror() throws {
+    func profileSessionRowIsReadableThroughTheHostMirror() async throws {
         let fm = FileManager.default
         let tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("tbd-detector-mirror-\(UUID().uuidString)", isDirectory: true)
@@ -89,7 +89,7 @@ struct ClaudeStateDetectorSessionPathTests {
             baseDirectory: tempRoot.appendingPathComponent("profiles", isDirectory: true),
             hostBaseDirectory: hostBase
         )
-        let profileDir = try manager.ensureOAuthDir(forProfileID: UUID())
+        let profileDir = try await manager.ensureOAuthDir(forProfileID: UUID())
 
         // The row is written the way a profile-spawned session writes it:
         // through `$CLAUDE_CONFIG_DIR/sessions/`, not to the host path.

@@ -552,48 +552,75 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// include the approval for this key, the file is rewritten with the
     /// correct content. Existing approvals for other keys are preserved.
     /// All unknown top-level keys in the existing `.claude.json` are preserved.
+    /// Its read-merge-write of `.claude.json` runs inside the
+    /// `ClaudeConfigDirSerializer` lane for this directory, because it is one of
+    /// that file's four writers and the completions probe — which suspends for
+    /// as long as a Claude Code process takes to answer — is another. Without
+    /// the lane a probe's own rewrite can land between this read and this write,
+    /// and the loser's keys (a folder-trust entry among them) are gone.
+    ///
+    /// Only the read-merge-write is inside. Creating the directory and ensuring
+    /// the host mirror symlinks touch no `.claude.json`, so they stay outside
+    /// and keep the critical section to the file it protects.
+    ///
+    /// - Parameter afterReadForTesting: a test-only seam, defaulted so no call
+    ///   site changes, awaited between the read of `.claude.json` and the write
+    ///   that replaces it. The merge is otherwise straight-line synchronous code
+    ///   inside the lane body, so that window cannot be straddled from outside —
+    ///   and a test that cannot straddle it cannot show what the lane is for.
+    ///   `ClaudeConfigDirSerializerTests.anInterleavedEnsureLeavesTheTrustEntryIntact`
+    ///   holds here while a trust entry is written, which is a lost trust key
+    ///   when this call skips the lane and a preserved one when it takes it.
     @discardableResult
-    public func ensureAPIKeyDir(forProfileID profileID: UUID, apiKey: String) throws -> URL {
+    public func ensureAPIKeyDir(
+        forProfileID profileID: UUID,
+        apiKey: String,
+        afterReadForTesting: (@Sendable () async -> Void)? = nil
+    ) async throws -> URL {
         let dir = configDirectory(forProfileID: profileID)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let approvalToken = Self.approvalToken(forAPIKey: apiKey)
         let claudeJSONPath = dir.appendingPathComponent(".claude.json")
 
-        var approved: [String] = []
-        var rejected: [String] = []
-        var hasOnboarding = true
-        var unknownKeys: [String: Any] = [:]
+        try await ClaudeConfigDirSerializer.shared.run(configDir: dir.path) {
+            var approved: [String] = []
+            var rejected: [String] = []
+            var hasOnboarding = true
+            var unknownKeys: [String: Any] = [:]
 
-        if let existing = try? Data(contentsOf: claudeJSONPath),
-           let parsed = try? JSONSerialization.jsonObject(with: existing) as? [String: Any] {
-            if let responses = parsed["customApiKeyResponses"] as? [String: Any] {
-                approved = (responses["approved"] as? [String]) ?? []
-                rejected = (responses["rejected"] as? [String]) ?? []
-            }
-            hasOnboarding = (parsed["hasCompletedOnboarding"] as? Bool) ?? true
+            if let existing = try? Data(contentsOf: claudeJSONPath),
+               let parsed = try? JSONSerialization.jsonObject(with: existing) as? [String: Any] {
+                if let responses = parsed["customApiKeyResponses"] as? [String: Any] {
+                    approved = (responses["approved"] as? [String]) ?? []
+                    rejected = (responses["rejected"] as? [String]) ?? []
+                }
+                hasOnboarding = (parsed["hasCompletedOnboarding"] as? Bool) ?? true
 
-            // Preserve all unknown top-level keys from the existing file.
-            for (key, value) in parsed {
-                if key != "customApiKeyResponses" && key != "hasCompletedOnboarding" {
-                    unknownKeys[key] = value
+                // Preserve all unknown top-level keys from the existing file.
+                for (key, value) in parsed {
+                    if key != "customApiKeyResponses" && key != "hasCompletedOnboarding" {
+                        unknownKeys[key] = value
+                    }
                 }
             }
+
+            await afterReadForTesting?()
+
+            if !approved.contains(approvalToken) {
+                approved.append(approvalToken)
+            }
+
+            var payload: [String: Any] = unknownKeys
+            payload["customApiKeyResponses"] = [
+                "approved": approved,
+                "rejected": rejected,
+            ]
+            payload["hasCompletedOnboarding"] = hasOnboarding
+
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: claudeJSONPath, options: [.atomic])
         }
-
-        if !approved.contains(approvalToken) {
-            approved.append(approvalToken)
-        }
-
-        var payload: [String: Any] = unknownKeys
-        payload["customApiKeyResponses"] = [
-            "approved": approved,
-            "rejected": rejected,
-        ]
-        payload["hasCompletedOnboarding"] = hasOnboarding
-
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: claudeJSONPath, options: [.atomic])
 
         ensureHostMirrors(in: dir)
 
@@ -614,22 +641,31 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// Host mirror slots are always ensured, regardless of whether `.claude.json`
     /// already existed. This is critical for profiles created before mirror support
     /// was added; without this, they would never get their symlinked customizations.
+    ///
+    /// The exists-check and the write are one critical section inside the
+    /// `ClaudeConfigDirSerializer` lane for this directory, for the reason given
+    /// on `ensureAPIKeyDir`. Checking outside the lane would be a race of its
+    /// own shape rather than a smaller one: a probe that creates `.claude.json`
+    /// between the check and the write turns "the file did not exist" into an
+    /// overwrite of the file it just wrote.
     @discardableResult
-    public func ensureOAuthDir(forProfileID profileID: UUID) throws -> URL {
+    public func ensureOAuthDir(forProfileID profileID: UUID) async throws -> URL {
         let dir = configDirectory(forProfileID: profileID)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let claudeJSONPath = dir.appendingPathComponent(".claude.json")
 
-        // If `.claude.json` already exists, leave it untouched.
-        if FileManager.default.fileExists(atPath: claudeJSONPath.path) {
-            logger.debug("claude config dir exists at \(dir.path, privacy: .public) for oauth profile \(profileID, privacy: .public); skipping .claude.json")
-        } else {
-            let payload: [String: Any] = [
-                "hasCompletedOnboarding": true,
-            ]
-            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: claudeJSONPath, options: [.atomic])
+        try await ClaudeConfigDirSerializer.shared.run(configDir: dir.path) {
+            // If `.claude.json` already exists, leave it untouched.
+            if FileManager.default.fileExists(atPath: claudeJSONPath.path) {
+                logger.debug("claude config dir exists at \(dir.path, privacy: .public) for oauth profile \(profileID, privacy: .public); skipping .claude.json")
+            } else {
+                let payload: [String: Any] = [
+                    "hasCompletedOnboarding": true,
+                ]
+                let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: claudeJSONPath, options: [.atomic])
+            }
         }
 
         // Always ensure host mirrors, even if .claude.json already existed.
@@ -692,7 +728,7 @@ extension ClaudeProfileConfigDirManager {
     /// so every caller that had carefully injected a temp-dir manager still
     /// wrote into the real `~/tbd/profiles`. There is one way to ask, and it
     /// goes through the manager you hold.
-    func resolveConfigDir(for profile: ResolvedModelProfile?) -> String? {
+    func resolveConfigDir(for profile: ResolvedModelProfile?) async -> String? {
         guard let profile else { return nil }
 
         switch profile.kind {
@@ -702,7 +738,7 @@ extension ClaudeProfileConfigDirManager {
         // of a /login inside the dir), and that is the spawn builder's job.
         case .oauth, .oauthToken:
             do {
-                let url = try ensureOAuthDir(forProfileID: profile.profileID)
+                let url = try await ensureOAuthDir(forProfileID: profile.profileID)
                 return url.path
             } catch {
                 logger.warning("failed to ensure oauth config dir for profile \(profile.profileID, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -715,7 +751,7 @@ extension ClaudeProfileConfigDirManager {
                 return nil
             }
             do {
-                let url = try ensureAPIKeyDir(forProfileID: profile.profileID, apiKey: apiKey)
+                let url = try await ensureAPIKeyDir(forProfileID: profile.profileID, apiKey: apiKey)
                 return url.path
             } catch {
                 logger.warning("failed to ensure api-key config dir for profile \(profile.profileID, privacy: .public): \(error.localizedDescription, privacy: .public)")

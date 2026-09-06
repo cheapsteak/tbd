@@ -45,7 +45,7 @@ extension WorktreeLifecycle {
             }
         }
         let projectsRoot = claudeProjectsRoot(
-            profileConfigDirPath: configDirManager.resolveConfigDir(
+            profileConfigDirPath: await configDirManager.resolveConfigDir(
                 for: resolvedProfile)
         )
         guard TranscriptProjectDirSync.locateSessionTranscript(

@@ -171,18 +171,43 @@ enum ClaudeTrustSeeder {
             projectKeys.append(resolvedPath)
         }
 
-        await writer.seed(
-            projectKeys: projectKeys,
-            configDirURL: configDirURL,
-            claudeJSONPath: claudeJSONPath,
-            worktreePath: worktree.localPath)
+        // Through the shared per-directory lane, so a completions probe running
+        // against this same config directory cannot interleave its own
+        // `.claude.json` rewrite with this read-merge-write. The inner actor is
+        // kept: it is what makes THIS body atomic, and the lane is what orders it
+        // against a suspending peer.
+        //
+        // `seed` is non-throwing — it handles every read and write failure
+        // itself — so the only error `run` could surface is one the body raised,
+        // and there is none. The `try?` therefore discards nothing that can
+        // occur; it is here because `run` is a throwing generic, not because a
+        // failure is being ignored.
+        _ = try? await ClaudeConfigDirSerializer.shared.run(
+            configDir: configDirURL.path
+        ) { [writer = Self.writer, projectKeys] in
+            await writer.seed(
+                projectKeys: projectKeys,
+                configDirURL: configDirURL,
+                claudeJSONPath: claudeJSONPath,
+                worktreePath: worktree.localPath)
+        }
     }
 
-    /// The process-wide lane every seed's read-merge-write runs on.
+    /// The process-wide actor every seed's read-merge-write runs on.
     ///
-    /// One lane rather than one per config dir: the early return below collapses
-    /// writes to at most once per newly-seen path, so contention is negligible
-    /// and a lane table would be state to keep for no measurable gain.
+    /// **Two levels, each doing what the other cannot.** This actor is what makes
+    /// one seed body atomic: the body never suspends, so the actor's serial
+    /// execution covers its whole read-through-rename window.
+    /// `ClaudeConfigDirSerializer` is what orders that body against a
+    /// *suspending* peer on the same config directory — the completions probe,
+    /// which spawns a process and awaits it, and which an actor alone would
+    /// happily let a seed run inside.
+    ///
+    /// One actor rather than one per config directory: the early return below
+    /// collapses writes to at most once per newly-seen path, so contention here
+    /// is negligible and a table would be state kept for no measurable gain. The
+    /// per-directory keying that does matter lives in the serializer, where the
+    /// waits are long enough for an unrelated profile to notice them.
     private static let writer = TrustSeedWriter()
 
     /// Serializes the read → parse → merge → write critical section.

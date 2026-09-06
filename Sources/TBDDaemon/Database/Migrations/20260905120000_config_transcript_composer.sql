@@ -1,0 +1,13 @@
+-- Gate for the live transcript's message composer: the composer UI, the
+-- completions probe, attachment writes, and the attachments GC leg.
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" (0) — which is what made auto_hibernate_enabled impossible to
+-- graduate without a forcing UPDATE that also reset deliberate opt-ins.
+-- The shipped default lives in exactly one place:
+-- Config.transcriptComposerEnabledDefault.
+--
+-- A config column rather than an app UserDefaults key because the GC leg it
+-- gates lives in the daemon and cannot read the app's defaults.
+ALTER TABLE config ADD COLUMN transcript_composer_enabled INTEGER;

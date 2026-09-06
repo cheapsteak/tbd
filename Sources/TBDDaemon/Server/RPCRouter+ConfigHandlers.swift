@@ -458,6 +458,26 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the transcript-composer gate — the default-off soak switch for
+    /// the composer, its completions probe, its attachment writes and its GC
+    /// leg. This is how the soak is turned on: the flag is the feature's only
+    /// opt-in, and leaving it reachable only by hand-editing `~/tbd/state.db`
+    /// would put the sole way to enable it behind a database the project's own
+    /// rules say not to go into.
+    ///
+    /// It takes effect on the daemon already running: the composer's handlers
+    /// read the column per request rather than at boot.
+    func handleConfigSetTranscriptComposerEnabled(
+        _ paramsData: Data
+    ) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetTranscriptComposerEnabledParams.self, from: paramsData)
+        try await db.config.setTranscriptComposerEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the update mode — the daemon's only policy about updating
     /// itself, and the default-off gate on a feature that rebuilds and replaces
     /// the whole installation.

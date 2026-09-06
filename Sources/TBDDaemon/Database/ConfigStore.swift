@@ -146,6 +146,13 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// it through `Config.holderHibernationEnabledDefault`, never through
     /// `?? false`.
     var holder_hibernation_enabled: Bool?
+    /// The live-transcript message composer's gate. **Genuinely tri-state**,
+    /// same shape as `holder_row_reconcile_enabled`: the
+    /// `20260905120000_config_transcript_composer` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve it
+    /// through `Config.transcriptComposerEnabledDefault`, never through
+    /// `?? false`.
+    var transcript_composer_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -219,6 +226,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   auto-hibernation gate, a separate opt-in from `holderRowReconcileDefault`
     ///   because it kills a live agent process rather than reclaiming a
     ///   already-dead row.
+    /// - Parameter transcriptComposerDefault: same shape once more, for
+    ///   `transcript_composer_enabled` — the live-transcript composer's gate,
+    ///   which is one switch for the composer UI, its completions probe,
+    ///   attachment writes and the attachments GC leg together.
     /// - Parameter updateModeDefault: and truly, finally the last, for
     ///   `update_mode` — the only one of these that is not a Bool, so the
     ///   parameter proves both properties at once: a NULL row follows a changed
@@ -240,6 +251,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault,
         holderRowReconcileDefault: Bool = Config.holderRowReconcileEnabledDefault,
         holderHibernationDefault: Bool = Config.holderHibernationEnabledDefault,
+        transcriptComposerDefault: Bool = Config.transcriptComposerEnabledDefault,
         updateModeDefault: UpdateMode = Config.updateModeDefault
     ) -> Config {
         Config(
@@ -323,6 +335,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // And once more, for holder hibernation's gate — NOT `?? false`.
             holderHibernationEnabled:
                 holder_hibernation_enabled ?? holderHibernationDefault,
+            // And once more, for the composer's gate — NOT `?? false`.
+            transcriptComposerEnabled:
+                transcript_composer_enabled ?? transcriptComposerDefault,
             // Same reasoning once more, for the update mode — NOT `?? .off`.
             // The `flatMap` covers the second way a value can be absent: a
             // string no `UpdateMode` case matches is as unusable as NULL, so it
@@ -859,6 +874,21 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET holder_hibernation_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the transcript-composer gate (default OFF, soaking). It gates the
+    /// composer UI, the completions probe, attachment writes and the attachments
+    /// GC leg together — one switch, because a half-enabled composer would leave
+    /// the feature broken in one of its four states rather than absent.
+    /// The column is written on every call, because writing either value is the
+    /// explicit gesture that lifts it out of NULL forever after.
+    public func setTranscriptComposerEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET transcript_composer_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }
