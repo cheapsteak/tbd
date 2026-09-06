@@ -45,6 +45,10 @@ final class CompletionController {
     /// Memoized rows, keyed by the kind and query that produced them.
     private var memoKey: String?
     private var memoRows: [CommandRanker.Row] = []
+    /// How many times ranking actually ran (as opposed to reusing `memoRows`).
+    /// Not part of the public surface — exists so a test can pin the
+    /// memoization the doc comment above promises.
+    private(set) var rankCount = 0
 
     init(frecency: FrecencyStore) {
         self.frecency = frecency
@@ -64,8 +68,10 @@ final class CompletionController {
         hasInventory = true
         memoKey = nil
         // Re-evaluate against the text that is already there, so a menu showing
-        // its loading row swaps in real rows the moment the cache lands.
-        if let match {
+        // its loading row swaps in real rows the moment the cache lands. Skipped
+        // when the current token is suppressed: otherwise an inventory that
+        // lands after Escape reopens the menu with no keystroke asking for it.
+        if let match, suppressedToken != token(for: match) {
             apply(match: match)
         }
     }
@@ -81,11 +87,20 @@ final class CompletionController {
         let currentToken = token(for: found)
         if let suppressedToken, suppressedToken == currentToken {
             match = found
-            presentation = .closed
+            setClosed()
             return
         }
         suppressedToken = nil
         apply(match: found)
+    }
+
+    /// Closes the menu and clears its rows and selection together, so a view
+    /// that binds `rows` independently of `isOpen` never shows stale content
+    /// from before the close.
+    private func setClosed() {
+        presentation = .closed
+        rows = []
+        selectedIndex = nil
     }
 
     /// The identity of a query: its sigil kind and the text after it. Used both
@@ -106,6 +121,7 @@ final class CompletionController {
         let key = token(for: found)
         if memoKey != key {
             memoKey = key
+            rankCount += 1
             memoRows = CommandRanker.rank(
                 commands: found.kind == .command
                     ? commands
@@ -118,10 +134,15 @@ final class CompletionController {
         rows = memoRows
 
         if rows.isEmpty {
-            // One character that matches nothing is almost always mid-typing;
-            // saying "no commands match" there is noise.
-            presentation = found.query.count > 1 ? .noMatch : .rows
-            selectedIndex = nil
+            // One character that matches nothing is almost always mid-typing,
+            // so it stays closed rather than presenting "no commands match" —
+            // that copy is reserved for a query past one character.
+            if found.query.count > 1 {
+                presentation = .noMatch
+                selectedIndex = nil
+            } else {
+                setClosed()
+            }
             return
         }
         presentation = .rows
@@ -180,8 +201,7 @@ final class CompletionController {
         if suppressingCurrentToken, let match {
             suppressedToken = token(for: match)
         }
-        presentation = .closed
-        selectedIndex = nil
+        setClosed()
     }
 
     func recordAcceptance(_ row: CommandRanker.Row) {
@@ -191,8 +211,6 @@ final class CompletionController {
 
     private func dismiss() {
         match = nil
-        rows = []
-        selectedIndex = nil
-        presentation = .closed
+        setClosed()
     }
 }

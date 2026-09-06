@@ -114,6 +114,30 @@ struct CompletionControllerTests {
         }
     }
 
+    /// Escape while the inventory is still loading must stay closed even once
+    /// the inventory arrives — otherwise the menu reopens with no keystroke,
+    /// the trap the spec forbids.
+    @Test func escapeWhileLoadingStaysClosedWhenInventoryArrives() {
+        let suiteName = "CompletionControllerTests-\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let c = CompletionController(
+            frecency: FrecencyStore(defaults: UserDefaults(suiteName: suiteName)!))
+        c.update(text: "/comp", selectionLocation: 5, hasMarkedText: false)
+        #expect(c.presentation == .loading)
+        c.close(suppressingCurrentToken: true)
+        #expect(!c.isOpen)
+
+        c.adopt(inventory: TerminalCompletionsResult(
+            commands: [
+                CompletionCommand(name: "compact", description: "Compact"),
+                CompletionCommand(name: "config", description: "Settings"),
+                CompletionCommand(name: "clear", description: "Clear"),
+            ],
+            agents: [CompletionAgent(name: "Explore", description: "Search")],
+            freshness: .fresh, source: .probe))
+        #expect(!c.isOpen)
+    }
+
     /// No menu opens or updates while an input method has marked text.
     @Test func compositionKeepsItClosed() {
         run { c in
@@ -141,8 +165,25 @@ struct CompletionControllerTests {
         run { c in
             c.update(text: "/z", selectionLocation: 2, hasMarkedText: false)
             #expect(c.presentation != .noMatch)
+            #expect(!c.isOpen)
             c.update(text: "/zqq", selectionLocation: 4, hasMarkedText: false)
             #expect(c.presentation == .noMatch)
+        }
+    }
+
+    /// Rows are memoized by query so a repeated `update` call with an
+    /// unchanged token does not re-rank; a changed query ranks again.
+    @Test func repeatedUpdatesMemoizeByQuery() {
+        run { c in
+            c.update(text: "/comp", selectionLocation: 5, hasMarkedText: false)
+            let afterFirst = c.rankCount
+            #expect(afterFirst > 0)
+
+            c.update(text: "/comp", selectionLocation: 5, hasMarkedText: false)
+            #expect(c.rankCount == afterFirst, "an unchanged token must not re-rank")
+
+            c.update(text: "/config", selectionLocation: 7, hasMarkedText: false)
+            #expect(c.rankCount == afterFirst + 1, "a changed query must rank again")
         }
     }
 
