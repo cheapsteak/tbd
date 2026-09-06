@@ -62,6 +62,13 @@ struct TableTranscriptPaneView: View {
     /// `@State` reference-holder shape as `presentationMemo` above.
     @State private var linkCache = TranscriptLinkResolverCache()
 
+    /// The transcript table this pane registered as its focus target, so
+    /// `onDisappear` can withdraw exactly the one it installed. A reference box
+    /// for the same reason `ComposerViewHandle` is one: it is written from
+    /// inside `makeNSView`, where a `@State` write is undefined behaviour, and
+    /// nothing renders from it.
+    @State private var registeredTable = RegisteredTranscriptTable()
+
     /// Absolute worktree root for resolving relative paths in transcript text.
     /// Empty when the worktree row has not loaded — or when it is remote, which
     /// `LocalWorktree` rejects — which makes relative paths simply not resolve.
@@ -138,7 +145,12 @@ struct TableTranscriptPaneView: View {
         .onChange(of: currentSessionID) { _, _ in
             activityGroupExpansion.removeAll()
         }
-        .onDisappear { clearWatchdogContext() }
+        .onDisappear {
+            clearWatchdogContext()
+            if let table = registeredTable.view {
+                appState.unregisterTranscriptView(table, for: terminalID)
+            }
+        }
     }
 
     // MARK: - Hang watchdog context
@@ -242,7 +254,8 @@ struct TableTranscriptPaneView: View {
                     activityToggleToken: activityToggleToken,
                     linkRoot: linkRoot,
                     nodesProvider: { timedRenderNodes(presentation.nodes) },
-                    onTableReady: { [appState, terminalID] table in
+                    onTableReady: { [appState, terminalID, registeredTable] table in
+                        registeredTable.view = table
                         appState.registerTranscriptView(table, for: terminalID)
                     }
                 )
@@ -624,4 +637,15 @@ private struct TaskKey: Equatable {
 private struct PaneIdentity: Hashable {
     let terminalID: UUID
     let sessionID: String?
+}
+
+/// A weak handle on the transcript table one pane registered.
+///
+/// Weak because the registry's own reference is weak and this box must not be
+/// the thing that keeps a torn-down table alive; it exists only so
+/// `onDisappear` can name the view it should withdraw rather than clearing the
+/// key and evicting a replacement that has already registered under it.
+@MainActor
+final class RegisteredTranscriptTable {
+    weak var view: NSTableView?
 }
