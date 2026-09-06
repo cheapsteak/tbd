@@ -180,4 +180,74 @@ struct TerminalCompletionsHandlerTests {
             environment["CLAUDE_CODE_OAUTH_TOKEN"]
                 == daemonEnvironment["CLAUDE_CODE_OAUTH_TOKEN"])
     }
+
+    /// A profile's ROUTING env decides *which* Claude answers, so the probe must
+    /// carry it or a Bedrock session gets probed in first-party mode and answers
+    /// with a command list it does not have. The keys come from the spawn
+    /// builder's own `routingEnv`, so the probe and the session cannot drift.
+    ///
+    /// The same helper is the reason no credential can ride along: it returns
+    /// non-secret keys only, and the spawn builder assigns the secret itself.
+    @Test func theProbeCarriesTheProfilesRoutingEnv() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setTranscriptComposerEnabled(true)
+
+        let profile = try await db.modelProfiles.create(
+            name: "bedrock", kind: .bedrock, model: "acme.claude-model",
+            awsRegion: "us-west-2", awsProfile: "acme-prod")
+        let terminal = try await makeTerminal(db, profileID: profile.id)
+
+        let manager = makeIsolatedConfigDirManager(tag: "completions-routing")
+        let recorder = EnvironmentRecorder()
+        let router = makeRouter(
+            db: db, configDirManager: manager,
+            probe: { _, _, environment in
+                await recorder.record(environment)
+                return Self.stubOutcome
+            })
+        let data = try JSONEncoder().encode(
+            TerminalCompletionsParams(terminalID: terminal.id))
+
+        let response = try await router.handleTerminalCompletions(data)
+        #expect(response.success)
+
+        let environment = try #require(await recorder.environment)
+        #expect(environment["CLAUDE_CODE_USE_BEDROCK"] == "1")
+        #expect(environment["AWS_REGION"] == "us-west-2")
+        #expect(environment["AWS_PROFILE"] == "acme-prod")
+        #expect(environment["ANTHROPIC_MODEL"] == "acme.claude-model")
+        // Bedrock keeps no isolated config dir, so probe and scan both read the
+        // ambient store — the one its session runs against.
+        #expect(environment["CLAUDE_CONFIG_DIR"] == manager.ambientConfigDirectory.path)
+        // And still no credential: `routingEnv` returns none, and the handler
+        // adds none. Compared against the daemon's own environment so an
+        // exported key on the developer's box cannot redden the run spuriously.
+        let daemonEnvironment = ProcessInfo.processInfo.environment
+        #expect(environment["ANTHROPIC_API_KEY"] == daemonEnvironment["ANTHROPIC_API_KEY"])
+        #expect(
+            environment["CLAUDE_CODE_OAUTH_TOKEN"]
+                == daemonEnvironment["CLAUDE_CODE_OAUTH_TOKEN"])
+    }
+
+    /// The gate is read PER REQUEST, not cached at router construction: one
+    /// router, refused before the column is flipped and answering after. A
+    /// daemon lives for days, so a toggle has to take effect without a restart.
+    @Test func theFlagIsReadPerRequest() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let terminal = try await makeTerminal(db)
+        let router = makeRouter(db: db)
+        let data = try JSONEncoder().encode(
+            TerminalCompletionsParams(terminalID: terminal.id))
+
+        let refused = try await router.handleTerminalCompletions(data)
+        #expect(!refused.success)
+
+        try await db.config.setTranscriptComposerEnabled(true)
+
+        let served = try await router.handleTerminalCompletions(data)
+        #expect(served.success)
+        let result = try JSONDecoder().decode(
+            TerminalCompletionsResult.self, from: Data((served.result ?? "{}").utf8))
+        #expect(result.commands.map(\.name) == ["compact"])
+    }
 }

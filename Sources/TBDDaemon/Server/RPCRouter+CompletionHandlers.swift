@@ -24,16 +24,19 @@ extension RPCRouter {
     /// environment is the base (the tmux server the session runs under inherited
     /// it from this process), then the free-form overrides in the builder's own
     /// precedence — global < repo < profile, `EnvOverrideResolver.merge` — and
-    /// then `CLAUDE_CONFIG_DIR` on top, because the builder layers its routing
-    /// env over the free-form one so a stray override cannot redirect a session.
+    /// then the profile's routing env on top, because the builder layers its
+    /// routing over the free-form one so a stray override cannot redirect a
+    /// session. The routing half comes from `ClaudeSpawnCommandBuilder.routingEnv`
+    /// rather than being restated here, so a bedrock or custom-base-URL profile
+    /// is probed through the endpoint and account store its session uses.
     ///
-    /// **A probe needs no credentials and adds none of its own.** The builder's
-    /// remaining keys are deliberately not reproduced here: an API key, an OAuth
-    /// token, a base URL or a model choice change the auth path without changing
-    /// the command list, and injecting a key into an OAuth profile's environment
-    /// was measured to *lose* three subscription-gated commands. A profile whose
-    /// own `envOverrides` carry a key or an endpoint keeps them, because that is
-    /// the environment its session runs in.
+    /// **A probe needs no credentials and adds none of its own.** `routingEnv`
+    /// returns non-secret keys only; the builder's `ANTHROPIC_API_KEY` and
+    /// `CLAUDE_CODE_OAUTH_TOKEN` are deliberately not reproduced. They change
+    /// the auth path without changing the command list, and injecting a key into
+    /// an OAuth profile's environment was measured to *lose* three
+    /// subscription-gated commands. A profile whose own `envOverrides` carry a
+    /// key keeps it, because that is the environment its session runs in.
     func handleTerminalCompletions(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalCompletionsParams.self, from: paramsData)
 
@@ -98,7 +101,26 @@ extension RPCRouter {
                 repo: repo?.envOverrides,
                 profile: profile?.envOverrides)
         ) { _, override in override }
+        // Pin the probe to the very directory the scan leg reads, so the two
+        // halves of the inventory can never disagree about which store they
+        // describe. A bedrock profile keeps no isolated dir, so this is the
+        // ambient one for it — the same store its session ends up using.
         environment["CLAUDE_CONFIG_DIR"] = configDir
+        // Then the profile's ROUTING env on top, from the spawn builder's own
+        // helper: a bedrock or custom-base-URL profile must be probed through
+        // the endpoint its session uses, or the answer is a first-party command
+        // list the session does not have. `routingEnv` returns non-secret keys
+        // only, and the layering matches the spawn path — routing over
+        // free-form overrides, so a stray override cannot redirect the probe.
+        environment.merge(
+            ClaudeSpawnCommandBuilder.routingEnv(
+                profileKind: profile?.kind,
+                profileBaseURL: profile?.baseURL,
+                profileModel: profile?.model,
+                profileAwsRegion: profile?.awsRegion,
+                profileAwsProfile: profile?.awsProfile,
+                profileConfigDir: configDir)
+        ) { _, routing in routing }
 
         let result = await completionInventory.inventory(
             for: CompletionInventoryService.Request(
