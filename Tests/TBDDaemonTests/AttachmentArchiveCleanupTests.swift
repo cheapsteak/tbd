@@ -16,9 +16,11 @@ extension TBDHomeSerialized {
 struct AttachmentArchiveCleanupTests {
     private let fm = FileManager.default
 
+    /// The fake home goes under the run's fenced scratch root, not
+    /// `fm.temporaryDirectory` — `scripts/test.sh` reclaims the former even when
+    /// the test process is killed, and does not fence the latter at all.
     private func isolateTBDHome() -> (URL, () -> Void) {
-        let home = fm.temporaryDirectory
-            .appendingPathComponent("tbd-att-\(UUID().uuidString.prefix(8))")
+        let home = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdatt"))
         try? fm.createDirectory(at: home, withIntermediateDirectories: true)
         let prior = setTBDHome(home.path)
         return (home, {
