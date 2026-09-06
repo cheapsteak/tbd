@@ -76,6 +76,19 @@ struct TerminalSendPartsShapeTests {
         #expect(message.contains("absolute"))
     }
 
+    /// An image path with an embedded newline would split the single quoted
+    /// paste that makes an image attach into more than one line, so it is
+    /// rejected here rather than reaching actuation.
+    @Test func anImagePathContainingANewlineIsMalformed() {
+        let shape = RPCRouter.validateSendShape(TerminalSendParams(
+            terminalID: terminalID, submit: true, parts: [.imagePath("/tmp/a\n.png")]))
+        guard case .malformed(let message) = shape else {
+            Issue.record("expected malformed, got \(shape)")
+            return
+        }
+        #expect(message.contains("newline"))
+    }
+
     /// `--verify` re-reads a pane for one delivered payload; a multi-part send
     /// has no single payload to look for. Refused rather than silently
     /// downgraded, per the never-answer-a-request-for-evidence-with-silence rule.

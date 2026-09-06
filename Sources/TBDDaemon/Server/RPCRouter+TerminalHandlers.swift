@@ -3081,13 +3081,12 @@ extension RPCRouter {
         // `beginActuation` for the reason the first refusal line above gives:
         // a well-formed act the daemon declined gets a row and a refusal
         // outcome, unlike a malformed payload that names no act.
-
-        // ─── What the holder arm cannot carry yet ───
-        //
-        // Placed ahead of the holder branch so `performHolderSend` sees only
-        // payloads it can deliver, and so nothing inside that arm changes: PR
-        // #816 owns it.
         if terminal.transport == .holder {
+            // ─── What the holder arm cannot carry yet ───
+            //
+            // Computed ahead of the call to `performHolderSend` below so that
+            // function sees only payloads it can deliver, and so nothing
+            // inside that arm changes: PR #816 owns it.
             let compositeCause: String?
             switch payload {
             case .parts(let parts, _) where parts.count > 1:
@@ -3100,7 +3099,7 @@ extension RPCRouter {
                 compositeCause = "a message containing a newline"
             case .text(let body, _, _) where body.contains("\n"):
                 compositeCause = "a message containing a newline"
-            default:
+            case .parts, .text, .keys:
                 compositeCause = nil
             }
             if let compositeCause {
@@ -3109,9 +3108,6 @@ extension RPCRouter {
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
-        }
-
-        if terminal.transport == .holder {
             return await performHolderSend(
                 payload: payload, terminal: terminal, actuationID: actuationID,
                 actor: actor, envelope: envelope)
@@ -3491,12 +3487,18 @@ extension RPCRouter {
     /// actuation row, the same dispatch envelope, the same per-terminal
     /// serializer lane (this runs inside it). What changes is the destination —
     /// `HolderInjectionCourier` routes by whether a viewer owns the pty — and
-    /// two things this transport cannot do yet, each refused by name rather
+    /// three things this transport cannot do yet, each refused by name rather
     /// than by "the holder transport", so a caller learns which capability is
     /// missing:
     ///
     /// - `--verify` has no delivery observation here.
     /// - `--keys` has no named-key → bytes mapping here (tmux owns that table).
+    /// - A composite send — more than one part, or a payload containing a
+    ///   newline — has no framing here at all; it is refused ahead of this
+    ///   function, by the composite gate in `performTerminalSend` (see "What
+    ///   the holder arm cannot carry yet" there). The `.parts` case below
+    ///   still turns away a multi-part payload defensively, but that gate
+    ///   means it should never see one.
     ///
     /// A daemon with no courier has no input path at all, and says so.
     ///
@@ -3600,9 +3602,10 @@ extension RPCRouter {
     }
 
     /// Deliver one body of text to a holder-backed session: the same envelope
-    /// handling, submit handling and courier call the `.text` arm of
-    /// `performHolderSend` uses, factored out so the single-part `.parts` arm
-    /// can reuse it verbatim rather than duplicating it.
+    /// handling, submit handling and courier call that `performHolderSend`
+    /// needs. Its `.text` arm and its single-part `.parts` arm converge on one
+    /// shared call to this function below their switch, rather than each
+    /// calling it separately — so there is exactly one call site, not two.
     ///
     /// `envelopeEligible` is a second, independent gate on the envelope,
     /// ahead of `envelope`'s disposition and `carriesDispatchEnvelope`: a lone
@@ -3611,7 +3614,7 @@ extension RPCRouter {
     private func deliverHolderText(
         _ text: String, submit: Bool, terminal: Terminal, actuationID: String,
         actor: ActuationActor?, envelope: DispatchEnvelopeDisposition,
-        envelopeEligible: Bool = true, courier: HolderInjectionCourier
+        envelopeEligible: Bool, courier: HolderInjectionCourier
     ) async -> RPCResponse {
         // Asked BEFORE anything is composed, because the answer decides the
         // bytes. Two sources, in order: the test seam if one is installed, then
@@ -4041,6 +4044,12 @@ extension RPCRouter {
                         "terminal.send image parts must name an absolute path; got \"\(path)\" "
                         + "— a relative path would resolve against whatever directory the "
                         + "receiving session happens to be in")
+                }
+                guard !path.contains("\n") else {
+                    return .malformed(
+                        "terminal.send image parts must not contain a newline; got \"\(path)\" "
+                        + "— an image attaches only when the whole paste is one quoted path, "
+                        + "and a newline inside it would split that one line into more than one")
                 }
             }
             if verify {

@@ -42,18 +42,29 @@ struct HolderCompositeSendRefusalTests {
 
     /// A single-part, single-line message is exactly what the holder arm can
     /// carry today, and must still go through. Without this the suite could be
-    /// green on a refusal that rejects every holder send.
+    /// green on a refusal that rejects every holder send. Wired with the same
+    /// `holderDeliveryRecorder` seam the `.parts` tests below use, so this
+    /// asserts the exact bytes delivered rather than only "got past the gate".
     @Test func aSingleLineTextSendToAHolderRowIsNotRefused() async throws {
-        let harness = try await SendHarness.make(transport: .holder)
+        let recorder = HolderWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
         let response = try await harness.send(TerminalSendParams(
             terminalID: harness.terminal.id, text: "hello", submit: true),
             actor: .app)
-        // A test daemon wires no injection courier, so this reaches the holder
-        // arm's own "no input path" refusal rather than succeeding — which is
-        // the point: it got PAST this rail.
+
         let error = response.error ?? ""
         #expect(!error.contains("more than one part"))
         #expect(!error.contains("newline"))
+        #expect(response.success, "error was: \(error)")
+        // `actor: .app` against a `.claude` row carries the dispatch envelope —
+        // mirroring the exact assertion `aSinglePartTextSendToAHolderRowIsNotRefused`
+        // makes for its single text part, since both paths converge on the same
+        // `deliverHolderText` call.
+        #expect(recorder.writes.count == 1)
+        let body = String(bytes: try #require(recorder.writes.first), encoding: .utf8) ?? ""
+        #expect(body.hasPrefix("<tbd-dispatch"))
+        #expect(body.hasSuffix("\nhello\r"))
     }
 
     /// A single-part `.parts` payload is exactly the remainder that reaches
