@@ -84,6 +84,18 @@ extension AppState {
     /// deliberately not consulted here either: the daemon has its own
     /// `wakesInFlight`, and it answers a racing wake with `woken: false`, which
     /// is exactly the honest reply for a composer — the prompt went nowhere.
+    ///
+    /// **Returns before the terminal refresh, on purpose.** The refresh is a
+    /// second daemon round trip that buys this method nothing the reply
+    /// itself needs — the caller's next move is `awaitSessionStart`, scoped to
+    /// the incarnation this method already has in hand. Awaiting the refresh
+    /// first would open a window between minting that incarnation and the
+    /// caller registering its waiter: a `SessionStart` landing in that window
+    /// would reach `noteSessionStart` before any waiter existed to release,
+    /// stalling the send to its timeout. (`noteSessionStart`'s latch closes
+    /// that gap too, independently — this is the other half of the fix.)
+    /// Firing the refresh as its own unstructured task keeps it happening
+    /// without making the caller wait for it.
     func wakeTerminalForComposer(
         terminalID: UUID, worktreeID: UUID, prompt: String
     ) async -> ComposerWakeReply {
@@ -91,7 +103,9 @@ extension AppState {
             let size = mainAreaTerminalSize()
             let result = try await composerWakeSender(
                 terminalID, size.cols, size.rows, prompt)
-            await refreshTerminals(worktreeID: worktreeID)
+            Task { @MainActor [weak self] in
+                await self?.refreshTerminals(worktreeID: worktreeID)
+            }
             return result.woken
                 ? .woken(incarnationID: result.sessionIncarnationID)
                 : .noOp

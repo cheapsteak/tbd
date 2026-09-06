@@ -821,6 +821,16 @@ final class AppState {
     /// terminal. `@ObservationIgnored` for the same reason as the two above:
     /// nothing renders from it.
     @ObservationIgnored var sessionStartWaiters: [UUID: [SessionStartWaiter]] = [:]
+    /// The most recent incarnation each terminal's `SessionStart` reported,
+    /// latched by `noteSessionStart` independent of whether anyone was waiting
+    /// at the time. Closes the gap between `wakeTerminalForComposer` minting an
+    /// incarnation and the caller registering an `awaitSessionStart` waiter for
+    /// it: a `SessionStart` that lands in that window would otherwise reach
+    /// `noteSessionStart` with no waiter to release and be dropped on the
+    /// floor, stalling the send to its timeout. `awaitSessionStart` checks this
+    /// latch before registering, so a already-arrived start is a same-frame
+    /// `true` rather than a wait.
+    @ObservationIgnored var lastStartedIncarnation: [UUID: UUID] = [:]
     /// Visual screenshots taken at suspend-click time, shown while daemon works.
     /// Keyed by terminal UUID. Cleared when suspend completes.
     var suspendingSnapshots: [UUID: NSImage] = [:]
