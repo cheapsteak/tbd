@@ -2881,15 +2881,13 @@ extension RPCRouter {
             + "input path wired for it. Nothing was typed and its session is unchanged."
     }
 
-    /// The refusal `terminal.send` returns for a validated `.parts` payload
-    /// today. `validateSendShape` accepts parts (Task 2 of the composer send
-    /// path), but neither delivery arm — this one or the holder arm — yet
-    /// composes the per-part pastes; that lands with the case that actually
-    /// walks the list (Task 3). Refused by name, on both transports, so a
-    /// caller learns the payload was well-formed and the daemon simply cannot
-    /// act on it yet, rather than either crashing on an unhandled case or
-    /// silently dropping to a `default:` that would also swallow a real future
-    /// bug.
+    /// The refusal a validated `.parts` payload gets on the **holder**
+    /// transport today. The tmux arm delivers parts; the holder arm, which
+    /// writes to a pty rather than pasting into a pane, does not compose the
+    /// per-part writes yet. Refused by name so a caller learns the payload was
+    /// well-formed and this transport simply cannot act on it yet, rather than
+    /// either crashing on an unhandled case or silently dropping to a
+    /// `default:` that would also swallow a real future bug.
     static func partsNotYetDeliverableRefusal(terminalID: UUID) -> String {
         "terminal.send parts was refused: terminal \(terminalID) validated a well-formed "
             + "parts payload, but delivery for parts is not implemented yet — nothing was "
@@ -3313,15 +3311,57 @@ extension RPCRouter {
                     )
                 }
 
-            case .parts:
-                // Shape-valid, not yet deliverable on this transport — see
-                // `partsNotYetDeliverableRefusal`. Refuse the same way every
-                // other well-formed-but-declined act in this function does:
-                // close the row that already exists rather than fall through
-                // to `.dispatched`.
-                let message = Self.partsNotYetDeliverableRefusal(terminalID: terminal.id)
-                await finishActuation(actuationID, .refused(.notEligible), error: message)
-                return RPCResponse(error: message)
+            case .parts(let parts, let submit):
+                // Each part is its own explicit bracketed paste, in order, and
+                // then ONE Enter. The split is what makes an image attach: Claude
+                // Code turns a paste into an image only when the whole paste is
+                // one quoted path, so an image concatenated with the words around
+                // it silently becomes literal text.
+                //
+                // The envelope, when it applies, rides on the FIRST text part —
+                // one envelope for one message. Prepending it to every part would
+                // put a `<tbd-dispatch/>` line in the middle of a sentence.
+                var envelopePending = envelope == .attached
+                    && Self.carriesDispatchEnvelope(terminal)
+                for part in parts {
+                    let body: String
+                    switch part {
+                    case .text(let value):
+                        // Skipped entirely, not pasted as an empty buffer — the
+                        // same reading the single-text arm gives an empty payload.
+                        guard !value.isEmpty else { continue }
+                        if envelopePending {
+                            body = Self.dispatchEnvelope(
+                                id: actuationID, from: (actor ?? .anonymous).dispatchLabel
+                            ) + "\n" + value
+                            envelopePending = false
+                        } else {
+                            body = value
+                        }
+                    case .imagePath(let path):
+                        // NEVER prefixed, whatever the envelope disposition: an
+                        // envelope line in front of the path is exactly the
+                        // "inside a sentence" case that measured as literal text.
+                        body = Self.quotedImagePath(path)
+                    }
+                    try await tmux.pasteText(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        bytes: Data(body.utf8)
+                    )
+                }
+
+                if submit {
+                    try await tmux.sendKey(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        key: "Enter"
+                    )
+                }
+
+                // `deliveredPayload` stays nil: it feeds the delivery verifier,
+                // which a parts payload cannot arm (`validateSendShape` refuses
+                // `--verify` with parts), so there is nothing to hand it.
             }
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
@@ -3423,10 +3463,10 @@ extension RPCRouter {
             return await refuseHolderSend(
                 actuationID, Self.holderKeysRefusal(terminalID: terminal.id))
         case .parts:
-            // Same "shape-valid, not yet deliverable" refusal as the tmux arm
-            // — see `partsNotYetDeliverableRefusal`. Not a holder-specific
-            // capability gap like the two refusals above: no transport
-            // composes the per-part pastes yet.
+            // Shape-valid, not yet deliverable on THIS transport — see
+            // `partsNotYetDeliverableRefusal`. The tmux arm walks the list and
+            // pastes each part; this arm writes to a pty and has no equivalent
+            // yet, so the gap is holder-specific like the two refusals above.
             return await refuseHolderSend(
                 actuationID, Self.partsNotYetDeliverableRefusal(terminalID: terminal.id))
         }
@@ -3697,6 +3737,18 @@ extension RPCRouter {
         case .claude, .codex: return true
         case .shell: return false
         }
+    }
+
+    /// The bytes one image part is pasted as: the bare quoted absolute path and
+    /// nothing else.
+    ///
+    /// Single quotes, with an embedded quote escaped the POSIX way. Measured on
+    /// Claude Code 2.1.261: a paste whose ENTIRE content is one quoted path with
+    /// an image extension becomes a base64 image block in the user message, while
+    /// the same path inside a sentence stays literal text. So the quoting is not
+    /// decoration and the part must not be concatenated with its neighbours.
+    static func quotedImagePath(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
     }
 
     /// Whether an adapter exists that can actually observe a delivery to this
