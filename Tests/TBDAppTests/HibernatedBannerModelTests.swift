@@ -71,6 +71,16 @@ struct HibernatedBannerModelTests {
         ))
     }
 
+    /// Session-exit park → names the process that left, not a TBD gesture.
+    @Test func exitedParkMessage() {
+        let banner = HibernatedBannerModel.banner(
+            for: terminal(hibernatedAt: Date(), hibernateReason: .exited)
+        )
+        #expect(banner == .hibernatedOverlay(
+            message: "Claude exited — click anywhere in the pane to resume"
+        ))
+    }
+
     /// Legacy pre-v46 park with no persisted reason → reads like `.auto`.
     @Test func nilReasonParkMessage() {
         let banner = HibernatedBannerModel.banner(

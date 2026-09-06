@@ -12,6 +12,9 @@ struct HibernateReasonExitedTests {
     @Test func theRawValueIsStableOnTheWire() throws {
         #expect(HibernateReason.exited.rawValue == "exited")
         let encoded = try JSONEncoder().encode(HibernateReason.exited)
+        // `String(bytes:encoding:)` on purpose: SwiftLint's
+        // `optional_data_string_conversion` rejects `String(decoding:as:)`, whose
+        // lossy replacement of invalid bytes would let a broken encoding pass.
         #expect(String(bytes: encoded, encoding: .utf8) == "\"exited\"")
     }
 

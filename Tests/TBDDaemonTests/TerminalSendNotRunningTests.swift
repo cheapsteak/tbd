@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TestSupport
 
 /// The refusal the composer and the CLI both need: a text send to a terminal
 /// whose Claude process is gone must not be pasted into the shell that is
@@ -28,10 +29,12 @@ struct TerminalSendNotRunningTests {
     }
 
     /// A throwaway actuation log per fixture. `ActuationLog` takes a PATH, not a
-    /// database — the record is an append-only JSONL file.
+    /// database — the record is an append-only JSONL file. It lands under the
+    /// run's fenced scratch dir, which `scripts/test.sh` removes even when the
+    /// test process is killed; a per-test `temporaryDirectory` would leak.
     private static func scratchLogPath() -> String {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-plan-\(UUID().uuidString)", isDirectory: true)
+        let directory = URL(
+            fileURLWithPath: fencedScratchRoot(prefix: "tbd-sendnotrunning"), isDirectory: true)
         try? FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true)
         return directory.appendingPathComponent("actuations.jsonl").path

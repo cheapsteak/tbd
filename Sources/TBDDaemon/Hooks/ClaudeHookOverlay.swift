@@ -131,10 +131,20 @@ public enum ClaudeHookOverlay {
     static let waitingForUserCommand =
         #"tbd terminal-activity waiting_for_user 2>/dev/null || true"#
 
-    /// Clears any standing delegation claim when a session ends. A session
-    /// that exits while background agents are live leaves a final
-    /// `turn_duration` record still reporting them, and no later turn ever
-    /// corrects it — so without this the claim would stand forever.
+    /// Reports the end of a session, which lands two facts.
+    ///
+    /// It clears any standing delegation claim: a session that exits while
+    /// background agents are live leaves a final `turn_duration` record still
+    /// reporting them, and no later turn ever corrects it, so without this the
+    /// claim would stand forever.
+    ///
+    /// And, when the reason means the process itself is leaving, it stamps the
+    /// terminal as parked with `HibernateReason.exited` — the machine-readable
+    /// "Claude is not running here" a send refuses on, rather than pasting a
+    /// message into the shell sitting in the pane. The stamp is a fast path, not
+    /// the guarantee: the send path also reads the pane's foreground process
+    /// group, so a lost hook costs a slower answer and a stale claim, never a
+    /// message run as a shell command.
     static let sessionEndCommand =
         #"tbd session-end 2>/dev/null || true"#
 
@@ -145,8 +155,9 @@ public enum ClaudeHookOverlay {
     /// actually bounds the hook is Claude Code's ~1.5-second SessionEnd
     /// shutdown budget, which cuts the callback off first either way; this
     /// value stays above it so a healthy RPC has the whole budget to land the
-    /// clear. Losing the clear to either bound costs only a stale claim on a
-    /// terminal whose session is gone.
+    /// clear. Losing the hook to either bound costs a stale claim and an
+    /// unstamped row on a terminal whose session is gone; the send path's
+    /// foreground-process rail still refuses the send.
     static let sessionEndTimeoutSeconds = 2
 
     /// The extended regex the prefilter greps a Bash hook payload for.
