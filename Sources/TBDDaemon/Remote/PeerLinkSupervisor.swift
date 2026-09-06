@@ -291,6 +291,18 @@ public actor PeerLinkSupervisor: PeerLinkSending {
     /// already finds a dead stream and replaces it. No wake handler is needed or
     /// available (the daemon has no AppKit run loop).
     private let now: @Sendable () -> Date
+    /// The random component of one reconnect delay, given the base the
+    /// exponential produced. Two providers restarted by the same event must not
+    /// come back in lockstep, which is all the randomness is for — so it is a
+    /// seam for the same reason `clock` and `now` are: it is the only part of
+    /// `superviseForever`'s arithmetic that is not a function of its inputs,
+    /// and a test that has to state the delay exactly has to be able to pin it.
+    /// Being handed the base is the other half — it is the only point at which
+    /// the supervisor's own backoff arithmetic is observable from outside, and
+    /// inferring it from how far apart two children were spawned measures the
+    /// test runner instead (see `reconnectBackoffGrowsAcrossRepeatedChildExit`).
+    /// Defaulted to the production ±20%, so no call site changes.
+    private let jitter: @Sendable (TimeInterval) -> TimeInterval
 
     /// Grace between SIGTERM and SIGKILL, and between observing the child's exit
     /// and finishing the line stream (so late bytes still get applied).
@@ -324,6 +336,9 @@ public actor PeerLinkSupervisor: PeerLinkSending {
                 backoffCap: TimeInterval = 60,
                 healthyResetUptime: TimeInterval = 300,
                 writeStallLimit: TimeInterval = 1,
+                jitter: @Sendable @escaping (TimeInterval) -> TimeInterval = {
+                    $0 * Double.random(in: -0.2...0.2)
+                },
                 clock: any Clock<Duration> = ContinuousClock(),
                 now: @Sendable @escaping () -> Date = { Date() }) {
         self.config = config
@@ -336,6 +351,7 @@ public actor PeerLinkSupervisor: PeerLinkSending {
         self.backoffCap = backoffCap
         self.healthyResetUptime = healthyResetUptime
         self.writeStallLimit = writeStallLimit
+        self.jitter = jitter
         self.clock = clock
         self.now = now
         self.connectionOpenedAt = now()
@@ -379,8 +395,7 @@ public actor PeerLinkSupervisor: PeerLinkSending {
             if now().timeIntervalSince(started) > healthyResetUptime { attempt = 0 }
             attempt += 1
             let base = min(backoffCap, pow(2.0, Double(attempt - 1)))
-            let jitter = base * Double.random(in: -0.2...0.2)
-            let delay = max(0.1, base + jitter)
+            let delay = max(0.1, base + self.jitter(base))
             peerBridgeLogger.debug(
                 "messages \(self.config.name, privacy: .public) ended; reconnect in \(delay, privacy: .public)s")
             try? await clock.sleep(for: .seconds(delay))

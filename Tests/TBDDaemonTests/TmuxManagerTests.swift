@@ -740,3 +740,97 @@ final class LockedCommandRecorder: @unchecked Sendable {
         #expect(error.localizedDescription.contains("CLAUDE_CODE_OAUTH_TOKEN=<redacted>"))
     }
 }
+
+/// Repairing an existing server's global environment.
+///
+/// A tmux server bakes its spawn environment into its global environment and
+/// hands that to every window it creates afterwards, and servers outlive daemon
+/// restarts — so scrubbing the daemon's own environment fixes new servers only.
+/// A server created by a daemon that carried its launcher's identity has to be
+/// repaired where it stands, which is what these two shapes do.
+@Suite("tmux server environment repair")
+struct TmuxServerEnvironmentRepairTests {
+    @Test func serverEnvironmentRepairUnsetsOnlyTBDAndCodexMarkersThenListsTheGlobals() {
+        let names = SpawnBaseEnvironment.serverRepairableMarkers.sorted()
+        var expected = ["-L", "tbd-a1b2c3d4"]
+        for (index, name) in names.enumerated() {
+            if index > 0 { expected.append(";") }
+            expected += ["set-environment", "-gu", name]
+        }
+        // The unnamed `show-environment -g` lists every global and never fails,
+        // so the same invocation's stdout answers the by-value config-dir
+        // question without a second client call.
+        expected += [";", "show-environment", "-g"]
+
+        let args = TmuxManager.serverEnvironmentRepairCommand(server: "tbd-a1b2c3d4")
+
+        #expect(args == expected)
+        // A pane that predates the repair holds Claude Code's markers in its own
+        // environment and reads them as ambient only while the server's global
+        // copy is there too, so removing the global copy would make a later
+        // `claude` in that pane read itself as a nested child. `TMUX` and
+        // `TMUX_PANE` are the server's own, set for every pane it creates.
+        for spared in SpawnBaseEnvironment.claudeCodeSessionMarkers
+            .union(SpawnBaseEnvironment.tmuxPaneMarkers) {
+            #expect(args.contains(spared) == false, "\(spared) must not be unset in place")
+        }
+        #expect(args.contains("TBD_TERMINAL_INCARNATION_ID"))
+        #expect(args.contains("CODEX_THREAD_ID"))
+    }
+
+    @Test func configDirRepairIsNeededOnlyForATBDMintedValue() {
+        let installation = ["TBD_HOME": "/tmp/example-tbd-home"]
+
+        // Under this installation's profiles root: minted by TBD for one
+        // profile-bound spawn, so no window created from now on may inherit it.
+        #expect(TmuxManager.configDirRepairNeeded(
+            showEnvironmentOutput: """
+                PATH=/usr/bin
+                CLAUDE_CONFIG_DIR=/tmp/example-tbd-home/profiles/x/claude
+                TERM=xterm-256color
+
+                """,
+            environment: installation))
+
+        // The user's own configuration, which TBD honours.
+        #expect(TmuxManager.configDirRepairNeeded(
+            showEnvironmentOutput: """
+                PATH=/usr/bin
+                CLAUDE_CONFIG_DIR=/Users/example/.claude-work
+                TERM=xterm-256color
+
+                """,
+            environment: installation) == false)
+
+        // An empty value: every reader in this tree treats it as unset, so a
+        // server handing it out to new panes needs repair just as much as one
+        // handing out a stale profile directory.
+        #expect(TmuxManager.configDirRepairNeeded(
+            showEnvironmentOutput: """
+                PATH=/usr/bin
+                CLAUDE_CONFIG_DIR=
+                TERM=xterm-256color
+
+                """,
+            environment: installation))
+
+        // tmux prints `-NAME` for a name the server has explicitly unset.
+        #expect(TmuxManager.configDirRepairNeeded(
+            showEnvironmentOutput: """
+                PATH=/usr/bin
+                -CLAUDE_CONFIG_DIR
+                TERM=xterm-256color
+
+                """,
+            environment: installation) == false)
+
+        // A server that never had one at all.
+        #expect(TmuxManager.configDirRepairNeeded(
+            showEnvironmentOutput: """
+                PATH=/usr/bin
+                TERM=xterm-256color
+
+                """,
+            environment: installation) == false)
+    }
+}

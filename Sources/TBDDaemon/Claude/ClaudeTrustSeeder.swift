@@ -76,7 +76,11 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-trust
 /// daemon's own environment. The seed then lands in `~/.claude.json` while the
 /// spawned pane reads config from the shell-rc dir, so the trust prompt still
 /// appears. This is no worse than the pre-seeder behavior and is unresolvable from
-/// the daemon side, so we accept it.
+/// the daemon side, so we accept it. A `CLAUDE_CONFIG_DIR` the daemon inherited
+/// from the session that launched it, naming a directory under this
+/// installation's profiles root, is likewise not observed — deliberately, since
+/// `SpawnBaseEnvironment` strips exactly that value from the base the spawned
+/// pane receives, so seeding into it would seed a config dir no job reads.
 enum ClaudeTrustSeeder {
     /// Pre-accept Claude Code's folder-trust dialog for a worktree whose trust
     /// answer TBD holds, by writing `projects["<path>"].hasTrustDialogAccepted
@@ -99,12 +103,22 @@ enum ClaudeTrustSeeder {
     /// `async` only because the read-merge-write hops onto `writer` to
     /// serialize; the gate and path resolution below are pure and stay on the
     /// caller.
+    ///
+    /// `environment` defaults to the *scrubbed* daemon environment — the same
+    /// base `SpawnBaseEnvironment` hands the spawned job — rather than the raw
+    /// process environment. The seeder must resolve the config dir the job will
+    /// actually read: a profile-less spawn under a daemon restarted from a
+    /// profile-bound session would otherwise be seeded into the launcher's
+    /// profile dir while the job reads `~/.claude.json`, and the trust dialog
+    /// would block before SessionStart, where nothing can detect or dismiss it.
+    /// `Daemon.scrubInheritedTBDEnv` makes the two agree at startup anyway; the
+    /// explicit default keeps them in lockstep by construction.
     static func ensureTrusted(
         worktree: Worktree,
         autoTrustNonScratch: Bool,
         profileConfigDir: String?,
         homeDirectory: String = NSHomeDirectory(),
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = SpawnBaseEnvironment.inheriting(ProcessInfo.processInfo.environment)
     ) async {
         // Two-tier gate (see the type doc comment for the full argument):
         // scratch spaces are TBD-owned empty dirs and always seed; a non-scratch

@@ -55,10 +55,13 @@ import TestSupport
 /// control's `openAttach` runs against `TBD_SOCKET_PATH`, which
 /// `scripts/test.sh` fences onto a scratch path with no listener — the connect
 /// fails with ENOENT and returns at once.
-// Two minutes, not one: the bounded waits below run to `TestDeadlines`' 90 s,
-// and a suite limit under that truncates the named diagnostic into a bare
-// "Time limit was exceeded" — measured, by mutating away `reader.start()`.
-@Suite("A holder-backed panel attaches to its pty, not to tmux", .timeLimit(.minutes(2)))
+// A hang guard, and it has to clear the bounded waits below, which run to
+// `TestDeadlines.saturatedPass` (90 s): a suite limit under that truncates
+// their named diagnostic into a bare "Time limit was exceeded" — measured, by
+// mutating away `reader.start()`. The shared dial is derived to clear exactly
+// that, so it is what this takes rather than a locally chosen two minutes. See
+// `.fastPassBounded` in `Tests/TestSupport/ClockTestSupport.swift`.
+@Suite("A holder-backed panel attaches to its pty, not to tmux", .fastPassBounded)
 struct TerminalHolderTransportGateTests {
 
     /// Records every tmux invocation and refuses all of them, so a preparation

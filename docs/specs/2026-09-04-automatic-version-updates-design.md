@@ -197,14 +197,17 @@ arguments, and inherits the user's environment. The script is the procedure:
    must be safe to `checkout --detach` at any time. Its `origin` is the
    upstream URL resolved as in §5.
 2. **Fetch and check out** `origin/main` detached. If the fetched
-   `scripts/update.sh` differs from the running copy, re-exec the fetched one
-   with the same arguments (guarded by an environment marker so it happens
-   once). This is how the procedure itself updates.
+   `scripts/update.sh`, or either library it sources, differs from the running
+   copy, re-exec the fetched script with the same arguments (guarded by an
+   environment marker so it happens once). This is how the procedure itself
+   updates.
 3. **Stamp** `TBDBuildIdentity.json` into `.build/<config>/` (commit, branch,
-   time, worktree, dirty) and **build** `TBDDaemon`, `TBDApp`, and `tbd`
-   with `scripts/swift-safe build -c release --product …`, the same module
-   cache flags as `restart.sh`. A failed build stops here; the running
-   installation is untouched.
+   time, worktree, dirty) and **build** every product in `RUNTIME_PRODUCTS`
+   (`scripts/restart-bundle-lib.sh`, the list `restart.sh` builds from too:
+   the daemon, the app, the CLI, and the helpers the daemon looks for beside
+   its own binary) with `scripts/swift-safe build -c release --product …`,
+   the same module cache flags as `restart.sh`. A failed build stops here;
+   the running installation is untouched.
 4. **Assemble, sign, and install** the app bundle to `/Applications/TBD.app`
    exactly as `restart.sh` does today. That code moves out of `restart.sh`
    into `scripts/restart-bundle-lib.sh` so the two scripts share it; the

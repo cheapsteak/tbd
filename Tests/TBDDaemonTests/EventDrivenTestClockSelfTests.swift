@@ -29,8 +29,15 @@ struct EventDrivenTestClockSelfTests {
     /// `ClockTestSupport.waitForSuspension`'s long note). Non-throwing with a
     /// named diagnostic on timeout, so a wedged handshake is attributed here
     /// instead of hanging.
+    ///
+    /// The deadline is `TestDeadlines.saturatedPass`, not a literal: every one
+    /// of the nine call sites waits for a task the test just started to reach a
+    /// statement, which is one scheduling hop through a fast pass that runs
+    /// ~5000 tests on three threads. At thirty seconds — below that pass's
+    /// median per-test *reported* duration — this helper produced eight reds in
+    /// a single healthy job with nothing wedged.
     private static func waitUntil(_ what: String,
-                                  timeout: Swift.Duration = .seconds(30),
+                                  timeout: Swift.Duration = TestDeadlines.saturatedPass,
                                   sourceLocation: SourceLocation = #_sourceLocation,
                                   _ condition: () -> Bool) async {
         let deadline = ContinuousClock.now.advanced(by: timeout)

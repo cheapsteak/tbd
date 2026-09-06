@@ -1499,15 +1499,27 @@ struct ModelProfileSpawnTests {
     }
 
     /// Poll until `condition` is true or `timeout` elapses.
+    ///
+    /// The deadline is the shared saturated-pass budget, not a literal: what it
+    /// waits for is produced by the coordinator's own detached pump task, which
+    /// runs on the cooperative pool behind the whole fast pass regardless of
+    /// how the test was started (`gateHoldingTask` in
+    /// `Tests/TestSupport/BoundedGateSupport.swift`). Five seconds is far below
+    /// that pass's healthy per-test latency.
     private func waitFor(
         _ condition: @Sendable () -> Bool,
-        timeout: Duration = .seconds(5)
+        timeout: Duration = TestDeadlines.saturatedPass
     ) async -> Bool {
         var elapsed: Duration = .zero
         let step: Duration = .milliseconds(10)
         while elapsed < timeout {
             if condition() { return true }
             try? await Task.sleep(for: step)
+            // `try?` swallows the CancellationError, and a cancelled sleep
+            // returns instantly — so without this the loop would spin through
+            // every remaining step at full speed instead of ending. Report
+            // whatever the condition says at the moment of cancellation.
+            if Task.isCancelled { return condition() }
             elapsed += step
         }
         return condition()

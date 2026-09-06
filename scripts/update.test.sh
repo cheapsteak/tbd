@@ -4,7 +4,7 @@
 # Nothing here builds, installs, signals a daemon, or touches a real ~/tbd.
 # HOME and TBD_HOME point at a temp directory for every case; `tbd`, `open`,
 # `codesign` and `security` are stubs on a temp PATH; and the update clone is a
-# real clone of a fixture repo whose `scripts/swift-safe` writes three empty
+# real clone of a fixture repo whose `scripts/swift-safe` writes five empty
 # files instead of compiling. git is the real git, against fixture repos.
 #
 # The end-to-end cases stop at --dry-run, which is the last step before the
@@ -789,6 +789,23 @@ EOF
     fi
 }
 
+test_reexec_when_only_a_sourced_library_differs() {
+    local case_dir out
+    case_dir="$(mkcase reexec-lib-case)"
+    # The fetched update.sh is byte-identical to the running one; only the
+    # library it sources has moved on.
+    printf "\n# a newer library\n" >> "$case_dir/remote/scripts/restart-bundle-lib.sh"
+    git -C "$case_dir/remote" commit -q -am "library only"
+
+    out="$(run_update "$case_dir" --dry-run --no-wake)"
+    assert_contains "a library-only change re-execs" \
+        "re-exec: the fetched restart-bundle-lib.sh differs" "$out"
+    assert_contains "and the fetched script completes the dry run" \
+        "installing nothing" "$out"
+    assert_eq "the hop happens once" "1" \
+        "$(printf "%s" "$out" | grep -c "re-exec: the fetched")"
+}
+
 # MARK: - --check
 
 test_check_reports_without_changing_anything() {
@@ -909,7 +926,7 @@ EOF
 #
 # One fetch-and-build, asserted from every angle: what it built, what it wrote,
 # what it refused to touch, and what it reported. A second run costs a clone
-# and three fake builds, so the cases share this one.
+# and five fake builds, so the cases share this one.
 
 test_dry_run_builds_but_installs_nothing() {
     local case_dir out sidecar log
@@ -925,6 +942,8 @@ test_dry_run_builds_but_installs_nothing() {
     assert_contains "--dry-run builds the daemon" "building TBDDaemon" "$out"
     assert_contains "--dry-run builds the app" "building TBDApp" "$out"
     assert_contains "--dry-run builds the CLI" "building TBDCLI" "$out"
+    assert_contains "--dry-run builds the pty holder" "building TBDHolder" "$out"
+    assert_contains "--dry-run builds the peer helper" "building TBDPeerHelper" "$out"
     assert_contains "--dry-run says it installs nothing" "installing nothing" "$out"
     assert_not_contains "--dry-run does not assemble a bundle" \
         "assembling and installing" "$out"
@@ -934,7 +953,7 @@ test_dry_run_builds_but_installs_nothing() {
     else
         pass "--dry-run does not launch the app"
     fi
-    assert_eq "--dry-run builds the release configuration by default" "3" \
+    assert_eq "--dry-run builds the release configuration by default" "5" \
         "$(grep -c 'release' "$case_dir/build.log")"
 
     # The sidecar the build stamped.
@@ -979,7 +998,7 @@ test_debug_flag_selects_the_debug_configuration() {
     local case_dir
     case_dir="$(mkcase debug-case)"
     run_update "$case_dir" --dry-run --debug >/dev/null 2>&1
-    assert_eq "--debug builds the debug configuration" "3" \
+    assert_eq "--debug builds the debug configuration" "5" \
         "$(grep -c 'debug' "$case_dir/build.log")"
 }
 
@@ -1611,6 +1630,7 @@ test_source_worktree_resolution
 test_json_field_reads_nested_paths
 test_reexec_predicate
 test_reexec_happens_once_and_passes_arguments
+test_reexec_when_only_a_sourced_library_differs
 test_check_reports_without_changing_anything
 test_check_fallback_decides_ancestry_like_the_daemon
 test_dry_run_builds_but_installs_nothing

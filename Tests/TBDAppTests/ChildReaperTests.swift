@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import Testing
 @testable import TBDApp
+import TestSupport
 
 /// Tier 2: real forked children, but no external server and no wall-clock
 /// assertion — `reapBlocking` is deterministic by construction, and the two
@@ -34,23 +35,26 @@ import Testing
 /// disposes of its child on that path so a stuck reap cannot poison the tests
 /// that follow.
 ///
-/// WHY AN EXPLICIT `.timeLimit(.minutes(1))` AND NOT `.clockDriven`. Following
-/// the precedent of `SubprocessTimeoutTests`, which states its reason rather
-/// than inheriting the shared trait: `.clockDriven`'s four minutes is sized for
-/// suites that arm a `TestClock` handshake in the ~4500-test parallel pass, and
-/// nothing here is clock-driven. What the limit has to afford is a test that
-/// fails through its own guards and still gets to report: the 30 s barrier hang
-/// guard plus the ~5 s `waitUntilZombie` budget plus the disposal that follows
-/// — 35 s against a sixty-second limit, so the diagnostic lands rather than
-/// being truncated. The honest path meanwhile finishes in under a second (the
-/// longest-lived child in the process is 0.3 s), which is the order-of-magnitude
-/// margin this trait is for. Four minutes of a shared box is not free.
+/// WHY `.fastPassBounded` AND NOT A NUMBER OF ITS OWN. What the limit has to
+/// afford is a test that fails through its own guards and still gets to report:
+/// the 30 s barrier hang guard plus the ~5 s `waitUntilZombie` budget plus the
+/// disposal that follows — 35 s, so the diagnostic lands rather than being
+/// truncated. The honest path meanwhile finishes in under a second (the
+/// longest-lived child in the process is 0.3 s). This suite arms no `TestClock`,
+/// which is why the trait is not spelled `.clockDriven`; but the two are one
+/// value, because what sizes them is the fast parallel pass rather than virtual
+/// time. The sixty seconds this used to spell out was reasoned as "four minutes
+/// of a shared box is not free", and that reasoning was wrong in its premise: a
+/// suite limit is wall time only on a failing run, and one minute is *below*
+/// the median reported duration of a healthy test in this pass, where duration
+/// is mostly suspension behind ~5000 other runnable tests. See
+/// `.fastPassBounded` in `Tests/TestSupport/ClockTestSupport.swift`.
 ///
 /// What the limit therefore is, stated rather than glossed: a coarse outer
 /// backstop for the ordinary case where a test is merely slow. The two waits
 /// above are what actually catch a stuck reap, and both are sized to fire —
 /// with their diagnostic — inside this limit rather than be truncated by it.
-@Suite("ChildReaper", .timeLimit(.minutes(1)))
+@Suite("ChildReaper", .fastPassBounded)
 struct ChildReaperTests {
 
     // MARK: - Helpers

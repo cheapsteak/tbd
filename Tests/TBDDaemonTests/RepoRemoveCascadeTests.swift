@@ -52,10 +52,15 @@ private final class PathGate: @unchecked Sendable {
         return opened.contains(path)
     }
 
-    func wait(_ path: String, timeout: TimeInterval = 10) async {
+    /// The self-release cap must strictly dominate the `waitUntil` that
+    /// observes this hold, or the gate opens itself mid-observation and the
+    /// test measures nothing. `TestGate.deadline` is sized for exactly that
+    /// relationship against `TestDeadlines.saturatedPass` — see
+    /// `Tests/TestSupport/BoundedGateSupport.swift`.
+    func wait(_ path: String, timeout: Duration = TestGate.deadline) async {
         lock.withLock { entered.append(path) }
-        let deadline = Date().addingTimeInterval(timeout)
-        while !isOpen(path), Date() < deadline {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+        while !isOpen(path), ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(5))
         }
     }
@@ -76,8 +81,12 @@ private struct CascadeWaitTimeout: Error, CustomStringConvertible {
 @Suite("repo.remove cascade cleanup ordering")
 struct RepoRemoveCascadeTests {
 
+    /// The deadline is the shared saturated-pass budget rather than a literal:
+    /// what these wait for is produced by a detached task no test owns, which
+    /// SE-0417 leaves on the cooperative pool behind the whole fast pass — see
+    /// `gateHoldingTask` in `Tests/TestSupport/BoundedGateSupport.swift`.
     private func waitUntil(
-        _ what: String, timeout: TimeInterval = 10,
+        _ what: String, timeout: TimeInterval = TestDeadlines.saturatedPassSeconds,
         observed: @Sendable () async -> String = { "still false" },
         _ condition: @Sendable () async -> Bool
     ) async throws {

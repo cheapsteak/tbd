@@ -83,7 +83,8 @@ struct ControlModeInputHealthTests {
             commandProvider: { server in server == "srv" ? client : nil },
             onHealthChange: { worktreeID, paneID, healthy, generation in
                 health.record(worktreeID, paneID, healthy, generation)
-            })
+            },
+            executor: GateExecutor.shared)
         return (router, recorder, health, feed)
     }
 
@@ -192,7 +193,8 @@ struct ControlModeInputHealthTests {
             },
             onHealthChange: { worktreeID, paneID, healthy, generation in
                 health.record(worktreeID, paneID, healthy, generation)
-            })
+            },
+            executor: GateExecutor.shared)
         let worktreeID = UUID()
         router.register(worktreeID: worktreeID, paneID: "%0", server: "srv")
         let header = SidecarInputHeader(worktreeID: worktreeID, paneID: "%0")

@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+import TestSupport
 
 @testable import TBDDaemonLib
 
@@ -60,7 +61,7 @@ struct TmuxControlConnectionWedgedWriteTests {
             connection.sendCommand(String(repeating: "x", count: 1_000_000))
             returned.increment()
         }
-        #expect(await waitUntil({ started.count == 1 }, timeout: .seconds(60)))
+        #expect(await waitUntil({ started.count == 1 }, timeout: TestDeadlines.saturatedPass))
         try await Task.sleep(for: .milliseconds(300))  // let it park in write()
         #expect(returned.count == 0, "precondition: the pty write should be wedged")
     }
@@ -89,13 +90,13 @@ struct TmuxControlConnectionWedgedWriteTests {
             stopReturned.increment()
         }
         #expect(
-            await waitUntil({ stopReturned.count == 1 }, timeout: .seconds(60)),
+            await waitUntil({ stopReturned.count == 1 }, timeout: TestDeadlines.saturatedPass),
             "stop() deadlocked behind a wedged pty write")
 
         // Killing the child tears the pty down, so the parked write must fail
         // (EIO — empirically NOT a process-killing SIGPIPE) and return.
         #expect(
-            await waitUntil({ sendReturned.count == 1 }, timeout: .seconds(60)),
+            await waitUntil({ sendReturned.count == 1 }, timeout: TestDeadlines.saturatedPass),
             "the wedged sendCommand never unwedged after the child died")
 
         // Post-stop the fd is retired: further sends are refused, not crashed.
@@ -138,7 +139,7 @@ struct TmuxControlConnectionWedgedWriteTests {
         // teardown. Eviction marks the server `stopping` BEFORE stop() runs.
         await client.handle(.commandSucceeded(number: 1, fromClient: true, lines: []))
         #expect(
-            await waitUntil({ stopStarted.count == 1 }, timeout: .seconds(60)),
+            await waitUntil({ stopStarted.count == 1 }, timeout: TestDeadlines.saturatedPass),
             "teardown never reached stop()")
 
         // Pre-fix, stop() deadlocks on the wedged writer's ioLock, the server
@@ -152,7 +153,7 @@ struct TmuxControlConnectionWedgedWriteTests {
             ensured.increment()
         }
         #expect(
-            await waitUntil({ ensured.count == 1 }, timeout: .seconds(30)),
+            await waitUntil({ ensured.count == 1 }, timeout: TestDeadlines.saturatedPass),
             "ensureConnection permanently suspended — the wedged stop never finished")
         #expect(stopFinished.count == 1)
         await supervisor.stopAll()

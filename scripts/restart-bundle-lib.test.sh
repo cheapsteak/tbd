@@ -416,6 +416,24 @@ test_stop_and_launch_use_the_anchored_pattern() {
     unset STUB_LOG
 }
 
+test_runtime_products_are_executable_targets() {
+    local product
+    if [ "${#RUNTIME_PRODUCTS[@]}" -eq 0 ]; then
+        fail "RUNTIME_PRODUCTS names at least one product"
+        return
+    fi
+    # A name that is not an executable target fails every restart at the
+    # per-product build step, so pin each one to Package.swift.
+    for product in "${RUNTIME_PRODUCTS[@]}"; do
+        if grep -A1 "\.executableTarget(" "$REPO_ROOT/Package.swift" \
+                | grep -q "name: \"$product\""; then
+            pass "RUNTIME_PRODUCTS: $product is an executable target"
+        else
+            fail "RUNTIME_PRODUCTS: $product is not an executable target in Package.swift"
+        fi
+    done
+}
+
 test_helper_refuses_direct_execution() {
     if bash "$HELPER" >/dev/null 2>&1; then
         fail "the helper refuses to be run directly"
@@ -441,6 +459,7 @@ test_install_replaces_the_previous_bundle
 test_install_rejects_missing_arguments
 test_exec_pattern_escaping
 test_stop_and_launch_use_the_anchored_pattern
+test_runtime_products_are_executable_targets
 test_helper_refuses_direct_execution
 
 if [ "$FAIL" -ne 0 ]; then

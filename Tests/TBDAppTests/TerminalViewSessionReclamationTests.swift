@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import SwiftTerm
 import Testing
+import TestSupport
 @testable import TBDApp
 
 /// Tier 2: the two teardown paths that must reclaim a tmux **view session**,
@@ -481,9 +482,17 @@ private actor RecordingTmuxRunner {
     /// Bounded wait for the held command to be reached. Throws a described
     /// error rather than recording an `#expect` failure, so the diagnostic
     /// reaches the CI summary's primary failure line.
+    /// The deadline is the shared saturated-pass budget, not a locally chosen
+    /// number: what this waits for is reached through a `Task { @MainActor }`
+    /// the production path creates, so SE-0417 carries no executor preference
+    /// into it (`gateHoldingTask`'s doc comment,
+    /// `Tests/TestSupport/BoundedGateSupport.swift`) and nothing here can move
+    /// it off the cooperative pool — it queues behind the whole fast pass, and
+    /// only the bound is ours to get right. Ten seconds is far below that pass's
+    /// median per-test latency, and this wait went red on `main` at that value.
     func awaitHold(
         describedAs subject: String,
-        within deadline: Duration = .seconds(10)
+        within deadline: Duration = TestDeadlines.saturatedPass
     ) async throws {
         for _ in 0..<attempts(for: deadline) {
             if holdWasReached { return }
@@ -496,7 +505,12 @@ private actor RecordingTmuxRunner {
         invocations.append(Invocation(server: server, args: args))
         if let heldCommand, args.first == heldCommand, !holdWasReleased {
             holdWasReached = true
-            for _ in 0..<attempts(for: .seconds(10)) where !holdWasReleased {
+            // The hold's own cap must strictly dominate the `awaitHold` that
+            // observes it (`TestDeadlines.saturatedPass`), or the stub releases
+            // itself mid-observation and the test measures nothing.
+            // `TestGate.deadline` is that value, and is sized for exactly this
+            // relationship — see `Tests/TestSupport/BoundedGateSupport.swift`.
+            for _ in 0..<attempts(for: TestGate.deadline) where !holdWasReleased {
                 try? await Task.sleep(for: .milliseconds(10))
             }
         }
@@ -538,10 +552,13 @@ private actor RecordingTmuxRunner {
     /// than recording an `#expect` failure: a bounded-wait diagnostic is the
     /// whole finding, and only a thrown error reaches the CI summary's primary
     /// failure line (`Tests/CLAUDE.md`, "Assertion hygiene").
+    /// The deadline is the shared saturated-pass budget: the kills arrive from
+    /// a detached task that no call-site change can pin off the cooperative
+    /// pool, so it queues behind the whole fast pass (see `awaitHold` above).
     func awaitKillSessions(
         atLeast count: Int,
         describedAs subject: String,
-        within deadline: Duration = .seconds(10)
+        within deadline: Duration = TestDeadlines.saturatedPass
     ) async throws -> [Invocation] {
         let pollInterval = Duration.milliseconds(10)
         let deadlineSeconds = Double(deadline.components.seconds)

@@ -36,6 +36,45 @@ BUILD_IDENTITY_PATHSPECS=(
     Package.resolved
 )
 
+# Every product a running installation needs. scripts/restart.sh and
+# scripts/update.sh both build exactly this list, so a product added here
+# reaches both paths. TBDCLI, TBDHolder and TBDPeerHelper are each found by a
+# SIBLING lookup beside the daemon binary, and a sibling that was never built
+# fails in the field rather than in the build:
+#
+#   TBDDaemon      launched in place from .build/<config>.
+#   TBDApp         hard-linked into the .app bundle by assemble_app_bundle.
+#   TBDCLI         `tbd`. Every replacement agent process is handed the
+#                  daemon's sibling copy as TBD_CLI_PATH and its hooks run that
+#                  one, swallowing the error when it is missing
+#                  (AgentProcessEnvironment, ClaudeHookOverlay,
+#                  CodexHomeManager). update.sh also re-links an existing
+#                  ~/.local/bin/tbd hard link to it.
+#   TBDHolder      the pty holder the daemon spawns for a holder-backed session
+#                  (HolderSpawner.locateSiblingExecutable). Missing, the daemon
+#                  reports ptyHolderSupported=false: the Settings toggle greys
+#                  out, and a toggle that was already on sends every new
+#                  session to tmux with no error.
+#   TBDPeerHelper  the shadow-peer helper for remote peer messaging
+#                  (ShadowPeerHelperProcessSpawner). Missing, a remote lane
+#                  fails to arm with executableMissing.
+#
+# Every product here is all-or-nothing: a helper that fails to compile stops
+# the restart or update the same way a daemon that fails to compile does. That
+# is deliberate. Each helper degrades gracefully at runtime when it is ABSENT,
+# and that graceful path is exactly how a never-built helper went unnoticed;
+# building it as a warning would put the same silent degradation one scroll
+# above the "Daemon ready" line. The holder and peer helper depend on
+# TBDShared and nothing else, and the CLI on TBDShared plus packages the
+# daemon also links, so a helper that fails while the daemon builds is a
+# broken tree, and a broken tree is what a restart should refuse.
+#
+# scripts/restart-bundle-lib.test.sh checks that each name is an executable
+# target in Package.swift, so a rename or typo fails there and not on the next
+# restart.
+# shellcheck disable=SC2034 # consumed by the two scripts that source this file
+RUNTIME_PRODUCTS=(TBDDaemon TBDApp TBDCLI TBDHolder TBDPeerHelper)
+
 # MARK: - Build identity
 
 # Escape a value for embedding in a JSON string literal. Backslashes first,

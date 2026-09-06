@@ -121,6 +121,7 @@ fake_swift_invocation="$(wc -l < "$FAKE_SWIFT_DUMP.count" | tr -d ' ')"
   echo "argv: $*"
   echo "HOME=${HOME:-<unset>}"
   echo "CFFIXED_USER_HOME=${CFFIXED_USER_HOME:-<unset>}"
+  echo "TBD_TEST_SCRATCH_ROOT=${TBD_TEST_SCRATCH_ROOT:-<unset>}"
   echo "TBD_HOME=${TBD_HOME:-<unset>}"
   echo "TBD_SOCKET_PATH=${TBD_SOCKET_PATH:-<unset>}"
   echo "TBD_CLAUDE_HOST_HOME=${TBD_CLAUDE_HOST_HOME:-<unset>}"
@@ -208,7 +209,8 @@ RUN_TEE=""
 run_script() {
   local script="$1" fix="$2"; shift 2
   RUN_OUT="$(cd "${RUN_CWD:-.}" && env -u CI -u TBD_HOME -u TBD_SOCKET_PATH -u TBD_CLAUDE_HOST_HOME \
-                 -u TBD_TEST_CODEX_HOME -u TBD_SWIFT_LOCK_PATH -u CFFIXED_USER_HOME \
+                 -u TBD_TEST_CODEX_HOME -u TBD_TEST_SCRATCH_ROOT \
+                 -u TBD_SWIFT_LOCK_PATH -u CFFIXED_USER_HOME \
                  -u TBD_SWIFT_JOBS -u TBD_SWIFT_LOCK_TIMEOUT_SECONDS \
                  -u TBD_SWIFT_HEARTBEAT_SECONDS -u TBD_SWIFT_ALLOW_ORPHAN \
                  -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_RC \
@@ -267,6 +269,11 @@ caller_tmux_tmpdir()      { echo "$1/real-tmux"; }
 caller_tmux_socket_dir()  { echo "$(caller_tmux_tmpdir "$1")/tmux-$(id -u)"; }
 # What the wrapper handed the run, read back out of the stub's dump.
 fenced_tmux_tmpdir()      { dump_of "$1" | sed -n 's/^TMUX_TMPDIR=//p'; }
+# The per-run scratch root the wrapper's EXIT trap deletes, as the run saw it.
+# Fixtures that must bind a socket under a short root of their own mint it here
+# rather than in `/tmp`, so a killed run still has them reclaimed.
+fenced_scratch_root()     { dump_of "$1" | sed -n 's/^TBD_TEST_SCRATCH_ROOT=//p'; }
+fenced_tbd_home()         { dump_of "$1" | sed -n 's/^TBD_HOME=//p'; }
 tmux_log_of()             { cat "$1/tmux-invocations" 2>/dev/null; }
 
 # A stub `tmux` on PATH, recording every argv it is handed. The wrapper's
@@ -613,7 +620,33 @@ test_no_fingerprint_leaves_containment_intact() {
   assert_contains "TBD_SOCKET_PATH is under the scratch dir" "$dump" "/sanctioned/tbd/sock"
   assert_contains "TBD_CLAUDE_HOST_HOME is under the scratch dir" "$dump" "/sanctioned/tbd/claude-host"
   assert_contains "TBD_TEST_CODEX_HOME is under the scratch dir" "$dump" "/sanctioned/tbd/codex-host"
+  assert_contains "TBD_TEST_SCRATCH_ROOT is a scratch dir" "$dump" "TBD_TEST_SCRATCH_ROOT=/tmp/tbd-test-home."
   assert_contains "decoys are still armed" "$dump" "decoy-mode tbd=0"
+  rmfix "$fix"
+}
+
+# THE RUN ROOT THE FIXTURES MINT UNDER MUST BE THE ONE THE TRAP DELETES. A few
+# fixtures cannot nest inside `TBD_HOME` — they bind a rendezvous socket and the
+# extra `/sanctioned/tbd` overshoots `sun_path` — so the wrapper hands them the
+# scratch root itself. If that name ever drifts off the trapped directory the
+# fixtures go back to leaking on a killed run, silently, which is the whole
+# defect this variable exists to close. Hence the derivation rather than a
+# literal: the exported value must be exactly `TBD_HOME` with `/sanctioned/tbd`
+# taken off it.
+test_scratch_root_names_the_directory_the_trap_deletes() {
+  local fix; fix="$(mkfix)"
+  run_wrapper "$fix"
+  assert_ok "the run is green" "$RUN_RC"
+  local root home
+  root="$(fenced_scratch_root "$fix")"
+  home="$(fenced_tbd_home "$fix")"
+  assert_contains "the scratch root is a run-scoped /tmp dir" "$root" "/tmp/tbd-test-home."
+  assert_eq "and TBD_HOME sits inside it" "$root" "${home%/sanctioned/tbd}"
+  # Naming the trapped directory is only half of it: the trap has to have
+  # actually removed it. The run above is a command substitution, so it has
+  # exited and its EXIT trap has run by the time this reads the path.
+  assert_eq "and the trap deleted it" "false" \
+    "$([ -e "$root" ] && echo true || echo false)"
   rmfix "$fix"
 }
 
@@ -622,12 +655,14 @@ test_no_fingerprint_leaves_containment_intact() {
 # section 5.
 test_inherited_fence_vars_are_overwritten() {
   local fix; fix="$(mkfix)"
-  RUN_ENV=(TBD_HOME="$fix/callers-home" TBD_CLAUDE_HOST_HOME="$fix/callers-claude")
+  RUN_ENV=(TBD_HOME="$fix/callers-home" TBD_CLAUDE_HOST_HOME="$fix/callers-claude"
+           TBD_TEST_SCRATCH_ROOT="$fix/callers-scratch")
   run_wrapper "$fix"
   RUN_ENV=()
   local dump; dump="$(dump_of "$fix")"
   assert_missing "an inherited TBD_HOME is discarded" "$dump" "TBD_HOME=$fix/callers-home"
   assert_missing "an inherited TBD_CLAUDE_HOST_HOME is discarded" "$dump" "TBD_CLAUDE_HOST_HOME=$fix/callers-claude"
+  assert_missing "an inherited TBD_TEST_SCRATCH_ROOT is discarded" "$dump" "TBD_TEST_SCRATCH_ROOT=$fix/callers-scratch"
   assert_contains "TBD_HOME is still the scratch dir" "$dump" "TBD_HOME=/tmp/tbd-test-home."
   rmfix "$fix"
 }

@@ -36,16 +36,18 @@ these steps in order.
   source worktree, else that worktree's `origin`, else whatever `--remote` you
   pass.
 - **Fetches and detaches onto `origin/main`.** If the fetched copy of
-  `scripts/update.sh` differs from the one running, the fetched one takes over
-  with the same arguments. That is how the procedure updates itself, and an
-  environment marker holds it to a single hop.
+  `scripts/update.sh`, or of either library it sources, differs from the one
+  running, the fetched script takes over with the same arguments. That is how
+  the procedure updates itself, and an environment marker holds it to a single
+  hop.
 - **Stamps the build identity.** `TBDBuildIdentity.json` lands in the build
   directory before the compiler runs, recording the commit, the branch, the
   build time, the clone's path, and whether the tree was dirty. Every binary
   reads the sidecar beside it, which is how `tbd version` knows what is
   running.
-- **Builds** `TBDDaemon`, `TBDApp` and `TBDCLI` through `scripts/swift-safe`,
-  with the same shared module cache `scripts/restart.sh` uses. A failed build
+- **Builds** the same products `scripts/restart.sh` builds — `TBDDaemon`,
+  `TBDApp`, `TBDCLI`, `TBDHolder` and `TBDPeerHelper` — through
+  `scripts/swift-safe`, with the same shared module cache. A failed build
   stops here and the running installation is untouched.
 - **Assembles, signs and installs** `/Applications/TBD.app`, using the same
   code `scripts/restart.sh` uses (`scripts/restart-bundle-lib.sh`). The bundle

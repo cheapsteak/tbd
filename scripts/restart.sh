@@ -171,7 +171,7 @@ fi
 if [ "$skip_build" = false ]; then
     echo "Building..."
     t0=$SECONDS
-    # Build the two PRODUCTS rather than the whole package.
+    # Build the runtime PRODUCTS rather than the whole package.
     #
     # A whole-package build compiles the test targets too, and
     # Tests/TestSupport does `@testable import TBDDaemonLib`, which needs
@@ -182,11 +182,14 @@ if [ "$skip_build" = false ]; then
     # reporting failure, and it is why the exit code below could not be
     # checked before this change.
     #
-    # SwiftPM honors only the LAST --product, so these are two invocations.
-    # Restarting needs exactly these two products; the test targets are
-    # scripts/test.sh's job, not the restart path's.
+    # SwiftPM honors only the LAST --product, so each is its own invocation.
+    # The list is RUNTIME_PRODUCTS in restart-bundle-lib.sh, shared with
+    # scripts/update.sh: the daemon, the app, and every helper the daemon
+    # looks for beside its own binary (see the list for what each one does
+    # when it is missing). The test targets are scripts/test.sh's job, not
+    # the restart path's.
     build_ok=true
-    for product in TBDDaemon TBDApp; do
+    for product in "${RUNTIME_PRODUCTS[@]}"; do
         # Capture the status, THEN print. Piping the build straight into
         # `tail` would make the pipeline's status `tail`'s (always 0) — the
         # very status-discarding bug this block exists to fix.
@@ -194,6 +197,11 @@ if [ "$skip_build" = false ]; then
                 -c "$build_config" --product "$product" \
                 "${MODULE_CACHE_FLAGS[@]}") 2>&1 ); then
             build_ok=false
+            # The rest would build behind the same machine-global lock and
+            # scroll the failure off the screen, and the restart below is
+            # abandoned either way.
+            printf '%s\n' "$build_out" | tail -3
+            break
         fi
         printf '%s\n' "$build_out" | tail -3
     done

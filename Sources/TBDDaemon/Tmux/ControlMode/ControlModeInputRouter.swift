@@ -80,11 +80,23 @@ final class ControlModeInputRouter: @unchecked Sendable {
     /// is initialized (its closure captures `self`).
     private var consumer: Task<Void, Never>?
 
+    /// - Parameter executor: Where the single consumer — and, per SE-0417,
+    ///   every default-actor hop and child task its delivery makes — is
+    ///   scheduled. `nil`, the production value, is exactly the old bare
+    ///   `Task {}`: the cooperative pool, however the router's owner was
+    ///   started. It exists so a test can keep the router's WHOLE delivery
+    ///   pipeline — the consumer, the `TmuxControlCommandClient` actor hops and
+    ///   the `PasteExecutor` sends beyond them — off a saturated parallel
+    ///   pass's queue, where one suspension hop costs that pass's per-test
+    ///   latency and a multi-hop handshake cannot be bought a turn by any
+    ///   bound. Production passes nothing; the daemon declares no task executor
+    ///   of its own.
     init(commandProvider: @escaping @Sendable (String) async -> TmuxControlCommandClient?,
          latency: InputLatencyRecorder = InputLatencyRecorder(),
          chunkSize: Int = 330,
          onHealthChange: @escaping @Sendable (UUID, String, Bool, UInt64?) -> Void = { _, _, _, _ in },
-         onInput: @escaping @Sendable (String) -> Void = { _ in }) {
+         onInput: @escaping @Sendable (String) -> Void = { _ in },
+         executor: (any TaskExecutor)? = nil) {
         self.commandProvider = commandProvider
         self.latency = latency
         self.chunkSize = chunkSize
@@ -98,7 +110,9 @@ final class ControlModeInputRouter: @unchecked Sendable {
         // One consumer, draining in order. `[weak self]` breaks the retain
         // cycle (self holds the task, the task references self); on `shutdown`
         // the stream finishes, the loop exits, and self is released.
-        self.consumer = Task { [weak self] in
+        // `executorPreference:` is nil in production, which is identical to a
+        // bare `Task {}`; see the `executor` parameter's note.
+        self.consumer = Task(executorPreference: executor) { [weak self] in
             for await item in stream {
                 await self?.deliver(item)
             }
