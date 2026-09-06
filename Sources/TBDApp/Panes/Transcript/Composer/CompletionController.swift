@@ -61,6 +61,10 @@ final class CompletionController {
         }
     }
 
+    /// The commands this controller is ranking over. Read by the argument-hint
+    /// placeholder, which needs the inventory but not the menu.
+    var inventoryCommands: [CompletionCommand] { commands }
+
     func adopt(inventory: TerminalCompletionsResult?) {
         guard let inventory else { return }
         commands = inventory.commands

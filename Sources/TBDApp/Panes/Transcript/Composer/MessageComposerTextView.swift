@@ -300,6 +300,24 @@ final class ComposerTextView: NSTextView {
         didSet { if argumentHint != oldValue { needsDisplay = true } }
     }
 
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let argumentHint, !argumentHint.isEmpty,
+              let layoutManager, let textContainer else { return }
+        let caret = selectedRange().location
+        let glyph = layoutManager.glyphIndexForCharacter(at: caret)
+        var origin = layoutManager.boundingRect(
+            forGlyphRange: NSRange(location: glyph, length: 0), in: textContainer).origin
+        origin.x += textContainerOrigin.x
+        origin.y += textContainerOrigin.y
+        (argumentHint as NSString).draw(
+            at: origin,
+            withAttributes: [
+                .font: font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+            ])
+    }
+
     /// Text wins when the pasteboard advertises both, preserving ordinary Cmd-V.
     /// An image-only paste is lifted here and never handed to `super`, so
     /// AppKit's default pipeline cannot insert an inline attachment.

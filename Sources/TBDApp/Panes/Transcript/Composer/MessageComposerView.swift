@@ -70,6 +70,10 @@ struct MessageComposerView: View {
                         controller?.update(
                             text: text, selectionLocation: caret,
                             hasMarkedText: hasMarkedText)
+                        (handle.view as? ComposerTextView)?.argumentHint =
+                            ComposerArgumentHint.hint(
+                                text: text, selectionLocation: caret,
+                                commands: controller?.inventoryCommands ?? [])
                     },
                     onSubmit: { text in submit(text) },
                     onEscape: { appState.focusTranscript(terminalID: terminal.id) },
