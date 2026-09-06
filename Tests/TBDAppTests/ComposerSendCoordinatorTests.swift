@@ -236,6 +236,16 @@ struct ComposerSendCoordinatorTests {
             return
         }
         #expect(message.contains("did not report"))
+        // **The sentence a person reads.** The bound is spelled in whole
+        // seconds — interpolating the `Duration` renders "45.0 seconds", which
+        // reads as a measurement — and the copy claims only what the app can
+        // know. The prompt left on the respawn's own argv, so a session that
+        // never reported in is one TBD heard nothing FROM, which is not the same
+        // as one that received nothing.
+        #expect(message.contains("45 seconds"))
+        #expect(!message.contains("45.0"))
+        #expect(message.contains("could not be confirmed"))
+        #expect(!message.lowercased().contains("was not delivered"))
         #expect(recorder.waitedOn.count == 1)
     }
 

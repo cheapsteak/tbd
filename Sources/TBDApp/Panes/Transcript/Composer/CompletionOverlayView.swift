@@ -56,10 +56,14 @@ struct CompletionOverlayView: View {
         case .noMatch:
             message("No commands match")
         case .rows:
-            // A one-character query that matches nothing also stays
-            // `.rows` (the controller reserves "no commands match" for
-            // longer queries, so a fresh keystroke isn't noisy) — render
-            // it the same way rather than an empty scroll view.
+            // Defensive. The controller reaches `.rows` only with rows to show:
+            // a query that matches nothing goes to `.noMatch`, or closes
+            // outright at one character, where "no commands match" would be
+            // noise on a keystroke somebody is still typing. `rows` is published
+            // separately from `presentation`, though, so the empty case is
+            // rendered as that same sentence rather than as an empty scroll
+            // view — a branch that should never run, and says something if it
+            // does.
             if controller.rows.isEmpty {
                 message("No commands match")
             } else {

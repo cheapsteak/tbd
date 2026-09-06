@@ -26,10 +26,15 @@ struct AttachmentStrip: View {
 
     var body: some View {
         if !ordered.isEmpty {
+            // Scanned ONCE per render and handed down. `detachedNumbers` runs a
+            // regex over the whole message, and reading it inside the row builder
+            // ran that scan once per thumbnail — on every keystroke, because the
+            // text it scans is what changed.
+            let detached = Set(draft.detachedNumbers)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(ordered) { attachment in
-                        thumbnail(attachment)
+                        thumbnail(attachment, detached: detached.contains(attachment.number))
                     }
                 }
                 .padding(.horizontal, 8)
@@ -39,8 +44,9 @@ struct AttachmentStrip: View {
     }
 
     @ViewBuilder
-    private func thumbnail(_ attachment: ComposerDraft.Attachment) -> some View {
-        let detached = draft.detachedNumbers.contains(attachment.number)
+    private func thumbnail(
+        _ attachment: ComposerDraft.Attachment, detached: Bool
+    ) -> some View {
         VStack(spacing: 2) {
             ZStack(alignment: .topTrailing) {
                 AttachmentThumbnailImage(path: attachment.path)

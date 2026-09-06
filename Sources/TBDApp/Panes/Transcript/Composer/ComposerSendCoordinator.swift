@@ -69,6 +69,11 @@ final class ComposerSendCoordinator {
     /// early would show an error for a wake that was about to land.
     static let wakeHoldTimeout: Duration = .seconds(45)
 
+    /// The same bound as a whole number, for the sentence a person reads.
+    /// Interpolating the `Duration` itself spells it "45.0 seconds", which reads
+    /// like a measurement rather than a deadline.
+    static var wakeHoldTimeoutSeconds: Int { Int(wakeHoldTimeout.components.seconds) }
+
     private let sendParams: Sender
     private let wake: Waker
     private let awaitSessionStart: SessionStartWaiter
@@ -201,10 +206,15 @@ final class ComposerSendCoordinator {
         guard await holdUntilSessionStart(
             terminalID: terminalID, incarnationID: incarnationID)
         else {
+            // Deliberately NOT "your message was not delivered": the prompt went
+            // out on the respawn's own argv, and a session that never reported
+            // in is a session TBD heard nothing from — which is not the same as
+            // one that got nothing. What the app knows is that it could not
+            // confirm.
             return .failed(message:
                 "The session this send started did not report in within "
-                + "\(Self.wakeHoldTimeout). Your message was not delivered — "
-                + "it is back in the box.")
+                + "\(Self.wakeHoldTimeoutSeconds) seconds, so delivery could not be "
+                + "confirmed. Your message is back in the box.")
         }
         return .woke
     }

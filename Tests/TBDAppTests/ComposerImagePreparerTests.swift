@@ -227,6 +227,25 @@ struct ComposerImagePreparerTests {
         #expect(ComposerImagePreparer.imageData(fromFileAt: url) == written)
     }
 
+    /// **The sniff reads a prefix; what comes back is the whole file.** An
+    /// unidentified file is decided on its first few KB rather than by pulling
+    /// all of it into memory — a drop hands over whatever URL the pasteboard
+    /// carried, which may be a disk image or a video. The fixture here is
+    /// comfortably larger than that prefix, so an implementation that returned
+    /// what it sniffed would hand back a truncated PNG and fail.
+    @Test func aMisnamedImageLargerThanTheSniffPrefixComesBackWhole() throws {
+        let root = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdimg"), isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("capture")
+        // Noise, so the PNG cannot compress down under the sniff prefix.
+        let written = try makeImage(width: 400, height: 400, type: .png, noisy: true)
+        #expect(written.count > 8 * 1024, "the fixture must exceed the sniff prefix")
+        try written.write(to: url)
+
+        #expect(ComposerImagePreparer.imageData(fromFileAt: url) == written)
+    }
+
     /// A misnamed image is still an image: the type check falls back to
     /// sniffing the bytes, so a screenshot saved without an extension works.
     @Test func aPNGWithAMisleadingExtensionIsStillRead() throws {

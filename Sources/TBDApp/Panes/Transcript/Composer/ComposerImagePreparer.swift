@@ -136,16 +136,45 @@ enum ComposerImagePreparer {
     /// one the filesystem already knows. It is not the last word: a screenshot
     /// saved with the wrong extension is still an image, so bytes ImageIO can
     /// open as an image are accepted regardless of what the file is called.
+    ///
+    /// **Nothing is read whole before it is identified.** A drop hands over
+    /// whatever URL the pasteboard carried — a disk image, a core dump, a video
+    /// — so the type comes first, and the fallback for a file whose type says
+    /// nothing sniffs only `sniffPrefixBytes` rather than pulling gigabytes into
+    /// memory to learn that they are not a picture. The read that does happen is
+    /// mapped, so the pages the preparer never touches are never faulted in.
     static func imageData(fromFileAt url: URL) -> Data? {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
-        if let declared = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType,
-           declared.conforms(to: .image) {
-            return data
-        }
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              CGImageSourceGetType(source) != nil,
-              CGImageSourceGetCount(source) > 0
+        let declared = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType
+        if declared?.conforms(to: .image) == true { return mappedContents(of: url) }
+        guard sniffedTypeIsImage(at: url) else { return nil }
+        return mappedContents(of: url)
+    }
+
+    /// How much of an unidentified file is read to decide whether it is an image.
+    /// Every container this can accept declares itself in its first bytes; 8 KB
+    /// clears the largest of those headers with room to spare.
+    private static let sniffPrefixBytes = 8 * 1024
+
+    private static func mappedContents(of url: URL) -> Data? {
+        guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
+              !data.isEmpty
         else { return nil }
         return data
+    }
+
+    /// Does the head of this file look like an image container?
+    ///
+    /// Only the TYPE is asked of the prefix — never the frame count, which a
+    /// truncated buffer cannot answer for every format. The full bytes are
+    /// decoded later by `preparePNG`, which refuses anything ImageIO cannot open.
+    private static func sniffedTypeIsImage(at url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let prefix = try? handle.read(upToCount: sniffPrefixBytes), !prefix.isEmpty,
+              let source = CGImageSourceCreateWithData(prefix as CFData, nil),
+              let type = CGImageSourceGetType(source),
+              UTType(type as String)?.conforms(to: .image) == true
+        else { return false }
+        return true
     }
 }
