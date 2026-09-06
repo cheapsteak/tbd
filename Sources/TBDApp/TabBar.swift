@@ -559,8 +559,14 @@ enum TabParkMenuModel {
 /// not reachable as a standalone awaitable step: it tears the attach down for
 /// good and nothing re-establishes one for a panel that stays on screen. A
 /// park that then refused — for unsent input, say — would leave a live tab
-/// showing a terminal nothing is driving. Suppressing the item costs the user
-/// one gesture (close the tab, or park the worktree from the sidebar); the
+/// showing a terminal nothing is driving.
+///
+/// The remedy is to stop holding the pty: close the tab, or let the panel be
+/// evicted from the viewer slots. Parking the worktree from the sidebar is
+/// **not** a way around this — that route fans out through the same daemon
+/// park, which fail-closes on the same attached viewer — so the app suppresses
+/// it for an attached holder row too, and the two surfaces stay honest with
+/// each other. What suppression costs the user is that one gesture; the
 /// alternative costs them the session's screen.
 enum ManualParkAffordance {
     static func isOfferable(

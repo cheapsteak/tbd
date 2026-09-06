@@ -28,6 +28,10 @@ struct HibernationGateTests {
         )
     }
 
+    /// Every terminal this helper is called with is a tmux row, so the soak
+    /// gate is passed off and named rather than defaulted: the production
+    /// signature has no default, and the tests that are ABOUT the gate call it
+    /// directly with both answers.
     private func decide(
         _ terminal: Terminal,
         enabled: Bool = true,
@@ -39,6 +43,7 @@ struct HibernationGateTests {
         HibernationGate.decide(
             terminal: terminal, autoHibernateEnabled: enabled,
             inputVetoEnabled: inputVetoEnabled,
+            holderHibernationEnabled: false,
             idleTimeout: timeout, idleSince: idleSince, lastInputAt: lastInputAt, now: now
         )
     }
@@ -249,6 +254,11 @@ struct HibernationGateTests {
             activityState: .idle, transport: .holder)
     }
 
+    /// The argument cannot be omitted: `decide` carries no default for it, so
+    /// a call site that forgets the flag is a compile error rather than a rail
+    /// that silently disagrees with the app's menu. That is what replaced the
+    /// old "forgetting fails toward refusing" reading, which would have
+    /// inverted the day the shipped constant flips.
     @Test func holderRowIsRefusedWhileTheSoakGateIsOff() {
         let idleSince = now.addingTimeInterval(-31 * 60)
         #expect(HibernationGate.decide(
@@ -263,15 +273,6 @@ struct HibernationGateTests {
             terminal: holderTerminal(), autoHibernateEnabled: true,
             holderHibernationEnabled: true, idleTimeout: 30 * 60,
             idleSince: idleSince, now: now) == .eligible)
-    }
-
-    /// Omitting the argument must fail toward refusal, which is the safe
-    /// direction and the whole reason the parameter carries a default at all.
-    @Test func theOmittedArgumentRefusesAHolderRow() {
-        let idleSince = now.addingTimeInterval(-31 * 60)
-        #expect(HibernationGate.decide(
-            terminal: holderTerminal(), autoHibernateEnabled: true,
-            idleTimeout: 30 * 60, idleSince: idleSince, now: now) == .holderTransport)
     }
 
     /// The flag decides what a HOLDER row gets and must not reach a tmux one:

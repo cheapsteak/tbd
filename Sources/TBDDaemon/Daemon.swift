@@ -908,26 +908,29 @@ public final class Daemon: Sendable {
                 viewerAttachment: { terminalID in
                     await registry.viewerAttachment(for: terminalID)
                 },
-                writeDirectly: { [inputActivity] terminalID, bytes in
+                writeDirectly: { terminalID, bytes in
                     // The daemon's own reader is the only descriptor it has —
                     // but it keeps that reader across an attach, suspended
                     // rather than stopped, so this fallback has a target in
                     // every attached state. No reader means the session is gone
                     // or was never adopted, which is the one case with nothing
                     // to write to.
+                    //
+                    // Deliberately NOT recorded as input activity. The veto's
+                    // fact source is the app's keystroke stream, and a write
+                    // that starts here is the daemon's own — an auto-resume, a
+                    // peer's `terminal.send` — never something a person typed
+                    // and has not sent. Recording it would leave the merge
+                    // rail's `activityStateObservedAt` anchor behind a
+                    // "keystroke" that will never be consumed, vetoing every
+                    // park of that row forever. See `InputActivityTracker`'s
+                    // holder key for why the veto is vacuous on this transport
+                    // anyway.
                     guard let reader = await registry.reader(for: terminalID) else {
                         throw HolderInjectionCourier.Error.noDaemonDescriptor(
                             terminalID: terminalID)
                     }
                     try await reader.write(bytes)
-                    // The pending-input veto's holder leg. A daemon-side write
-                    // is the ONLY input into a holder session the daemon can
-                    // see — a viewer types on its own descriptor and tells
-                    // nobody — so this is what there is to record, and it is
-                    // recorded only after the write actually landed. Keyed by
-                    // terminal id, matching `InputActivityTracker.key(for:)`
-                    // for a holder row.
-                    inputActivity.recordInput(paneID: terminalID.uuidString)
                 })
         }
 
@@ -1706,6 +1709,17 @@ public final class Daemon: Sendable {
                 // failure. Nil with no courier (mock mode, or no holder
                 // registry to build one on): the actuator then refuses a holder
                 // row by name instead of typing at coordinates it does not have.
+                //
+                // **`.daemonWrote(.ackDeadlineElapsed)` is counted as delivered
+                // with its eyes open.** It is the one branch that can duplicate:
+                // the app was holding the pty, never answered inside the ack
+                // deadline, and may yet write the bytes it was given — so the
+                // daemon's own write can land a second "continue". That trade is
+                // made deliberately in this direction. A doubled continue lands
+                // in a session that is working again, as a stray message the
+                // user can see and undo; a missed resume is the silent failure
+                // this whole rail exists to prevent, and it is discovered hours
+                // later by a limit screen nobody continued.
                 holderSend: holderInjectionCourier.map { courier in
                     let send: @Sendable (UUID, Data) async -> Bool = { terminalID, bytes in
                         switch await courier.deliver(terminalID: terminalID, bytes: bytes) {
@@ -1714,6 +1728,21 @@ public final class Daemon: Sendable {
                         }
                     }
                     return send
+                },
+                // The rail's liveness answer for a holder-backed row, and this
+                // transport's counterpart to `windowExists`. A positive exit
+                // report from the holder is the only evidence admitted: the
+                // absence of a daemon reader means a viewer owns the pty, which
+                // is the ordinary live state and would cancel the auto-resume of
+                // every session with a tab open on it.
+                holderSessionEnded: holderRegistry.map { registry in
+                    let ended: @Sendable (UUID) async -> Bool = { terminalID in
+                        switch await registry.lastKnownStatus(for: terminalID) {
+                        case .exited, .exitedStatusUnknown: return true
+                        case .alive, nil: return false
+                        }
+                    }
+                    return ended
                 }
             )
             let resumeScheduler = LimitResumeScheduler(

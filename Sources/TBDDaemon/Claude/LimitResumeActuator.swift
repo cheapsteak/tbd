@@ -162,9 +162,24 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// yes/no out — so the actuator neither imports the holder subsystem nor
     /// has to fake an actor to be tested.
     private let holderSend: (@Sendable (UUID, Data) async -> Bool)?
+    /// Whether the holder session behind a terminal has ended, as the daemon's
+    /// registry last heard it — this transport's answer to `windowExists`.
+    ///
+    /// Production passes "the last status this registry recorded is `.exited`
+    /// or `.exitedStatusUnknown`", which is a POSITIVE report from the holder
+    /// that its job is over. Nothing weaker is admissible here: in particular
+    /// **the absence of a daemon reader is not evidence**, because a viewer
+    /// holding the pty is the ordinary live state on this transport and would
+    /// cancel every armed resume on a session the user is looking at.
+    ///
+    /// `nil` — mock mode, or no registry — behaves exactly as before: the rail
+    /// asks nobody and proceeds to the courier, which fails by name if the
+    /// session really is gone.
+    private let holderSessionEnded: (@Sendable (UUID) async -> Bool)?
 
-    /// `holderSend` defaults to `nil` so every existing call site — and every
-    /// test that has no holder row in it — constructs the actuator unchanged.
+    /// `holderSend` and `holderSessionEnded` default to `nil` so every existing
+    /// call site — and every test that has no holder row in it — constructs the
+    /// actuator unchanged.
     public init(
         db: TBDDatabase,
         tmux: any ResumeSendingTmux,
@@ -173,7 +188,8 @@ public struct LimitResumeActuator: LimitResumeActuating {
         transcriptModifiedAt: @escaping @Sendable (String) -> Date?,
         waiter: @escaping @Sendable (Duration) async -> Void,
         actuationLog: ActuationLog,
-        holderSend: (@Sendable (UUID, Data) async -> Bool)? = nil
+        holderSend: (@Sendable (UUID, Data) async -> Bool)? = nil,
+        holderSessionEnded: (@Sendable (UUID) async -> Bool)? = nil
     ) {
         self.db = db
         self.tmux = tmux
@@ -183,6 +199,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
         self.waiter = waiter
         self.actuationLog = actuationLog
         self.holderSend = holderSend
+        self.holderSessionEnded = holderSessionEnded
     }
 
     /// Early-cancel probe (see `LimitResumeActuating.userAlreadyContinued`).
@@ -499,7 +516,10 @@ public struct LimitResumeActuator: LimitResumeActuating {
     ///
     /// - **`windowExists` and the worktree lookup.** Both name a tmux server
     ///   and window this row does not have. A holder session's liveness is its
-    ///   child process, and the courier addresses it by terminal id.
+    ///   child process, and the courier addresses it by terminal id — so the
+    ///   liveness question is not dropped, it is asked of a different oracle:
+    ///   `holderSessionEnded`, in the same position and with the same silent
+    ///   `.terminalGone` cancel.
     /// - **The pane-identity consultation (step 1a).** It exists because tmux
     ///   reuses pane ids, so a stale coordinate can name a live stranger. There
     ///   is no coordinate here to go stale: a holder row's pane id is `""` by
@@ -536,6 +556,27 @@ public struct LimitResumeActuator: LimitResumeActuating {
         // silent cancel. Parking already cancels the pending row; this catches
         // a park that raced the scheduler.
         guard !terminal.isParked else { return .notEligible(.terminalGone) }
+
+        // Liveness, in the position `windowExists` occupies on the tmux arm and
+        // with the same silent `.terminalGone` cancel. Without it the holder
+        // arm had no liveness answer at all: a row whose child exited without
+        // anything parking it would be typed at, and the write would land on a
+        // pty nobody is reading — an armed resume reported as delivered on a
+        // session that is over.
+        //
+        // The evidence has to be positive, which is why the seam asks about the
+        // holder's reported STATUS rather than about the daemon's reader. On
+        // this transport a session with no daemon reader is usually a session a
+        // viewer is holding — the most ordinary live state there is — so
+        // `reader(for:) == nil` would cancel the auto-resume of every session
+        // with a tab open on it.
+        if let sessionEnded = self.holderSessionEnded, await sessionEnded(terminal.id) {
+            logger.info("""
+                actuate: terminal \(terminal.id.uuidString, privacy: .public) is holder-backed \
+                and its holder reported the session over — cancelling
+                """)
+            return .notEligible(.terminalGone)
+        }
 
         // 1b, unchanged: the row itself can be cancelled while a prior
         // attempt's ~20s verify window runs.

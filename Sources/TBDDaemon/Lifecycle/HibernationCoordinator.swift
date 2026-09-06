@@ -365,10 +365,18 @@ public actor HibernationCoordinator {
     /// fans out over every terminal in the worktree and most are refused by the
     /// rails above, so — like the idle sweep — the row goes after the gate, at
     /// the moment this rail is actually about to act on a session.
+    ///
+    /// `holderHibernationEnabled` is not defaulted, for the reason
+    /// `Terminal.isManuallyHibernatable(holderHibernationEnabled:)` gives: the
+    /// flag reaches several call sites across the daemon and the app, and a
+    /// missing argument should be a compile error rather than a rail that
+    /// quietly disagrees with the menu the user is looking at. A default that
+    /// leaned on "forgetting refuses, which is safe" would invert the day the
+    /// shipped constant flips, which is this flag's whole graduation plan.
     public func hibernateForMerge(
         terminalID: UUID,
         inputVetoEnabled: Bool,
-        holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault
+        holderHibernationEnabled: Bool
     ) async -> HibernateResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
@@ -1483,6 +1491,30 @@ public actor HibernationCoordinator {
                 lastInputAt: lastInputAt,
                 now: reference
             )
+
+            // A holder row whose screen this daemon cannot read is not a
+            // candidate, however idle it is. `performHolderHibernate` fails
+            // closed on exactly this — a viewer owns the pty, or no reader was
+            // ever adopted — but it only reaches that refusal after the sweep
+            // has written a request row and its refused outcome. On a tab the
+            // user is looking at the condition holds for as long as the tab is
+            // open, so without this check an open tab costs one
+            // request+refusal pair per sweep, forever, for a park that could
+            // never have happened.
+            //
+            // The gate cannot make this call: it is pure, and the registry is
+            // only available here. So the sweep asks, and treats the answer the
+            // way it treats the `.running` family — reset the idle clock and
+            // any armed debounce, write nothing — which restarts the full idle
+            // window from the moment the viewer leaves.
+            if terminal.transport == .holder,
+               decision == .eligible || decision == .notIdleLongEnough,
+               await holderScreenIsUnreadable(terminalID: terminal.id) {
+                logger.debug("hibernate: not arming \(terminal.id, privacy: .public) — the daemon cannot read this holder session's screen")
+                idleSince[terminal.id] = nil
+                pendingKillSince[terminal.id] = nil
+                continue
+            }
 
             switch decision {
             case .eligible:

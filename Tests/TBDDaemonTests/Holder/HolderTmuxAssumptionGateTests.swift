@@ -472,11 +472,12 @@ struct HolderTmuxAssumptionGateTests {
         // Idle for an hour with the sweep armed: every other rail passes, so
         // `.eligible` is what this row gets without the transport gate.
         #expect(HibernationGate.decide(
-            terminal: terminal, autoHibernateEnabled: true, idleTimeout: 60,
+            terminal: terminal, autoHibernateEnabled: true,
+            holderHibernationEnabled: false, idleTimeout: 60,
             idleSince: now.addingTimeInterval(-3600), now: now) == .holderTransport)
         #expect(HibernationGate.decideForMerge(
             terminal: terminal, inputVetoEnabled: false,
-            lastInputAt: nil) == .holderTransport)
+            holderHibernationEnabled: false, lastInputAt: nil) == .holderTransport)
     }
 
     /// The same two rails with the flag on: a holder row that passes every
@@ -510,10 +511,12 @@ struct HolderTmuxAssumptionGateTests {
 
         let now = Date()
         #expect(HibernationGate.decide(
-            terminal: terminal, autoHibernateEnabled: true, idleTimeout: 60,
+            terminal: terminal, autoHibernateEnabled: true,
+            holderHibernationEnabled: false, idleTimeout: 60,
             idleSince: now.addingTimeInterval(-3600), now: now) == .eligible)
         #expect(HibernationGate.decideForMerge(
-            terminal: terminal, inputVetoEnabled: false, lastInputAt: nil) == .eligible)
+            terminal: terminal, inputVetoEnabled: false,
+            holderHibernationEnabled: false, lastInputAt: nil) == .eligible)
     }
 
     // MARK: - Gate 3: wake
@@ -1643,9 +1646,14 @@ struct HolderTmuxAssumptionGateTests {
     /// registry wires, so the flag-off tests below assert the flag and not an
     /// absent seam. `waiter` defaults to a no-op, so only the test that asserts
     /// on the pause between the holder arm's two writes records them.
+    ///
+    /// `holderSessionEnded` defaults to nil for the same reason `holderSend`
+    /// does: that is what a daemon with no holder registry wires, so a test
+    /// that says nothing about liveness is asserting on today's behaviour.
     private func resumeActuator(
         _ db: TBDDatabase, tmux: FakeResumeTmux,
         holderSend: (@Sendable (UUID, Data) async -> Bool)? = nil,
+        holderSessionEnded: (@Sendable (UUID) async -> Bool)? = nil,
         waiter: @escaping @Sendable (Duration) async -> Void = { _ in }
     ) -> LimitResumeActuator {
         LimitResumeActuator(
@@ -1653,7 +1661,8 @@ struct HolderTmuxAssumptionGateTests {
             readTranscript: { _ in nil },
             transcriptModifiedAt: { _ in nil },
             waiter: waiter, actuationLog: makeTestActuationLog(),
-            holderSend: holderSend)
+            holderSend: holderSend,
+            holderSessionEnded: holderSessionEnded)
     }
 
     /// The reproduction, on the answer a real tmux gives — and the shipped
@@ -1819,6 +1828,100 @@ struct HolderTmuxAssumptionGateTests {
         #expect(tmux.sends.isEmpty)
     }
 
+    /// The holder arm's liveness answer, in the position `windowExists`
+    /// occupies on the tmux arm and with the same silent cancel.
+    ///
+    /// Nothing had parked this row: its child simply ended. Without the seam
+    /// the arm has no liveness question at all and types "continue" onto a pty
+    /// nobody is reading, reporting an armed resume as delivered into a session
+    /// that is over.
+    @Test("auto-resume cancels silently when the holder reports the session over")
+    func autoResumeCancelsWhenTheHolderSessionHasEnded() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try await db.config.setHolderHibernationEnabled(true)
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .working, source: .derived)
+        let resume = try await armedResume(db, terminal: terminal)
+
+        let tmux = FakeResumeTmux()
+        tmux.windowAlive = true
+        let holder = RecordedHolderWrites()
+        let outcome = await resumeActuator(
+            db, tmux: tmux, holderSend: holder.send,
+            holderSessionEnded: { _ in true }
+        ).actuate(resume)
+
+        #expect(outcome == .terminalGone, "expected .terminalGone, got \(outcome)")
+        #expect(holder.writes().isEmpty,
+                "auto-resume typed into a session its holder had reported over")
+        #expect(tmux.sends.isEmpty)
+    }
+
+    /// The other answer. A seam that answered "ended" for everything would pass
+    /// the test above while cancelling every armed resume on the transport, so
+    /// this leg is what makes that one about the answer rather than about the
+    /// seam's presence.
+    @Test("auto-resume still sends when the holder reports the session live")
+    func autoResumeSendsWhenTheHolderSessionIsLive() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try await db.config.setHolderHibernationEnabled(true)
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .working, source: .derived)
+        let resume = try await armedResume(db, terminal: terminal)
+
+        let tmux = FakeResumeTmux()
+        tmux.windowAlive = true
+        let holder = RecordedHolderWrites()
+        let outcome = await resumeActuator(
+            db, tmux: tmux, holderSend: holder.send,
+            holderSessionEnded: { _ in false }
+        ).actuate(resume)
+
+        #expect(outcome == .sent, "expected .sent, got \(outcome)")
+        #expect(holder.writes() == [
+            .write(terminalID: terminal.id, bytes: Data([0x1B])),
+            .write(terminalID: terminal.id, bytes: Data("continue".utf8) + Data([0x0D])),
+        ], "the holder arm's send was \(holder.snapshot())")
+    }
+
+    /// The seam absent. A daemon with no holder registry wires nil, and that
+    /// must behave exactly as it did before the seam existed — asking nobody
+    /// and proceeding to the courier, which fails by name if the session really
+    /// is gone.
+    @Test("auto-resume with no liveness seam sends exactly as it did before")
+    func autoResumeWithoutALivenessSeamIsUnchanged() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try await db.config.setHolderHibernationEnabled(true)
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .working, source: .derived)
+        let resume = try await armedResume(db, terminal: terminal)
+
+        let tmux = FakeResumeTmux()
+        tmux.windowAlive = true
+        let holder = RecordedHolderWrites()
+        let outcome = await resumeActuator(
+            db, tmux: tmux, holderSend: holder.send, holderSessionEnded: nil
+        ).actuate(resume)
+
+        #expect(outcome == .sent, "expected .sent, got \(outcome)")
+        #expect(holder.writes() == [
+            .write(terminalID: terminal.id, bytes: Data([0x1B])),
+            .write(terminalID: terminal.id, bytes: Data("continue".utf8) + Data([0x0D])),
+        ], "the holder arm's send was \(holder.snapshot())")
+    }
+
     /// A courier that found no route answers no, and the rail says so by name
     /// rather than reporting the generic "no activity after 2 sends" — and it
     /// does not try again, because the courier has already exhausted its own
@@ -1955,5 +2058,165 @@ struct HolderTmuxAssumptionGateTests {
         #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
         #expect(holder.writes().isEmpty,
                 "a tmux row was routed through the holder input path")
+    }
+
+    // MARK: - Gate 11: the idle sweep and a screen the daemon cannot read
+
+    private func sweepLogPath() throws -> String {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-holdergate-sweep-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("actuations.jsonl").path
+    }
+
+    private func logRows(at path: String) throws -> [[String: Any]] {
+        guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+        return try contents
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in
+                try #require(
+                    try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+            }
+    }
+
+    /// A coordinator whose actuation record is a real file this test can count
+    /// rows in, and whose date seam the test drives — the sweep's poll/decide
+    /// sequence needs three passes and two elapsed windows, and none of that
+    /// may cost wall time.
+    private func sweepCoordinator(
+        _ db: TBDDatabase, logPath: String, dates: TestDateSource,
+        registry: HolderRegistry?
+    ) async -> HibernationCoordinator {
+        let coordinator = HibernationCoordinator(
+            db: db, tmux: TmuxManager(dryRun: true),
+            configDirManager: isolatedConfigDirManager(),
+            now: dates.provider,
+            exitPollAttempts: 1, exitPollInterval: .milliseconds(1),
+            actuationLog: ActuationLog(path: logPath))
+        await coordinator.setHolderRegistry(registry)
+        return coordinator
+    }
+
+    /// Seed the idle marker, cross the idle window to arm the debounce, then
+    /// let the settle window elapse so the rail reaches its act moment.
+    private func sweepToTheActMoment(
+        _ coord: HibernationCoordinator, dates: TestDateSource, idleMinutes: Int = 1
+    ) async {
+        await coord.sweep()
+        dates.advance(by: TimeInterval(idleMinutes) * 60 + 1)
+        await coord.sweep()
+        dates.advance(by: HibernationCoordinator.killDebounce + 1)
+        await coord.sweep()
+    }
+
+    /// The registry check the sweep makes before it arms or fires a holder row.
+    ///
+    /// `HibernationGate` is pure and cannot see who holds a pty, so a holder
+    /// row whose screen the daemon cannot read still reaches `.eligible` — and
+    /// `performHolderHibernate` then fails closed, but only after the sweep has
+    /// written a request row and its refused outcome. On a tab the user is
+    /// looking at that condition holds for as long as the tab is open, so the
+    /// pair would be paid on every sweep forever. The assertion is therefore on
+    /// the RECORD being empty, not on the row being unparked: the row is
+    /// unparked either way, and only the record can tell "refused" from "never
+    /// asked".
+    @Test("the sweep neither arms nor fires a holder row whose screen it cannot read")
+    func sweepSkipsAHolderRowTheDaemonIsNotReading() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+        let logPath = try sweepLogPath()
+        let dates = TestDateSource()
+        // This registry adopted nothing, so it holds no reader for the session
+        // — the same state a daemon is in while a viewer owns the pty, reached
+        // without a live holder.
+        let coord = await sweepCoordinator(
+            db, logPath: logPath, dates: dates,
+            registry: holderRegistry(listing: [terminal]))
+
+        await sweepToTheActMoment(coord, dates: dates)
+        // A fourth pass a whole window later. Resetting the markers must mean
+        // "never fires while this holds", not "fires one sweep later".
+        dates.advance(by: 61 + HibernationCoordinator.killDebounce + 1)
+        await coord.sweep()
+
+        let written = try logRows(at: logPath)
+        #expect(written.isEmpty,
+                "the sweep asked for a park it could never have completed: \(written)")
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+    }
+
+    /// The other side of that check, and the marker half of the same fix.
+    ///
+    /// With no registry wired at all the sweep has nothing to ask, so it does
+    /// arm and fire — which is what makes the assertion above about the
+    /// registry answer rather than about holder rows being skipped wholesale.
+    /// The park then refuses by name, and that refusal clears `idleSince` and
+    /// `pendingKillSince` like every other refusal in the method: the next
+    /// sweep, at the same instant with the debounce still long past, writes
+    /// nothing. Leaving the markers armed would re-fire the identical refusal
+    /// on every pass.
+    @Test("with no registry the sweep fires once and the refusal clears its markers")
+    func sweepFiresOnceWhenNoRegistryCanAnswer() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let logPath = try sweepLogPath()
+        let dates = TestDateSource()
+        let coord = await sweepCoordinator(
+            db, logPath: logPath, dates: dates, registry: nil)
+
+        await sweepToTheActMoment(coord, dates: dates)
+
+        let afterAct = try logRows(at: logPath)
+        #expect(afterAct.count == 2, "expected one request row and its outcome, got \(afterAct)")
+        #expect(afterAct.first?["kind"] as? String == "hibernate")
+        // The outcome's free-text slot is `error`, which is where
+        // `ActuationOutcome.detail` puts a refusal reason.
+        #expect(afterAct.last?["error"] as? String == "this daemon has no holder registry")
+
+        await coord.sweep()
+        let afterASecondPass = try logRows(at: logPath)
+        #expect(afterASecondPass.count == 2,
+                "the refusal left its markers armed, so the next sweep re-fired it: "
+                    + "\(afterASecondPass)")
+        #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
+    }
+
+    /// The transport leg. The registry question is asked of holder rows only —
+    /// an inverted comparison would stop the idle sweep parking tmux sessions
+    /// on any daemon that happens to have a registry wired.
+    @Test("the sweep still parks an identical tmux row on a daemon with a registry")
+    func sweepStillParksATmuxRowWithARegistryWired() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .tmux)
+        let logPath = try sweepLogPath()
+        let dates = TestDateSource()
+        let coord = await sweepCoordinator(
+            db, logPath: logPath, dates: dates,
+            registry: holderRegistry(listing: [terminal]))
+
+        await sweepToTheActMoment(coord, dates: dates)
+
+        #expect(try await db.terminals.get(id: terminal.id)?.isParked == true)
+        let written = try logRows(at: logPath)
+        #expect(written.count == 2, "expected one request row and its outcome, got \(written)")
+        #expect(written.last?["result"] as? String == "dispatched")
     }
 }

@@ -151,6 +151,9 @@ import TestSupport
         HibernationGate.decide(
             terminal: terminal,
             autoHibernateEnabled: true,
+            // A tmux fixture; the gate takes no default for this, so it is
+            // named rather than omitted.
+            holderHibernationEnabled: false,
             idleTimeout: 60,
             idleSince: Self.baselineActivityAt,
             now: Self.baselineActivityAt.addingTimeInterval(3600))

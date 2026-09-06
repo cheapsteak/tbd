@@ -605,9 +605,17 @@ Everything TBD does through tmux today, and its replacement:
   toward; the three sanctioned scrapers migrate onto it as part of this work.
 - **Hibernation and revive** — hibernate instructs the holder to terminate its
   child (the holder reports status and exits); revive spawns a fresh holder.
-  The input-veto and queued-prompt flags keep their semantics, now gating
-  daemon writes to the master instead of tmux `send-keys`. Three properties
-  of the park are load-bearing rather than incidental:
+  The queued-prompt flag keeps its semantics, now gating daemon writes to the
+  master instead of tmux `send-keys`. The **input veto does not carry over**:
+  its fact source is the app's keystroke stream, and on this transport those
+  keystrokes go straight down the pty the viewer holds — which is exactly the
+  state a park refuses anyway — so the veto is vacuous for a holder row and
+  the screen rail below is the pending-input rail there. Recording the
+  daemon's own writes in its place would be strictly worse than recording
+  nothing: an auto-resume or a peer's `terminal.send` would then read as
+  unsent typed input forever against the merge rail's
+  `activityStateObservedAt` anchor, vetoing every park of that row. Three
+  properties of the park are load-bearing rather than incidental:
 
   - **The row never finalizes parked while the child is still running.** The
     park writes its intent, ends the child, confirms the exit, and only then

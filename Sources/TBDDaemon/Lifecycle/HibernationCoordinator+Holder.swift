@@ -53,6 +53,25 @@ extension HibernationCoordinator {
         "The daemon is not reading this session's terminal, so it cannot check "
         + "for unsent input before hibernating"
 
+    /// Whether the screen the park's pending-input rail would have to judge is
+    /// one this daemon cannot read — a viewer owns the pty, or no reader was
+    /// ever adopted for the session.
+    ///
+    /// The same question `performHolderHibernate` asks before its two
+    /// fail-closed refusals, lifted out so the sweep can ask it *first*.
+    /// `HibernationGate` is pure — it decides from the row, the config and the
+    /// clock, and has no way to see who holds a pty — so the sweep is the only
+    /// place with the registry in hand.
+    ///
+    /// A daemon with no registry at all answers false: that is the tmux-only
+    /// configuration, where a holder row is a leftover and the park's own
+    /// no-registry refusal is the right place to say so once.
+    func holderScreenIsUnreadable(terminalID: UUID) async -> Bool {
+        guard let registry = holderRegistry else { return false }
+        if await registry.viewerAttachment(for: terminalID) != nil { return true }
+        return await registry.reader(for: terminalID) == nil
+    }
+
     // MARK: - Park
 
     /// Park a holder-backed session: end the job its holder forked, then record
@@ -96,10 +115,20 @@ extension HibernationCoordinator {
             return refusal
         }
 
+        // The three refusals below clear `idleSince` and `pendingKillSince`
+        // like every other refusal in this method. Each one names a condition
+        // that will still hold on the next sweep — no registry on this daemon,
+        // a viewer that owns the pty until its tab closes, a session this
+        // daemon never adopted — so leaving the markers armed would re-fire the
+        // identical refusal every pass. Clearing them makes the row start its
+        // idle clock again from the moment the condition clears.
+
         // No registry means no reader, no way to write `/exit`, and no way to
         // abandon the holder afterwards. Say so by name rather than parking a
         // row whose process nothing in this daemon can end.
         guard let registry = holderRegistry else {
+            idleSince[terminal.id] = nil
+            pendingKillSince[terminal.id] = nil
             return .notEligible(reason: "this daemon has no holder registry")
         }
 
@@ -109,10 +138,14 @@ extension HibernationCoordinator {
         // not the screen the session is showing. Each half answers with its own
         // name: they differ in what the person reading the refusal can do next.
         if await registry.viewerAttachment(for: terminal.id) != nil {
+            idleSince[terminal.id] = nil
+            pendingKillSince[terminal.id] = nil
             logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — a viewer holds this session's pty")
             return .notEligible(reason: Self.holderViewerAttachedRefusal)
         }
         guard let reader = await registry.reader(for: terminal.id) else {
+            idleSince[terminal.id] = nil
+            pendingKillSince[terminal.id] = nil
             logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — the daemon holds no reader for this session")
             return .notEligible(reason: Self.holderNoReaderRefusal)
         }
@@ -309,25 +342,37 @@ extension HibernationCoordinator {
             childPID: childPID, terminalID: terminalID, registry: registry)
     }
 
+    /// Whether the holder's job can be treated as gone.
+    ///
+    /// Two positive facts count as gone, and one silence deliberately does not.
+    ///
+    /// **A verdict must never rest on evidence the escalation itself erased.**
+    /// `abandon(terminal:)` sets this session's remembered status back to nil,
+    /// so the poll that runs *after* the escalation reads no status at all. On
+    /// a row whose `child_pid` column is NULL there is then nothing else to
+    /// read — the process table has no answer to give for a pid this daemon may
+    /// not signal — and treating that silence as an exit is precisely how a row
+    /// finalizes parked over a live child.
+    ///
+    /// So when the pid is unusable, only a POSITIVE `.exited` /
+    /// `.exitedStatusUnknown` from the registry counts as gone; nil and
+    /// `.alive` alike answer "not gone". The consequence is that a NULL-pid
+    /// park rolls back after its escalation rather than completing, which is
+    /// the safe direction: the row is left awake, where the reconcile arm and
+    /// the reaper's holder leg can judge it. Every path that recorded a real
+    /// child pid is unchanged, because the process table answers there.
     private func childIsGone(
         childPID: Int32, terminalID: UUID, registry: HolderRegistry
     ) async -> Bool {
-        let status = await registry.lastKnownStatus(for: terminalID)
-        switch status {
+        switch await registry.lastKnownStatus(for: terminalID) {
         case .exited, .exitedStatusUnknown: return true
         case .alive, nil: break
         }
-        let statusAlive = (status == .alive)
-        // A pid of 0 or below names nothing this daemon may signal or wait on,
-        // so the process table has no answer to give and the registry's is the
-        // only evidence there is. An explicit `.alive` is a positive report
-        // from the holder that its job is still running, and it must not be
-        // thrown away because the row's `child_pid` column happened to be
-        // NULL — that reading would let a park finalize over a live child,
-        // which is the one thing this whole path exists to prevent. With no
-        // report either way, a row that never recorded a child pid has nothing
-        // to outlive.
-        guard childPID > 1 else { return !statusAlive }
+        // Reaching here means the registry reported the job alive, or has
+        // nothing to report because the escalation cleared what it knew.
+        // Neither is evidence of an exit, and with no pid to check there is no
+        // second source to ask.
+        guard childPID > 1 else { return false }
         guard signaller.isAlive(childPID) else { return true }
         // `ps -o stat=` reports a corpse as `Z...`. It answers `kill(pid, 0)`,
         // so liveness alone cannot tell it from a running process — and the

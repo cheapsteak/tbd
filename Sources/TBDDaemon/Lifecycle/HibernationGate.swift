@@ -40,11 +40,14 @@ public enum HibernationGate {
     ///   - autoHibernateEnabled: the global master switch.
     ///   - inputVetoEnabled: soak flag for the input-pipeline pending-input veto.
     ///   - holderHibernationEnabled: `config.holderHibernationEnabled`, the soak
-    ///     gate for park/wake on the pty-holder transport. Defaulted — unlike
-    ///     `decideForMerge`'s `inputVetoEnabled` — because forgetting it fails
-    ///     toward REFUSING a holder row, which is the safe direction: a session
-    ///     that is wrongly left awake is recoverable, one parked by a mechanic
-    ///     nobody armed is not.
+    ///     gate for park/wake on the pty-holder transport. Not defaulted, for
+    ///     the reason `Terminal.isManuallyHibernatable(holderHibernationEnabled:)`
+    ///     gives: the flag reaches several call sites across the daemon and the
+    ///     app, and a missing argument should be a compile error rather than a
+    ///     rail that quietly disagrees with the menu the user is looking at.
+    ///     "Forgetting fails toward refusing" would be an argument with a
+    ///     shelf life — it inverts the day the shipped constant flips, which is
+    ///     the whole graduation plan for this flag.
     ///   - idleTimeout: how long a terminal must be idle before it qualifies.
     ///   - idleSince: when the terminal last went idle (its `hibernationIdleSince`
     ///     marker). `nil` means "no idle marker yet" — treated as not-yet-idle,
@@ -57,7 +60,7 @@ public enum HibernationGate {
         terminal: Terminal,
         autoHibernateEnabled: Bool,
         inputVetoEnabled: Bool = false,
-        holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault,
+        holderHibernationEnabled: Bool,
         idleTimeout: TimeInterval,
         idleSince: Date?,
         lastInputAt: Date? = nil,
@@ -146,17 +149,18 @@ public enum HibernationGate {
     ///     path that silently forgets to arm this rail is the exact defect this
     ///     parameter exists to prevent.
     ///   - holderHibernationEnabled: `config.holderHibernationEnabled`, the
-    ///     soak gate for park/wake on the pty-holder transport. Defaulted for
-    ///     the same reason it is on `decide`: forgetting it refuses a holder
-    ///     row, and a session left awake is recoverable where one parked by an
-    ///     unarmed mechanic is not.
+    ///     soak gate for park/wake on the pty-holder transport. Not defaulted,
+    ///     for the same reason it is not on `decide`: a missing argument should be
+    ///     a compile error, not a rail that silently disagrees with the app's
+    ///     menu — and any "forgetting fails safe" reading inverts the day the
+    ///     shipped constant flips.
     ///   - lastInputAt: the timestamp of the last keystroke/paste routed to
     ///     this terminal's pane (from `InputActivityTracker`) — the same fact
     ///     the sweep passes. `nil` means no input was recorded for the pane.
     public static func decideForMerge(
         terminal: Terminal,
         inputVetoEnabled: Bool,
-        holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault,
+        holderHibernationEnabled: Bool,
         lastInputAt: Date?
     ) -> Decision {
         if let blocked = blockingRail(

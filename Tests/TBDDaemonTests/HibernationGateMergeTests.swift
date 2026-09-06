@@ -37,8 +37,13 @@ struct HibernationGateMergeTests {
         inputVetoEnabled: Bool = false,
         lastInputAt: Date? = nil
     ) -> HibernationGate.Decision {
+        // Every terminal in this suite is a tmux row, so the soak gate is
+        // passed off and named. The production signature has no default for
+        // it, and the tests that are about the gate live beside the holder
+        // fixtures in HolderTmuxAssumptionGateTests.
         HibernationGate.decideForMerge(
-            terminal: terminal, inputVetoEnabled: inputVetoEnabled, lastInputAt: lastInputAt)
+            terminal: terminal, inputVetoEnabled: inputVetoEnabled,
+            holderHibernationEnabled: false, lastInputAt: lastInputAt)
     }
 
     // MARK: - The go path: no idle window at all
@@ -67,6 +72,7 @@ struct HibernationGateMergeTests {
         let t = claudeTerminal(activityState: .idle)
         let sweepWithSwitchOff = HibernationGate.decide(
             terminal: t, autoHibernateEnabled: false,
+            holderHibernationEnabled: false,
             idleTimeout: 30 * 60,
             idleSince: Date(timeIntervalSince1970: 0), now: Date()
         )
@@ -215,6 +221,9 @@ struct HibernationGateMergeTests {
             transport: .holder)
     }
 
+    /// The argument cannot be omitted: `decideForMerge` carries no default for
+    /// it, the same as `decide`, so a park path that forgets the flag is a
+    /// compile error rather than a rail that silently disagrees with the app.
     @Test func mergeParkRefusesAHolderRowWhileTheSoakGateIsOff() {
         #expect(HibernationGate.decideForMerge(
             terminal: holderTerminal(), inputVetoEnabled: false,
@@ -225,13 +234,6 @@ struct HibernationGateMergeTests {
         #expect(HibernationGate.decideForMerge(
             terminal: holderTerminal(), inputVetoEnabled: false,
             holderHibernationEnabled: true, lastInputAt: nil) == .eligible)
-    }
-
-    /// Omitting the argument refuses, the same safe direction `decide` takes.
-    @Test func theOmittedArgumentRefusesAHolderMergePark() {
-        #expect(HibernationGate.decideForMerge(
-            terminal: holderTerminal(), inputVetoEnabled: false,
-            lastInputAt: nil) == .holderTransport)
     }
 
     /// With the gate on, a holder row still answers to every other rail — the
