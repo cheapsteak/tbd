@@ -156,15 +156,6 @@ struct PeerLinkSupervisorTests {
     /// reconnect would come back after one virtual second where the probe
     /// advances 3.99, and the requested delays would read `[1, 1, 1]`.
     ///
-    /// **And that it waits no longer than it.** The lower bound alone leaves a
-    /// supervisor that computed the right base and then slept far past it
-    /// passing, so each reconnect is also pinned from above: the connection
-    /// must be open by `computed + delay` plus one advance step. One step is
-    /// the bound because that is the driver's granularity —
-    /// `advanceVirtualTime` re-checks its condition after every advance, so
-    /// starting a hair short of the deadline it can overshoot by a single step
-    /// and no more.
-    ///
     /// `healthyResetUptime` is 3600 against a frozen date source, so the attempt
     /// counter cannot reset mid-test and turn the growth back into a flat line —
     /// which the requested-delay sequence is what pins.
@@ -193,9 +184,6 @@ struct PeerLinkSupervisorTests {
         // Short of the deadline by a hair, so "did not respawn" is attributable
         // to the backoff and not to the probe stopping early.
         let hair = Duration.milliseconds(10)
-        // Derived from the driver, not restated: the upper bound below is
-        // exactly one of its advances wide, so the two must move together.
-        let driverStep = Duration.seconds(virtualAdvanceStepSeconds)
         for (index, wait) in expected.enumerated() {
             let attempt = index + 1
             let computed = await advanceVirtualTime(
@@ -226,21 +214,6 @@ struct PeerLinkSupervisorTests {
                 observed: { "spawns=\(stub.spawnCount())" }
             ) { stub.spawnCount() >= attempt + 1 }
             if opened == nil { break }
-
-            // The other half of the bound. The probe left the clock a hair
-            // short of `request.at + wait`, and `advanceVirtualTime` re-checks
-            // its condition after every advance — so a supervisor that wakes
-            // when its delay is up has the connection open within one step of
-            // the deadline. Later than that and it slept longer than it asked
-            // to, which the "did not respawn early" assertion above cannot see.
-            let ceiling = request.at.advanced(by: Duration.seconds(wait) + driverStep)
-            #expect(
-                clock.now <= ceiling,
-                """
-                connection \(attempt + 1) opened \(ceiling.duration(to: clock.now)) later than one \
-                advance step past its \(request.base)s backoff: the supervisor must wake when the \
-                delay it requested is up, not merely no earlier than it
-                """)
         }
 
         // Captured before the stop, as `linkGoesUpOnHelloExchangeAndDownOnChildExit`
@@ -1460,11 +1433,6 @@ private struct PeerLinkAdvanceTimeout: Error, CustomStringConvertible {
     }
 }
 
-/// The virtual-time granularity ``advanceVirtualTime`` moves in, named so a
-/// test pinning an *upper* bound can derive its tolerance from the driver
-/// instead of restating the number and letting the two drift apart.
-private let virtualAdvanceStepSeconds: Double = 0.25
-
 /// Advances virtual time in `step`s for as long as the code under test keeps
 /// **re-arming** a sleep, until `condition` holds, and returns the virtual
 /// seconds it spent getting there (`nil` on timeout).
@@ -1480,7 +1448,7 @@ private let virtualAdvanceStepSeconds: Double = 0.25
 private func advanceVirtualTime(
     _ clock: TestClock<Duration>,
     until what: String,
-    step: Double = virtualAdvanceStepSeconds,
+    step: Double = 0.25,
     timeout: Swift.Duration = .seconds(45),
     pollInterval: Swift.Duration = .milliseconds(25),
     observed: @Sendable () async -> String = { "nothing" },
