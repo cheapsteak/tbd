@@ -2881,6 +2881,36 @@ extension RPCRouter {
             + "input path wired for it. Nothing was typed and its session is unchanged."
     }
 
+    /// The refusal a text `terminal.send` gets for a terminal whose Claude
+    /// process is gone.
+    ///
+    /// Named separately from the transport refusals because the caller's remedy
+    /// is different and specific: wake the terminal, which delivers the message
+    /// atomically with the respawn. Without this rail the send finds a live pane
+    /// with a shell prompt in it, pastes the message, presses Enter, and runs the
+    /// message as a shell command while reporting success.
+    static func parkedSendRefusal(terminalID: UUID, exited: Bool) -> String {
+        let cause = exited
+            ? "its Claude session exited"
+            : "it is hibernated"
+        return "terminal.send was refused: terminal \(terminalID) is not running — \(cause), so "
+            + "nothing was typed. Wake it instead (`tbd terminal wake --terminal \(terminalID) "
+            + "--prompt \"…\"`), which delivers the message as the resumed session's first prompt."
+    }
+
+    /// The refusal a text `terminal.send` gets when the pane is alive but the
+    /// process table says Claude does not own its foreground process group.
+    ///
+    /// The second of two independent rails, and the one that covers a MISSED
+    /// hook: a crashed session emits no `SessionEnd`, so nothing stamped the row.
+    /// It asks the same inspector the limit-resume path has always asked, which
+    /// reads `ps` — a process-table fact, never the rendered screen.
+    static func claudeNotForegroundRefusal(terminalID: UUID, paneID: String) -> String {
+        "terminal.send was refused: Claude is not the foreground process of pane \(paneID) for "
+            + "terminal \(terminalID) — a shell is, so the message would have run as a command "
+            + "line. Nothing was typed."
+    }
+
     func handleTerminalSend(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -2997,6 +3027,42 @@ extension RPCRouter {
             return await performHolderSend(
                 payload: payload, terminal: terminal, actuationID: actuationID,
                 actor: actor, envelope: envelope)
+        }
+
+        // ─── Is Claude actually running here? ───
+        //
+        // Text only. `--keys` exists to answer a dialog and to interrupt, and a
+        // key sequence into a shell is not the failure this rail exists to stop.
+        //
+        // Two independent facts, because each fails on its own. The park stamp is
+        // written by the `SessionEnd` hook and is missed whenever the process
+        // crashes; the foreground-process inspector reads the process table and
+        // is available only for a tmux-backed row with a live pane. Both are
+        // machine facts — a column and `ps` — never the rendered screen, which
+        // this codebase forbids reading for state.
+        if case .text(let body, _, _) = payload, !body.isEmpty {
+            if terminal.hibernatedAt != nil {
+                let message = Self.parkedSendRefusal(
+                    terminalID: terminal.id, exited: terminal.isExitStamped)
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+            // A pane id that resolves to a pid is the precondition for asking at
+            // all, and `panePID > 0` is not decoration: a tmux that cannot answer
+            // reports "0", and asking the process table about pid 0 is a question
+            // with no meaning. An unreadable pid therefore proceeds — a tmux that
+            // cannot answer is not evidence that Claude left, and the pane
+            // consultation below is the rail that judges a missing or dead pane,
+            // properly.
+            if let panePIDString = try? await tmux.panePID(
+                    server: worktree.tmuxServer, paneID: terminal.tmuxPaneID),
+               let panePID = Int32(panePIDString), panePID > 0,
+               paneProcessInspector.foregroundClaudePID(panePID: panePID) == nil {
+                let message = Self.claudeNotForegroundRefusal(
+                    terminalID: terminal.id, paneID: terminal.tmuxPaneID)
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
         }
 
         // ─── The second refusal line: a well-formed act the daemon declines ───

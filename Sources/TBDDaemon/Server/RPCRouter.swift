@@ -281,6 +281,12 @@ public final class RPCRouter: Sendable {
     /// moved, this says whether the session itself did.
     let transcriptDeltaInspector: TranscriptDeltaInspector
 
+    /// How the daemon asks whether Claude owns a pane's foreground process
+    /// group. The same seam the limit-resume actuator uses, held here so the
+    /// send path can refuse a pane whose agent has left without any test
+    /// needing a real `ps`. A process-table fact, never screen text.
+    let paneProcessInspector: any PaneProcessInspecting
+
     public init(
         db: TBDDatabase,
         lifecycle: WorktreeLifecycle,
@@ -306,12 +312,14 @@ public final class RPCRouter: Sendable {
         transcriptFingerprinter: @escaping TranscriptFingerprinter = TranscriptFingerprinting.live,
         transcriptDeltaInspector: @escaping TranscriptDeltaInspector
             = TranscriptDeltaInspection.live,
+        paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
         actuationLog: ActuationLog
     ) {
         self.now = now
         self.tmuxSocketPathResolver = tmuxSocketPathResolver
         self.transcriptFingerprinter = transcriptFingerprinter
         self.transcriptDeltaInspector = transcriptDeltaInspector
+        self.paneProcessInspector = paneProcessInspector
         self.actuationLog = actuationLog
         self.db = db
         self.lifecycle = lifecycle

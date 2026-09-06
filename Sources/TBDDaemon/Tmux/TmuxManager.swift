@@ -173,6 +173,11 @@ public struct TmuxManager: Sendable {
     /// transport failure rather than a refusal, and a non-throwing hook would
     /// leave that branch with no way to be exercised.
     public let dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)?
+    /// Optional test hook consulted by `panePID` in dryRun mode:
+    /// `(server, paneID)` to the pid string to report. Without it dryRun reports
+    /// "0", which makes the send path's foreground-process rail unreachable from
+    /// a test — the same gap `dryRunPaneCurrentCommand` closes for its own query.
+    public let dryRunPanePID: (@Sendable (String, String) -> String)?
     /// Optional test hook consulted by `killSessionIfClientless` in dryRun
     /// mode: `(server, session)` → true when tmux would have *spared* the
     /// session because a client attached between the listing and the kill.
@@ -239,7 +244,7 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunListSessions: (@Sendable (String) -> [TmuxSessionInfo])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunSessionSpared: (@Sendable (String, String) -> Bool)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, dryRunServerPresence: (@Sendable (String) -> TmuxPresence)? = nil, dryRunWindowPresence: (@Sendable (String, String) -> TmuxPresence)? = nil, realModeServerPresenceOverride: (@Sendable (String) -> TmuxPresence?)? = nil, realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxPresence?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunListSessions: (@Sendable (String) -> [TmuxSessionInfo])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPanePID: (@Sendable (String, String) -> String)? = nil, dryRunSessionSpared: (@Sendable (String, String) -> Bool)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, dryRunServerPresence: (@Sendable (String) -> TmuxPresence)? = nil, dryRunWindowPresence: (@Sendable (String, String) -> TmuxPresence)? = nil, realModeServerPresenceOverride: (@Sendable (String) -> TmuxPresence?)? = nil, realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxPresence?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
@@ -254,6 +259,7 @@ public struct TmuxManager: Sendable {
         self.dryRunRespawnWindowError = dryRunRespawnWindowError
         self.dryRunKillWindowError = dryRunKillWindowError
         self.dryRunPaneSendTarget = dryRunPaneSendTarget
+        self.dryRunPanePID = dryRunPanePID
         self.dryRunSessionSpared = dryRunSessionSpared
         self.dryRunPaneWindowID = dryRunPaneWindowID
         self.dryRunPasteBytes = dryRunPasteBytes
@@ -1541,7 +1547,7 @@ public struct TmuxManager: Sendable {
     }
 
     public func panePID(server: String, paneID: String) async throws -> String {
-        if dryRun { return "0" }
+        if dryRun { return dryRunPanePID?(server, paneID) ?? "0" }
         let args = Self.panePIDQuery(server: server, paneID: paneID)
         return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
     }
