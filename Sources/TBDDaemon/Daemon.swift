@@ -909,8 +909,12 @@ public final class Daemon: Sendable {
                     await registry.viewerAttachment(for: terminalID)
                 },
                 writeDirectly: { terminalID, bytes in
-                    // The daemon's own reader is the only descriptor it has,
-                    // and it has one only while nobody else owns the pty.
+                    // The daemon's own reader is the only descriptor it has —
+                    // but it keeps that reader across an attach, suspended
+                    // rather than stopped, so this fallback has a target in
+                    // every attached state. No reader means the session is gone
+                    // or was never adopted, which is the one case with nothing
+                    // to write to.
                     guard let reader = await registry.reader(for: terminalID) else {
                         throw HolderInjectionCourier.Error.noDaemonDescriptor(
                             terminalID: terminalID)

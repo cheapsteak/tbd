@@ -2483,13 +2483,20 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // Holder path: **this panel owns `TIOCSWINSZ` for as long as it
                 // owns the pty**, and makes the same ioctl the arm above makes,
                 // on the write-only duplicate it took at attach. It is not left
-                // to the daemon: the daemon deliberately does not issue
-                // `TIOCSWINSZ` for a session a viewer holds (see
-                // `HolderRegistry.applyViewerResize`), because two ioctls for
-                // one resize signal the child twice and, in the window where
-                // they disagree, at a geometry nobody is painting. So a resize
-                // routed only through the RPC below would reach the emulator's
-                // grid and never the child.
+                // to the daemon: once the attach is acknowledged — or has timed
+                // out unacknowledged — `HolderRegistry.applyViewerResize` sees
+                // a `viewerAttachment` and resizes only the emulator's grid,
+                // leaving the tty size to whoever is painting it. So a resize
+                // routed only through the RPC below would reach the grid and
+                // never the child.
+                //
+                // The exception is the vended-but-not-yet-acked window, where
+                // there is no `viewerAttachment` yet and the daemon's arm still
+                // calls `reader.resize()` — the same narrow window
+                // `HolderInjectionCourier.deliver` names for writes, and for
+                // the same reason. Both sides may set the size for one RPC
+                // round trip; two ioctls signal the child twice and, until they
+                // agree, at a geometry nobody is painting. Narrow, not zero.
                 setHolderWindowSize(cols: newCols, rows: newRows)
                 // The daemon is told either way, and for a different reason per
                 // transport: for a control-mode window it is the sole size
