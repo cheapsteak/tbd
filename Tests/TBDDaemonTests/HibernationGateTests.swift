@@ -292,10 +292,22 @@ struct HibernationGateTests {
     ///
     /// - `blockingRail == nil` ⇔ `isAutoHibernationEligible`. Both are "every
     ///   hard rail passes, keep-warm included".
-    /// - `blockingRail == nil || blockingRail == .keepWarm` ⇔
-    ///   `isManuallyHibernatable`. A manual park is allowed to override
-    ///   keep-warm and nothing else, so keep-warm is the one blocker the
-    ///   manual predicate forgives.
+    /// - `blockingRail(the same row with keep-warm cleared) == nil` ⇔
+    ///   `isManuallyHibernatable`. A manual park overrides keep-warm and
+    ///   nothing else, so the honest way to say that is to ask the cascade the
+    ///   question with keep-warm taken out of it.
+    ///
+    /// **Not** `rail == nil || rail == .keepWarm`, which is the obvious
+    /// spelling and is wrong: `blockingRail` returns the most specific blocker
+    /// in ITS order, and keep-warm sits ahead of the activity rails — so a
+    /// keep-warm row that is mid-turn answers `.keepWarm`, and forgiving that
+    /// answer would read as "only keep-warm blocks this" while
+    /// `isManuallyHibernatable` correctly refuses it for running a turn. This
+    /// test was written with that spelling and found the twelve rows where it
+    /// disagrees, which is the whole argument for having it. Nothing in
+    /// production computes manual eligibility from `blockingRail` — the manual
+    /// path calls the predicate directly — so those rows were a defect in the
+    /// assertion rather than in the daemon.
     ///
     /// The structural fix — `isManuallyHibernatable` becoming
     /// `blockingRail(...) == nil`, with the reason-bearing cascade moved into
@@ -324,14 +336,19 @@ struct HibernationGateTests {
                                         let rail = HibernationGate.blockingRail(
                                             terminal: terminal,
                                             holderHibernationEnabled: holderHibernationEnabled)
+                                        var withoutKeepWarm = terminal
+                                        withoutKeepWarm.keepWarm = false
+                                        let railIgnoringKeepWarm = HibernationGate.blockingRail(
+                                            terminal: withoutKeepWarm,
+                                            holderHibernationEnabled: holderHibernationEnabled)
                                         let auto = terminal.isAutoHibernationEligible(
                                             holderHibernationEnabled: holderHibernationEnabled)
                                         let manual = terminal.isManuallyHibernatable(
                                             holderHibernationEnabled: holderHibernationEnabled)
                                         #expect((rail == nil) == auto,
                                                 "blockingRail said \(String(describing: rail)) while isAutoHibernationEligible said \(auto) for \(transport) flag=\(holderHibernationEnabled) session=\(String(describing: sessionID)) kind=\(String(describing: kind)) hibernated=\(hibernatedAt != nil) suspended=\(suspendedAt != nil) keepWarm=\(keepWarm) activity=\(activity)")
-                                        #expect((rail == nil || rail == .keepWarm) == manual,
-                                                "blockingRail said \(String(describing: rail)) while isManuallyHibernatable said \(manual) for \(transport) flag=\(holderHibernationEnabled) session=\(String(describing: sessionID)) kind=\(String(describing: kind)) hibernated=\(hibernatedAt != nil) suspended=\(suspendedAt != nil) keepWarm=\(keepWarm) activity=\(activity)")
+                                        #expect((railIgnoringKeepWarm == nil) == manual,
+                                                "blockingRail with keep-warm cleared said \(String(describing: railIgnoringKeepWarm)) while isManuallyHibernatable said \(manual) for \(transport) flag=\(holderHibernationEnabled) session=\(String(describing: sessionID)) kind=\(String(describing: kind)) hibernated=\(hibernatedAt != nil) suspended=\(suspendedAt != nil) keepWarm=\(keepWarm) activity=\(activity)")
                                         rows += 1
                                         if rail == nil { passedEveryRail += 1 }
                                     }
