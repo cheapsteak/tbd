@@ -487,15 +487,16 @@ actor HolderReader {
         emulator.renderScreen()
     }
 
-    /// The tail of the scrollback plus the viewport, at most `maxLines` lines.
-    func renderScreenWithScrollback(maxLines: Int) -> String {
-        emulator.renderScreenWithScrollback(maxLines: maxLines)
-    }
-
-    /// The typed screen `terminal.output` answers with: the same lines
-    /// `renderScreenWithScrollback` produces, plus the facts a string cannot
-    /// carry — where the viewport starts, where the cursor is, what modes the
-    /// child is in, which store answered, and how stale that store is.
+    /// The typed screen `terminal.output` answers with: the tail of the
+    /// scrollback plus the viewport at most `maxLines` long, plus the facts a
+    /// string cannot carry — where the viewport starts, where the cursor is,
+    /// what modes the child is in, which store answered, and how stale that
+    /// store is.
+    ///
+    /// The one whole-buffer walk. A second one existed while `terminal.output`
+    /// was migrating and produced the same lines with none of the facts; it is
+    /// gone, because two walks over one buffer are two chances for a
+    /// projection fix to land in only one of them.
     ///
     /// **`source` is read from this reader's own drain state**, which is the
     /// only place it can be read honestly. A reader that is draining is on the
@@ -1268,27 +1269,6 @@ private final class HolderEmulator: @unchecked Sendable {
         }
     }
 
-    /// The tail of the whole buffer — scrollback and viewport together.
-    ///
-    /// Enumeration starts at `totalLinesTrimmed`, the absolute index of the
-    /// oldest line still held, and runs until `getScrollInvariantLine` returns
-    /// nil: there is no public line count, and `Buffer.lines` is internal.
-    func renderScreenWithScrollback(maxLines: Int) -> String {
-        guard maxLines > 0 else { return "" }
-        return terminal.terminalLock.withLock {
-            var lines: [String] = []
-            var row = terminal.buffer.totalLinesTrimmed
-            while let line = terminal.getScrollInvariantLine(row: row) {
-                lines.append(Self.rowText(line))
-                row += 1
-            }
-            if lines.count > maxLines {
-                lines.removeFirst(lines.count - maxLines)
-            }
-            return Self.joined(lines)
-        }
-    }
-
     /// The typed screen, taken as **one observation** under a single
     /// `terminalLock` hold.
     ///
@@ -1298,9 +1278,12 @@ private final class HolderEmulator: @unchecked Sendable {
     /// change beside lines from before it, which is exactly the pairing the
     /// input path must not compose against.
     ///
-    /// The line walk is `renderScreenWithScrollback`'s: enumerate from
-    /// `totalLinesTrimmed` until `getScrollInvariantLine` returns nil, because
-    /// there is no public line count and `Buffer.lines` is internal.
+    /// The line walk enumerates from `totalLinesTrimmed`, the absolute index of
+    /// the oldest line still held, until `getScrollInvariantLine` returns nil —
+    /// because there is no public line count and `Buffer.lines` is internal.
+    /// It is the only whole-buffer walk in this type: the string-returning twin
+    /// that answered `terminal.output` before the screen contract is gone, so a
+    /// change to the projection cannot land in one walk and miss the other.
     ///
     /// **Nothing here feeds the terminal**, which is why the cursor's
     /// visibility is read from a flag the delegate keeps rather than probed

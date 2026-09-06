@@ -25,10 +25,10 @@ import Testing
 /// pins the daemon's renderer to the same projection.
 ///
 /// It exercises the production path rather than a copy of it: `ingest` feeds
-/// the reader's emulator synchronously, and `renderScreen` /
-/// `renderScreenWithScrollback` are the very functions `terminal.output`
-/// calls. No drain thread and no real pty are involved, so nothing here is
-/// timing-dependent.
+/// the reader's emulator synchronously, and `screen` is the very function
+/// `terminal.output` calls — `renderScreen` is the viewport-only twin the
+/// holder suites read a session's screen with. No drain thread and no real pty
+/// are involved, so nothing here is timing-dependent.
 @Suite struct HolderRenderProjectionTests {
 
     private static let nul = "\u{0}"
@@ -119,10 +119,10 @@ import Testing
 
     // MARK: - The scrollback render
 
-    /// `renderScreenWithScrollback` is a second, separate walk over the buffer
-    /// and needs the projection in its own right. The gap here is deliberately
-    /// placed on a line that has already scrolled off the viewport, so only the
-    /// scrollback path can produce it.
+    /// `screen` walks the whole buffer rather than the viewport, and needs the
+    /// projection in its own right. The gap here is deliberately placed on a
+    /// line that has already scrolled off the viewport, so only the scrollback
+    /// path can produce it.
     @Test("the scrollback render projects never-written cells as spaces too")
     func scrollbackRenderProjectsNeverWrittenCells() async throws {
         let harness = try Harness(columns: 40, rows: 5)
@@ -143,7 +143,7 @@ import Testing
             !viewport.contains("gap"),
             "the gap line is still on screen, so this asserts nothing about scrollback")
 
-        let history = await harness.reader.renderScreenWithScrollback(maxLines: 100)
+        let history = try await harness.reader.screen(maxLines: 100).output
         #expect(
             history.contains("          gap"),
             "rendered \(history.debugDescription)")
