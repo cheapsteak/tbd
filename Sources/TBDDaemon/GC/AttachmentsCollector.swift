@@ -9,6 +9,16 @@ struct AttachmentsCollector: Sendable {
     enum Decision: Equatable, Sendable {
         case keep(reason: String)
         case reap
+        /// The directory names a worktree row that still exists. The directory
+        /// itself always stays — even once it holds nothing — and each staged
+        /// file the floor has passed goes on its own.
+        case reapFiles(stale: [URL], kept: [KeptFile])
+    }
+
+    /// One file inside a live worktree's directory that stays, and why.
+    struct KeptFile: Equatable, Sendable {
+        let file: URL
+        let reason: String
     }
 
     /// How long an orphan's files must have sat untouched before they go.
@@ -56,10 +66,10 @@ struct AttachmentsCollector: Sendable {
         guard let id = UUID(uuidString: directory.lastPathComponent) else {
             return .keep(reason: "not-a-worktree-id")
         }
-        guard !liveWorktreeIDs.contains(id) else {
-            return .keep(reason: "live-worktree")
-        }
         let floor = now().addingTimeInterval(-Double(floorDays) * 86_400)
+        if liveWorktreeIDs.contains(id) {
+            return decideLiveWorktree(directory, floor: floor)
+        }
         // **An unreadable directory is not an empty one.** Reading through `try?`
         // and falling back to `[]` made a directory the sweep cannot open — a
         // permissions problem, a volume that answered badly — look like a
@@ -92,10 +102,50 @@ struct AttachmentsCollector: Sendable {
         return .reap
     }
 
-    /// Unlink the directory and everything in it. Returns whether it went.
-    func reap(_ directory: URL) -> Bool {
+    /// A live worktree's directory outlives its files.
+    ///
+    /// The row is what makes the directory worth keeping, so the directory
+    /// stays for as long as the row does — but the images inside it do not age
+    /// with the worktree. A staged file is read at paste time, or at resume
+    /// time on the wake path, so it is needed for minutes; one the floor has
+    /// passed is spent, and the same fourteen days that govern an orphan govern
+    /// it. Every branch here still fails toward keeping.
+    private func decideLiveWorktree(_ directory: URL, floor: Date) -> Decision {
+        // An unreadable directory is not an empty one, exactly as in the orphan
+        // branch: it yields no files to classify, so nothing here may act.
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.isRegularFileKey]) else {
+            return .keep(reason: "contents-unreadable")
+        }
+        var stale: [URL] = []
+        var kept: [KeptFile] = []
+        for entry in entries {
+            // Only a regular file is a staged image. A subdirectory, a symlink,
+            // or anything else a later feature puts here is left alone rather
+            // than classified by a rule that never considered it.
+            guard (try? entry.resourceValues(forKeys: [.isRegularFileKey]))?
+                .isRegularFile == true else { continue }
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: entry.path),
+                  let modified = attrs[.modificationDate] as? Date else {
+                // A file whose age cannot be read is a file whose age is
+                // unknown, and unknown is not old.
+                kept.append(KeptFile(file: entry, reason: "age-unreadable"))
+                continue
+            }
+            if modified > floor {
+                kept.append(KeptFile(file: entry, reason: "younger-than-floor"))
+            } else {
+                stale.append(entry)
+            }
+        }
+        return .reapFiles(stale: stale, kept: kept)
+    }
+
+    /// Unlink one node: a whole orphan directory with everything in it, or a
+    /// single staged file inside a live worktree's. Returns whether it went.
+    func reap(_ node: URL) -> Bool {
         do {
-            try FileManager.default.removeItem(at: directory)
+            try FileManager.default.removeItem(at: node)
             return true
         } catch {
             return false

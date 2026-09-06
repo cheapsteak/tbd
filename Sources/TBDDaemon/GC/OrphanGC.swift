@@ -961,10 +961,16 @@ public actor OrphanGC {
     /// `.active` here would let this leg reap out from under a worktree somebody
     /// can still revive.
     ///
+    /// A directory whose row still exists is never removed, but the files in it
+    /// age individually: a staged image is read at paste time, or at resume time
+    /// on the wake path, so one the floor has passed is spent and goes on its
+    /// own.
+    ///
     /// No `ReapRecord` is written. The record type is keyed by the worktree a
     /// reap removed and carries a restorability pointer; there is nothing a
     /// `tbd gc restore` could put back here, because the image was staged for a
-    /// message in a worktree that no longer exists.
+    /// message in a worktree that no longer exists — or, for a per-file reap,
+    /// for one nobody sent in two weeks.
     private func reclaimAttachments(
         config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
@@ -1008,6 +1014,30 @@ public actor OrphanGC {
                 logger.info("""
                 gc: reclaimed composer attachments \(candidate.path, privacy: .public)
                 """)
+            case .reapFiles(let stale, let kept):
+                // The directory belongs to a row that still exists, so it stays
+                // whatever happens to the files inside it — including when the
+                // last one goes and it is left empty.
+                planned.append("KEEP live-worktree \(candidate.path)")
+                for keptFile in kept {
+                    planned.append("KEEP \(keptFile.reason) \(keptFile.file.path)")
+                }
+                for file in stale {
+                    planned.append(
+                        "REAP attachments \(file.path) live-worktree-file-past-floor")
+                    guard !dryRun else { continue }
+                    guard attachmentsCollector.reap(file) else {
+                        planned.append("KEEP unlink-failed \(file.path)")
+                        logger.warning("""
+                        gc: could not unlink \(file.path, privacy: .public)
+                        """)
+                        continue
+                    }
+                    reaped += 1
+                    logger.info("""
+                    gc: reclaimed staged attachment \(file.path, privacy: .public)
+                    """)
+                }
             }
         }
     }

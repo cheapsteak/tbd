@@ -67,6 +67,24 @@ struct OrphanGCAttachmentsTests {
         return path
     }
 
+    /// The path as a plan line spells it. The sweep reaches every node through
+    /// `contentsOfDirectory`, which hands back the resolved `/private/tmp` form,
+    /// while `TBDConstants` composes the `/tmp` symlink — so a raw comparison
+    /// never matches and a negative one passes for the wrong reason.
+    ///
+    /// `realpath`, not `resolvingSymlinksInPath`: the Foundation call strips a
+    /// leading `/private` back off by design, which is the very difference this
+    /// has to erase. The parent is resolved and the last component appended, so
+    /// it answers for a file the sweep has already unlinked.
+    private func planPath(_ path: String) -> String {
+        let url = URL(fileURLWithPath: path)
+        guard let resolved = realpath(url.deletingLastPathComponent().path, nil) else {
+            return path
+        }
+        defer { free(resolved) }
+        return String(cString: resolved) + "/" + url.lastPathComponent
+    }
+
     /// A live worktree row whose id this suite chooses, so the attachments
     /// directory it stages can be named after it.
     private func insertWorktree(_ db: TBDDatabase, id: UUID) async throws {
@@ -80,6 +98,9 @@ struct OrphanGCAttachmentsTests {
 
     // MARK: - Keeps
 
+    /// The directory of a worktree row that still exists is never removed. The
+    /// files inside it age individually — see the per-file pair below — so this
+    /// stages one the floor has not reached.
     @Test func aLiveWorktreesAttachmentsAreKept() async throws {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
@@ -87,7 +108,7 @@ struct OrphanGCAttachmentsTests {
         try await db.config.setTranscriptComposerEnabled(true)
         let worktreeID = UUID()
         try await insertWorktree(db, id: worktreeID)
-        let path = stage(worktreeID)
+        let path = stage(worktreeID, ageDays: 1)
 
         let result = await makeGC(db: db, home: home).sweep()
 
@@ -98,6 +119,7 @@ struct OrphanGCAttachmentsTests {
     /// An archived row is still a row: the archive path's own unlink is what
     /// handles it, so this leg must read every status rather than only `.active`
     /// and reap a directory out from under a worktree somebody can still revive.
+    /// Its file is younger than the floor, so the per-file rule leaves it too.
     @Test func anArchivedWorktreesAttachmentsAreKept() async throws {
         let (home, restore) = isolateTBDHome()
         defer { restore() }
@@ -110,7 +132,7 @@ struct OrphanGCAttachmentsTests {
                 path: "/tmp/tbd-nonexistent-\(worktreeID.uuidString)",
                 status: .archived, tmuxServer: "tbd-test", sortOrder: 1)).insert(conn)
         }
-        let path = stage(worktreeID)
+        let path = stage(worktreeID, ageDays: 1)
 
         let result = await makeGC(db: db, home: home).sweep()
 
@@ -283,6 +305,77 @@ struct OrphanGCAttachmentsTests {
 
         #expect(fm.fileExists(atPath: strayFile.path), "a bare-UUID file must survive the sweep")
         #expect(!result.planned.contains { $0.contains(strayFile.path) })
+    }
+
+    // MARK: - Files inside a live worktree
+
+    /// The per-file rule: inside a directory whose row still lives, a staged
+    /// file past the floor goes on its own while the directory and everything
+    /// younger stay. A staged image is read at paste time, or at resume time on
+    /// the wake path, so it is needed for minutes — a two-week-old one is spent.
+    @Test func aStaleFileInALiveWorktreeIsReapedWhileTheDirectoryStays() async throws {
+        let (home, restore) = isolateTBDHome()
+        defer { restore() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setTranscriptComposerEnabled(true)
+        let worktreeID = UUID()
+        try await insertWorktree(db, id: worktreeID)
+        let old = stage(worktreeID, ageDays: 30)
+        let young = stage(worktreeID, ageDays: 1)
+        let directory = TBDConstants.attachmentsDir(worktreeID: worktreeID)
+
+        let result = await makeGC(db: db, home: home).sweep()
+
+        #expect(!fm.fileExists(atPath: old), "a file past the floor goes")
+        #expect(fm.fileExists(atPath: young), "a file the floor has not reached stays")
+        #expect(fm.fileExists(atPath: directory.path), "the directory outlives its files")
+        #expect(result.planned.contains(
+            "REAP attachments \(planPath(old)) live-worktree-file-past-floor"))
+        #expect(result.planned.contains("KEEP younger-than-floor \(planPath(young))"))
+        #expect(result.planned.contains("KEEP live-worktree \(planPath(directory.path))"))
+        #expect(result.reaped == 1)
+    }
+
+    /// The dry run plans the per-file reap and touches nothing, the same way it
+    /// does for an orphan directory.
+    @Test func aDryRunPlansALiveWorktreesStaleFileWithoutUnlinkingIt() async throws {
+        let (home, restore) = isolateTBDHome()
+        defer { restore() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setTranscriptComposerEnabled(true)
+        let worktreeID = UUID()
+        try await insertWorktree(db, id: worktreeID)
+        let old = stage(worktreeID, ageDays: 30)
+
+        let result = await makeGC(db: db, home: home).sweep(dryRun: true)
+
+        #expect(fm.fileExists(atPath: old), "a dry run must never touch disk")
+        #expect(result.planned.contains(
+            "REAP attachments \(planPath(old)) live-worktree-file-past-floor"))
+        #expect(result.reaped == 0)
+    }
+
+    /// Only regular files age. A subdirectory somebody or some later feature
+    /// put inside a live worktree's directory is not a staged image, so no rule
+    /// here classifies it.
+    @Test func aNonRegularEntryInALiveWorktreeIsIgnored() async throws {
+        let (home, restore) = isolateTBDHome()
+        defer { restore() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setTranscriptComposerEnabled(true)
+        let worktreeID = UUID()
+        try await insertWorktree(db, id: worktreeID)
+        let nested = TBDConstants.attachmentsDir(worktreeID: worktreeID)
+            .appendingPathComponent("nested", isDirectory: true)
+        try fm.createDirectory(at: nested, withIntermediateDirectories: true)
+        let stamp = clock.addingTimeInterval(-30 * 86_400)
+        try fm.setAttributes([.modificationDate: stamp], ofItemAtPath: nested.path)
+
+        let result = await makeGC(db: db, home: home).sweep()
+
+        #expect(fm.fileExists(atPath: nested.path))
+        #expect(!result.planned.contains { $0.contains(planPath(nested.path)) })
+        #expect(result.reaped == 0)
     }
 
     // MARK: - The flag
