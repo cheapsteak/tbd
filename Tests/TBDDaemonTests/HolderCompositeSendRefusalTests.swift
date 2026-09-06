@@ -85,28 +85,33 @@ struct HolderCompositeSendRefusalTests {
         #expect(body.hasSuffix("\nhello\r"))
     }
 
-    /// Same as above for a single image part: delivered as the bare quoted
-    /// path — `RPCRouter.quotedImagePath` — the same bytes the tmux arm pastes.
+    /// Same as above for a single image part, EXCEPT for the envelope: it
+    /// must carry none, regardless of disposition — Claude Code attaches an
+    /// image only when the paste is the bare quoted path and nothing else
+    /// (measured on 2.1.261), so a prefix ahead of it turns the path into
+    /// literal text and attaches nothing. `connection: nil` (unauthenticated,
+    /// requesting no suppression) is the harness's default, spelled out here
+    /// because this is exactly the disposition an envelope would otherwise
+    /// attach under — proving the exclusion is the image part's own rule, not
+    /// suppression having been granted.
     @Test func aSingleImagePartSendToAHolderRowIsNotRefused() async throws {
         let recorder = HolderWriteRecorder()
         let harness = try await SendHarness.make(
             transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
-        let response = try await harness.send(TerminalSendParams(
-            terminalID: harness.terminal.id, submit: true, parts: [.imagePath("/tmp/a.png")]),
-            actor: .app)
+        let response = try await harness.send(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true, parts: [.imagePath("/tmp/a.png")]),
+            actor: .app, connection: nil)
 
         let error = response.error ?? ""
         #expect(!error.contains("more than one part"))
         #expect(!error.contains("newline"))
         #expect(!error.contains("parts"))
         #expect(response.success, "error was: \(error)")
-        // Same reasoning as the text case: a single-part `.parts` send is
-        // delivered exactly as the `.text` arm delivers a body, envelope
-        // included — unlike the tmux arm, which never envelopes an image part.
         #expect(recorder.writes.count == 1)
         let body = String(bytes: try #require(recorder.writes.first), encoding: .utf8) ?? ""
-        #expect(body.hasPrefix("<tbd-dispatch"))
-        #expect(body.hasSuffix("\n'/tmp/a.png'\r"))
+        #expect(!body.contains("<tbd-dispatch"))
+        #expect(body == "'/tmp/a.png'\r")
     }
 
     /// A tmux row is untouched by any of it.

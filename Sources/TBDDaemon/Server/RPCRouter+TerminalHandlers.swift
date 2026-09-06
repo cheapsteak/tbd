@@ -3552,10 +3552,19 @@ extension RPCRouter {
         }
         let text: String
         let submit: Bool
+        // Whether `text` is allowed to carry the dispatch envelope at all,
+        // independent of `envelope`'s disposition or `carriesDispatchEnvelope`.
+        // `false` only for a lone image part: Claude Code attaches an image
+        // exclusively when the WHOLE paste is one quoted path (measured on
+        // 2.1.261), so a prefix ahead of it turns the path into literal text
+        // and attaches nothing — matching the tmux arm's rule that an image
+        // part is never enveloped.
+        let envelopeEligible: Bool
         switch payload {
         case .text(let body, let submitting, _):
             text = body
             submit = submitting
+            envelopeEligible = true
         case .keys:
             return await refuseHolderSend(
                 actuationID, Self.holderKeysRefusal(terminalID: terminal.id))
@@ -3569,8 +3578,10 @@ extension RPCRouter {
             switch parts[0] {
             case .text(let value):
                 text = value
+                envelopeEligible = true
             case .imagePath(let path):
                 text = Self.quotedImagePath(path)
+                envelopeEligible = false
             }
             submit = submitting
         case .parts:
@@ -3585,17 +3596,22 @@ extension RPCRouter {
 
         return await deliverHolderText(
             text, submit: submit, terminal: terminal, actuationID: actuationID,
-            actor: actor, envelope: envelope, courier: courier)
+            actor: actor, envelope: envelope, envelopeEligible: envelopeEligible, courier: courier)
     }
 
     /// Deliver one body of text to a holder-backed session: the same envelope
     /// handling, submit handling and courier call the `.text` arm of
     /// `performHolderSend` uses, factored out so the single-part `.parts` arm
     /// can reuse it verbatim rather than duplicating it.
+    ///
+    /// `envelopeEligible` is a second, independent gate on the envelope,
+    /// ahead of `envelope`'s disposition and `carriesDispatchEnvelope`: a lone
+    /// image part passes `false` so the quoted path it built from is never
+    /// prefixed, no matter what those two would otherwise decide.
     private func deliverHolderText(
         _ text: String, submit: Bool, terminal: Terminal, actuationID: String,
         actor: ActuationActor?, envelope: DispatchEnvelopeDisposition,
-        courier: HolderInjectionCourier
+        envelopeEligible: Bool = true, courier: HolderInjectionCourier
     ) async -> RPCResponse {
         // Asked BEFORE anything is composed, because the answer decides the
         // bytes. Two sources, in order: the test seam if one is installed, then
@@ -3621,7 +3637,8 @@ extension RPCRouter {
         // is a real way to press Enter and must not start pasting a tag.
         let body = text.isEmpty
             ? ""
-            : (envelope == .attached && Self.carriesDispatchEnvelope(terminal)
+            : (envelopeEligible && envelope == .attached
+                && Self.carriesDispatchEnvelope(terminal)
                 ? Self.dispatchEnvelope(
                     id: actuationID, from: (actor ?? .anonymous).dispatchLabel) + "\n" + text
                 : text)
