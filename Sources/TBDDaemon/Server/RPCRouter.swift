@@ -309,6 +309,15 @@ public final class RPCRouter: Sendable {
     /// in a test without a process to inspect.
     let processSignaller: any ProcessSignaller
 
+    /// Behavior seam for the one place the send path has to *wait*: the settle
+    /// after an image paste, before whatever the parts arm does next. A
+    /// `Duration` is behavior, so this is the `Clock` seam rather than the
+    /// `now` date seam beside it, and it is existential (`any Clock<Duration>`)
+    /// for the reason every other subsystem here holds one that way — a generic
+    /// parameter would infect the `Sendable` conformances the router already
+    /// carries.
+    let clock: any Clock<Duration>
+
     public init(
         db: TBDDatabase,
         lifecycle: WorktreeLifecycle,
@@ -338,10 +347,12 @@ public final class RPCRouter: Sendable {
         completionInventory: CompletionInventoryService = CompletionInventoryService(),
         recordedAppIdentity: @escaping @Sendable () async -> ProcessIdentity? = { nil },
         processSignaller: any ProcessSignaller = ProductionProcessSignaller(),
-        actuationLog: ActuationLog
+        actuationLog: ActuationLog,
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.recordedAppIdentity = recordedAppIdentity
         self.processSignaller = processSignaller
+        self.clock = clock
         self.now = now
         self.tmuxSocketPathResolver = tmuxSocketPathResolver
         self.transcriptFingerprinter = transcriptFingerprinter

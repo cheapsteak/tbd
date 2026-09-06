@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TestSupport
 
 /// What actually reaches the pane for a parts payload.
 ///
@@ -9,7 +10,7 @@ import TBDShared
 /// reason parts exist is that Claude Code turns a paste into an image attachment
 /// only when the WHOLE paste is one quoted path, so an image part pasted
 /// together with its surrounding words silently becomes literal text.
-@Suite("terminal.send parts delivery")
+@Suite("terminal.send parts delivery", .clockDriven)
 struct TerminalSendPartsDeliveryTests {
 
     // MARK: - The image paste
@@ -198,5 +199,111 @@ struct TerminalSendPartsDeliveryTests {
         #expect(error.contains("foreground process"))
         #expect(harness.tmux.pastedBodies.isEmpty)
         #expect(harness.tmux.sentKeys.isEmpty)
+    }
+
+    // MARK: - The settle after an image paste
+
+    /// **The image token lands where the caret is when the attach finishes.**
+    /// Claude Code turns a pasted quoted path into an attachment
+    /// asynchronously; pasting the next part before that lands moves the caret,
+    /// so the `[Image#N]` token arrives at the END of the message and an Enter
+    /// that arrives mid-attach is swallowed. Both were observed live against
+    /// 2.1.261, on the first image a Claude process had ever been given.
+    ///
+    /// **The wait is once per image part, not once per successor.** It belongs
+    /// to the image paste and is taken before whatever comes next, so an image
+    /// followed by text waits ONCE — between the two pastes — and not again
+    /// before Enter: the token has already landed by then, and Enter after a
+    /// plain text paste is what the single-text arm has always done. The image
+    /// being LAST is the case where that same one wait covers the Enter, which
+    /// `anImageAsTheLastPartSettlesBeforeEnter` pins.
+    ///
+    /// Pinned by advancing: the second paste has not happened before the
+    /// advance and has after.
+    @Test func anImagePartSettlesBeforeTheNextPaste() async throws {
+        let clock = EventDrivenTestClock()
+        let harness = try await SendHarness.make(clock: clock)
+        let send = Task {
+            try await harness.send(TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true,
+                parts: [.imagePath("/tmp/a.png"), .text(" and tell me what it is")]),
+                actor: .app)
+        }
+
+        // Armed on the settle, with the image pasted and NOTHING after it.
+        await clock.sleeperArmed()
+        #expect(harness.tmux.pastedBodies == ["'/tmp/a.png'"])
+        #expect(harness.tmux.sentKeys.isEmpty)
+
+        await clock.advance(by: RPCRouter.imageAttachSettle)
+        // Bounded rather than `await send.value`, so a regression that arms a
+        // SECOND sleeper reports itself instead of wedging the suite.
+        _ = try await waitFor(
+            "the trailing text part and the Enter",
+            observed: { "pastes \(harness.tmux.pastedBodies), keys \(harness.tmux.sentKeys)" }
+        ) { harness.tmux.sentKeys == ["Enter"] }
+        send.cancel()
+        _ = await send.result
+
+        let bodies = harness.tmux.pastedBodies
+        try #require(bodies.count == 2)
+        #expect(bodies[0] == "'/tmp/a.png'")
+        #expect(bodies[1].hasSuffix(" and tell me what it is"))
+        // Once, not twice: nothing is still parked on the clock.
+        #expect(clock.sleeperCount == 0)
+    }
+
+    /// The image as the LAST part: the same one settle stands between its paste
+    /// and the Enter, which is the swallowed-Enter half of the defect.
+    @Test func anImageAsTheLastPartSettlesBeforeEnter() async throws {
+        let clock = EventDrivenTestClock()
+        let harness = try await SendHarness.make(clock: clock)
+        let send = Task {
+            try await harness.send(TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true,
+                parts: [.text("look at "), .imagePath("/tmp/a.png")]),
+                actor: .app)
+        }
+
+        await clock.sleeperArmed()
+        #expect(harness.tmux.pastedBodies.count == 2)
+        #expect(harness.tmux.sentKeys.isEmpty, "Enter must not race the attach")
+
+        await clock.advance(by: RPCRouter.imageAttachSettle)
+        _ = try await waitFor(
+            "the Enter after the settle",
+            observed: { "keys \(harness.tmux.sentKeys)" }
+        ) { harness.tmux.sentKeys == ["Enter"] }
+        send.cancel()
+        _ = await send.result
+        #expect(clock.sleeperCount == 0)
+    }
+
+    /// **A payload with no image part waits for nothing.** The settle is the
+    /// image paste's, so a text-only parts send must cost exactly what it cost
+    /// before — it runs to completion with the clock never advanced, and
+    /// nothing is ever parked on it.
+    @Test func aTextOnlyPartsSendNeverTouchesTheClock() async throws {
+        let clock = EventDrivenTestClock()
+        let harness = try await SendHarness.make(clock: clock)
+        let send = Task {
+            try await harness.send(TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true,
+                parts: [.text("look at "), .text("this")]),
+                actor: .app)
+        }
+
+        // Nothing advances the clock here. Completing at all is the assertion:
+        // a send that slept would still be parked.
+        _ = try await waitFor(
+            "the text-only send to finish with the clock never advanced",
+            observed: { "keys \(harness.tmux.sentKeys), sleepers \(clock.sleeperCount)" }
+        ) { harness.tmux.sentKeys == ["Enter"] }
+        send.cancel()
+        _ = await send.result
+
+        #expect(harness.tmux.pastedBodies.count == 2)
+        #expect(clock.sleeperCount == 0)
+        #expect(clock.now == EventDrivenTestClock.Instant(), "virtual time never moved")
     }
 }

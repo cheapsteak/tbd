@@ -3472,12 +3472,35 @@ extension RPCRouter {
                     envelopePending = false
                 }
 
+                // ─── The settle after an image paste ───
+                //
+                // Claude Code attaches an image and writes its `[Image#N]`
+                // token asynchronously, at the caret's position AT ATTACH TIME.
+                // So the wait belongs to the image paste rather than to any one
+                // successor: it is taken once per image part, before whatever
+                // comes next — the next paste, or the Enter if the image was
+                // last. That is why an image followed by text waits ONCE and
+                // not twice: by the time the trailing text has been pasted the
+                // token has already landed, and Enter after a plain text paste
+                // is the same thing the single-text arm has always done.
+                //
+                // `Self.imageAttachSettle` carries the measurement. Nothing
+                // here fires for a payload with no image part.
+                var settlePending = false
+                func settleIfNeeded() async throws {
+                    guard settlePending else { return }
+                    settlePending = false
+                    try await clock.sleep(for: Self.imageAttachSettle)
+                }
+
                 for part in parts {
                     let body: String
                     switch part {
                     case .text(let value):
                         // Skipped entirely, not pasted as an empty buffer — the
                         // same reading the single-text arm gives an empty payload.
+                        // Skipped BEFORE the settle too: a part that pastes
+                        // nothing moves no caret, so it needs nothing waited for.
                         guard !value.isEmpty else { continue }
                         if envelopePending {
                             body = Self.dispatchEnvelope(
@@ -3493,14 +3516,19 @@ extension RPCRouter {
                         // "inside a sentence" case that measured as literal text.
                         body = Self.quotedImagePath(path)
                     }
+                    try await settleIfNeeded()
                     try await tmux.pasteText(
                         server: worktree.tmuxServer,
                         paneID: terminal.tmuxPaneID,
                         bytes: Data(body.utf8)
                     )
+                    if case .imagePath = part { settlePending = true }
                 }
 
                 if submit {
+                    // An Enter that arrives mid-attach is swallowed, so the
+                    // same settle covers it when the image was the last part.
+                    try await settleIfNeeded()
                     try await tmux.sendKey(
                         server: worktree.tmuxServer,
                         paneID: terminal.tmuxPaneID,
@@ -4065,6 +4093,31 @@ extension RPCRouter {
     static func quotedImagePath(_ path: String) -> String {
         "'" + path.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
     }
+
+    /// How long the parts arm waits after pasting an image path, before it
+    /// pastes anything else or presses Enter.
+    ///
+    /// **Why a wait exists at all.** Claude Code turns the paste into an
+    /// attachment *asynchronously* and then writes its `[Image#N]` token in at
+    /// wherever the caret is when the attach lands. Pasting the next part
+    /// before that happens moves the caret, so the token arrives at the END of
+    /// the message — the person's sentence reads
+    /// `look at  and tell me what it is[Image#1]` — and an Enter that arrives
+    /// mid-attach is swallowed, leaving the message standing unsent. Both were
+    /// observed live against Claude Code 2.1.261, on the first image a given
+    /// Claude process had ever been given.
+    ///
+    /// **Where the number comes from.** Measured against the real 2.1.261 TUI
+    /// driven under a pty against the fake model API, pasting one bare quoted
+    /// image path into a fresh session and timing until `[Image#1]` rendered:
+    /// 15 fresh sessions, min 0.18 s, max 0.68 s, median ≈0.24 s (the live
+    /// verification's own hand observation on a loaded fleet machine was ≈1 s).
+    /// 2 s is a clean number above twice both maxima.
+    ///
+    /// It is one constant in one place so a soak can move it, and it is spent
+    /// only by a payload that actually carries an image — a text-only parts
+    /// send waits for nothing.
+    static let imageAttachSettle: Duration = .seconds(2)
 
     /// Whether an adapter exists that can actually observe a delivery to this
     /// target — the narrower question `--verify` turns on.

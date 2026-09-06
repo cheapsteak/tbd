@@ -1,3 +1,4 @@
+import Clocks
 import Foundation
 import Testing
 @testable import TBDDaemonLib
@@ -101,7 +102,13 @@ struct SendHarness {
         // than only that some rail did or didn't refuse it. `nil` (the
         // default) leaves `holderInjectionCourier` unset, which is what every
         // other holder test relies on to reach `holderInputUnavailable`.
-        holderDeliveryRecorder: (@Sendable (Data) -> Void)? = nil
+        holderDeliveryRecorder: (@Sendable (Data) -> Void)? = nil,
+        // The send path's one wait: the settle the parts arm takes after an
+        // image paste. Defaulted to `ImmediateClock`, so every suite built on
+        // this harness runs the production arm without spending wall time on
+        // it; a suite that wants to PIN the wait passes an
+        // `EventDrivenTestClock` instead.
+        clock: any Clock<Duration> = ImmediateClock()
     ) async throws -> SendHarness {
         let double = TmuxDouble()
         let tmux = TmuxManager(
@@ -126,7 +133,8 @@ struct SendHarness {
             paneProcessInspector: StubInspector(foregroundByAgent: foregroundByAgent),
             recordedAppIdentity: recordedAppIdentity,
             processSignaller: processSignaller,
-            actuationLog: ActuationLog(path: Self.scratchLogPath()))
+            actuationLog: ActuationLog(path: Self.scratchLogPath()),
+            clock: clock)
         if let holderDeliveryRecorder {
             router.holderInjectionCourier = HolderInjectionCourier(
                 sendFrame: { _ in },
@@ -192,14 +200,16 @@ struct SendHarness {
     static func makeAuthenticated(
         transport: TerminalTransport = .tmux,
         kind: TerminalKind = .claude,
-        holderDeliveryRecorder: (@Sendable (Data) -> Void)? = nil
+        holderDeliveryRecorder: (@Sendable (Data) -> Void)? = nil,
+        clock: any Clock<Duration> = ImmediateClock()
     ) async throws -> SendHarness {
         try await make(
             transport: transport,
             kind: kind,
             recordedAppIdentity: { AuthenticatedApp.identity },
             processSignaller: AuthenticatedApp.Signaller(),
-            holderDeliveryRecorder: holderDeliveryRecorder)
+            holderDeliveryRecorder: holderDeliveryRecorder,
+            clock: clock)
     }
 
     /// `connection` is what the daemon would have learned from the socket the
