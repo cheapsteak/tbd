@@ -126,6 +126,70 @@ struct ClaudeCompletionScanTests {
                 "a disabled plugin's commands must not be offered: \(names.sorted())")
     }
 
+    /// Every TBD profile config dir mirrors the host store by symlinking its
+    /// slots (`<profile>/claude/commands -> ~/.claude/commands`, same for
+    /// `skills` and `agents`), and `contentsOfDirectory(at:)` / `enumerator(at:)`
+    /// return NOTHING for a directory URL that IS a symlink — silently. So this
+    /// is the only shape that matters in the field, and without resolving the
+    /// root the scan finds zero user commands, skills, and agents.
+    @Test func aSymlinkedRootIsStillRead() throws {
+        let root = try makeTree()
+        defer { try? fm.removeItem(at: root) }
+
+        // The fixture really does link rather than nest: assert the shape, so a
+        // future edit that quietly makes these real directories cannot turn this
+        // test green for the wrong reason.
+        for slot in ["commands", "skills", "agents"] {
+            let link = root.appendingPathComponent("cfg/\(slot)")
+            #expect((try? fm.destinationOfSymbolicLink(atPath: link.path)) != nil,
+                    "fixture cfg/\(slot) must be a symlink")
+        }
+
+        let result = ClaudeCompletionScan.scan(
+            configDir: root.appendingPathComponent("cfg").path,
+            worktreePath: root.appendingPathComponent("wt").path)
+
+        let names = Set(result.commands.map(\.name))
+        #expect(names.contains("user-cmd"), "symlinked commands root: \(names.sorted())")
+        #expect(names.contains("user-skill"), "symlinked skills root: \(names.sorted())")
+        let agentNames = Set(result.agents.map(\.name))
+        #expect(agentNames.contains("scout"), "symlinked agents root: \(agentNames.sorted())")
+    }
+
+    /// Plugin items are namespaced by the plugin's name for the same reason
+    /// commands are: several installed plugins ship an agent called
+    /// `code-reviewer`, and un-namespaced they collapse into one row.
+    @Test func pluginAgentsAndSkillsAreNamespaced() throws {
+        let root = try makeTree()
+        defer { try? fm.removeItem(at: root) }
+
+        let result = ClaudeCompletionScan.scan(
+            configDir: root.appendingPathComponent("cfg").path,
+            worktreePath: root.appendingPathComponent("wt").path)
+
+        let agentNames = Set(result.agents.map(\.name))
+        // The user tree ships a `code-reviewer` too; both must survive the dedup.
+        #expect(agentNames.contains("code-reviewer"))
+        #expect(agentNames.contains("alpha:code-reviewer"),
+                "plugin agents must be namespaced: \(agentNames.sorted())")
+        #expect(Set(result.commands.map(\.name)).contains("alpha:plugin-skill"))
+    }
+
+    /// Claude Code names a command in a subdirectory `dir:command`, so the name
+    /// comes from the path relative to `commands/`, not the file stem alone.
+    @Test func aNestedCommandDirectoryBecomesAColonPrefix() throws {
+        let root = try makeTree()
+        defer { try? fm.removeItem(at: root) }
+
+        let result = ClaudeCompletionScan.scan(
+            configDir: root.appendingPathComponent("cfg").path,
+            worktreePath: root.appendingPathComponent("wt").path)
+
+        let names = Set(result.commands.map(\.name))
+        #expect(names.contains("nested:deep-cmd"), "nested command name: \(names.sorted())")
+        #expect(!names.contains("deep-cmd"))
+    }
+
     @Test func anEmptyTreeYieldsAnEmptyInventory() throws {
         let root = fm.temporaryDirectory
             .appendingPathComponent("tbd-scan-empty-\(UUID().uuidString.prefix(8))")
@@ -153,24 +217,47 @@ struct ClaudeCompletionScanTests {
         let cfg = root.appendingPathComponent("cfg")
         let wt = root.appendingPathComponent("wt")
 
-        try write(cfg.appendingPathComponent("commands/user-cmd.md"), """
+        // A profile config dir does not hold these three; it links them to the
+        // host store, which is the shape the scan has to survive. The real trees
+        // live beside it and `cfg/<slot>` is a symbolic link to each.
+        let host = root.appendingPathComponent("host")
+        try write(host.appendingPathComponent("commands/user-cmd.md"), """
             ---
             description: A user command
             argument-hint: "<thing>"
             ---
             """)
-        try write(cfg.appendingPathComponent("skills/user-skill/SKILL.md"), """
+        try write(host.appendingPathComponent("commands/nested/deep-cmd.md"), """
+            ---
+            description: A command in a subdirectory
+            ---
+            """)
+        try write(host.appendingPathComponent("skills/user-skill/SKILL.md"), """
             ---
             name: user-skill
             description: A user skill
             ---
             """)
-        try write(cfg.appendingPathComponent("agents/scout.md"), """
+        try write(host.appendingPathComponent("agents/scout.md"), """
             ---
             name: scout
             description: A subagent
             ---
             """)
+        // Shares a name with the enabled plugin's agent: un-namespaced, the two
+        // collapse into one row.
+        try write(host.appendingPathComponent("agents/code-reviewer.md"), """
+            ---
+            name: code-reviewer
+            description: The user's own reviewer
+            ---
+            """)
+        try fm.createDirectory(at: cfg, withIntermediateDirectories: true)
+        for slot in ["commands", "skills", "agents"] {
+            try fm.createSymbolicLink(
+                at: cfg.appendingPathComponent(slot),
+                withDestinationURL: host.appendingPathComponent(slot))
+        }
         try write(wt.appendingPathComponent(".claude/commands/project-cmd.md"), """
             ---
             description: A project command
@@ -192,6 +279,18 @@ struct ClaudeCompletionScanTests {
         try write(alphaRoot.appendingPathComponent("commands/enabled-cmd.md"), """
             ---
             description: From the enabled plugin
+            ---
+            """)
+        try write(alphaRoot.appendingPathComponent("skills/plugin-skill/SKILL.md"), """
+            ---
+            name: plugin-skill
+            description: A skill from the enabled plugin
+            ---
+            """)
+        try write(alphaRoot.appendingPathComponent("agents/code-reviewer.md"), """
+            ---
+            name: code-reviewer
+            description: The plugin's reviewer
             ---
             """)
         try write(betaRoot.appendingPathComponent("commands/disabled-cmd.md"), """

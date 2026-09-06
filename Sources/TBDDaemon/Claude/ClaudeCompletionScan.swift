@@ -147,7 +147,7 @@ enum ClaudeCompletionScan {
         for root in [config, project] {
             commands += commandsInDirectory(root.appendingPathComponent("commands"), prefix: nil)
             commands += skillsInDirectory(root.appendingPathComponent("skills"), prefix: nil)
-            agents += agentsInDirectory(root.appendingPathComponent("agents"))
+            agents += agentsInDirectory(root.appendingPathComponent("agents"), prefix: nil)
         }
 
         let installedJSON = try? Data(
@@ -171,7 +171,8 @@ enum ClaudeCompletionScan {
                     root.appendingPathComponent("commands"), prefix: prefix)
                 commands += skillsInDirectory(
                     root.appendingPathComponent("skills"), prefix: prefix)
-                agents += agentsInDirectory(root.appendingPathComponent("agents"))
+                agents += agentsInDirectory(
+                    root.appendingPathComponent("agents"), prefix: prefix)
             }
         }
 
@@ -188,15 +189,41 @@ enum ClaudeCompletionScan {
 
     // MARK: - Directory readers
 
+    /// Immediate entries of `url`, which is routinely a symlink.
+    ///
+    /// Every TBD profile config dir mirrors the host store by linking its slots
+    /// (`<profile>/claude/skills -> ~/.claude/skills`), and
+    /// `contentsOfDirectory(at:)` returns an EMPTY array — not an error — for a
+    /// directory URL that IS a symlink. `SymlinkedDirectoryListing` is the
+    /// repo's answer to exactly that; see its doc comment.
+    ///
+    /// No `.isDirectoryKey` filter on purpose: a *skill* directory inside a real
+    /// `skills/` root is often itself a symlink, and filtering on the key would
+    /// drop it. A non-directory entry costs one failed read of `SKILL.md`.
     private static func subdirectories(of url: URL) -> [URL] {
-        (try? FileManager.default.contentsOfDirectory(
-            at: url, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        SymlinkedDirectoryListing.entries(of: url) ?? []
     }
 
-    private static func markdownFiles(in url: URL) -> [URL] {
+    /// Every `.md` file beneath `url`, paired with its path components relative
+    /// to `url` — `["nested", "deep-cmd.md"]` for `commands/nested/deep-cmd.md`.
+    ///
+    /// The root is resolved first for the same reason `subdirectories(of:)`
+    /// goes through `SymlinkedDirectoryListing`: `enumerator(at:)` is the same
+    /// machinery, and it walks nothing when handed a symlinked root.
+    private static func markdownFiles(in url: URL) -> [(file: URL, relative: [String])] {
+        let root = url.resolvingSymlinksInPath()
         guard let enumerator = FileManager.default.enumerator(
-            at: url, includingPropertiesForKeys: nil) else { return [] }
-        return enumerator.compactMap { $0 as? URL }.filter { $0.pathExtension == "md" }
+            at: root, includingPropertiesForKeys: nil) else { return [] }
+        let rootComponents = root.standardizedFileURL.pathComponents
+        return enumerator.compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "md" }
+            .map { file in
+                let components = file.standardizedFileURL.pathComponents
+                guard components.count > rootComponents.count,
+                      Array(components.prefix(rootComponents.count)) == rootComponents
+                else { return (file, [file.lastPathComponent]) }
+                return (file, Array(components.dropFirst(rootComponents.count)))
+            }
     }
 
     private static func qualify(_ name: String, prefix: String?) -> String {
@@ -205,11 +232,14 @@ enum ClaudeCompletionScan {
     }
 
     private static func commandsInDirectory(_ url: URL, prefix: String?) -> [CompletionCommand] {
-        markdownFiles(in: url).compactMap { file in
+        markdownFiles(in: url).compactMap { file, relative in
             guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
             let front = parseFrontmatter(text)
-            let name = front.name ?? file.deletingPathExtension().lastPathComponent
-            guard !name.isEmpty else { return nil }
+            let leaf = front.name ?? file.deletingPathExtension().lastPathComponent
+            guard !leaf.isEmpty else { return nil }
+            // Claude Code names a command in a subdirectory `dir:command`, so
+            // the directory part comes from the path relative to `commands/`.
+            let name = (relative.dropLast() + [leaf]).joined(separator: ":")
             return CompletionCommand(
                 name: qualify(name, prefix: prefix),
                 description: front.description ?? "",
@@ -233,13 +263,17 @@ enum ClaudeCompletionScan {
         }
     }
 
-    private static func agentsInDirectory(_ url: URL) -> [CompletionAgent] {
-        markdownFiles(in: url).compactMap { file in
+    /// Agents are namespaced by plugin exactly as commands and skills are:
+    /// several installed plugins ship an agent called `code-reviewer`, and
+    /// un-namespaced they collapse into one row in the dedup below.
+    private static func agentsInDirectory(_ url: URL, prefix: String?) -> [CompletionAgent] {
+        markdownFiles(in: url).compactMap { file, _ in
             guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
             let front = parseFrontmatter(text)
             let name = front.name ?? file.deletingPathExtension().lastPathComponent
             guard !name.isEmpty else { return nil }
-            return CompletionAgent(name: name, description: front.description ?? "")
+            return CompletionAgent(
+                name: qualify(name, prefix: prefix), description: front.description ?? "")
         }
     }
 }
