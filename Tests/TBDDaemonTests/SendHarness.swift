@@ -93,7 +93,15 @@ struct SendHarness {
         // pass them authenticates nobody, so every send it makes carries the
         // envelope.
         recordedAppIdentity: @escaping @Sendable () async -> ProcessIdentity? = { nil },
-        processSignaller: any ProcessSignaller = ProductionProcessSignaller()
+        processSignaller: any ProcessSignaller = ProductionProcessSignaller(),
+        // Wires a real `HolderInjectionCourier` whose viewer is always
+        // detached (so `deliver` takes the direct-write branch, never the
+        // sidecar) and whose write lands here instead of any pty, so a holder
+        // test can assert the exact bytes `performHolderSend` composed rather
+        // than only that some rail did or didn't refuse it. `nil` (the
+        // default) leaves `holderInjectionCourier` unset, which is what every
+        // other holder test relies on to reach `holderInputUnavailable`.
+        holderDeliveryRecorder: (@Sendable (Data) -> Void)? = nil
     ) async throws -> SendHarness {
         let double = TmuxDouble()
         let tmux = TmuxManager(
@@ -119,6 +127,12 @@ struct SendHarness {
             recordedAppIdentity: recordedAppIdentity,
             processSignaller: processSignaller,
             actuationLog: ActuationLog(path: Self.scratchLogPath()))
+        if let holderDeliveryRecorder {
+            router.holderInjectionCourier = HolderInjectionCourier(
+                sendFrame: { _ in },
+                viewerAttachment: { _ in nil },
+                writeDirectly: { _, bytes in holderDeliveryRecorder(bytes) })
+        }
 
         let repo = try await db.repos.create(
             path: "/tmp/acme-\(UUID().uuidString)", displayName: "acme",

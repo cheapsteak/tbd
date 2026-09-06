@@ -2904,22 +2904,6 @@ extension RPCRouter {
             + "Nothing was typed. Send a single-line message, or move the session to tmux."
     }
 
-    /// The refusal a validated `.parts` payload still gets inside
-    /// `performHolderSend` after `holderCompositeRefusal` has already run
-    /// ahead of the holder branch in `performTerminalSend`. That gate only
-    /// catches a `.parts` payload that is multi-part or carries a newline —
-    /// the shapes this codebase's 64-byte measurement covers. A single-part,
-    /// single-line `.parts` payload (one image path, or one line of text named
-    /// through the parts wire shape instead of `--text`) is NOT composite and
-    /// passes that gate untouched, yet the holder arm still has no per-part
-    /// delivery of its own — Task 3 built that composition for the tmux arm
-    /// only. This is the defensive backstop for that remainder: kept so the
-    /// `switch` in `performHolderSend` stays exhaustive with no `default:`
-    /// that could also swallow a real future bug.
-    static func partsNotYetDeliverableRefusal(terminalID: UUID) -> String {
-        Self.holderCompositeRefusal(terminalID: terminalID, cause: "a message delivered as parts")
-    }
-
     /// The refusal a text `terminal.send` gets for a terminal whose Claude
     /// process is gone.
     ///
@@ -3575,17 +3559,44 @@ extension RPCRouter {
         case .keys:
             return await refuseHolderSend(
                 actuationID, Self.holderKeysRefusal(terminalID: terminal.id))
-        case .parts:
+        case .parts(let parts, let submitting) where parts.count == 1:
             // Shape-valid and NOT composite — `performTerminalSend`'s
             // `holderCompositeRefusal` gate already turned away a multi-part or
             // multi-line send before this arm was reached. What lands here is
-            // the remainder: a single-part, single-line `.parts` payload the
-            // holder arm still has no per-part delivery for — see
-            // `partsNotYetDeliverableRefusal`.
+            // exactly one part, and the holder arm carries it the same way the
+            // `.text` arm above carries its body: a text part's value verbatim,
+            // an image part as the same quoted path the tmux arm pastes.
+            switch parts[0] {
+            case .text(let value):
+                text = value
+            case .imagePath(let path):
+                text = Self.quotedImagePath(path)
+            }
+            submit = submitting
+        case .parts:
+            // Defensive backstop: the composite gate ahead of this arm already
+            // refuses any `.parts` payload with more than one part, so this
+            // should be unreachable. Kept so the switch stays exhaustive with
+            // no `default:` that could also swallow a real future bug.
             return await refuseHolderSend(
-                actuationID, Self.partsNotYetDeliverableRefusal(terminalID: terminal.id))
+                actuationID, Self.holderCompositeRefusal(
+                    terminalID: terminal.id, cause: "a message in more than one part"))
         }
 
+        return await deliverHolderText(
+            text, submit: submit, terminal: terminal, actuationID: actuationID,
+            actor: actor, envelope: envelope, courier: courier)
+    }
+
+    /// Deliver one body of text to a holder-backed session: the same envelope
+    /// handling, submit handling and courier call the `.text` arm of
+    /// `performHolderSend` uses, factored out so the single-part `.parts` arm
+    /// can reuse it verbatim rather than duplicating it.
+    private func deliverHolderText(
+        _ text: String, submit: Bool, terminal: Terminal, actuationID: String,
+        actor: ActuationActor?, envelope: DispatchEnvelopeDisposition,
+        courier: HolderInjectionCourier
+    ) async -> RPCResponse {
         // Asked BEFORE anything is composed, because the answer decides the
         // bytes. Two sources, in order: the test seam if one is installed, then
         // the registry's own reader for this session.

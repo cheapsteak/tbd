@@ -56,6 +56,59 @@ struct HolderCompositeSendRefusalTests {
         #expect(!error.contains("newline"))
     }
 
+    /// A single-part `.parts` payload is exactly the remainder that reaches
+    /// `performHolderSend`'s `.parts` arm once the composite gate above has
+    /// turned away anything bigger — and Fix round 1's ruling is that a single
+    /// text part is delivered the same way `--text` delivers a body. Modeled on
+    /// `aSingleLineTextSendToAHolderRowIsNotRefused`: SendHarness wires a real
+    /// (test-only) injection courier here, so this asserts the exact bytes
+    /// delivered rather than only "got past the gate".
+    @Test func aSinglePartTextSendToAHolderRowIsNotRefused() async throws {
+        let recorder = HolderWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
+        let response = try await harness.send(TerminalSendParams(
+            terminalID: harness.terminal.id, submit: true, parts: [.text("hello")]),
+            actor: .app)
+
+        let error = response.error ?? ""
+        #expect(!error.contains("more than one part"))
+        #expect(!error.contains("newline"))
+        #expect(!error.contains("parts"))
+        #expect(response.success, "error was: \(error)")
+        // `actor: .app` against a `.claude` row carries the dispatch envelope,
+        // exactly as the `.text` arm's body would — this single-part `.parts`
+        // send is deliberately delivered the same way, envelope included.
+        #expect(recorder.writes.count == 1)
+        let body = String(bytes: try #require(recorder.writes.first), encoding: .utf8) ?? ""
+        #expect(body.hasPrefix("<tbd-dispatch"))
+        #expect(body.hasSuffix("\nhello\r"))
+    }
+
+    /// Same as above for a single image part: delivered as the bare quoted
+    /// path — `RPCRouter.quotedImagePath` — the same bytes the tmux arm pastes.
+    @Test func aSingleImagePartSendToAHolderRowIsNotRefused() async throws {
+        let recorder = HolderWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
+        let response = try await harness.send(TerminalSendParams(
+            terminalID: harness.terminal.id, submit: true, parts: [.imagePath("/tmp/a.png")]),
+            actor: .app)
+
+        let error = response.error ?? ""
+        #expect(!error.contains("more than one part"))
+        #expect(!error.contains("newline"))
+        #expect(!error.contains("parts"))
+        #expect(response.success, "error was: \(error)")
+        // Same reasoning as the text case: a single-part `.parts` send is
+        // delivered exactly as the `.text` arm delivers a body, envelope
+        // included — unlike the tmux arm, which never envelopes an image part.
+        #expect(recorder.writes.count == 1)
+        let body = String(bytes: try #require(recorder.writes.first), encoding: .utf8) ?? ""
+        #expect(body.hasPrefix("<tbd-dispatch"))
+        #expect(body.hasSuffix("\n'/tmp/a.png'\r"))
+    }
+
     /// A tmux row is untouched by any of it.
     @Test func aTmuxRowStillAcceptsMultiLineAndParts() async throws {
         let harness = try await SendHarness.make(transport: .tmux)
@@ -69,5 +122,24 @@ struct HolderCompositeSendRefusalTests {
             parts: [.text("a"), .imagePath("/tmp/a.png")]),
             actor: .app)
         #expect(parts.success, "error was: \(parts.error ?? "none")")
+    }
+}
+
+/// Collects the bytes `SendHarness`'s stubbed `HolderInjectionCourier` was
+/// asked to write, when a test passes `holderDeliveryRecorder`. A lock-guarded
+/// class, matching `SendHarness.TmuxDouble`, because the courier's
+/// `writeDirectly` closure runs off the test's task.
+private final class HolderWriteRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _writes: [Data] = []
+    var writes: [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _writes
+    }
+    func record(_ bytes: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        _writes.append(bytes)
     }
 }
