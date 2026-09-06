@@ -66,22 +66,29 @@ private final class RecordedHolderWrites: @unchecked Sendable {
         snapshot().filter { if case .write = $0 { return true } else { return false } }
     }
 
+    private func recordWrite(terminalID: UUID, bytes: Data) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        events.append(.write(terminalID: terminalID, bytes: bytes))
+        writeCount += 1
+        return writeCount <= acceptedWrites
+    }
+
+    private func recordPause(_ duration: Duration) {
+        lock.lock()
+        defer { lock.unlock() }
+        events.append(.pause(duration))
+    }
+
     var send: @Sendable (UUID, Data) async -> Bool {
         { [self] terminalID, bytes in
-            lock.lock()
-            events.append(.write(terminalID: terminalID, bytes: bytes))
-            writeCount += 1
-            let accepted = writeCount <= acceptedWrites
-            lock.unlock()
-            return accepted
+            recordWrite(terminalID: terminalID, bytes: bytes)
         }
     }
 
     var waiter: @Sendable (Duration) async -> Void {
         { [self] duration in
-            lock.lock()
-            events.append(.pause(duration))
-            lock.unlock()
+            recordPause(duration)
         }
     }
 }
