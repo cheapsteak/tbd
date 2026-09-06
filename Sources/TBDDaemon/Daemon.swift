@@ -1369,7 +1369,15 @@ public final class Daemon: Sendable {
                         terminalID: terminal.id,
                         holderPID: terminal.holderPID,
                         childPID: childPID,
-                        createdAt: terminal.createdAt)
+                        // The identity anchor, not the row's birthday. A row
+                        // woken from a park carries a child younger than
+                        // itself, and anchoring on `createdAt` there would make
+                        // every such session read as `.startTimeMismatch` —
+                        // which this leg spells "keep", so the orphan it exists
+                        // to reclaim would survive every sweep. NULL means the
+                        // row has never been parked, and there the two are the
+                        // same instant.
+                        createdAt: terminal.holderChildStartedAt ?? terminal.createdAt)
                 }
             }
             let reaper = AgentReaper(

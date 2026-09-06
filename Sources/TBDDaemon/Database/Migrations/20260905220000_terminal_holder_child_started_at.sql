@@ -1,0 +1,16 @@
+-- When the job behind a holder-transport row was last started.
+--
+-- The reaper's holder leg and the wake path both verify a recorded child pid
+-- through ProcessIdentityCheck, and that check anchors on a start time. Until
+-- this column existed the only anchor available was the row's `createdAt`,
+-- which is the same instant only while the row still holds its FIRST child. A
+-- woken session's child is younger than its row by however long it was parked,
+-- so the anchor has to move with the child rather than with the row —
+-- otherwise every woken session reads as `.startTimeMismatch`, which the
+-- reaper spells "keep" (a leak) and the wake path spells "not gone" (a lie).
+--
+-- NULL means the row has never been through a park/wake cycle, so `createdAt`
+-- is still the right anchor; every reader spells that `holderChildStartedAt ??
+-- createdAt`. Park clears it back to NULL along with the two pid columns,
+-- because a parked row names no child at all.
+ALTER TABLE terminal ADD COLUMN holder_child_started_at DATETIME;

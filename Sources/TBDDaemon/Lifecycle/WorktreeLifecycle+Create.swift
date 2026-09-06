@@ -1622,7 +1622,12 @@ extension WorktreeLifecycle {
                 watchDeskRole: watchDeskRole,
                 transport: primaryTransport,
                 holderPID: holderHandle?.holderPID,
-                childPID: holderHandle?.childPID
+                childPID: holderHandle?.childPID,
+                // The identity anchor for the job just spawned. `createdAt`
+                // would say the same thing today and stop being true the first
+                // time this row is parked and woken, so it is recorded from the
+                // start rather than only on the wake path.
+                holderChildStartedAt: holderHandle == nil ? nil : Date()
             )
         } catch {
             // Best-effort creation-time cleanup on both transports: a resource

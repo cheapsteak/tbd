@@ -724,6 +724,16 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var holderPID: Int32?
     /// PID of the job the holder `forkpty()`d. Nil for tmux rows.
     public var childPID: Int32?
+    /// When the job named by `childPID` was started, for the identity checks
+    /// that guard against pid reuse.
+    ///
+    /// Nil means this row has never been through a park/wake cycle, so its
+    /// `createdAt` is still the moment its child was born and remains the right
+    /// anchor — every reader spells that `holderChildStartedAt ?? createdAt`. A
+    /// woken session's child is younger than its row by however long the
+    /// session was parked, which is exactly the case `createdAt` alone cannot
+    /// describe. Cleared with the two pid columns when a row parks.
+    public var holderChildStartedAt: Date?
 
     /// `activityState` as a fact — value, source, observed-at — or nil.
     ///
@@ -787,7 +797,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 awaitingInputObservedAt: Date? = nil,
                 transport: TerminalTransport = .tmux,
                 holderPID: Int32? = nil,
-                childPID: Int32? = nil) {
+                childPID: Int32? = nil,
+                holderChildStartedAt: Date? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -821,6 +832,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.transport = transport
         self.holderPID = holderPID
         self.childPID = childPID
+        self.holderChildStartedAt = holderChildStartedAt
     }
 
     enum CodingKeys: String, CodingKey {
@@ -832,7 +844,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt, watchDeskRole
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
-        case transport, holderPID, childPID
+        case transport, holderPID, childPID, holderChildStartedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -886,6 +898,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
             .flatMap(TerminalTransport.init(rawValue:)) ?? .tmux
         holderPID = try c.decodeIfPresent(Int32.self, forKey: .holderPID)
         childPID = try c.decodeIfPresent(Int32.self, forKey: .childPID)
+        holderChildStartedAt = try c.decodeIfPresent(Date.self, forKey: .holderChildStartedAt)
     }
 }
 
