@@ -524,6 +524,22 @@ actor HolderReader {
     }
 
     /// Whether this reader's emulator is live or frozen — see `screen`.
+    ///
+    /// Three states answer `.staleDaemon`, but **only one of them is reachable
+    /// in production**, and that is what makes the answer mean what the type
+    /// says it does. `HolderRegistry` publishes a reader into its `.adopted`
+    /// slot only after `start()` has returned, and `reader(for:)` reads no
+    /// other slot — so no caller can reach an `.idle` reader — while a stopped
+    /// reader has been through `.releasing` and been dropped from the slot, so
+    /// no caller can reach one of those either. What a consumer can reach is a
+    /// reader suspended for an attach, which is exactly the case `staleDaemon`
+    /// describes: a viewer holds the pty, and this emulator has been frozen
+    /// since it did.
+    ///
+    /// A test harness *can* hold an `.idle` reader, and one answers
+    /// `staleDaemon` there. That is not a special case to be excused: an idle
+    /// reader's emulator is by definition not being fed, so a screen taken from
+    /// it is a frozen one and saying so is the truthful answer.
     private var currentSource: TerminalScreen.Source {
         state == .draining ? .daemon : .staleDaemon
     }
@@ -1223,14 +1239,25 @@ private final class HolderEmulator: @unchecked Sendable {
     /// no age at all, so a fresh, silent session reads as exactly as old as it
     /// is instead of as instantly current.
     private let adoptedAt: ContinuousClock.Instant
-    /// When this emulator last consumed a byte **from the pty**.
+    /// When this emulator last took in bytes that came from outside the daemon.
     ///
     /// Under `terminalLock` like everything else here, and stamped in `feed`
-    /// only. That placement is the whole definition: `snapshotPreamble`'s
-    /// `DECRQM` probes feed the `Terminal` directly rather than through this
-    /// method, so the daemon asking its own emulator a question can never make
-    /// a stale screen look fresh. Keep it that way — routing a probe through
-    /// `feed` would make every read reset the age it was taken to measure.
+    /// only — which is the whole definition, because it is what decides the
+    /// answer for each of the three things that reach `feed` and the one that
+    /// does not:
+    ///
+    /// - **The drain loop's reads** and **the quiesce remainder** stamp it.
+    ///   They are the child's own output; this is the measurement's subject.
+    /// - **A handback preamble** (`ingest(preamble:)`) stamps it, deliberately.
+    ///   A returning viewer hands back the screen as it stood a moment ago, so
+    ///   the emulator's view really is fresh again, and reporting it as an hour
+    ///   old would make a take-back look like a session nobody had watched.
+    /// - **`snapshotPreamble`'s `DECRQM` probes** do not, because they feed the
+    ///   `Terminal` directly rather than through this method. The daemon asking
+    ///   its own emulator a question must never make a stale screen look fresh.
+    ///   Keep it that way — routing a probe through `feed` would make every
+    ///   read reset the age it was taken to measure.
+    ///
     /// `screen` asks nothing at all: it reads the delegate's `DECTCEM` flag.
     private var lastByteAt: ContinuousClock.Instant?
 
@@ -1527,17 +1554,22 @@ private final class ReplyForwardingDelegate: TerminalDelegate {
     /// delegate from inside a parse, which always runs under `terminalLock`,
     /// and `HolderEmulator.screen` reads the flag under that same lock.
     ///
-    /// **One residual, and it is a reset.** `RIS` (`ESC c`, via SwiftTerm's
-    /// `resetToInitialState`) and `DECSTR` (`CSI ! p`) both clear
-    /// `cursorHidden` by assignment, with no delegate call. So a reset arriving
-    /// while the cursor is hidden leaves this reading hidden while the terminal
-    /// is showing. It self-corrects on the child's next *hide-then-show* pair,
-    /// not on a bare `DECSET 25`: `Terminal.showCursor` returns early when
-    /// `cursorHidden` is already false, so the call the flag needs never
-    /// happens until something has set it true again. A TUI hides its cursor
-    /// for a repaint and shows it afterwards, so in practice that is the next
-    /// repaint — but a child that resets and only ever shows reads hidden until
-    /// it does hide once.
+    /// **One residual, and it is `DECSTR`.** A soft reset (`CSI ! p`,
+    /// `Terminal.cmdSoftReset`) clears `cursorHidden` by assignment, with no
+    /// delegate call, so a soft reset arriving while the cursor is hidden
+    /// leaves this reading hidden while the terminal is showing. `RIS` (`ESC
+    /// c`) does **not** have this problem, though its `setup(isReset:)` clears
+    /// the same field: `resetToInitialState` saves `cursorHidden` around the
+    /// call and restores it afterwards, so a full reset leaves the flag exactly
+    /// as it found it and this reading stays true.
+    ///
+    /// The `DECSTR` residual self-corrects on the child's next
+    /// *hide-then-show* pair, not on a bare `DECSET 25`: `Terminal.showCursor`
+    /// returns early when `cursorHidden` is already false, so the call the flag
+    /// needs never happens until something has set it true again. A TUI hides
+    /// its cursor for a repaint and shows it afterwards, so in practice that is
+    /// the next repaint — but a child that soft-resets and only ever shows
+    /// reads hidden until it does hide once.
     private(set) var cursorVisible = true
 
     init(reply: @escaping @Sendable (ArraySlice<UInt8>) -> Void) {
