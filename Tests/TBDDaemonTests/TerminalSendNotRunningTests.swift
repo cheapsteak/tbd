@@ -53,7 +53,8 @@ struct TerminalSendNotRunningTests {
     /// supplies one through the `dryRunPanePID` hook this task adds — the shape
     /// every other dry-run answer in that file already uses.
     private func makeFixture(
-        foregroundByAgent: [String: Int32], kind: TerminalKind? = .claude
+        foregroundByAgent: [String: Int32], kind: TerminalKind? = .claude,
+        claudeSessionID: String? = "sess-1"
     ) async throws -> Fixture {
         let db = try TBDDatabase(inMemory: true)
         let worktree = try await db.worktrees.createScratch(
@@ -61,7 +62,7 @@ struct TerminalSendNotRunningTests {
             path: "/tmp/tbd-nonexistent-\(UUID().uuidString)", tmuxServer: "tbd-test")
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "claude", claudeSessionID: "sess-1", kind: kind)
+            label: "claude", claudeSessionID: claudeSessionID, kind: kind)
         let tmux = TmuxManager(
             dryRun: true,
             dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) },
@@ -165,15 +166,19 @@ struct TerminalSendNotRunningTests {
     /// The kind picks the name, and nothing else does. Mapping it wrong in
     /// either direction is the whole bug this rail had.
     ///
-    /// A row with NO recorded kind is a legacy Claude terminal, which is the
-    /// reading `Terminal.isClaudeResumable` and the continue-in-Codex path
-    /// already give it. Reading it as a shell instead would skip the rail
-    /// entirely for the oldest rows on the machine.
+    /// A row with NO recorded kind gets exactly the reading migration
+    /// `v22_terminal_kind`'s backfill gave it — Claude when it carries a
+    /// Claude session id, shell otherwise — which is also what `Terminal
+    /// .isClaudeResumable` already requires. Reading every kindless row as
+    /// Claude regardless of session id, as an earlier version of this helper
+    /// did, ran the rail against a plain shell pane that never had a "claude"
+    /// process to find.
     @Test func theForegroundAgentNameFollowsTheKind() {
-        #expect(RPCRouter.foregroundAgentName(for: .claude) == "claude")
-        #expect(RPCRouter.foregroundAgentName(for: .codex) == "codex")
-        #expect(RPCRouter.foregroundAgentName(for: .shell) == nil)
-        #expect(RPCRouter.foregroundAgentName(for: nil) == "claude")
+        #expect(RPCRouter.foregroundAgentName(kind: .claude, claudeSessionID: "sess-1") == "claude")
+        #expect(RPCRouter.foregroundAgentName(kind: .codex, claudeSessionID: nil) == "codex")
+        #expect(RPCRouter.foregroundAgentName(kind: .shell, claudeSessionID: nil) == nil)
+        #expect(RPCRouter.foregroundAgentName(kind: nil, claudeSessionID: "sess-1") == "claude")
+        #expect(RPCRouter.foregroundAgentName(kind: nil, claudeSessionID: nil) == nil)
     }
 
     /// The handler-level half of the same fact: a row whose `kind` column is
@@ -185,7 +190,20 @@ struct TerminalSendNotRunningTests {
         #expect(!response.success)
         let error = try #require(response.error)
         #expect(error.contains("foreground process"))
-        #expect(error.contains("(claude)"), "a kindless row is read as a Claude row")
+        #expect(error.contains("(claude)"), "a kindless row with a Claude session id is read as claude")
+    }
+
+    /// The other half of the same fact: a kindless row with NO Claude session
+    /// id either is the plain-shell shape the live suite's fixtures create
+    /// (`db.terminals.create` with neither `kind` nor `claudeSessionID`
+    /// supplied) — the regression this case guards is the rail reading such a
+    /// row as Claude and refusing a healthy shell send that never had a
+    /// "claude" process to find.
+    @Test func aKindlessTerminalWithNoSessionIsNotSubjectToTheForegroundRail() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:], kind: nil, claudeSessionID: nil)
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
     }
 
     /// The two rails split on the empty payload, and the park rail takes it.

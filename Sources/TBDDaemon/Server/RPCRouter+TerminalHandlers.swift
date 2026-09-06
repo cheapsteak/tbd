@@ -2905,7 +2905,7 @@ extension RPCRouter {
     /// The second of two independent rails, and the one that covers a MISSED
     /// hook: a crashed session emits no `SessionEnd`, so nothing stamped the row.
     /// It is the only rail a Codex row has, because Codex ships no `SessionEnd`
-    /// hook to stamp with — see `foregroundAgentName(for:)`.
+    /// hook to stamp with — see `foregroundAgentName(kind:claudeSessionID:)`.
     /// It asks the same inspector the limit-resume path has always asked, which
     /// reads `ps` — a process-table fact, never the rendered screen.
     static func agentNotForegroundRefusal(
@@ -2925,17 +2925,19 @@ extension RPCRouter {
     /// its command line, so the kind picks the name and the same `ps` question
     /// answers for both.
     ///
-    /// A row with NO recorded kind predates the column and is a Claude
-    /// terminal — the reading `Terminal.isClaudeResumable` and the
-    /// continue-in-Codex path already give it, and the one this follows.
-    /// Defaulting a kindless row to `.shell` instead would skip the rail for
-    /// exactly the oldest rows on the machine, which are the likeliest to have
-    /// outlived the agent that once ran in them.
+    /// A row with NO recorded kind predates the column, and gets exactly the
+    /// reading migration `v22_terminal_kind`'s backfill gave every such row
+    /// when the column was introduced — Claude when it carries a Claude
+    /// session id, shell otherwise — which is also what `Terminal
+    /// .isClaudeResumable` already requires of a kindless row. Reading every
+    /// kindless row as Claude regardless of session id would run this rail,
+    /// expecting a "claude" process, against a plain shell pane that never
+    /// had one.
     ///
     /// Pure and static so the mapping is testable without a database, a pane, or
     /// a process table.
-    static func foregroundAgentName(for kind: TerminalKind?) -> String? {
-        switch kind ?? .claude {
+    static func foregroundAgentName(kind: TerminalKind?, claudeSessionID: String?) -> String? {
+        switch kind ?? (claudeSessionID == nil ? .shell : .claude) {
         case .shell: return nil
         case .claude: return "claude"
         case .codex: return "codex"
@@ -3094,12 +3096,14 @@ extension RPCRouter {
             // The foreground rail is kind-aware, not Claude-only. The
             // inspector's question is "does a foreground process whose command
             // line contains <name> own this pane", and the kind supplies the
-            // name: "claude" for a Claude row, "codex" for a Codex one, and
-            // "claude" again for a row whose kind was never recorded, which is
-            // what every other liveness reading in this codebase makes of one.
-            // A shell has no name to supply — its pane pid IS the shell, with no
-            // agent under it — so the rail never runs for one, and a shell send
-            // that would otherwise be refused every time goes through.
+            // name: "claude" for a Claude row, "codex" for a Codex one, and for
+            // a row whose kind was never recorded, whichever of the two the
+            // Claude session id decides — the same reading `v22_terminal_kind`
+            // backfilled onto every such row and `Terminal.isClaudeResumable`
+            // already requires. A shell has no name to supply — its pane pid IS
+            // the shell, with no agent under it — so the rail never runs for
+            // one, and a shell send that would otherwise be refused every time
+            // goes through.
             //
             // Covering Codex here matters more than it does for Claude: a Codex
             // row is never exit-stamped, because Codex ships no `SessionEnd`
@@ -3118,7 +3122,8 @@ extension RPCRouter {
             // consultation below is the rail that judges a missing or dead pane,
             // properly.
             if !body.isEmpty,
-               let agentName = Self.foregroundAgentName(for: terminal.kind),
+               let agentName = Self.foregroundAgentName(
+                    kind: terminal.kind, claudeSessionID: terminal.claudeSessionID),
                let panePIDString = try? await tmux.panePID(
                     server: worktree.tmuxServer, paneID: terminal.tmuxPaneID),
                let panePID = Int32(panePIDString), panePID > 0,
