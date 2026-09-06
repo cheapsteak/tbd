@@ -131,10 +131,12 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     ///
     /// **It may be negative**, when the requested tail cut inside the viewport
     /// — ask for 6 lines of a 24-row screen and the first four rows of that
-    /// viewport are simply not in `lines`. **It may also equal `lines.count`**,
-    /// when the whole viewport was blank rows that the trim dropped. Both are
-    /// well-formed answers, and a consumer indexing `lines` with it must bounds
-    /// check rather than assume.
+    /// viewport are simply not in `lines`. **It may also exceed `lines.count`**,
+    /// because the trailing-blank trim does not stop at the viewport's first
+    /// row: a blank viewport over scrollback whose own last row is blank has
+    /// both trimmed away, and the index is left past the end rather than at it.
+    /// Both are well-formed answers, and a consumer indexing `lines` with it
+    /// must bounds check rather than assume.
     public let viewportStart: Int
     public let cursor: Cursor
     public let size: Size

@@ -249,6 +249,39 @@ import Testing
             """)
     }
 
+    /// The upper bound the field's documentation states, pinned: the index can
+    /// land **past** the end of `lines`, not merely at it.
+    ///
+    /// The trailing-blank trim walks off the end of the viewport and on into
+    /// scrollback whenever the viewport is blank, so a blank viewport sitting
+    /// over a blank scrollback row loses both. Here that is one written row,
+    /// one blank scrollback row and four blank viewport rows: six enumerated,
+    /// one surviving, and a viewport index of 2 — an index a consumer that
+    /// trusted `viewportStart <= lines.count` would use to slice and trap on.
+    @Test("viewportStart can exceed lines.count when the trim eats into scrollback")
+    func viewportStartCanExceedTheLineCount() async throws {
+        let harness = try Harness(columns: 40, rows: 4)
+        defer { harness.tearDown() }
+
+        // "a", then five newlines: three walk the cursor to the last row and
+        // two scroll, so the buffer holds "a" and one blank row of scrollback
+        // above a viewport of four blank rows.
+        await harness.reader.ingest(preamble: Self.data("a\r\n\r\n\r\n\r\n\r\n"))
+        let screen = try await harness.reader.screen(maxLines: 50)
+
+        #expect(screen.lines == ["a"])
+        #expect(screen.size.rows == 4)
+        #expect(
+            screen.viewportStart == 2,
+            """
+            the trim no longer reaches into scrollback, so this shape stopped proving the \
+            documented bound: lines \(screen.lines) start \(screen.viewportStart)
+            """)
+        #expect(
+            screen.viewportStart > screen.lines.count,
+            "viewportStart is documented as able to exceed lines.count and here it does not")
+    }
+
     // MARK: - Age
 
     /// One rule for every source: how long ago the answering store last
