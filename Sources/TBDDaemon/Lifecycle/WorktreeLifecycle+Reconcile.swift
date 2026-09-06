@@ -646,6 +646,13 @@ extension WorktreeLifecycle {
         let holderArmEnabled =
             (try? await db.config.get().holderRowReconcileEnabled)
             ?? Config.holderRowReconcileEnabledDefault
+        // Read beside the arm's own gate and for the same reason: what a
+        // finished holder session's row BECOMES is one judgement per pass, and
+        // a flip landing between two rows would park one and delete its sibling
+        // for no reason a reader could reconstruct.
+        let holderHibernationEnabled =
+            (try? await db.config.get().holderHibernationEnabled)
+            ?? Config.holderHibernationEnabledDefault
         // The budget covers the pass, not one server: the arm is serial across
         // every server this call reconciles, so a per-server budget would
         // multiply by the server count exactly the way a per-probe timeout
@@ -661,7 +668,8 @@ extension WorktreeLifecycle {
         do {
             try await reconcileTerminalsWhileLockedPerServer(
                 in: worktrees, actuationLog: actuationLog,
-                holderArmEnabled: holderArmEnabled)
+                holderArmEnabled: holderArmEnabled,
+                holderHibernationEnabled: holderHibernationEnabled)
         } catch {
             await holderProbeBudget.end()
             throw error
@@ -672,7 +680,8 @@ extension WorktreeLifecycle {
     /// The per-server half of `reconcileTerminals`, split out only so its
     /// caller can bracket it with the pass's probe budget.
     private func reconcileTerminalsWhileLockedPerServer(
-        in worktrees: [LocalWorktree], actuationLog: ActuationLog, holderArmEnabled: Bool
+        in worktrees: [LocalWorktree], actuationLog: ActuationLog, holderArmEnabled: Bool,
+        holderHibernationEnabled: Bool
     ) async throws {
         let grouped = Dictionary(grouping: worktrees, by: \.tmuxServer)
         for server in grouped.keys.sorted() {
@@ -686,7 +695,8 @@ extension WorktreeLifecycle {
                 }
                 try await reconcileTerminalsWhileLocked(
                     in: currentWorktrees, actuationLog: actuationLog,
-                    holderArmEnabled: holderArmEnabled)
+                    holderArmEnabled: holderArmEnabled,
+                    holderHibernationEnabled: holderHibernationEnabled)
             }
         }
     }
@@ -698,7 +708,8 @@ extension WorktreeLifecycle {
     /// holding this lock neither protects nor delays it.
     private func reconcileTerminalsWhileLocked(
         in worktrees: [LocalWorktree], actuationLog: ActuationLog,
-        holderArmEnabled: Bool
+        holderArmEnabled: Bool,
+        holderHibernationEnabled: Bool
     ) async throws {
         // Probe the server each worktree row actually stores, not a canonical
         // name. Promoted scratch worktrees keep their inherited scratch server.
@@ -823,22 +834,26 @@ extension WorktreeLifecycle {
                     disposal = "window \(terminal.tmuxWindowID) gone or reassigned"
                 }
 
-                // **Parking is a tmux-transport outcome, and only that.** A
-                // holder-backed row is deleted even when it names a resumable
-                // Claude session, because a parked holder row is inert and
-                // noisy rather than recoverable: `HibernationCoordinator.wake`
-                // refuses `transport == .holder` ahead of its "wake any parked
-                // row" branch, and this sweep skips parked rows, so nothing
-                // would ever judge it again — while the app's focus-wake
-                // selects exactly `isParked && isClaudeResumable &&
+                // **What a finished session's row becomes is one rule with one
+                // per-transport condition.** A resumable Claude row is PARKED,
+                // preserving its session id for a later wake; anything else is
+                // deleted, because there is nothing to preserve.
+                //
+                // The holder transport joins that rule only when
+                // `holder_hibernation_enabled` is on, and the reason is that a
+                // parked row is only worth having if something can wake it.
+                // With the gate off `HibernationCoordinator.wake` refuses a
+                // holder row, and this sweep skips parked rows, so a parked
+                // holder row would never be judged again — while the app's
+                // focus-wake selects exactly `isParked && isClaudeResumable &&
                 // hibernateReason != .manual` and would fire a failing wake RPC
                 // on every focus of that worktree, forever. Deleting says the
-                // true thing instead. The cost is real and named in the PR: a
-                // holder-backed resumable Claude session that ends loses the
-                // park a tmux one would get, until a holder wake path lands —
-                // which is a feature, not a reconciler's job.
-                if terminal.transport != .holder, terminal.isClaudeResumable,
-                   let sessionID = terminal.claudeSessionID {
+                // true thing in that state. With the gate on, the wake path
+                // exists and the park is worth exactly what it is worth on
+                // tmux.
+                let parkable = terminal.isClaudeResumable
+                    && (terminal.transport != .holder || holderHibernationEnabled)
+                if parkable, let sessionID = terminal.claudeSessionID {
                     // This park bypasses `HibernationCoordinator`, so the
                     // reconcile rail records its own independent actuation.
                     // Fail closed if that authoritative record cannot be made.
@@ -852,6 +867,15 @@ extension WorktreeLifecycle {
                     do {
                         try await db.terminals.setHibernated(
                             id: terminal.id, sessionID: sessionID, reason: .recovery)
+                        // A parked holder row names no processes. The holder
+                        // and its job are already gone — that is what
+                        // `.sessionOver` established — so leaving their pids on
+                        // the row would point the reaper's holder leg and every
+                        // identity check at numbers the kernel has recycled.
+                        if terminal.transport == .holder {
+                            try await db.terminals.setHolderProcess(
+                                id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
+                        }
                         await actuationLog.appendOutcome(
                             confirms: actuationID, result: .dispatched)
                     } catch {
@@ -861,7 +885,7 @@ extension WorktreeLifecycle {
                     logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
                 } else {
                     try? await db.deleteTerminalAndTab(id: terminal.id)
-                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), \(Self.deletionRationale(for: terminal), privacy: .public)")
+                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), \(Self.deletionRationale(for: terminal, holderHibernationEnabled: holderHibernationEnabled), privacy: .public)")
                 }
                 await pendingQuestions.clear(terminalID: terminal.id)
                 await subscriptions?.broadcastPendingQuestions(
@@ -920,12 +944,15 @@ extension WorktreeLifecycle {
     /// Composed by a named function so a test can pin the text: the two
     /// deletions are not the same event, and a line that told a
     /// holder-transport Claude row it had "no session to preserve" would be
-    /// false about the one row shape whose park was deliberately withheld.
-    static func deletionRationale(for terminal: Terminal) -> String {
-        guard terminal.transport == .holder, terminal.isClaudeResumable,
-            terminal.claudeSessionID != nil
+    /// false about the one row shape whose park was withheld by a soak gate
+    /// rather than by having nothing worth keeping.
+    static func deletionRationale(
+        for terminal: Terminal, holderHibernationEnabled: Bool
+    ) -> String {
+        guard terminal.transport == .holder, !holderHibernationEnabled,
+            terminal.isClaudeResumable, terminal.claudeSessionID != nil
         else { return "no session to preserve" }
-        return "its Claude session is not resumable from a park on the holder transport"
+        return "holder hibernation is off, so a parked holder row would have nothing to wake it"
     }
 
     /// How a finished session's job ended, in words, for the one log line that

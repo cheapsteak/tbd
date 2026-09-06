@@ -16,7 +16,7 @@ public enum HibernateResult: Equatable, Sendable {
 /// mechanic for the pty-holder transport is behind a soak gate whatever
 /// triggered it — the property the soak validates (a row never claims parked
 /// while its child runs) does not depend on who asked.
-private enum HibernateEligibilityPolicy: Sendable {
+enum HibernateEligibilityPolicy: Sendable {
     case manual(holderHibernationEnabled: Bool)
     case merge(inputVetoEnabled: Bool, holderHibernationEnabled: Bool)
     case automatic(
@@ -112,7 +112,7 @@ public enum WakeResult: Equatable, Sendable {
 /// full uncached input on its next message whether or not the process stayed
 /// alive — parking an idle session is therefore nearly free.
 public actor HibernationCoordinator {
-    private let db: TBDDatabase
+    let db: TBDDatabase
     private let tmux: TmuxManager
     private let modelProfileResolver: ModelProfileResolver?
     private let subscriptions: StateSubscriptionManager?
@@ -122,14 +122,14 @@ public actor HibernationCoordinator {
     private let configDirManager: ClaudeProfileConfigDirManager
     /// Default input activity tracker. Wired post-construction by Daemon.swift
     /// to the shared instance from the input router so both use the same tracker.
-    private var inputActivity: InputActivityTracker
-    private let now: @Sendable () -> Date
+    var inputActivity: InputActivityTracker
+    let now: @Sendable () -> Date
 
     /// Per-terminal "first time we observed it idle-at-rest" marker, maintained
     /// by `sweep`. In-memory only: a daemon restart clears it, so a freshly
     /// started daemon won't instantly hibernate long-idle sessions — it waits a
     /// full idle window first, which is the safe behavior.
-    private var idleSince: [UUID: Date] = [:]
+    var idleSince: [UUID: Date] = [:]
 
     /// Terminal ids with an in-flight wake respawn, so a double-focus can't
     /// spawn two `claude --resume` processes into the same window.
@@ -153,7 +153,7 @@ public actor HibernationCoordinator {
     /// holds. State can flip in the final instant (a turn starts, a permission
     /// prompt appears), so the kill decision is re-verified here, not at
     /// arm-time. (Knative/KEDA poll-cheaply / decide-against-window pattern.)
-    private var pendingKillSince: [UUID: Date] = [:]
+    var pendingKillSince: [UUID: Date] = [:]
 
     /// Settle window between crossing the idle threshold and the actual kill.
     static let killDebounce: TimeInterval = 20
@@ -177,7 +177,22 @@ public actor HibernationCoordinator {
     /// Delay seam for the verify-exit poll (`Duration` is behavior). Tests
     /// inject a `TestClock` so the poll's pacing is virtual and the
     /// "escalate after exactly N attempts" boundary is exact.
-    private let clock: any Clock<Duration>
+    let clock: any Clock<Duration>
+
+    /// The pty-holder registry, wired post-construction by Daemon.swift the way
+    /// `inputActivity` is — the registry is built before the RPC router that
+    /// owns this coordinator, and both must reach the SAME actor: the park path
+    /// reads a session's screen through the reader the spawn path registered.
+    ///
+    /// Nil in mock mode and in any composition with no holder transport, where
+    /// the park path refuses by name rather than pretending it could have read
+    /// a screen.
+    var holderRegistry: HolderRegistry?
+
+    /// How the holder park observes and ends a child process. Injected so a
+    /// test can state "the job declined `/exit`" in one line instead of
+    /// arranging a real one.
+    let signaller: any ProcessSignaller
 
     /// The daemon's actuation record. The idle sweep and the merge-park rail
     /// are daemon-internal actuation sites — they bypass the router, so each
@@ -200,6 +215,7 @@ public actor HibernationCoordinator {
         exitPollAttempts: Int = 15,
         exitPollInterval: Duration = .milliseconds(200),
         clock: any Clock<Duration> = ContinuousClock(),
+        signaller: any ProcessSignaller = ProductionProcessSignaller(),
         actuationLog: ActuationLog
     ) {
         self.db = db
@@ -212,6 +228,7 @@ public actor HibernationCoordinator {
         self.exitPollAttempts = exitPollAttempts
         self.exitPollInterval = exitPollInterval
         self.clock = clock
+        self.signaller = signaller
         self.actuationLog = actuationLog
     }
 
@@ -240,6 +257,14 @@ public actor HibernationCoordinator {
     /// Wire the input activity tracker so the sweep can veto parks based on
     /// pending typed input. Set once by Daemon.swift after construction so the
     /// shared tracker is used across the input router and coordinator.
+    /// Wire the pty-holder registry. Set once by Daemon.swift after
+    /// construction, for the same reason `setInputActivity` is: the registry
+    /// exists before the router that owns this coordinator, and every consumer
+    /// must share the one actor that holds the daemon's readers.
+    func setHolderRegistry(_ registry: HolderRegistry?) {
+        holderRegistry = registry
+    }
+
     func setInputActivity(_ tracker: InputActivityTracker) {
         // Replace the default tracker with the shared one from the input router.
         // This is safe because nothing has accessed inputActivity yet at wiring time.
@@ -426,6 +451,17 @@ public actor HibernationCoordinator {
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .notFound
         }
+        // The two transports diverge here, ahead of the first tmux call. A
+        // holder-backed row has no tmux server to lock and no pane to capture:
+        // its park writes to the holder's pty, confirms the child is gone, and
+        // clears the row's pids. Everything above this line — the singleflight
+        // claim, the session-id and worktree lookups — is shared, and
+        // everything below it is the tmux mechanic, unchanged.
+        if terminal.transport == .holder {
+            return await performHolderHibernate(
+                terminal: terminal, worktree: worktree, reason: reason, policy: policy)
+        }
+
         let server = worktree.tmuxServer
         let paneID = terminal.tmuxPaneID
 
@@ -673,7 +709,7 @@ public actor HibernationCoordinator {
         return .ok
     }
 
-    private func hibernationRefusal(
+    func hibernationRefusal(
         terminal: Terminal,
         policy: HibernateEligibilityPolicy
     ) -> HibernateResult? {
@@ -876,17 +912,27 @@ public actor HibernationCoordinator {
             return .notFound
         }
         // Ahead of the parked check, and therefore ahead of BOTH downstream
-        // paths: `classifyUnparkedWake` probes the pane, and the parked branch
-        // respawns into it. A holder row's pane id is the empty string, which
-        // tmux answers for by reporting the pane gone — so the unparked path
-        // would report a live session as `.sessionGone` and the parked path
-        // would respawn a second `claude --resume` for a session whose original
-        // process is still alive on the holder's pty. Refuse, mutating nothing.
-        guard terminal.transport != .holder else { return .holderTransport }
+        // paths. Read once, before anything is mutated: a holder row whose soak
+        // gate is off is refused here, mutating nothing, rather than reaching
+        // either branch below.
+        let holderHibernationEnabled = await resolvedHolderHibernationEnabled()
+        if terminal.transport == .holder, !holderHibernationEnabled {
+            return .holderTransport
+        }
         // Wake ANY parked row, not just `hibernatedAt`-marked ones: legacy rows
         // and the reconcile / recreate-window paths may carry only `suspendedAt`.
         // `clearHibernated` nils both columns, so this fully un-parks either.
-        guard terminal.isParked else { return await classifyUnparkedWake(terminal) }
+        //
+        // The unparked answer is per-transport: `classifyUnparkedWake` probes a
+        // tmux pane, and a holder row's pane id is the empty string, which tmux
+        // answers for by reporting the pane gone — a live session reported as
+        // `.sessionGone`. The holder classification asks the process table
+        // instead.
+        guard terminal.isParked else {
+            return terminal.transport == .holder
+                ? await classifyUnparkedHolderWake(terminal)
+                : await classifyUnparkedWake(terminal)
+        }
         guard let sessionID = terminal.claudeSessionID else { return .noSessionID }
         let expectedReplacementState = TerminalReplacementSnapshot(terminal: terminal)
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
@@ -903,10 +949,17 @@ public actor HibernationCoordinator {
         let server = worktree.tmuxServer
         let paneID = terminal.tmuxPaneID
 
-        // `claude --resume` is cwd-scoped (session lookup is per-directory).
-        // Respawning inside the existing window already runs in the worktree,
-        // but assert it so a moved/relocated worktree can't silently resume in
-        // the wrong directory (or fail to find the session).
+        // Assert that the process about to be resumed will run in THIS
+        // worktree. Not a lookup concern: `claude --resume <id>` is not
+        // cwd-scoped — measured on claude 2.1.261, a resume from another
+        // directory succeeds and appends to the original project directory's
+        // JSONL. What the check is for is belonging: a session resumed outside
+        // its worktree would edit the wrong tree while writing to the right
+        // transcript, which is the harder failure to notice. The respawn `-c`s
+        // into the worktree path regardless, so this only reports.
+        //
+        // tmux-only, because it reads a pane's cwd. A holder row has no pane
+        // and takes the branch above.
         if let paneCwd = try? await tmux.paneCurrentPath(server: server, paneID: paneID),
            paneCwd != worktree.path {
             logger.warning("wake: pane cwd \(paneCwd, privacy: .public) != worktree path \(worktree.path, privacy: .public) for terminal \(terminal.id, privacy: .public); respawn will -c into the worktree path")
@@ -1041,6 +1094,24 @@ public actor HibernationCoordinator {
             "TBD_TERMINAL_ID": terminal.id.uuidString,
         ]
         let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
+
+        // The transports diverge again, and for the last time. Everything above
+        // — profile, env, overlay, trust seed, transcript sync, the resume
+        // argv with its queued prompt — is shared verbatim, because it decides
+        // WHAT to resume and that is transport-independent. Below is the tmux
+        // mechanic.
+        if terminal.transport == .holder {
+            return await wakeHolderSection(
+                terminal: terminal,
+                worktree: worktree,
+                sessionID: sessionID,
+                expectedReplacementState: expectedReplacementState,
+                spawnCommand: spawn.command,
+                env: env,
+                sensitiveEnv: sensitiveEnv,
+                cols: cols,
+                rows: rows)
+        }
 
         // The window/pane the rest of wake must reference: the original ones
         // when the window survived, or the recreated window's fresh ones.
@@ -1468,6 +1539,10 @@ public actor HibernationCoordinator {
         guard let allTerminals = try? await db.terminals.list() else { return }
 
         for terminal in allTerminals where terminal.isParked {
+            if terminal.transport == .holder {
+                await reconcileParkedHolderRow(terminal)
+                continue
+            }
             guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else { continue }
             let server = worktree.tmuxServer
 
@@ -1577,7 +1652,7 @@ public actor HibernationCoordinator {
     /// `hibernated` flip and reads the row's snapshot once, and wake-on-focus
     /// reads the row's reason — a later refetch is too late. Wake broadcasts
     /// leave them nil.
-    private func broadcastHibernation(
+    func broadcastHibernation(
         terminal: Terminal, hibernated: Bool, keepWarm: Bool,
         tmuxWindowID: String? = nil, tmuxPaneID: String? = nil,
         suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil

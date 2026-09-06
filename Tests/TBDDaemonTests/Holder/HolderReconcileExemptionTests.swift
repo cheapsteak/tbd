@@ -95,12 +95,19 @@ struct HolderReconcileExemptionTests {
             "the sweep deleted a holder-backed shell row")
     }
 
-    @Test("a tmux-backed row whose window is gone is still parked or deleted")
-    func tmuxRowStillReconciledNormally() async throws {
+    /// Both values of `holder_hibernation_enabled`, because the tmux arm must
+    /// be blind to it: the flag decides what a HOLDER row becomes, and a
+    /// condition written to test the flag alone rather than the flag AND the
+    /// transport would change this outcome too.
+    @Test(
+        "a tmux-backed row whose window is gone is still parked or deleted",
+        arguments: [false, true])
+    func tmuxRowStillReconciledNormally(holderHibernationEnabled: Bool) async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(holderHibernationEnabled)
         let lifecycle = makeLifecycle(db: db, tmux: deadWindowTmux())
         let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
 

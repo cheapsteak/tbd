@@ -908,7 +908,7 @@ public final class Daemon: Sendable {
                 viewerAttachment: { terminalID in
                     await registry.viewerAttachment(for: terminalID)
                 },
-                writeDirectly: { terminalID, bytes in
+                writeDirectly: { [inputActivity] terminalID, bytes in
                     // The daemon's own reader is the only descriptor it has —
                     // but it keeps that reader across an attach, suspended
                     // rather than stopped, so this fallback has a target in
@@ -920,6 +920,14 @@ public final class Daemon: Sendable {
                             terminalID: terminalID)
                     }
                     try await reader.write(bytes)
+                    // The pending-input veto's holder leg. A daemon-side write
+                    // is the ONLY input into a holder session the daemon can
+                    // see — a viewer types on its own descriptor and tells
+                    // nobody — so this is what there is to record, and it is
+                    // recorded only after the write actually landed. Keyed by
+                    // terminal id, matching `InputActivityTracker.key(for:)`
+                    // for a holder row.
+                    inputActivity.recordInput(paneID: terminalID.uuidString)
                 })
         }
 
@@ -1050,6 +1058,10 @@ public final class Daemon: Sendable {
         )
         // Wire the shared input activity tracker to the coordinator
         await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
+        // And the holder registry, for the same reason and on the same terms:
+        // the park path reads a holder session's screen through the reader the
+        // spawn path registered, so all three must hold ONE registry.
+        await rpcRouter.hibernationCoordinator.setHolderRegistry(holderRegistry)
         // Queued prompt, second half: route the parking RPC and the readiness
         // and confirmation hooks to the coordinator, and give it the paste
         // path's send seam.

@@ -103,7 +103,7 @@ struct HolderReconcileInventoryTests {
 
     // MARK: - The sweep
 
-    @Test("a holder-backed row whose holder is gone is deleted, never parked")
+    @Test("with holder hibernation off, a row whose holder is gone is deleted, never parked")
     func vanishedHolderRowsAreDeleted() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -129,19 +129,75 @@ struct HolderReconcileInventoryTests {
             actuationLog: makeTestActuationLog(),
             reapSharedScratchTmuxResources: true)
 
-        // **The park is withheld on purpose.** `HibernationCoordinator.wake`
-        // refuses `transport == .holder` before its "wake any parked row"
-        // branch and this sweep skips parked rows, so a parked holder row could
-        // never be woken and never be re-judged — while the app's focus-wake
-        // selects exactly `isParked && isClaudeResumable && hibernateReason !=
-        // .manual` and would fire a failing wake RPC on every focus of the
-        // worktree, forever.
+        // **The park is withheld while the soak gate is off, on purpose.**
+        // `HibernationCoordinator.wake` refuses a holder row with the gate off,
+        // and this sweep skips parked rows, so a parked holder row could never
+        // be woken and never be re-judged — while the app's focus-wake selects
+        // exactly `isParked && isClaudeResumable && hibernateReason != .manual`
+        // and would fire a failing wake RPC on every focus of the worktree,
+        // forever.
+        #expect(
+            try await db.config.get().holderHibernationEnabled == false,
+            "this test asserts the gate's off branch; it must not have been touched")
         #expect(
             try await db.terminals.get(id: claude.id) == nil,
-            "a holder-backed resumable Claude row was parked instead of deleted; a parked holder row is unwakeable and re-fires focus-wake forever")
+            "a holder-backed resumable Claude row was parked instead of deleted; with holder hibernation off a parked holder row is unwakeable and re-fires focus-wake forever")
         #expect(
             try await db.terminals.get(id: shell.id) == nil,
             "a holder-backed shell row whose holder is gone was left in the inventory")
+    }
+
+    /// The same fixture with `holder_hibernation_enabled` ON: the resumable
+    /// Claude row is PARKED rather than deleted, exactly as the tmux arm parks
+    /// its equivalent, and the shell row is still deleted because there is
+    /// nothing about it to preserve.
+    ///
+    /// Deliberately identical input to the test above — only the gesture
+    /// differs — so a gate that stopped being read shows up as two tests
+    /// asserting opposite outcomes on the same rows.
+    @Test("with holder hibernation on, a resumable holder row is parked instead of deleted")
+    func holderHibernationOnParksResumableRows() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        try await enableTheHolderArm(db)
+        try await db.config.setHolderHibernationEnabled(true)
+        let lifecycle = makeLifecycle(
+            db: db,
+            signaller: deadJobs([4243, 4245]),
+            registry: registry(environment: vanishedHolderEnvironment()))
+        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
+
+        let claude = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-holder",
+            kind: .claude, transport: .holder, holderPID: 4242, childPID: 4243)
+        let shell = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .shell, transport: .holder, holderPID: 4244, childPID: 4245)
+
+        try await lifecycle.reconcile(
+            repoID: repo.id,
+            actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: true)
+
+        let parked = try #require(
+            try await db.terminals.get(id: claude.id),
+            "a resumable holder row was deleted with holder hibernation on")
+        #expect(parked.isParked)
+        #expect(parked.hibernateReason == .recovery)
+        #expect(parked.claudeSessionID == "sess-holder", "the session id must survive the park")
+        // A parked holder row names no processes: the holder and its job are
+        // already gone, and pids left on the row point every identity check at
+        // numbers the kernel has recycled.
+        #expect(parked.holderPID == nil)
+        #expect(parked.childPID == nil)
+        #expect(parked.holderChildStartedAt == nil)
+
+        #expect(
+            try await db.terminals.get(id: shell.id) == nil,
+            "a holder-backed shell row has no session to preserve and must still be deleted")
     }
 
     /// The gate's off branch, which is the shipped default: the arm judges
@@ -597,7 +653,8 @@ struct HolderReconcileInventoryTests {
 
     /// The two deletions are different events and the log must not conflate
     /// them. A holder-transport Claude row *has* a session to preserve; what it
-    /// does not have is a park it could be woken from.
+    /// does not have, while the soak gate is off, is anything that could wake
+    /// the park.
     @Test("a withheld park says so rather than claiming there was no session")
     func theDeletionRationaleNamesTheWithheldPark() {
         let holderClaude = Terminal(
@@ -605,13 +662,23 @@ struct HolderReconcileInventoryTests {
             label: TerminalLabel.claudeCode, claudeSessionID: "sess-holder",
             kind: .claude, transport: .holder)
         #expect(
-            WorktreeLifecycle.deletionRationale(for: holderClaude)
-                == "its Claude session is not resumable from a park on the holder transport")
+            WorktreeLifecycle.deletionRationale(
+                for: holderClaude, holderHibernationEnabled: false)
+                == "holder hibernation is off, so a parked holder row would have nothing to wake it")
 
         let holderShell = Terminal(
             worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
             kind: .shell, transport: .holder)
-        #expect(WorktreeLifecycle.deletionRationale(for: holderShell) == "no session to preserve")
+        #expect(
+            WorktreeLifecycle.deletionRationale(
+                for: holderShell, holderHibernationEnabled: false) == "no session to preserve")
+        // With the gate ON this Claude row is not deleted at all, so the only
+        // rationale it could carry would be a lie. The function says the
+        // generic thing rather than repeating the withheld-park sentence for a
+        // park that was not withheld.
+        #expect(
+            WorktreeLifecycle.deletionRationale(
+                for: holderClaude, holderHibernationEnabled: true) == "no session to preserve")
     }
 }
 
