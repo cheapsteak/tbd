@@ -42,16 +42,18 @@ struct SessionEndCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         let environment = ProcessInfo.processInfo.environment
+
+        // Read stdin BEFORE any early return, including the terminal-ID guard
+        // below: Claude Code pipes the payload and waits on the write, so a
+        // command that exits without draining it can leave the hook's writer
+        // blocked on a full pipe until its timeout.
+        let reason = Self.hookReason(from: FileHandle.standardInput.readDataToEndOfFile())
+
         guard let terminalIDString = environment["TBD_TERMINAL_ID"],
               let terminalID = UUID(uuidString: terminalIDString) else {
             sessionEndLogger.debug("suppressed reason=noTerminalID")
             return
         }
-
-        // Read stdin BEFORE the daemon check: Claude Code pipes the payload and
-        // waits on the write, so a command that exits without draining it can
-        // leave the hook's writer blocked on a full pipe until its timeout.
-        let reason = Self.hookReason(from: FileHandle.standardInput.readDataToEndOfFile())
 
         let client = SocketClient()
         guard client.isDaemonRunning else {
