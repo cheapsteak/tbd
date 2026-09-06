@@ -421,14 +421,32 @@ however the test started the call. It is not pinning a thread, and no
 `gateHoldingTask` can move it. Where the test owns the callee, inject the
 executor into the callee instead: `ShutdownLatch(executor:)` is that seam,
 and `ServerShutdownLatchTests` builds its latch on `GateExecutor.shared` so
-its run cannot queue behind the pass at all — a bound cannot fix a queue that
-never drains, and CI measured 0 of 8 detached callers back after 90 s while
-the test's own polling task ran on time: a detached task runs at default
-priority, behind every higher-priority test task the pass keeps runnable. Where the test reaches the hop through production
-code it does not construct — a server's `stop()` — bound a gate released from
-beyond it at `TestDeadlines.saturatedPass` (90 s) and give the outer
-observation a strictly larger budget, so a genuinely lost handshake still
-reports before the wedge does. A snappier inner bound reports
+its run leaves the shared queue altogether.
+
+**What starves such a handshake is hop count, not priority.** Every task in a
+test pass runs at one priority: a test body, a `Task { }`, a `Task.detached { }`
+and a `gateHoldingTask { }` all read medium (21), measured on the 3-core CI
+runner and pinned by `TaskPriorityParityTests`
+(`Tests/TBDDaemonTests/TaskPriorityParityTests.swift`). So nothing in the pass
+is queued *behind higher-priority work* — the pool's queue is FIFO among the
+~5,000 tasks the pass keeps runnable, and one suspension hop costs the pass's
+own per-test latency: p50 65.6 s and p99 92.1 s on a green fast pass 1. A
+handshake that needs *k* hops therefore costs *k* × that, and the uninjected
+latch needs three or four — each caller starting, reaching the latch and
+awaiting the run; the run's own unstructured task starting; then every caller
+resuming. That is why CI measured 0 of 8 callers back after 90 s while the
+test's own polling task, already runnable, kept reporting on time: 90 s is one
+hop's worth of budget for a four-hop handshake. **A bound cannot buy a hop its
+turn** — sizing one to fit four hops taxes every healthy run, while injecting
+the executor removes the hops from the shared queue and costs nothing. (The one
+deliberate exception to the single priority is swift-clocks' `megaYield`, which
+creates background-QoS tasks on purpose; see "Clock and date seams".)
+
+Where the test reaches the hop through production code it does not construct —
+a server's `stop()` — the bound is all that is left: release a gate from beyond
+it at `TestDeadlines.saturatedPass` (90 s) and give the outer observation a
+strictly larger budget, so a genuinely lost handshake still reports before the
+wedge does. A snappier inner bound reports
 starvation the outer bound was sized to tolerate — which is exactly how
 `SocketServerSocketOwnershipTests` went red on a 30 s staging gate while every
 assertion in the test passed.
