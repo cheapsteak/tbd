@@ -504,6 +504,7 @@ import Testing
             "20260902140000_config_gc_retained_transcripts",
             "20260903193500_config_holder_row_reconcile",
             "20260904172536_config_update_mode",
+            "20260905120000_config_transcript_composer",
             "20260905213000_config_holder_hibernation",
             "20260905220000_terminal_holder_child_started_at",
         ]

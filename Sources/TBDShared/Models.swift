@@ -1653,6 +1653,26 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var holderHibernationEnabled: Bool
+    /// The single opt-in for the live transcript's message composer
+    /// (`docs/specs/2026-09-05-transcript-composer-design.md`, "Flag"): the
+    /// composer UI, the `terminal.completions` probe, attachment writes under
+    /// `~/tbd/attachments/`, and the OrphanGC leg that reclaims them.
+    ///
+    /// It ships OFF because the composer types into a live agent session and
+    /// writes files that outlive the request that made them. One flag rather
+    /// than four: a composer with completions off, or with attachments off,
+    /// would be a broken feature rather than a smaller one.
+    ///
+    /// A **config column** rather than an app default, because the GC leg lives
+    /// in the daemon and cannot read the app's `UserDefaults`.
+    ///
+    /// **Resolved, not stored**, like `holderRowReconcileEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `transcript_composer_enabled ?? Config.transcriptComposerEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var transcriptComposerEnabled: Bool
     /// The single opt-in for remote peer messaging
     /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
     /// rollout"): publishing a shadow peer for each remote session and carrying
@@ -1818,6 +1838,13 @@ public struct Config: Codable, Sendable, Equatable {
     /// constant, with no forcing `UPDATE` migration and every explicit opt-out
     /// left alone.
     public static let holderHibernationEnabledDefault = false
+    /// The shipped default for `transcriptComposerEnabled`, and the single place
+    /// it lives. The composer ships off; graduation — after a soak in which no
+    /// message reached a session that was not running, no probe left a process or
+    /// a directory behind, and the GC leg never reclaimed a live worktree's
+    /// attachments — is a change to this constant, with no forcing `UPDATE`
+    /// migration and every explicit opt-out left alone.
+    public static let transcriptComposerEnabledDefault = false
     /// The shipped default for `updateMode`, and the single place it lives.
     /// Updating ships off; graduation to `check` — after a soak in which the
     /// notice was accurate and the hourly `ls-remote` cost nothing anyone
@@ -1868,6 +1895,7 @@ public struct Config: Codable, Sendable, Equatable {
                     Config.gcRetainedTranscriptsEnabledDefault,
                 holderRowReconcileEnabled: Bool = Config.holderRowReconcileEnabledDefault,
                 holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault,
+                transcriptComposerEnabled: Bool = Config.transcriptComposerEnabledDefault,
                 updateMode: UpdateMode = Config.updateModeDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
@@ -1911,6 +1939,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
         self.holderRowReconcileEnabled = holderRowReconcileEnabled
         self.holderHibernationEnabled = holderHibernationEnabled
+        self.transcriptComposerEnabled = transcriptComposerEnabled
         self.updateMode = updateMode
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
@@ -2037,6 +2066,12 @@ public struct Config: Codable, Sendable, Equatable {
         holderHibernationEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .holderHibernationEnabled)
             ?? Config.holderHibernationEnabledDefault
+        // And once more, for the composer's gate: absent means the sender knew
+        // nothing about the flag, which is the NULL column's situation — follow
+        // the shipped default rather than hardcoding `false`.
+        transcriptComposerEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .transcriptComposerEnabled)
+            ?? Config.transcriptComposerEnabledDefault
         // Same shape for the update mode, with one addition: an unrecognised
         // NAME from a newer daemon (a fourth mode) is as unusable as an absent
         // key, so it resolves to the shipped default instead of failing the
