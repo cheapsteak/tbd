@@ -115,6 +115,13 @@ struct CommandRankerTests {
     // separates, and each hands the loser a large frecency so a pass cannot be an
     // accident of the tiebreak.
 
+    /// Not tier-discriminating: the source's own sentinel scores (`Int.max/2`
+    /// for an exact name, `Int.max/4` for an exact alias) already sort in the
+    /// same order as the tiers do, so a sort that dropped the tier comparison
+    /// and fell back to score alone would still pass this. No pair of commands
+    /// can equalize those two constants from the outside. What this pins is the
+    /// observable order — `deploy` before `ship` — and that a heavy frecency on
+    /// the loser cannot override it.
     @Test func anExactNameBeatsAnExactAlias() {
         let ranked = CommandRanker.rank(
             commands: [command("deploy"), command("ship", aliases: ["deploy"])],

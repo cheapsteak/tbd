@@ -70,7 +70,10 @@ enum CommandRanker {
     static func fuzzyScore(query: String, candidate: String) -> Int? {
         let needle = Array(query.lowercased())
         let hay = Array(candidate)
-        let hayLower = Array(candidate.lowercased())
+        // Lowercased element-wise, not `Array(candidate.lowercased())` — a
+        // lowercasing that changes grapheme count (e.g. İ) would desync the two
+        // arrays and index `hayLower` out of step with `hay`.
+        let hayLower = hay.map { Character(String($0).lowercased()) }
         guard !needle.isEmpty else { return 0 }
 
         var score = 0
@@ -245,8 +248,9 @@ enum CommandRanker {
     }
 
     /// UTF-16 ranges of the greedy leftmost subsequence, for highlighting. Empty
-    /// when the query does not appear as a subsequence — a matched alias row
-    /// highlights nothing on the name, which is honest.
+    /// when the query does not appear as a subsequence of `name` — highlights
+    /// apply only when the query is a subsequence of the name, whether or not
+    /// the row's match actually came from an alias.
     private static func highlightRanges(query: String, in name: String) -> [NSRange] {
         let nsName = name as NSString
         let needle = Array(query.lowercased())
