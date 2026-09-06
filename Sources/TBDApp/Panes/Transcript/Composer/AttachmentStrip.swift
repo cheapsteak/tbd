@@ -106,7 +106,7 @@ private struct AttachmentThumbnailImage: View {
     var body: some View {
         Group {
             if let image {
-                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                Image(nsImage: image).resizable().scaledToFill()
             } else {
                 RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.15))
             }
