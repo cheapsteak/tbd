@@ -548,10 +548,11 @@ it reads back to the daemon:
   macOS App Nap coalesces a backgrounded app's work, and an app being wedged
   or busy correlates with exactly the moments supervision most wants a
   screen, so "quiet" is not the rare case it looks like.
-  Safety-critical consumers fail closed: the hibernation input-veto check
-  treats no-answer as unsafe and refuses to hibernate, never risking typed
-  input. Best-effort consumers fall back to the daemon's frozen-at-attach
-  emulator, labeled stale, rather than blocking on an unresponsive app.
+  Safety-critical consumers fail closed: the hibernation pending-input rail
+  acts only on a screen the daemon rendered live, and its refusals are set out
+  under "Feature parity" below. Best-effort consumers fall back to the
+  daemon's frozen-at-attach emulator, labeled stale, rather than blocking on
+  an unresponsive app.
 - Terminal scrollback history has a hole across each attached period (minus
   whatever the kernel buffer held at the edges). This is the accepted cost,
   and it is cheap here specifically: the artifact users actually mine history
@@ -600,9 +601,13 @@ Everything TBD does through tmux today, and its replacement:
 - **Machine reads** (`tbd terminal read`, the interactive-login driver, the
   hibernation pending-input rail, the embedded supervision babysitter) — the
   daemon renders its own emulator when it is the reader and pulls a snapshot
-  from the app when a viewer is attached. This replaces `capture-pane` with a
-  first-party interface, which the no-TUI-scraping rule already pushes
-  toward; the three sanctioned scrapers migrate onto it as part of this work.
+  from the app when a viewer is attached. Every such read answers with a
+  typed screen that names which store answered and how stale it is, so a
+  consumer can hold a policy rather than a hope
+  ([`2026-09-05-child-as-contract-party-design.md`](2026-09-05-child-as-contract-party-design.md)).
+  This replaces `capture-pane` with a first-party interface, which the
+  no-TUI-scraping rule already pushes toward; the three sanctioned scrapers
+  migrate onto it as part of this work.
 - **Hibernation and revive** — hibernate instructs the holder to terminate its
   child (the holder reports status and exits); revive spawns a fresh holder.
   The queued-prompt flag keeps its semantics, now gating daemon writes to the
@@ -624,11 +629,18 @@ Everything TBD does through tmux today, and its replacement:
     the session awake, because a row that claims parked over a live process is
     reclaimable by nothing: no sweep reads it, and a wake would put a second
     agent on the same session.
-  - **The pending-input rail fails closed when the daemon is not the reader.**
-    It judges the daemon's own emulator, which is frozen for the duration of a
-    viewer's attach (see "Two stores, reconciled on demand"), so a park asked
-    for while a viewer holds the pty is refused by name. Refusing is
-    recoverable; eating a half-composed prompt is not.
+  - **The pending-input rail acts only on a screen the daemon rendered live.**
+    It reads the typed screen the machine-read contract answers with and
+    branches on that answer's `source`. A `daemon` screen is judged for a
+    half-composed prompt; every other answer is refused, each by a name of its
+    own, because the remedies differ — a `staleDaemon` or `viewer` screen
+    means somebody has the session open and the tab is what to close, a
+    session with no reader is one the daemon has lost track of, and a screen
+    that will not project is a defect to fix. Refusing is recoverable; eating
+    a half-composed prompt is not. The idle sweep asks the same question
+    before it arms a row, reading the source alone rather than paying for the
+    lines, so a session the park could never complete costs no
+    request-and-refusal pair on every pass.
   - **Revive re-anchors the identity check.** The row records when its current
     child started, because a woken session's child is younger than its row and
     every reclaimer that verifies a recorded pid against a start time would
