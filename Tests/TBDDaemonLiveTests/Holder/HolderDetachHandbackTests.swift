@@ -23,6 +23,13 @@ import Testing
 /// daemon's model frozen at the instant the viewer arrived, because the jiggle
 /// heals only programs that repaint and a shell repaints essentially nothing.
 ///
+/// **`reader(for:) == nil` is not the instrument for "the daemon is off the
+/// pty", and this suite does not use it as one.** An attach suspends the
+/// daemon's reader and retains it — the emulator is the session's only screen
+/// while a viewer holds the descriptor, and the only source of the child's
+/// modes — so an attached session has a reader and is not being read. The
+/// honest instrument is `isDraining`, which reads the drain thread's own flag.
+///
 /// **Tier 3.** A real `TBDHolder`, a real pty, a real job.
 @Suite(.serialized)
 struct HolderDetachHandbackTests {
@@ -53,8 +60,9 @@ struct HolderDetachHandbackTests {
         let seen = readPTYUntil(fd: viewer.ptyFD, contains: "GOT:WHILE-ATTACHED")
         #expect(seen != nil, "the viewer never saw its own job's answer")
         viewer.terminal.feed(Data((seen ?? "").utf8))
-        #expect(await fixture.registry.reader(for: fixture.terminalID) == nil,
-                "an acknowledged attach releases the daemon's reader for good")
+        let suspended = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(await !suspended.isDraining,
+                "the daemon is still draining a pty a viewer acknowledged owning")
 
         // The order the app keeps, and the reason it keeps it: nothing may read
         // this pty between the close and the daemon's resume.
@@ -82,6 +90,36 @@ struct HolderDetachHandbackTests {
         #expect(await pollUntil("the job's answer after the handback") {
             await resumed.renderScreen().contains("GOT:AFTER-DETACH")
         })
+    }
+
+    /// The far side of `staleDaemon`: once the take-back lands, the same reader
+    /// is the live store again and says so.
+    ///
+    /// It is asserted here rather than in a unit test because `.daemon` is the
+    /// one source that cannot be constructed without a running drain thread —
+    /// it is read from the reader's own state, so a reader that is not actually
+    /// on a pty cannot answer it. `HolderScreenContractTests` says as much in
+    /// place of building a fake.
+    @Test func aHandbackMakesTheDaemonTheLiveStoreAgain() async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+        defer { fixture.tearDown() }
+
+        let viewer = try await fixture.attachAViewer()
+        let suspended = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(try await suspended.screen(maxLines: 50).source == .staleDaemon)
+
+        viewer.close()
+        try await fixture.registry.acceptHandback(
+            terminal: fixture.terminalRow, generation: viewer.generation,
+            preamble: viewer.terminal.snapshot())
+
+        let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(await resumed.isDraining)
+        #expect(try await resumed.screen(maxLines: 50).source == .daemon, """
+            the daemon is draining this pty again but its screen still labels itself frozen, so \
+            every consumer keyed on `source` applies a stale policy to a live session
+            """)
+        #expect(await resumed.modeReading().source == .daemon)
     }
 
     // MARK: - The unacknowledged attach, which kept its reader
@@ -146,52 +184,70 @@ struct HolderDetachHandbackTests {
         }
         #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == viewer.generation,
                 "a stale detach took the pty from the attach that holds it")
-        #expect(await fixture.registry.reader(for: fixture.terminalID) == nil,
+        let stillSuspended = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(await !stillSuspended.isDraining,
                 "a stale detach put the daemon back on a pty a viewer is reading")
     }
 
-    /// A handback whose take-back **fails** must still drop the claim, or the
-    /// error path re-creates the exact brick this method exists to prevent: the
-    /// session undrained, unwritable, and refused by `beginAttach` until it is
-    /// torn down, with no second detach ever coming — the app closed its
-    /// descriptors before it sent this one. Reachable without a race: a holder
-    /// busy past the retry budget, an adoption that times out, or (here) a
-    /// rendezvous socket that has gone.
-    @Test func aFailedHandbackDoesNotLeaveTheSessionClaimed() async throws {
+    /// **The take-back no longer depends on the holder being reachable**, and
+    /// that is the strictly better outcome the retained reader buys.
+    ///
+    /// Before the emulator was retained, an acknowledged attach left the slot
+    /// empty, so a detach had to open a fresh hand-over — a connect to the
+    /// session's rendezvous socket, a second `dup`, a second drain loop. Every
+    /// way that round trip could fail (a holder busy past the retry budget, an
+    /// adoption that timed out, a socket that had gone) was a way for a closed
+    /// tab to brick its session. The reader now never leaves the descriptor, so
+    /// the resume is a restart of its own thread and asks the holder nothing.
+    ///
+    /// This unlinks the rendezvous socket — the failure that used to be fatal
+    /// here — and asserts the handback succeeds through it: the claim is
+    /// cleared, the same reader is draining again, and the session is live.
+    ///
+    /// **The failing take-back is no longer reachable by a test on this arm,
+    /// and no failure is fabricated to stand in for it.** What is left that can
+    /// throw is `HolderReader.resumeDraining`, which fails only when `pipe()`
+    /// does — an out-of-descriptors condition a test on a shared box must not
+    /// induce. The claim-dropping behaviour on the error path is still there
+    /// and still correct; it is simply unreachable from here now. Its sibling
+    /// `HolderAppDeathSeizureTests.aFailedSeizureIsNoLongerReachableThroughAMissingSocket`
+    /// records the same for the seizure.
+    @Test func aHandbackSucceedsWithoutTheHoldersSocket() async throws {
         let fixture = try await HandbackFixture.start(command: Self.echoJob)
         defer { fixture.tearDown() }
 
         let viewer = try await fixture.attachAViewer()
+        let suspended = try #require(await fixture.registry.reader(for: fixture.terminalID))
         viewer.close()
         // The holder is still alive and still bound to this socket; unlinking
-        // the path is what a connect can no longer find, so `beginAdoption`
-        // fails on its first attempt rather than spending the busy budget.
+        // the path is what a connect can no longer find, so any adoption would
+        // fail on its first attempt rather than spending the busy budget.
         try FileManager.default.removeItem(
             atPath: try HolderRendezvous.socketPath(
                 sessionID: fixture.terminalID,
                 environment: HolderProcessFixture.environment(home: fixture.process.home)))
 
-        await #expect(throws: (any Swift.Error).self) {
-            try await fixture.registry.acceptHandback(
-                terminal: fixture.terminalRow, generation: viewer.generation,
-                preamble: Data("PREAMBLE".utf8))
-        }
+        try await fixture.registry.acceptHandback(
+            terminal: fixture.terminalRow, generation: viewer.generation,
+            preamble: viewer.terminal.snapshot())
 
         #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == nil, """
-            a handback that could not take the session back left the viewer's claim standing, so \
-            nothing drains this pty, no injection can reach it, and every re-open is refused
+            the handback left the viewer's claim standing, so nothing drains this pty, no \
+            injection can reach it, and every re-open is refused
             """)
-        // And the claim is not merely absent from the map: the guard that reads
-        // it no longer refuses a recovery. This adopt fails too — the socket is
-        // gone — but it must fail on the socket, not on the claim.
-        do {
-            _ = try await fixture.registry.adopt(terminal: fixture.terminalRow)
-        } catch {
-            #expect(
-                (error as? HolderRegistry.Error)
-                    != .attachedToViewer(terminalID: fixture.terminalID),
-                "a recovery attach is still refused on the claim the failed handback left behind")
-        }
+        let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(resumed === suspended, """
+            the handback opened a hand-over for a session whose own reader had never left the \
+            descriptor — and with the rendezvous socket gone it could not have succeeded
+            """)
+        #expect(await resumed.isDraining, "the suspended reader was not put back on the pty")
+
+        // Live again, not merely claimed: the daemon writes, the job answers,
+        // and the answer lands on the screen it is keeping.
+        try await resumed.write(Data("AFTER-SOCKETLESS-HANDBACK\n".utf8))
+        #expect(await pollUntil("the job's answer after the socketless handback") {
+            await resumed.renderScreen().contains("GOT:AFTER-SOCKETLESS-HANDBACK")
+        })
     }
 
     /// The negative that scopes this task: **an app that dies mid-detach needs
@@ -211,7 +267,9 @@ struct HolderDetachHandbackTests {
 
         #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == viewer.generation,
                 "a closed descriptor is not evidence this daemon can see")
-        #expect(await fixture.registry.reader(for: fixture.terminalID) == nil)
+        let stillSuspended = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(await !stillSuspended.isDraining,
+                "the daemon resumed a pty on nothing but a closed descriptor it cannot see")
         await #expect(throws: HolderRegistry.Error.attachedToViewer(terminalID: fixture.terminalID)) {
             try await fixture.registry.adopt(terminal: fixture.terminalRow)
         }

@@ -102,6 +102,47 @@ struct HolderSpawnGateTests {
             "the holder path started a tmux server: \(issued)")
     }
 
+    /// A spawned session's drain loop is counted exactly like an adopted
+    /// one's.
+    ///
+    /// `spawn` and `beginAdoption` are the registry's two publish sites, and
+    /// `peakLiveDrainLoops` is the one instrument for "two readers on one pty"
+    /// — the byte theft object identity cannot see. A publish that counted only
+    /// `drainLoopsStarted` left the live count at zero for every spawned
+    /// session, so the peak could not rise above zero however many loops ran
+    /// beside it, and the release's unconditional decrement then drove the
+    /// count negative and kept it there.
+    ///
+    /// The second half is what sees that drift: after the first session is
+    /// released the registry spawns another, and a live count that had gone to
+    /// -1 leaves the peak at 0 rather than 1. It pins the decrement too — a
+    /// release that stopped the reader without dropping the count would put the
+    /// peak at 2 here.
+    @Test func aSpawnedSessionCountsItsDrainLoopLikeAnAdoptedOne() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: true)
+        defer { fixture.tearDown() }
+
+        let created = try await fixture.spawnPrimaryTerminals()
+        let terminalID = created[0].id
+        #expect(await fixture.registry.drainLoopsStarted == 1)
+        #expect(await fixture.registry.peakLiveDrainLoops == 1, """
+            a spawned session's drain loop was never counted live, so nothing can see a second \
+            reader started beside it
+            """)
+
+        await fixture.registry.release(terminalID: terminalID)
+        let second = try await fixture.spawnPrimaryTerminals()
+        let secondPrimary = try #require(try await fixture.db.terminals.get(id: second[0].id))
+        #expect(
+            secondPrimary.transport == .holder,
+            "the second session did not take the holder path")
+        #expect(await fixture.registry.drainLoopsStarted == 2)
+        #expect(await fixture.registry.peakLiveDrainLoops == 1, """
+            the live drain-loop count drifted across a release: one loop was live at a time \
+            throughout, and the peak says otherwise
+            """)
+    }
+
     /// Flag on, registry present, but nothing to spawn with: the create still
     /// succeeds, on tmux.
     ///

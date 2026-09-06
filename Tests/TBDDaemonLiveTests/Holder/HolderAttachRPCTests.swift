@@ -367,7 +367,12 @@ struct HolderAttachRPCTests {
                     generation: vend.generation, terminalID: harness.terminalID)))
         #expect(response.success)
         #expect(await harness.registry.viewerAttachment(for: harness.terminalID) == vend.generation)
-        #expect(await harness.registry.reader(for: harness.terminalID) == nil)
+        // The reader is retained across the acknowledgement — suspended, so it
+        // holds the session's screen without being on the pty. `isDraining` is
+        // the instrument for "the daemon is not reading"; the reader's presence
+        // is not.
+        let suspended = try #require(await harness.registry.reader(for: harness.terminalID))
+        #expect(await !suspended.isDraining)
 
         // The viewer's descriptor outlives the daemon's, which is the point of
         // handing over a dup rather than the reader's own.
@@ -437,7 +442,8 @@ struct HolderAttachRPCTests {
         // refusal — but the claim stands.
         #expect(response.success)
         #expect(await harness.registry.viewerAttachment(for: harness.terminalID) == vend.generation)
-        #expect(await harness.registry.reader(for: harness.terminalID) == nil,
+        let suspended = try #require(await harness.registry.reader(for: harness.terminalID))
+        #expect(await !suspended.isDraining,
                 "a detach the daemon could not check put it back on a pty a viewer holds")
     }
 

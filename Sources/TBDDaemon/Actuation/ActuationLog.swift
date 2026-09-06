@@ -174,12 +174,25 @@ public actor ActuationLog {
     /// not merely forbidden here, it is unspellable: the observed vocabulary
     /// lives in a type this signature does not accept (`ObservedResult`), and
     /// reaches the file only through `appendObservation`.
-    func appendOutcome(confirms: String, result: ActuationOutcome, error: String? = nil) {
+    ///
+    /// `modeSource` and `modeAgeMilliseconds` are defaulted to nil because only
+    /// one caller has them: a holder send, which composed its bytes against a
+    /// mode oracle and records what it composed against. Every other act passes
+    /// nothing and writes neither key.
+    func appendOutcome(
+        confirms: String,
+        result: ActuationOutcome,
+        error: String? = nil,
+        modeSource: ActuationModeSource? = nil,
+        modeAgeMilliseconds: Int? = nil
+    ) {
         var row = ActuationRow(actor: .daemon(), kind: .outcome)
         row.id = Self.mintID()
         row.confirms = confirms
         row.result = .synchronous(result.result)
         row.reason = result.reason
+        row.modeSource = modeSource
+        row.modeAgeMilliseconds = modeAgeMilliseconds
         row.error = error
         try? appendWithOneRetry(row, failClosed: false)
     }

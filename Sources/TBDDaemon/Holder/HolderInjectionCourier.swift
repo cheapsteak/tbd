@@ -62,9 +62,12 @@ actor HolderInjectionCourier {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "holderInjection")
 
     enum Error: LocalizedError, Equatable {
-        /// The daemon holds no descriptor for this session's pty. Ordinary
-        /// while a viewer is attached — the attach acknowledgement releases the
-        /// daemon's reader, which closes it — and a genuine fault otherwise.
+        /// The daemon holds no descriptor for this session's pty. **Not an
+        /// attached session's ordinary state** — the daemon keeps its reader,
+        /// suspended, across an attach, and a suspended reader's descriptor is
+        /// open. It means the registry has no reader for this session at all:
+        /// the session is gone, was never adopted, or is mid-release. A genuine
+        /// fault in every case.
         case noDaemonDescriptor(terminalID: UUID)
 
         var errorDescription: String? {
@@ -175,36 +178,24 @@ actor HolderInjectionCourier {
     /// per-terminal send serializer upstream is what keeps two callers'
     /// messages apart.
     ///
-    /// **Known gap, and the honest statement of it.** Once a viewer has
-    /// *acknowledged* an attach the daemon has released its reader and closed
-    /// its descriptor (`HolderRegistry.confirmAttach` → `HolderReader.stop`),
-    /// so `writeDirectly` has nothing to write to and the fail-open fallback
-    /// reports `.notDelivered` instead of writing. Nothing is lost silently —
-    /// the caller is told, and the actuation row records a transport failure —
-    /// but in that state the fallback is not yet the fail-open the spec
-    /// describes. Closing it means the daemon keeping a **write-only** dup
-    /// across an attach (the one-reader invariant is about readers; multiple
-    /// writers to a pty master are fine), which is an ownership change
-    /// belonging to the detach and app-death work, not here.
+    /// **The fallback really writes, in every attached state.** The daemon
+    /// keeps its reader across an attach — suspended, never stopped, whether or
+    /// not the viewer acknowledged (`HolderRegistry.confirmAttach`) — so its
+    /// descriptor stays open and `HolderReader.write` guards only on
+    /// `.stopped`. That is what makes `ackDeadlineElapsed`,
+    /// `viewerReportedNothingWritten` and `viewerFrameUndeliverable` genuinely
+    /// fail *open* rather than reporting `.notDelivered` for the very sessions
+    /// the fallback exists to serve: a viewer that is napping, wedged, or gone
+    /// without telling anyone. The one-reader invariant is untouched by this —
+    /// it is about readers, and several writers on a pty master are fine.
     ///
-    /// **The gap is not every attached state, and the exceptions matter.**
-    /// `viewerAttachment` means "a viewer *may* hold this pty", and two states
-    /// leave the daemon's descriptor open underneath it:
-    ///
-    /// - **A timed-out attach.** `HolderRegistry.cancelPendingAttach`'s
-    ///   `.unacknowledged` arm records the claim and deliberately leaves the
-    ///   slot `.adopted` with its reader merely `.suspended` — the descriptor
-    ///   is still open, and `HolderReader.write` guards only on `.stopped`. So
-    ///   `viewerAttachment != nil` **and** `reader(for:) != nil`, and the
-    ///   fallback really fires and really writes. That is the case fail-open
-    ///   exists for above all others: the app is presumed hung or dead.
-    /// - **The vended-but-not-yet-acked window.** `beginAttach` records a
-    ///   pending attach but no `viewerAttachment`, so this method takes the
-    ///   *detached* branch and writes through that same suspended reader —
-    ///   while the app already holds its `dup` of the descriptor
-    ///   (`TerminalPanelView.startHolderClient` takes it before
-    ///   `attach.ready`) and may already be writing keystrokes. Two writers,
-    ///   for one RPC round trip. Narrow, not zero.
+    /// **The vended-but-not-yet-acked window is the one state with two live
+    /// writers.** `beginAttach` records a pending attach but no
+    /// `viewerAttachment`, so this method takes the *detached* branch and
+    /// writes through the suspended reader — while the app already holds its
+    /// `dup` of the descriptor (`TerminalPanelView.startHolderClient` takes it
+    /// before `attach.ready`) and may already be writing keystrokes. Two
+    /// writers, for one RPC round trip. Narrow, not zero, and unchanged.
     func deliver(terminalID: UUID, bytes: Data) async -> Delivery {
         guard await viewerAttachment(terminalID) != nil else {
             return await writeFromDaemon(terminalID: terminalID, bytes: bytes, because: .detached)

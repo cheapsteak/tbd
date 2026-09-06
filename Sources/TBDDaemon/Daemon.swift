@@ -909,8 +909,12 @@ public final class Daemon: Sendable {
                     await registry.viewerAttachment(for: terminalID)
                 },
                 writeDirectly: { terminalID, bytes in
-                    // The daemon's own reader is the only descriptor it has,
-                    // and it has one only while nobody else owns the pty.
+                    // The daemon's own reader is the only descriptor it has —
+                    // but it keeps that reader across an attach, suspended
+                    // rather than stopped, so this fallback has a target in
+                    // every attached state. No reader means the session is gone
+                    // or was never adopted, which is the one case with nothing
+                    // to write to.
                     guard let reader = await registry.reader(for: terminalID) else {
                         throw HolderInjectionCourier.Error.noDaemonDescriptor(
                             terminalID: terminalID)
@@ -1230,7 +1234,8 @@ public final class Daemon: Sendable {
         // stopped accepting — independent of how badly any one of them is.
         // Binding first would instead open a window in which the socket answers while holder
         // sessions have no readers — `terminal.output` fails a live session
-        // with "its session is gone or was never adopted", a sentence no caller
+        // with "its session is gone, was never adopted, or is mid-transition", a
+        // sentence no caller
         // can tell apart from the truth about a genuinely dead one, and the
         // app's `attach.request` throws `noLiveReader` for the same session —
         // and it would not even make the daemon answerable, because steps 8b-8d

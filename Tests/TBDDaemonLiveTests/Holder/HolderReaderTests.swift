@@ -89,7 +89,7 @@ struct HolderReaderTests {
             await reader.renderScreen().contains("line-5000")
         }
         #expect(sawTail)
-        let history = await reader.renderScreenWithScrollback(maxLines: 500)
+        let history = try await reader.screen(maxLines: 500).output
         #expect(history.contains("line-4900"), "the scrollback did not keep the recent history")
     }
 

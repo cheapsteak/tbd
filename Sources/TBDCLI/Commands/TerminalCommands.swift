@@ -487,8 +487,60 @@ struct TerminalOutput: AsyncParsableCommand {
         if json {
             printJSON(result)
         } else {
+            // stdout stays exactly the screen text — scripts pipe it, diff it
+            // and match on it — so the provenance goes to stderr, where a
+            // human and a supervising agent both see it and no pipeline does.
+            if let screen = result.screen, let note = Self.stalenessNote(for: screen) {
+                FileHandle.standardError.write(Data("\(note)\n".utf8))
+            }
             print(result.output)
         }
+    }
+
+    /// What to tell a reader about a screen that did not come from the live
+    /// store, or `nil` when it did.
+    ///
+    /// `tbd terminal output` is one of the consumers the screen contract makes
+    /// declare a policy for `.staleDaemon`, and its declared policy is *accept
+    /// and surface*: the answer is still the best one available, and a reader
+    /// told which store produced it and how old it is has learned something the
+    /// bare string could never tell them. Before the typed screen this call
+    /// simply failed on a session a viewer held; answering with a frozen screen
+    /// and saying nothing would be the worse of the two, because a supervisor
+    /// reading a three-hour-old composer sees a live one.
+    ///
+    /// The source is spelled with the enum's own raw value, so the note and the
+    /// `--json` field a script correlates against can never drift apart.
+    static func stalenessNote(for screen: TerminalScreen) -> String? {
+        let age = humaneAge(milliseconds: screen.ageMilliseconds)
+        switch screen.source {
+        case .daemon:
+            return nil
+        case .viewer:
+            return """
+                note: screen came from the viewer holding this session's pty \
+                (source \(screen.source.rawValue), age \(age))
+                """
+        case .staleDaemon:
+            return """
+                note: screen is the daemon's emulator as it stood when a viewer attached \
+                (source \(screen.source.rawValue), age \(age))
+                """
+        }
+    }
+
+    /// An age a person can judge at a glance: seconds under a minute, minutes
+    /// and seconds under an hour, hours and minutes above it.
+    ///
+    /// Milliseconds are the wire's unit because a threshold is compared in
+    /// them; nobody reading a note decides anything on the difference between
+    /// 2,460,000 and 2,461,000.
+    private static func humaneAge(milliseconds: Int) -> String {
+        let seconds = max(0, milliseconds) / 1_000
+        if seconds < 60 { return "\(seconds)s" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m \(seconds % 60)s" }
+        return "\(minutes / 60)h \(minutes % 60)m"
     }
 }
 
