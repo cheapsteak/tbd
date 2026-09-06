@@ -24,8 +24,9 @@ import Foundation
 /// press Enter, and a bracketed paste of nothing is a pair of markers the child
 /// has to interpret for no reason — a shell at its prompt would show them.
 ///
-/// **A wrapped body carries no paste marker of its own.** Both markers are
-/// taken out, for reasons that differ. `ESC[201~` inside the paste closes it
+/// **A send carries no paste marker of its own, in either mode.** Both markers
+/// are taken out of every body, wrapped or bare. Inside a wrapping they break
+/// it, for reasons that differ. `ESC[201~` inside the paste closes it
 /// early, so everything after it — the rest of the body and the submitting
 /// `\r` — arrives as keystrokes instead of text, which is precisely the failure
 /// the wrapping exists to prevent, reached by content rather than by chunk
@@ -37,9 +38,20 @@ import Foundation
 /// marker inside a paste can only ever be a break-out or a restart: there is
 /// nothing a child could display for one, so removing it loses nothing a caller
 /// meant to send, and removal is done bytewise on the composed body so a marker
-/// cannot re-form across a removal. Only the wrapped path touches the body; an
-/// unwrapped send is delivered verbatim, because with no paste open there is
-/// nothing to break out of and the bytes are the caller's to send.
+/// cannot re-form across a removal.
+///
+/// **The bare path strips too, and that is not symmetry for its own sake.** A
+/// paste marker in a text send is never content a child can display, whichever
+/// mode the composition read: with bracketing off the child prints the six
+/// bytes or misreads them, so delivering them verbatim serves no caller. And
+/// the mode this composition reads can be *stale* — `staleDaemon` is a reading
+/// from an emulator that stopped consuming bytes when a viewer took the pty,
+/// possibly hours ago — so "bracketing is off" is a guess about a child that
+/// may well have turned it on since. An unstripped `ESC[200~` delivered bare to
+/// such a child opens a paste nothing closes, and the submitting `\r` and every
+/// keystroke after it are swallowed as pasted text. Stripping unconditionally
+/// costs a caller nothing it could have meant and removes that failure from
+/// both branches.
 enum HolderSendComposition {
     /// `ESC [ 2 0 0 ~` — the start of a bracketed paste.
     static let pasteStart = Data([0x1b, 0x5b, 0x32, 0x30, 0x30, 0x7e])
@@ -60,11 +72,11 @@ enum HolderSendComposition {
     /// - Returns: one `Data`, written in one call, so the message is never
     ///   interleaved with another writer's.
     static func compose(body: String, submit: Bool, bracketedPaste: Bool) -> Data {
-        // Stripped before the emptiness test, not after, so the two rules
-        // compose: a body that was nothing but paste markers has nothing left
-        // to paste, and wrapping it would put the markers the empty-body rule
-        // exists to avoid in front of the Enter.
-        let payload = bracketedPaste ? removingPasteMarkers(from: Data(body.utf8)) : Data(body.utf8)
+        // Stripped in both modes, and before the emptiness test rather than
+        // after, so the two rules compose: a body that was nothing but paste
+        // markers has nothing left to paste, and wrapping it would put the
+        // markers the empty-body rule exists to avoid in front of the Enter.
+        let payload = removingPasteMarkers(from: Data(body.utf8))
         var message = Data()
         if !payload.isEmpty {
             if bracketedPaste { message.append(pasteStart) }
@@ -76,7 +88,8 @@ enum HolderSendComposition {
     }
 
     /// `body` with every `ESC[200~` and `ESC[201~` taken out, so the only paste
-    /// markers in the composed message are the pair this type puts there.
+    /// markers in the composed message are the pair this type puts there — and
+    /// on the bare path, where it puts none, there are none at all.
     ///
     /// Written as an append-and-retract scan rather than a search-and-replace
     /// because a single replacing pass is not enough: removing the marker from

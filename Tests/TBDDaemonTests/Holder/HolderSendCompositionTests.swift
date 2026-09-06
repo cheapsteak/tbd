@@ -167,25 +167,28 @@ import Testing
         #expect(Self.occurrences(of: Self.end, in: composed) == 1)
     }
 
-    /// **Only the wrapped path touches the body.** With no paste open there is
-    /// nothing to break out of or restart, and the bytes are the caller's to
-    /// send — a caller writing paste markers to a child that reads them
-    /// literally is entitled to have them arrive. Silently editing an unwrapped
-    /// send would be a second, invisible rule about what `terminal.send`
-    /// delivers, so the body carries both markers here and both survive.
-    @Test("the same body unwrapped is delivered verbatim, both markers included")
-    func anUnwrappedBodyKeepsItsPasteMarkers() {
+    /// **The bare path strips too.** A paste marker is never content a child
+    /// can display: with bracketing off it prints the six bytes or misreads
+    /// them, so verbatim delivery serves no caller. And the mode this reads can
+    /// be stale — a `staleDaemon` "off" is a guess about a child that may have
+    /// turned bracketing on since the attach — in which case an unstripped
+    /// `ESC[200~` opens a paste nothing closes and swallows the `\r` below and
+    /// every later keystroke. So the same body composed bare loses both
+    /// markers, exactly as the wrapped one does.
+    @Test("the same body unwrapped loses its paste markers too")
+    func anUnwrappedBodyLosesItsPasteMarkersToo() {
         let body = "before\u{1b}[200~middle\u{1b}[201~after"
         let composed = HolderSendComposition.compose(
             body: body, submit: true, bracketedPaste: false)
 
-        #expect(composed == Self.expected(body: body, wrapped: false, submit: true))
         #expect(
-            Self.occurrences(of: Self.start, in: composed) == 1,
-            "the caller's own start marker did not survive an unwrapped send")
+            composed == Self.expected(body: "beforemiddleafter", wrapped: false, submit: true))
         #expect(
-            Self.occurrences(of: Self.end, in: composed) == 1,
-            "the caller's own end marker did not survive an unwrapped send")
+            Self.occurrences(of: Self.start, in: composed) == 0,
+            "a start marker survived a bare send and can open a paste nothing closes")
+        #expect(
+            Self.occurrences(of: Self.end, in: composed) == 0,
+            "an end marker survived a bare send")
     }
 
     /// A body that is *nothing but* an end marker has nothing left to paste,
@@ -213,6 +216,39 @@ import Testing
             body: "\u{1b}[201~", submit: false, bracketedPaste: true)
 
         #expect(composed.isEmpty)
+    }
+
+    /// The bare-mode variant of the pair above, and the case the stale-mode
+    /// hazard is sharpest in: a body that is nothing but a marker composes to a
+    /// bare Enter here too, because the strip runs before the emptiness test in
+    /// both modes. Delivering the marker instead would send a child that has
+    /// bracketing on — as a `staleDaemon` "off" cannot rule out — six bytes and
+    /// then a `\r` it would absorb.
+    @Test("a body of only a marker composes to a bare Enter in bare mode too")
+    func aBodyOfOnlyAMarkerIsABareEnterUnwrapped() {
+        for marker in ["\u{1b}[201~", "\u{1b}[200~"] {
+            let composed = HolderSendComposition.compose(
+                body: marker, submit: true, bracketedPaste: false)
+
+            #expect(
+                composed == Self.carriageReturn,
+                "a bare submitting send of only \(marker.debugDescription) was not a bare Enter")
+            #expect(Self.occurrences(of: Self.start, in: composed) == 0)
+            #expect(Self.occurrences(of: Self.end, in: composed) == 0)
+        }
+    }
+
+    /// And without `--submit` there is nothing left to write at all — the
+    /// second way a caller with something to say reaches an empty message,
+    /// reached in bare mode as well as wrapped.
+    @Test("a body of only a marker and no submit composes to nothing in bare mode too")
+    func aBodyOfOnlyAMarkerWithoutSubmitIsEmptyUnwrapped() {
+        for marker in ["\u{1b}[201~", "\u{1b}[200~"] {
+            #expect(
+                HolderSendComposition.compose(
+                    body: marker, submit: false, bracketedPaste: false).isEmpty,
+                "a bare non-submitting send of only \(marker.debugDescription) wrote bytes")
+        }
     }
 
     // MARK: - A body that tries to restart the paste itself
