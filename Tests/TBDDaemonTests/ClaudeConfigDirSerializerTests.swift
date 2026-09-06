@@ -172,11 +172,31 @@ struct ClaudeConfigDirSerializerTests {
                 "the write must still happen once the lane is released")
     }
 
-    /// The interaction the two writers exist to protect: a trust entry seeded
-    /// into `.claude.json` survives an `ensureAPIKeyDir` that runs against the
-    /// same directory. Unserialized, the ensure's read-merge-write can be built
-    /// from a snapshot taken before the seed and write the trust key back out of
+    /// The interaction the two writers exist to protect: a trust entry written
+    /// into `.claude.json` survives an `ensureAPIKeyDir` running against the same
+    /// directory. Unserialized, the ensure's read-merge-write is built from a
+    /// snapshot taken before the trust write and writes the trust key back out of
     /// existence.
+    ///
+    /// **The trust write must land BETWEEN the ensure's read and the ensure's
+    /// write, or the test proves nothing.** Seeding it up front — what this test
+    /// used to do — leaves an ordering no lane is needed for: every ensure then
+    /// reads a file that already carries the entry, and the test passes with the
+    /// lane deleted. The merge is straight-line synchronous code inside the lane
+    /// body, so that window cannot be straddled from outside; `afterReadForTesting`
+    /// is the minimal seam that opens it, and it is the ONLY thing here that is
+    /// test-only.
+    ///
+    /// The rest is the same handshake as `ensureAPIKeyDirWaitsForTheLaneOnItsConfigDir`
+    /// above. A holder takes the lane and plays the trust seeder's part: it waits
+    /// until the ensure has been issued, gives a lane-ignoring ensure 50 ms to
+    /// reach its read and park in the seam, writes the trust entry, and releases.
+    /// With the lane, the ensure has not read yet and reads the trust-bearing
+    /// file; without it, the ensure read a file that had none and rewrites it away.
+    ///
+    /// Discriminating: verified by bypassing the lane in `ensureAPIKeyDir` (call
+    /// the body directly instead of through `ClaudeConfigDirSerializer.shared.run`),
+    /// which makes this fail on a missing `hasTrustDialogAccepted`.
     @Test func anInterleavedEnsureLeavesTheTrustEntryIntact() async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("tbd-lane-trust-\(UUID().uuidString)", isDirectory: true)
@@ -189,19 +209,52 @@ struct ClaudeConfigDirSerializerTests {
 
         let claudeJSON = configDir.appendingPathComponent(".claude.json")
         let key = "sk-ant-test-key-0123456789"
-        // Seed a trust entry the way the seeder leaves one behind.
-        let seeded: [String: Any] = [
-            "hasCompletedOnboarding": true,
-            "projects": ["/some/worktree": ["hasTrustDialogAccepted": true]],
-        ]
-        try JSONSerialization.data(withJSONObject: seeded, options: [.sortedKeys])
-            .write(to: claudeJSON, options: [.atomic])
+        // The pre-trust file: what a lane-ignoring ensure reads if it starts
+        // before the trust write lands.
+        try JSONSerialization.data(
+            withJSONObject: ["hasCompletedOnboarding": true], options: [.sortedKeys]
+        ).write(to: claudeJSON, options: [.atomic])
 
-        // Two ensures and a lane-held rewrite, all against the one directory.
-        async let a: Void = { _ = try? await manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: key) }()
-        async let b: Void = { _ = try? await manager.ensureOAuthDir(forProfileID: profileID) }()
-        async let c: Void = { _ = try? await manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: key) }()
-        _ = await (a, b, c)
+        let (holderEntered, holderDidEnter) = AsyncStream<Void>.makeStream()
+        let (ensureIssued, ensureWasIssued) = AsyncStream<Void>.makeStream()
+        let (trustWritten, trustWasWritten) = AsyncStream<Void>.makeStream()
+
+        // The trust seeder's part, holding the lane the way the seeder does.
+        async let holder: Void = ClaudeConfigDirSerializer.shared.run(
+            configDir: configDir.path
+        ) {
+            holderDidEnter.yield()
+            var issued = ensureIssued.makeAsyncIterator()
+            _ = await issued.next()
+            // Give a lane-ignoring ensure every chance to reach its read before
+            // the trust entry exists.
+            try? await Task.sleep(for: .milliseconds(50))
+            let seeded: [String: Any] = [
+                "hasCompletedOnboarding": true,
+                "projects": ["/some/worktree": ["hasTrustDialogAccepted": true]],
+            ]
+            try JSONSerialization.data(withJSONObject: seeded, options: [.sortedKeys])
+                .write(to: claudeJSON, options: [.atomic])
+            trustWasWritten.yield()
+        }
+        var entries = holderEntered.makeAsyncIterator()
+        _ = await entries.next()
+
+        async let ensure: Void = {
+            _ = try? await manager.ensureAPIKeyDir(
+                forProfileID: profileID, apiKey: key,
+                afterReadForTesting: {
+                    // Held only by an ensure that read before the trust write;
+                    // an ensure that waited for the lane finds this already
+                    // yielded and passes straight through.
+                    var written = trustWritten.makeAsyncIterator()
+                    _ = await written.next()
+                })
+        }()
+        ensureWasIssued.yield()
+
+        _ = try await holder
+        await ensure
 
         let parsed = try JSONSerialization.jsonObject(
             with: Data(contentsOf: claudeJSON)) as? [String: Any]
@@ -209,6 +262,8 @@ struct ClaudeConfigDirSerializerTests {
         let entry = projects?["/some/worktree"] as? [String: Any]
         #expect(entry?["hasTrustDialogAccepted"] as? Bool == true,
                 "the trust entry was lost to an interleaved ensure: \(parsed ?? [:])")
+        // Also proves the ensure really rewrote the file, so the assertion above
+        // is not passing merely because nothing ran.
         let responses = parsed?["customApiKeyResponses"] as? [String: Any]
         #expect((responses?["approved"] as? [String])?.contains(String(key.suffix(20))) == true,
                 "the api-key approval must also survive")

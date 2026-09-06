@@ -562,8 +562,21 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// Only the read-merge-write is inside. Creating the directory and ensuring
     /// the host mirror symlinks touch no `.claude.json`, so they stay outside
     /// and keep the critical section to the file it protects.
+    ///
+    /// - Parameter afterReadForTesting: a test-only seam, defaulted so no call
+    ///   site changes, awaited between the read of `.claude.json` and the write
+    ///   that replaces it. The merge is otherwise straight-line synchronous code
+    ///   inside the lane body, so that window cannot be straddled from outside —
+    ///   and a test that cannot straddle it cannot show what the lane is for.
+    ///   `ClaudeConfigDirSerializerTests.anInterleavedEnsureLeavesTheTrustEntryIntact`
+    ///   holds here while a trust entry is written, which is a lost trust key
+    ///   when this call skips the lane and a preserved one when it takes it.
     @discardableResult
-    public func ensureAPIKeyDir(forProfileID profileID: UUID, apiKey: String) async throws -> URL {
+    public func ensureAPIKeyDir(
+        forProfileID profileID: UUID,
+        apiKey: String,
+        afterReadForTesting: (@Sendable () async -> Void)? = nil
+    ) async throws -> URL {
         let dir = configDirectory(forProfileID: profileID)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -591,6 +604,8 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                     }
                 }
             }
+
+            await afterReadForTesting?()
 
             if !approved.contains(approvalToken) {
                 approved.append(approvalToken)
