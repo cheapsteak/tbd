@@ -885,7 +885,7 @@ struct ModelProfileRPCTests {
 
         // Create an OAuth profile and ensure its config dir is created with temp base
         let oauthProfile = try await db.modelProfiles.create(name: "OAuth", kind: .oauth)
-        let _ = try manager.ensureOAuthDir(forProfileID: oauthProfile.id)
+        let _ = try await manager.ensureOAuthDir(forProfileID: oauthProfile.id)
         let profileDir = manager.profileDirectory(forProfileID: oauthProfile.id)
 
         // Verify dir exists before deletion
@@ -917,7 +917,7 @@ struct ModelProfileRPCTests {
         let token = freshToken(Self.apiPrefix)
         try ModelProfileKeychain.store(id: apiKeyProfile.id.uuidString, token: token)
 
-        let _ = try manager.ensureAPIKeyDir(forProfileID: apiKeyProfile.id, apiKey: token)
+        let _ = try await manager.ensureAPIKeyDir(forProfileID: apiKeyProfile.id, apiKey: token)
         let profileDir = manager.profileDirectory(forProfileID: apiKeyProfile.id)
 
         // Verify dir exists before deletion
@@ -950,7 +950,7 @@ struct ModelProfileRPCTests {
         let (router, db, _) = makeRouter(configDirManager: manager, claudeCredentialsKeychain: probe)
 
         let profile = try await db.modelProfiles.create(name: "OrderCanary", kind: .oauth)
-        _ = try manager.ensureOAuthDir(forProfileID: profile.id)
+        _ = try await manager.ensureOAuthDir(forProfileID: profile.id)
         let profileDir = manager.profileDirectory(forProfileID: profile.id)
         #expect(FileManager.default.fileExists(atPath: profileDir.path))
 
@@ -1015,7 +1015,7 @@ struct ModelProfileRPCTests {
             configDirManager: manager, claudeCredentialsKeychain: ProfileRowPresenceProbe())
 
         let profile = try await db.modelProfiles.create(name: "RmFailCanary", kind: .oauth)
-        _ = try manager.ensureOAuthDir(forProfileID: profile.id)
+        _ = try await manager.ensureOAuthDir(forProfileID: profile.id)
         let profileDir = manager.profileDirectory(forProfileID: profile.id)
 
         // Unlinking a child needs write permission on the parent, so this makes
@@ -1059,7 +1059,7 @@ struct ModelProfileRPCTests {
         // Create an OAuth profile and ensure its config dir with mirror symlinks
         let oauthProfile = try await db.modelProfiles.create(name: "OAuth", kind: .oauth)
         let profileClaudeDir = manager.configDirectory(forProfileID: oauthProfile.id)
-        _ = try manager.ensureOAuthDir(forProfileID: oauthProfile.id)
+        _ = try await manager.ensureOAuthDir(forProfileID: oauthProfile.id)
 
         // Write sentinel files in host slots
         let projectsSentinel = tempHostDir.appendingPathComponent("projects/-Users-test-cwd/sentinel.jsonl")
@@ -1072,7 +1072,7 @@ struct ModelProfileRPCTests {
         // Create a sidecar by seeding profile-side CLAUDE.md, then calling ensure again
         let profileClaudeFile = profileClaudeDir.appendingPathComponent("CLAUDE.md")
         try "# Profile CLAUDE.md".write(to: profileClaudeFile, atomically: true, encoding: .utf8)
-        _ = try manager.ensureOAuthDir(forProfileID: oauthProfile.id)
+        _ = try await manager.ensureOAuthDir(forProfileID: oauthProfile.id)
 
         let profileDir = manager.profileDirectory(forProfileID: oauthProfile.id)
 

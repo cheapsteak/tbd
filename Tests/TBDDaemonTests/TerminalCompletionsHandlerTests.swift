@@ -159,7 +159,7 @@ struct TerminalCompletionsHandlerTests {
         let response = try await router.handleTerminalCompletions(data)
         #expect(response.success)
 
-        let expectedConfigDir = try #require(manager.resolveConfigDir(
+        let expectedConfigDir = try #require(await manager.resolveConfigDir(
             for: ResolvedModelProfile(
                 profileID: profile.id, name: "p", kind: .oauth, baseURL: nil, model: nil,
                 secret: nil, awsRegion: nil, awsProfile: nil, fallbackModels: nil,

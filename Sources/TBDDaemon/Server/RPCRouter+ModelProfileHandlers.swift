@@ -648,7 +648,7 @@ extension RPCRouter {
         guard profile.kind == .oauth else {
             return RPCResponse(error: "Profile '\(profile.name)' is a \(profile.kind.rawValue) profile — only OAuth profiles use an isolated login config dir")
         }
-        let dir = try configDirManager.ensureOAuthDir(forProfileID: profile.id)
+        let dir = try await configDirManager.ensureOAuthDir(forProfileID: profile.id)
         return try RPCResponse(result: ModelProfilePrepareConfigDirResult(configDirPath: dir.path))
     }
 }

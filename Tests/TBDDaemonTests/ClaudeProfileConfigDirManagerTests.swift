@@ -36,14 +36,14 @@ struct ClaudeProfileConfigDirManagerTests {
     // MARK: - ensureAPIKeyDir
 
     @Test("ensureAPIKeyDir creates the directory tree and writes pre-populated .claude.json")
-    func ensureAPIKeyDirCreatesAndPopulates() throws {
+    func ensureAPIKeyDirCreatesAndPopulates() async throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
         let profileID = UUID()
         let apiKey = "sk-ant-test-AAAAAAAAAAAAAAAAAAAAAAAAA-LASTTWENTYCHARSXXX1"
 
-        let dir = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
+        let dir = try await manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
 
         #expect(FileManager.default.fileExists(atPath: dir.path))
         #expect(dir.path.hasSuffix("/claude"))
@@ -61,15 +61,15 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("ensureAPIKeyDir is idempotent — re-call with same key keeps single approval")
-    func ensureAPIKeyDirIdempotent() throws {
+    func ensureAPIKeyDirIdempotent() async throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
         let profileID = UUID()
         let apiKey = "sk-ant-AAAAAAAAAAAAAAAAAAAAAAA-DUPLICATEKEYTEST123"
 
-        let dir1 = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
-        let dir2 = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
+        let dir1 = try await manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
+        let dir2 = try await manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
         #expect(dir1 == dir2)
 
         let data = try Data(contentsOf: dir2.appendingPathComponent(".claude.json"))
@@ -80,7 +80,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("ensureAPIKeyDir appends new approval if api key changed, preserving old ones")
-    func ensureAPIKeyDirAppendsApproval() throws {
+    func ensureAPIKeyDirAppendsApproval() async throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
@@ -88,8 +88,8 @@ struct ClaudeProfileConfigDirManagerTests {
         let oldKey = "sk-ant-OLDOLDOLDOLDOLDOLDOLDOLDOLD-OLDLASTTWENTYCHARS12"
         let newKey = "sk-ant-NEWNEWNEWNEWNEWNEWNEWNEW-NEWLASTTWENTYCHARS34"
 
-        _ = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: oldKey)
-        let dir = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: newKey)
+        _ = try await manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: oldKey)
+        let dir = try await manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: newKey)
 
         let data = try Data(contentsOf: dir.appendingPathComponent(".claude.json"))
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -99,7 +99,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("ensureAPIKeyDir preserves unknown top-level keys from existing .claude.json")
-    func ensureAPIKeyDirPreservesUnknownKeys() throws {
+    func ensureAPIKeyDirPreservesUnknownKeys() async throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
@@ -123,7 +123,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try initialData.write(to: dir.appendingPathComponent(".claude.json"), options: [.atomic])
 
         // Call ensureAPIKeyDir and verify unknown keys survive
-        _ = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
+        _ = try await manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
 
         let claudeJSON = dir.appendingPathComponent(".claude.json")
         let finalData = try Data(contentsOf: claudeJSON)
@@ -143,13 +143,13 @@ struct ClaudeProfileConfigDirManagerTests {
     // MARK: - ensureOAuthDir
 
     @Test("ensureOAuthDir creates the directory and writes .claude.json with hasCompletedOnboarding only")
-    func ensureOAuthDirCreatesAndPopulates() throws {
+    func ensureOAuthDirCreatesAndPopulates() async throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
         let profileID = UUID()
 
-        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+        let dir = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         #expect(FileManager.default.fileExists(atPath: dir.path))
         #expect(dir.path.hasSuffix("/claude"))
@@ -164,20 +164,20 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("ensureOAuthDir leaves existing .claude.json untouched")
-    func ensureOAuthDirLeavesExisting() throws {
+    func ensureOAuthDirLeavesExisting() async throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
         let profileID = UUID()
 
         // First call creates the dir and .claude.json
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         let claudeJSON = manager.configDirectory(forProfileID: profileID).appendingPathComponent(".claude.json")
         let originalData = try Data(contentsOf: claudeJSON)
 
         // Second call should leave it untouched
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         let secondData = try Data(contentsOf: claudeJSON)
         #expect(originalData == secondData)
@@ -186,16 +186,16 @@ struct ClaudeProfileConfigDirManagerTests {
     // MARK: - resolveConfigDir
 
     @Test("resolveConfigDir returns nil for nil profile")
-    func resolveNilProfileReturnsNil() {
+    func resolveNilProfileReturnsNil() async {
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase())
-        #expect(manager.resolveConfigDir(for: nil) == nil)
+        await #expect(manager.resolveConfigDir(for: nil) == nil)
     }
 
     /// `resolveConfigDir` is an instance method precisely so this assertion is
     /// possible: the dir it creates lands under the injected base, not under
     /// the ambient `~/tbd/profiles`.
     @Test("resolveConfigDir creates the oauth dir under the manager's own base")
-    func resolveOAuthProfileReturnsPath() throws {
+    func resolveOAuthProfileReturnsPath() async throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let profileID = UUID()
@@ -213,13 +213,13 @@ struct ClaudeProfileConfigDirManagerTests {
             fallbackModels: nil,
             envOverrides: [:]
         )
-        let path = try #require(manager.resolveConfigDir(for: profile))
+        let path = try #require(await manager.resolveConfigDir(for: profile))
         #expect(path.contains(profileID.uuidString.lowercased()))
         #expect(path.hasPrefix(base.path))
     }
 
     @Test("resolveConfigDir creates the api-key dir under the manager's own base")
-    func ensureAPIKeyDirReturnsPath() throws {
+    func ensureAPIKeyDirReturnsPath() async throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let profileID = UUID()
@@ -237,13 +237,13 @@ struct ClaudeProfileConfigDirManagerTests {
             fallbackModels: nil,
             envOverrides: [:]
         )
-        let path = try #require(manager.resolveConfigDir(for: profile))
+        let path = try #require(await manager.resolveConfigDir(for: profile))
         #expect(path.contains(profileID.uuidString.lowercased()))
         #expect(path.hasPrefix(base.path))
     }
 
     @Test("resolveConfigDir returns nil for .bedrock profile")
-    func resolveBedrockReturnsNil() {
+    func resolveBedrockReturnsNil() async {
         let profile = ResolvedModelProfile(
             profileID: UUID(),
             name: "Bedrock",
@@ -256,11 +256,11 @@ struct ClaudeProfileConfigDirManagerTests {
             fallbackModels: nil,
             envOverrides: [:]
         )
-        #expect(ClaudeProfileConfigDirManager(baseDirectory: tempBase()).resolveConfigDir(for: profile) == nil)
+        await #expect(ClaudeProfileConfigDirManager(baseDirectory: tempBase()).resolveConfigDir(for: profile) == nil)
     }
 
     @Test("resolveConfigDir returns nil for .apiKey profile with no secret")
-    func resolveAPIKeyWithoutSecretReturnsNil() {
+    func resolveAPIKeyWithoutSecretReturnsNil() async {
         let profile = ResolvedModelProfile(
             profileID: UUID(),
             name: "API Key (no secret)",
@@ -273,13 +273,13 @@ struct ClaudeProfileConfigDirManagerTests {
             fallbackModels: nil,
             envOverrides: [:]
         )
-        #expect(ClaudeProfileConfigDirManager(baseDirectory: tempBase()).resolveConfigDir(for: profile) == nil)
+        await #expect(ClaudeProfileConfigDirManager(baseDirectory: tempBase()).resolveConfigDir(for: profile) == nil)
     }
 
     // MARK: - host mirror slots
 
     @Test("shared-claude-projects.AC1.1/AC1.2: symlink dir and file host slots after ensureOAuthDir and ensureAPIKeyDir")
-    func hostMirrorSymlinksOAuthAndAPIKey() throws {
+    func hostMirrorSymlinksOAuthAndAPIKey() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -298,7 +298,7 @@ struct ClaudeProfileConfigDirManagerTests {
         let profileID = UUID()
 
         // Test ensureOAuthDir
-        let oauthDir = try manager.ensureOAuthDir(forProfileID: profileID)
+        let oauthDir = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Check plugins symlink
         let pluginsLink = oauthDir.appendingPathComponent("plugins")
@@ -314,7 +314,7 @@ struct ClaudeProfileConfigDirManagerTests {
 
         // Test ensureAPIKeyDir with same profile
         let apiKey = "sk-ant-test-AAAAAAAAAAAAAAAAAAAAAAAAA-LASTTWENTYCHARSXXX1"
-        _ = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
+        _ = try await manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
 
         // Symlinks should still be there
         #expect((try? fm.destinationOfSymbolicLink(atPath: pluginsLink.path)) != nil)
@@ -322,7 +322,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("shared-claude-projects.AC1.3: skip host slot if not present on host")
-    func hostMirrorSkipsAbsentSlot() throws {
+    func hostMirrorSkipsAbsentSlot() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -339,7 +339,7 @@ struct ClaudeProfileConfigDirManagerTests {
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
         let profileID = UUID()
 
-        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+        let dir = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // plugins should be symlinked
         #expect((try? fm.destinationOfSymbolicLink(atPath: dir.appendingPathComponent("plugins").path)) != nil)
@@ -349,7 +349,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("AC2.1: idempotent — calling ensureOAuthDir twice leaves symlink intact")
-    func hostMirrorIdempotentOAuth() throws {
+    func hostMirrorIdempotentOAuth() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -364,11 +364,11 @@ struct ClaudeProfileConfigDirManagerTests {
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
         let profileID = UUID()
 
-        let dir1 = try manager.ensureOAuthDir(forProfileID: profileID)
+        let dir1 = try await manager.ensureOAuthDir(forProfileID: profileID)
         let pluginsLink = dir1.appendingPathComponent("plugins")
         let dest1 = try fm.destinationOfSymbolicLink(atPath: pluginsLink.path)
 
-        let dir2 = try manager.ensureOAuthDir(forProfileID: profileID)
+        let dir2 = try await manager.ensureOAuthDir(forProfileID: profileID)
         let dest2 = try fm.destinationOfSymbolicLink(atPath: pluginsLink.path)
 
         #expect(dir1 == dir2)
@@ -376,7 +376,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("Issue 1 regression: ensureOAuthDir sets up mirrors when .claude.json already exists")
-    func ensureOAuthDirSetsUpMirrorsWhenClaudeJSONAlreadyExists() throws {
+    func ensureOAuthDirSetsUpMirrorsWhenClaudeJSONAlreadyExists() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -403,7 +403,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try existingData.write(to: claudeJSONPath, options: [.atomic])
 
         // Call ensureOAuthDir on a profile that already has .claude.json
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Assert that plugins symlink was created (the early-return bug would skip this)
         let pluginsLink = profileClaudeDir.appendingPathComponent("plugins")
@@ -416,7 +416,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("AC3.1: migrate projects directory content to host before symlinking")
-    func hostMirrorMigrateProjectsDir() throws {
+    func hostMirrorMigrateProjectsDir() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -440,7 +440,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try "PROFILE CONTENT".write(to: sessionFile, atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Verify profile projects is now a symlink
         #expect((try? fm.destinationOfSymbolicLink(atPath: projectsDir.path)) != nil)
@@ -453,7 +453,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("AC3.2: collision skip during projects migration")
-    func hostMirrorProjectsMigrationCollisionSkip() throws {
+    func hostMirrorProjectsMigrationCollisionSkip() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -485,7 +485,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try "PROFILE UNIQUE".write(to: profileUniqueFile, atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Host file should still contain "HOST" (collision not overwritten)
         let hostContent = try String(contentsOf: hostFile, encoding: .utf8)
@@ -500,7 +500,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("AC1.1: overlapping cwd-hash dirs with disjoint files merge successfully")
-    func hostMirrorProjectsMigrationMergesDisjointFiles() throws {
+    func hostMirrorProjectsMigrationMergesDisjointFiles() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -528,7 +528,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try "PROFILE".write(to: profileFileA, atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Verify: host file still has original content (untouched)
         let hostContent = try String(contentsOf: hostFileA, encoding: .utf8)
@@ -546,7 +546,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("AC1.2: cwd-hash dir only in profile is moved to host intact")
-    func hostMirrorProjectsMigrationMovesProfileOnlyDir() throws {
+    func hostMirrorProjectsMigrationMovesProfileOnlyDir() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -570,7 +570,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try "PROFILE ONLY".write(to: profileFile, atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Verify: profile-only dir was moved to host intact
         let hostFile = tempHost.appendingPathComponent("projects/-cwd-only-profile/sess-X.jsonl")
@@ -584,7 +584,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("AC1.3: actual file-level collision aborts migration atomically")
-    func hostMirrorProjectsMigrationFileCollisionAbortsAtomically() throws {
+    func hostMirrorProjectsMigrationFileCollisionAbortsAtomically() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -622,7 +622,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try "PROFILE B".write(to: profileFileClean, atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Verify: host file still has original content (collision not overwritten)
         let hostContent = try String(contentsOf: hostFileCollide, encoding: .utf8)
@@ -646,7 +646,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("AC2.1: non-projects directory with content gets sidecar + symlink")
-    func hostMirrorNonProjectsDirWithContentGetsSidecar() throws {
+    func hostMirrorNonProjectsDirWithContentGetsSidecar() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -669,7 +669,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try "plugin content".write(to: profilePlugins.appendingPathComponent("profile-only.txt"), atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Profile plugins should now be a symlink to host
         #expect((try? fm.destinationOfSymbolicLink(atPath: profilePlugins.path)) != nil)
@@ -682,7 +682,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("AC3.3b: non-projects empty directory is replaced with symlink")
-    func hostMirrorNonProjectsEmptyDir() throws {
+    func hostMirrorNonProjectsEmptyDir() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -704,14 +704,14 @@ struct ClaudeProfileConfigDirManagerTests {
         try fm.createDirectory(at: profilePlugins, withIntermediateDirectories: true)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Profile plugins should now be a symlink
         #expect((try? fm.destinationOfSymbolicLink(atPath: profilePlugins.path)) != nil)
     }
 
     @Test("AC2.1 file variant: non-projects file gets sidecar + symlink")
-    func hostMirrorNonProjectsFileGetsSidecar() throws {
+    func hostMirrorNonProjectsFileGetsSidecar() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -733,7 +733,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try "# Profile CLAUDE.md".write(to: profileClaudeFile, atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Profile CLAUDE.md should now be a symlink to host
         #expect((try? fm.destinationOfSymbolicLink(atPath: profileClaudeFile.path)) != nil)
@@ -746,7 +746,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("AC2.2: pre-existing sidecar is not overwritten")
-    func hostMirrorSidecarNotOverwritten() throws {
+    func hostMirrorSidecarNotOverwritten() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -768,7 +768,7 @@ struct ClaudeProfileConfigDirManagerTests {
 
         // Run 1: Create the file and sidecar
         try "# Profile CLAUDE.md Run 1".write(to: profileClaudeFile, atomically: true, encoding: .utf8)
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Verify sidecar was created with Run 1 content
         #expect(fm.fileExists(atPath: sidecar.path))
@@ -782,7 +782,7 @@ struct ClaudeProfileConfigDirManagerTests {
         // second ensureOAuthDir, profileClaudeFile is a real file with "Run 2" content.
         // This documents that the "skip if sidecar exists" code path is genuinely exercised.
         try "# Profile CLAUDE.md Run 2".write(to: profileClaudeFile, atomically: true, encoding: .utf8)
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Verify full post-Run-2 state:
         // 1. Sidecar still has Run 1 content (not overwritten)
@@ -801,7 +801,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("AC2.3: empty real directory becomes symlink without sidecar")
-    func hostMirrorEmptyDirNoSidecar() throws {
+    func hostMirrorEmptyDirNoSidecar() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -823,7 +823,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try fm.createDirectory(at: profileSkills, withIntermediateDirectories: true)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Profile skills should now be a symlink
         #expect((try? fm.destinationOfSymbolicLink(atPath: profileSkills.path)) != nil)
@@ -834,7 +834,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("AC3.3c variant: symlink with wrong target is left alone")
-    func hostMirrorSymlinkWrongTarget() throws {
+    func hostMirrorSymlinkWrongTarget() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -858,7 +858,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try fm.createSymbolicLink(at: profilePlugins, withDestinationURL: junkDir)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Profile plugins symlink should still point to junk (unchanged)
         let dest = try fm.destinationOfSymbolicLink(atPath: profilePlugins.path)
@@ -887,7 +887,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("symlink resolution handles paths through symlinks (e.g. /var -> /private/var)")
-    func hostMirrorSymlinkResolutionThroughPathSymlinks() throws {
+    func hostMirrorSymlinkResolutionThroughPathSymlinks() async throws {
         let tempBase = tempBase()
         let tempHostBase = tempHostBase()
         defer {
@@ -903,21 +903,21 @@ struct ClaudeProfileConfigDirManagerTests {
         let profileID = UUID()
 
         // Create host slot and then profile slot with symlink
-        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+        let dir = try await manager.ensureOAuthDir(forProfileID: profileID)
         let pluginsLink = dir.appendingPathComponent("plugins")
 
         // Verify the symlink was created and points to the right place
         #expect((try? fm.destinationOfSymbolicLink(atPath: pluginsLink.path)) != nil)
 
         // Re-calling should be idempotent
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
         #expect((try? fm.destinationOfSymbolicLink(atPath: pluginsLink.path)) != nil)
     }
 
     // MARK: - recursive-projects-merge.AC1: same-name directories merge by recursing
 
     @Test("recursive-projects-merge.AC1.1: nested dir-vs-dir with disjoint files merges successfully")
-    func hostMirrorProjectsMigrationNestedDirMerges() throws {
+    func hostMirrorProjectsMigrationNestedDirMerges() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -945,7 +945,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try "PROFILE".write(to: profileLeaf, atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Verify: host file untouched
         #expect(try String(contentsOf: hostLeaf, encoding: .utf8) == "HOST")
@@ -960,7 +960,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("recursive-projects-merge.AC1.2: empty profile-side memory/ merges (the real bug)")
-    func hostMirrorProjectsMigrationEmptyProfileMemory() throws {
+    func hostMirrorProjectsMigrationEmptyProfileMemory() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -986,7 +986,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try fm.createDirectory(at: profileProjectsBase.appendingPathComponent("-cwd-A/memory", isDirectory: true), withIntermediateDirectories: true)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Verify: host memory/note.md still has original content
         #expect(try String(contentsOf: hostMemNote, encoding: .utf8) == "HOST NOTE")
@@ -998,7 +998,7 @@ struct ClaudeProfileConfigDirManagerTests {
     // MARK: - recursive-projects-merge.AC2: real collisions still abort atomically
 
     @Test("recursive-projects-merge.AC2.1: nested file-vs-file collision aborts atomically")
-    func hostMirrorProjectsMigrationNestedFileCollisionAbortsAtomically() throws {
+    func hostMirrorProjectsMigrationNestedFileCollisionAbortsAtomically() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -1034,7 +1034,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try "PROFILE X".write(to: profileX, atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Verify: host leaf still has original content (collision not overwritten)
         #expect(try String(contentsOf: hostLeaf, encoding: .utf8) == "HOST LEAF")
@@ -1055,7 +1055,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("recursive-projects-merge.AC2.2: type-mismatch collision (directory vs file) aborts atomically")
-    func hostMirrorProjectsMigrationTypeCollisionAbortsAtomically() throws {
+    func hostMirrorProjectsMigrationTypeCollisionAbortsAtomically() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -1083,7 +1083,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try "PROFILE FOO FILE".write(to: profileFooFile, atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
-        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        _ = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Verify: host foo is still a directory with original content
         #expect(fm.fileExists(atPath: hostFooFile.path))
@@ -1119,7 +1119,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("sessions/ is symlinked to the host registry when the host slot already exists")
-    func sessionsSlotSymlinkedWhenHostSlotExists() throws {
+    func sessionsSlotSymlinkedWhenHostSlotExists() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -1136,7 +1136,7 @@ struct ClaudeProfileConfigDirManagerTests {
                                 atomically: true, encoding: .utf8)
 
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
-        let dir = try manager.ensureOAuthDir(forProfileID: UUID())
+        let dir = try await manager.ensureOAuthDir(forProfileID: UUID())
 
         let link = dir.appendingPathComponent("sessions")
         #expect(try symlinkPoints(link, to: hostSessions))
@@ -1144,7 +1144,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("sessions/ host dir is created 0700 and symlinked when the host lacks it")
-    func sessionsSlotCreatesHostDirWhenMissing() throws {
+    func sessionsSlotCreatesHostDirWhenMissing() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -1157,7 +1157,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
 
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
-        let dir = try manager.ensureOAuthDir(forProfileID: UUID())
+        let dir = try await manager.ensureOAuthDir(forProfileID: UUID())
 
         let hostSessions = tempHost.appendingPathComponent("sessions", isDirectory: true)
         var isDir: ObjCBool = false
@@ -1173,7 +1173,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("sessions/ slot is idempotent — a second ensure leaves the same symlink")
-    func sessionsSlotIdempotent() throws {
+    func sessionsSlotIdempotent() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -1187,11 +1187,11 @@ struct ClaudeProfileConfigDirManagerTests {
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
         let profileID = UUID()
 
-        let dir1 = try manager.ensureOAuthDir(forProfileID: profileID)
+        let dir1 = try await manager.ensureOAuthDir(forProfileID: profileID)
         let link = dir1.appendingPathComponent("sessions")
         let dest1 = try fm.destinationOfSymbolicLink(atPath: link.path)
 
-        let dir2 = try manager.ensureOAuthDir(forProfileID: profileID)
+        let dir2 = try await manager.ensureOAuthDir(forProfileID: profileID)
         let dest2 = try fm.destinationOfSymbolicLink(atPath: link.path)
 
         #expect(dir1 == dir2)
@@ -1226,7 +1226,7 @@ struct ClaudeProfileConfigDirManagerTests {
     /// the row's owner unlinks the *host* path when it exits — so a sidecar
     /// move would orphan a running session's row where nothing ever reads it.
     @Test("pre-existing profile sessions/ rows are merged into the host registry")
-    func sessionsSlotMergesProfileRowsIntoHost() throws {
+    func sessionsSlotMergesProfileRowsIntoHost() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -1247,7 +1247,7 @@ struct ClaudeProfileConfigDirManagerTests {
             rows: ["4242.json": #"{"pid":4242}"#, "77.json": #"{"pid":77}"#]
         )
 
-        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+        let dir = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         // Both profile rows now live in the host registry, contents intact.
         #expect(try String(contentsOf: hostSessions.appendingPathComponent("4242.json"),
@@ -1269,7 +1269,7 @@ struct ClaudeProfileConfigDirManagerTests {
     /// a dead process whose PID was reused. Newest modification time wins,
     /// in both directions.
     @Test("a same-named row on both sides keeps the newer copy")
-    func sessionsSlotMergeKeepsNewerRow() throws {
+    func sessionsSlotMergeKeepsNewerRow() async throws {
         let fm = FileManager.default
         let old = Date(timeIntervalSince1970: 1_000_000)
         let new = Date(timeIntervalSince1970: 2_000_000)
@@ -1299,7 +1299,7 @@ struct ClaudeProfileConfigDirManagerTests {
                 modified: profileIsNewer ? new : old
             )
 
-            let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+            let dir = try await manager.ensureOAuthDir(forProfileID: profileID)
 
             let surviving = try String(contentsOf: hostRow, encoding: .utf8)
             #expect(surviving == (profileIsNewer ? #"{"pid":500,"side":"profile"}"#
@@ -1313,7 +1313,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("an empty profile sessions/ dir is just replaced by the symlink")
-    func sessionsSlotEmptyProfileDirJustSymlinks() throws {
+    func sessionsSlotEmptyProfileDirJustSymlinks() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -1331,7 +1331,7 @@ struct ClaudeProfileConfigDirManagerTests {
         let profileID = UUID()
         _ = try seedProfileSessions(manager, profileID: profileID, rows: [:])
 
-        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+        let dir = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         #expect(try symlinkPoints(dir.appendingPathComponent("sessions"), to: hostSessions))
         #expect(!fm.fileExists(atPath: dir.appendingPathComponent("sessions.profile-local").path))
@@ -1343,7 +1343,7 @@ struct ClaudeProfileConfigDirManagerTests {
     /// the merge leaked, the profile's file would have landed in the host store
     /// instead, silently overwriting nothing but destroying the isolation.
     @Test("merge does not leak — a non-sessions slot still uses the sidecar")
-    func mergeIsScopedToSessionsSlot() throws {
+    func mergeIsScopedToSessionsSlot() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -1363,7 +1363,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try "profile-only".write(to: profileCommands.appendingPathComponent("mine.md"),
                                  atomically: true, encoding: .utf8)
 
-        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+        let dir = try await manager.ensureOAuthDir(forProfileID: profileID)
 
         let sidecarEntry = dir.appendingPathComponent("commands.profile-local")
             .appendingPathComponent("mine.md")
@@ -1376,7 +1376,7 @@ struct ClaudeProfileConfigDirManagerTests {
     /// `fileExists` says "true" for a regular file, so an unvalidated guard
     /// would symlink every profile at it and fail every registry write.
     @Test("a host sessions/ that is a regular file is left alone, not symlinked at")
-    func hostSessionsRegularFileIsLeftAlone() throws {
+    func hostSessionsRegularFileIsLeftAlone() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -1390,7 +1390,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try "not a directory".write(to: hostSessions, atomically: true, encoding: .utf8)
 
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
-        let dir = try manager.ensureOAuthDir(forProfileID: UUID())
+        let dir = try await manager.ensureOAuthDir(forProfileID: UUID())
 
         #expect((try? fm.destinationOfSymbolicLink(atPath: dir.appendingPathComponent("sessions").path)) == nil)
         #expect(!fm.fileExists(atPath: dir.appendingPathComponent("sessions").path))
@@ -1402,7 +1402,7 @@ struct ClaudeProfileConfigDirManagerTests {
     /// guard would take the create branch, hit EEXIST, log, and return — every
     /// spawn, forever.
     @Test("a host sessions/ that is a dangling symlink is left alone")
-    func hostSessionsDanglingSymlinkIsLeftAlone() throws {
+    func hostSessionsDanglingSymlinkIsLeftAlone() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -1417,7 +1417,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try fm.createSymbolicLink(at: hostSessions, withDestinationURL: missingTarget)
 
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
-        let dir = try manager.ensureOAuthDir(forProfileID: UUID())
+        let dir = try await manager.ensureOAuthDir(forProfileID: UUID())
 
         #expect((try? fm.destinationOfSymbolicLink(atPath: dir.appendingPathComponent("sessions").path)) == nil)
         #expect(!fm.fileExists(atPath: dir.appendingPathComponent("sessions").path))
@@ -1431,7 +1431,7 @@ struct ClaudeProfileConfigDirManagerTests {
     /// (0700, owned by TBD) is exactly the host state the other slots take care
     /// not to fabricate.
     @Test("an absent host base directory is never created for the sessions slot")
-    func absentHostBaseDirectoryIsNeverCreated() throws {
+    func absentHostBaseDirectoryIsNeverCreated() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -1444,7 +1444,7 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(!fm.fileExists(atPath: tempHost.path))
 
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
-        let dir = try manager.ensureOAuthDir(forProfileID: UUID())
+        let dir = try await manager.ensureOAuthDir(forProfileID: UUID())
 
         #expect(!fm.fileExists(atPath: tempHost.path), "host store must not be conjured")
         #expect(!fm.fileExists(atPath: tempHost.appendingPathComponent("sessions").path))
@@ -1452,7 +1452,7 @@ struct ClaudeProfileConfigDirManagerTests {
     }
 
     @Test("create-on-missing does not leak to the other slots — absent host slots still skip")
-    func createOnMissingIsScopedToSessionsSlot() throws {
+    func createOnMissingIsScopedToSessionsSlot() async throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -1465,7 +1465,7 @@ struct ClaudeProfileConfigDirManagerTests {
         try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
 
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
-        let dir = try manager.ensureOAuthDir(forProfileID: UUID())
+        let dir = try await manager.ensureOAuthDir(forProfileID: UUID())
 
         for slot in ["projects", "plugins", "skills", "agents", "commands", "hooks", "CLAUDE.md", "settings.json"] {
             #expect(!fm.fileExists(atPath: tempHost.appendingPathComponent(slot).path),

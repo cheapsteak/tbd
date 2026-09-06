@@ -115,4 +115,102 @@ struct ClaudeConfigDirSerializerTests {
         }
         #expect(await serializer.trackedDirectoryCount == 0)
     }
+
+    // MARK: - The other two writers of `.claude.json`
+
+    /// `ensureAPIKeyDir` is a read-merge-write of the same file the probe
+    /// rewrites, so it must wait for the lane rather than write through it.
+    ///
+    /// Discriminating: with the `ensure*` write outside the lane it lands while
+    /// the lane is held and `wroteWhileHeld` is true; inside the lane it cannot
+    /// start until the holder returns. The holder signals as it enters and then
+    /// waits for the ensure call to have been *issued*, so the ordering under
+    /// test is established rather than raced.
+    @Test func ensureAPIKeyDirWaitsForTheLaneOnItsConfigDir() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-lane-ensure-\(UUID().uuidString)", isDirectory: true)
+        let profileID = UUID()
+        let manager = ClaudeProfileConfigDirManager(
+            baseDirectory: dir, hostBaseDirectory: dir.appendingPathComponent("host"))
+        let configDir = manager.configDirectory(forProfileID: profileID)
+        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let claudeJSON = configDir.appendingPathComponent(".claude.json")
+        let (holderEntered, holderDidEnter) = AsyncStream<Void>.makeStream()
+        let (ensureIssued, ensureWasIssued) = AsyncStream<Void>.makeStream()
+
+        // `ensure*Dir` reaches the shared lane, so the holder must too.
+        async let holder: Void = ClaudeConfigDirSerializer.shared.run(
+            configDir: configDir.path
+        ) {
+            holderDidEnter.yield()
+            var issued = ensureIssued.makeAsyncIterator()
+            _ = await issued.next()
+            // Give a lane-ignoring writer every chance to land before we look.
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        var entries = holderEntered.makeAsyncIterator()
+        _ = await entries.next()
+
+        async let ensure: Void = {
+            _ = try? await manager.ensureAPIKeyDir(
+                forProfileID: profileID, apiKey: "sk-ant-test-key-0123456789")
+        }()
+        ensureWasIssued.yield()
+
+        // Sampled while the lane is still held by `holder`.
+        try? await Task.sleep(for: .milliseconds(20))
+        let wroteWhileHeld = FileManager.default.fileExists(atPath: claudeJSON.path)
+
+        _ = try await holder
+        await ensure
+
+        #expect(!wroteWhileHeld,
+                "ensureAPIKeyDir wrote .claude.json while another writer held the lane")
+        #expect(FileManager.default.fileExists(atPath: claudeJSON.path),
+                "the write must still happen once the lane is released")
+    }
+
+    /// The interaction the two writers exist to protect: a trust entry seeded
+    /// into `.claude.json` survives an `ensureAPIKeyDir` that runs against the
+    /// same directory. Unserialized, the ensure's read-merge-write can be built
+    /// from a snapshot taken before the seed and write the trust key back out of
+    /// existence.
+    @Test func anInterleavedEnsureLeavesTheTrustEntryIntact() async throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-lane-trust-\(UUID().uuidString)", isDirectory: true)
+        let profileID = UUID()
+        let manager = ClaudeProfileConfigDirManager(
+            baseDirectory: dir, hostBaseDirectory: dir.appendingPathComponent("host"))
+        let configDir = manager.configDirectory(forProfileID: profileID)
+        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let claudeJSON = configDir.appendingPathComponent(".claude.json")
+        let key = "sk-ant-test-key-0123456789"
+        // Seed a trust entry the way the seeder leaves one behind.
+        let seeded: [String: Any] = [
+            "hasCompletedOnboarding": true,
+            "projects": ["/some/worktree": ["hasTrustDialogAccepted": true]],
+        ]
+        try JSONSerialization.data(withJSONObject: seeded, options: [.sortedKeys])
+            .write(to: claudeJSON, options: [.atomic])
+
+        // Two ensures and a lane-held rewrite, all against the one directory.
+        async let a: Void = { _ = try? await manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: key) }()
+        async let b: Void = { _ = try? await manager.ensureOAuthDir(forProfileID: profileID) }()
+        async let c: Void = { _ = try? await manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: key) }()
+        _ = await (a, b, c)
+
+        let parsed = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: claudeJSON)) as? [String: Any]
+        let projects = parsed?["projects"] as? [String: Any]
+        let entry = projects?["/some/worktree"] as? [String: Any]
+        #expect(entry?["hasTrustDialogAccepted"] as? Bool == true,
+                "the trust entry was lost to an interleaved ensure: \(parsed ?? [:])")
+        let responses = parsed?["customApiKeyResponses"] as? [String: Any]
+        #expect((responses?["approved"] as? [String])?.contains(String(key.suffix(20))) == true,
+                "the api-key approval must also survive")
+    }
 }

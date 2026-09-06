@@ -1137,7 +1137,7 @@ public actor HibernationCoordinator {
             repo: repo?.envOverrides,
             profile: resolvedProfile?.envOverrides
         )
-        let profileConfigDir = configDirManager.resolveConfigDir(for: resolvedProfile)
+        let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
         let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
             fallbackModels: resolvedProfile?.fallbackModels,
             sessionKey: terminal.id.uuidString,

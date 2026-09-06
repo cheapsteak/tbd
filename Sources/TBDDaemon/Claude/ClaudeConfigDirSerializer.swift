@@ -4,14 +4,32 @@ import Foundation
 /// `.claude.json`, so a completions probe can never overlap a folder-trust seed
 /// on the same file.
 ///
-/// Two writers, and neither is read-only. `ClaudeTrustSeeder` does a
-/// read-merge-write to pre-accept the folder-trust dialog. The completions probe
-/// starts Claude Code itself, which — measured on 2.1.261 — writes first-run
-/// metadata and a backup into a fresh config directory, and rewrote an existing
-/// project entry (keeping the trust key, dropping an onboarding key). Two
-/// last-writer-wins rewrites of one file can lose the trust key, and a worktree
-/// whose trust key is gone stalls on a dialog no TBD mechanism can see or
-/// dismiss.
+/// **Four writers, and the contract is every writer of
+/// `<configDir>/.claude.json` — not merely the two this lane was introduced
+/// for.** A lane that half the writers ignore orders nothing.
+///
+/// - `ClaudeTrustSeeder` does a read-merge-write to pre-accept the folder-trust
+///   dialog.
+/// - The completions probe starts Claude Code itself, which — measured on
+///   2.1.261 — writes first-run metadata and a backup into a fresh config
+///   directory, and rewrote an existing project entry (keeping the trust key,
+///   dropping an onboarding key).
+/// - `ClaudeProfileConfigDirManager.ensureAPIKeyDir` read-merge-writes the
+///   file to add an API-key approval, preserving unknown top-level keys.
+/// - `ClaudeProfileConfigDirManager.ensureOAuthDir` writes a minimal file when
+///   one does not already exist — a check and a write that must be one
+///   critical section, or a probe creating the file in between turns the check
+///   into an overwrite.
+///
+/// Two last-writer-wins rewrites of one file can lose the trust key, and a
+/// worktree whose trust key is gone stalls on a dialog no TBD mechanism can see
+/// or dismiss.
+///
+/// **The two `ensure*Dir` writers take the lane around their `.claude.json`
+/// section only.** Creating the directory and ensuring the host mirror symlinks
+/// touch a different set of paths, so they stay outside; and neither lane body
+/// anywhere calls `resolveConfigDir`, which is what keeps this non-reentrant
+/// lane from deadlocking against itself.
 ///
 /// **A chained-`Task` lane rather than an actor method, and that distinction is
 /// load-bearing.** `ClaudeTrustSeeder.TrustSeedWriter.seed` is atomic because it

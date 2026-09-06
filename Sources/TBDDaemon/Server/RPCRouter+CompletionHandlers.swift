@@ -74,7 +74,7 @@ extension RPCRouter {
         // `ambientConfigDirectory` names. NOT the home directory: the scan and
         // the staleness fingerprint both read `<configDir>/commands` and
         // friends, and `$HOME/commands` is nobody's config.
-        let configDir = configDirManager.resolveConfigDir(for: profile)
+        let configDir = await configDirManager.resolveConfigDir(for: profile)
             ?? configDirManager.ambientConfigDirectory.path
 
         // The middle scope of the env-override merge. A scratch worktree has no
