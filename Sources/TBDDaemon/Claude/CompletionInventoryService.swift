@@ -114,6 +114,17 @@ actor CompletionInventoryService {
 
     /// Which binary this request should ask. `nil` when nothing resolves, which
     /// is the one case with no probe to run at all.
+    ///
+    /// A pid that still presents a **shell** is skipped rather than pinned. The
+    /// holder forks `$SHELL -ilc "… claude …"` and records that pid, and the
+    /// shell only replaces itself with the agent binary when it `exec`s — so
+    /// between spawn and `exec` the recorded child pid is `/bin/zsh`, which is
+    /// exactly `AgentReaper.isHolderChildExecutable`'s reason for existing.
+    /// Pinning it would run `zsh` with the probe's flags, fail, and drop every
+    /// request to the uncached scan until the shell got around to `exec`ing.
+    /// The test is membership in the reaper's shell set, never equality against
+    /// `"claude"`: a renamed binary or a stub script (`scripts/claude-stub.py`)
+    /// is a legitimate answer.
     static func pinnedExecutable(
         childPID: Int32?,
         panePID: Int32?,
@@ -121,7 +132,10 @@ actor CompletionInventoryService {
         fallback: () -> String?
     ) -> String? {
         for pid in [childPID, panePID].compactMap({ $0 }) where pid > 0 {
-            if let path = executablePathForPID(pid), !path.isEmpty { return path }
+            guard let path = executablePathForPID(pid), !path.isEmpty else { continue }
+            let basename = (path as NSString).lastPathComponent
+            guard !AgentReaper.holderChildShellBasenames.contains(basename) else { continue }
+            return path
         }
         return fallback()
     }
@@ -198,6 +212,15 @@ actor CompletionInventoryService {
     ///
     /// A missing entry contributes a fixed marker rather than being skipped, so
     /// creating the first `commands/` directory is itself a change.
+    ///
+    /// Every path is resolved through its symlinks before it is stat'd, and that
+    /// is load-bearing rather than tidy. `FileManager.attributesOfItem(atPath:)`
+    /// has `lstat` semantics, and `ClaudeProfileConfigDirManager.mirrorSlots`
+    /// symlinks `commands`, `skills`, `agents`, `settings.json` and `plugins`
+    /// into every profile config directory — so on the paths that matter most,
+    /// an unresolved stat reads the link's own mtime, frozen at profile
+    /// creation, and adding a command or a skill would never invalidate the
+    /// cache. Resolving first stats the target the link points at.
     static let liveFingerprint: @Sendable (String, String) -> String = { configDir, worktreePath in
         let config = URL(fileURLWithPath: configDir, isDirectory: true)
         let project = URL(fileURLWithPath: worktreePath, isDirectory: true)
@@ -215,7 +238,8 @@ actor CompletionInventoryService {
             project.appendingPathComponent("agents"),
         ]
         let parts = paths.map { url -> String in
-            guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+            let resolved = url.resolvingSymlinksInPath().path
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: resolved),
                   let modified = attrs[.modificationDate] as? Date
             else { return "-" }
             return String(modified.timeIntervalSince1970)

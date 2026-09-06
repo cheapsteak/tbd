@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
@@ -71,6 +72,68 @@ struct CompletionInventoryServiceTests {
             fallback: { nil }) == nil)
     }
 
+    /// The holder records the pid of `$SHELL -ilc "… claude …"`, and that pid
+    /// presents as the login shell until it `exec`s the agent. Pinning the shell
+    /// would run `zsh` with the probe's flags, fail, and drop every request to
+    /// the uncached scan for as long as the window lasts — so a shell is skipped
+    /// and the next candidate is tried.
+    @Test func itSkipsAPIDThatIsStillAShell() {
+        #expect(CompletionInventoryService.pinnedExecutable(
+            childPID: 4242, panePID: 99,
+            executablePathForPID: { pid in pid == 4242 ? "/bin/zsh" : "/versions/x/claude" },
+            fallback: { "/resolved/claude" }) == "/versions/x/claude")
+
+        // Both pids still shells: nothing running is worth asking, so the
+        // resolver answers.
+        #expect(CompletionInventoryService.pinnedExecutable(
+            childPID: 4242, panePID: 99,
+            executablePathForPID: { pid in pid == 4242 ? "/bin/zsh" : "/opt/homebrew/bin/fish" },
+            fallback: { "/resolved/claude" }) == "/resolved/claude")
+
+        // The gate is "not a shell", never "is named claude": a renamed binary
+        // or a stub script is a legitimate thing for a session to be running.
+        #expect(CompletionInventoryService.pinnedExecutable(
+            childPID: 4242, panePID: nil,
+            executablePathForPID: { _ in "/opt/tbd/claude-stub.py" },
+            fallback: { "/resolved/claude" }) == "/opt/tbd/claude-stub.py")
+    }
+
+    // MARK: - Fingerprint
+
+    /// `attributesOfItem(atPath:)` has `lstat` semantics, and
+    /// `ClaudeProfileConfigDirManager.mirrorSlots` symlinks `commands`,
+    /// `skills`, `agents` and `settings.json` into every profile config
+    /// directory. Stat the link and four of the six config-dir entries report a
+    /// mtime frozen at profile creation, so adding a command or a skill would
+    /// never invalidate the cache.
+    @Test func theFingerprintFollowsASymlinkedCommandsDirectory() throws {
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdfp"))
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let configDir = root.appendingPathComponent("config")
+        let worktree = root.appendingPathComponent("wt")
+        let target = root.appendingPathComponent("store/commands")
+        for dir in [configDir, worktree, target] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        try fm.createSymbolicLink(
+            at: configDir.appendingPathComponent("commands"),
+            withDestinationURL: target)
+
+        let before = CompletionInventoryService.liveFingerprint(configDir.path, worktree.path)
+        // An explicit later date rather than a touch: mtime at one-second
+        // resolution would let a change inside the same second look like none.
+        try fm.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(120)],
+            ofItemAtPath: target.path)
+        let after = CompletionInventoryService.liveFingerprint(configDir.path, worktree.path)
+
+        #expect(before != after,
+                "a change under the symlink target must invalidate the cache")
+    }
+
     // MARK: - Cache
 
     @Test func aSecondRequestWithTheSameFingerprintServesTheCache() async throws {
@@ -124,7 +187,43 @@ struct CompletionInventoryServiceTests {
         #expect(await calls.value == 2)
     }
 
+    /// Two worktrees on one profile see different project-level commands, so the
+    /// worktree path is part of the identity a cached answer is keyed on.
+    @Test func theCacheKeyIncludesTheWorktreePath() async throws {
+        let calls = Counter()
+        let service = makeService(probeCalls: calls, probeResult: {
+            ClaudeCompletionProbe.Outcome(commands: [], agents: [])
+        })
+        _ = await service.inventory(for: request())
+        _ = await service.inventory(for: CompletionInventoryService.Request(
+            terminalID: UUID(), childPID: 4242, panePID: nil,
+            configDir: "/cfg", worktreePath: "/other-wt", environment: [:]))
+        #expect(await calls.value == 2)
+    }
+
     // MARK: - Fallback
+
+    /// Nothing resolves — no pid presents a binary and the resolver has none
+    /// either. There is no probe to run, so none is attempted.
+    @Test func noResolvableExecutableScansWithoutProbing() async throws {
+        let calls = Counter()
+        let service = CompletionInventoryService(
+            probe: { _, _, _ in
+                await calls.bump()
+                return ClaudeCompletionProbe.Outcome(commands: [], agents: [])
+            },
+            scan: { _, _ in ([CompletionCommand(name: "scanned", description: "d")], []) },
+            resolveExecutable: { nil },
+            executablePathForPID: { _ in nil },
+            fingerprint: { _, _ in "fp-1" })
+
+        let result = await service.inventory(for: request())
+
+        #expect(await calls.value == 0, "there is no binary to ask")
+        #expect(result.source == .scan)
+        #expect(result.freshness == .fallback)
+        #expect(result.commands.map(\.name) == ["scanned"])
+    }
 
     @Test func aTimedOutProbeFallsBackToTheScan() async throws {
         let calls = Counter()
