@@ -466,15 +466,44 @@ struct FDSidecarClientTests {
         let promise = client.expectFD(worktreeID: UUID(), paneID: "%3", attachID: UUID())
         Darwin.close(daemonSide)   // daemon goes away
 
-        // Deliberately a short literal rather than the shared saturated-pass
-        // budget: the assertion here is that EOF fails the waiter, and the
-        // deadline only caps a run in which it did not. Raising it would make
-        // an already-failing test wait 90 s to say so.
-        await #expect(throws: FDSidecarError.self) {
-            _ = try await promise.value(timeout: .seconds(2))
+        // The deadline is a hang guard, nothing more: the assertion below pins
+        // the failure's IDENTITY, so `.timedOut` — the case a starved runner
+        // produces — is red here rather than a second way to pass. That is why
+        // the budget is the shared saturated-pass one and not a short literal;
+        // a snappy deadline would only convert a scheduling excursion into a
+        // spurious `.timedOut` failure.
+        var thrown: (any Error)?
+        do {
+            let fd = try await promise.value(timeout: TestDeadlines.saturatedPass)
+            Darwin.close(fd)
+        } catch {
+            thrown = error
         }
-        // The receive loop marks the client disconnected on EOF.
-        try await Task.sleep(for: .milliseconds(200))
-        #expect(!client.isConnected)
+        let failure = try #require(thrown, "EOF must fail the pending waiter, not vend an fd")
+        // FDSidecarError is not Equatable (it carries an errno payload), so
+        // pattern-match and report whatever arrived instead.
+        guard let sidecarError = failure as? FDSidecarError,
+              case .disconnected = sidecarError else {
+            Issue.record(UnexpectedWaiterFailure(observed: failure))
+            return
+        }
+
+        // The receive loop marks the client disconnected on EOF — it does so on
+        // its own thread, so poll for it rather than sleeping a fixed slice.
+        _ = try await waitFor(
+            "the client to observe EOF and mark itself disconnected",
+            observed: { "isConnected=\(client.isConnected)" }
+        ) { !client.isConnected }
+    }
+
+    /// Carries the error a pending waiter actually failed with onto the primary
+    /// failure line (assertion-hygiene rule 4: only `Issue.record(_: some Error)`
+    /// survives into a CI summary).
+    private struct UnexpectedWaiterFailure: Error, CustomStringConvertible {
+        let observed: any Error
+
+        var description: String {
+            "EOF must fail the pending waiter with FDSidecarError.disconnected — observed \(observed)"
+        }
     }
 }
