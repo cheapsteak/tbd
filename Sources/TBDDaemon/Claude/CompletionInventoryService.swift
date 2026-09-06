@@ -82,6 +82,17 @@ public actor CompletionInventoryService {
     private let executablePathForPID: @Sendable (Int32) -> String?
     private let fingerprint: @Sendable (String, String) -> String
     private let serializer: ClaudeConfigDirSerializer
+    /// Answers already probed, keyed by executable, config directory and
+    /// worktree.
+    ///
+    /// Unbounded and never evicted: one entry per (binary, profile, worktree)
+    /// triple the daemon has served, which the fleet's own size bounds in
+    /// practice — a few hundred small string lists at the very top end.
+    ///
+    /// Not keyed on the request's environment. Two requests for one triple with
+    /// different environment overrides share the entry the first one filled, so
+    /// an override that changes which commands Claude Code reports is not
+    /// noticed until something the fingerprint watches changes on disk.
     private var cache: [CacheKey: CacheEntry] = [:]
 
     /// The live probe: start the session's own binary and ask it.
@@ -240,6 +251,11 @@ public actor CompletionInventoryService {
     ///
     /// A missing entry contributes a fixed marker rather than being skipped, so
     /// creating the first `commands/` directory is itself a change.
+    ///
+    /// Only the listed paths are stat'd, never their trees: a file added inside
+    /// an existing subdirectory of `commands/` does not change the parent
+    /// directory's mtime, so it does not invalidate the cache until something
+    /// else here moves.
     ///
     /// Every path is resolved through its symlinks before it is stat'd, and that
     /// is load-bearing rather than tidy. `FileManager.attributesOfItem(atPath:)`

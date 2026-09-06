@@ -48,11 +48,16 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "completions.
 /// caller must therefore run it through `ClaudeConfigDirSerializer`, which is
 /// where it is ordered against `ClaudeTrustSeeder`.
 ///
-/// **Reconciler note.** This spawns a process and writes one temporary file. Both
-/// are reclaimed by the call itself — the process by `runBoundedProcess`, whose
-/// deadline signals the child and escalates SIGTERM to SIGKILL on its own
-/// watchdog thread, the file by the `defer` in `run`. Neither can accumulate:
-/// nothing here outlives the request, so no sweep covers it and none is needed.
+/// **Reconciler note.** One process and one temporary file, each reclaimed by
+/// the call itself: the process by `runBoundedProcess`, whose deadline signals
+/// the child by pid and escalates SIGTERM to SIGKILL on its own watchdog
+/// thread, and the file by the `defer` in `run`. Reclaiming the child by pid is
+/// enough because the child can have no descendants of its own, and that is a
+/// consequence of the flags rather than an assumption: `disableAllHooks` and
+/// the strict empty MCP configuration remove the only two things a probe would
+/// otherwise spawn. Nothing durable is created either — no git ref, no
+/// worktree, no tmux server, no file that outlives the call — so there is no
+/// orphan for a sweep to reclaim and none covers this.
 enum ClaudeCompletionProbe {
 
     /// The settings overlay passed with `--settings`. Two switches, each closing
