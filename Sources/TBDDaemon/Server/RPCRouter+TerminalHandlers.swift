@@ -2958,7 +2958,8 @@ extension RPCRouter {
     }
 
     func handleTerminalSend(
-        _ paramsData: Data, actor: ActuationActor? = nil
+        _ paramsData: Data, actor: ActuationActor? = nil,
+        connection: RPCConnectionContext? = nil
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSendParams.self, from: paramsData)
         // Queue behind any send already mid-flight to this same terminal; sends
@@ -2966,7 +2967,7 @@ extension RPCRouter {
         // lane so the target check and the typing it authorizes cannot be
         // separated by another caller's paste.
         return try await terminalSendSerializer.run(terminalID: params.terminalID) {
-            try await self.performTerminalSend(params, actor: actor)
+            try await self.performTerminalSend(params, actor: actor, connection: connection)
         }
     }
 
@@ -3005,7 +3006,8 @@ extension RPCRouter {
 
     private func performTerminalSend(
         _ params: TerminalSendParams, actor: ActuationActor?,
-        envelope: DispatchEnvelopeDisposition = .attached
+        envelope: DispatchEnvelopeDisposition = .attached,
+        connection: RPCConnectionContext? = nil
     ) async throws -> RPCResponse {
         // ─── The first of two refusal lines, and the reason they differ ───
         //
@@ -3251,6 +3253,14 @@ extension RPCRouter {
         // below so a retry can re-deliver byte-identically.
         var deliveredPayload: String?
 
+        // Resolved ONCE, ahead of the delivery block, so both arms below read
+        // the same answer. A rail's own `.suppressed` passes through; a
+        // request's is granted only on a connection the daemon authenticated.
+        let effectiveEnvelope = await effectiveEnvelope(
+            railDisposition: envelope,
+            requested: params.envelope,
+            connection: connection)
+
         do {
             switch payload {
             case .text(let text, let submit, _):
@@ -3295,7 +3305,8 @@ extension RPCRouter {
                     // words must deliver them byte-identically. It is not
                     // reachable from `TerminalSendParams` — see
                     // `DispatchEnvelopeDisposition`.
-                    let composed = envelope == .attached && Self.carriesDispatchEnvelope(terminal)
+                    let composed = effectiveEnvelope == .attached
+                        && Self.carriesDispatchEnvelope(terminal)
                         ? Self.dispatchEnvelope(
                             id: actuationID, from: (actor ?? .anonymous).dispatchLabel
                         ) + "\n" + text
@@ -3339,7 +3350,7 @@ extension RPCRouter {
                 // The envelope, when it applies, rides on the FIRST text part —
                 // one envelope for one message. Prepending it to every part would
                 // put a `<tbd-dispatch/>` line in the middle of a sentence.
-                var envelopePending = envelope == .attached
+                var envelopePending = effectiveEnvelope == .attached
                     && Self.carriesDispatchEnvelope(terminal)
                 for part in parts {
                     let body: String
@@ -3754,6 +3765,90 @@ extension RPCRouter {
         switch terminal.kind ?? .shell {
         case .claude, .codex: return true
         case .shell: return false
+        }
+    }
+
+    /// The answer `authenticatesEnvelopeSuppression` gives, and there are only
+    /// two of them: an unauthenticated connection is never a shade of yes.
+    enum EnvelopeSuppressionVerdict: Equatable, Sendable {
+        case authenticated
+        /// Named, because a suppression that did not happen has to be
+        /// explainable from a log line without re-deriving the whole check.
+        case refused(reason: String)
+    }
+
+    /// Whether a request that asked for envelope suppression is entitled to it.
+    ///
+    /// **The connection is authenticated, not the request.** Suppression is
+    /// authority, not preference, so it rests on nothing the request says about
+    /// itself: `ActuationActor` is an ambient declaration any local process can
+    /// stamp, and the CLI, the app and every agent share one socket.
+    ///
+    /// Two halves. The kernel names the peer of an `AF_UNIX` socket, so the pid
+    /// cannot be claimed by somebody else — that gets us to "this connection is
+    /// provisionally the app's" for the cost of one `getsockopt` already paid at
+    /// accept. A pid is a number the kernel reissues, so the request that
+    /// actually asks pays for the rest: the sidecar's recorded identity is
+    /// re-verified through `ProcessIdentityCheck`, the one identity check in
+    /// this daemon, with a zero tolerance because the recorded start time IS the
+    /// fact rather than a proxy for it. Only `.same` authenticates. Two process
+    /// reads, on a composer send and nowhere else.
+    ///
+    /// **Fails closed in every direction**, and the reason names itself so a
+    /// suppression that did not happen can be explained afterwards.
+    ///
+    /// The daemon's own `.suppressed` disposition — the queued-prompt rail's,
+    /// set inside the send core and never arriving from a params struct — does
+    /// not pass through here at all.
+    func authenticatesEnvelopeSuppression(
+        connection: RPCConnectionContext?
+    ) async -> EnvelopeSuppressionVerdict {
+        guard let peerPID = connection?.peerPID else {
+            return .refused(reason: "peer-pid-unestablished")
+        }
+        guard let recorded = await recordedAppIdentity() else {
+            return .refused(reason: "no-recorded-sidecar-client")
+        }
+        guard recorded.pid == peerPID else {
+            return .refused(reason: "peer-pid-is-not-the-apps")
+        }
+        switch ProcessIdentityCheck.verify(
+            pid: recorded.pid,
+            startedWithin: 0,
+            of: recorded.startedAt,
+            executableIsAcceptable: { $0 == recorded.commandLine },
+            signaller: processSignaller
+        ) {
+        case .same: return .authenticated
+        case .notRunning: return .refused(reason: "recorded-app-not-running")
+        case .startTimeUnreadable: return .refused(reason: "start-time-unreadable")
+        case .startTimeMismatch: return .refused(reason: "pid-reused-start-time")
+        case .commandUnreadable: return .refused(reason: "command-unreadable")
+        case .foreignExecutable: return .refused(reason: "pid-reused-executable")
+        }
+    }
+
+    /// The disposition the daemon will actually apply to one send.
+    ///
+    /// A rail's internal `.suppressed` passes straight through — it was decided
+    /// inside the send core, not asked for on the wire. A request's asked-for
+    /// suppression is granted only on an authenticated connection.
+    private func effectiveEnvelope(
+        railDisposition: DispatchEnvelopeDisposition,
+        requested: EnvelopeDisposition?,
+        connection: RPCConnectionContext?
+    ) async -> DispatchEnvelopeDisposition {
+        if railDisposition == .suppressed { return .suppressed }
+        guard requested == .suppressed else { return .attached }
+        switch await authenticatesEnvelopeSuppression(connection: connection) {
+        case .authenticated:
+            return .suppressed
+        case .refused(let reason):
+            logger.debug("""
+                send: envelope suppression refused (\(reason, privacy: .public)) — \
+                attaching the dispatch line
+                """)
+            return .attached
         }
     }
 

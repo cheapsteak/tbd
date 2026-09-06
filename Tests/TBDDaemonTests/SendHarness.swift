@@ -86,7 +86,14 @@ struct SendHarness {
         // for "no foreground agent here" — the foreground rail's negative case
         // — without touching anything else about the harness. Defaulted to the
         // live-agent answer every other call site relies on.
-        foregroundByAgent: [String: Int32] = ["claude": 4242, "codex": 4242]
+        foregroundByAgent: [String: Int32] = ["claude": 4242, "codex": 4242],
+        // The two halves of the envelope-suppression check, defaulted to the
+        // fail-closed answers the production router defaults to: no recorded
+        // sidecar client, and the real process reader. A suite that does not
+        // pass them authenticates nobody, so every send it makes carries the
+        // envelope.
+        recordedAppIdentity: @escaping @Sendable () async -> ProcessIdentity? = { nil },
+        processSignaller: any ProcessSignaller = ProductionProcessSignaller()
     ) async throws -> SendHarness {
         let double = TmuxDouble()
         let tmux = TmuxManager(
@@ -109,6 +116,8 @@ struct SendHarness {
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
             tmux: tmux,
             paneProcessInspector: StubInspector(foregroundByAgent: foregroundByAgent),
+            recordedAppIdentity: recordedAppIdentity,
+            processSignaller: processSignaller,
             actuationLog: ActuationLog(path: Self.scratchLogPath()))
 
         let repo = try await db.repos.create(
@@ -131,10 +140,16 @@ struct SendHarness {
         return SendHarness(router: router, db: db, terminal: terminal, tmux: double)
     }
 
+    /// `connection` is what the daemon would have learned from the socket the
+    /// request arrived on. Defaulted to nil — "not established" — which is what
+    /// every non-socket caller of the router gets, and the answer that keeps the
+    /// envelope.
     func send(
         _ params: TerminalSendParams,
-        actor: ActuationActor?
+        actor: ActuationActor?,
+        connection: RPCConnectionContext? = nil
     ) async throws -> RPCResponse {
-        try await router.handleTerminalSend(try JSONEncoder().encode(params), actor: actor)
+        try await router.handleTerminalSend(
+            try JSONEncoder().encode(params), actor: actor, connection: connection)
     }
 }

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import NIOCore
 import NIOPosix
@@ -433,6 +434,13 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
     private let limiter: RPCConcurrencyLimiter
     private var buffer: String = ""
 
+    /// What the kernel says about this connection's peer, read once at accept.
+    ///
+    /// Mutated in `channelActive` and read in `channelRead`, both of which run
+    /// on the channel's event loop, so no lock is needed and none may be added
+    /// (`context.channel` access off the loop is a NIO precondition crash).
+    private var connection = RPCConnectionContext(peerPID: nil)
+
     init(router: RPCRouter, connectedClients: ManagedAtomic<Int>, limiter: RPCConcurrencyLimiter) {
         self.router = router
         self.connectedClients = connectedClients
@@ -441,6 +449,21 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
 
     func channelActive(context: ChannelHandlerContext) {
         connectedClients.wrappingIncrementThenLoad()
+        // One `getsockopt`, through NIO's socket-option provider rather than a
+        // raw fd, because NIO owns the descriptor. `channelActive` runs ON the
+        // event loop, and the provider completes its promise inline in that
+        // case, so `whenComplete` fires before this method returns and therefore
+        // before any `channelRead` — the ordering the suppression check needs.
+        // If it ever did not, the failure direction is the safe one: an
+        // unestablished peer keeps the envelope.
+        guard let provider = context.channel as? SocketOptionProvider else { return }
+        provider.unsafeGetSocketOption(
+            level: NIOBSDSocket.OptionLevel(rawValue: SOL_LOCAL),
+            name: NIOBSDSocket.Option(rawValue: LOCAL_PEERPID)
+        ).whenComplete { [weak self] (result: Result<pid_t, any Error>) in
+            guard case .success(let pid) = result, pid > 0 else { return }
+            self?.connection = RPCConnectionContext(peerPID: pid)
+        }
     }
 
     func channelInactive(context: ChannelHandlerContext) {
@@ -464,8 +487,11 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
             let wrappedCtx = SendableContext(context: context)
             let router = self.router
             let limiter = self.limiter
+            let connection = self.connection
             Task {
-                await Self.processLine(trimmed, router: router, limiter: limiter, wrappedCtx: wrappedCtx)
+                await Self.processLine(
+                    trimmed, router: router, limiter: limiter,
+                    wrappedCtx: wrappedCtx, connection: connection)
             }
         }
     }
@@ -474,7 +500,8 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
         _ line: String,
         router: RPCRouter,
         limiter: RPCConcurrencyLimiter,
-        wrappedCtx: SendableContext
+        wrappedCtx: SendableContext,
+        connection: RPCConnectionContext
     ) async {
         guard let data = line.data(using: .utf8) else { return }
 
@@ -556,7 +583,7 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
         let signposter = RPCSignposts.signposter
         let signpostID = signposter.makeSignpostID()
         let intervalState = signposter.beginInterval("rpc.handle", id: signpostID, "\(method, privacy: .public)")
-        let response = await router.handleRaw(data)
+        let response = await router.handleRaw(data, connection: connection)
         signposter.endInterval("rpc.handle", intervalState)
 
         await limiter.release()

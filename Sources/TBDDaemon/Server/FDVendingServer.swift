@@ -191,6 +191,13 @@ actor FDVendingServer {
         onReceiveLoopExit = handler
     }
 
+    /// The identity recorded for the current client at adopt time, or nil when
+    /// no client is connected.
+    ///
+    /// Read-only on purpose: the sidecar is the only writer, and a second one
+    /// would be a way to install an identity the kernel never reported.
+    func currentClientIdentity() -> ProcessIdentity? { clientIdentity }
+
     /// Start listening on `path`. Any existing file at `path` is removed first.
     /// Only meaningful in the live daemon; tests should call `adoptConnection`
     /// directly.

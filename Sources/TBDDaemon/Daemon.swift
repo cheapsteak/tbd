@@ -1057,6 +1057,12 @@ public final class Daemon: Sendable {
             pendingQuestions: pendingQuestions,
             remoteManager: remoteManager,
             claudeCloudLive: claudeCloudLive,
+            // Envelope suppression is authenticated against the sidecar's
+            // recorded client — the app — and against nothing the request says
+            // about itself. See `authenticatesEnvelopeSuppression`.
+            recordedAppIdentity: { [fdVendingServer] in
+                await fdVendingServer.currentClientIdentity()
+            },
             actuationLog: actuationLog
         )
         // Wire the shared input activity tracker to the coordinator
