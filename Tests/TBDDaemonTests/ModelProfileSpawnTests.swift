@@ -1515,6 +1515,11 @@ struct ModelProfileSpawnTests {
         while elapsed < timeout {
             if condition() { return true }
             try? await Task.sleep(for: step)
+            // `try?` swallows the CancellationError, and a cancelled sleep
+            // returns instantly — so without this the loop would spin through
+            // every remaining step at full speed instead of ending. Report
+            // whatever the condition says at the moment of cancellation.
+            if Task.isCancelled { return condition() }
             elapsed += step
         }
         return condition()
