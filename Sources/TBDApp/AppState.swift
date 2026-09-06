@@ -1456,6 +1456,13 @@ final class AppState {
                 terminalID: terminalID, cols: cols, rows: rows,
                 fallbackToDefaultProfile: fallback, prompt: prompt)
         }
+    /// How `setTranscriptComposerEnabled` persists the composer gate —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored
+    lazy var transcriptComposerFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in
+            try await daemonClient.setTranscriptComposerEnabled(enabled: enabled)
+        }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.

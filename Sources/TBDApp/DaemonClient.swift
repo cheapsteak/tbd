@@ -1202,6 +1202,16 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the transcript-composer gate (default OFF). Read per request by
+    /// the daemon, so no restart is needed; the app re-reads capabilities right
+    /// after writing so the toggle reflects the daemon's persisted state.
+    func setTranscriptComposerEnabled(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetTranscriptComposerEnabled,
+            params: ConfigSetTranscriptComposerEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the Claude cloud sessions gate (default OFF). The daemon builds
     /// its provider manager only at boot, so this takes effect on the next
     /// daemon restart rather than the next gesture.

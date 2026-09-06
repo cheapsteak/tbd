@@ -391,6 +391,10 @@ public enum RPCMethod {
     /// opt-in. Reading needs no method of its own: `config.get` already carries
     /// the resolved value.
     public static let configSetPtyHolderEnabled = "config.setPtyHolderEnabled"
+    /// The transcript-composer gate (`transcript_composer_enabled`) — the
+    /// feature's only opt-in. Reading needs no method of its own: `config.get`
+    /// already carries the resolved value.
+    public static let configSetTranscriptComposerEnabled = "config.setTranscriptComposerEnabled"
     /// The update mode (`update_mode`) — `off`, `check` or `auto`. The one
     /// policy the daemon holds about updating itself. Reading needs no method
     /// of its own: `config.get` and `daemon.capabilities` both carry the
@@ -1877,6 +1881,15 @@ public struct ConfigSetPeerMessagingEnabledParams: Codable, Sendable {
 /// so an operator who turns the feature off stays off when the shipped default
 /// graduates.
 public struct ConfigSetPtyHolderEnabledParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setTranscriptComposerEnabled` — the composer gate (default
+/// OFF during soak). Writing either value is the explicit gesture that lifts the
+/// column out of its NULL "never chose" state, so an operator who turns the
+/// feature off stays off when the shipped default graduates.
+public struct ConfigSetTranscriptComposerEnabledParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
@@ -3591,6 +3604,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// is set. Default OFF while it soaks. Read at sweep time, so the Settings
     /// toggle reads it back from here rather than from a local guess.
     public let holderHibernationEnabled: Bool
+    /// Whether the live transcript's message composer is enabled
+    /// (`transcript_composer_enabled`). Default OFF while it soaks. The app gates
+    /// the whole composer — the field, the completions request, attachment
+    /// writes — on this, so with it false the transcript pane behaves exactly as
+    /// it did before. Resolved through `Config.transcriptComposerEnabledDefault`,
+    /// so an install that never touched the toggle reports the shipped default.
+    public let transcriptComposerEnabled: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -3609,7 +3629,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 updateMode: UpdateMode = Config.updateModeDefault,
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
                 ptyHolderSupported: Bool = false,
-                holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault) {
+                holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault,
+                transcriptComposerEnabled: Bool = Config.transcriptComposerEnabledDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -3628,6 +3649,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.ptyHolderEnabled = ptyHolderEnabled
         self.ptyHolderSupported = ptyHolderSupported
         self.holderHibernationEnabled = holderHibernationEnabled
+        self.transcriptComposerEnabled = transcriptComposerEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -3693,6 +3715,12 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // rather than assuming the gate is live.
         holderHibernationEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .holderHibernationEnabled) ?? Config.holderHibernationEnabledDefault
+        // New field for the composer gate. A daemon that does not send it has no
+        // `terminal.completions` either, so fall through to the shipped default
+        // rather than showing a composer nothing can serve.
+        transcriptComposerEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .transcriptComposerEnabled)
+            ?? Config.transcriptComposerEnabledDefault
     }
 }
 

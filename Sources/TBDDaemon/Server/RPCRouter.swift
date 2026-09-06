@@ -783,6 +783,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetUpdateMode(request.paramsData)
             case RPCMethod.configSetPtyHolderEnabled:
                 return try await handleConfigSetPtyHolderEnabled(request.paramsData)
+            case RPCMethod.configSetTranscriptComposerEnabled:
+                return try await handleConfigSetTranscriptComposerEnabled(request.paramsData)
             case RPCMethod.peerStatus:
                 return try await handlePeerStatus()
             case RPCMethod.gcList:
@@ -872,7 +874,8 @@ public final class RPCRouter: Sendable {
             // falls back to tmux silently. Reported so Settings can say so
             // instead of offering a switch that would change nothing.
             ptyHolderSupported: holderRegistry?.canSpawn == true,
-            holderHibernationEnabled: config.holderHibernationEnabled))
+            holderHibernationEnabled: config.holderHibernationEnabled,
+            transcriptComposerEnabled: config.transcriptComposerEnabled))
     }
 
     // MARK: - PR Status
