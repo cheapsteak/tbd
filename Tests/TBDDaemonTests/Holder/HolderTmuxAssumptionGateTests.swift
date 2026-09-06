@@ -866,12 +866,168 @@ struct HolderTmuxAssumptionGateTests {
         #expect(writes.all.count == 1, "the whole send must be one write, not two")
         #expect(text.hasPrefix("<tbd-dispatch id="))
         #expect(text.hasSuffix("/>\nhello\r"))
+        // This router has neither an oracle seam nor a registry, so nothing
+        // could answer what modes the child is in — and the send proceeded
+        // anyway, bare, recording that it was a guess made blind. Refusing
+        // instead would make every rail's send fail closed whenever the daemon
+        // cannot see a store, which is precisely when rails need to send.
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["modeSource"] as? String == "unavailable")
+        #expect(outcome["modeAgeMilliseconds"] == nil,
+                "an unavailable oracle has no store whose age could be recorded")
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before)
         // The strongest half: delivery sits ahead of the whole tmux mechanic,
         // so nothing about the send is addressed to a pane that never existed.
         #expect(recorded.snapshot().isEmpty,
                 "terminal.send reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    // MARK: - Gate 10: the child's modes decide the bytes
+
+    /// The oracle seam, standing in for a registry-backed reader.
+    ///
+    /// Reaching the three answers through a real registry would mean a real
+    /// holder, a real pty and a real attach for what is a pure question about
+    /// which bytes get composed. The registry-backed resolution is exercised
+    /// live; this is how the composition's own branches are pinned.
+    private func oracle(
+        bracketedPaste: Bool,
+        source: TerminalScreen.Source = .daemon,
+        ageMilliseconds: Int = 0
+    ) -> @Sendable (UUID) async -> TerminalModeReading? {
+        { _ in
+            TerminalModeReading(
+                modes: TerminalScreen.ChildModes(
+                    bracketedPaste: bracketedPaste,
+                    applicationCursor: false,
+                    alternateScreen: false),
+                source: source,
+                ageMilliseconds: ageMilliseconds)
+        }
+    }
+
+    /// The outcome row this router last wrote, read back off its own actuation
+    /// log. The provenance is asserted **on the row** rather than on a log
+    /// line, because the row is what a person reading the record afterwards
+    /// actually has.
+    private static func outcomeRow(of rpc: RPCRouter) async -> [String: Any]? {
+        let path = await rpc.actuationLog.path
+        guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        var rows: [[String: Any]] = []
+        for line in contents.split(separator: "\n") {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+                  let row = object as? [String: Any]
+            else { continue }
+            rows.append(row)
+        }
+        return rows.last { $0["kind"] as? String == "outcome" }
+    }
+
+    /// The defect this closes, at the router level: with the child in
+    /// bracketed-paste mode the whole message — envelope and body together —
+    /// goes inside one explicit paste, and the submitting `\r` follows the end
+    /// marker. Still one write, so the message is never split across a routing
+    /// decision.
+    @Test("a send to a bracketing child is one wrapped paste with the Enter outside it")
+    func sendWrapsForABracketingChild() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(db, worktreeID: wt.id, transport: .holder)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: deadWindowTmux(recorded))
+        rpc.holderInjectionCourier = writes.courier()
+        rpc.holderModeOracle = oracle(bracketedPaste: true, source: .daemon, ageMilliseconds: 0)
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(writes.all.count == 1, "the whole send must be one write, not two")
+        let written = try #require(writes.all.first)
+        let text = try #require(String(data: written, encoding: .utf8))
+        #expect(text.hasPrefix("\u{1b}[200~<tbd-dispatch id="))
+        #expect(text.hasSuffix("/>\nhello\u{1b}[201~\r"))
+        #expect(
+            text.components(separatedBy: "\u{1b}[200~").count == 2,
+            "the start marker appears more than once: \(text.debugDescription)")
+
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["result"] as? String == "dispatched")
+        #expect(outcome["modeSource"] as? String == "daemon")
+        #expect(outcome["modeAgeMilliseconds"] as? Int == 0)
+        #expect(recorded.snapshot().isEmpty)
+    }
+
+    /// The other direction, and it is not symmetry for its own sake: a shell at
+    /// its prompt, or any program that never asked for bracketing, prints
+    /// markers it does not understand and would execute a line starting with
+    /// one.
+    @Test("a send to a non-bracketing child is bare bytes and an Enter")
+    func sendStaysBareForANonBracketingChild() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(db, worktreeID: wt.id, transport: .holder)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: deadWindowTmux(recorded))
+        rpc.holderInjectionCourier = writes.courier()
+        rpc.holderModeOracle = oracle(bracketedPaste: false)
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        let written = try #require(writes.all.first)
+        let text = try #require(String(data: written, encoding: .utf8))
+        #expect(text.hasSuffix("/>\nhello\r"))
+        #expect(!text.contains("\u{1b}[200~"))
+        #expect(!text.contains("\u{1b}[201~"))
+        #expect(recorded.snapshot().isEmpty)
+    }
+
+    /// The residue of the whole design, made examinable. When a viewer holds
+    /// the pty and does not answer, the daemon composes against the modes its
+    /// retained emulator held at the attach and **proceeds** — and records that
+    /// it guessed, and how old the guess was. A row reading `staleDaemon` at 41
+    /// minutes tells whoever reads the record afterwards exactly that.
+    @Test("a send composed against a stale emulator records its source and age")
+    func sendRecordsStaleProvenance() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(db, worktreeID: wt.id, transport: .holder)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: deadWindowTmux(recorded))
+        rpc.holderInjectionCourier = writes.courier()
+        rpc.holderModeOracle = oracle(
+            bracketedPaste: true, source: .staleDaemon, ageMilliseconds: 2_460_000)
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true)))
+
+        #expect(response.success, "a stale oracle must not refuse the send")
+        // Composed per the stale modes, not bare: proceeding means acting on
+        // what the emulator says, not falling back to a safe-looking default.
+        let written = try #require(writes.all.first)
+        let text = try #require(String(data: written, encoding: .utf8))
+        #expect(text.hasPrefix("\u{1b}[200~"))
+        #expect(text.hasSuffix("\u{1b}[201~\r"))
+
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["result"] as? String == "dispatched")
+        #expect(outcome["modeSource"] as? String == "stale-daemon")
+        #expect(outcome["modeAgeMilliseconds"] as? Int == 2_460_000)
     }
 
     @Test("terminal.send --verify refuses a holder row by naming verification")

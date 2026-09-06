@@ -185,6 +185,49 @@ enum ActuationOutcome: Sendable, Equatable {
     }
 }
 
+/// Which store answered when a holder send asked what modes the child was in.
+///
+/// The same vocabulary as `TerminalScreen.Source` plus `unavailable`, and the
+/// extra case is the point: a send composed against *no* answer at all is a
+/// different fact from one composed against a frozen emulator, and the record
+/// has to be able to say which.
+///
+/// This is the guard on the one place this design knowingly proceeds on
+/// information that may be wrong. A message composed against `staleDaemon`
+/// modes can mis-paste — the markers printed by a child that never asked for
+/// them, or absorbed by one that did — and that is accepted, because refusing
+/// would make every supervision send fail closed exactly when the app is
+/// napping or wedged, which is when supervision most needs to send. What makes
+/// it honest rather than merely optimistic is that the guess is recorded: a row
+/// reading `dispatched, modeSource: staleDaemon` tells whoever reads the record
+/// afterwards that the composition was a guess, and the age says how old.
+///
+/// New raw values are additive, like every other closed vocabulary here.
+enum ActuationModeSource: String, Codable, Sendable, CaseIterable, Equatable {
+    /// The daemon is the session's reader and answered from its live emulator.
+    case daemon
+    /// A viewer holds the pty and answered a pull from its own terminal.
+    case viewer
+    /// A viewer holds the pty and did not answer; the daemon's retained
+    /// emulator answered instead, as of its last byte.
+    case staleDaemon = "stale-daemon"
+    /// Nothing answered. No registry, or no reader for this session — it is
+    /// gone or was never adopted, in which case the write is about to fail
+    /// anyway. Composed bare, and carries no age, because there is no store
+    /// whose age it could be.
+    case unavailable
+
+    /// The record's name for the store a screen reading came from. Total, so a
+    /// new `TerminalScreen.Source` cannot reach the record unmapped.
+    init(_ source: TerminalScreen.Source) {
+        switch source {
+        case .daemon: self = .daemon
+        case .viewer: self = .viewer
+        case .staleDaemon: self = .staleDaemon
+        }
+    }
+}
+
 /// The thing an actuation acted on. Local sessions carry `worktree`/`terminal`
 /// (full uppercase UUID strings, matching the DB); remote sessions carry
 /// `provider` and, once known, `session`.
@@ -259,5 +302,28 @@ struct ActuationRow: Codable, Sendable, Equatable {
     /// Set on — and only on — a `refused` outcome, by `appendOutcome` from the
     /// same `ActuationOutcome` that decided `result`.
     var reason: RefusedReason?
+    /// Which store answered the mode oracle that a holder send was composed
+    /// against.
+    ///
+    /// Set on holder-send outcome rows and nowhere else — the tmux arm has no
+    /// oracle (tmux tracks the pane's mode itself and pastes accordingly), and
+    /// no other act composes bytes against a child's modes. Absent on a row
+    /// where nothing was composed, which is what the empty-payload send is: it
+    /// wrote nothing, so it guessed nothing.
+    ///
+    /// **Per dispatch, not per act.** A verified send that is re-delivered
+    /// recomposes against the modes as they are then, and each dispatch writes
+    /// its own outcome row, so every attempt carries its own immutable
+    /// provenance and nothing is overwritten.
+    var modeSource: ActuationModeSource?
+    /// How long ago the answering emulator had last consumed a byte from the
+    /// pty when it was asked, in milliseconds.
+    ///
+    /// Rides with `modeSource` and is absent whenever that is `unavailable`:
+    /// nothing answered, so there is no store whose age this could be. It is
+    /// what turns "stale" from an adjective into a number — a row reading
+    /// `staleDaemon` at 41 minutes and one at 200 milliseconds describe very
+    /// different amounts of guessing.
+    var modeAgeMilliseconds: Int?
     var error: String?
 }

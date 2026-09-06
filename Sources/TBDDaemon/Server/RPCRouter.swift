@@ -241,6 +241,20 @@ public final class RPCRouter: Sendable {
     /// input path in this daemon rather than being silently dropped.
     nonisolated(unsafe) var holderInjectionCourier: HolderInjectionCourier?
 
+    /// Answers what modes a holder-backed session's child is in, for the send
+    /// path to compose against. A **test seam only** — production leaves it
+    /// nil and `performHolderSend` falls through to the registry's own reader,
+    /// which is the single source the design names.
+    ///
+    /// It exists because the alternative is worse: reaching the three answers
+    /// (`daemon`, `staleDaemon`, and no answer at all) through a real registry
+    /// means a real holder, a real pty and a real attach for what is a pure
+    /// question about which bytes get composed. The registry-backed path is
+    /// exercised live; this is how the composition's own branches are pinned.
+    ///
+    /// `nil` from the seam means the same thing as no reader: nothing answered.
+    nonisolated(unsafe) var holderModeOracle: (@Sendable (UUID) async -> TerminalModeReading?)?
+
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
 

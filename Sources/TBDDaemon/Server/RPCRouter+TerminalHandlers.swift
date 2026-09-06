@@ -3188,31 +3188,35 @@ extension RPCRouter {
     /// actuation row, the same dispatch envelope, the same per-terminal
     /// serializer lane (this runs inside it). What changes is the destination —
     /// `HolderInjectionCourier` routes by whether a viewer owns the pty — and
-    /// three things this transport cannot do yet, each refused by name rather
+    /// two things this transport cannot do yet, each refused by name rather
     /// than by "the holder transport", so a caller learns which capability is
     /// missing:
     ///
-    /// - `--verify` has no delivery observation here (the verifier re-reads a
-    ///   tmux pane, and there is none).
+    /// - `--verify` has no delivery observation here.
     /// - `--keys` has no named-key → bytes mapping here (tmux owns that table).
-    /// - A daemon with no courier has no input path at all.
     ///
-    /// **The whole send is one message.** The body, its envelope and the
-    /// carriage return that submits it are composed here and handed to the
-    /// courier in a single call, because a payload split across two writes can
-    /// be split across a routing decision — and because `HolderReader.write`
-    /// completes partial writes in a loop, so one call is one uninterrupted
-    /// write. That is a deliberate divergence from the tmux arm, which pastes
-    /// the body and presses Enter as two separate acts.
+    /// A daemon with no courier has no input path at all, and says so.
     ///
-    /// The cost of that divergence is worth naming: the tmux arm wraps the
-    /// body in an *explicit* bracketed paste so a payload larger than the pty
-    /// buffer cannot have its trailing Enter absorbed by a TUI's paste-burst
-    /// detection. This arm cannot do the same, because the wrappers are correct
-    /// only when the child has bracketed-paste mode on and the daemon's holder
-    /// emulator does not expose that mode to callers. So a very large `--text
-    /// --submit` here can leave its Enter unpressed. Exposing the mode from the
-    /// emulator is what closes it.
+    /// **The whole send is one message.** The body, its envelope, its paste
+    /// markers and the carriage return that submits it are composed here and
+    /// handed to the courier in a single call, because a payload split across
+    /// two writes can be split across a routing decision — and because
+    /// `HolderReader.write` completes partial writes in a loop, so one call is
+    /// one uninterrupted write.
+    ///
+    /// **The child's modes decide the bytes.** `HolderSendComposition` wraps a
+    /// non-empty body in `ESC[200~`…`ESC[201~` exactly when the child has
+    /// bracketed paste on, and the submitting `\r` follows the end marker — so
+    /// the Enter is provably outside the paste, which is the property the tmux
+    /// arm gets from delivering in two acts and this arm used to lack. A child
+    /// that never asked for bracketing gets bare bytes, because markers it does
+    /// not understand are markers it prints.
+    ///
+    /// The oracle is consulted at composition time, which is a moment, and the
+    /// child can change a mode between that moment and the write. tmux has the
+    /// same window — the server reads the pane's mode when it pastes, not when
+    /// the bytes land — and it is accepted for the same reason: a mode that
+    /// flips mid-send produces a visible mis-paste, not a silent loss.
     private func performHolderSend(
         payload: TerminalSendPayload, terminal: Terminal, actuationID: String,
         actor: ActuationActor?, envelope: DispatchEnvelopeDisposition
@@ -3236,40 +3240,78 @@ extension RPCRouter {
                 actuationID, Self.holderKeysRefusal(terminalID: terminal.id))
         }
 
+        // Asked BEFORE anything is composed, because the answer decides the
+        // bytes. Two sources, in order: the test seam if one is installed, then
+        // the registry's own reader for this session.
+        //
+        // **A `nil` answer proceeds; it never refuses.** There is no reader,
+        // which means the session is gone or was never adopted — in which case
+        // the courier's write is about to fail and say so with the right cause.
+        // Refusing here would put a second, wronger refusal in front of that,
+        // and more importantly it would make every rail's send fail closed
+        // whenever the daemon cannot see a store: the moments that correlate
+        // exactly with supervision needing to send. The composition step's job
+        // is to record what it composed against, not to decide whether delivery
+        // is possible — the courier decides that, and it fails open.
+        let reading = await holderModeReading(terminalID: terminal.id)
+        let modeSource = reading.map { ActuationModeSource($0.source) } ?? .unavailable
+        // Absent for `unavailable`: nothing answered, so there is no store
+        // whose age this could be.
+        let modeAge = reading?.ageMilliseconds
+
         // Same envelope rule as the tmux arm, and for the same reasons — see
         // the long comment there. Empty text stays empty: `--text "" --submit`
         // is a real way to press Enter and must not start pasting a tag.
-        var message = Data()
-        if !text.isEmpty {
-            let composed = envelope == .attached && Self.carriesDispatchEnvelope(terminal)
+        let body = text.isEmpty
+            ? ""
+            : (envelope == .attached && Self.carriesDispatchEnvelope(terminal)
                 ? Self.dispatchEnvelope(
                     id: actuationID, from: (actor ?? .anonymous).dispatchLabel) + "\n" + text
-                : text
-            message.append(Data(composed.utf8))
-        }
-        // Carriage return, not newline: this is what a terminal delivers when
-        // Return is pressed, and what tmux's `send-keys Enter` sends.
-        if submit { message.append(0x0d) }
+                : text)
+        let message = HolderSendComposition.compose(
+            body: body, submit: submit,
+            bracketedPaste: reading?.modes.bracketedPaste ?? false)
 
         guard !message.isEmpty else {
             // `--text ""` with no `--submit`: a well-formed act that names
             // nothing to write. The tmux arm reaches the same outcome by
-            // skipping both of its sub-steps.
+            // skipping both of its sub-steps. No mode provenance is recorded,
+            // because nothing was composed — there is no guess to disclose.
             await finishActuation(actuationID, .dispatched)
             return .ok()
         }
 
         switch await courier.deliver(terminalID: terminal.id, bytes: message) {
         case .viewerWrote, .daemonWrote:
-            await finishActuation(actuationID, .dispatched)
+            await finishActuation(
+                actuationID, .dispatched,
+                modeSource: modeSource, modeAgeMilliseconds: modeAge)
             return .ok()
         case .notDelivered(let reason):
             // The transport, not a decision: the daemon tried to write and
             // could not. Classified as such so the record does not read like a
-            // rail that declined.
-            await finishActuation(actuationID, .transportFailed, error: reason)
+            // rail that declined. The provenance rides here too — what was
+            // composed is a fact about the attempt, not about its success.
+            await finishActuation(
+                actuationID, .transportFailed, error: reason,
+                modeSource: modeSource, modeAgeMilliseconds: modeAge)
             return RPCResponse(error: reason)
         }
+    }
+
+    /// What the child's modes are, as best this daemon can say.
+    ///
+    /// The seam first so a test can pin all three answers without a real
+    /// holder; otherwise the registry's reader for this session, which is
+    /// retained across an attach and so answers for an open session as well as
+    /// a detached one — `.daemon` while the daemon is draining, `.staleDaemon`
+    /// while a viewer holds the pty.
+    private func holderModeReading(terminalID: UUID) async -> TerminalModeReading? {
+        if let holderModeOracle {
+            return await holderModeOracle(terminalID)
+        }
+        guard let reader = await holderRegistry?.reader(for: terminalID) else { return nil }
+        return await reader.modeReading()
     }
 
     /// Close a holder send that never touched the transport. One helper because
