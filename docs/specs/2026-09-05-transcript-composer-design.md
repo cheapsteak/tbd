@@ -551,11 +551,14 @@ effect, and it runs only when a composer is shown.
 
 Two changes ship ahead of the composer with no flag, as bug fixes: the daemon's
 not-running refusal with its exit stamp and inspector rail, and the app passing
-the wake prompt it has never passed. The wake-prompt wiring is inert until the
-composer exists: every parameter it adds is defaulted to nil, no existing call
-site passes a prompt, and a nil prompt encodes no field, so no input reaches a
-session through it before the flagged composer supplies one. The envelope
-option, the parts list, and the opt-in gate land with the composer.
+the wake prompt it has never passed. That change needs no flag because it
+adds no new way for input to reach a session: the wake prompt is an existing,
+unflagged parameter that the CLI's wake command already passes and that the
+nightwatch skill already uses to resume a parked session with a composed
+prompt. The app's side is the only new call site, and it stays inert until the
+composer exists: every parameter it adds defaults to nil, nothing in the app
+passes a prompt yet, and a nil prompt encodes no field. The envelope option,
+the parts list, and the opt-in gate land with the composer.
 
 Graduation: after a soak with the toggle on, flip the default constant.
 
