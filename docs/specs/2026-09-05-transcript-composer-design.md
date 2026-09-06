@@ -560,6 +560,21 @@ composer exists: every parameter it adds defaults to nil, nothing in the app
 passes a prompt yet, and a nil prompt encodes no field. The envelope option,
 the parts list, and the opt-in gate land with the composer.
 
+The exit stamp earns the same unflagged treatment on its own terms, not by
+riding along with the wake prompt's. It records a fact the agent's own
+`SessionEnd` hook reported — that the process has already ended — and neither
+kills anything nor sends anything, which is exactly what distinguishes it from
+the two auto-park causes that do sit behind flags: the idle sweep's
+`auto_hibernate_enabled` decides to end a session nobody asked to end, and the
+merge park's gate in `HibernationGate` decides to interrupt one. The stamp
+decides nothing; it transcribes. It is scoped by session incarnation and
+excludes holder transport, so it can only ever describe the tmux process it
+was told about, and it is retracted the moment `SessionStart` or the wake path
+reports the session back — so a wrong stamp costs one stray banner and one
+refused send, never lost input. The refusal it enables is the bug fix: without
+it, a send to a parked pane finds a live shell prompt, pastes the message,
+presses Enter, and runs the text as a shell command while reporting success.
+
 Graduation: after a soak with the toggle on, flip the default constant.
 
 ## Testing
