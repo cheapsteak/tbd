@@ -65,7 +65,7 @@ extension AppState {
     /// smaller loss than an error banner over a text field.
     func fetchCompletions(terminalID: UUID) async -> TerminalCompletionsResult? {
         do {
-            return try await daemonClient.terminalCompletions(terminalID: terminalID)
+            return try await composerCompletionsFetcher(terminalID)
         } catch {
             logger.debug("""
             completions unavailable for terminal \
