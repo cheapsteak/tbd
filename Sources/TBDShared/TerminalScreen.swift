@@ -11,14 +11,23 @@ import Foundation
 ///
 /// The second reason is the whitelist. Every cell that reaches `lines` is
 /// printable or a tab: a never-written cell is projected as a space by the
-/// render, the trailing half of a wide glyph is omitted, and anything else — a
-/// stray control character, a `U+0000` that slipped through — is refused at
-/// construction. That refusal is deliberately *not* delegated to each render
-/// site remembering to sanitize: a row carrying a control character is a bug in
-/// the projection, and a bug is better raised at the boundary than shipped to a
-/// consumer that matches on text and silently fails to find the characters on
-/// either side of the hole. (1,595 such `U+0000` cells were measured across
-/// five of nine live sessions in one sweep, and no consumer had noticed.)
+/// render, the trailing half of a wide glyph is omitted, and every other
+/// disallowed scalar is projected as `U+FFFD`. The render does that against
+/// `isDisallowed`, the same predicate the initializer checks with, so the two
+/// cannot disagree about what a screen line may hold.
+///
+/// **The render substitutes; the initializer refuses.** A child may legitimately
+/// store a `DEL` or a C1 byte in a cell — SwiftTerm's ground-state fast path
+/// keeps them verbatim — so refusing those at construction would make one
+/// `printf '\x7f'` break every later read of the session until the line left
+/// scrollback. Substituting at the render keeps the whitelist true without
+/// making a session's own output able to silence it. What survives to the
+/// initializer is therefore a *projection bug* rather than anything a session
+/// can do: a render that forgot the predicate, or a producer that never ran
+/// one. A bug is better raised at the boundary than shipped to a consumer that
+/// matches on text and silently fails to find the characters on either side of
+/// the hole. (1,595 `U+0000` cells were measured across five of nine live
+/// sessions in one sweep, and no consumer had noticed.)
 ///
 /// Plain data, in `TBDShared`, with no emulator in it. The projection from a
 /// grid to these lines belongs to whichever store did the rendering; this is
@@ -159,9 +168,13 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     /// means whoever measured it subtracted the wrong way round.
     public enum ValidationError: LocalizedError, Equatable, CustomStringConvertible {
         /// A row carried a character no screen line may contain: any C0 control
-        /// but tab, `DEL`, or a C1 control. `U+0000` is included — a
-        /// never-written cell is the render's job to project as a space, and
-        /// one arriving here means it did not.
+        /// but tab, `DEL`, or a C1 control.
+        ///
+        /// **Not something a child can cause.** A render substitutes every one
+        /// of these — `U+0000` as a space, the rest as `U+FFFD` — using the
+        /// same `isDisallowed` predicate checked here, so a session that prints
+        /// a `DEL` produces a replacement character rather than an unreadable
+        /// session. One arriving here means a render skipped the predicate.
         case disallowedCharacter(lineIndex: Int, scalar: UInt32)
         /// An age measured as a negative interval.
         case negativeAge(milliseconds: Int)
@@ -214,10 +227,18 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
         self.ageMilliseconds = ageMilliseconds
     }
 
+    /// Whether a scalar is one a screen line may not hold.
+    ///
+    /// Public and static because it has **two** call sites that must agree: the
+    /// initializer below, which refuses, and each render's character provider,
+    /// which substitutes. Two copies of this rule would drift, and the shape of
+    /// the drift is a render that lets through exactly what the initializer
+    /// throws on — a session whose every read fails.
+    ///
     /// Tab is the one control a line may hold: a program that lays a screen out
     /// with tabs is doing something a reader can see, and stripping them would
     /// move every column after one.
-    private static func isDisallowed(_ scalar: Unicode.Scalar) -> Bool {
+    public static func isDisallowed(_ scalar: Unicode.Scalar) -> Bool {
         if scalar == "\t" { return false }
         let value = scalar.value
         return value < 0x20 || value == 0x7f || (0x80...0x9f).contains(value)

@@ -43,6 +43,56 @@ import Testing
         #expect(!screen.output.contains(Self.nul))
     }
 
+    /// A child may legitimately print a `DEL`, and it lands in a cell verbatim:
+    /// the printable run inserter takes every byte from `0x20` through `0x7f`
+    /// without consulting a width, so `0x7f` is stored the way `A` is. The
+    /// whitelist refuses it, so a render that mapped only `U+0000` would make
+    /// one `printf '\x7f'` throw on **every** later read of the session, until
+    /// the line left the scrollback — a session-wide outage caused by the
+    /// session's own output. Two assertions in one again: a screen came back at
+    /// all, and the byte is visible as a replacement character rather than
+    /// silently gone.
+    ///
+    /// This is the only disallowed scalar a child can currently get into a
+    /// cell. C1 controls are dropped before insertion — measured: `U+0085`
+    /// through this same path renders as nothing at all, because SwiftTerm
+    /// consults a width table for non-ASCII and inserts nothing at width zero.
+    /// The render substitutes for every disallowed scalar regardless, against
+    /// `TerminalScreen.isDisallowed` rather than a list of the ones known to be
+    /// reachable, so a width table that changes its mind cannot reopen the
+    /// outage. `TerminalScreenTests` pins that predicate.
+    @Test("a DEL a child stored in a cell renders as U+FFFD instead of breaking the read")
+    func delInACellRendersAsReplacement() async throws {
+        let harness = try Harness(columns: 40, rows: 8)
+        defer { harness.tearDown() }
+
+        await harness.reader.ingest(preamble: Self.data("a\u{7f}b"))
+        let screen = try await harness.reader.screen(maxLines: 50)
+
+        #expect(
+            screen.lines.first == "a\u{fffd}b",
+            "rendered \(String(describing: screen.lines.first))")
+    }
+
+    /// The substitution must not swallow the case it was built beside: a
+    /// never-written cell is still a space, not a replacement character. A
+    /// render that mapped every disallowed scalar to `U+FFFD` without keeping
+    /// the NUL special would fill a differentially-painted line with visible
+    /// junk where `tmux capture-pane` returns blanks.
+    @Test("a never-written cell is still a space, not a replacement character")
+    func nulStillProjectsAsASpaceBesideTheSubstitution() async throws {
+        let harness = try Harness(columns: 40, rows: 8)
+        defer { harness.tearDown() }
+
+        await harness.reader.ingest(preamble: Self.data("a\(Self.esc)[4Gb\u{7f}c"))
+        let screen = try await harness.reader.screen(maxLines: 50)
+
+        #expect(
+            screen.lines.first == "a  b\u{fffd}c",
+            "rendered \(String(describing: screen.lines.first))")
+        #expect(!screen.output.contains(Self.nul))
+    }
+
     /// The trailing cell of a two-column glyph carries code 0 as well, and it
     /// is not an unwritten cell: padding it to a space would double the width
     /// of every CJK character and every emoji. The line is one grapheme per

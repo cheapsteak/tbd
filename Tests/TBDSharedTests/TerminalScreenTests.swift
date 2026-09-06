@@ -84,6 +84,55 @@ import Testing
         #expect(screen.output == "name\tvalue")
     }
 
+    // MARK: - The predicate the render and the initializer share
+
+    /// **The whitelist is one predicate with two call sites**, and this pins the
+    /// half the initializer cannot: what a render is to substitute for.
+    ///
+    /// A render that owned its own copy of the rule would drift, and the shape
+    /// of the drift is a render letting through exactly what the initializer
+    /// throws on — a session whose every `terminal.output` fails until the
+    /// offending line leaves the scrollback. That is not hypothetical: the
+    /// holder render mapped `U+0000` alone, and a `DEL` is a byte a child can
+    /// put in a cell. So the predicate is public, the render reads it, and this
+    /// pins it over the whole excluded set rather than over the one scalar that
+    /// happens to be reachable through today's emulator.
+    @Test(
+        "isDisallowed names exactly the scalars a screen line may not hold",
+        arguments: [
+            (UInt32(0x00), true),  // NUL — a never-written cell the render must fill
+            (0x07, true),  // C0
+            (0x0a, true),  // a newline is a lost row boundary
+            (0x1f, true),  // the top of the C0 band
+            (0x7f, true),  // DEL — the one a child can currently store
+            (0x80, true),  // the bottom of the C1 band
+            (0x9b, true),  // C1
+            (0x9f, true),  // the top of the C1 band
+            (0x09, false),  // tab, the one control a line may hold
+            (0x20, false),  // space
+            (0x41, false),  // A
+            (0x7e, false),  // ~, the last printable ASCII
+            (0xa0, false),  // just past C1
+            (0x65e5, false),  // 日 — a wide glyph is not a control
+        ])
+    func isDisallowedNamesTheExcludedSet(scalar: UInt32, disallowed: Bool) throws {
+        let unicode = try #require(Unicode.Scalar(scalar))
+        #expect(
+            TerminalScreen.isDisallowed(unicode) == disallowed,
+            "U+\(String(format: "%04X", scalar)) was judged \(!disallowed ? "disallowed" : "allowed")")
+
+        // And the initializer agrees, which is what makes them one rule rather
+        // than two that happen to match today.
+        let line = "a\(Character(unicode))b"
+        if disallowed {
+            #expect(throws: TerminalScreen.ValidationError.self) {
+                _ = try Self.make(lines: [line])
+            }
+        } else {
+            #expect(try Self.make(lines: [line]).lines == [line])
+        }
+    }
+
     @Test("a negative age is refused")
     func negativeAgeIsRefused() throws {
         let error = #expect(throws: TerminalScreen.ValidationError.self) {

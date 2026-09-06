@@ -1465,13 +1465,35 @@ private final class HolderEmulator: @unchecked Sendable {
     /// every emoji. Trimming is unaffected — `trimRight` is computed from
     /// `getTrimmedLength()` before the projection runs, so a row nobody wrote
     /// still renders empty rather than as a row of spaces.
+    ///
+    /// **`U+0000` is not the only cell a screen line may not hold.** SwiftTerm's
+    /// printable-run inserter takes every byte from `0x20` through `0x7f`
+    /// without consulting a width, so a `printf '\x7f'` leaves a `DEL` in a cell
+    /// — legal for a child to emit, and refused by `TerminalScreen`'s
+    /// whitelist. Mapping only the NUL would therefore let one such byte break
+    /// *every* later read of that session until the line left the scrollback: a
+    /// session-wide outage caused by the session's own output.
+    ///
+    /// `DEL` is the only one reachable today — a C1 control is dropped before
+    /// insertion, because non-ASCII goes through a width table and nothing of
+    /// width zero is inserted. The projection is written against
+    /// `TerminalScreen.isDisallowed` anyway, rather than against the list of
+    /// scalars currently known to get through: the render and the whitelist
+    /// cannot disagree if they read the same predicate, and a width table that
+    /// changes its mind cannot reopen the outage. `U+FFFD` rather than a space
+    /// for these, because unlike a never-written cell something *was* written
+    /// and a reader should see that something is there.
     private static func rowText(_ line: BufferLine) -> String {
         line.translateToString(
             trimRight: true,
             skipNullCellsFollowingWide: true,
             characterProvider: { cell in
                 let character = cell.getCharacter()
-                return character == Character(Unicode.Scalar(0)) ? " " : character
+                if character == Character(Unicode.Scalar(0)) { return " " }
+                guard character.unicodeScalars.contains(where: TerminalScreen.isDisallowed) else {
+                    return character
+                }
+                return "\u{FFFD}"
             })
     }
 
