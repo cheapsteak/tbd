@@ -520,7 +520,8 @@ struct OrphanGCTests {
         let broadcaster = BroadcastDeltas()
         let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
 
-        await gc.scratchpadCleanup(forRemovedWorktreePath: worktreePath, repoPath: "/Users/chang/tbd")
+        await gc.removedWorktreeCleanup(
+            worktreeID: UUID(), worktreePath: worktreePath, repoPath: "/Users/chang/tbd")
 
         #expect(!FileManager.default.fileExists(atPath: scratchDir.path))
         let records = try await db.reapRecords.list(repoPath: nil)
@@ -555,7 +556,8 @@ struct OrphanGCTests {
         let broadcaster = BroadcastDeltas()
         let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
 
-        await gc.scratchpadCleanup(forRemovedWorktreePath: worktreeDir.path, repoPath: "/Users/chang/tbd")
+        await gc.removedWorktreeCleanup(
+            worktreeID: UUID(), worktreePath: worktreeDir.path, repoPath: "/Users/chang/tbd")
 
         #expect(FileManager.default.fileExists(atPath: scratchDir.path),
                 "worktree dir still on disk — the removal must have failed, so the scratchpad stays intact")
@@ -683,7 +685,8 @@ struct OrphanGCTests {
         let broadcaster = BroadcastDeltas()
         let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
 
-        await gc.scratchpadCleanup(forRemovedWorktreePath: worktreePath, repoPath: "/Users/chang/tbd")
+        await gc.removedWorktreeCleanup(
+            worktreeID: UUID(), worktreePath: worktreePath, repoPath: "/Users/chang/tbd")
 
         #expect(FileManager.default.fileExists(atPath: scratchDir.path),
                 "the gcEnabled master switch must suppress event-driven deletion too")

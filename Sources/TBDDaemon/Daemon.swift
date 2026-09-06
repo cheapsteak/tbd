@@ -966,8 +966,9 @@ public final class Daemon: Sendable {
         if mockMode == nil {
             let gc = OrphanGC(db: database, git: git, broadcast: { [subs] delta in subs.broadcast(delta: delta) })
             self.orphanGC = gc
-            lifecycle.onWorktreeRemoved = { [gc] path, repoPath in
-                await gc.scratchpadCleanup(forRemovedWorktreePath: path, repoPath: repoPath)
+            lifecycle.onWorktreeRemoved = { [gc] worktreeID, path, repoPath in
+                await gc.removedWorktreeCleanup(
+                    worktreeID: worktreeID, worktreePath: path, repoPath: repoPath)
             }
         }
 

@@ -215,10 +215,11 @@ extension WorktreeLifecycle {
             // callback's precondition — the path is gone — holds here, before
             // the bytes are actually reclaimed by the drain below. Firing now
             // rather than after drain matches the design's ordering and keeps
-            // the event-driven scratchpad cleanup this callback exists to
-            // trigger prompt even when the drain that follows is slow.
+            // the event-driven cleanup this callback exists to trigger — the
+            // scratchpad and the composer attachments — prompt even when the
+            // drain that follows is slow.
             if let onWorktreeRemoved {
-                await onWorktreeRemoved(worktree.localPath, repo.path)
+                await onWorktreeRemoved(worktree.id, worktree.localPath, repo.path)
             }
 
             // Reclaim the bytes inline, with no deadline attached. Every
@@ -251,7 +252,7 @@ extension WorktreeLifecycle {
                 // fired unconditionally after a swallowed failure.
                 let removed = !FileManager.default.fileExists(atPath: worktree.localPath)
                 if removed, let onWorktreeRemoved {
-                    await onWorktreeRemoved(worktree.localPath, repo.path)
+                    await onWorktreeRemoved(worktree.id, worktree.localPath, repo.path)
                 }
             } catch {
                 archiveLogger.error("""

@@ -1420,37 +1420,82 @@ public actor OrphanGC {
         broadcast(.reapRecordsChanged)
     }
 
-    // MARK: - Event-driven scratchpad cleanup
+    // MARK: - Event-driven removed-worktree cleanup
 
-    /// Entry point for the archive hook (Task 8): a TBD worktree at `path`
-    /// was just removed, so its Claude Code scratchpad (if any) is cleaned up
-    /// immediately rather than waiting for the next sweep's reconciliation.
-    /// `repoPath` is the owning repo's root (the archive caller has `repo` in
-    /// scope), stamped onto the resulting record; pass `""` when unknown.
+    /// Event-driven reclaim for a worktree that has just been removed: its
+    /// Claude Code scratchpad, and its composer attachments.
     ///
-    /// Verifies the worktree directory is actually gone before doing
-    /// anything else. `completeArchiveWorktree` already fires this callback
-    /// only once it has confirmed the path is gone — queued out of its pool
-    /// slot on the success leg, or a verified `git.worktreeRemove` on the
-    /// fallback leg — so this is defense in depth against a future caller
-    /// that doesn't uphold that contract, not a workaround for a swallowed
-    /// failure: a failed removal must never orphan-classify (and delete) a
-    /// scratchpad that's still in active use.
+    /// Renamed from `scratchpadCleanup` when attachments joined it: the callback
+    /// covers two resources now, and a name that promised one would send the next
+    /// reader looking for a second callback that does not exist.
+    ///
+    /// `repoPath` is the owning repo's root (the archive caller has `repo` in
+    /// scope), stamped onto the resulting scratchpad record; pass `""` when
+    /// unknown.
+    ///
+    /// Verifies the worktree directory is actually gone before doing anything
+    /// else. `completeArchiveWorktree` already fires this callback only once it
+    /// has confirmed the path is gone — queued out of its pool slot on the
+    /// success leg, or a verified `git.worktreeRemove` on the fallback leg — so
+    /// this is defense in depth against a future caller that doesn't uphold that
+    /// contract, not a workaround for a swallowed failure: a failed removal must
+    /// never orphan-classify (and delete) resources that are still in active use.
     ///
     /// The `gcEnabled` master switch governs ALL GC deletion, including this
-    /// event-driven path — one toggle covers both collectors. A config read
+    /// event-driven path — one toggle covers every collector. A config read
     /// failure also skips (fail toward keeping).
-    public func scratchpadCleanup(forRemovedWorktreePath path: String, repoPath: String) async {
-        guard !FileManager.default.fileExists(atPath: path) else {
-            logger.debug("gc: scratchpad cleanup skipped for \(path, privacy: .public) — worktree dir still exists")
+    ///
+    /// **Best effort, by design.** A revived worktree does not get its images
+    /// back, and every path this misses — a crash between the rename and this
+    /// call, a worktree removed outside TBD — is covered by the hourly
+    /// attachments sweep. That division is the doctrine: creation against the
+    /// filesystem cannot be transactional, so the sweep is the standing
+    /// guarantee and this is the prompt best effort.
+    public func removedWorktreeCleanup(
+        worktreeID: UUID, worktreePath: String, repoPath: String
+    ) async {
+        guard !FileManager.default.fileExists(atPath: worktreePath) else {
+            logger.debug("""
+            gc: removed-worktree cleanup skipped for \(worktreePath, privacy: .public) \
+            — worktree dir still exists
+            """)
             return
         }
         guard let config = try? await db.config.get(), config.gcEnabled else {
-            logger.debug("gc: scratchpad cleanup skipped for \(path, privacy: .public) — gc disabled")
+            logger.debug("""
+            gc: removed-worktree cleanup skipped for \(worktreePath, privacy: .public) \
+            — gc disabled
+            """)
             return
         }
+
+        // Attachments first: it is one `removeItem` and cannot fail the
+        // scratchpad reclaim below.
+        //
+        // NOT additionally gated on the composer flag. The directory exists only
+        // because the composer wrote into it, and a person who turned the
+        // composer off afterwards would otherwise leave images behind
+        // permanently — a flag that gates CREATION must not gate the reclaim of
+        // what was already created.
+        let attachments = TBDConstants.attachmentsDir(worktreeID: worktreeID)
+        if FileManager.default.fileExists(atPath: attachments.path) {
+            do {
+                try FileManager.default.removeItem(at: attachments)
+                logger.info("""
+                gc: removed attachments for worktree \
+                \(worktreeID.uuidString, privacy: .public)
+                """)
+            } catch {
+                logger.warning("""
+                gc: could not remove attachments for worktree \
+                \(worktreeID.uuidString, privacy: .public): \
+                \(error.localizedDescription, privacy: .public) — the hourly sweep will retry
+                """)
+            }
+        }
+
         guard let record = await scratchpadCollector.cleanUp(
-            forRemovedWorktreePath: path, repoPath: repoPath, now: now()
+            forRemovedWorktreePath: worktreePath, repoPath: repoPath, now: now()
         ) else {
             return
         }
