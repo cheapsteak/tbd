@@ -3169,6 +3169,34 @@ extension RPCRouter {
             }
         }
 
+        // ─── The opt-in awaiting-input gate ───
+        //
+        // Inside the per-terminal serializer, which this whole handler runs in,
+        // so the state this reads cannot change between the check and the paste
+        // it authorizes.
+        //
+        // Opt-in, never daemon-wide: agents use this verb to answer permission
+        // dialogs deliberately, and a blanket gate would refuse exactly those
+        // sends. The composer always opts in; existing CLI callers do not.
+        if params.gateOnAwaitingInput == true {
+            // The supersession check `terminal.list` already applies, through the
+            // same type and the same two injected seams — never a second
+            // implementation of "did the session move on".
+            let superseded = await AwaitingInputSupersession(
+                db: db,
+                fingerprint: transcriptFingerprinter,
+                delta: transcriptDeltaInspector
+            ).reconcile(terminal: terminal)
+
+            if case .refuse(let message) = AwaitingInputSendGate.decide(
+                reason: superseded ? nil : terminal.awaitingInputReason,
+                superseded: superseded
+            ) {
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+        }
+
         // ─── The second refusal line: a well-formed act the daemon declines ───
         //
         // `--verify` while `delivery_verification_enabled` is off is a refusal,
