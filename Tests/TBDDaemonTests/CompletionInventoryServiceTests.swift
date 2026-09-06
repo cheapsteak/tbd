@@ -17,6 +17,11 @@ struct CompletionInventoryServiceTests {
         func bump() { value += 1 }
     }
 
+    private actor Trace {
+        private(set) var marks: [String] = []
+        func mark(_ value: String) { marks.append(value) }
+    }
+
     private func request(terminalID: UUID = UUID(), childPID: Int32? = 4242) ->
         CompletionInventoryService.Request {
         CompletionInventoryService.Request(
@@ -260,6 +265,51 @@ struct CompletionInventoryServiceTests {
         _ = await service.inventory(for: request())
         _ = await service.inventory(for: request())
         #expect(await calls.value == 2)
+    }
+
+    // MARK: - The serializer lane
+
+    /// The probe rewrites `.claude.json`, and so does `ClaudeTrustSeeder`, so
+    /// the probe must run through the per-directory lane rather than beside it.
+    /// A seed that is already inside the lane for this request's config
+    /// directory must therefore finish before the probe starts.
+    ///
+    /// The seed body suspends in the middle, which is the whole point: an actor
+    /// would let the probe run inside that suspension, and only the lane orders
+    /// them. Remove `serializer.run` from `inventory(for:)` and the probe's mark
+    /// lands between the seed's two, failing this.
+    @Test func theProbeRunsInsideTheConfigDirectoryLane() async throws {
+        let serializer = ClaudeConfigDirSerializer()
+        let trace = Trace()
+        let service = CompletionInventoryService(
+            probe: { _, _, _ in
+                await trace.mark("probe")
+                return ClaudeCompletionProbe.Outcome(commands: [], agents: [])
+            },
+            scan: { _, _ in ([], []) },
+            resolveExecutable: { "/usr/local/bin/claude" },
+            executablePathForPID: { _ in "/versions/2.1.261/claude" },
+            fingerprint: { _, _ in "fp-1" },
+            serializer: serializer)
+
+        // Occupy the lane for the request's own config directory, signalling as
+        // the body enters so the request is made after the lane is held rather
+        // than after a guessed sleep.
+        let (seedEntered, seedDidEnter) = AsyncStream<Void>.makeStream()
+        async let seed: Void = serializer.run(configDir: "/cfg") {
+            await trace.mark("seed-start")
+            seedDidEnter.yield()
+            try? await Task.sleep(for: .milliseconds(40))
+            await trace.mark("seed-end")
+        }
+        var seedEntries = seedEntered.makeAsyncIterator()
+        _ = await seedEntries.next()
+
+        _ = await service.inventory(for: request())
+        _ = try await seed
+
+        #expect(await trace.marks == ["seed-start", "seed-end", "probe"],
+                "the probe must wait for the lane, not interleave with it")
     }
 
     /// A lock-guarded box, not an actor: the fingerprint seam is a synchronous

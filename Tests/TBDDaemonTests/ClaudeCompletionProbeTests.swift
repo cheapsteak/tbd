@@ -92,6 +92,40 @@ struct ClaudeCompletionProbeTests {
         #expect(ClaudeCompletionProbe.decode(responseLine: Data(json.utf8)) == nil)
     }
 
+    /// An empty `argumentHint` is not a hint. It would render as an empty
+    /// placeholder — a blank box after the token — so it must arrive as nil.
+    /// Fixture command 3 carries `"argumentHint": ""` for exactly this.
+    @Test func anEmptyArgumentHintDecodesToNone() throws {
+        let data = try Data(contentsOf: Self.fixtureURL)
+        let decoded = try #require(ClaudeCompletionProbe.decode(responseLine: data))
+        #expect(decoded.commands[2].name == "superpowers:brainstorming")
+        #expect(decoded.commands[2].argumentHint == nil)
+    }
+
+    /// The probe writes one request and then reads whatever the binary emits. A
+    /// success frame answering a *different* request is somebody else's answer,
+    /// so it must not be mistaken for this one's.
+    @Test func aSuccessResponseForAnotherRequestIsNotAnInventory() {
+        let json = """
+            {"type":"control_response","response":{"subtype":"success",\
+            "request_id":"r2","response":{"commands":[{"name":"x"}],"agents":[]}}}
+            """
+        #expect(ClaudeCompletionProbe.decode(responseLine: Data(json.utf8)) == nil)
+    }
+
+    /// A command with no `description` is still worth completing: the decode is
+    /// lenient by design and an absent description becomes "".
+    @Test func aCommandWithoutADescriptionDecodesToAnEmptyOne() throws {
+        let json = """
+            {"type":"control_response","response":{"subtype":"success",\
+            "request_id":"r1","response":{"commands":[{"name":"x"}],"agents":[]}}}
+            """
+        let decoded = try #require(
+            ClaudeCompletionProbe.decode(responseLine: Data(json.utf8)))
+        #expect(decoded.commands.map(\.name) == ["x"])
+        #expect(decoded.commands[0].description == "")
+    }
+
     @Test func garbageIsNotAnInventory() {
         #expect(ClaudeCompletionProbe.decode(responseLine: Data("not json".utf8)) == nil)
         #expect(ClaudeCompletionProbe.decode(responseLine: Data()) == nil)
@@ -148,7 +182,19 @@ struct ClaudeCompletionProbeTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let script = dir.appendingPathComponent("claude")
         var body = "#!/bin/sh\ncat > /dev/null\n"
-        if sleepSeconds > 0 { body += "sleep \(sleepSeconds)\n" }
+        if sleepSeconds > 0 {
+            // `exec`, so the sleeping process IS the child the probe spawned.
+            // A plain `sleep` leaves the shell as the child: the deadline kills
+            // the shell, the forked `sleep` is reparented and runs out its full
+            // duration, and every run of this test strands one.
+            //
+            // Which also means nothing may follow it — `exec` replaces the
+            // shell — so a sleeping fixture never emits a response line.
+            precondition(
+                response == nil,
+                "a sleeping fixture cannot also emit: exec replaces the shell")
+            body += "exec sleep \(sleepSeconds)\n"
+        }
         if let response {
             let line = String(decoding: response, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)

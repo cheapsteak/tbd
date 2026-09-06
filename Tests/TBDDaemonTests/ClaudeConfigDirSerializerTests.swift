@@ -18,15 +18,20 @@ struct ClaudeConfigDirSerializerTests {
     @Test func twoBodiesOnOneDirectoryNeverOverlap() async throws {
         let serializer = ClaudeConfigDirSerializer()
         let trace = Trace()
+        // The first body signals as it enters its lane, and the second is not
+        // queued until that signal lands. A fixed sleep here would be a guess:
+        // too short on a loaded machine and the second body is queued first, so
+        // the test would assert nothing and still pass.
+        let (firstEntered, firstDidEnter) = AsyncStream<Void>.makeStream()
 
         async let first: Void = serializer.run(configDir: "/cfg") {
             await trace.mark("a-start")
+            firstDidEnter.yield()
             try? await Task.sleep(for: .milliseconds(40))
             await trace.mark("a-end")
         }
-        // Give the first body a turn to enter its lane before queueing the
-        // second, so this asserts ordering rather than racing to observe it.
-        try await Task.sleep(for: .milliseconds(5))
+        var firstEntries = firstEntered.makeAsyncIterator()
+        _ = await firstEntries.next()
         async let second: Void = serializer.run(configDir: "/cfg") {
             await trace.mark("b-start")
             await trace.mark("b-end")
@@ -41,13 +46,17 @@ struct ClaudeConfigDirSerializerTests {
     @Test func twoDirectoriesRunConcurrently() async throws {
         let serializer = ClaudeConfigDirSerializer()
         let trace = Trace()
+        // Same entry signal as above, for the same reason.
+        let (firstEntered, firstDidEnter) = AsyncStream<Void>.makeStream()
 
         async let first: Void = serializer.run(configDir: "/one") {
             await trace.mark("a-start")
+            firstDidEnter.yield()
             try? await Task.sleep(for: .milliseconds(40))
             await trace.mark("a-end")
         }
-        try await Task.sleep(for: .milliseconds(5))
+        var firstEntries = firstEntered.makeAsyncIterator()
+        _ = await firstEntries.next()
         async let second: Void = serializer.run(configDir: "/two") {
             await trace.mark("b-start")
             await trace.mark("b-end")
