@@ -10,7 +10,9 @@ import Testing
 /// consumer that matches on text and would silently fail to find the characters
 /// on either side of it — the failure mode measured in the field as 1,595
 /// invisible `U+0000` cells nobody had noticed. And **`output` is derived**, so
-/// it can never disagree with `lines` however it arrived.
+/// it can never disagree with `lines` however it arrived — including on the
+/// wire, where the screen carries only `lines` and the joined string a script
+/// reads sits at the top level of `TerminalOutputResult`.
 ///
 /// The NUL-to-space projection itself is deliberately *not* here. It belongs to
 /// whichever store rendered the grid, and is pinned on the constructed value in
@@ -146,24 +148,41 @@ import Testing
         #expect(try Self.make(lines: ["ok"], ageMilliseconds: 0).ageMilliseconds == 0)
     }
 
-    // MARK: - `output` is derived, and it is on the wire
+    // MARK: - `output` is derived, and it is not on the screen's wire
 
     @Test("output is the lines joined with newlines")
     func outputIsDerived() throws {
         #expect(try Self.make(lines: ["one", "two", "three"]).output == "one\ntwo\nthree")
     }
 
-    /// Scripts read `tbd terminal output --json` and pull `.output` out of it.
-    /// A computed property would never reach the wire, so the encoder writes it
-    /// explicitly — and this is what would go red if that were dropped as
-    /// redundant.
-    @Test("output appears in the encoded JSON beside lines")
-    func outputIsEncoded() throws {
+    /// The screen ships its text once. `lines` is the text; the joined string a
+    /// script reads rides at the top level of `TerminalOutputResult`, and a copy
+    /// inside the screen object would put the same characters on the wire a
+    /// second time for no consumer at all.
+    @Test("the encoded screen carries lines and no output copy of them")
+    func outputIsNotEncodedInsideTheScreen() throws {
         let data = try JSONEncoder().encode(try Self.make(lines: ["alpha", "beta"]))
         let object = try #require(
             try JSONSerialization.jsonObject(with: data) as? [String: Any])
-        #expect(object["output"] as? String == "alpha\nbeta")
+        #expect(object["output"] == nil, "the screen encoded a redundant copy of its text")
         #expect(object["lines"] as? [String] == ["alpha", "beta"])
+    }
+
+    /// The compatibility half, and the reason the copy above can go: a script
+    /// that reads `.output` out of `tbd terminal output --json` still finds it,
+    /// at the top level, saying exactly what the screen's lines say.
+    @Test("the result's JSON carries a top-level output equal to the screen's")
+    func resultCarriesTopLevelOutput() throws {
+        let screen = try Self.make(lines: ["alpha", "beta"])
+        let data = try JSONEncoder().encode(TerminalOutputResult(screen: screen))
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["output"] as? String == screen.output)
+        #expect(object["output"] as? String == "alpha\nbeta")
+
+        let decoded = try JSONDecoder().decode(TerminalOutputResult.self, from: data)
+        #expect(decoded.output == "alpha\nbeta")
+        #expect(decoded.screen == screen, "the screen did not survive the round trip")
     }
 
     /// The other half: whatever an `output` key on the wire says, the decoded

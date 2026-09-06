@@ -166,10 +166,16 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     /// The lines joined with `\n`.
     ///
     /// Derived, carrying no information of its own, and kept for exactly one
-    /// reason: scripts and skills read `tbd terminal output` today, and it is
-    /// what lets the in-place change to this RPC result be invisible to every
-    /// consumer that has not migrated. It is written to the wire by
-    /// `encode(to:)` and ignored on the way back in.
+    /// reason: scripts and skills read `tbd terminal output` today, and the
+    /// string is what lets the in-place change to this RPC result be invisible
+    /// to every consumer that has not migrated.
+    ///
+    /// **Swift-side only; the screen's wire form carries no `output`.** The
+    /// compatibility string a script reads is `TerminalOutputResult.output`, at
+    /// the top level of the answer, and it is this property — so the text
+    /// crosses the socket as the lines plus that one string, rather than as a
+    /// third copy nobody reads. Decoding re-derives the field from `lines`,
+    /// which is why a payload that carries an `output` anyway loses nothing.
     public var output: String { lines.joined(separator: "\n") }
 
     /// The three modes, their provenance, and their age — everything the input
@@ -265,12 +271,14 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     // MARK: - Coding
 
     private enum CodingKeys: String, CodingKey {
-        case lines, viewportStart, cursor, size, modes, source, ageMilliseconds, output
+        case lines, viewportStart, cursor, size, modes, source, ageMilliseconds
     }
 
-    /// Writes `output` beside `lines`, because it is a field a script reads out
-    /// of `tbd terminal output --json` and a computed property would otherwise
-    /// never reach the wire.
+    /// Written out field by field rather than synthesised, so the wire form is
+    /// stated in one readable place — and so `output` is provably not on it.
+    /// The lines are the text; `TerminalOutputResult` carries the joined string
+    /// for the consumers that read one, and a third copy inside the screen
+    /// would only make the answer longer.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(lines, forKey: .lines)
@@ -280,13 +288,12 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
         try container.encode(modes, forKey: .modes)
         try container.encode(source, forKey: .source)
         try container.encode(ageMilliseconds, forKey: .ageMilliseconds)
-        try container.encode(output, forKey: .output)
     }
 
     /// **Any `output` on the wire is ignored** and the field is re-derived from
-    /// `lines`, so the two can never disagree in a decoded value — including
-    /// for a payload that carries no `output` at all, which is what a future
-    /// producer that stopped writing it would send.
+    /// `lines`, so the two can never disagree in a decoded value. This producer
+    /// writes none; a payload from anywhere that carries one — an older
+    /// producer, a hand-written fixture — decodes to exactly the same value.
     ///
     /// Decoding runs the same validation construction does. A screen that
     /// arrives with a control character in it is refused at the boundary rather

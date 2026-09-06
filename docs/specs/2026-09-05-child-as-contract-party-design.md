@@ -165,9 +165,15 @@ stale (`2026-08-30-pty-holder-session-transport-design.md:548-553`).
   For `viewer`, the app reports its own monotonic interval since its last
   byte and the daemon forwards it; the interval is a duration, so no clock
   has to be shared.
-- **`output: String`** – the lines joined with `\n`, kept for one reason:
-  scripts and skills read `tbd terminal output` today and the CLI prints it.
-  It is derived from `lines` and carries no information of its own.
+
+The screen is one field short of that list. **`output: String`** — the lines
+joined with `\n` — is kept for one reason, that scripts and skills read `tbd
+terminal output` today and the CLI prints it, and it lives at the top level of
+`TerminalOutputResult` rather than inside the screen: it is derived from
+`lines`, carries no information of its own, and a copy nested in the screen
+would put the same characters on the wire twice over for no consumer at all.
+The Swift-side screen exposes it as a computed property, so one derivation
+serves both.
 
 The typed screen is the answer of the existing `terminal.output` method, not
 a sibling method beside it. A second method would leave the first one

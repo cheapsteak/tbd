@@ -3834,7 +3834,9 @@ public struct TerminalOutputResult: Codable, Sendable {
     }
 
     /// The holder arm. `output` is derived from the screen, so the two can
-    /// never disagree.
+    /// never disagree — and this is the only place the joined string crosses
+    /// the wire, since `TerminalScreen` encodes its `lines` and no copy of
+    /// them.
     public init(screen: TerminalScreen) {
         self.output = screen.output
         self.screen = screen
