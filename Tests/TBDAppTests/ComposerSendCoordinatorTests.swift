@@ -208,8 +208,19 @@ struct ComposerSendCoordinatorTests {
             },
             awaitSessionStart: { terminalID, incarnationID in
                 recorder.waitedOn.append((terminalID, incarnationID))
-                // Never answers on its own. Only the clock can end this send.
-                while !Task.isCancelled { await Task.yield() }
+                // Never answers on its own. Only the clock can end this send —
+                // and this parks until it does rather than spinning: a
+                // `Task.yield()` loop burns a core for the whole hold and, on a
+                // cooperative pool of one, can starve the very timer it is
+                // waiting for.
+                let (parked, release) = AsyncStream<Void>.makeStream()
+                await withTaskCancellationHandler {
+                    // Nothing is ever yielded into it; the loop ends when the
+                    // race cancels the loser and `finish()` closes the stream.
+                    for await _ in parked {}
+                } onCancel: {
+                    release.finish()
+                }
                 return false
             },
             clock: clock)
@@ -226,6 +237,39 @@ struct ComposerSendCoordinatorTests {
         }
         #expect(message.contains("did not report"))
         #expect(recorder.waitedOn.count == 1)
+    }
+
+    // MARK: - What the banner says
+
+    /// A refusal reaches the person in the daemon's own words. The error's
+    /// `localizedDescription` would prefix them with "RPC error: ", which names
+    /// a transport nobody typing into the composer has heard of.
+    @Test func aRefusalsMessageReachesTheBannerVerbatim() async throws {
+        let recorder = Recorder()
+        let outcome = await makeCoordinator(recorder: recorder, sendFails: true).send(
+            text: "hi", paths: [:], state: .running,
+            terminalID: UUID(), worktreeID: UUID())
+
+        #expect(outcome == .failed(message: "nope"))
+    }
+
+    private struct BoomError: LocalizedError {
+        var errorDescription: String? { "boom" }
+    }
+
+    /// The other branch: anything that is not an RPC refusal keeps its own
+    /// description. The unwrapping drops the daemon's framing, not the error.
+    @Test func aNonRPCFailureKeepsItsOwnDescription() async throws {
+        let coordinator = ComposerSendCoordinator(
+            send: { _ in throw BoomError() },
+            wake: { _, _, _ in .noOp },
+            awaitSessionStart: { _, _ in false })
+
+        let outcome = await coordinator.send(
+            text: "hi", paths: [:], state: .running,
+            terminalID: UUID(), worktreeID: UUID())
+
+        #expect(outcome == .failed(message: "boom"))
     }
 
     // MARK: - Refusals

@@ -141,8 +141,24 @@ final class ComposerSendCoordinator {
             composer send failed for terminal \(terminalID.uuidString, privacy: .public): \
             \(error, privacy: .public)
             """)
-            return .failed(message: error.localizedDescription)
+            return .failed(message: Self.bannerMessage(for: error))
         }
+    }
+
+    /// What the banner says about a send that did not land.
+    ///
+    /// A refusal comes back as `DaemonClientError.rpcError` carrying the
+    /// **daemon's own sentence** about why it refused — the only part of it a
+    /// person can act on. Its `localizedDescription` prefixes that with
+    /// "RPC error: ", which names a transport nobody using the composer has
+    /// heard of. Everything else keeps its description, because for those the
+    /// framing is the whole message.
+    static func bannerMessage(for error: any Error) -> String {
+        if let daemonError = error as? DaemonClientError,
+           case .rpcError(let message, _) = daemonError {
+            return message
+        }
+        return error.localizedDescription
     }
 
     // MARK: - Not running
