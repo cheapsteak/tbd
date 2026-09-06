@@ -522,9 +522,15 @@ This is a new kind of durable resource, so it names its reconcilers:
   worktree's attachments directory under the same GC-enabled guard. A revived
   worktree does not get its images back. This is best effort.
 - **Periodic sweep.** A new OrphanGC leg runs on the existing hourly cadence.
-  For each directory under attachments: keep it if its name is not a UUID or
-  names a live worktree row; otherwise delete files older than 14 days and
-  remove the directory when empty. It follows the existing leg shape: skip the
+  For each directory under attachments: keep it if its name is not a UUID;
+  otherwise, if no worktree row of that id remains, remove the whole directory
+  once nothing in it is younger than 14 days. Inside a directory whose row does
+  still exist, each file older than fourteen days is reclaimed on its own while
+  the directory stays — it is never removed while the row lives, even once it
+  holds nothing. That per-file reclaim is safe because a staged image is read at
+  paste time, or at resume time on the wake path: the file is needed for
+  minutes, never days, so one that has sat untouched for two weeks belongs to a
+  message nobody is going to send. It follows the existing leg shape: skip the
   whole leg on a failed database read, emit keep and reap lines into the plan,
   record each reclaim. Fourteen days is a soak knob, not a load-bearing number.
   A file whose token was deleted, or whose send failed, stays on disk for this
