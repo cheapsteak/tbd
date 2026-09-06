@@ -48,11 +48,31 @@ struct ClaudeConfigDirSerializerTests {
         let trace = Trace()
         // Same entry signal as above, for the same reason.
         let (firstEntered, firstDidEnter) = AsyncStream<Void>.makeStream()
+        // The first body does not finish until the second has run, so the
+        // interleaving is established by a signal rather than by a sleep the
+        // second body is assumed to beat. A fixed sleep asserts nothing about
+        // the serializer: on a loaded machine the second task simply is not
+        // scheduled inside the window, the marks come out in lane order, and
+        // the test fails without a bug — which is exactly what it did.
+        //
+        // `didRun` carries a Bool so a real regression FAILS rather than hangs:
+        // if an unrelated directory did queue behind this one the second body
+        // can never run, and only the watchdog's `false` releases the first.
+        // The wait is off the critical path — it costs nothing when the lanes
+        // are independent, and 30 s once when they are not.
+        let (secondRan, secondDidRun) = AsyncStream<Bool>.makeStream()
 
         async let first: Void = serializer.run(configDir: "/one") {
             await trace.mark("a-start")
             firstDidEnter.yield()
-            try? await Task.sleep(for: .milliseconds(40))
+            let watchdog = Task {
+                try? await Task.sleep(for: .seconds(30))
+                secondDidRun.yield(false)
+            }
+            var runs = secondRan.makeAsyncIterator()
+            let ranConcurrently = await runs.next() ?? false
+            watchdog.cancel()
+            if !ranConcurrently { await trace.mark("a-gave-up-waiting") }
             await trace.mark("a-end")
         }
         var firstEntries = firstEntered.makeAsyncIterator()
@@ -60,10 +80,13 @@ struct ClaudeConfigDirSerializerTests {
         async let second: Void = serializer.run(configDir: "/two") {
             await trace.mark("b-start")
             await trace.mark("b-end")
+            secondDidRun.yield(true)
         }
         _ = try await (first, second)
 
         let marks = await trace.marks
+        #expect(!marks.contains("a-gave-up-waiting"),
+                "an unrelated directory must not queue behind this one: \(marks)")
         #expect(marks.firstIndex(of: "b-end")! < marks.firstIndex(of: "a-end")!,
                 "an unrelated directory must not queue behind this one: \(marks)")
     }
