@@ -159,6 +159,38 @@ private final class Deadline: @unchecked Sendable {
     }
 }
 
+/// A one-shot hand-off slot for work the deadline action must NOT run itself.
+///
+/// The deadline action runs on the single shared `SubprocessWatchdog` thread,
+/// which every bounded call in the daemon depends on. Anything that could block
+/// there is a fleet-wide hazard, so the action deposits it here and the calling
+/// task — which is about to be resumed anyway, and owns nothing but itself —
+/// runs it on the way out. Whatever the deposited work does, it can delay only
+/// the one call that owns it.
+///
+/// `@unchecked Sendable` for the same reason `Deadline` is: the closure captures
+/// `Process`, `Pipe` and `FileHandle`, none of them `Sendable`. Exactly one
+/// deposit ever happens (the deadline action is behind `ContinuationGuard`) and
+/// `run()` takes the closure out under the lock, so at most one execution can
+/// ever be in flight.
+private final class DeferredWork: @unchecked Sendable {
+    private let slot = OSAllocatedUnfairLock<(@Sendable () -> Void)?>(initialState: nil)
+
+    /// Deposits work for the awaiting caller. Must happen BEFORE the
+    /// continuation is resumed — see the deadline action's comment.
+    func deposit(_ work: @escaping @Sendable () -> Void) { slot.withLock { $0 = work } }
+
+    /// Runs the deposited work, if any, exactly once. A no-op on every path
+    /// that never deposited (completion, spawn failure).
+    func run() {
+        let work = slot.withLock { state -> (@Sendable () -> Void)? in
+            defer { state = nil }
+            return state
+        }
+        work?()
+    }
+}
+
 /// Bridges the calling `Task`'s cancellation into the deadline mechanism as a
 /// THIRD, independent trigger alongside the watchdog-thread and clock armers
 /// (see `Deadline` above). `runBoundedProcess` runs as part of its caller's
@@ -311,10 +343,31 @@ enum BoundedProcessRunnerError: Error, Equatable, LocalizedError {
 /// The deadline is immune to GCD-pool starvation via two independent guarantees:
 ///
 /// 1. SCHEDULING — the deadline AND the SIGTERM→SIGKILL escalation fire on the
-///    dedicated `SubprocessWatchdog` thread, never on a GCD queue. The whole
-///    fire path (claim guard → detach readability handlers → finish accumulators
-///    → SIGTERM → resume) runs on that thread with no GCD hop before the
-///    continuation resumes.
+///    dedicated `SubprocessWatchdog` thread, never on a GCD queue. The fire path
+///    (claim guard → SIGTERM → schedule the SIGKILL escalation → hand the
+///    snapshot to the caller → resume) runs on that thread with no GCD hop
+///    before the continuation resumes.
+///
+///    **Every step of that path is non-blocking, and that is a property of the
+///    mechanism rather than of any one call.** One thread fires every bounded
+///    deadline in the daemon, so work that can wait on something there does not
+///    delay one call — it stops `GitManager`, `TmuxManager`, `ProviderRunner`
+///    and every completion probe from ever seeing their deadlines, and it stops
+///    the SIGKILL escalation this action just queued behind itself, which is the
+///    very thing that would have unblocked it. The snapshot is the one step that
+///    can wait: it acquires the accumulator lock, which a drain worker holds
+///    across a blocking read on a pipe whose write end the child — or a
+///    grandchild that inherited it — still holds. So the action hands the
+///    snapshot to the task that is already awaiting this call (`DeferredWork`)
+///    and that task runs it after being resumed. A wedged drain can then hold up
+///    the one call that owns it and nothing else.
+///
+///    The pty path never had this exposure, because it sets `O_NONBLOCK` on the
+///    primary at creation. The pipe path cannot follow it there: its drain goes
+///    through `availableData`, which turns a read errno into an Objective-C
+///    exception Swift cannot catch (the reason `readAvailableRaw` exists at
+///    all). Structure, not ordering, is what closes the hazard for both.
+///
 /// 2. AUTHORITY — the completion path records a monotonic start instant and, if
 ///    the child's exit is observed only AFTER the full deadline elapsed, reports
 ///    `.timedOut` regardless of exit status. The timeout bounds the CALL, not
@@ -373,9 +426,18 @@ func runBoundedProcess(
     // `onCancel` always has somewhere to register with even if the calling
     // task is already cancelled before `operation` runs.
     let cancellationRelay = CancellationRelay()
+    // The deadline path's snapshot, run here rather than on the watchdog thread
+    // (see SCHEDULING). Created outside the continuation closure because this is
+    // the scope that runs it.
+    let deferredSnapshot = DeferredWork()
 
     return try await withTaskCancellationHandler(operation: {
-    try await withCheckedThrowingContinuation { continuation in
+    // Runs on every exit — the value path and the spawn-failure throw — and is
+    // a no-op unless the deadline path deposited something. Deliberately the
+    // last thing this call does: it may wait on a drain worker parked on a pipe
+    // a grandchild still holds, and this task is the only thing it may delay.
+    defer { deferredSnapshot.run() }
+    return try await withCheckedThrowingContinuation { continuation in
         let process = Process()
         let stdoutAccumulator = PipeDataAccumulator()
         let stderrAccumulator = PipeDataAccumulator()
@@ -417,11 +479,15 @@ func runBoundedProcess(
             // Non-blocking primary. `readAvailableRaw` runs on a GCD worker and
             // holds the accumulator lock across its `read(2)`, so a spurious
             // readability wakeup on a BLOCKING descriptor would park that worker
-            // holding the lock — and `finish()`, which the watchdog thread calls
-            // on the deadline path, would then block behind it. That thread is
-            // the one this file promises never blocks. `EAGAIN` is already a
-            // "keep draining" return, and `finish()` sets this flag itself, so
-            // the pattern is unchanged, only earlier.
+            // holding the lock — and `finish()` would then block behind it,
+            // until a child that may never write again exits. `EAGAIN` is
+            // already a "keep draining" return, and `finish()` sets this flag
+            // itself, so the pattern is unchanged, only earlier. The deadline
+            // path is insulated from that wait for both stdio modes by a
+            // different means — it no longer snapshots on the watchdog thread
+            // at all (see SCHEDULING) — so this flag is what bounds the wait
+            // for the OTHER snapshot callers, the termination and
+            // spawn-failure paths.
             let flags = fcntl(primary, F_GETFL)
             if flags >= 0 {
                 _ = fcntl(primary, F_SETFL, flags | O_NONBLOCK)
@@ -486,27 +552,34 @@ func runBoundedProcess(
         // SAME watchdog thread after a brief grace (a GCD asyncAfter would
         // starve alongside the timer it replaces; the grace is deliberately NOT
         // virtualized, so the kill path under test stays the real kill path),
-        // then stop draining and resume `.timedOut`.
+        // hand the snapshot to the awaiting caller, and resume `.timedOut`.
         //
-        // **Signal BEFORE snapshotting, and the order is load-bearing.**
-        // `snapshot()` does not read the pipe under a lock it might wait on for
-        // long — `finish()` sets O_NONBLOCK before draining — but it must still
-        // ACQUIRE the accumulator lock, and a drain worker can be parked inside
-        // `FileHandle.availableData` on a pipe read end that is still blocking.
-        // That read returns only at EOF, and the write end is held by the very
-        // child this action exists to kill. Snapshotting first therefore parks
-        // the watchdog thread — the one thread this file promises never blocks —
-        // behind the process it was about to end, until that process exits on
-        // its own; the SIGTERM below is never reached, and a deadline of 300 ms
-        // is observed 60 s later. Killing first is what makes the parked read
-        // return. (Measured: a 300 ms deadline against a `sleep 60` child
-        // resolved after ~49 s.) The residual wait is now bounded by the child's
-        // death — the 500 ms SIGKILL escalation — rather than by its lifetime.
+        // **Nothing here may wait on anything, because this is the one thread
+        // every bounded deadline in the daemon shares.** Signalling and
+        // scheduling are pure bookkeeping; the snapshot is not. `snapshot()`
+        // does not read the pipe under a lock it might hold for long —
+        // `finish()` sets O_NONBLOCK before draining — but it must still ACQUIRE
+        // the accumulator lock, and a drain worker can hold that lock across a
+        // blocking `FileHandle.availableData` on a pipe read end whose write end
+        // is held by the very child this action exists to kill, or by a
+        // grandchild that inherited it and outlives the kill. Running it here
+        // would park the watchdog behind that child: the SIGKILL escalation just
+        // queued on this same thread could never run, so the one event that
+        // would have released the read never happens, and every other bounded
+        // call in the daemon loses its deadline along with this one. The action
+        // therefore deposits the snapshot in `deferredSnapshot` and the awaiting
+        // task runs it — the outcome carries no output, so nothing about the
+        // result waits on it, and a wedged drain delays only this call.
+        //
+        // The deposit MUST precede the resume. The resumed task runs the deposit
+        // on its way out; hand it over after resuming and it can find an empty
+        // slot, leaving the drain handlers attached and the read ends open for
+        // the lifetime of the process.
         //
         // `claim()` is the FIRST statement, before any side effect. That is what
         // makes a superseded armer harmless: a deadline task that was cancelled
         // after its sleep had already resumed still reaches here, fails the
-        // claim, and returns without snapshotting, signalling, or resuming. If
+        // claim, and returns without signalling, depositing, or resuming. If
         // anyone ever moves a side effect above the claim, that stops being true.
         let deadline = Deadline {
             guard state.claim() else { return }
@@ -517,7 +590,7 @@ func runBoundedProcess(
                     if process.isRunning { kill(pid, SIGKILL) }
                 }
             }
-            _ = snapshot()
+            deferredSnapshot.deposit { _ = snapshot() }
             continuation.resume(returning: .timedOut)
         }
 

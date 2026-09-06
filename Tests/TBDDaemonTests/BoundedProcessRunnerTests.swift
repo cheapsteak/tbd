@@ -1,6 +1,7 @@
 import Darwin
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 
 // Tier 2: spawns short-lived local processes (/usr/bin/env, /bin/cat) it fully
@@ -262,5 +263,173 @@ struct BoundedProcessRunnerTests {
         }
         #expect((String(data: stdout, encoding: .utf8) ?? "").contains("out"))
         #expect((String(data: stderr, encoding: .utf8) ?? "").contains("err"))
+    }
+
+    // MARK: - The deadline path must not block the shared watchdog
+
+    /// A child that IGNORES SIGTERM must still be gone when the call returns,
+    /// which can only happen if the SIGKILL escalation ran.
+    ///
+    /// The escalation is queued on the same `SubprocessWatchdog` thread that
+    /// just ran the deadline action, so it can only fire if that action left the
+    /// thread free. That is why the snapshot no longer runs there: it acquires
+    /// the accumulator lock, a drain worker can hold that lock across a blocking
+    /// read on a pipe the child still owns, and an action that waits there waits
+    /// for the escalation it queued behind itself — a deadlock that would take
+    /// every other bounded deadline in the daemon down with it.
+    ///
+    /// `trap '' TERM` before `exec` is what makes the child TERM-proof and keeps
+    /// it a single process: `SIG_IGN` survives `exec`, so the sleeping process
+    /// itself ignores SIGTERM, holds the stdout pipe, and strands no grandchild.
+    ///
+    /// The 20 s bound is a hang-catcher, not a wall-clock tolerance: a working
+    /// escalation resolves this in ~1.2 s and a broken one waits the 30 s child
+    /// out, so nothing in between is a legitimate outcome.
+    ///
+    /// Verified by mutation. Blocking the deadline action for 30 s where the
+    /// snapshot used to run turns this red at 30.6 s against 1.2 s green.
+    @Test func aTermIgnoringChildIsKilledByTheEscalationAtItsDeadline() async throws {
+        let scratch = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let pidFile = scratch.appendingPathComponent("pid")
+
+        let started = ContinuousClock.now
+        let outcome = try await runBoundedProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", Self.termIgnoringScript(pidFile: pidFile)],
+            currentDirectory: nil,
+            timeout: .milliseconds(300),
+            stdio: .pipes)
+        let elapsed = ContinuousClock.now - started
+
+        guard case .timedOut = outcome else {
+            Issue.record("expected .timedOut, got \(outcome)")
+            return
+        }
+        #expect(elapsed < .seconds(20),
+                "a 300 ms deadline resolved after \(elapsed) — the call waited its child out")
+
+        let recorded = Self.readPid(from: pidFile)
+        defer { if let recorded { kill(recorded, SIGKILL) } }
+        let pid = try #require(recorded, "the child never recorded its pid")
+        try await waitFor(
+            "the TERM-ignoring child to be reaped",
+            deadline: .seconds(20),
+            observed: { Self.isAlive(pid) ? "pid \(pid) still alive" : "pid \(pid) gone" }
+        ) { !Self.isAlive(pid) }
+    }
+
+    /// A second bounded call's deadline AND its SIGKILL escalation must both be
+    /// served while a first call's timeout path is still resolving.
+    ///
+    /// This is the property the shared watchdog exists to provide, and the one a
+    /// blocking deadline action destroys. It discriminates through the SECOND
+    /// call's child rather than its wall clock, because a wall clock cannot see
+    /// the difference: `runBoundedProcess` also arms its deadline on the
+    /// injected clock, whose sleeper runs on the cooperative executor, so a
+    /// wedged watchdog still lets the second call report `.timedOut` roughly on
+    /// time. What it cannot do is deliver the SIGKILL, which is queued on the
+    /// wedged thread and nowhere else — so a TERM-ignoring child that outlives
+    /// its call is the signal that the watchdog was not free.
+    ///
+    /// The second call is awaited FIRST, and its child checked against a bound
+    /// far shorter than the first call's child could supply, so the failure is
+    /// attributable: it is the second call's own escalation that did not arrive,
+    /// not the pair taking too long.
+    ///
+    /// Verified by mutation, twice, and the two runs are what separate this test
+    /// from its neighbour. Blocking the deadline action wherever it runs turns
+    /// both tests red on their wall-clock bounds. Blocking it ONLY on the
+    /// watchdog thread leaves every deadline here firing on time — the clock
+    /// armer serves them from the cooperative executor — and this test still
+    /// goes red, on both children still being alive 8 s after their calls
+    /// returned. Nothing but the watchdog can deliver those SIGKILLs.
+    @Test func aSecondDeadlineIsServedWhileAnothersTimeoutPathResolves() async throws {
+        let scratch = try Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let firstPidFile = scratch.appendingPathComponent("first")
+        let secondPidFile = scratch.appendingPathComponent("second")
+
+        // The first deadline fires well before the second, so the second is
+        // armed and pending on the watchdog while the first is being resolved.
+        let started = ContinuousClock.now
+        async let first = runBoundedProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", Self.termIgnoringScript(pidFile: firstPidFile)],
+            currentDirectory: nil,
+            timeout: .milliseconds(200),
+            stdio: .pipes)
+        async let second = runBoundedProcess(
+            executable: "/bin/sh",
+            arguments: ["-c", Self.termIgnoringScript(pidFile: secondPidFile)],
+            currentDirectory: nil,
+            timeout: .milliseconds(600),
+            stdio: .pipes)
+
+        // The second call's own guarantees, checked before the first is even
+        // awaited: a resumed deadline and, 8 s later at the outside, a child
+        // that only the watchdog's SIGKILL could have removed.
+        let secondOutcome = try await second
+        let secondElapsed = ContinuousClock.now - started
+        #expect(secondElapsed < .seconds(20),
+                "a 600 ms deadline resolved after \(secondElapsed) — the call waited its child out")
+        guard case .timedOut = secondOutcome else {
+            Issue.record("expected the second call to time out, got \(secondOutcome)")
+            return
+        }
+
+        let recordedSecond = Self.readPid(from: secondPidFile)
+        defer { if let recordedSecond { kill(recordedSecond, SIGKILL) } }
+        let secondPid = try #require(recordedSecond, "the second child never recorded its pid")
+        try await waitFor(
+            "the second call's TERM-ignoring child to be reaped",
+            deadline: .seconds(8),
+            observed: { Self.isAlive(secondPid) ? "pid \(secondPid) still alive" : "pid \(secondPid) gone" }
+        ) { !Self.isAlive(secondPid) }
+
+        let firstOutcome = try await first
+        let elapsed = ContinuousClock.now - started
+        #expect(elapsed < .seconds(20),
+                "both 200/600 ms deadlines resolved only after \(elapsed)")
+        guard case .timedOut = firstOutcome else {
+            Issue.record("expected the first call to time out, got \(firstOutcome)")
+            return
+        }
+        let recordedFirst = Self.readPid(from: firstPidFile)
+        defer { if let recordedFirst { kill(recordedFirst, SIGKILL) } }
+        let firstPid = try #require(recordedFirst, "the first child never recorded its pid")
+        try await waitFor(
+            "the first call's TERM-ignoring child to be reaped",
+            deadline: .seconds(8),
+            observed: { Self.isAlive(firstPid) ? "pid \(firstPid) still alive" : "pid \(firstPid) gone" }
+        ) { !Self.isAlive(firstPid) }
+    }
+
+    // MARK: - Fixtures
+
+    /// A `sh -c` body that records its own pid, then becomes a 30 s sleeper that
+    /// ignores SIGTERM. `SIG_IGN` is inherited across `exec`, so the surviving
+    /// process is the shell's own pid and nothing is left behind for a sweep.
+    private static func termIgnoringScript(pidFile: URL) -> String {
+        "trap '' TERM; echo $$ > '\(pidFile.path)'; exec /bin/sleep 30"
+    }
+
+    private static func makeScratchDirectory() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-runner-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private static func readPid(from file: URL) -> pid_t? {
+        guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+        return pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Whether a pid is still signallable. A reaped child is `ESRCH`; anything
+    /// else (including `EPERM`, which this test can never see for its own
+    /// children) counts as alive so the wait reports rather than passing blind.
+    private static func isAlive(_ pid: pid_t) -> Bool {
+        kill(pid, 0) == 0 || errno != ESRCH
     }
 }
