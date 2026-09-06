@@ -481,12 +481,27 @@ func runBoundedProcess(
             return (out, err)
         }
 
-        // Deadline action. On fire: stop draining, kill the DIRECT child
-        // (grandchildren keep their inherited write ends — see above), escalate
-        // to SIGKILL on the SAME watchdog thread after a brief grace (a GCD
-        // asyncAfter would starve alongside the timer it replaces; the grace is
-        // deliberately NOT virtualized, so the kill path under test stays the
-        // real kill path), and resume `.timedOut`.
+        // Deadline action. On fire: kill the DIRECT child (grandchildren keep
+        // their inherited write ends — see above), escalating to SIGKILL on the
+        // SAME watchdog thread after a brief grace (a GCD asyncAfter would
+        // starve alongside the timer it replaces; the grace is deliberately NOT
+        // virtualized, so the kill path under test stays the real kill path),
+        // then stop draining and resume `.timedOut`.
+        //
+        // **Signal BEFORE snapshotting, and the order is load-bearing.**
+        // `snapshot()` does not read the pipe under a lock it might wait on for
+        // long — `finish()` sets O_NONBLOCK before draining — but it must still
+        // ACQUIRE the accumulator lock, and a drain worker can be parked inside
+        // `FileHandle.availableData` on a pipe read end that is still blocking.
+        // That read returns only at EOF, and the write end is held by the very
+        // child this action exists to kill. Snapshotting first therefore parks
+        // the watchdog thread — the one thread this file promises never blocks —
+        // behind the process it was about to end, until that process exits on
+        // its own; the SIGTERM below is never reached, and a deadline of 300 ms
+        // is observed 60 s later. Killing first is what makes the parked read
+        // return. (Measured: a 300 ms deadline against a `sleep 60` child
+        // resolved after ~49 s.) The residual wait is now bounded by the child's
+        // death — the 500 ms SIGKILL escalation — rather than by its lifetime.
         //
         // `claim()` is the FIRST statement, before any side effect. That is what
         // makes a superseded armer harmless: a deadline task that was cancelled
@@ -495,7 +510,6 @@ func runBoundedProcess(
         // anyone ever moves a side effect above the claim, that stops being true.
         let deadline = Deadline {
             guard state.claim() else { return }
-            _ = snapshot()
             let pid = process.processIdentifier
             if pid > 0 {
                 kill(pid, SIGTERM)
@@ -503,6 +517,7 @@ func runBoundedProcess(
                     if process.isRunning { kill(pid, SIGKILL) }
                 }
             }
+            _ = snapshot()
             continuation.resume(returning: .timedOut)
         }
 
