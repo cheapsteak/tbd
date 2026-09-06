@@ -117,10 +117,10 @@ import Testing
         #expect(screen.cursor.column == 4)
     }
 
-    /// `cursorHidden` is not a public property, so visibility is a `DECRQM` 25
-    /// answer read through the collecting delegate. This is also what proves
-    /// that probe reaches the terminal at all: a reader that never asked would
-    /// report the default in both directions.
+    /// `cursorHidden` is not a public property, so visibility is tracked on the
+    /// delegate: SwiftTerm calls `showCursor`/`hideCursor` whenever the child
+    /// sets or resets mode 25. Asserted in both directions, because a reader
+    /// wired to the mode's default would satisfy either half alone.
     @Test("cursor visibility follows DECTCEM")
     func cursorVisibility() async throws {
         let harness = try Harness(columns: 40, rows: 8)
@@ -131,6 +131,42 @@ import Testing
         #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == false)
         await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?25h"))
         #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == true)
+    }
+
+    /// **A screen read must not feed the terminal.** This is the case that
+    /// separates a tracked flag from a `DECRQM` probe.
+    ///
+    /// `screen` runs on every `terminal.output`, including against a reader
+    /// whose drain thread is mid-stream. SwiftTerm's parser carries its state
+    /// across `feed` calls and an `ESC` in any state aborts the pending
+    /// sequence, so a probe issued while the last read ended mid-sequence would
+    /// truncate the child's — routine, since a TUI repaint larger than the pty
+    /// buffer arrives split.
+    ///
+    /// Here the first ingest ends inside an SGR's parameters. Read the screen,
+    /// then deliver the rest: the halves must join and colour the `X`. A probe
+    /// would have aborted the `ESC[38;5;`, leaving `196m` to print as literal
+    /// text — so the whole line, not just its colour, is the assertion.
+    @Test("reading a screen does not abort a sequence split across two reads")
+    func readingDoesNotAbortASplitSequence() async throws {
+        let harness = try Harness(columns: 40, rows: 8)
+        defer { harness.tearDown() }
+
+        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?25l"))
+        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[38;5;"))
+
+        // Reading mid-sequence answers with the visibility last set, and the
+        // half-parsed sequence has printed nothing.
+        let midParse = try await harness.reader.screen(maxLines: 8)
+        #expect(midParse.cursor.visible == false)
+        #expect(midParse.lines.isEmpty)
+
+        await harness.reader.ingest(preamble: Self.data("196mX"))
+        let screen = try await harness.reader.screen(maxLines: 8)
+        #expect(
+            screen.lines.first == "X",
+            "the split SGR did not complete — it printed as text: \(screen.lines)")
+        #expect(screen.cursor.visible == false)
     }
 
     // MARK: - viewportStart
@@ -197,10 +233,9 @@ import Testing
         #expect(try await harness.reader.screen(maxLines: 8).ageMilliseconds == 2_460_000)
     }
 
-    /// The cursor-visibility probe feeds the terminal a `DECRQM` query, and a
-    /// query the daemon asked its own emulator is not a byte the child sent. If
-    /// it counted, every read would reset the age it was taken to measure and
-    /// no screen could ever be reported stale.
+    /// A read is not a byte the child sent. If anything a read did counted,
+    /// every read would reset the age it was taken to measure and no screen
+    /// could ever be reported stale.
     @Test("reading a screen does not make the screen look fresher")
     func readingDoesNotResetTheAge() async throws {
         let clock = SteppedMonotonicClock()

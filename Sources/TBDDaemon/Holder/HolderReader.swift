@@ -1226,11 +1226,11 @@ private final class HolderEmulator: @unchecked Sendable {
     ///
     /// Under `terminalLock` like everything else here, and stamped in `feed`
     /// only. That placement is the whole definition: `snapshotPreamble`'s
-    /// `DECRQM` probes and `screen`'s cursor-visibility probe feed the
-    /// `Terminal` directly rather than through this method, so the daemon
-    /// asking its own emulator a question can never make a stale screen look
-    /// fresh. Keep it that way — routing a probe through `feed` would make
-    /// every read reset the age it was taken to measure.
+    /// `DECRQM` probes feed the `Terminal` directly rather than through this
+    /// method, so the daemon asking its own emulator a question can never make
+    /// a stale screen look fresh. Keep it that way — routing a probe through
+    /// `feed` would make every read reset the age it was taken to measure.
+    /// `screen` asks nothing at all: it reads the delegate's `DECTCEM` flag.
     private var lastByteAt: ContinuousClock.Instant?
 
     init(
@@ -1302,12 +1302,24 @@ private final class HolderEmulator: @unchecked Sendable {
     /// `totalLinesTrimmed` until `getScrollInvariantLine` returns nil, because
     /// there is no public line count and `Buffer.lines` is internal.
     ///
-    /// Two probes run inside the hold and neither touches `lastByteAt`. The
-    /// cursor's visibility is a `DECRQM` 25 answer, because `cursorHidden` is
-    /// not public, and it is read the way `snapshotPreamble` reads its modes —
-    /// through `DelegateModeReader` with the delegate switched to collecting,
-    /// so the answer reaches this method instead of arriving at the child as if
-    /// somebody had typed it.
+    /// **Nothing here feeds the terminal**, which is why the cursor's
+    /// visibility is read from a flag the delegate keeps rather than probed
+    /// with a `DECRQM` 25 query. `Terminal.cursorHidden` is not public, but
+    /// SwiftTerm calls `showCursor`/`hideCursor` on its delegate every time the
+    /// child sets or resets `DECTCEM`, so the fact arrives without asking.
+    ///
+    /// A probe here would be fed into a live parser: this method runs on every
+    /// `terminal.output`, including against a reader whose drain thread is
+    /// mid-stream, and SwiftTerm's parser carries its state across `feed` calls
+    /// while an `ESC` in any state aborts whatever sequence is pending. A read
+    /// whose last chunk ended mid-sequence — routine when a TUI repaint exceeds
+    /// the pty buffer — would therefore truncate the child's sequence, print
+    /// its remainder into the screen model as literal text, and swallow the
+    /// reply to a query the child was in the middle of asking. `snapshotPreamble`
+    /// still probes, once per attach; its own doc argues that case.
+    ///
+    /// It does not touch `lastByteAt` either — a daemon reading its own
+    /// emulator must not make a stale screen look fresh.
     func screen(maxLines: Int, source: TerminalScreen.Source) throws -> TerminalScreen {
         try terminal.terminalLock.withLock {
             var enumerated: [String] = []
@@ -1339,7 +1351,7 @@ private final class HolderEmulator: @unchecked Sendable {
             let cursor = TerminalScreen.Cursor(
                 row: terminal.buffer.y,
                 column: terminal.buffer.x,
-                visible: cursorIsVisible())
+                visible: delegate.cursorVisible)
 
             return try TerminalScreen(
                 lines: lines,
@@ -1371,20 +1383,6 @@ private final class HolderEmulator: @unchecked Sendable {
             bracketedPaste: terminal.bracketedPasteMode,
             applicationCursor: terminal.applicationCursor,
             alternateScreen: terminal.isCurrentBufferAlternate)
-    }
-
-    /// `DECTCEM` (mode 25) through the collecting delegate. Caller holds
-    /// `terminalLock`.
-    ///
-    /// A terminal that does not answer is read as a visible cursor, which is
-    /// the state a terminal is in until a program hides it — the same default
-    /// the mode itself has.
-    private func cursorIsVisible() -> Bool {
-        let reader = DelegateModeReader(terminal: terminal, delegate: delegate)
-        delegate.beginCollectingReplies()
-        defer { delegate.endCollectingReplies() }
-        guard let answer = reader.requestMode(25, decPrivate: true) else { return true }
-        return answer == 1
     }
 
     /// How long ago this emulator last consumed a byte, in milliseconds, never
@@ -1486,11 +1484,19 @@ private final class HolderEmulator: @unchecked Sendable {
     }
 }
 
-/// The emulator's only required delegate hook: bytes the terminal itself wants
-/// to send back — device-status replies, cursor-position reports, the answers
-/// to `DECRQM`. `TerminalDelegate` declares 31 methods and a public extension
-/// defaults 30 of them; this is the one that has no default, and routing it
-/// anywhere but the child would turn every terminal query into a hang.
+/// The emulator's delegate: the terminal's outbound wire, plus the one piece of
+/// its state that is not readable from a public property.
+///
+/// `send` is the required hook — bytes the terminal itself wants to send back:
+/// device-status replies, cursor-position reports, the answers to `DECRQM`.
+/// `TerminalDelegate` declares 31 methods and a public extension defaults 30 of
+/// them; `send` is the one that has no default, and routing it anywhere but the
+/// child would turn every terminal query into a hang.
+///
+/// `showCursor`/`hideCursor` are overridden from that default set, because
+/// being *told* about `DECTCEM` is the only way to know the cursor's visibility
+/// without asking the terminal — and asking is what `HolderEmulator.screen`
+/// must never do.
 private final class ReplyForwardingDelegate: TerminalDelegate {
     private let reply: @Sendable (ArraySlice<UInt8>) -> Void
     /// While true, replies are kept here instead of being written to the pty.
@@ -1502,8 +1508,43 @@ private final class ReplyForwardingDelegate: TerminalDelegate {
     private var collecting = false
     private var collected: [UInt8] = []
 
+    /// Whether the child's cursor is currently visible — `DECTCEM`, mode 25.
+    ///
+    /// `Terminal.cursorHidden` is not public, and the emulator must not ask for
+    /// it: a `DECRQM` probe fed into a parser that is mid-sequence aborts the
+    /// child's sequence (see `HolderEmulator.screen`). So the fact is taken
+    /// where SwiftTerm volunteers it instead — `showCursor`/`hideCursor` are
+    /// called on the delegate whenever the child sets or resets the mode.
+    /// Starts `true`, the mode's own default: a terminal shows its cursor until
+    /// a program hides it.
+    ///
+    /// Like `collecting`, this needs no lock of its own. The terminal calls its
+    /// delegate from inside a parse, which always runs under `terminalLock`,
+    /// and `HolderEmulator.screen` reads the flag under that same lock.
+    ///
+    /// **One residual, and it is a reset.** `RIS` (`ESC c`, via SwiftTerm's
+    /// `resetToInitialState`) and `DECSTR` (`CSI ! p`) both clear
+    /// `cursorHidden` by assignment, with no delegate call. So a reset arriving
+    /// while the cursor is hidden leaves this reading hidden while the terminal
+    /// is showing. It self-corrects on the child's next *hide-then-show* pair,
+    /// not on a bare `DECSET 25`: `Terminal.showCursor` returns early when
+    /// `cursorHidden` is already false, so the call the flag needs never
+    /// happens until something has set it true again. A TUI hides its cursor
+    /// for a repaint and shows it afterwards, so in practice that is the next
+    /// repaint — but a child that resets and only ever shows reads hidden until
+    /// it does hide once.
+    private(set) var cursorVisible = true
+
     init(reply: @escaping @Sendable (ArraySlice<UInt8>) -> Void) {
         self.reply = reply
+    }
+
+    func showCursor(source: Terminal) {
+        cursorVisible = true
+    }
+
+    func hideCursor(source: Terminal) {
+        cursorVisible = false
     }
 
     func send(source: Terminal, data: ArraySlice<UInt8>) {
@@ -1547,9 +1588,13 @@ private final class ReplyForwardingDelegate: TerminalDelegate {
 /// rather than a suppressing one: the same switch that keeps the answers away
 /// from the child is what makes them readable here.
 ///
-/// The caller must hold `terminal.terminalLock` and must have put the delegate
-/// in collecting mode; `HolderEmulator.snapshotPreamble` is the only construction
-/// site and does both.
+/// The caller must hold `terminal.terminalLock` — the lock every parse, and so
+/// every `send`, arrives under — and must have put the delegate in collecting
+/// mode with `beginCollectingReplies`, or the answers go to the child and this
+/// reads nothing. `HolderEmulator.snapshotPreamble` is the only construction
+/// site, and it does both. Deliberately only that one: a probe is safe there
+/// because it runs once per attach, and unsafe on the per-`terminal.output`
+/// path, where it would abort a sequence the child is mid-way through sending.
 private struct DelegateModeReader: ModeReplyReader {
     let terminal: Terminal
     let delegate: ReplyForwardingDelegate
