@@ -63,6 +63,14 @@ public actor OrphanGC {
     private let deletionQueueCollector: DeletionQueueCollector
     private let profileDirCollector: ProfileDirCollector
     private let holderRendezvousCollector: HolderRendezvousCollector
+    private let attachmentsCollector: AttachmentsCollector
+    /// The attachments root both halves of the reconciler pair read — the hourly
+    /// sweep through `attachmentsCollector`, and `removedWorktreeCleanup`
+    /// directly. Cached at init from the injected seam, so ONE seam governs
+    /// both: re-resolving `TBDConstants.attachmentsDir` per call would let an
+    /// injected base steer the sweep while the event-driven half kept walking
+    /// the process-global one.
+    private let attachmentsBase: URL
     private let rowlessHolderCollector: RowlessHolderCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
@@ -148,6 +156,7 @@ public actor OrphanGC {
         orphanProcessPollInterval: Duration = .milliseconds(100),
         clock: any Clock<Duration> = ContinuousClock(),
         holdersBase: URL? = nil,
+        attachmentsBase: URL? = nil,
         holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
         rowlessHolderHandshake: (@Sendable (String) async -> RowlessHolderHandshake)? = nil,
         rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil
@@ -186,6 +195,10 @@ public actor OrphanGC {
             now: resolvedNow,
             handshake: rowlessHolderHandshake,
             reclaimer: rowlessHolderReclaimer)
+        let resolvedAttachmentsBase = attachmentsBase ?? TBDConstants.attachmentsDir
+        self.attachmentsBase = resolvedAttachmentsBase
+        self.attachmentsCollector = AttachmentsCollector(
+            base: resolvedAttachmentsBase, now: resolvedNow)
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -293,6 +306,10 @@ public actor OrphanGC {
         )
 
         await reclaimRetainedTranscripts(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
+        await reclaimAttachments(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
@@ -913,6 +930,118 @@ public actor OrphanGC {
         }
     }
 
+    // MARK: - Composer attachments
+
+    /// Reclaims `~/tbd/attachments/<worktreeID>/` directories whose worktree is
+    /// gone — the named periodic reconciler for the composer's attachment files
+    /// (`docs/specs/2026-09-05-transcript-composer-design.md`, "Reclaim").
+    ///
+    /// Its event-driven sibling is `removedWorktreeCleanup`, which unlinks a
+    /// worktree's directory the moment the worktree is archived. That path is
+    /// best effort by construction — a crash between the archive's commit point
+    /// and the callback, or a worktree removed outside TBD, leaves a directory
+    /// nobody unlinked — and this is the standing guarantee behind it. That
+    /// division is the doctrine the whole codebase uses: creation against the
+    /// filesystem cannot be transactional, so the sweep is the mechanism and
+    /// create-time cleanup is the optimisation.
+    ///
+    /// Gated by `transcriptComposerEnabled` on top of `gcEnabled`, because the
+    /// feature that writes these files is itself behind that flag — a machine
+    /// that has never opened the composer has nothing here for this phase to be
+    /// right or wrong about. `dryRun` bypasses the flag exactly as `sweep` lets
+    /// it bypass `gcEnabled`: planning is read-only, and someone deciding whether
+    /// to enable a default-off flag needs to see what enabling it would reclaim.
+    /// A NON-dry run still requires the flag.
+    ///
+    /// **An unreadable worktree list skips the whole leg**, rather than reading
+    /// an empty list as "no worktree is live" and reaping every directory.
+    ///
+    /// The row read is unfiltered on purpose: an archived row is still a row, and
+    /// the archive path's own unlink is what handles its directory. Filtering to
+    /// `.active` here would let this leg reap out from under a worktree somebody
+    /// can still revive.
+    ///
+    /// A directory whose row still exists is never removed, but the files in it
+    /// age individually: a staged image is read at paste time, or at resume time
+    /// on the wake path, so one the floor has passed is spent and goes on its
+    /// own.
+    ///
+    /// No `ReapRecord` is written. The record type is keyed by the worktree a
+    /// reap removed and carries a restorability pointer; there is nothing a
+    /// `tbd gc restore` could put back here, because the image was staged for a
+    /// message in a worktree that no longer exists — or, for a per-file reap,
+    /// for one nobody sent in two weeks.
+    private func reclaimAttachments(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        guard config.transcriptComposerEnabled || dryRun else { return }
+
+        let live: Set<UUID>
+        do {
+            live = Set(try await db.worktrees.list().map(\.id))
+        } catch {
+            logger.error("""
+            gc: worktree rows unreadable this sweep \
+            (\(error.localizedDescription, privacy: .public)) — skipping the attachments phase
+            """)
+            planned.append("KEEP rows-unreadable attachments")
+            return
+        }
+
+        for candidate in attachmentsCollector.candidates() {
+            switch attachmentsCollector.decide(
+                candidate, liveWorktreeIDs: live,
+                floorDays: AttachmentsCollector.defaultFloorDays
+            ) {
+            case .keep(let reason):
+                planned.append("KEEP \(reason) \(candidate.path)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) \(candidate.path, privacy: .public)
+                """)
+            case .reap:
+                planned.append("REAP attachments \(candidate.path)")
+                // This leg's guard is `transcriptComposerEnabled || dryRun`, so
+                // every line below runs only with the flag actually on.
+                guard !dryRun else { continue }
+                guard attachmentsCollector.reap(candidate) else {
+                    planned.append("KEEP unlink-failed \(candidate.path)")
+                    logger.warning("""
+                    gc: could not unlink \(candidate.path, privacy: .public)
+                    """)
+                    continue
+                }
+                reaped += 1
+                logger.info("""
+                gc: reclaimed composer attachments \(candidate.path, privacy: .public)
+                """)
+            case .reapFiles(let stale, let kept):
+                // The directory belongs to a row that still exists, so it stays
+                // whatever happens to the files inside it — including when the
+                // last one goes and it is left empty.
+                planned.append("KEEP live-worktree \(candidate.path)")
+                for keptFile in kept {
+                    planned.append("KEEP \(keptFile.reason) \(keptFile.file.path)")
+                }
+                for file in stale {
+                    planned.append(
+                        "REAP attachments \(file.path) live-worktree-file-past-floor")
+                    guard !dryRun else { continue }
+                    guard attachmentsCollector.reap(file) else {
+                        planned.append("KEEP unlink-failed \(file.path)")
+                        logger.warning("""
+                        gc: could not unlink \(file.path, privacy: .public)
+                        """)
+                        continue
+                    }
+                    reaped += 1
+                    logger.info("""
+                    gc: reclaimed staged attachment \(file.path, privacy: .public)
+                    """)
+                }
+            }
+        }
+    }
+
     /// `(provider, key)` as one comparable value — the identity a receipt has,
     /// with a separator no path component can contain.
     private static func transcriptIdentity(_ row: RetainedTranscript) -> String {
@@ -1420,37 +1549,82 @@ public actor OrphanGC {
         broadcast(.reapRecordsChanged)
     }
 
-    // MARK: - Event-driven scratchpad cleanup
+    // MARK: - Event-driven removed-worktree cleanup
 
-    /// Entry point for the archive hook (Task 8): a TBD worktree at `path`
-    /// was just removed, so its Claude Code scratchpad (if any) is cleaned up
-    /// immediately rather than waiting for the next sweep's reconciliation.
-    /// `repoPath` is the owning repo's root (the archive caller has `repo` in
-    /// scope), stamped onto the resulting record; pass `""` when unknown.
+    /// Event-driven reclaim for a worktree that has just been removed: its
+    /// Claude Code scratchpad, and its composer attachments.
     ///
-    /// Verifies the worktree directory is actually gone before doing
-    /// anything else. `completeArchiveWorktree` already fires this callback
-    /// only once it has confirmed the path is gone — queued out of its pool
-    /// slot on the success leg, or a verified `git.worktreeRemove` on the
-    /// fallback leg — so this is defense in depth against a future caller
-    /// that doesn't uphold that contract, not a workaround for a swallowed
-    /// failure: a failed removal must never orphan-classify (and delete) a
-    /// scratchpad that's still in active use.
+    /// Renamed from `scratchpadCleanup` when attachments joined it: the callback
+    /// covers two resources now, and a name that promised one would send the next
+    /// reader looking for a second callback that does not exist.
+    ///
+    /// `repoPath` is the owning repo's root (the archive caller has `repo` in
+    /// scope), stamped onto the resulting scratchpad record; pass `""` when
+    /// unknown.
+    ///
+    /// Verifies the worktree directory is actually gone before doing anything
+    /// else. `completeArchiveWorktree` already fires this callback only once it
+    /// has confirmed the path is gone — queued out of its pool slot on the
+    /// success leg, or a verified `git.worktreeRemove` on the fallback leg — so
+    /// this is defense in depth against a future caller that doesn't uphold that
+    /// contract, not a workaround for a swallowed failure: a failed removal must
+    /// never orphan-classify (and delete) resources that are still in active use.
     ///
     /// The `gcEnabled` master switch governs ALL GC deletion, including this
-    /// event-driven path — one toggle covers both collectors. A config read
+    /// event-driven path — one toggle covers every collector. A config read
     /// failure also skips (fail toward keeping).
-    public func scratchpadCleanup(forRemovedWorktreePath path: String, repoPath: String) async {
-        guard !FileManager.default.fileExists(atPath: path) else {
-            logger.debug("gc: scratchpad cleanup skipped for \(path, privacy: .public) — worktree dir still exists")
+    ///
+    /// **Best effort, by design.** A revived worktree does not get its images
+    /// back, and every path this misses — a crash between the rename and this
+    /// call, a worktree removed outside TBD — is covered by the hourly
+    /// attachments sweep. That division is the doctrine: creation against the
+    /// filesystem cannot be transactional, so the sweep is the standing
+    /// guarantee and this is the prompt best effort.
+    public func removedWorktreeCleanup(
+        worktreeID: UUID, worktreePath: String, repoPath: String
+    ) async {
+        guard !FileManager.default.fileExists(atPath: worktreePath) else {
+            logger.debug("""
+            gc: removed-worktree cleanup skipped for \(worktreePath, privacy: .public) \
+            — worktree dir still exists
+            """)
             return
         }
         guard let config = try? await db.config.get(), config.gcEnabled else {
-            logger.debug("gc: scratchpad cleanup skipped for \(path, privacy: .public) — gc disabled")
+            logger.debug("""
+            gc: removed-worktree cleanup skipped for \(worktreePath, privacy: .public) \
+            — gc disabled
+            """)
             return
         }
+
+        // Attachments first: it is one `removeItem` and cannot fail the
+        // scratchpad reclaim below.
+        //
+        // NOT additionally gated on the composer flag. The directory exists only
+        // because the composer wrote into it, and a person who turned the
+        // composer off afterwards would otherwise leave images behind
+        // permanently — a flag that gates CREATION must not gate the reclaim of
+        // what was already created.
+        let attachments = attachmentsBase.appendingPathComponent(worktreeID.uuidString)
+        if FileManager.default.fileExists(atPath: attachments.path) {
+            do {
+                try FileManager.default.removeItem(at: attachments)
+                logger.info("""
+                gc: removed attachments for worktree \
+                \(worktreeID.uuidString, privacy: .public)
+                """)
+            } catch {
+                logger.warning("""
+                gc: could not remove attachments for worktree \
+                \(worktreeID.uuidString, privacy: .public): \
+                \(error.localizedDescription, privacy: .public) — the hourly sweep will retry
+                """)
+            }
+        }
+
         guard let record = await scratchpadCollector.cleanUp(
-            forRemovedWorktreePath: path, repoPath: repoPath, now: now()
+            forRemovedWorktreePath: worktreePath, repoPath: repoPath, now: now()
         ) else {
             return
         }

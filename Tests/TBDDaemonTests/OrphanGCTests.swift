@@ -510,7 +510,7 @@ struct OrphanGCTests {
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: sandbox) }
 
-        let worktreePath = "/Users/chang/tbd/worktrees/removed-wt"
+        let worktreePath = "/tmp/acme/tbd/worktrees/removed-wt"
         let slug = ScratchpadCollector.slug(forWorktreePath: worktreePath)
         let scratchDir = base.appendingPathComponent(slug)
         try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
@@ -520,13 +520,14 @@ struct OrphanGCTests {
         let broadcaster = BroadcastDeltas()
         let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
 
-        await gc.scratchpadCleanup(forRemovedWorktreePath: worktreePath, repoPath: "/Users/chang/tbd")
+        await gc.removedWorktreeCleanup(
+            worktreeID: UUID(), worktreePath: worktreePath, repoPath: "/tmp/acme/tbd")
 
         #expect(!FileManager.default.fileExists(atPath: scratchDir.path))
         let records = try await db.reapRecords.list(repoPath: nil)
         #expect(records.count == 1)
         #expect(records.first?.kind == .scratchpad)
-        #expect(records.first?.repoPath == "/Users/chang/tbd", "event path must stamp the caller's repoPath")
+        #expect(records.first?.repoPath == "/tmp/acme/tbd", "event path must stamp the caller's repoPath")
 
         let deltas = broadcaster.snapshot()
         #expect(deltas.contains { if case .reapRecordsChanged = $0 { return true }; return false })
@@ -555,7 +556,8 @@ struct OrphanGCTests {
         let broadcaster = BroadcastDeltas()
         let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
 
-        await gc.scratchpadCleanup(forRemovedWorktreePath: worktreeDir.path, repoPath: "/Users/chang/tbd")
+        await gc.removedWorktreeCleanup(
+            worktreeID: UUID(), worktreePath: worktreeDir.path, repoPath: "/tmp/acme/tbd")
 
         #expect(FileManager.default.fileExists(atPath: scratchDir.path),
                 "worktree dir still on disk — the removal must have failed, so the scratchpad stays intact")
@@ -672,7 +674,7 @@ struct OrphanGCTests {
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: sandbox) }
 
-        let worktreePath = "/Users/chang/tbd/worktrees/removed-wt"
+        let worktreePath = "/tmp/acme/tbd/worktrees/removed-wt"
         let slug = ScratchpadCollector.slug(forWorktreePath: worktreePath)
         let scratchDir = base.appendingPathComponent(slug)
         try FileManager.default.createDirectory(at: scratchDir, withIntermediateDirectories: true)
@@ -683,7 +685,8 @@ struct OrphanGCTests {
         let broadcaster = BroadcastDeltas()
         let gc = makeGC(db: db, git: GitManager(), broadcaster: broadcaster, scratchpadBase: base)
 
-        await gc.scratchpadCleanup(forRemovedWorktreePath: worktreePath, repoPath: "/Users/chang/tbd")
+        await gc.removedWorktreeCleanup(
+            worktreeID: UUID(), worktreePath: worktreePath, repoPath: "/tmp/acme/tbd")
 
         #expect(FileManager.default.fileExists(atPath: scratchDir.path),
                 "the gcEnabled master switch must suppress event-driven deletion too")

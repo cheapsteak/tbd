@@ -169,11 +169,13 @@ extension RPCRouter {
         // reconciliation has no path left to resolve it by. Scratch spaces
         // have no owning repo, so repoPath is "" — the same
         // unresolvable-repo convention `OrphanGC`'s own reconciliation uses.
-        // `scratchpadCleanup` re-verifies the directory is gone and is
+        // `removedWorktreeCleanup` re-verifies the directory is gone and is
         // gated by `gcEnabled` internally, so this is safe to call
-        // unconditionally.
+        // unconditionally. It also unlinks the row's composer attachments,
+        // which are keyed by the same worktree id the row is about to lose.
         if let orphanGC {
-            await orphanGC.scratchpadCleanup(forRemovedWorktreePath: wt.path, repoPath: "")
+            await orphanGC.removedWorktreeCleanup(
+                worktreeID: wt.id, worktreePath: wt.path, repoPath: "")
         }
 
         // Hard delete: closed-terminal history (rows + captured files) goes

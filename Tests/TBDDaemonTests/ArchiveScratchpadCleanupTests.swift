@@ -5,7 +5,7 @@ import Testing
 @testable import TBDShared
 
 /// Task 8: `WorktreeLifecycle.onWorktreeRemoved` fires whenever a worktree's
-/// directory is actually removed from disk, so `OrphanGC.scratchpadCleanup`
+/// directory is actually removed from disk, so `OrphanGC.removedWorktreeCleanup`
 /// can run event-driven instead of waiting for the next hourly sweep.
 @Suite struct ArchiveScratchpadCleanupTests {
     @Test func archiveWorktreeFiresOnWorktreeRemovedWithThePath() async throws {
@@ -20,7 +20,7 @@ import Testing
             hooks: HookResolver()
         )
         let box = RemovedPathBox()
-        lifecycle.onWorktreeRemoved = { path, repoPath in await box.record(path, repoPath) }
+        lifecycle.onWorktreeRemoved = { _, path, repoPath in await box.record(path, repoPath) }
 
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
@@ -70,7 +70,7 @@ import Testing
             hooks: HookResolver()
         )
         let box = RemovedPathBox()
-        lifecycle.onWorktreeRemoved = { path, repoPath in await box.record(path, repoPath) }
+        lifecycle.onWorktreeRemoved = { _, path, repoPath in await box.record(path, repoPath) }
 
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)

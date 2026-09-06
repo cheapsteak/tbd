@@ -252,6 +252,59 @@ public enum TBDConstants {
         terminalHistoryPath(worktreeID: worktreeID, terminalID: terminalID, environment: ProcessInfo.processInfo.environment)
     }
 
+    /// Base directory for composer attachments: `~/tbd/attachments`. Honors
+    /// TBD_HOME.
+    ///
+    /// One subdirectory per worktree, holding the images a person pasted or
+    /// dropped into that worktree's transcript composer. File-backed rather than
+    /// a DB column for the same reason notes and terminal history are: the
+    /// content is a blob the app reads directly, and the row would carry only
+    /// bytes nobody queries.
+    public static func attachmentsDir(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("attachments")
+    }
+    public static var attachmentsDir: URL {
+        attachmentsDir(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// One worktree's attachment directory:
+    /// `~/tbd/attachments/<worktreeID>`. Honors TBD_HOME.
+    ///
+    /// Keyed by worktree rather than by terminal because a composer draft
+    /// survives a session rollover, and because reclaiming is a worktree-shaped
+    /// question — the archive path knows which worktree went away, and the GC
+    /// leg compares directory names against live worktree rows.
+    public static func attachmentsDir(
+        worktreeID: UUID, environment: [String: String]
+    ) -> URL {
+        attachmentsDir(environment: environment)
+            .appendingPathComponent(worktreeID.uuidString)
+    }
+    public static func attachmentsDir(worktreeID: UUID) -> URL {
+        attachmentsDir(worktreeID: worktreeID, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// Path to one staged attachment:
+    /// `~/tbd/attachments/<worktreeID>/<attachmentID>.png`. Honors TBD_HOME.
+    ///
+    /// Always `.png`: the app re-encodes every accepted image through ImageIO
+    /// before writing, so the extension is a fact about what TBD wrote rather
+    /// than a guess about what was pasted. Claude Code's paste handler keys its
+    /// image detection on the extension, which is why it is spelled here and not
+    /// carried from the source file.
+    public static func attachmentPath(
+        worktreeID: UUID, attachmentID: UUID, environment: [String: String]
+    ) -> String {
+        attachmentsDir(worktreeID: worktreeID, environment: environment)
+            .appendingPathComponent("\(attachmentID.uuidString).png")
+            .path
+    }
+    public static func attachmentPath(worktreeID: UUID, attachmentID: UUID) -> String {
+        attachmentPath(
+            worktreeID: worktreeID, attachmentID: attachmentID,
+            environment: ProcessInfo.processInfo.environment)
+    }
+
     /// Base directory for transcripts recalled from a provider's retained
     /// store: `~/tbd/transcripts`. Honors TBD_HOME.
     ///

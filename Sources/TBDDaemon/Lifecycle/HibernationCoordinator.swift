@@ -44,7 +44,10 @@ public enum UnparkedPaneDisagreement: Equatable, Sendable {
 }
 
 public enum WakeResult: Equatable, Sendable {
-    case ok
+    /// The wake respawned the agent. Carries the incarnation
+    /// `prepareHibernatedAgentRespawn` minted for that spawn, which is what
+    /// scopes a caller's wait to the session THIS call started.
+    case ok(sessionIncarnationID: UUID?)
     case notHibernated   // idempotent no-op: nothing to wake
     /// The row is NOT parked — TBD believes this terminal is awake — but its
     /// pane says otherwise, so there is no live session for an "already awake"
@@ -1319,7 +1322,7 @@ public actor HibernationCoordinator {
             server: liveServer,
             expectedIncarnationID: liveIncarnationID)
         logger.info("woke terminal \(terminal.id, privacy: .public) (resume \(sessionID, privacy: .public))")
-        return .ok
+        return .ok(sessionIncarnationID: liveIncarnationID)
     }
 
     /// Outcome of `wakeTmuxSection`: the live pane/window ids the rest of

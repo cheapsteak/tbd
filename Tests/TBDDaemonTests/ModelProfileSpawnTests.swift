@@ -1421,7 +1421,7 @@ struct ModelProfileSpawnTests {
         // Now wake via the unified coordinator (the router's own instance).
         let beforeWake = recorder.calls.count
         let wakeResult = await router.hibernationCoordinator.wake(terminalID: term.id)
-        #expect(wakeResult == .ok)
+        #expect(wakeResult.isOk)
 
         let postWake = Array(recorder.calls.dropFirst(beforeWake))
         let joined = postWake.map { $0.joined(separator: " ") }.joined(separator: "\n")

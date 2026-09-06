@@ -977,7 +977,10 @@ extension HibernationCoordinator {
         // pane's screen, and this row has no pane. A holder session's resumed
         // id is recaptured the way every other fact about it is — from hooks.
         logger.info("woke holder-backed terminal \(terminal.id, privacy: .public) (resume \(sessionID, privacy: .public), holder \(handle.holderPID, privacy: .public), child \(handle.childPID, privacy: .public))")
-        return .ok
+        // The incarnation this wake minted for the replacement agent, the same
+        // fact the tmux arm reports: it is what scopes a caller's wait to the
+        // session THIS call started rather than to whatever starts next.
+        return .ok(sessionIncarnationID: incarnationID)
     }
 
     /// Un-park a parked row whose holder is already running, or answer nil so
@@ -1074,7 +1077,9 @@ extension HibernationCoordinator {
             terminal: terminal, hibernated: false, keepWarm: terminal.keepWarm,
             tmuxWindowID: "", tmuxPaneID: "")
         logger.info("wake: adopted the holder already running for \(terminal.id, privacy: .public) instead of spawning a second one — \(evidence, privacy: .public); the row was parked over it")
-        return .ok
+        // No incarnation: adopting a holder that was already running spawns
+        // nothing, so there is no new session for a caller's wait to scope to.
+        return .ok(sessionIncarnationID: nil)
     }
 
     /// Put the registry's own view of a session's processes back onto its row.

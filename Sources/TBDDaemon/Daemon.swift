@@ -966,8 +966,9 @@ public final class Daemon: Sendable {
         if mockMode == nil {
             let gc = OrphanGC(db: database, git: git, broadcast: { [subs] delta in subs.broadcast(delta: delta) })
             self.orphanGC = gc
-            lifecycle.onWorktreeRemoved = { [gc] path, repoPath in
-                await gc.scratchpadCleanup(forRemovedWorktreePath: path, repoPath: repoPath)
+            lifecycle.onWorktreeRemoved = { [gc] worktreeID, path, repoPath in
+                await gc.removedWorktreeCleanup(
+                    worktreeID: worktreeID, worktreePath: path, repoPath: repoPath)
             }
         }
 
@@ -1057,6 +1058,12 @@ public final class Daemon: Sendable {
             pendingQuestions: pendingQuestions,
             remoteManager: remoteManager,
             claudeCloudLive: claudeCloudLive,
+            // Envelope suppression is authenticated against the sidecar's
+            // recorded client — the app — and against nothing the request says
+            // about itself. See `authenticatesEnvelopeSuppression`.
+            recordedAppIdentity: { [fdVendingServer] in
+                await fdVendingServer.currentClientIdentity()
+            },
             actuationLog: actuationLog
         )
         // Wire the shared input activity tracker to the coordinator

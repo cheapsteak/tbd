@@ -136,7 +136,7 @@ struct HolderHibernationLiveTests {
         #expect(await fixture.coordinator.manualHibernate(terminalID: terminal.id) == .ok)
 
         let result = await fixture.coordinator.wake(terminalID: terminal.id)
-        #expect(result == .ok, "wake refused: \(result)")
+        #expect(result.isOk, "wake refused: \(result)")
 
         let woken = try #require(try await fixture.db.terminals.get(id: terminal.id))
         #expect(!woken.isParked)
@@ -435,7 +435,7 @@ struct HolderHibernationLiveTests {
                 "the fixture lost its reader, so this test would exercise the wrong branch")
 
         let result = await fixture.coordinator.wake(terminalID: terminal.id)
-        #expect(result == .ok, "wake refused: \(result)")
+        #expect(result.isOk, "wake refused: \(result)")
 
         let woken = try #require(try await fixture.db.terminals.get(id: terminal.id))
         #expect(!woken.isParked)

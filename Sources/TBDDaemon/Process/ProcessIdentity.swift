@@ -8,7 +8,10 @@ import Foundation
 /// process from a stranger that inherited the number. The two facts beside it
 /// are what close that gap — the start time, which `execve` does not move, and
 /// the command line, which says what is running there now.
-struct ProcessIdentity: Sendable, Equatable {
+/// `public` only because it names a parameter of `RPCRouter`'s public
+/// initializer (the envelope-suppression seam). Its members stay internal:
+/// nothing outside this module constructs or reads one.
+public struct ProcessIdentity: Sendable, Equatable {
     let pid: Int32
     /// When the process holding `pid` started, as read from the kernel at the
     /// moment this identity was recorded.

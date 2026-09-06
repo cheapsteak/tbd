@@ -291,6 +291,33 @@ public final class RPCRouter: Sendable {
     /// needing a real `ps`. A process-table fact, never screen text.
     let paneProcessInspector: any PaneProcessInspecting
 
+    /// The identity the FD-vending sidecar recorded for its current client.
+    ///
+    /// That client is the app: it connects the sidecar eagerly and
+    /// unconditionally as soon as the RPC socket answers, and the sidecar has
+    /// exactly one. The daemon already treats this identity as load-bearing —
+    /// `AppLivenessArbiter` decides on it whether the daemon may read a pty
+    /// again — so nothing new is being trusted here, only read from one more
+    /// place.
+    ///
+    /// Injected, and defaulting to "no recorded client", so a router built in a
+    /// test authenticates nobody until a test says otherwise. That default is
+    /// the fail-closed one.
+    let recordedAppIdentity: @Sendable () async -> ProcessIdentity?
+    /// The one process-fact reader, injected for the same reason `AgentReaper`
+    /// and `AppLivenessArbiter` take one: the re-verification must be statable
+    /// in a test without a process to inspect.
+    let processSignaller: any ProcessSignaller
+
+    /// Behavior seam for the one place the send path has to *wait*: the settle
+    /// after an image paste, before whatever the parts arm does next. A
+    /// `Duration` is behavior, so this is the `Clock` seam rather than the
+    /// `now` date seam beside it, and it is existential (`any Clock<Duration>`)
+    /// for the reason every other subsystem here holds one that way — a generic
+    /// parameter would infect the `Sendable` conformances the router already
+    /// carries.
+    let clock: any Clock<Duration>
+
     public init(
         db: TBDDatabase,
         lifecycle: WorktreeLifecycle,
@@ -318,8 +345,14 @@ public final class RPCRouter: Sendable {
             = TranscriptDeltaInspection.live,
         paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
         completionInventory: CompletionInventoryService = CompletionInventoryService(),
-        actuationLog: ActuationLog
+        recordedAppIdentity: @escaping @Sendable () async -> ProcessIdentity? = { nil },
+        processSignaller: any ProcessSignaller = ProductionProcessSignaller(),
+        actuationLog: ActuationLog,
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
+        self.recordedAppIdentity = recordedAppIdentity
+        self.processSignaller = processSignaller
+        self.clock = clock
         self.now = now
         self.tmuxSocketPathResolver = tmuxSocketPathResolver
         self.transcriptFingerprinter = transcriptFingerprinter
@@ -415,17 +448,26 @@ public final class RPCRouter: Sendable {
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
     /// Returns an RPCResponse.
-    public func handleRaw(_ data: Data) async -> RPCResponse {
+    ///
+    /// `connection` is what the daemon knows about the socket the bytes arrived
+    /// on, as opposed to what they say about themselves. Defaulted to nil —
+    /// "not established" — because most callers are not sockets at all, and
+    /// that is the fail-closed answer for every one of them.
+    public func handleRaw(
+        _ data: Data, connection: RPCConnectionContext? = nil
+    ) async -> RPCResponse {
         do {
             let request = try decoder.decode(RPCRequest.self, from: data)
-            return await handle(request)
+            return await handle(request, connection: connection)
         } catch {
             return RPCResponse(error: "Failed to decode request: \(error.localizedDescription)")
         }
     }
 
     /// Handle a decoded RPCRequest and return an RPCResponse.
-    public func handle(_ request: RPCRequest) async -> RPCResponse {
+    public func handle(
+        _ request: RPCRequest, connection: RPCConnectionContext? = nil
+    ) async -> RPCResponse {
         do {
             switch request.method {
             case RPCMethod.repoAdd:
@@ -489,7 +531,10 @@ public final class RPCRouter: Sendable {
             case RPCMethod.terminalAttachCommand:
                 return try await handleTerminalAttachCommand(request.paramsData)
             case RPCMethod.terminalSend:
-                return try await handleTerminalSend(request.paramsData, actor: request.actor)
+                // The ONE case that is handed the connection, because it is the
+                // one that makes an authorization decision on it.
+                return try await handleTerminalSend(
+                    request.paramsData, actor: request.actor, connection: connection)
             case RPCMethod.terminalCompletions:
                 return try await handleTerminalCompletions(request.paramsData)
             case RPCMethod.terminalDelete:

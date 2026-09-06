@@ -45,7 +45,7 @@ struct WorktreeArchiveDeletionQueueTests {
         // `WorktreeLifecycle` is a struct, so the callback is supplied at
         // construction rather than assigned onto a stored instance.
         let observed = ObservedRemoval()
-        let harness = try await ArchiveHarness.make(onWorktreeRemoved: { path, _ in
+        let harness = try await ArchiveHarness.make(onWorktreeRemoved: { _, path, _ in
             await observed.record(
                 path: path,
                 existedAtCallTime: FileManager.default.fileExists(atPath: path)
@@ -139,7 +139,7 @@ struct WorktreeArchiveDeletionQueueTests {
         // here has one path succeed, so the callback firing looks correct
         // either way.
         let observed = ObservedRemoval()
-        let harness = try await ArchiveHarness.make(onWorktreeRemoved: { path, _ in
+        let harness = try await ArchiveHarness.make(onWorktreeRemoved: { _, path, _ in
             await observed.record(
                 path: path,
                 existedAtCallTime: FileManager.default.fileExists(atPath: path)
@@ -196,7 +196,9 @@ struct ArchiveHarness {
     let tempDir: URL
 
     static func make(
-        onWorktreeRemoved: (@Sendable (_ worktreePath: String, _ repoPath: String) async -> Void)? = nil
+        onWorktreeRemoved:
+            (@Sendable (_ worktreeID: UUID, _ worktreePath: String, _ repoPath: String)
+                async -> Void)? = nil
     ) async throws -> ArchiveHarness {
         let (tempDir, repoDir) = try await createTestRepo()
         let db = try TBDDatabase(inMemory: true)
