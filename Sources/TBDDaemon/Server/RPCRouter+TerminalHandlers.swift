@@ -4121,11 +4121,22 @@ extension RPCRouter {
         // un-park there would silently undo an operator's deliberate hibernate.
         // Placed after the identity check above, so a hook this pass rejected
         // retracts nothing.
-        if (try? await db.terminals.clearSessionExitStamp(id: terminal.id)) == true {
-            await broadcastExitStampChange(terminalID: terminal.id, parked: false)
-            logger.debug("""
-                sessionEvent: cleared the exit stamp on terminal \
-                \(terminal.id.uuidString, privacy: .public)
+        // A thrown store error is NOT the same fact as a refused retraction, and
+        // collapsing the two would leave a terminal parked as `.exited` while its
+        // Claude is live — refused (`false`) stays a trace, a failure is an error.
+        do {
+            if try await db.terminals.clearSessionExitStamp(id: terminal.id) {
+                await broadcastExitStampChange(terminalID: terminal.id, parked: false)
+                logger.debug("""
+                    sessionEvent: cleared the exit stamp on terminal \
+                    \(terminal.id.uuidString, privacy: .public)
+                    """)
+            }
+        } catch {
+            logger.error("""
+                sessionEvent: clearing the exit stamp on terminal \
+                \(terminal.id.uuidString, privacy: .public) FAILED, the row stays \
+                parked as exited: \(String(describing: error), privacy: .public)
                 """)
         }
 
