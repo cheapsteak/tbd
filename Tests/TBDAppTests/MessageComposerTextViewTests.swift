@@ -12,6 +12,14 @@ import Testing
 /// composer genuinely needs, as ONE-SHOT COMMANDS carrying a token — the idiom
 /// the transcript pane already uses for scroll-to-bottom — so a re-sent value
 /// can never re-apply.
+/// Records `onTextChange` calls. A reference type because the representable's
+/// callbacks are escaping closures, and a captured local `var` cannot be
+/// mutated from one under Swift 6 concurrency checking.
+@MainActor
+private final class TextChangeRecorder {
+    var reports: [(text: String, caret: Int, marked: Bool)] = []
+}
+
 @MainActor
 @Suite("MessageComposerTextView commands")
 struct MessageComposerTextViewTests {
@@ -20,6 +28,19 @@ struct MessageComposerTextViewTests {
         let view = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 80))
         view.string = initial
         return view
+    }
+
+    /// A representable with inert callbacks, apart from any the caller replaces.
+    private func makeComposer(
+        onTextChange: @escaping (String, Int, Bool) -> Void = { _, _, _ in }
+    ) -> MessageComposerTextView {
+        MessageComposerTextView(
+            onTextChange: onTextChange,
+            onSubmit: { _ in },
+            onEscape: {},
+            onImageData: { _ in },
+            menuIsOpen: { false },
+            onMenuAction: { _ in })
     }
 
     @Test func restoreReplacesTheWholeText() {
@@ -81,6 +102,108 @@ struct MessageComposerTextViewTests {
             ComposerCommand(
                 token: 1,
                 kind: .replaceRange(NSRange(location: 40, length: 5), with: "x")),
+            to: view)
+        #expect(view.string == "short")
+    }
+
+    /// **The text view actually grows, and overflows into a scroll.** A
+    /// regression guard rather than a bug fix: the composer builds its own
+    /// `NSTextView` instead of taking one from
+    /// `NSTextView.scrollableTextView()`, so the sizing that factory performs —
+    /// `minSize`, `maxSize`, the container size, `widthTracksTextView` — is
+    /// stated by hand, and nothing else in this process would notice if a later
+    /// edit dropped one of them and left the box a sliver.
+    ///
+    /// Layout has to be forced: nothing here is in a window, and `sizeToFit()`
+    /// reports the last laid-out size rather than laying out first.
+    @Test func theTextViewGrowsWithItsContentAndScrollsPastTheCap() throws {
+        let scrollView = makeComposer().makeScrollView(
+            coordinator: MessageComposerTextView.Coordinator())
+        scrollView.setFrameSize(NSSize(width: 300, height: 40))
+        scrollView.layoutSubtreeIfNeeded()
+        let textView = try #require(scrollView.documentView as? NSTextView)
+
+        func layOut() {
+            if let manager = textView.layoutManager, let container = textView.textContainer {
+                manager.ensureLayout(for: container)
+            }
+            textView.sizeToFit()
+        }
+
+        textView.string = "one line"
+        layOut()
+        let oneLine = textView.frame.height
+        #expect(oneLine > 0, "a view clamped by a zero maxSize can never show anything")
+
+        textView.string = Array(repeating: "line", count: 5).joined(separator: "\n")
+        layOut()
+        let fiveLines = textView.frame.height
+        #expect(fiveLines > oneLine, "five lines must be taller than one")
+
+        // Past the visible cap the document keeps growing and the scroll view
+        // scrolls it, rather than the box swallowing the overflow.
+        textView.string = Array(repeating: "line", count: 40).joined(separator: "\n")
+        layOut()
+        #expect(textView.frame.height > scrollView.contentSize.height,
+                "overflowing text must make the document taller than the clip view")
+    }
+
+    /// **A wholesale write reports itself, rather than hoping AppKit will.**
+    /// `.restore` and `.clear` assign `NSTextView.string`, which — measured on
+    /// this AppKit — posts no text-change notification at all; what fires is a
+    /// selection change, and only because the caret is reset afterwards.
+    /// Leaning on that leaves `onTextChange` depending on an undocumented side
+    /// effect for the one write that must never be missed: a send clears the
+    /// box, and a composer whose state is not resynchronised still believes it
+    /// holds the message that was just sent.
+    ///
+    /// The text view here is deliberately NOT wired to the coordinator as its
+    /// delegate, so what is measured is the command path's own reporting rather
+    /// than whatever notifications AppKit chose to post.
+    @Test func clearOnAlreadyEmptyTextReportsWithoutAnyNotification() {
+        let recorder = TextChangeRecorder()
+        let coordinator = MessageComposerTextView.Coordinator(
+            makeComposer { text, caret, marked in
+                recorder.reports.append((text, caret, marked))
+            })
+        let view = makeTextView("")
+
+        coordinator.applyIfNew(ComposerCommand(token: 1, kind: .clear), to: view)
+
+        #expect(recorder.reports.count == 1, "an empty clear still has to report")
+        #expect(recorder.reports.first?.text == "")
+        #expect(recorder.reports.first?.caret == 0)
+        #expect(recorder.reports.first?.marked == false,
+                "the marked flag is read off the text view, never assumed")
+    }
+
+    /// A `.restore` reports too, carrying the text and the caret it just placed.
+    @Test func restoreReportsWithoutAnyNotification() {
+        let recorder = TextChangeRecorder()
+        let coordinator = MessageComposerTextView.Coordinator(
+            makeComposer { text, caret, marked in
+                recorder.reports.append((text, caret, marked))
+            })
+        let view = makeTextView("")
+
+        coordinator.applyIfNew(ComposerCommand(token: 1, kind: .restore("draft")), to: view)
+
+        #expect(recorder.reports.count == 1)
+        #expect(recorder.reports.first?.text == "draft")
+        #expect(recorder.reports.first?.caret == 5)
+    }
+
+    /// **A "not found" range is refused, not trapped.** A completion whose token
+    /// the text no longer holds produces `NSRange(location: NSNotFound, …)`,
+    /// whose location is `Int.max`; a bounds check written as
+    /// `location + length <= length` overflows and crashes the app before it can
+    /// refuse anything.
+    @Test func aNotFoundRangeIsRefusedRatherThanOverflowing() {
+        let view = makeTextView("short")
+        MessageComposerTextView.apply(
+            ComposerCommand(
+                token: 1,
+                kind: .replaceRange(NSRange(location: NSNotFound, length: 3), with: "x")),
             to: view)
         #expect(view.string == "short")
     }

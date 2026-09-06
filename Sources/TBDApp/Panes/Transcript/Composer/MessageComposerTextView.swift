@@ -93,8 +93,13 @@ struct MessageComposerTextView: NSViewRepresentable {
             // Refused rather than clamped: a range the text no longer holds means
             // the person edited while this was in flight, and inserting at a
             // clamped position would put the token somewhere nobody asked for.
+            // Two comparisons rather than `location + length <= ns.length`:
+            // the range this is most likely to refuse is
+            // `NSRange(location: NSNotFound, …)`, whose location is `Int.max`,
+            // and that addition traps before the comparison can refuse it.
             guard range.location >= 0, range.length >= 0,
-                  range.location + range.length <= ns.length else { return }
+                  range.location <= ns.length,
+                  range.length <= ns.length - range.location else { return }
             textView.insertText(replacement, replacementRange: range)
             textView.setSelectedRange(
                 NSRange(location: range.location + (replacement as NSString).length, length: 0))
@@ -109,15 +114,40 @@ struct MessageComposerTextView: NSViewRepresentable {
     // MARK: - NSViewRepresentable
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+        makeScrollView(coordinator: context.coordinator)
+    }
+
+    /// Build the scroll view and the text view inside it.
+    ///
+    /// Split out of `makeNSView(context:)` because an
+    /// `NSViewRepresentableContext` cannot be constructed outside SwiftUI, and
+    /// the geometry set up here is exactly what a test has to be able to reach.
+    func makeScrollView(coordinator: Coordinator) -> NSScrollView {
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
         scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
         // A fixed maximum height with a scroller past it, so a growing message
         // never shifts the transcript above it.
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
 
-        let textView = ComposerTextView(frame: .zero)
-        textView.delegate = context.coordinator
+        let contentSize = scrollView.contentSize
+        let textView = ComposerTextView(frame: NSRect(origin: .zero, size: contentSize))
+        // The geometry `NSTextView.scrollableTextView()` would have set up,
+        // spelled out because a subclass rules that factory out. It is stated
+        // rather than inherited: `NSScrollView`'s `documentView` setter happens
+        // to re-seed `minSize`, `maxSize` and the container from the clip view,
+        // and `widthTracksTextView` happens to default to `true`, so a text view
+        // built at `.zero` does grow today — but none of that is documented, and
+        // a composer that silently stops growing is a box a paragraph cannot be
+        // typed into.
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.containerSize = NSSize(
+            width: contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+        textView.delegate = coordinator
         textView.isRichText = false
         textView.allowsUndo = true
         textView.drawsBackground = false
@@ -137,7 +167,7 @@ struct MessageComposerTextView: NSViewRepresentable {
         textView.registerForDraggedTypes([.fileURL])
 
         scrollView.documentView = textView
-        context.coordinator.textView = textView
+        coordinator.textView = textView
         onViewReady?(textView)
         return scrollView
     }
@@ -177,6 +207,21 @@ struct MessageComposerTextView: NSViewRepresentable {
             guard lastAppliedToken != command.token else { return false }
             lastAppliedToken = command.token
             MessageComposerTextView.apply(command, to: textView)
+            switch command.kind {
+            case .restore, .clear:
+                // These two assign `.string`, which posts no text-change
+                // notification at all. A selection change does fire, and it
+                // happens to report through the same helper — but that is an
+                // undocumented side effect, and the write it would be carrying
+                // is the one that must never be missed: a send clears the box,
+                // and a composer whose state is not resynchronised still
+                // believes it holds the message that just went out.
+                report(textView)
+            case .replaceRange, .insertAtCaret:
+                // `insertText(_:replacementRange:)` goes through
+                // `didChangeText`, which reports already.
+                break
+            }
             return true
         }
 
