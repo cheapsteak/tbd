@@ -199,6 +199,19 @@ import Testing
         #expect(Self.occurrences(of: Self.start, in: composed) == 0)
     }
 
+    /// The same body without `--submit`: the strip empties it, the empty-body
+    /// rule declines to wrap it, and no Return follows — so the composition is
+    /// nothing at all. It is the second way a caller with something to say
+    /// reaches an empty message, and the send arm above records the mode
+    /// provenance for it, because a composition did run.
+    @Test("a body of only an end marker and no submit composes to nothing")
+    func aBodyOfOnlyAnEndMarkerWithoutSubmit() {
+        let composed = HolderSendComposition.compose(
+            body: "\u{1b}[201~", submit: false, bracketedPaste: true)
+
+        #expect(composed.isEmpty)
+    }
+
     /// The start marker is deliberately *not* stripped: it opens nothing a
     /// child has not already been told is open, so it cannot break out, and
     /// removing it would edit a body for no gain. This pins the asymmetry so it

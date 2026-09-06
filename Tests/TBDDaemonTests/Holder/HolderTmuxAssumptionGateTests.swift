@@ -1032,6 +1032,48 @@ struct HolderTmuxAssumptionGateTests {
         #expect(outcome["modeAgeMilliseconds"] as? Int == 2_460_000)
     }
 
+    /// A caller with something to say whose message composes to nothing, and
+    /// the row still says what it was composed against.
+    ///
+    /// `--text $'\e[201~'` with no `--submit` against a bracketing child is the
+    /// second way to reach an empty message: the composition strips the end
+    /// marker — a caller's own marker would otherwise close the paste — and
+    /// what is left is empty, so nothing is written. The composition happened
+    /// all the same, and its provenance is a fact about the attempt, so the row
+    /// carries the source it asked. Only `--text ""` composes against nothing
+    /// and has nothing to disclose.
+    ///
+    /// A **shell** row, because the dispatch envelope goes only to agent
+    /// sessions: prepended, it would leave a non-empty body and this case could
+    /// not be reached at all.
+    @Test("a body that strips to nothing still records what it was composed against")
+    func strippedToNothingStillRecordsProvenance() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.shell, kind: .shell, transport: .holder,
+            holderPID: 9101, childPID: 9102)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: deadWindowTmux(recorded))
+        rpc.holderInjectionCourier = writes.courier()
+        rpc.holderModeOracle = oracle(bracketedPaste: true, source: .daemon, ageMilliseconds: 0)
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "\u{1b}[201~", submit: false)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(writes.all.isEmpty, "a message that composed to nothing must write nothing")
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["result"] as? String == "dispatched")
+        #expect(outcome["modeSource"] as? String == "daemon")
+        #expect(outcome["modeAgeMilliseconds"] as? Int == 0)
+    }
+
     @Test("terminal.send --verify refuses a holder row by naming verification")
     func sendVerifyRefusesHolderRow() async throws {
         let db = try TBDDatabase(inMemory: true)

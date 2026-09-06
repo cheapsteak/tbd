@@ -3295,11 +3295,23 @@ extension RPCRouter {
             bracketedPaste: reading?.modes.bracketedPaste ?? false)
 
         guard !message.isEmpty else {
-            // `--text ""` with no `--submit`: a well-formed act that names
-            // nothing to write. The tmux arm reaches the same outcome by
-            // skipping both of its sub-steps. No mode provenance is recorded,
-            // because nothing was composed — there is no guess to disclose.
-            await finishActuation(actuationID, .dispatched)
+            // Nothing to write, reached two ways. `--text ""` with no
+            // `--submit` is a well-formed act that names nothing — the tmux arm
+            // reaches the same outcome by skipping both of its sub-steps. A
+            // body that was nothing but end markers reaches it too, because the
+            // composition strips those before it tests for emptiness, and a
+            // caller's `ESC[201~` cannot be allowed to leave an open paste.
+            //
+            // Provenance is recorded whenever the caller's text was non-empty:
+            // a composition did happen, against a store this asked, and what it
+            // composed against is a fact about the attempt however little the
+            // attempt came to. An empty text composed against nothing, so there
+            // is no guess to disclose.
+            let composed = !text.isEmpty
+            await finishActuation(
+                actuationID, .dispatched,
+                modeSource: composed ? modeSource : nil,
+                modeAgeMilliseconds: composed ? modeAge : nil)
             return .ok()
         }
 
