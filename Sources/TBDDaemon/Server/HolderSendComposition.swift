@@ -79,15 +79,24 @@ enum HolderSendComposition {
     /// a marker is retracted the moment the byte that completes it is appended,
     /// so the invariant holds after every step and the output provably contains
     /// none — in one pass over the body.
+    ///
+    /// The suffix is compared **in place**, and the last byte of the pattern is
+    /// checked first. This runs inside the per-terminal send serializer on a
+    /// body with no size cap, and the obvious spelling — materialising
+    /// `kept.suffix(pattern.count)` into an `Array` — allocates once per input
+    /// byte for a comparison that ordinary text loses on its first byte.
     static func removingEndMarkers(from body: Data) -> Data {
         let pattern = [UInt8](pasteEnd)
+        guard let terminator = pattern.last else { return body }
         var kept: [UInt8] = []
         kept.reserveCapacity(body.count)
         for byte in body {
             kept.append(byte)
-            if kept.count >= pattern.count, Array(kept.suffix(pattern.count)) == pattern {
-                kept.removeLast(pattern.count)
-            }
+            guard byte == terminator, kept.count >= pattern.count else { continue }
+            let start = kept.count - pattern.count
+            var index = 0
+            while index < pattern.count, kept[start + index] == pattern[index] { index += 1 }
+            if index == pattern.count { kept.removeLast(pattern.count) }
         }
         return Data(kept)
     }
