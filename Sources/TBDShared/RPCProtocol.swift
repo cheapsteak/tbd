@@ -2785,7 +2785,22 @@ public struct TerminalWakeResult: Codable, Sendable {
     /// false — idempotent no-op (already awake, or another wake in flight).
     /// A `prompt` param is delivered only when true.
     public let woken: Bool
-    public init(woken: Bool) { self.woken = woken }
+    /// The session incarnation this respawn minted, planted in the spawned
+    /// process's environment as `TBD_TERMINAL_INCARNATION_ID` and echoed back on
+    /// that process's hooks.
+    ///
+    /// Populated **only** on the `woken: true` path, where a spawn actually
+    /// happened. Nil on every no-op, because there is no spawn to name — and a
+    /// caller that scoped a wait to this id would otherwise wait on somebody
+    /// else's session.
+    ///
+    /// Optional for wire compatibility in both directions: an older daemon sends
+    /// no field, and a caller that does not know about one ignores it.
+    public let sessionIncarnationID: UUID?
+    public init(woken: Bool, sessionIncarnationID: UUID? = nil) {
+        self.woken = woken
+        self.sessionIncarnationID = sessionIncarnationID
+    }
 }
 
 /// Params for `terminal.completions` — what slash commands, skills and subagents

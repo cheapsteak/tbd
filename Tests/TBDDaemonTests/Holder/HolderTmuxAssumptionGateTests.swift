@@ -826,7 +826,7 @@ struct HolderTmuxAssumptionGateTests {
             id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
 
         let result = await coordinator(db, tmux: tmux).wake(terminalID: terminal.id)
-        #expect(result == .ok)
+        #expect(isWakeOk(result))
         #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
         #expect(!recorded.snapshot().isEmpty, "the tmux leg must still drive tmux")
     }
@@ -918,7 +918,7 @@ struct HolderTmuxAssumptionGateTests {
         let result = await coordinator(
             db, tmux: tmux, registry: registry, signaller: signaller)
             .wake(terminalID: terminal.id)
-        #expect(result == .ok,
+        #expect(result.isOk,
                 "a row parked over a live holder was not adopted")
 
         let after = try #require(try await db.terminals.get(id: terminal.id))
@@ -1005,7 +1005,7 @@ struct HolderTmuxAssumptionGateTests {
 
         let result = await coordinator(db, tmux: tmux, signaller: signaller)
             .wake(terminalID: terminal.id)
-        #expect(result == .ok)
+        #expect(result.isOk)
         #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
         #expect(!recorded.snapshot().isEmpty,
                 "the tmux leg must still drive tmux to wake a parked row")

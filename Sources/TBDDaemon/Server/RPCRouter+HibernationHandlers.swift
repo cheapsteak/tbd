@@ -69,6 +69,27 @@ extension RPCRouter {
         }
     }
 
+    /// The success payload for a wake outcome, or nil for an outcome that is an
+    /// RPC error rather than a result.
+    ///
+    /// Pure and static so the four rows that matter — woken with an id, woken
+    /// without one, and each idempotent no-op — are statable without a
+    /// coordinator, a database or a tmux server.
+    static func wakeResultPayload(for result: WakeResult) -> TerminalWakeResult? {
+        switch result {
+        case .ok(let incarnationID):
+            return TerminalWakeResult(woken: true, sessionIncarnationID: incarnationID)
+        case .notHibernated, .inFlight:
+            // Benign no-ops for an idempotent wake — `woken: false` so an
+            // autonomous caller knows its `prompt` was NOT delivered (the
+            // terminal is live; pasting into it now could hit a human session),
+            // and no incarnation, because no spawn happened to name.
+            return TerminalWakeResult(woken: false)
+        default:
+            return nil
+        }
+    }
+
     /// `terminal.wake` — respawn `claude --resume <id>` in the hibernated
     /// terminal's kept-alive window. Idempotent.
     func handleTerminalWake(
@@ -87,14 +108,10 @@ extension RPCRouter {
         await finishActuation(
             actuationID, ActuationOutcome.classify(result),
             error: ActuationOutcome.detail(result))
+        if let payload = Self.wakeResultPayload(for: result) {
+            return try RPCResponse(result: payload)
+        }
         switch result {
-        case .ok:
-            return try RPCResponse(result: TerminalWakeResult(woken: true))
-        case .notHibernated, .inFlight:
-            // Benign no-ops for an idempotent wake — but report woken: false so
-            // autonomous callers know their `prompt` was NOT delivered (the
-            // terminal is live; pasting into it now could hit a human session).
-            return try RPCResponse(result: TerminalWakeResult(woken: false))
         case .sessionGone(let paneID, let detail):
             // NOT a benign no-op: the row claims awake but its pane disagrees,
             // so there was nothing live to deliver `prompt` to. An error (not
@@ -121,6 +138,12 @@ extension RPCRouter {
             return RPCResponse(error: HibernationCoordinator.holderTransportRefusal)
         case .paneBusy(let pid):
             return RPCResponse(error: HibernationCoordinator.paneBusyRefusal(pid: pid))
+        case .ok, .notHibernated, .inFlight:
+            // Unreachable: `wakeResultPayload` returns non-nil for exactly
+            // these three cases and this function already returned above.
+            // Kept explicit (rather than `default:`) so a new WakeResult case
+            // added later must be classified deliberately in BOTH switches.
+            preconditionFailure("wakeResultPayload already handled \(result)")
         }
     }
 

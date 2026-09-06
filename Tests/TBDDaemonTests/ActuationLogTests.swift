@@ -200,7 +200,7 @@ struct ActuationLogTests {
             == .refused(.notEligible))
         #expect(ActuationOutcome.classify(HibernateResult.notFound) == .refused(.notFound))
 
-        #expect(ActuationOutcome.classify(WakeResult.ok) == .dispatched)
+        #expect(ActuationOutcome.classify(WakeResult.ok(sessionIncarnationID: nil)) == .dispatched)
         #expect(ActuationOutcome.classify(WakeResult.respawnFailed(reason: "tmux")) == .transportFailed)
         #expect(ActuationOutcome.classify(WakeResult.notHibernated) == .refused(.noop))
         #expect(ActuationOutcome.classify(WakeResult.inFlight) == .refused(.inFlight))

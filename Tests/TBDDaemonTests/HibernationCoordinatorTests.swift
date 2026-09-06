@@ -968,7 +968,7 @@ struct HibernationCoordinatorTests {
                 "the pendingResumeAt mirror must clear with the park write")
 
         let woke = await coord.wake(terminalID: terminalID)
-        #expect(woke == .ok)
+        #expect(isWakeOk(woke))
         #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil,
                 "wake must not resurrect the cancelled resume")
         #expect(try await db.terminals.get(id: terminalID)?.pendingResumeAt == nil)
@@ -1000,7 +1000,7 @@ struct HibernationCoordinatorTests {
         #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
 
         let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake == .ok)
+        #expect(isWakeOk(wake))
         #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
 
         // A respawn-window with `claude --resume` must have been issued.
@@ -1019,7 +1019,7 @@ struct HibernationCoordinatorTests {
         #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
         let parked = try #require(try await db.terminals.get(id: terminalID))
 
-        #expect(await coord.wake(terminalID: terminalID) == .ok)
+        #expect(isWakeOk(await coord.wake(terminalID: terminalID)))
         let awake = try #require(try await db.terminals.get(id: terminalID))
         #expect(awake.sessionIncarnationID != parked.sessionIncarnationID)
         #expect(awake.tmuxWindowID == parked.tmuxWindowID)
@@ -1172,7 +1172,7 @@ struct HibernationCoordinatorTests {
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog())
-        #expect(await coord.wake(terminalID: terminalID) == .ok)
+        #expect(isWakeOk(await coord.wake(terminalID: terminalID)))
         #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
     }
 
@@ -1199,7 +1199,7 @@ struct HibernationCoordinatorTests {
         #expect(before?.suspendedAt != nil)
 
         let wake = await coordinator(db).wake(terminalID: terminalID)
-        #expect(wake == .ok)
+        #expect(isWakeOk(wake))
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.hibernatedAt == nil, "wake must clear hibernatedAt")
         #expect(after?.suspendedAt == nil, "wake must also clear legacy suspendedAt")
@@ -1223,7 +1223,7 @@ struct HibernationCoordinatorTests {
         #expect(before?.isParked == true)
 
         let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake == .ok, "wake must un-park a suspendedAt-only row, not no-op it")
+        #expect(isWakeOk(wake), "wake must un-park a suspendedAt-only row, not no-op it")
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.isParked == false, "row fully un-parked (both columns nil)")
 
@@ -1286,7 +1286,7 @@ struct HibernationCoordinatorTests {
             paneProcessInspector: FakeInspector(claudePID: nil, foregroundPID: 4242),
             actuationLog: makeTestActuationLog())
 
-        #expect(await coord.wake(terminalID: terminalID) == .ok)
+        #expect(await coord.wake(terminalID: terminalID).isOk)
         #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
         let joined = recorded.snapshot().map { $0.joined(separator: " ") }
         #expect(joined.contains { $0.contains("respawn-window") && $0.contains("claude --resume sess-1") },
@@ -1308,7 +1308,7 @@ struct HibernationCoordinatorTests {
             paneProcessInspector: FakeInspector(claudePID: nil, foregroundPID: 9999),
             actuationLog: makeTestActuationLog())
 
-        #expect(await coord.wake(terminalID: terminalID) == .ok)
+        #expect(await coord.wake(terminalID: terminalID).isOk)
         #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
     }
 
@@ -1332,7 +1332,7 @@ struct HibernationCoordinatorTests {
         await coord.setOnServerCreated { server in serverHookCalls.append([server]) }
 
         let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake == .ok)
+        #expect(isWakeOk(wake))
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.isParked == false, "row must be un-parked")
         #expect(after?.tmuxWindowID == "@0", "live-window wake must keep the window id")
@@ -1365,7 +1365,7 @@ struct HibernationCoordinatorTests {
         await coord.setOnServerCreated { server in serverHookCalls.append([server]) }
 
         let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake == .ok)
+        #expect(isWakeOk(wake))
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.isParked == false, "row must be un-parked")
         #expect(after?.tmuxWindowID == "@mock-0", "recreate must persist the new window id")
@@ -1440,7 +1440,7 @@ struct HibernationCoordinatorTests {
         #expect((await router.handle(staleHook)).success)
         #expect(try await db.terminals.get(id: terminalID)?.claudeSessionID == "sess-1")
         recorder.release()
-        #expect(await wake.value == .ok)
+        #expect(isWakeOk(await wake.value))
 
         let replacementHook = try RPCRequest(
             method: RPCMethod.terminalSessionEvent,
@@ -1499,7 +1499,7 @@ struct HibernationCoordinatorTests {
         #expect(try await db.terminals.get(id: terminalID)?.claudeSessionID == "sess-1")
 
         recorder.release()
-        #expect(await wake.value == .ok)
+        #expect(isWakeOk(await wake.value))
         let finalized = try #require(try await db.terminals.get(id: terminalID))
         #expect(!finalized.isParked)
         #expect(finalized.claudeSessionID == "sess-1")
@@ -1544,7 +1544,7 @@ struct HibernationCoordinatorTests {
         try await db.terminals.delete(id: terminalID)
         recorder.release()
 
-        #expect(await wake.value != .ok)
+        #expect(!isWakeOk(await wake.value))
         #expect(deltas.snapshot().isEmpty,
                 "a wake whose final durable marker clear failed must not broadcast success")
         let joined = recorder.snapshot().map { $0.joined(separator: " ") }
@@ -1578,7 +1578,7 @@ struct HibernationCoordinatorTests {
         let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
 
         let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake == .ok)
+        #expect(isWakeOk(wake))
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.isParked == false)
         #expect(after?.tmuxWindowID == "@mock-0", "collision must force a recreate with fresh ids")
@@ -1609,7 +1609,7 @@ struct HibernationCoordinatorTests {
         let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
 
         let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake == .ok)
+        #expect(isWakeOk(wake))
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.tmuxWindowID == "@0", "no collision → in-place respawn keeps the ids")
         #expect(after?.tmuxPaneID == "%0")
@@ -1674,7 +1674,7 @@ struct HibernationCoordinatorTests {
 
         let results = await [first.value, second.value]
         #expect(duplicateWasRejectedBeforeDatabaseRelease)
-        #expect(results.filter { $0 == .ok }.count == 1)
+        #expect(results.filter { isWakeOk($0) }.count == 1)
         #expect(results.filter { $0 == .inFlight }.count == 1)
         let after = try #require(try await db.terminals.get(id: terminalID))
         #expect(after.sessionIncarnationID != parked.sessionIncarnationID)
@@ -1706,7 +1706,7 @@ struct HibernationCoordinatorTests {
             kind: .claude)
         try await db.terminals.setHibernated(
             id: terminalID, sessionID: "sess-retry")
-        #expect(await subject.wake(terminalID: terminalID) == .ok)
+        #expect(isWakeOk(await subject.wake(terminalID: terminalID)))
     }
 
     /// Two concurrent wakes, two parked terminals, SAME server, both windows
@@ -1731,8 +1731,8 @@ struct HibernationCoordinatorTests {
         async let wakeA = coord.wake(terminalID: terminalA)
         async let wakeB = coord.wake(terminalID: terminalB.id)
         let (resultA, resultB) = await (wakeA, wakeB)
-        #expect(resultA == .ok)
-        #expect(resultB == .ok)
+        #expect(isWakeOk(resultA))
+        #expect(isWakeOk(resultB))
 
         let afterA = try await db.terminals.get(id: terminalA)
         let afterB = try await db.terminals.get(id: terminalB.id)
@@ -1795,8 +1795,8 @@ struct HibernationCoordinatorTests {
         async let wakeA = coord.wake(terminalID: terminalA.id)
         async let wakeB = coord.wake(terminalID: terminalB.id)
         let (resultA, resultB) = await (wakeA, wakeB)
-        #expect(resultA == .ok, "different servers must not serialize/deadlock each other")
-        #expect(resultB == .ok, "different servers must not serialize/deadlock each other")
+        #expect(isWakeOk(resultA), "different servers must not serialize/deadlock each other")
+        #expect(isWakeOk(resultB), "different servers must not serialize/deadlock each other")
 
         let joined = recorded.snapshot().map { $0.joined(separator: " ") }
         #expect(joined.contains { $0.contains("new-window") && $0.contains("-L tbd-hib-a") },
@@ -1974,7 +1974,7 @@ struct HibernationCoordinatorTests {
         #expect(failed.claudeSessionID == "sess-1")
         #expect(failed.transcriptPath == "/tmp/live-wake-retry.jsonl")
 
-        #expect(await coord.wake(terminalID: terminalID) == .ok)
+        #expect(isWakeOk(await coord.wake(terminalID: terminalID)))
         let retried = try #require(try await db.terminals.get(id: terminalID))
         #expect(!retried.isParked)
         #expect(retried.claudeSessionID == "sess-1")
@@ -2014,7 +2014,7 @@ struct HibernationCoordinatorTests {
         #expect(failed.claudeSessionID == "sess-1")
         #expect(failed.transcriptPath == "/tmp/dead-wake-retry.jsonl")
 
-        #expect(await coord.wake(terminalID: terminalID) == .ok)
+        #expect(isWakeOk(await coord.wake(terminalID: terminalID)))
         let retried = try #require(try await db.terminals.get(id: terminalID))
         #expect(!retried.isParked)
         #expect(retried.claudeSessionID == "sess-1")
@@ -2052,7 +2052,7 @@ struct HibernationCoordinatorTests {
             actuationLog: makeTestActuationLog()
         )
         let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake == .ok)
+        #expect(isWakeOk(wake))
 
         // `/tmp/hib-repo` munges to `-tmp-hib-repo` under the injected root.
         let derived = projects.appendingPathComponent("-tmp-hib-repo/sess-1.jsonl")
@@ -2107,7 +2107,7 @@ struct HibernationCoordinatorTests {
         let coord = coordinatorWithResolver(db)
         let wake = await coord.wake(terminalID: terminalID, allowDefaultProfileFallback: true)
 
-        #expect(wake == .ok)
+        #expect(isWakeOk(wake))
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.hibernatedAt == nil, "row must be un-parked")
     }
@@ -2125,7 +2125,7 @@ struct HibernationCoordinatorTests {
         let coord = coordinatorWithResolver(db)
         let wake = await coord.wake(terminalID: terminalID)
 
-        #expect(wake == .ok)
+        #expect(isWakeOk(wake))
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.hibernatedAt == nil, "row must be un-parked")
     }
@@ -2182,7 +2182,7 @@ struct HibernationCoordinatorTests {
         let commandCount = commands.snapshot().count
         keychainGate.release()
 
-        #expect(await wake.value != .ok)
+        #expect(!isWakeOk(await wake.value))
         let unchanged = try #require(try await db.terminals.get(id: terminalID))
         #expect(unchanged == swapped)
         #expect(commands.snapshot().count == commandCount,
@@ -2245,7 +2245,7 @@ struct HibernationCoordinatorTests {
             return
         }
 
-        #expect(await coordinator.wake(terminalID: terminalID) == .ok)
+        #expect(isWakeOk(await coordinator.wake(terminalID: terminalID)))
         let woken = try #require(try await db.terminals.get(id: terminalID))
         #expect(!woken.isParked)
         #expect(woken.profileID == oldProfile.id)
@@ -2275,7 +2275,7 @@ struct HibernationCoordinatorTests {
         let coord = coordinator(db)
         let wake = await coord.wake(terminalID: terminalID)
 
-        #expect(wake == .ok, "without a resolver, no profile check fires")
+        #expect(isWakeOk(wake), "without a resolver, no profile check fires")
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.hibernatedAt == nil)
     }
@@ -2456,7 +2456,7 @@ struct HibernationCoordinatorTests {
 
         _ = await coord.manualHibernate(terminalID: terminalID)
         let wake = await coord.wake(terminalID: terminalID)
-        #expect(wake == .ok)
+        #expect(isWakeOk(wake))
 
         let delta = recorder.snapshot().last
         #expect(delta?.hibernated == false)
