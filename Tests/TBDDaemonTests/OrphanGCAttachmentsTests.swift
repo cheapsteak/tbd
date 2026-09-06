@@ -192,6 +192,31 @@ struct OrphanGCAttachmentsTests {
         #expect(result.reaped >= 1)
     }
 
+    /// A bare-UUID top-level *file* (not a directory) must not be classified as
+    /// an orphan directory. Before this fix, `decide` read its
+    /// `contentsOfDirectory` as empty and reaped it as though it were an empty
+    /// orphan — `candidates()` must filter it out before `decide` ever sees it,
+    /// matching `HolderRendezvousCollector.candidates()`'s node-type rejection.
+    @Test func aBareUUIDFileIsNotAnAttachmentsCandidate() async throws {
+        let (home, restore) = isolateTBDHome()
+        defer { restore() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setTranscriptComposerEnabled(true)
+        let strayID = UUID()
+        let strayFile = TBDConstants.attachmentsDir.appendingPathComponent(strayID.uuidString)
+        try fm.createDirectory(
+            at: TBDConstants.attachmentsDir, withIntermediateDirectories: true)
+        fm.createFile(atPath: strayFile.path, contents: Data([0x89, 0x50, 0x4E, 0x47]))
+        let stamp = clock.addingTimeInterval(-30 * 86_400)
+        try? fm.setAttributes(
+            [.creationDate: stamp, .modificationDate: stamp], ofItemAtPath: strayFile.path)
+
+        let result = await makeGC(db: db, home: home).sweep()
+
+        #expect(fm.fileExists(atPath: strayFile.path), "a bare-UUID file must survive the sweep")
+        #expect(!result.planned.contains { $0.contains(strayFile.path) })
+    }
+
     // MARK: - The flag
 
     /// With the flag off the leg does nothing in a real sweep — the whole
@@ -224,6 +249,44 @@ struct OrphanGCAttachmentsTests {
         #expect(fm.fileExists(atPath: path), "a dry run must never touch disk")
         #expect(result.planned.contains { $0.hasPrefix("REAP attachments") })
         #expect(result.reaped == 0)
+    }
+
+    // MARK: - The injected base seam
+
+    /// Exercises `OrphanGC`'s `attachmentsBase:` seam directly: a base under the
+    /// fenced scratch root, distinct from (and outside) the isolated `TBD_HOME`
+    /// this suite otherwise sets — proof the collector honors the injected base
+    /// rather than falling back to `TBDConstants.attachmentsDir`.
+    @Test func attachmentsBaseSeamIsHonoredIndependentlyOfTBDHome() async throws {
+        let (home, restore) = isolateTBDHome()
+        defer { restore() }
+        let attachmentsBase = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdgcaatt"))
+        try fm.createDirectory(at: attachmentsBase, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: attachmentsBase) }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setTranscriptComposerEnabled(true)
+        let orphan = UUID()
+        let orphanDir = attachmentsBase.appendingPathComponent(orphan.uuidString)
+        try fm.createDirectory(at: orphanDir, withIntermediateDirectories: true)
+        let file = orphanDir.appendingPathComponent("x.png")
+        fm.createFile(atPath: file.path, contents: Data([0x89, 0x50, 0x4E, 0x47]))
+        let stamp = clock.addingTimeInterval(-30 * 86_400)
+        try? fm.setAttributes(
+            [.creationDate: stamp, .modificationDate: stamp], ofItemAtPath: file.path)
+        let fixed = clock
+
+        let gc = OrphanGC(
+            db: db, git: GitManager(), broadcast: { _ in }, liveCWDsProvider: { [] },
+            scratchpadBase: home.appendingPathComponent("s", isDirectory: true),
+            now: { fixed },
+            profileDirBase: home.appendingPathComponent("p", isDirectory: true),
+            holdersBase: home.appendingPathComponent("h", isDirectory: true),
+            attachmentsBase: attachmentsBase)
+        let result = await gc.sweep()
+
+        #expect(!fm.fileExists(atPath: orphanDir.path))
+        #expect(result.planned.contains { $0.hasPrefix("REAP attachments") })
+        #expect(result.reaped >= 1)
     }
 }
 

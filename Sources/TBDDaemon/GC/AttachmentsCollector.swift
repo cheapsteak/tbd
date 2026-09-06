@@ -32,10 +32,20 @@ struct AttachmentsCollector: Sendable {
         self.now = now
     }
 
-    /// Every entry directly under the attachments base.
+    /// Every directory directly under the attachments base.
+    ///
+    /// A non-directory entry is not a candidate at all, matching
+    /// `HolderRendezvousCollector.candidates()`: the wrong node type is filtered
+    /// out here rather than classified by `decide`, which never considered it.
+    /// Without this, a bare-UUID *file* at the top level would read as an
+    /// orphan directory whose `contentsOfDirectory` comes back empty — reaped
+    /// on the very first sweep past the floor.
     func candidates() -> [URL] {
-        (try? FileManager.default.contentsOfDirectory(
+        let entries = (try? FileManager.default.contentsOfDirectory(
             at: base, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        return entries.filter {
+            (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+        }
     }
 
     /// **Every branch fails toward keeping.**
