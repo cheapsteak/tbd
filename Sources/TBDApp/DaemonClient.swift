@@ -825,6 +825,20 @@ actor DaemonClient {
         )
     }
 
+    /// Send a composed message: an ordered parts list, the dispatch envelope
+    /// suppressed, and the awaiting-input gate opted in. Distinct from
+    /// `sendToTerminal` so the composer's contract is one call site rather than
+    /// five defaulted arguments spread across every caller of a shared verb.
+    ///
+    /// Note what asking for suppression does and does not do. The daemon honors
+    /// it only on a connection it has authenticated as this app's — the peer pid
+    /// the kernel reports for the socket, matched against the pid the FD-vending
+    /// sidecar recorded and then re-verified. Nothing about this call asserts
+    /// anything; it asks, on a socket that already belongs to us.
+    func sendComposerMessage(_ params: TerminalSendParams) async throws {
+        try await callVoidAsync(method: RPCMethod.terminalSend, params: params)
+    }
+
     /// Publish an explicit terminal activity state transition.
     func setTerminalActivity(
         terminalID: UUID,
@@ -1657,6 +1671,23 @@ actor DaemonClient {
             params: TerminalWakeParams(
                 terminalID: terminalID, cols: cols, rows: rows,
                 fallbackToDefaultProfile: fallbackToDefaultProfile, prompt: prompt)
+        )
+    }
+
+    /// Wake a terminal and read back what the daemon answered.
+    ///
+    /// The same RPC `terminalWake` calls. A separate method only because that
+    /// one is `callVoidAsync` and its existing callers all want it to stay that
+    /// way — the composer is the only caller that needs the result, because it
+    /// is the only one that scopes a wait to the spawn this call made.
+    func terminalWakeReporting(
+        terminalID: UUID, cols: Int? = nil, rows: Int? = nil, prompt: String
+    ) async throws -> TerminalWakeResult {
+        try await callAsync(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(
+                terminalID: terminalID, cols: cols, rows: rows, prompt: prompt),
+            resultType: TerminalWakeResult.self
         )
     }
 

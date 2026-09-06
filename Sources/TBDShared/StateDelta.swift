@@ -216,18 +216,28 @@ public struct TerminalSessionDelta: Codable, Sendable {
     /// Ordering generation of the accepted SessionStart. Optional for wire
     /// compatibility with older daemons and for non-hook session updates.
     public let sessionOrderObservedAt: Date?
+    /// The session incarnation the accepted `SessionStart` reported — the id TBD
+    /// planted in that process's environment as `TBD_TERMINAL_INCARNATION_ID`.
+    ///
+    /// Nil for a spawn that carried none (a worktree's first, an archive
+    /// restore), for session updates that are not a hook, and for daemons that
+    /// predate this field. A consumer scoping a wait to one spawn must read nil
+    /// as "not this one", never as "close enough".
+    public let sessionIncarnationID: UUID?
     public init(
         terminalID: UUID,
         worktreeID: UUID,
         sessionID: String,
         transcriptPath: String?,
-        sessionOrderObservedAt: Date? = nil
+        sessionOrderObservedAt: Date? = nil,
+        sessionIncarnationID: UUID? = nil
     ) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
         self.sessionID = sessionID
         self.transcriptPath = transcriptPath
         self.sessionOrderObservedAt = sessionOrderObservedAt
+        self.sessionIncarnationID = sessionIncarnationID
     }
 }
 

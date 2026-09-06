@@ -131,6 +131,51 @@ struct TerminalSessionEventHandlerTests {
             return
         }
         #expect(session.sessionOrderObservedAt == nil)
+        // A hook that reported no incarnation names no spawn, so the delta
+        // carries none either. A consumer scoping a wait to one spawn must be
+        // able to read this as "not this one".
+        #expect(session.sessionIncarnationID == nil)
+    }
+
+    /// The accepted hook's own incarnation rides the delta, which is what lets
+    /// the app scope a wait to the spawn it just asked for. `applySessionStart`
+    /// accepts only when the reported id equals the row's, so this is the id of
+    /// the process that reported in.
+    @Test("an accepted SessionStart broadcasts the incarnation it reported")
+    func acceptedIncarnationRidesTheDelta() async throws {
+        let (terminal, _) = try await makeTerminal()
+        // Rotating the tmux ids is how the row gets a durable incarnation
+        // token; read it back rather than inventing one, because a reported id
+        // that does not equal the row's is rejected outright.
+        try await db.terminals.updateTmuxIDs(id: terminal.id, windowID: "@7", paneID: "%7")
+        let incarnation = try #require(
+            try await db.terminals.get(id: terminal.id)?.sessionIncarnationID)
+        let captured = SessionDeltaCapture()
+        router.subscriptions.addSubscriber { data in
+            captured.append(data)
+            return true
+        }
+        let request = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "resumed-id",
+                transcriptPath: nil,
+                source: "startup",
+                sessionIncarnationID: incarnation
+            )
+        )
+        let response = await router.handle(request)
+        #expect(response.success)
+
+        let delta = try #require(captured.values.compactMap {
+            try? JSONDecoder().decode(StateDelta.self, from: $0)
+        }.first)
+        guard case let .terminalSessionUpdated(session) = delta else {
+            Issue.record("expected terminalSessionUpdated")
+            return
+        }
+        #expect(session.sessionIncarnationID == incarnation)
     }
 
     @Test("ignores non-absolute transcriptPath but still updates sessionID")

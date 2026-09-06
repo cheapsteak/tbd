@@ -810,6 +810,17 @@ final class AppState {
     /// `ComposerDraft` is itself `@Observable` — an observable registry would
     /// republish every composer in the app whenever any one of them appeared.
     @ObservationIgnored var composerDrafts: [UUID: ComposerDraft] = [:]
+    /// Weak composer text views keyed by terminal, so Cmd+/ can move focus into
+    /// one. `@ObservationIgnored` for the same reason `terminalFocusTargets` is:
+    /// focus is not state anything renders from.
+    @ObservationIgnored var composerFocusTargets: [UUID: ComposerFocusTarget] = [:]
+    /// Weak transcript tables keyed by terminal, so Escape in the composer can
+    /// hand focus back to what the person was reading.
+    @ObservationIgnored var transcriptFocusTargets: [UUID: ComposerFocusTarget] = [:]
+    /// Suspended callers waiting for one spawn's `SessionStart`, keyed by
+    /// terminal. `@ObservationIgnored` for the same reason as the two above:
+    /// nothing renders from it.
+    @ObservationIgnored var sessionStartWaiters: [UUID: [SessionStartWaiter]] = [:]
     /// Visual screenshots taken at suspend-click time, shown while daemon works.
     /// Keyed by terminal UUID. Cleared when suspend completes.
     var suspendingSnapshots: [UUID: NSImage] = [:]
@@ -1459,6 +1470,16 @@ final class AppState {
             try await daemonClient.terminalWake(
                 terminalID: terminalID, cols: cols, rows: rows,
                 fallbackToDefaultProfile: fallback, prompt: prompt)
+        }
+    /// How the composer's wake reaches the daemon — the result-returning sibling
+    /// of `terminalWakeSender`, injectable for the same reason, so the wake's
+    /// three replies are statable in a test without a running daemon.
+    @ObservationIgnored
+    lazy var composerWakeSender:
+        @MainActor (UUID, Int?, Int?, String) async throws -> TerminalWakeResult =
+        { [daemonClient] terminalID, cols, rows, prompt in
+            try await daemonClient.terminalWakeReporting(
+                terminalID: terminalID, cols: cols, rows: rows, prompt: prompt)
         }
     /// How `setTranscriptComposerEnabled` persists the composer gate —
     /// injectable for the same reason as `controlModeSetter`.
@@ -2297,6 +2318,10 @@ final class AppState {
                 await self?.refreshDaemonCapabilities()
             }
         case .terminalSessionUpdated(let d):
+            // Ahead of the row update, and outside it: `applyTerminalSessionDelta`
+            // returns early for a terminal this app has not cached, and a wake's
+            // hold must release whether or not the row happens to be in the map.
+            noteSessionStart(terminalID: d.terminalID, incarnationID: d.sessionIncarnationID)
             applyTerminalSessionDelta(d)
         case .terminalCreated(let d):
             applyTerminalCreatedDelta(d)
