@@ -212,12 +212,12 @@ design builds is the pull the model has always required.
 - **Viewer holds the pty and does not answer** – the pull is bounded on an
   injected clock. On expiry the daemon answers from the emulator it suspended
   at attach, `source: .staleDaemon`, `age` per the one rule above. The
-  emulator is retained across an attach for exactly this — it is not stopped
-  at the acknowledgement, only suspended, which is what the transport spec's
-  "frozen-at-attach" fallback assumed and the current release path does not
-  do (`HolderRegistry.swift:1416-1431` stops it). The memory cost is one
-  emulator per attached session, which is the cost the transport spec already
-  budgeted for every session.
+  emulator is retained across an attach for exactly this — the acknowledgement
+  suspends the daemon's reader and never stops it
+  (`HolderRegistry.confirmAttach`), which is what the transport spec's
+  "frozen-at-attach" fallback assumes. The memory cost is one emulator per
+  attached session, which is the cost the transport spec already budgeted for
+  every session.
 - **No reader at all** – the session is gone or never adopted. An error, as
   today, and the error says which.
 
@@ -598,7 +598,7 @@ two entries struck.
   only pushes deltas today; a request-reply pair on it is a new direction on
   a channel with no reply discipline, where the sidecar already has one
   (`injection` / `injectionAck`).
-- **Stop the daemon's emulator at attach, as today.** Makes `staleDaemon` an
+- **Stop the daemon's emulator at attach.** Makes `staleDaemon` an
   empty screen with an age — honest and useless. Suspending it costs one
   emulator per attached session, which the transport spec budgets for every
   session regardless.

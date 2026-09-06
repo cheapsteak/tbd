@@ -194,9 +194,27 @@ struct HolderAttachHandoffTests {
 
     // MARK: - Ownership
 
+    /// What an acknowledgement decides, and what it deliberately does not.
+    ///
+    /// It decides **who reads the pty**: the viewer, and the daemon neither
+    /// drains it nor duplicates it again. It does not decide who owns the
+    /// *emulator*. That reader stays in the slot, suspended, because it holds
+    /// the session's screen as it stood at the attach and is the only store
+    /// there is whenever the viewer cannot answer for itself.
+    ///
+    /// `reader(for:) != nil` is therefore not evidence the daemon is on the
+    /// pty, and this suite no longer uses it as such. `isDraining` is the
+    /// honest instrument: it reads the drain thread's own flag.
     @Test func acknowledgingAnAttachHandsTheSessionToTheViewer() async throws {
         let fixture = try await AttachFixture.start(command: Self.echoJob)
         defer { fixture.tearDown() }
+
+        // Something on the screen before the hand-over, so "the emulator was
+        // retained" is a claim about content and not only about a pointer.
+        try await fixture.reader.write(Data("BEFORE-ATTACH\n".utf8))
+        #expect(await pollUntil("the job's answer before the attach") {
+            await fixture.reader.renderScreen().contains("GOT:BEFORE-ATTACH")
+        })
 
         let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
         defer { close(vend.ptyFD) }
@@ -212,10 +230,23 @@ struct HolderAttachHandoffTests {
             terminalID: fixture.terminalID, generation: vend.generation)
 
         #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == vend.generation)
+        let retained = try #require(
+            await fixture.registry.reader(for: fixture.terminalID),
+            """
+            the acknowledgement discarded the daemon's emulator, so this session has no screen \
+            to answer a machine read with and no modes to compose input against
+            """)
+        #expect(retained === fixture.reader, "the acknowledgement built a second reader")
         #expect(
-            await fixture.registry.reader(for: fixture.terminalID) == nil,
-            "the daemon kept a reader for a session it no longer reads")
-        #expect(await !fixture.reader.isDraining)
+            await !retained.isDraining,
+            "the daemon is still draining a pty it handed to a viewer")
+
+        // Retained with its contents, not merely retained: the screen the
+        // daemon was holding at the attach is still there to answer with.
+        let held = await retained.renderScreen()
+        #expect(held.contains("GOT:BEFORE-ATTACH"), """
+            the retained emulator lost the screen it was holding: \(held)
+            """)
 
         // And the session belongs to the viewer: an adoption must refuse it
         // rather than build the second reader that would steal its bytes.

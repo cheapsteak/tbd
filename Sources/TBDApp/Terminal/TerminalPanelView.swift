@@ -2483,10 +2483,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // Holder path: **this panel owns `TIOCSWINSZ` for as long as it
                 // owns the pty**, and makes the same ioctl the arm above makes,
                 // on the write-only duplicate it took at attach. It is not left
-                // to the daemon because the daemon has no descriptor to make it
-                // on — it released its reader when it handed the pty over — so
-                // a resize routed only through the RPC below would reach the
-                // emulator and never the child.
+                // to the daemon: the daemon deliberately does not issue
+                // `TIOCSWINSZ` for a session a viewer holds (see
+                // `HolderRegistry.applyViewerResize`), because two ioctls for
+                // one resize signal the child twice and, in the window where
+                // they disagree, at a geometry nobody is painting. So a resize
+                // routed only through the RPC below would reach the emulator's
+                // grid and never the child.
                 setHolderWindowSize(cols: newCols, rows: newRows)
                 // The daemon is told either way, and for a different reason per
                 // transport: for a control-mode window it is the sole size

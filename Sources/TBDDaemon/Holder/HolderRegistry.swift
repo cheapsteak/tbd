@@ -251,9 +251,13 @@ actor HolderRegistry {
     ///
     /// Unreachability arguments elsewhere in this type rest on it — notably
     /// `confirmAttach`'s second guard, which is argued dead by enumerating the
-    /// writers of `slots`. **A new writer of `slots` or of either map has to
-    /// keep this true**, because the next reader will reach the guard long
-    /// before reaching the chain that makes it unreachable.
+    /// writers of `slots`. That enumeration is `spawn`, `beginAdoption` (which
+    /// `adopt` and the take-back's no-reader arm both reach), `release` and its
+    /// `clearIfStillReleasing`, and it does **not** include `confirmAttach`:
+    /// an acknowledgement leaves the slot exactly as it found it, `.adopted`
+    /// with a suspended reader. **A new writer of `slots` or of
+    /// either map has to keep this true**, because the next reader will reach
+    /// the guard long before reaching the chain that makes it unreachable.
     private var pendingAttaches: [UUID: PendingAttach] = [:]
     /// Sessions whose pty a viewer owns, and the attach generation that owns
     /// it. **The daemon reads none of these**, and `adopt` refuses them, which
@@ -294,6 +298,16 @@ actor HolderRegistry {
     /// The decrement happens inside the releasing task, before anything awaiting
     /// that task resumes, so an adoption queued behind a release can never see
     /// its own publish overlap the reader it waited for.
+    ///
+    /// **A suspended reader stays counted, and both suspending paths agree on
+    /// that.** An attach that timed out unacknowledged keeps its reader
+    /// suspended and its loop counted; so does an attach that was
+    /// acknowledged, which retains the same reader for the same reason. Only a
+    /// release decrements. The number therefore means "loops this registry is
+    /// on the hook for", which is what the one-reader invariant needs it to
+    /// mean — a suspended reader is one this registry may put back on a pty,
+    /// and a second one built beside it would be the byte theft `peakLiveDrainLoops`
+    /// exists to see.
     private var liveDrainLoops = 0
     /// The most drain loops that have ever been live at one time.
     ///
@@ -418,10 +432,20 @@ actor HolderRegistry {
 
     // MARK: - Reading
 
-    /// The live reader for a session, or nil if none has been adopted.
+    /// The reader this registry holds for a session, or nil if it holds none.
     ///
-    /// A session still being adopted answers nil: there is no drain loop yet.
-    /// So does one being released — its reader may still be draining, but it is
+    /// **A returned reader may be suspended**, and most attached sessions'
+    /// readers are: `beginAttach` suspends the drain, and neither the
+    /// acknowledgement nor a timed-out attach resumes or discards it. So this
+    /// answers "which emulator is this session's" rather than "who is on the
+    /// pty". Writing through a suspended reader is fine — the one-reader
+    /// invariant is about readers, and several writers on a pty master are not
+    /// a hazard. Anything that needs the *drain* must ask `isDraining`, and
+    /// anything that needs to know who owns the pty must ask
+    /// `viewerAttachment(for:)`.
+    ///
+    /// A session still being adopted answers nil: there is no reader yet. So
+    /// does one being released — its reader may still be draining, but it is
     /// on its way out and nothing new should be routed to it.
     func reader(for terminalID: UUID) -> HolderReader? {
         guard case .adopted(let reader) = slots[terminalID] else { return nil }
@@ -455,11 +479,16 @@ actor HolderRegistry {
     /// defect the adoption path was fixed for once already, seen from the other
     /// side.
     ///
+    /// **The grid tracks the viewer for the whole of an attach**, confirmed or
+    /// not, because the reader is retained across both. So a session a viewer
+    /// is resizing keeps a daemon-side emulator at the width the viewer is
+    /// painting at, which is what makes the fallback screen (`staleDaemon`) and
+    /// the next adoption's re-render read correctly instead of wrapping every
+    /// later line at a width nobody is looking at.
+    ///
     /// A session with no reader is skipped silently: there is no grid to
-    /// reshape and no descriptor to size. That is the ordinary state of a
-    /// *confirmed* attach — the daemon released its reader at the
-    /// acknowledgement — and there the viewer's own ioctl is the whole resize,
-    /// with the pty itself carrying the geometry into the next adoption.
+    /// reshape and no descriptor to size. That is a session being adopted or
+    /// released, not an attached one.
     func applyViewerResize(terminalID: UUID, columns: Int, rows: Int) async {
         guard let reader = reader(for: terminalID) else { return }
         if viewerAttachment(for: terminalID) != nil {
@@ -1349,7 +1378,7 @@ actor HolderRegistry {
         Self.logger.info(
             """
             vended the pty for session \(terminalID.uuidString, privacy: .public) to a viewer as \
-            attach \(generation, privacy: .public); the daemon has stopped reading it and will not \
+            attach \(generation, privacy: .public); the daemon's reader is suspended and will not \
             resume without an answer about that viewer
             """)
         return HolderAttachVend(
@@ -1357,16 +1386,34 @@ actor HolderRegistry {
     }
 
     /// The viewer's acknowledgement: it is reading the descriptor, so this
-    /// session is now its to read and the daemon's reader is released for good.
+    /// session is now the viewer's to read, and the daemon's reader stays
+    /// suspended and retained.
+    ///
+    /// **Suspended, not stopped, and that is the whole of what an
+    /// acknowledgement decides.** `beginAttach` already took the daemon off the
+    /// pty; what is left to settle is whether the emulator it built goes with
+    /// it. It does not. That emulator holds the session's screen as it stood at
+    /// the attach, and it is the only store there is whenever the viewer cannot
+    /// answer for itself — a machine read of an open session falls back to it
+    /// (`source: .staleDaemon`), the input path asks it what modes the child is
+    /// in, and a take-back resumes it instead of opening a second hand-over.
+    /// Stopping it would make every one of those answers an empty screen or an
+    /// error naming the wrong cause. The cost is one emulator per attached
+    /// session, which is what the transport budgets for every session anyway.
+    ///
+    /// A suspended reader still holds its descriptor, so the daemon can still
+    /// *write* to the pty — the one-reader invariant is about readers, and
+    /// several writers on a pty master are fine. What it must never do is
+    /// resume the drain without evidence the viewer is gone; `acceptHandback`
+    /// and `seizeFromDeadApp` are the only two callers that carry it.
     ///
     /// The jiggle goes here rather than at the vend, and that ordering is the
     /// point of it: a program repaints on `SIGWINCH` into the tty, and the ack
     /// is the first moment anybody is certainly there to receive the repaint.
-    /// It happens before the reader is stopped because the reader owns the
-    /// descriptor the ioctl rides on.
+    /// The reader owns the descriptor the ioctl rides on, and keeps owning it.
     ///
     /// Generation-checked. A stale ack — a superseded viewer's, or a duplicate
-    /// — is refused rather than allowed to release a reader a live attach is
+    /// — is refused rather than allowed to hand away a pty a live attach is
     /// relying on.
     ///
     /// **A refused ack records no claim, and that is examined rather than
@@ -1380,7 +1427,9 @@ actor HolderRegistry {
     ///   is unreachable. Every writer of `slots` that can change the reader
     ///   under a live pending entry clears `pendingAttaches` first (`release`),
     ///   and the two that would install a different reader refuse outright
-    ///   while a pending entry exists (`adopt`, `beginAttach`).
+    ///   while a pending entry exists (`adopt`, `beginAttach`). This method
+    ///   does not write `slots` at all — it leaves the slot exactly as it
+    ///   found it — so it is not itself one of the writers to enumerate.
     /// - The **first** guard (the pending entry is already gone) is reachable
     ///   only through a clearer that has itself settled the question:
     ///   `cancelPendingAttach(.unacknowledged)` records the claim,
@@ -1403,25 +1452,24 @@ actor HolderRegistry {
         }
         clearPendingAttach(terminalID: terminalID, generation: generation)
         // Recorded BEFORE anything that suspends — the jiggle below is a
-        // deliberate 10 ms sleep, and the stop after it is longer again. Two
-        // callers resume inside that window and both must find the session
-        // already marked as the viewer's: an `adopt` waiting on the release,
-        // and a `beginAttach` parked between its quiesce and its guard, which
-        // would otherwise hand out a second live descriptor for a pty this
-        // acknowledgement has just given away.
+        // deliberate 10 ms sleep. Two callers resume inside that window and
+        // both must find the session already marked as the viewer's: an
+        // `adopt` waiting on this actor, and a `beginAttach` parked between its
+        // quiesce and its guard, which would otherwise hand out a second live
+        // descriptor for a pty this acknowledgement has just given away.
         viewerAttachments[terminalID] = generation
 
         await reader.jiggle()
 
-        let task = Task<Void, Never> { await self.stopPublished(reader) }
-        slots[terminalID] = .releasing(task)
-        await task.value
-        clearIfStillReleasing(task, for: terminalID)
+        // The slot is left as it was found: `.adopted(reader)`, with the reader
+        // suspended since `beginAttach` and nothing here resuming it. Nothing
+        // decrements `liveDrainLoops` either, which is deliberate and matches
+        // the `.unacknowledged` arm — see the counter's own comment.
         Self.logger.info(
             """
             attach \(generation, privacy: .public) for session \
             \(terminalID.uuidString, privacy: .public) was acknowledged; the daemon's reader is \
-            released and the viewer owns the pty
+            suspended and retained, and the viewer owns the pty
             """)
     }
 
@@ -1596,16 +1644,13 @@ actor HolderRegistry {
     /// last `read()` is still outstanding, which is the double-reader
     /// corruption in miniature.
     ///
-    /// Two states arrive here, and they differ in what "resume" means:
-    ///
-    /// - **An acknowledged attach** released the daemon's reader for good
-    ///   (`confirmAttach`), so the slot is empty and the session is taken back
-    ///   through a fresh hand-over from its holder. The holder `dup`s on every
-    ///   `handOverPTY`, so there is always another descriptor to be had.
-    /// - **An attach that timed out unacknowledged** kept its reader, suspended
-    ///   (`AttachCancelReason.unacknowledged`) — the viewer may have been
-    ///   reading all along, and it evidently was, because it is detaching. That
-    ///   reader is put back on the pty it never let go of.
+    /// **Every attach keeps its reader**, suspended, whether or not it was
+    /// acknowledged — an acknowledgement decides who reads the pty, not who
+    /// owns the emulator. So the ordinary take-back ingests the viewer's screen
+    /// into that reader and resumes the drain it never restarted, rather than
+    /// opening a second hand-over against a master this registry already holds.
+    /// The reader kept its descriptor throughout, so the resume needs nothing
+    /// from the holder — not even a reachable rendezvous socket.
     ///
     /// **The claim is held across the resume and cleared only after it lands**,
     /// the same invariant `cancelPendingAttach`'s resuming arm states: no window
@@ -1638,9 +1683,23 @@ actor HolderRegistry {
     /// rot.
     ///
     /// With no preamble there is simply nothing to ingest: the suspended reader
-    /// still holds the screen it had before the attach, a fresh adoption seeds
-    /// from the holder's hand-over as any adoption does, and the jiggle is what
+    /// still holds the screen it had before the attach, and the jiggle is what
     /// gets a repainting program to redraw the rest.
+    ///
+    /// **The `.adopted` arm serves every attach**, acknowledged or timed out,
+    /// because both keep their reader suspended on a descriptor they never let
+    /// go of. It is the ordinary path, and the strictly better one: no holder
+    /// round trip, no second `dup`, no second drain loop, and the screen the
+    /// daemon had at the attach is still underneath whatever the preamble puts
+    /// on top of it.
+    ///
+    /// **The `nil` arm is defensive and expected to be dead.** A claim can only
+    /// outlive its reader if something emptied the slot while the claim stood,
+    /// and the one writer that empties a slot — `release` — clears the claim
+    /// first. It is kept rather than turned into a `throw` because the
+    /// alternative to a fresh adoption here is a session bricked for the
+    /// daemon's whole life, and a hand-over from the holder is a legitimate
+    /// recovery whenever that state is somehow reached.
     private func takeBackFromViewer(
         terminalID: UUID, generation: UInt64, preamble: Data?
     ) async throws {
@@ -1652,13 +1711,15 @@ actor HolderRegistry {
         do {
             switch slots[terminalID] {
             case .adopted(let suspended):
-                // The unacknowledged-attach arm. The reader never left the
-                // descriptor, so the screen goes in before the drain restarts
-                // and the resume is a restart of its thread.
+                // Every attach's arm. The reader never left the descriptor, so
+                // the screen goes in before the drain restarts and the resume is
+                // a restart of its thread.
                 if let preamble { await suspended.ingest(preamble: preamble) }
                 try await suspended.resumeDraining()
                 reader = suspended
             case nil:
+                // Defensive; see the header. A claim with no reader under it
+                // means something emptied the slot without clearing the claim.
                 reader = try await beginAdoption(
                     of: terminalID, seedingScreenWith: preamble ?? Data())
             case .adopting, .releasing:
