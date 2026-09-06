@@ -635,9 +635,14 @@ Everything TBD does through tmux today, and its replacement:
 
   The same flag decides the **limit-resume rail**, which types "continue" into
   a session whose usage limit has reset. On this transport it writes through
-  `HolderInjectionCourier` rather than tmux `send-keys` — one message of ESC,
-  the literal and a carriage return, ten bytes, far under the size at which an
-  unwrapped write loses its trailing `\r`. Its pane-identity, pane-PID and
+  `HolderInjectionCourier` rather than tmux `send-keys`, in the tmux sequence's
+  own shape and timing: one write of `ESC`, the same 150 ms pause, then one
+  write of the literal and its carriage return. The Escape needs a read of its
+  own because an ink-style input parser reads `ESC` followed immediately by a
+  printable byte as a meta key, so a single combined write would compose Alt-c
+  and then "ontinue" on every attempt. The second write keeps its `\r` — nine
+  bytes, under the size at which an unwrapped write loses its trailing `\r`, so
+  no bracketed-paste wrapper is needed. Its pane-identity, pane-PID and
   copy-mode rails are tmux's alone and are skipped; the verification that
   follows the send reads hook-fed activity state and transcript growth, so it
   is the same code for both transports. It belongs under this flag rather than

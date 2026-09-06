@@ -25,32 +25,63 @@ final class RecordedTmuxArgs: @unchecked Sendable {
     }
 }
 
-/// Every payload a rail handed the holder input seam, and the answer it got.
+/// Every payload a rail handed the holder input seam, every pause it took
+/// between them, and the answer the seam gave back — in one ordered log,
+/// because on this transport the ORDER of "Escape, pause, text" is the
+/// property under test and two separate recorders could not express it.
 ///
-/// Shaped exactly like the closure `Daemon.start` builds over
+/// `send` is shaped exactly like the closure `Daemon.start` builds over
 /// `HolderInjectionCourier.deliver` — bytes in, delivered-or-not out — so a
 /// test asserts on the bytes production would put on a pty rather than on a
-/// mock of the courier's internals.
+/// mock of the courier's internals. `waiter` is the actuator's own sleep seam,
+/// recording instead of sleeping (the same trick
+/// `LimitResumeActuatorTests.toggleFlippedOffBetweenAttemptsCancelsAfterOneSend`
+/// uses to act between an actuation's steps).
 private final class RecordedHolderWrites: @unchecked Sendable {
+    enum Event: Equatable {
+        case write(terminalID: UUID, bytes: Data)
+        case pause(Duration)
+    }
+
     private let lock = NSLock()
-    private var writes: [(terminalID: UUID, bytes: Data)] = []
-    /// What the seam answers: `true` for delivered, `false` for a courier that
-    /// found no route at all.
-    private let accepts: Bool
+    private var events: [Event] = []
+    private var writeCount = 0
+    /// How many writes the seam answers `true` to before it starts answering
+    /// `false` — a courier that found no route at all. Default: every one.
+    /// `0` refuses the first write, `1` the second, which is how the two
+    /// halves of the holder arm's send are failed independently.
+    private let acceptedWrites: Int
 
-    init(accepts: Bool = true) { self.accepts = accepts }
+    init(acceptedWrites: Int = .max) { self.acceptedWrites = acceptedWrites }
 
-    func snapshot() -> [(terminalID: UUID, bytes: Data)] {
+    /// Writes and pauses interleaved, in the order they happened.
+    func snapshot() -> [Event] {
         lock.lock(); defer { lock.unlock() }
-        return writes
+        return events
+    }
+
+    /// Just the writes, for the tests whose whole assertion is that there were
+    /// none.
+    func writes() -> [Event] {
+        snapshot().filter { if case .write = $0 { return true } else { return false } }
     }
 
     var send: @Sendable (UUID, Data) async -> Bool {
         { [self] terminalID, bytes in
             lock.lock()
-            writes.append((terminalID: terminalID, bytes: bytes))
+            events.append(.write(terminalID: terminalID, bytes: bytes))
+            writeCount += 1
+            let accepted = writeCount <= acceptedWrites
             lock.unlock()
-            return accepts
+            return accepted
+        }
+    }
+
+    var waiter: @Sendable (Duration) async -> Void {
+        { [self] duration in
+            lock.lock()
+            events.append(.pause(duration))
+            lock.unlock()
         }
     }
 }
@@ -1552,16 +1583,18 @@ struct HolderTmuxAssumptionGateTests {
     ///
     /// `holderSend` defaults to nil, which is also what a daemon with no holder
     /// registry wires, so the flag-off tests below assert the flag and not an
-    /// absent seam.
+    /// absent seam. `waiter` defaults to a no-op, so only the test that asserts
+    /// on the pause between the holder arm's two writes records them.
     private func resumeActuator(
         _ db: TBDDatabase, tmux: FakeResumeTmux,
-        holderSend: (@Sendable (UUID, Data) async -> Bool)? = nil
+        holderSend: (@Sendable (UUID, Data) async -> Bool)? = nil,
+        waiter: @escaping @Sendable (Duration) async -> Void = { _ in }
     ) -> LimitResumeActuator {
         LimitResumeActuator(
             db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
             readTranscript: { _ in nil },
             transcriptModifiedAt: { _ in nil },
-            waiter: { _ in }, actuationLog: makeTestActuationLog(),
+            waiter: waiter, actuationLog: makeTestActuationLog(),
             holderSend: holderSend)
     }
 
@@ -1601,7 +1634,7 @@ struct HolderTmuxAssumptionGateTests {
         #expect(outcome == .failed(LimitResumeActuator.holderTransportRefusal),
                 "expected the named refusal, got \(outcome)")
         #expect(tmux.sends.isEmpty)
-        #expect(holder.snapshot().isEmpty,
+        #expect(holder.writes().isEmpty,
                 "the flag is off and the rail still wrote to the holder's pty")
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
@@ -1641,7 +1674,7 @@ struct HolderTmuxAssumptionGateTests {
                 "expected the named refusal, got \(outcome)")
         #expect(tmux.sends.isEmpty,
                 "auto-resume typed into a holder row: \(tmux.sends)")
-        #expect(holder.snapshot().isEmpty,
+        #expect(holder.writes().isEmpty,
                 "the flag is off and the rail still wrote to the holder's pty")
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before)
@@ -1650,12 +1683,18 @@ struct HolderTmuxAssumptionGateTests {
     /// The other branch of the same gate: with the flag on, the rail delivers
     /// the resume through the holder input path instead of refusing.
     ///
-    /// The bytes are asserted whole rather than against the actuator's own
-    /// constant, because the constant is what this test exists to pin: ESC,
-    /// the literal `continue`, carriage return — one write, ten bytes, no
-    /// bracketed-paste wrapper (Claude Code's stdin tokenizer swallows the
-    /// `\r` only at 64 bytes and up).
-    @Test("auto-resume writes ESC + continue + CR to a holder session with the flag on")
+    /// Two writes with the tmux arm's 150 ms pause between them, asserted as
+    /// one ordered log because the order is the property. ESC has to arrive in
+    /// a read of its own: an ink-style parser reads ESC followed immediately by
+    /// a printable byte as a meta key, so a single `ESC`+`continue`+`\r` write
+    /// composes Alt-c and then "ontinue" every time, which no retry recovers.
+    /// The second write keeps its carriage return — 9 bytes, under the 64 at
+    /// which Claude Code's stdin tokenizer swallows an unwrapped `\r`.
+    ///
+    /// The bytes are spelled out here rather than compared against the
+    /// actuator's own constants, because those constants are what this test
+    /// exists to pin.
+    @Test("auto-resume writes ESC, a pause, then continue + CR to a holder session with the flag on")
     func autoResumeWritesTheContinueMessageToHolderRowWithFlagOn() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (wt, dir) = try await seedWorktree(db)
@@ -1666,7 +1705,9 @@ struct HolderTmuxAssumptionGateTests {
         // The activity hook already reports working, so the first verification
         // poll succeeds without a transcript on disk — the same fixture the
         // tmux leg uses, because verification reads hook-fed state and the
-        // transcript and so is the same code for both transports.
+        // transcript and so is the same code for both transports. It also
+        // means verification never reaches its own `waiter` call, so every
+        // pause in the log below belongs to the send.
         try await db.terminals.setActivityState(
             id: terminal.id, activityState: .working, source: .derived)
         let resume = try await armedResume(db, terminal: terminal)
@@ -1676,19 +1717,16 @@ struct HolderTmuxAssumptionGateTests {
         // makes that a real assertion rather than a refusal in disguise.
         tmux.windowAlive = true
         let holder = RecordedHolderWrites()
-        let outcome = await resumeActuator(db, tmux: tmux, holderSend: holder.send)
-            .actuate(resume)
+        let outcome = await resumeActuator(
+            db, tmux: tmux, holderSend: holder.send, waiter: holder.waiter
+        ).actuate(resume)
 
         #expect(outcome == .sent, "expected .sent, got \(outcome)")
-        let writes = holder.snapshot()
-        #expect(writes.count == 1, "expected one write, got \(writes.count)")
-        let write = try #require(writes.first)
-        #expect(write.terminalID == terminal.id,
-                "the write was addressed to \(write.terminalID), not the scheduled terminal")
-        #expect(write.bytes == Data([0x1B]) + Data("continue".utf8) + Data([0x0D]),
-                "wrote \(Array(write.bytes))")
-        #expect(write.bytes.count == 10,
-                "the payload must stay under the 64-byte threshold that eats an unwrapped \\r")
+        #expect(holder.snapshot() == [
+            .write(terminalID: terminal.id, bytes: Data([0x1B])),
+            .pause(.milliseconds(150)),
+            .write(terminalID: terminal.id, bytes: Data("continue".utf8) + Data([0x0D])),
+        ], "the holder arm's send was \(holder.snapshot())")
         #expect(tmux.sends.isEmpty,
                 "the holder arm reached tmux: \(tmux.sends)")
     }
@@ -1718,7 +1756,7 @@ struct HolderTmuxAssumptionGateTests {
             .actuate(resume)
 
         #expect(outcome == .terminalGone, "expected .terminalGone, got \(outcome)")
-        #expect(holder.snapshot().isEmpty,
+        #expect(holder.writes().isEmpty,
                 "auto-resume wrote into a parked holder session")
         #expect(tmux.sends.isEmpty)
     }
@@ -1727,7 +1765,10 @@ struct HolderTmuxAssumptionGateTests {
     /// rather than reporting the generic "no activity after 2 sends" — and it
     /// does not try again, because the courier has already exhausted its own
     /// routes by the time it answers.
-    @Test("auto-resume fails by name when the holder input path takes nothing")
+    ///
+    /// A refused Escape also stops the sequence there: no pause, and no
+    /// "continue" typed at a session that did not take the Escape.
+    @Test("auto-resume fails by name when the holder input path refuses the Escape")
     func autoResumeFailsByNameWhenHolderWriteIsRefused() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (wt, dir) = try await seedWorktree(db)
@@ -1738,14 +1779,45 @@ struct HolderTmuxAssumptionGateTests {
         let resume = try await armedResume(db, terminal: terminal)
 
         let tmux = FakeResumeTmux()
-        let holder = RecordedHolderWrites(accepts: false)
-        let outcome = await resumeActuator(db, tmux: tmux, holderSend: holder.send)
-            .actuate(resume)
+        let holder = RecordedHolderWrites(acceptedWrites: 0)
+        let outcome = await resumeActuator(
+            db, tmux: tmux, holderSend: holder.send, waiter: holder.waiter
+        ).actuate(resume)
 
         #expect(outcome == .failed(LimitResumeActuator.holderWriteRefused),
                 "expected the named write failure, got \(outcome)")
-        #expect(holder.snapshot().count == 1,
-                "an undeliverable write was retried: \(holder.snapshot().count) attempts")
+        #expect(holder.snapshot() == [.write(terminalID: terminal.id, bytes: Data([0x1B]))],
+                "a refused Escape was followed by more: \(holder.snapshot())")
+        #expect(tmux.sends.isEmpty)
+    }
+
+    /// The other half of the same failure: the Escape lands, the text does not.
+    /// Same named failure, and still no retry — a half-delivered send is not a
+    /// send, and the courier that refused the second write would refuse it
+    /// again by the same route.
+    @Test("auto-resume fails by name when the holder input path refuses the continue text")
+    func autoResumeFailsByNameWhenHolderSecondWriteIsRefused() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try await db.config.setHolderHibernationEnabled(true)
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let resume = try await armedResume(db, terminal: terminal)
+
+        let tmux = FakeResumeTmux()
+        let holder = RecordedHolderWrites(acceptedWrites: 1)
+        let outcome = await resumeActuator(
+            db, tmux: tmux, holderSend: holder.send, waiter: holder.waiter
+        ).actuate(resume)
+
+        #expect(outcome == .failed(LimitResumeActuator.holderWriteRefused),
+                "expected the named write failure, got \(outcome)")
+        #expect(holder.snapshot() == [
+            .write(terminalID: terminal.id, bytes: Data([0x1B])),
+            .pause(.milliseconds(150)),
+            .write(terminalID: terminal.id, bytes: Data("continue".utf8) + Data([0x0D])),
+        ], "the send was retried or reshaped: \(holder.snapshot())")
         #expect(tmux.sends.isEmpty)
     }
 
@@ -1823,7 +1895,7 @@ struct HolderTmuxAssumptionGateTests {
 
         #expect(outcome == .sent, "expected .sent, got \(outcome)")
         #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
-        #expect(holder.snapshot().isEmpty,
+        #expect(holder.writes().isEmpty,
                 "a tmux row was routed through the holder input path")
     }
 }

@@ -59,7 +59,7 @@ public struct ProductionPaneProcessInspector: PaneProcessInspecting {
 
 /// Runs one actuation attempt for a scheduled resume: eligibility checks, the
 /// send — tmux's Escape/continue/Enter key sequence, or the holder transport's
-/// single write of the same three things — and post-send verification, which is
+/// two writes of the same three things — and post-send verification, which is
 /// the same for both because it reads hook-fed state and the transcript rather
 /// than anything the transport can see.
 public struct LimitResumeActuator: LimitResumeActuating {
@@ -97,38 +97,44 @@ public struct LimitResumeActuator: LimitResumeActuating {
     static let holderWriteRefused =
         "the resume could not be written to the holder-backed session"
 
-    /// The single message the holder arm writes: `ESC`, the literal, carriage
-    /// return — 10 bytes.
+    /// The first of the holder arm's two writes: `ESC`, alone — one byte.
     ///
-    /// **One write, not three.** The tmux arm sends Escape, the text and Enter
-    /// as three `send-keys` calls with 150 ms between them, because tmux owns a
-    /// named-key table and because text+Enter in one `send-keys` is read as a
-    /// bracketed paste. Neither applies here: this transport carries raw bytes
-    /// and has no key table yet (the child-as-contract-party design,
+    /// The whole send is `ESC`, then `interKeyPause`, then
+    /// `holderContinuePayload`, which is the tmux arm's Escape/pause/text
+    /// timing expressed in raw bytes. There is no named-key table on this
+    /// transport (the child-as-contract-party design,
     /// `docs/specs/2026-09-05-child-as-contract-party-design.md`, is where one
-    /// comes from — it needs the child's cursor-key mode to choose a byte
-    /// sequence for a named key), and a
-    /// message split across several courier calls can be split across a routing
-    /// decision — `HolderInjectionCourier` picks the viewer or the daemon per
-    /// call, so two calls are two independent routings. `performHolderSend`
-    /// composes its whole send as one write for exactly that reason.
+    /// comes from: choosing bytes for a named key needs the child's cursor-key
+    /// mode), so the two keys this rail needs are written as the bytes a
+    /// terminal delivers for them — `0x1B` for Escape, `0x0D` for Return.
     ///
-    /// **Why no bracketed-paste wrapper.** Claude Code's stdin tokenizer
+    /// **Why `ESC` gets a write and a pause of its own.** An ink-style input
+    /// parser reads `ESC` immediately followed by a printable byte as a meta
+    /// key, so `ESC` and the text arriving in one read compose Alt-c and then
+    /// "ontinue" — deterministically, on every attempt, which is why the retry
+    /// in `actuate` could not recover it. The pause goes through the same
+    /// `waiter` seam as the tmux arm's, so tests advance it virtually and only
+    /// production sleeps.
+    static let holderEscapePayload = Data([0x1B])
+
+    /// The second of the holder arm's two writes: the literal and the carriage
+    /// return that submits it — 9 bytes, one write.
+    ///
+    /// **Text and carriage return together, unlike Escape.** Nothing composes
+    /// them into a different key, and a message split across two courier calls
+    /// can be split across a routing decision — `HolderInjectionCourier` picks
+    /// the viewer or the daemon per call, so two calls are two independent
+    /// routings. `performHolderSend` composes its own body and `\r` as one
+    /// write for exactly that reason.
+    ///
+    /// **And no bracketed-paste wrapper.** Claude Code's stdin tokenizer
     /// swallows the trailing `\r` of any single *unwrapped* write of 64 bytes
-    /// or more (measured on 2.1.261: 63 bytes submits, 64 does not); the
+    /// or more (measured on 2.1.261: 63 bytes submits, 64 does not). The
     /// wrappers are the fix, and they are correct only when the child has
     /// bracketed-paste mode on, which the daemon's emulator does not yet
-    /// expose. At 10 bytes this payload is far under that threshold, so it
+    /// expose. At 9 bytes this write is far under that threshold, so it
     /// submits as bare bytes and needs no wrapper.
-    ///
-    /// **What one write costs.** ESC and the text land in the same read, so a
-    /// child that reads `ESC`+char as a meta-key composes Alt-c and types
-    /// "ontinue" — the same defect the tmux arm's inter-key pause exists to
-    /// prevent, and a pause cannot be expressed inside a single write. The
-    /// retry in `actuate` covers a first attempt that composes wrongly, and the
-    /// whole arm is behind the default-off holder-hibernation flag while that
-    /// is soaked.
-    static let holderContinuePayload = Data(("\u{1B}" + continueMessage + "\r").utf8)
+    static let holderContinuePayload = Data((continueMessage + "\r").utf8)
 
     static let verifyPollInterval: Duration = .seconds(1)
     static let verifyPolls = 20   // ~20s window
@@ -285,8 +291,9 @@ public struct LimitResumeActuator: LimitResumeActuating {
                 // courier has already exhausted its own routes by the time it
                 // answers no — viewer, then the daemon's own descriptor — so a
                 // second identical write would take the same route to the same
-                // answer, ~20s of verification later.
-                guard await send(context.terminalID, Self.holderContinuePayload) else {
+                // answer, ~20s of verification later. Either write answering no
+                // ends the actuation the same way: half a send is not a send.
+                guard await sendHolderContinue(send: send, terminalID: context.terminalID) else {
                     await actuationLog.appendOutcome(
                         confirms: actuationID, result: .transportFailed,
                         error: Self.holderWriteRefused)
@@ -634,7 +641,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
     }
 
     /// The exact production send sequence for the tmux arm (spec §Actuation 5);
-    /// the holder arm's single-write equivalent is `holderContinuePayload`:
+    /// the holder arm's raw-bytes equivalent is `sendHolderContinue`:
     /// Escape first — at the limit, newer Claude Code opens the
     /// `/rate-limit-options` menu whose highlighted default can be "Upgrade
     /// your plan"; a blind Enter can confirm a paid upgrade. Escape
@@ -653,6 +660,27 @@ public struct LimitResumeActuator: LimitResumeActuating {
         try await tmux.sendKeys(server: server, paneID: paneID, text: continueMessage)
         await waiter(interKeyPause)
         try await tmux.sendKey(server: server, paneID: paneID, key: "Enter")
+    }
+
+    /// The holder arm's counterpart to `sendContinueSequence`: the same
+    /// Escape/pause/text-and-submit shape, written as bytes.
+    ///
+    /// Two writes with `interKeyPause` between them — `holderEscapePayload`
+    /// says why the pause is load-bearing rather than cosmetic here, and
+    /// `holderContinuePayload` says why the literal and its carriage return
+    /// stay together. The pause runs on the same injected `waiter` the tmux arm
+    /// uses, so a test advances it and only production sleeps.
+    ///
+    /// Answers whether the whole sequence was delivered. A `false` from the
+    /// first write skips the second: nothing is gained by typing "continue" at
+    /// a session that did not take the Escape, and the caller reports one named
+    /// failure either way.
+    private func sendHolderContinue(
+        send: @Sendable (UUID, Data) async -> Bool, terminalID: UUID
+    ) async -> Bool {
+        guard await send(terminalID, Self.holderEscapePayload) else { return false }
+        await waiter(Self.interKeyPause)
+        return await send(terminalID, Self.holderContinuePayload)
     }
 
     /// Success signal within ~20s: the activity hook reports `working`, or
