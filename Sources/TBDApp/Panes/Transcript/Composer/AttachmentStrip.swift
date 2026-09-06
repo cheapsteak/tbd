@@ -12,7 +12,10 @@ import SwiftUI
 struct AttachmentStrip: View {
     let draft: ComposerDraft
     let onReinsert: (Int) -> Void
-    let onReveal: (Int) -> Void
+    /// An attached thumbnail was clicked: move the caret to its token. There is
+    /// deliberately no second gesture — no Finder reveal — because there is no
+    /// second affordance on a thumbnail to carry one.
+    let onFocusToken: (Int) -> Void
     let onRemove: (Int) -> Void
     let hoveredNumber: Int?
     let onHover: (Int?) -> Void
@@ -73,13 +76,17 @@ struct AttachmentStrip: View {
             }
         }
         .onTapGesture {
-            if detached { onReinsert(attachment.number) } else { onReveal(attachment.number) }
+            if detached {
+                onReinsert(attachment.number)
+            } else {
+                onFocusToken(attachment.number)
+            }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             detached
                 ? "Image \(attachment.number), not in message. Click to re-insert."
-                : "Image \(attachment.number), in message.")
+                : "Image \(attachment.number), in message. Click to go to it.")
     }
 }
 

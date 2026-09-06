@@ -92,6 +92,91 @@ struct MessageComposerViewTests {
         #expect(parked.contains("hibernated"))
     }
 
+    // MARK: - The draft a switched terminal gets
+
+    /// Switching to a terminal whose draft is empty **clears** the box. The
+    /// `NSTextView` is reused across the switch, so restoring only non-empty
+    /// drafts would leave the previous terminal's message on screen, addressed
+    /// to a session that never saw it typed.
+    @Test func aTerminalWithAnEmptyDraftClearsTheBox() {
+        #expect(MessageComposerView.restoreCommand(draftText: "") == .clear)
+    }
+
+    @Test func aTerminalWithADraftRestoresIt() {
+        #expect(
+            MessageComposerView.restoreCommand(draftText: "half a sentence")
+                == .restore("half a sentence"))
+    }
+
+    // MARK: - Clicking a thumbnail that is in the message
+
+    /// It moves the caret to that image's token — the token replaced with
+    /// itself, which leaves the text untouched and the insertion point after it.
+    /// It does not open Finder: the thumbnail carries one gesture, and where the
+    /// image sits in the sentence is the question a click on an attached one is
+    /// asking.
+    @Test func clickingAnAttachedThumbnailMovesTheCaretToItsToken() throws {
+        let token = ComposerTokens.text(for: 2)
+        let text = "before \(token) after"
+
+        let command = try #require(
+            MessageComposerView.caretCommand(text: text, number: 2))
+
+        let expected = (text as NSString).range(of: token)
+        #expect(command == .replaceRange(expected, with: token))
+    }
+
+    /// A number the text no longer anchors has nowhere to put the caret, so the
+    /// click does nothing rather than guessing at a position.
+    @Test func aThumbnailWhoseTokenIsGoneMovesNothing() {
+        #expect(MessageComposerView.caretCommand(text: "no tokens here", number: 1) == nil)
+    }
+
+    // MARK: - Removing an image
+
+    /// **Every** occurrence goes. Re-inserting an image twice is how a person
+    /// refers to it twice, and leaving the second copy behind would send a path
+    /// for an image the strip no longer lists.
+    @Test func removingADuplicatedTokenRemovesEveryOccurrence() throws {
+        let token = ComposerTokens.text(for: 1)
+        let text = "a \(token) b \(token) c"
+
+        let command = try #require(
+            MessageComposerView.removalCommand(text: text, number: 1))
+        guard case .replaceRange(let range, let replacement) = command else {
+            Issue.record("expected a range replacement, got \(command)")
+            return
+        }
+        let updated = (text as NSString).replacingCharacters(in: range, with: replacement)
+
+        #expect(updated == "a  b  c")
+        #expect(ComposerTokens.attachedNumbers(in: updated).isEmpty)
+    }
+
+    /// Only that image's tokens. A neighbouring image keeps its anchor, and the
+    /// text outside the removed span is not rewritten at all.
+    @Test func removingOneImageLeavesTheOthersAnchored() throws {
+        let text = "x \(ComposerTokens.text(for: 1)) y \(ComposerTokens.text(for: 2)) "
+            + "z \(ComposerTokens.text(for: 1))"
+
+        let command = try #require(
+            MessageComposerView.removalCommand(text: text, number: 1))
+        guard case .replaceRange(let range, let replacement) = command else {
+            Issue.record("expected a range replacement, got \(command)")
+            return
+        }
+        let updated = (text as NSString).replacingCharacters(in: range, with: replacement)
+
+        #expect(ComposerTokens.attachedNumbers(in: updated) == [2])
+        #expect(updated.hasPrefix("x "))
+    }
+
+    /// An image whose token the person already deleted removes nothing from the
+    /// text — the strip's x still drops the image, but there is no edit to make.
+    @Test func removingAnImageWithNoTokenLeftIssuesNoCommand() {
+        #expect(MessageComposerView.removalCommand(text: "just words", number: 1) == nil)
+    }
+
     // MARK: - The attachment write
 
     /// The PNG lands under the worktree's own attachment directory, derived from

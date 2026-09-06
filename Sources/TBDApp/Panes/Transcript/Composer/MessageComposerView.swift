@@ -31,7 +31,7 @@ struct MessageComposerView: View {
     @State private var isSending = false
     @State private var errorMessage: String?
     @State private var hoveredAttachment: Int?
-    @State private var textViewHandle: NSView?
+    @State private var handle = ComposerViewHandle()
 
     private var draft: ComposerDraft { appState.composerDraft(for: terminal.id) }
 
@@ -57,7 +57,7 @@ struct MessageComposerView: View {
             AttachmentStrip(
                 draft: draft,
                 onReinsert: { insertToken($0) },
-                onReveal: { reveal($0) },
+                onFocusToken: { focusToken($0) },
                 onRemove: { removeAttachment($0) },
                 hoveredNumber: hoveredAttachment,
                 onHover: { hoveredAttachment = $0 })
@@ -98,8 +98,13 @@ struct MessageComposerView: View {
             }
         }
         .onDisappear {
-            guard let textViewHandle else { return }
-            appState.unregisterComposerView(textViewHandle, for: terminal.id)
+            // The flag first, and unconditionally: it is what stops a
+            // registration still sitting in the deferred queue from installing a
+            // dead view as this terminal's focus target.
+            handle.isGone = true
+            guard let view = handle.view else { return }
+            appState.unregisterComposerView(view, for: terminal.id)
+            handle.view = nil
         }
         .task(id: terminal.id) { await setUp() }
     }
@@ -107,16 +112,31 @@ struct MessageComposerView: View {
     // MARK: - Set-up
 
     /// The text view hands itself out once, from `makeNSView`. Registration is
-    /// deferred off that call because it writes `@State`, and SwiftUI treats a
-    /// state write during a view update as undefined behavior.
+    /// deferred off that call because it mutates observable state, and SwiftUI
+    /// treats a state write during a view update as undefined behavior.
+    ///
+    /// **The handle itself is not deferred.** It lives in a reference box written
+    /// synchronously here, so a teardown landing inside the one-turn gap still
+    /// has a view to unregister — and still gets to veto the registration that
+    /// has not run yet. `registerComposerView` has no newer-wins guard (only
+    /// `unregisterComposerView` does), so a late registration would silently
+    /// install a view whose pane is gone as this terminal's focus target, and
+    /// Cmd+/ would put the caret nowhere.
     private func adopt(_ view: NSView) {
+        handle.view = view
+        // A freshly made view is a new life for this box, whatever the last one
+        // ended in.
+        handle.isGone = false
         Task { @MainActor in
-            textViewHandle = view
+            guard !handle.isGone, view.window != nil else { return }
             appState.registerComposerView(view, for: terminal.id)
         }
     }
 
     private func setUp() async {
+        // A banner belongs to the terminal it was raised for; carrying it across
+        // a switch would blame the new session for the old one's refusal.
+        errorMessage = nil
         if controller == nil {
             controller = CompletionController(
                 frecency: FrecencyStore(defaults: appState.userDefaults))
@@ -139,11 +159,9 @@ struct MessageComposerView: View {
                         terminalID: terminalID, incarnationID: incarnationID)
                 })
         }
-        // Restore the draft into a view that has just been made — the one write
-        // the one-way contract admits, as an explicit one-shot command.
-        if !draft.text.isEmpty {
-            issue(.restore(draft.text))
-        }
+        // Restore the draft into the view — the one write the one-way contract
+        // admits, as an explicit one-shot command.
+        issue(Self.restoreCommand(draftText: draft.text))
         // The inventory is warmed when the composer first appears, never on a
         // keystroke: the probe is a process spawn, and paying it on `/` would put
         // half a second between the sigil and the list.
@@ -157,6 +175,16 @@ struct MessageComposerView: View {
     private func issue(_ kind: ComposerCommand.Kind) {
         commandToken += 1
         command = ComposerCommand(token: commandToken, kind: kind)
+    }
+
+    /// What a composer handed a terminal does to the text view it is **reusing**.
+    ///
+    /// An empty draft is a command too. The `NSTextView` survives a switch from
+    /// one terminal to the next, so restoring only non-empty drafts leaves the
+    /// previous terminal's half-written message sitting in the box — addressed,
+    /// after the switch, to somebody else.
+    static func restoreCommand(draftText: String) -> ComposerCommand.Kind {
+        draftText.isEmpty ? .clear : .restore(draftText)
     }
 
     // MARK: - Completion
@@ -272,18 +300,65 @@ struct MessageComposerView: View {
         issue(.insertAtCaret(ComposerTokens.text(for: number)))
     }
 
-    private func reveal(_ number: Int) {
-        guard let path = draft.pathsByNumber[number] else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    /// Where the caret goes when an **attached** thumbnail is clicked: onto that
+    /// image's own token.
+    ///
+    /// The token is replaced with itself, which is how the one-shot command
+    /// vocabulary spells "put the caret here" — `.replaceRange` leaves the
+    /// insertion point after what it inserted, so the text is unchanged
+    /// character for character and the caret lands at the end of the token that
+    /// was clicked. A person clicking a thumbnail that is in the message is
+    /// asking where in the sentence it sits, which is a question only the caret
+    /// can answer; the strip carries no second gesture that could mean anything
+    /// else.
+    static func caretCommand(text: String, number: Int) -> ComposerCommand.Kind? {
+        guard let token = ComposerTokens.scan(text).first(where: { $0.number == number })
+        else { return nil }
+        return .replaceRange(token.range, with: ComposerTokens.text(for: number))
+    }
+
+    /// The one command that strips **every** occurrence of one image token.
+    ///
+    /// One command rather than one per occurrence: the view holds a single
+    /// pending instruction, so two issued in the same turn collapse and only the
+    /// last would ever reach the text view. The span from the first occurrence to
+    /// the last is rewritten in one go instead, with the tokens inside it removed
+    /// back to front so the earlier offsets stay valid, and nothing outside the
+    /// span is touched. A duplicated token is ordinary — re-inserting an image
+    /// twice is how a person refers to it twice — and leaving the second copy
+    /// behind would send a path for an image the strip no longer lists.
+    static func removalCommand(text: String, number: Int) -> ComposerCommand.Kind? {
+        let ranges = ComposerTokens.scan(text)
+            .filter { $0.number == number }
+            .map(\.range)
+        guard let first = ranges.first, let last = ranges.last else { return nil }
+        let span = NSRange(
+            location: first.location,
+            length: last.location + last.length - first.location)
+        var replacement = (text as NSString).substring(with: span) as NSString
+        for range in ranges.reversed() {
+            replacement = replacement.replacingCharacters(
+                in: NSRange(location: range.location - span.location, length: range.length),
+                with: "") as NSString
+        }
+        return .replaceRange(span, with: replacement as String)
+    }
+
+    private func focusToken(_ number: Int) {
+        guard let kind = Self.caretCommand(text: currentText(), number: number)
+        else { return }
+        issue(kind)
+        appState.focusComposer(terminalID: terminal.id)
     }
 
     private func removeAttachment(_ number: Int) {
+        // The text first: the strip's own map is what `currentText()` is read
+        // against, and removing the image before the token would leave the
+        // command scanning for a number that is already gone.
+        let kind = Self.removalCommand(text: currentText(), number: number)
         draft.removeAttachment(number: number)
-        // Remove its token from the text too, so the strip and the message agree.
-        let token = ComposerTokens.text(for: number)
-        if let range = (draft.text as NSString).range(of: token).toOptional() {
-            issue(.replaceRange(range, with: ""))
-        }
+        // Remove its tokens from the text too, so the strip and the message agree.
+        if let kind { issue(kind) }
     }
 
     // MARK: - Sending
@@ -291,7 +366,7 @@ struct MessageComposerView: View {
     /// The text view's own string, never a struct SwiftUI can leave a keystroke
     /// behind. The draft is the fallback for the moment before the view exists.
     private func currentText() -> String {
-        (textViewHandle as? NSTextView)?.string ?? draft.text
+        (handle.view as? NSTextView)?.string ?? draft.text
     }
 
     private func submit(_ text: String) {
@@ -378,7 +453,17 @@ struct MessageComposerView: View {
     }
 }
 
-private extension NSRange {
-    /// `NSString.range(of:)` reports `NSNotFound` rather than nil.
-    func toOptional() -> NSRange? { location == NSNotFound ? nil : self }
+/// The composer's text view, and whether its pane has gone.
+///
+/// A reference box rather than `@State` for one reason: both facts are written
+/// from places a view update forbids state writes in — `makeNSView`, and the
+/// deferred turn after it — and both must be readable by `onDisappear`, which can
+/// land between the two. Nothing here drives rendering, so nothing needs to
+/// invalidate the view.
+@MainActor
+final class ComposerViewHandle {
+    var view: NSView?
+    /// Set by `onDisappear`. A registration still queued when this flips must not
+    /// run: the pane it belongs to is already gone.
+    var isGone = false
 }
