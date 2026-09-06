@@ -12,7 +12,7 @@ struct HibernateReasonExitedTests {
     @Test func theRawValueIsStableOnTheWire() throws {
         #expect(HibernateReason.exited.rawValue == "exited")
         let encoded = try JSONEncoder().encode(HibernateReason.exited)
-        #expect(String(decoding: encoded, as: UTF8.self) == "\"exited\"")
+        #expect(String(bytes: encoded, encoding: .utf8) == "\"exited\"")
     }
 
     @Test func itRoundTripsThroughATerminal() throws {

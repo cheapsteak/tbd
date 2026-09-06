@@ -40,14 +40,16 @@ struct TerminalSendNotRunningTests {
     /// `TmuxManager(dryRun:)` reports every pane pid as "0", so the fixture
     /// supplies one through the `dryRunPanePID` hook this task adds — the shape
     /// every other dry-run answer in that file already uses.
-    private func makeFixture(foreground: Int32?) async throws -> Fixture {
+    private func makeFixture(
+        foreground: Int32?, kind: TerminalKind = .claude
+    ) async throws -> Fixture {
         let db = try TBDDatabase(inMemory: true)
         let worktree = try await db.worktrees.createScratch(
             name: "wt", displayName: "wt",
             path: "/tmp/tbd-nonexistent-\(UUID().uuidString)", tmuxServer: "tbd-test")
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "claude", claudeSessionID: "sess-1", kind: .claude)
+            label: "claude", claudeSessionID: "sess-1", kind: kind)
         let tmux = TmuxManager(
             dryRun: true,
             dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) },
@@ -107,6 +109,27 @@ struct TerminalSendNotRunningTests {
     /// passing because every send is refused.
     @Test func aLiveRowWithClaudeForegroundIsNotRefused() async throws {
         let f = try await makeFixture(foreground: 4242)
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+    }
+
+    /// A shell terminal has no Claude to be foreground, so the foreground rail
+    /// must never run for one. Without the kind gate this send is refused in
+    /// production: the pane pid is `-zsh`, it has no `claude` descendant, and the
+    /// inspector answers nil for every shell session there is.
+    @Test func aShellTerminalIsNotSubjectToTheForegroundRail() async throws {
+        let f = try await makeFixture(foreground: nil, kind: .shell)
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+    }
+
+    /// Codex is agent-bearing and supported, and its command line contains no
+    /// "claude", so the inspector answers nil for a perfectly healthy Codex
+    /// session. The gate is on the terminal's KIND, not on what `ps` says.
+    @Test func aCodexTerminalIsNotSubjectToTheForegroundRail() async throws {
+        let f = try await makeFixture(foreground: nil, kind: .codex)
 
         let response = try await send(f)
         #expect(response.success, "error was: \(response.error ?? "none")")

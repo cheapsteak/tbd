@@ -3047,6 +3047,17 @@ extension RPCRouter {
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
+            // The foreground rail is Claude-only, on the same predicate the
+            // `--verify` rails below use. The inspector's question is literally
+            // "does a foreground process whose command line contains `claude`
+            // own this pane" — which is `nil` for every healthy shell session
+            // (the pane pid IS the shell, with no children) and for every
+            // healthy Codex session (`codex …` contains no "claude"). Asking it
+            // about a non-Claude kind refuses a send that should have gone
+            // through, so the kind decides whether the question means anything.
+            // The park rail above stays kind-agnostic: a parked row of any kind
+            // has no live session behind it.
+            //
             // A pane id that resolves to a pid is the precondition for asking at
             // all, and `panePID > 0` is not decoration: a tmux that cannot answer
             // reports "0", and asking the process table about pid 0 is a question
@@ -3054,7 +3065,8 @@ extension RPCRouter {
             // cannot answer is not evidence that Claude left, and the pane
             // consultation below is the rail that judges a missing or dead pane,
             // properly.
-            if let panePIDString = try? await tmux.panePID(
+            if Self.supportsDeliveryObservation(terminal),
+               let panePIDString = try? await tmux.panePID(
                     server: worktree.tmuxServer, paneID: terminal.tmuxPaneID),
                let panePID = Int32(panePIDString), panePID > 0,
                paneProcessInspector.foregroundClaudePID(panePID: panePID) == nil {

@@ -38,15 +38,31 @@ public struct ProductionPaneProcessInspector: PaneProcessInspecting {
     }
 
     public func foregroundClaudePID(panePID: Int32) -> Int32? {
-        // Candidates: pane PID itself (zsh may have exec'd into Claude),
-        // its children, and grandchildren (wrapper-shell spawns).
-        var candidates: [Int32] = [panePID]
+        // Candidates, cheapest first: the pane PID itself (zsh may have exec'd
+        // into Claude) and its direct children, which one `ps` table scan
+        // answers together.
         let children = signaller.children(ofServerPID: panePID)
-        candidates += children
+        if let match = firstForegroundClaude(in: [panePID] + children) { return match }
+
+        // Grandchildren (wrapper-shell spawns) cost a FULL `ps -axo pid=,ppid=`
+        // scan each, so they are walked only after the cheap candidates came up
+        // empty — which is exactly the case this rail is asked about on the
+        // interactive send path, where the ordinary answer is the pane pid or one
+        // of its children. Scanning order is unchanged: a grandchild could only
+        // ever have won after every child lost anyway.
         for child in children {
-            candidates += signaller.children(ofServerPID: child)
+            if let match = firstForegroundClaude(in: signaller.children(ofServerPID: child)) {
+                return match
+            }
         }
-        for pid in candidates {
+        return nil
+    }
+
+    /// The first pid in `pids` that owns its tty's foreground process group and
+    /// whose command line names Claude. Two `ps` invocations per candidate, so
+    /// callers pass the cheapest candidate set they have.
+    private func firstForegroundClaude(in pids: [Int32]) -> Int32? {
+        for pid in pids {
             guard let stat = signaller.stat(pid), stat.contains("+"),
                   let command = signaller.commandLine(pid)?.lowercased(),
                   command.contains("claude")
