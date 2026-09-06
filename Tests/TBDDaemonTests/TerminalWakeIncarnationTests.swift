@@ -30,9 +30,13 @@ struct TerminalWakeIncarnationTests {
         }
     }
 
-    /// A daemon that respawned without being able to mint one — the shape a
-    /// legacy row produces — reports `woken: true` and no id, and the app must
-    /// then never enter the hold rather than hold forever.
+    /// `sessionIncarnationID` is nil here for wire compatibility rather than
+    /// because the daemon can actually produce this shape — `liveIncarnationID`
+    /// is non-optional on the respawn path, so a nil id never comes from this
+    /// process today. The optional exists so an older daemon's `{"woken":true}`
+    /// (no field at all) still decodes; this test pins that the decoder
+    /// tolerates it and that the app must not hold forever waiting on an id
+    /// that will never arrive.
     @Test func aWokenPathWithNoIDIsStillWoken() throws {
         let payload = try #require(
             RPCRouter.wakeResultPayload(for: .ok(sessionIncarnationID: nil)))

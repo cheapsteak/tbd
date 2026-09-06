@@ -268,7 +268,7 @@ struct WakePathGuardTests {
 
         let result = await router.hibernationCoordinator.wake(terminalID: terminal.id)
 
-        #expect(isWakeOk(result))
+        #expect(result.isOk)
         #expect(try await db.terminals.get(id: terminal.id)?.hibernatedAt == nil)
         let derived = TranscriptProjectDirSync.derivedProjectDir(
             worktreePath: wtDir.path, projectsRoot: ambientRoot)

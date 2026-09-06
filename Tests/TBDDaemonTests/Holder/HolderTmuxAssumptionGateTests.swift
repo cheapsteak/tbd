@@ -826,7 +826,7 @@ struct HolderTmuxAssumptionGateTests {
             id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
 
         let result = await coordinator(db, tmux: tmux).wake(terminalID: terminal.id)
-        #expect(isWakeOk(result))
+        #expect(result.isOk)
         #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
         #expect(!recorded.snapshot().isEmpty, "the tmux leg must still drive tmux")
     }
