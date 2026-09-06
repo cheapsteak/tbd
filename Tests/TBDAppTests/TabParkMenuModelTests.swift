@@ -75,4 +75,41 @@ struct TabParkMenuModelTests {
         #expect(TabParkMenuModel.action(for: shell, holderHibernationEnabled: false) == nil)
         #expect(TabParkMenuModel.action(for: codex, holderHibernationEnabled: false) == nil)
     }
+
+    /// Both branches of the holder soak gate. The menu must agree with the rail
+    /// the daemon will apply: with the gate off a holder tab offers nothing,
+    /// because a Hibernate item there could only ever produce a refusal the
+    /// user cannot act on; with it on the same tab offers Hibernate.
+    @Test func holderTabFollowsTheSoakGate() {
+        let holder = Terminal(
+            id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+            claudeSessionID: "session-1", kind: .claude, activityState: .idle,
+            transport: .holder)
+        #expect(TabParkMenuModel.action(for: holder, holderHibernationEnabled: false) == nil)
+        #expect(
+            TabParkMenuModel.action(for: holder, holderHibernationEnabled: true) == .hibernate)
+    }
+
+    /// A PARKED holder tab offers Wake under both values: the gate decides
+    /// whether a park may happen, and a row that is already parked has to be
+    /// wakeable however it got there — an older daemon, or the reconcile rail.
+    @Test func parkedHolderTabAlwaysOffersWake() {
+        let parked = Terminal(
+            id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+            claudeSessionID: "session-1", kind: .claude, activityState: .idle,
+            hibernatedAt: Date(), transport: .holder)
+        #expect(TabParkMenuModel.action(for: parked, holderHibernationEnabled: false) == .wake)
+        #expect(TabParkMenuModel.action(for: parked, holderHibernationEnabled: true) == .wake)
+    }
+
+    /// A tmux tab is unaffected by either value, which is what makes the two
+    /// tests above about the transport rather than about the flag alone.
+    @Test func tmuxTabIsUnaffectedByTheSoakGate() {
+        let terminal = claudeTerminal()
+        for enabled in [false, true] {
+            #expect(
+                TabParkMenuModel.action(for: terminal, holderHibernationEnabled: enabled)
+                    == .hibernate)
+        }
+    }
 }

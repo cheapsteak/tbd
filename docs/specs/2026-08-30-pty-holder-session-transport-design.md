@@ -606,7 +606,32 @@ Everything TBD does through tmux today, and its replacement:
 - **Hibernation and revive** — hibernate instructs the holder to terminate its
   child (the holder reports status and exits); revive spawns a fresh holder.
   The input-veto and queued-prompt flags keep their semantics, now gating
-  daemon writes to the master instead of tmux `send-keys`.
+  daemon writes to the master instead of tmux `send-keys`. Three properties
+  of the park are load-bearing rather than incidental:
+
+  - **The row never finalizes parked while the child is still running.** The
+    park writes its intent, ends the child, confirms the exit, and only then
+    finalizes and clears the row's holder and child pids. A child that survives
+    both the polite `/exit` and the escalation rolls the intent back and leaves
+    the session awake, because a row that claims parked over a live process is
+    reclaimable by nothing: no sweep reads it, and a wake would put a second
+    agent on the same session.
+  - **The pending-input rail fails closed when the daemon is not the reader.**
+    It judges the daemon's own emulator, which is frozen for the duration of a
+    viewer's attach (see "Two stores, reconciled on demand"), so a park asked
+    for while a viewer holds the pty is refused by name. Refusing is
+    recoverable; eating a half-composed prompt is not.
+  - **Revive re-anchors the identity check.** The row records when its current
+    child started, because a woken session's child is younger than its row and
+    every reclaimer that verifies a recorded pid against a start time would
+    otherwise read it as a stranger.
+
+  Park and wake on this transport ship behind `holder_hibernation_enabled`,
+  which is separate from `pty_holder_enabled` because that outer gate has to be
+  on for a holder row to exist at all and so cannot express "transport on,
+  hibernation not yet". With it off, every park and wake path refuses a holder
+  row and the reconcile arm deletes a finished holder session rather than
+  parking it — a park is only worth having where something can wake it.
 - **Scrollback** — bounded emulator history while detached, SwiftTerm's own
   history while attached, transcripts as the durable record. tmux's 50k-line
   retention is not matched and deliberately so.

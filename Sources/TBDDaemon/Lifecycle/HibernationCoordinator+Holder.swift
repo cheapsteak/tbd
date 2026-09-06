@@ -22,14 +22,6 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "Hibernation"
 /// invisible to every reconciler that reads rows.
 extension HibernationCoordinator {
 
-    /// How many times the escalation poll re-checks the child after
-    /// `abandon` has signalled it. Five at the production `exitPollInterval` of
-    /// 200 ms is one second — the budget a `SIGKILL`ed process needs to leave
-    /// the process table, not a budget for it to shut down politely, which is
-    /// what the poll before it was for. It rides `exitPollInterval` rather than
-    /// carrying its own so a test that shrinks the polite poll shrinks this too.
-    static var holderEscalationAttempts: Int { 5 }
-
     /// The refusal for a holder session the daemon cannot read the screen of.
     ///
     /// Fail-closed, per the transport design's two-store rule: while a viewer
@@ -164,7 +156,7 @@ extension HibernationCoordinator {
             }
             gone = await pollUntilChildIsGone(
                 childPID: childPID, terminalID: terminal.id, registry: registry,
-                attempts: Self.holderEscalationAttempts)
+                attempts: holderEscalationAttempts)
         } else {
             // Gone politely, so the holder was never told to let go — and a
             // holder whose child has exited winds itself down, which is a race

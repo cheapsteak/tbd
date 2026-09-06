@@ -174,6 +174,18 @@ public actor HibernationCoordinator {
     nonisolated let exitPollAttempts: Int
     nonisolated let exitPollInterval: Duration
 
+    /// How many times the holder park re-checks its child AFTER escalating to
+    /// `HolderRegistry.abandon` — which forgets the holder, kills the job by
+    /// process group and reaps the corpse.
+    ///
+    /// Five at the production `exitPollInterval` of 200 ms is one second, and
+    /// it is a different budget from the poll before it: that one waits for a
+    /// session to shut itself down politely, this one waits for a `SIGKILL`ed
+    /// process to leave the process table. Injectable on the same terms as the
+    /// pair above, and for the same reason — a test proving the "the child
+    /// survived everything" branch must not pay a real second to do it.
+    nonisolated let holderEscalationAttempts: Int
+
     /// Delay seam for the verify-exit poll (`Duration` is behavior). Tests
     /// inject a `TestClock` so the poll's pacing is virtual and the
     /// "escalate after exactly N attempts" boundary is exact.
@@ -214,6 +226,7 @@ public actor HibernationCoordinator {
         now: @escaping @Sendable () -> Date = { Date() },
         exitPollAttempts: Int = 15,
         exitPollInterval: Duration = .milliseconds(200),
+        holderEscalationAttempts: Int = 5,
         clock: any Clock<Duration> = ContinuousClock(),
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
         actuationLog: ActuationLog
@@ -227,6 +240,7 @@ public actor HibernationCoordinator {
         self.now = now
         self.exitPollAttempts = exitPollAttempts
         self.exitPollInterval = exitPollInterval
+        self.holderEscalationAttempts = holderEscalationAttempts
         self.clock = clock
         self.signaller = signaller
         self.actuationLog = actuationLog
@@ -958,9 +972,12 @@ public actor HibernationCoordinator {
         // transcript, which is the harder failure to notice. The respawn `-c`s
         // into the worktree path regardless, so this only reports.
         //
-        // tmux-only, because it reads a pane's cwd. A holder row has no pane
-        // and takes the branch above.
-        if let paneCwd = try? await tmux.paneCurrentPath(server: server, paneID: paneID),
+        // tmux-only, and the guard is not decoration: a holder row's pane id is
+        // the empty string, so this would ask a tmux server — starting one, on
+        // a worktree whose sessions deliberately have none — about a
+        // coordinate that names nothing.
+        if terminal.transport != .holder,
+           let paneCwd = try? await tmux.paneCurrentPath(server: server, paneID: paneID),
            paneCwd != worktree.path {
             logger.warning("wake: pane cwd \(paneCwd, privacy: .public) != worktree path \(worktree.path, privacy: .public) for terminal \(terminal.id, privacy: .public); respawn will -c into the worktree path")
         }

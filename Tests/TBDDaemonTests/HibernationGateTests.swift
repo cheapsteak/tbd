@@ -236,4 +236,59 @@ struct HibernationGateTests {
         #expect(decision == .pendingTypedInput)
         // The gate alone blocks, so even if the scrape is broken the park is safe.
     }
+
+    // MARK: - The holder-transport soak gate, both branches
+
+    /// A holder-backed row that passes every other rail. Only `transport`
+    /// differs from the baseline above, so the two tests below are about the
+    /// flag and nothing else.
+    private func holderTerminal() -> Terminal {
+        Terminal(
+            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude,
+            activityState: .idle, transport: .holder)
+    }
+
+    @Test func holderRowIsRefusedWhileTheSoakGateIsOff() {
+        let idleSince = now.addingTimeInterval(-31 * 60)
+        #expect(HibernationGate.decide(
+            terminal: holderTerminal(), autoHibernateEnabled: true,
+            holderHibernationEnabled: false, idleTimeout: 30 * 60,
+            idleSince: idleSince, now: now) == .holderTransport)
+    }
+
+    @Test func holderRowIsEligibleOnceTheSoakGateIsOn() {
+        let idleSince = now.addingTimeInterval(-31 * 60)
+        #expect(HibernationGate.decide(
+            terminal: holderTerminal(), autoHibernateEnabled: true,
+            holderHibernationEnabled: true, idleTimeout: 30 * 60,
+            idleSince: idleSince, now: now) == .eligible)
+    }
+
+    /// Omitting the argument must fail toward refusal, which is the safe
+    /// direction and the whole reason the parameter carries a default at all.
+    @Test func theOmittedArgumentRefusesAHolderRow() {
+        let idleSince = now.addingTimeInterval(-31 * 60)
+        #expect(HibernationGate.decide(
+            terminal: holderTerminal(), autoHibernateEnabled: true,
+            idleTimeout: 30 * 60, idleSince: idleSince, now: now) == .holderTransport)
+    }
+
+    /// The flag decides what a HOLDER row gets and must not reach a tmux one:
+    /// a condition written on the flag alone rather than on the flag AND the
+    /// transport would still pass every assertion above.
+    @Test func aTmuxRowIsUnaffectedByTheSoakGate() {
+        let idleSince = now.addingTimeInterval(-31 * 60)
+        for enabled in [false, true] {
+            #expect(HibernationGate.decide(
+                terminal: claudeTerminal(), autoHibernateEnabled: true,
+                holderHibernationEnabled: enabled, idleTimeout: 30 * 60,
+                idleSince: idleSince, now: now) == .eligible)
+            #expect(HibernationGate.decide(
+                terminal: claudeTerminal(activityState: .working),
+                autoHibernateEnabled: true,
+                holderHibernationEnabled: enabled, idleTimeout: 30 * 60,
+                idleSince: idleSince, now: now) == .running)
+        }
+    }
 }

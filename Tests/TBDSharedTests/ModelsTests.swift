@@ -331,6 +331,40 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
     #expect(!t(.idle, suspendedAt: Date()).isManuallyHibernatable(holderHibernationEnabled: false))   // suspended
 }
 
+/// The pty-holder soak gate, both branches, on both eligibility methods.
+///
+/// The gate is the ONLY thing separating the two arms here: the row is the same
+/// idle, resumable Claude session either way, and a tmux twin of it is asserted
+/// alongside so a condition written on the flag alone — rather than on the flag
+/// AND the transport — fails rather than passing both arms.
+@Test func testHolderHibernationGateOnBothEligibilityMethods() {
+    let holder = Terminal(
+        worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+        claudeSessionID: "s", kind: .claude, activityState: .idle, transport: .holder)
+    #expect(!holder.isManuallyHibernatable(holderHibernationEnabled: false))
+    #expect(!holder.isAutoHibernationEligible(holderHibernationEnabled: false))
+    #expect(holder.isManuallyHibernatable(holderHibernationEnabled: true))
+    #expect(holder.isAutoHibernationEligible(holderHibernationEnabled: true))
+
+    // With the gate on, the holder row still answers to every other rail: the
+    // flag lifts one refusal, not all of them.
+    var busy = holder
+    busy.activityState = .working
+    #expect(!busy.isManuallyHibernatable(holderHibernationEnabled: true))
+    var warm = holder
+    warm.keepWarm = true
+    #expect(!warm.isAutoHibernationEligible(holderHibernationEnabled: true))
+    #expect(warm.isManuallyHibernatable(holderHibernationEnabled: true))
+
+    let tmux = Terminal(
+        worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+        claudeSessionID: "s", kind: .claude, activityState: .idle)
+    for enabled in [false, true] {
+        #expect(tmux.isManuallyHibernatable(holderHibernationEnabled: enabled))
+        #expect(tmux.isAutoHibernationEligible(holderHibernationEnabled: enabled))
+    }
+}
+
 @Test func testAutoHibernationEligibilityAddsKeepWarmRail() {
     let base = Terminal(worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
                         claudeSessionID: "s", kind: .claude, activityState: .idle)

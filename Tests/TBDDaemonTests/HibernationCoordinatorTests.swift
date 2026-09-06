@@ -900,6 +900,13 @@ struct HibernationCoordinatorTests {
         #expect(coord.exitPollInterval == .milliseconds(200))
         #expect(coord.exitPollInterval * coord.exitPollAttempts == .seconds(3),
                 "the shipped verify-exit window must stay ~3s")
+        // The holder park's escalation budget rides the same interval: five
+        // more checks after `abandon` has SIGKILLed the job, i.e. one second
+        // for a dead process to leave the process table. A different budget
+        // from the three seconds above, which waits for a polite shutdown.
+        #expect(coord.holderEscalationAttempts == 5)
+        #expect(coord.exitPollInterval * coord.holderEscalationAttempts == .seconds(1),
+                "the shipped holder escalation window must stay ~1s")
     }
 
     /// The ANSI pane snapshot captured before the kill is persisted into
