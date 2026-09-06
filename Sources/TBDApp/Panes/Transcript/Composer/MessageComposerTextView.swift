@@ -189,10 +189,16 @@ struct MessageComposerTextView: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
+    @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MessageComposerTextView?
         weak var textView: ComposerTextView?
         private var lastAppliedToken: Int?
+        /// True for the duration of one command's application. AppKit posts its
+        /// text and selection notifications synchronously from `insertText`, and
+        /// a command is applied from inside `updateNSView` — so those reports are
+        /// swallowed here and re-issued one turn later.
+        private var isApplyingCommand = false
 
         override init() { super.init() }
 
@@ -202,27 +208,38 @@ struct MessageComposerTextView: NSViewRepresentable {
         }
 
         /// Run a command once. Returns whether it ran.
+        ///
+        /// **Every kind reports, and every kind reports LATE.** `.restore` and
+        /// `.clear` assign `.string`, which posts no text-change notification at
+        /// all, so the report has to be made here rather than hoped for; a send
+        /// clears the box, and a composer whose state is not resynchronised
+        /// still believes it holds the message that just went out.
+        /// `.replaceRange` and `.insertAtCaret` do go through `didChangeText` —
+        /// but synchronously, from inside `updateNSView`.
+        ///
+        /// Either way the report writes `@Observable` state that sibling views
+        /// render, and SwiftUI treats a write during a view update as undefined
+        /// behavior. So the notifications this application raises are swallowed
+        /// and ONE report is made a main-actor turn later, the same deferral
+        /// `MessageComposerView.adopt` makes for its registration.
         @discardableResult
         func applyIfNew(_ command: ComposerCommand, to textView: NSTextView) -> Bool {
             guard lastAppliedToken != command.token else { return false }
             lastAppliedToken = command.token
+            isApplyingCommand = true
             MessageComposerTextView.apply(command, to: textView)
-            switch command.kind {
-            case .restore, .clear:
-                // These two assign `.string`, which posts no text-change
-                // notification at all. A selection change does fire, and it
-                // happens to report through the same helper — but that is an
-                // undocumented side effect, and the write it would be carrying
-                // is the one that must never be missed: a send clears the box,
-                // and a composer whose state is not resynchronised still
-                // believes it holds the message that just went out.
-                report(textView)
-            case .replaceRange, .insertAtCaret:
-                // `insertText(_:replacementRange:)` goes through
-                // `didChangeText`, which reports already.
-                break
-            }
+            isApplyingCommand = false
+            scheduleReport(textView)
             return true
+        }
+
+        /// The one deferred report. Weak on both sides: a pane torn down inside
+        /// the one-turn gap leaves nothing to report to.
+        private func scheduleReport(_ textView: NSTextView) {
+            Task { @MainActor [weak self, weak textView] in
+                guard let self, let textView else { return }
+                self.report(textView)
+            }
         }
 
         func textDidChange(_ notification: Notification) {
@@ -238,6 +255,9 @@ struct MessageComposerTextView: NSViewRepresentable {
         }
 
         private func report(_ textView: NSTextView) {
+            // A command's own notifications are swallowed; `scheduleReport`
+            // makes the one report that covers them.
+            guard !isApplyingCommand else { return }
             parent?.onTextChange(
                 textView.string, textView.selectedRange().location, textView.hasMarkedText())
         }

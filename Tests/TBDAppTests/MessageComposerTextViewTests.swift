@@ -160,7 +160,7 @@ struct MessageComposerTextViewTests {
     /// The text view here is deliberately NOT wired to the coordinator as its
     /// delegate, so what is measured is the command path's own reporting rather
     /// than whatever notifications AppKit chose to post.
-    @Test func clearOnAlreadyEmptyTextReportsWithoutAnyNotification() {
+    @Test func clearOnAlreadyEmptyTextReportsWithoutAnyNotification() async {
         let recorder = TextChangeRecorder()
         let coordinator = MessageComposerTextView.Coordinator(
             makeComposer { text, caret, marked in
@@ -170,6 +170,10 @@ struct MessageComposerTextViewTests {
 
         coordinator.applyIfNew(ComposerCommand(token: 1, kind: .clear), to: view)
 
+        #expect(recorder.reports.isEmpty,
+                "a command runs inside updateNSView; nothing may be reported there")
+        await Task.yield()
+
         #expect(recorder.reports.count == 1, "an empty clear still has to report")
         #expect(recorder.reports.first?.text == "")
         #expect(recorder.reports.first?.caret == 0)
@@ -178,7 +182,7 @@ struct MessageComposerTextViewTests {
     }
 
     /// A `.restore` reports too, carrying the text and the caret it just placed.
-    @Test func restoreReportsWithoutAnyNotification() {
+    @Test func restoreReportsWithoutAnyNotification() async {
         let recorder = TextChangeRecorder()
         let coordinator = MessageComposerTextView.Coordinator(
             makeComposer { text, caret, marked in
@@ -188,9 +192,48 @@ struct MessageComposerTextViewTests {
 
         coordinator.applyIfNew(ComposerCommand(token: 1, kind: .restore("draft")), to: view)
 
+        #expect(recorder.reports.isEmpty, "the report is deferred off the update pass")
+        await Task.yield()
+
         #expect(recorder.reports.count == 1)
         #expect(recorder.reports.first?.text == "draft")
         #expect(recorder.reports.first?.caret == 5)
+    }
+
+    /// **An insertion reports late too, and exactly once.**
+    ///
+    /// `.replaceRange` and `.insertAtCaret` go through
+    /// `insertText(_:replacementRange:)`, which posts `didChangeText` and a
+    /// selection change SYNCHRONOUSLY — and the command is applied from inside
+    /// `updateNSView`, so reporting from those notifications writes `draft.text`,
+    /// the completion controller and the argument hint, all of them
+    /// `@Observable` state that sibling views render, during a SwiftUI view
+    /// update. The coordinator is wired as the delegate here precisely so those
+    /// notifications fire; what must come out of them is nothing at all, and one
+    /// report a turn later.
+    @Test func anInsertionReportsOnceOnALaterTurn() async {
+        let recorder = TextChangeRecorder()
+        let coordinator = MessageComposerTextView.Coordinator(
+            makeComposer { text, caret, marked in
+                recorder.reports.append((text, caret, marked))
+            })
+        let view = makeTextView("please /comp")
+        view.delegate = coordinator
+        defer { view.delegate = nil }
+
+        coordinator.applyIfNew(
+            ComposerCommand(
+                token: 1,
+                kind: .replaceRange(NSRange(location: 7, length: 5), with: "/compact ")),
+            to: view)
+
+        #expect(recorder.reports.isEmpty,
+                "AppKit's own notifications must not report from inside the update pass")
+        await Task.yield()
+
+        #expect(recorder.reports.count == 1, "one command, one report")
+        #expect(recorder.reports.first?.text == "please /compact ")
+        #expect(recorder.reports.first?.caret == 16, "the caret follows the insertion")
     }
 
     /// **A "not found" range is refused, not trapped.** A completion whose token
