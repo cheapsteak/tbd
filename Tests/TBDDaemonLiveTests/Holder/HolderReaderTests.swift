@@ -75,7 +75,8 @@ struct HolderReaderTests {
         let (_, ptyFD) = try await client.handOverPTY()
         await client.close()
         let reader = HolderReader(
-            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
+            observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -110,7 +111,8 @@ struct HolderReaderTests {
         let (_, ptyFD) = try await client.handOverPTY()
         await client.close()
         let reader = HolderReader(
-            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
+            observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -151,7 +153,7 @@ struct HolderReaderTests {
         await client.close()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
-            readFault: fault.seam())
+            readFault: fault.seam(), observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -185,7 +187,7 @@ struct HolderReaderTests {
         await client.close()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
-            readFault: fault.seam())
+            readFault: fault.seam(), observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -218,7 +220,7 @@ struct HolderReaderTests {
         await client.close()
         let reader = HolderReader(
             sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
-            readFault: fault.seam())
+            readFault: fault.seam(), observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -242,7 +244,8 @@ struct HolderReaderTests {
         let (_, ptyFD) = try await client.handOverPTY()
         await client.close()
         let reader = HolderReader(
-            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
+            observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -269,7 +272,8 @@ struct HolderReaderTests {
         let (_, ptyFD) = try await client.handOverPTY()
         await client.close()
         let reader = HolderReader(
-            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
+            observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -300,7 +304,8 @@ struct HolderReaderTests {
         let client = fixture.client
         let (_, ptyFD) = try await client.handOverPTY()
         let reader = HolderReader(
-            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
+            observedChildFromStart: true)
         try await reader.start()
         defer { stopInBackground(reader) }
 
@@ -357,7 +362,8 @@ struct HolderReaderTests {
         _ = fcntl(readEnd, F_SETFL, fcntl(readEnd, F_GETFL) | O_NONBLOCK)
 
         let reader = HolderReader(
-            sessionID: UUID(), ptyFD: ends[1], columns: 80, rows: 24)
+            sessionID: UUID(), ptyFD: ends[1], columns: 80, rows: 24,
+            observedChildFromStart: true)
         let neverDrained = await reader.isDraining
         #expect(neverDrained == false)
 

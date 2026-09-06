@@ -151,6 +151,26 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     public let cursor: Cursor
     public let size: Size
     public let modes: ChildModes
+    /// Whether the answering emulator has witnessed the child's mode setup.
+    ///
+    /// `modes` says what the emulator's flags are; this says whether they are
+    /// **observations** or merely a fresh terminal's defaults. It is true one
+    /// way: the emulator was born with the child, so the startup `DECSET`s
+    /// waiting in the pty buffer for the first reader landed in it and its
+    /// flags are the child's own.
+    ///
+    /// It is false for an emulator built over an *already running* child — the
+    /// daemon re-adopting a session it did not spawn — and it stays false for
+    /// that emulator's whole life. A handback preamble restores the modes'
+    /// *values*, because the snapshot states every mode it carries, set or
+    /// reset; it raises no provenance, because the store that captured it was
+    /// itself seeded by this emulator's own attach preamble and can hand back
+    /// no more than it was given.
+    ///
+    /// So `false` means: read `modes` as defaults, not as facts — unless the
+    /// child happened to re-emit a mode escape of its own after the adoption,
+    /// which nothing here can tell.
+    public let modesObserved: Bool
     public let source: Source
     /// How long ago the answering store's emulator last consumed a byte from
     /// the pty, in milliseconds, on a monotonic clock — never wall time, so no
@@ -180,7 +200,9 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     /// The three modes, their provenance, and their age — everything the input
     /// path needs and nothing it does not.
     public var modeReading: TerminalModeReading {
-        TerminalModeReading(modes: modes, source: source, ageMilliseconds: ageMilliseconds)
+        TerminalModeReading(
+            modes: modes, modesObserved: modesObserved, source: source,
+            ageMilliseconds: ageMilliseconds)
     }
 
     /// Why a screen could not be constructed.
@@ -230,6 +252,7 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
         cursor: Cursor,
         size: Size,
         modes: ChildModes,
+        modesObserved: Bool,
         source: Source,
         ageMilliseconds: Int
     ) throws {
@@ -246,6 +269,7 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
         self.cursor = cursor
         self.size = size
         self.modes = modes
+        self.modesObserved = modesObserved
         self.source = source
         self.ageMilliseconds = ageMilliseconds
     }
@@ -270,7 +294,7 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     // MARK: - Coding
 
     private enum CodingKeys: String, CodingKey {
-        case lines, viewportStart, cursor, size, modes, source, ageMilliseconds
+        case lines, viewportStart, cursor, size, modes, modesObserved, source, ageMilliseconds
     }
 
     /// Written out field by field rather than synthesised, so the wire form is
@@ -285,6 +309,7 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
         try container.encode(cursor, forKey: .cursor)
         try container.encode(size, forKey: .size)
         try container.encode(modes, forKey: .modes)
+        try container.encode(modesObserved, forKey: .modesObserved)
         try container.encode(source, forKey: .source)
         try container.encode(ageMilliseconds, forKey: .ageMilliseconds)
     }
@@ -297,6 +322,13 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     /// Decoding runs the same validation construction does. A screen that
     /// arrives with a control character in it is refused at the boundary rather
     /// than handed on, for the same reason it is refused at the producer.
+    ///
+    /// **A missing `modesObserved` decodes as observed.** A producer that
+    /// predates the field could not tell the two cases apart, so it has no
+    /// answer to withhold — and `true` is what every consumer assumed while the
+    /// field did not exist. An older daemon's screen therefore decodes to the
+    /// behaviour it has always had, rather than to a refusal or a wrapping it
+    /// never asked for.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
@@ -305,6 +337,7 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
             cursor: container.decode(Cursor.self, forKey: .cursor),
             size: container.decode(Size.self, forKey: .size),
             modes: container.decode(ChildModes.self, forKey: .modes),
+            modesObserved: container.decodeIfPresent(Bool.self, forKey: .modesObserved) ?? true,
             source: container.decode(Source.self, forKey: .source),
             ageMilliseconds: container.decode(Int.self, forKey: .ageMilliseconds))
     }
@@ -318,13 +351,22 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
 /// to compose one message would walk the scrollback on every send.
 public struct TerminalModeReading: Sendable, Equatable {
     public let modes: TerminalScreen.ChildModes
+    /// Whether the answering emulator has witnessed the child's mode setup —
+    /// `TerminalScreen.modesObserved`, on the answer the input path actually
+    /// reads. `false` means `modes` are a fresh terminal's defaults rather than
+    /// anything the child was seen to do.
+    public let modesObserved: Bool
     public let source: TerminalScreen.Source
     public let ageMilliseconds: Int
 
     public init(
-        modes: TerminalScreen.ChildModes, source: TerminalScreen.Source, ageMilliseconds: Int
+        modes: TerminalScreen.ChildModes,
+        modesObserved: Bool,
+        source: TerminalScreen.Source,
+        ageMilliseconds: Int
     ) {
         self.modes = modes
+        self.modesObserved = modesObserved
         self.source = source
         self.ageMilliseconds = ageMilliseconds
     }

@@ -137,6 +137,20 @@ actor HolderReader {
     ///   session's output is exhausted — see `hasReachedEndOfOutput`. It must
     ///   not block, and must not stop this reader inline; the registry's
     ///   reclaimer hops onto the actor instead.
+    /// - Parameter observedChildFromStart: whether this reader's emulator will
+    ///   see every byte the child has ever written. `true` at spawn, where the
+    ///   child's startup `DECSET`s are still sitting in the pty buffer waiting
+    ///   for the first reader, so the emulator's modes become the child's. It
+    ///   is `false` when the reader is built over a child that was already
+    ///   running — the daemon re-adopting a session across a restart — where
+    ///   the setup has long since been read by somebody else and this emulator
+    ///   holds a fresh terminal's defaults for as long as it lives. Reported
+    ///   as `modesObserved` on every screen and mode reading this reader gives.
+    ///   Required and named at every construction site, for the same reason
+    ///   `take` names it: a default would be right on one path — a test harness
+    ///   feeding its own emulator from the start, `true` — and a silent lie on
+    ///   the other, the registry's adoption path, where the honest answer is
+    ///   `false`.
     /// - Parameter monotonicNow: reads the monotonic clock, for the two
     ///   instants the emulator stamps — its adoption and its last consumed
     ///   byte — whose difference is a screen's `age`. It sits *before* `clock`
@@ -155,6 +169,7 @@ actor HolderReader {
         stopTimeout: Duration = HolderReader.defaultStopTimeout,
         readFault: HolderReadFault? = nil,
         onEndOfOutput: (@Sendable () -> Void)? = nil,
+        observedChildFromStart: Bool,
         monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
         clock: any Clock<Duration> = ContinuousClock()
     ) {
@@ -172,6 +187,7 @@ actor HolderReader {
             columns: columns,
             rows: rows,
             scrollback: scrollbackLines,
+            modesObserved: observedChildFromStart,
             monotonicNow: monotonicNow,
             reply: { [descriptor] bytes in descriptor.replyBestEffort(bytes) })
     }
@@ -540,6 +556,12 @@ actor HolderReader {
     /// `staleDaemon` there. That is not a special case to be excused: an idle
     /// reader's emulator is by definition not being fed, so a screen taken from
     /// it is a frozen one and saying so is the truthful answer.
+    ///
+    /// **What it does not encode is whether the emulator has watched this child
+    /// since birth.** A reader draining a session it re-adopted after a restart
+    /// answers `.daemon`, correctly — its lines are live — while its modes are
+    /// a fresh terminal's defaults. That is the separate axis `modesObserved`
+    /// carries.
     private var currentSource: TerminalScreen.Source {
         state == .draining ? .daemon : .staleDaemon
     }
@@ -577,6 +599,15 @@ actor HolderReader {
     /// *ordered*, and a live byte parsed ahead of the prelude would be erased
     /// by it — output the viewer never saw and the daemon then throws away.
     /// A stopped reader ignores the feed: its screen has no further readers.
+    ///
+    /// **A preamble restores the modes' values and not their provenance.** The
+    /// writer states every mode the capture carries, so the flags after the
+    /// feed are the departing viewer's — but that viewer's emulator was itself
+    /// seeded by *this* reader's attach preamble, so what comes back is what
+    /// this reader handed out. A preamble can carry no more provenance than the
+    /// reader already had. Nothing here therefore moves `modesObserved`: a
+    /// re-adopted session stays unobserved across every attach and handback,
+    /// and only a session this daemon spawned is ever observed.
     func ingest(preamble: Data) {
         guard state != .stopped, !preamble.isEmpty else { return }
         emulator.feed([UInt8](preamble)[...])
@@ -1260,14 +1291,26 @@ private final class HolderEmulator: @unchecked Sendable {
     ///
     /// `screen` asks nothing at all: it reads the delegate's `DECTCEM` flag.
     private var lastByteAt: ContinuousClock.Instant?
+    /// Whether this emulator's mode flags are observations of the child rather
+    /// than a fresh terminal's defaults — the `modesObserved` every screen and
+    /// mode reading carries.
+    ///
+    /// Set at construction by whoever knows how this emulator came to exist,
+    /// and never moved afterwards: nothing this emulator can be fed carries
+    /// provenance it was not built with, because every preamble in the system
+    /// originates from a daemon emulator's own snapshot. Read under
+    /// `terminalLock`, like `lastByteAt` and everything else here.
+    private let modesObserved: Bool
 
     init(
         columns: Int, rows: Int, scrollback: Int,
+        modesObserved: Bool,
         monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant,
         reply: @escaping @Sendable (ArraySlice<UInt8>) -> Void
     ) {
         let delegate = ReplyForwardingDelegate(reply: reply)
         self.delegate = delegate
+        self.modesObserved = modesObserved
         self.monotonicNow = monotonicNow
         self.adoptedAt = monotonicNow()
         self.terminal = Terminal(
@@ -1278,6 +1321,11 @@ private final class HolderEmulator: @unchecked Sendable {
                 scrollback: max(0, scrollback)))
     }
 
+    /// Bytes from outside — the drain loop's reads, the quiesce remainder, a
+    /// handback preamble. **None of it marks the modes observed**: the child's
+    /// running output says nothing about the modes it set before this emulator
+    /// existed, so a session that happens to print a lot must not talk its way
+    /// into a provenance it never earned.
     func feed(_ bytes: ArraySlice<UInt8>) {
         terminal.terminalLock.withLock {
             lastByteAt = monotonicNow()
@@ -1369,6 +1417,7 @@ private final class HolderEmulator: @unchecked Sendable {
                 cursor: cursor,
                 size: TerminalScreen.Size(columns: terminal.cols, rows: terminal.rows),
                 modes: currentModes(),
+                modesObserved: modesObserved,
                 source: source,
                 ageMilliseconds: ageMilliseconds())
         }
@@ -1378,7 +1427,8 @@ private final class HolderEmulator: @unchecked Sendable {
     func modeReading(source: TerminalScreen.Source) -> TerminalModeReading {
         terminal.terminalLock.withLock {
             TerminalModeReading(
-                modes: currentModes(), source: source, ageMilliseconds: ageMilliseconds())
+                modes: currentModes(), modesObserved: modesObserved, source: source,
+                ageMilliseconds: ageMilliseconds())
         }
     }
 

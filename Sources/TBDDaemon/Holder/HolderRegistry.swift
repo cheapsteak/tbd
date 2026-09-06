@@ -574,6 +574,10 @@ actor HolderRegistry {
                 terminalID: terminalID,
                 over: spawned.client,
                 expecting: owner,
+                // The job has only just been forked, and nothing has read its
+                // pty yet, so whatever it says about its modes on startup lands
+                // in this emulator.
+                observedChildFromStart: true,
                 onEndOfOutput: endOfOutputNotifier(for: terminalID))
         } catch {
             // The holder is up and supervising a job that no row will ever
@@ -894,6 +898,15 @@ actor HolderRegistry {
                 busyRetryBudget: budget,
                 receiveTimeout: Self.adoptionReceiveTimeout,
                 clock: clock,
+                // The child has been running without this emulator — since the
+                // last daemon, or since a viewer took the pty — so its mode
+                // setup was consumed by somebody else and the fresh terminal
+                // this builds starts on defaults, permanently. A preamble, when
+                // there is one, restores the modes' values and not their
+                // provenance: the viewer that captured it was itself seeded by
+                // this session's attach preamble, so it can hand back no more
+                // than the daemon gave it.
+                observedChildFromStart: false,
                 onEndOfOutput: notifyEndOfOutput,
                 seedingScreenWith: preamble)
         }
@@ -1204,6 +1217,7 @@ actor HolderRegistry {
         busyRetryBudget: Duration,
         receiveTimeout: Duration,
         clock: any Clock<Duration>,
+        observedChildFromStart: Bool,
         onEndOfOutput: (@Sendable () -> Void)?,
         seedingScreenWith preamble: Data = Data()
     ) async throws -> Adoption {
@@ -1215,6 +1229,7 @@ actor HolderRegistry {
                     socketPath: socketPath,
                     expecting: owner,
                     receiveTimeout: receiveTimeout,
+                    observedChildFromStart: observedChildFromStart,
                     onEndOfOutput: onEndOfOutput,
                     seedingScreenWith: preamble)
             } catch HolderClient.Error.rejected(let version) {
@@ -1238,6 +1253,7 @@ actor HolderRegistry {
         socketPath: String,
         expecting owner: HolderOwnerToken,
         receiveTimeout: Duration,
+        observedChildFromStart: Bool,
         onEndOfOutput: (@Sendable () -> Void)?,
         seedingScreenWith preamble: Data = Data()
     ) async throws -> Adoption {
@@ -1245,6 +1261,7 @@ actor HolderRegistry {
             terminalID: terminalID,
             over: HolderClient(socketPath: socketPath, receiveTimeout: receiveTimeout),
             expecting: owner,
+            observedChildFromStart: observedChildFromStart,
             onEndOfOutput: onEndOfOutput,
             seedingScreenWith: preamble)
     }
@@ -1258,10 +1275,20 @@ actor HolderRegistry {
     /// holder serves one client at a time, so a connection kept past the
     /// hand-over would refuse every later verb, a `forget` on the deletion path
     /// above all.
+    ///
+    /// - Parameter observedChildFromStart: whether the reader this builds will
+    ///   have seen every byte its child ever wrote — `true` for a session this
+    ///   daemon just spawned, whose startup `DECSET`s are still queued in the
+    ///   pty, and `false` for one adopted while it was already running, whose
+    ///   mode setup was read by somebody else long ago. It rides all the way to
+    ///   `TerminalScreen.modesObserved`, and it is named at every call site
+    ///   rather than defaulted, because a default is right on one of these two
+    ///   paths and a silent lie on the other.
     private static func take(
         terminalID: UUID,
         over client: HolderClient,
         expecting owner: HolderOwnerToken,
+        observedChildFromStart: Bool,
         onEndOfOutput: (@Sendable () -> Void)? = nil,
         seedingScreenWith preamble: Data = Data()
     ) async throws -> Adoption {
@@ -1310,7 +1337,8 @@ actor HolderRegistry {
             ptyFD: ptyFD,
             columns: grid.columns,
             rows: grid.rows,
-            onEndOfOutput: onEndOfOutput)
+            onEndOfOutput: onEndOfOutput,
+            observedChildFromStart: observedChildFromStart)
         // BEFORE the drain starts, and that ordering is the whole of the
         // handback's fidelity: the preamble's reset prelude erases the display
         // and the scrollback, so a live byte parsed ahead of it would be wiped

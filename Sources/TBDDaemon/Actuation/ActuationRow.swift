@@ -336,5 +336,17 @@ struct ActuationRow: Codable, Sendable, Equatable {
     /// `staleDaemon` at 41 minutes and one at 200 milliseconds describe very
     /// different amounts of guessing.
     var modeAgeMilliseconds: Int?
+    /// Whether the answering emulator had witnessed the child's mode setup, or
+    /// was only reporting a fresh terminal's defaults.
+    ///
+    /// Rides with `modeSource` and is absent whenever that is `unavailable`,
+    /// for the same reason the age is: nothing answered, so there is nothing
+    /// whose provenance this could be. `false` says the composition was made
+    /// against defaults rather than against anything the child was seen to do
+    /// — the row's way of saying "this was a guess" about a `daemon` source,
+    /// which `staleDaemon` already says about a suspended one. Between them a
+    /// reader learns both ways a composition can be uninformed: the store
+    /// stopped watching, or it never saw the child start.
+    var modesObserved: Bool?
     var error: String?
 }

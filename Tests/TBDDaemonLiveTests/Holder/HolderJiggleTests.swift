@@ -159,7 +159,8 @@ struct HolderJiggleTests {
         let (_, ptyFD) = try await fixture.client.handOverPTY()
         await fixture.client.close()
         let reader = HolderReader(
-            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
+            observedChildFromStart: true)
         try await reader.start()
         return reader
     }

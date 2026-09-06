@@ -176,7 +176,8 @@ import Testing
                 ptyFD: pair[0],
                 columns: columns,
                 rows: rows,
-                scrollbackLines: 200)
+                scrollbackLines: 200,
+                observedChildFromStart: true)
         }
 
         /// Closes this side only. The reader's own end is closed by its

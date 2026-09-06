@@ -138,7 +138,9 @@ struct HolderDescriptorInheritanceTests {
             !Self.isCloseOnExec(pair[0]),
             "the source must be inheritable, or a plain dup would pass this test too")
 
-        let reader = HolderReader(sessionID: UUID(), ptyFD: pair[0], columns: 80, rows: 24)
+        let reader = HolderReader(
+            sessionID: UUID(), ptyFD: pair[0], columns: 80, rows: 24,
+            observedChildFromStart: true)
         let duplicate = try await reader.suspendDraining()
         #expect(duplicate >= 0)
 

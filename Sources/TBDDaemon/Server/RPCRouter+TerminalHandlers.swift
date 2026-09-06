@@ -3228,6 +3228,23 @@ extension RPCRouter {
     /// the child changed since then is invisible here for as long as the viewer
     /// holds it — possibly hours.
     ///
+    /// **A third case is not a window at all.** A reading whose `modesObserved`
+    /// is `false` comes from an emulator built over a child that was already
+    /// running — the daemon re-adopting a session it did not spawn — so its
+    /// flags are a fresh terminal's defaults and say nothing about the child at
+    /// any moment, and no attach or handback since can have changed that. There
+    /// the composition wraps **for an agent session**, because that is where a
+    /// bare send fails silently: the receiving TUI's paste-burst heuristic
+    /// absorbs the `\r` and the message sits in the composer with nothing to
+    /// say why, and printed markers are the visible failure preferred to it. A
+    /// re-adopted **shell** composes bare, because a shell's line editor
+    /// submits bare input of any length and has no burst heuristic to fool, so
+    /// wrapping it would only hand a `sudo`/`ssh`/`rm -i` prompt markers to
+    /// print for a stall that cannot happen.
+    /// `HolderSendComposition.bracketedPaste(for:unobservedShouldWrap:)` owns
+    /// that rule, keyed on `carriesDispatchEnvelope`, and the row's
+    /// `modesObserved` discloses the guess.
+    ///
     /// Both windows are accepted, and the wide one is accepted by ruling: the
     /// design's "Proceeding on stale modes" section weighs a rare wrong
     /// composition against rails that fail closed exactly when supervision most
@@ -3277,9 +3294,10 @@ extension RPCRouter {
         // is possible — the courier decides that, and it fails open.
         let reading = await holderModeReading(terminalID: terminal.id)
         let modeSource = reading.map { ActuationModeSource($0.source) } ?? .unavailable
-        // Absent for `unavailable`: nothing answered, so there is no store
-        // whose age this could be.
+        // Both absent for `unavailable`: nothing answered, so there is no store
+        // whose age or provenance these could be.
         let modeAge = reading?.ageMilliseconds
+        let modesObserved = reading?.modesObserved
 
         // Same envelope rule as the tmux arm, and for the same reasons — see
         // the long comment there. Empty text stays empty: `--text "" --submit`
@@ -3292,7 +3310,8 @@ extension RPCRouter {
                 : text)
         let message = HolderSendComposition.compose(
             body: body, submit: submit,
-            bracketedPaste: reading?.modes.bracketedPaste ?? false)
+            bracketedPaste: HolderSendComposition.bracketedPaste(
+                for: reading, unobservedShouldWrap: Self.carriesDispatchEnvelope(terminal)))
 
         guard !message.isEmpty else {
             // Nothing to write, reached two ways. `--text ""` with no
@@ -3312,7 +3331,8 @@ extension RPCRouter {
             await finishActuation(
                 actuationID, .dispatched,
                 modeSource: composed ? modeSource : nil,
-                modeAgeMilliseconds: composed ? modeAge : nil)
+                modeAgeMilliseconds: composed ? modeAge : nil,
+                modesObserved: composed ? modesObserved : nil)
             return .ok()
         }
 
@@ -3320,7 +3340,8 @@ extension RPCRouter {
         case .viewerWrote, .daemonWrote:
             await finishActuation(
                 actuationID, .dispatched,
-                modeSource: modeSource, modeAgeMilliseconds: modeAge)
+                modeSource: modeSource, modeAgeMilliseconds: modeAge,
+                modesObserved: modesObserved)
             return .ok()
         case .notDelivered(let reason):
             // The transport, not a decision: the daemon tried to write and
@@ -3329,7 +3350,8 @@ extension RPCRouter {
             // composed is a fact about the attempt, not about its success.
             await finishActuation(
                 actuationID, .transportFailed, error: reason,
-                modeSource: modeSource, modeAgeMilliseconds: modeAge)
+                modeSource: modeSource, modeAgeMilliseconds: modeAge,
+                modesObserved: modesObserved)
             return RPCResponse(error: reason)
         }
     }

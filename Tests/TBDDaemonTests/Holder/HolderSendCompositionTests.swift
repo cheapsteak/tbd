@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 import Testing
 
 @testable import TBDDaemonLib
@@ -299,5 +300,79 @@ import Testing
         #expect(Self.occurrences(of: Self.end, in: composed) == 1)
         #expect(composed.last == 0x0d)
         #expect(composed.dropLast().suffix(Self.end.count) == Self.end)
+    }
+
+    // MARK: - Whether to wrap at all
+
+    private static func reading(
+        bracketedPaste: Bool, modesObserved: Bool, source: TerminalScreen.Source = .daemon
+    ) -> TerminalModeReading {
+        TerminalModeReading(
+            modes: TerminalScreen.ChildModes(
+                bracketedPaste: bracketedPaste, applicationCursor: false,
+                alternateScreen: false),
+            modesObserved: modesObserved,
+            source: source,
+            ageMilliseconds: 0)
+    }
+
+    /// Nothing answered, so there is nothing to reason from. The write is about
+    /// to fail and say so, and bare bytes are what every child understood
+    /// before any of this existed. The child-kind flag cannot change that.
+    @Test("no reading at all composes bare")
+    func noReadingComposesBare() {
+        #expect(HolderSendComposition.bracketedPaste(for: nil, unobservedShouldWrap: true) == false)
+        #expect(
+            HolderSendComposition.bracketedPaste(for: nil, unobservedShouldWrap: false) == false)
+    }
+
+    /// An observed flag is evidence about the child, so it is simply obeyed and
+    /// `unobservedShouldWrap` does not enter into it — asserted with the flag
+    /// set both ways to show it is ignored when the modes are observed.
+    @Test("an observed mode is taken at its word, and the child-kind flag is ignored")
+    func observedModeIsObeyed() {
+        for unobservedShouldWrap in [true, false] {
+            #expect(
+                HolderSendComposition.bracketedPaste(
+                    for: Self.reading(bracketedPaste: true, modesObserved: true),
+                    unobservedShouldWrap: unobservedShouldWrap))
+            #expect(
+                HolderSendComposition.bracketedPaste(
+                    for: Self.reading(bracketedPaste: false, modesObserved: true),
+                    unobservedShouldWrap: unobservedShouldWrap) == false)
+        }
+    }
+
+    /// An unobserved reading is a guess, and where it lands is the caller's
+    /// call: `unobservedShouldWrap: true` is an agent session, whose burst
+    /// heuristic can absorb a bare `\r` silently, so wrapping buys the visible
+    /// failure over the silent one. The flag's own `bracketedPaste` value is
+    /// not evidence of anything and does not move the answer.
+    @Test("an unobserved reading wraps when the caller says to, whatever the flag reads")
+    func unobservedReadingWrapsWhenAsked() {
+        #expect(
+            HolderSendComposition.bracketedPaste(
+                for: Self.reading(bracketedPaste: false, modesObserved: false),
+                unobservedShouldWrap: true))
+        #expect(
+            HolderSendComposition.bracketedPaste(
+                for: Self.reading(bracketedPaste: true, modesObserved: false),
+                unobservedShouldWrap: true))
+    }
+
+    /// The regression this closes: a shell composes bare under the same
+    /// uncertainty, because its line editor submits bare input of any length
+    /// and has no burst heuristic to fool. `unobservedShouldWrap: false`, and
+    /// the guessed `bracketedPaste` value must not talk it back into wrapping.
+    @Test("an unobserved reading stays bare when the caller says not to wrap")
+    func unobservedReadingStaysBareWhenNotAsked() {
+        #expect(
+            HolderSendComposition.bracketedPaste(
+                for: Self.reading(bracketedPaste: false, modesObserved: false),
+                unobservedShouldWrap: false) == false)
+        #expect(
+            HolderSendComposition.bracketedPaste(
+                for: Self.reading(bracketedPaste: true, modesObserved: false),
+                unobservedShouldWrap: false) == false)
     }
 }

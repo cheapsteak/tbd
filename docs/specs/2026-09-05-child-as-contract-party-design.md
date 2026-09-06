@@ -143,6 +143,22 @@ stale (`2026-08-30-pty-holder-session-transport-design.md:548-553`).
 - **`modes`** – the child-facing state a writer needs before composing input:
   `bracketedPaste`, `applicationCursor`, `alternateScreen`. Read from the
   emulator that produced the lines, so lines and modes are one observation.
+- **`modesObserved`** – whether the answering emulator has witnessed the
+  child's mode setup, so a reader can tell an observation from a default. It
+  is true one way: the emulator was born with the child at spawn, so the
+  startup `DECSET`s waiting in the pty buffer for the first reader landed in
+  it. It is false one way, and for that emulator's whole life: an emulator
+  built over an already-running child, which is the daemon re-adopting a
+  session it did not spawn. A handback preamble restores the modes' *values*,
+  since the snapshot states each mode it carries — set or reset — as an escape
+  of its own; it raises no provenance, because the store that captured it was
+  itself seeded by this emulator's attach preamble and can hand back no more
+  than the daemon gave it. Every preamble in the transport originates from a
+  daemon emulator's snapshot, so none can carry provenance the reader lacked.
+  The field is orthogonal to `source`, which answers a different question —
+  which store, and is its screen live — and a re-adopted draining reader is
+  honestly `daemon` with `modesObserved: false`, its lines live and its modes
+  unobserved.
 - **`source`** – which store answered: `daemon` (the daemon is the reader and
   rendered its live emulator), `viewer` (a viewer holds the pty and answered a
   pull), or `staleDaemon` (a viewer holds the pty, did not answer, and this is
@@ -337,6 +353,27 @@ person reading the record afterwards that the composition was a guess and
 how old the guess was; the verifier's observation on the same row then says
 whether the guess landed. A refusal would have carried the same honesty at
 the price of the stall; a silent fallback would have carried neither.
+
+Unobserved modes are the same residue reached from the other side, and the
+asymmetry above decides them — but only for the children the asymmetry holds
+for. A reading with `modesObserved: false` carries a fresh terminal's defaults
+rather than anything the child was seen to do, so its `bracketedPaste: false`
+is not evidence of anything. For a session running an agent TUI the oracle
+composes as if bracketed paste were on and records `modesObserved: false` on
+the row, because of the two ways it can be wrong only one leaves a trace: read
+as off when it is on, the TUI's burst heuristic absorbs the `\r` and the
+message sits in the composer with nothing to say why; read as on when it is
+off, the child prints the markers, which somebody can see. Wrapping under
+uncertainty buys the visible failure over the silent one.
+
+The wrap is scoped to those burst-heuristic children, and a re-adopted **shell**
+composes bare. A shell's line editor submits bare input of any length and has
+no heuristic to fool, so a bare send never stalls there; wrapping one that
+never asked for brackets would only hand a `sudo` or `ssh` prompt markers to
+print, or a line made of them to run, in exchange for a stall that cannot
+happen. Uncertainty is a reason to wrap only where composing bare fails
+silently. An *observed* `false` is not uncertainty at all and composes bare for
+any child.
 
 ### What this does not change
 

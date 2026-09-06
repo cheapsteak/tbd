@@ -23,6 +23,7 @@ import Testing
     private static func make(
         lines: [String],
         viewportStart: Int = 0,
+        modesObserved: Bool = true,
         source: TerminalScreen.Source = .daemon,
         ageMilliseconds: Int = 0
     ) throws -> TerminalScreen {
@@ -33,6 +34,7 @@ import Testing
             size: TerminalScreen.Size(columns: 80, rows: 24),
             modes: TerminalScreen.ChildModes(
                 bracketedPaste: false, applicationCursor: false, alternateScreen: false),
+            modesObserved: modesObserved,
             source: source,
             ageMilliseconds: ageMilliseconds)
     }
@@ -270,11 +272,47 @@ import Testing
             size: TerminalScreen.Size(columns: 80, rows: 24),
             modes: TerminalScreen.ChildModes(
                 bracketedPaste: true, applicationCursor: true, alternateScreen: false),
+            modesObserved: false,
             source: .staleDaemon,
             ageMilliseconds: 41)
         #expect(
             screen.modeReading
                 == TerminalModeReading(
-                    modes: screen.modes, source: .staleDaemon, ageMilliseconds: 41))
+                    modes: screen.modes, modesObserved: false, source: .staleDaemon,
+                    ageMilliseconds: 41))
+    }
+
+    /// The second axis beside `source`, and it has to survive the wire for the
+    /// same reason `source` does: a consumer that composes input reads it, and
+    /// a screen that arrived over the socket is the only form that consumer
+    /// ever sees.
+    @Test("modesObserved survives a round trip")
+    func modesObservedRoundTrips() throws {
+        for observed in [true, false] {
+            let screen = try Self.make(lines: ["x"], modesObserved: observed)
+            let decoded = try JSONDecoder().decode(
+                TerminalScreen.self, from: try JSONEncoder().encode(screen))
+            #expect(decoded.modesObserved == observed)
+            #expect(decoded == screen)
+        }
+    }
+
+    /// A producer that predates the field could not tell the two cases apart,
+    /// so it has no answer to withhold — and `true` is what every consumer
+    /// assumed while the field did not exist. An older daemon's screen must
+    /// therefore decode to the behaviour it has always had, not to a wrapping
+    /// nobody asked for.
+    @Test("a payload without modesObserved decodes as observed")
+    func absentModesObservedDecodesAsObserved() throws {
+        let cursor = #"{"row":1,"column":2,"visible":true}"#
+        let size = #"{"columns":80,"rows":24}"#
+        let modes =
+            #"{"bracketedPaste":false,"applicationCursor":false,"alternateScreen":false}"#
+        let payload = """
+            {"lines":["alpha"],"viewportStart":0,"cursor":\(cursor),"size":\(size),\
+            "modes":\(modes),"source":"daemon","ageMilliseconds":5}
+            """
+        let decoded = try JSONDecoder().decode(TerminalScreen.self, from: Data(payload.utf8))
+        #expect(decoded.modesObserved)
     }
 }
