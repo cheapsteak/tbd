@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 @testable import TBDDaemonLib
+@testable import TBDShared
 
 /// Tests for the InputActivityTracker: timestamp recording, query, forget, and
 /// pruning. Pure: no DB, no tmux, no actor. One test per method/path.
@@ -119,5 +120,50 @@ struct InputActivityTrackerTests {
         #expect(time2 >= time1)
         // pane1's time should not have changed
         #expect(tracker.lastInput(paneID: pane1) == time1)
+    }
+
+    // MARK: - The per-transport key
+
+    /// A tmux row is keyed by its pane id, unchanged.
+    @Test func aTmuxRowIsKeyedByItsPaneID() {
+        let terminal = Terminal(
+            worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%7", kind: .claude)
+        #expect(InputActivityTracker.key(for: terminal) == "%7")
+    }
+
+    /// A holder row has no pane, so its `tmuxPaneID` is the empty string by
+    /// construction. Keying on that would put EVERY holder session in one
+    /// bucket: input typed into any of them would veto a park on all the
+    /// others, and forgetting one would forget them all. Two rows, two keys, is
+    /// the assertion — the empty string is not.
+    @Test func holderRowsGetDistinctKeys() {
+        let first = Terminal(
+            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
+            transport: .holder)
+        let second = Terminal(
+            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
+            transport: .holder)
+        #expect(InputActivityTracker.key(for: first) == first.id.uuidString)
+        #expect(InputActivityTracker.key(for: first) != InputActivityTracker.key(for: second))
+        #expect(!InputActivityTracker.key(for: first).isEmpty)
+    }
+
+    /// The keys are what the two transports' entries actually live under, so a
+    /// veto recorded for one holder session cannot be read for another.
+    @Test func aHolderVetoIsNotVisibleToAnotherHolderSession() {
+        let tracker = InputActivityTracker()
+        let first = Terminal(
+            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
+            transport: .holder)
+        let second = Terminal(
+            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "", kind: .claude,
+            transport: .holder)
+
+        tracker.recordInput(paneID: InputActivityTracker.key(for: first))
+        #expect(tracker.lastInput(paneID: InputActivityTracker.key(for: first)) != nil)
+        #expect(tracker.lastInput(paneID: InputActivityTracker.key(for: second)) == nil)
+
+        tracker.forget(paneID: InputActivityTracker.key(for: first))
+        #expect(tracker.lastInput(paneID: InputActivityTracker.key(for: first)) == nil)
     }
 }

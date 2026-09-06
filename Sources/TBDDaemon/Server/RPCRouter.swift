@@ -727,6 +727,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetRemoteDeleteEnabled(request.paramsData)
             case RPCMethod.configSetHolderRowReconcileEnabled:
                 return try await handleConfigSetHolderRowReconcileEnabled(request.paramsData)
+            case RPCMethod.configSetHolderHibernationEnabled:
+                return try await handleConfigSetHolderHibernationEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -861,7 +863,8 @@ public final class RPCRouter: Sendable {
             // unable to start a holder, and with the flag on that combination
             // falls back to tmux silently. Reported so Settings can say so
             // instead of offering a switch that would change nothing.
-            ptyHolderSupported: holderRegistry?.canSpawn == true))
+            ptyHolderSupported: holderRegistry?.canSpawn == true,
+            holderHibernationEnabled: config.holderHibernationEnabled))
     }
 
     // MARK: - PR Status

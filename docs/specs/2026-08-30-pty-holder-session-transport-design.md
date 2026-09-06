@@ -548,10 +548,11 @@ it reads back to the daemon:
   macOS App Nap coalesces a backgrounded app's work, and an app being wedged
   or busy correlates with exactly the moments supervision most wants a
   screen, so "quiet" is not the rare case it looks like.
-  Safety-critical consumers fail closed: the hibernation input-veto check
-  treats no-answer as unsafe and refuses to hibernate, never risking typed
-  input. Best-effort consumers fall back to the daemon's frozen-at-attach
-  emulator, labeled stale, rather than blocking on an unresponsive app.
+  Safety-critical consumers fail closed: the hibernation pending-input rail
+  acts only on a screen the daemon rendered live, and its refusals are set out
+  under "Feature parity" below. Best-effort consumers fall back to the
+  daemon's frozen-at-attach emulator, labeled stale, rather than blocking on
+  an unresponsive app.
 - Terminal scrollback history has a hole across each attached period (minus
   whatever the kernel buffer held at the edges). This is the accepted cost,
   and it is cheap here specifically: the artifact users actually mine history
@@ -600,13 +601,97 @@ Everything TBD does through tmux today, and its replacement:
 - **Machine reads** (`tbd terminal read`, the interactive-login driver, the
   hibernation pending-input rail, the embedded supervision babysitter) — the
   daemon renders its own emulator when it is the reader and pulls a snapshot
-  from the app when a viewer is attached. This replaces `capture-pane` with a
-  first-party interface, which the no-TUI-scraping rule already pushes
-  toward; the three sanctioned scrapers migrate onto it as part of this work.
+  from the app when a viewer is attached. Every such read answers with a
+  typed screen that names which store answered and how stale it is, so a
+  consumer can hold a policy rather than a hope
+  ([`2026-09-05-child-as-contract-party-design.md`](2026-09-05-child-as-contract-party-design.md)).
+  This replaces `capture-pane` with a first-party interface, which the
+  no-TUI-scraping rule already pushes toward; the three sanctioned scrapers
+  migrate onto it as part of this work.
 - **Hibernation and revive** — hibernate instructs the holder to terminate its
   child (the holder reports status and exits); revive spawns a fresh holder.
-  The input-veto and queued-prompt flags keep their semantics, now gating
-  daemon writes to the master instead of tmux `send-keys`.
+  The queued-prompt flag keeps its semantics, now gating daemon writes to the
+  master instead of tmux `send-keys`. The **input veto does not carry over**:
+  its fact source is the app's keystroke stream, and on this transport those
+  keystrokes go straight down the pty the viewer holds — which is exactly the
+  state a park refuses anyway — so the veto is vacuous for a holder row and
+  the screen rail below is the pending-input rail there. Recording the
+  daemon's own writes in its place would be strictly worse than recording
+  nothing: an auto-resume or a peer's `terminal.send` would then read as
+  unsent typed input forever against the merge rail's
+  `activityStateObservedAt` anchor, vetoing every park of that row. Three
+  properties of the park are load-bearing rather than incidental:
+
+  - **The row never finalizes parked while the child is still running.** The
+    park writes its intent, ends the child, confirms the exit, and only then
+    finalizes and clears the row's holder and child pids. A child that survives
+    both the polite `/exit` and the escalation rolls the intent back and leaves
+    the session awake, because a row that claims parked over a live process is
+    reclaimable by nothing: no sweep reads it, and a wake would put a second
+    agent on the same session.
+  - **The park escalates in rungs, and each rung is identity-checked.** An
+    in-band `/exit`, then `SIGTERM` to the child pid alone, then telling the
+    holder to forget the pty and killing the job by process group — each with
+    its own bounded window, so a session whose Stop hooks and MCP teardown
+    outlast the polite one still gets to shut itself down rather than being
+    killed mid-write. Before any signal the recorded pid is verified as this
+    session's own child, the way every other signalling site in the daemon
+    verifies one; an identity that cannot be established signals nothing, lets
+    the holder go without a kill, and leaves the row awake for a reconciler to
+    judge.
+  - **The pending-input rail acts only on a screen the daemon rendered live.**
+    It reads the typed screen the machine-read contract answers with and
+    branches on that answer's `source`. A `daemon` screen is judged for a
+    half-composed prompt; every other answer is refused, each by a name of its
+    own, because the remedies differ — a `staleDaemon` or `viewer` screen
+    means somebody has the session open and the tab is what to close, a
+    session with no reader is one the daemon has lost track of, and a screen
+    that will not project is a defect to fix. Refusing is recoverable; eating
+    a half-composed prompt is not. The idle sweep asks the same question
+    before it arms a row, reading the source alone rather than paying for the
+    lines, so a session the park could never complete costs no
+    request-and-refusal pair on every pass.
+  - **Revive re-anchors the identity check.** The row records when its current
+    child started, because a woken session's child is younger than its row and
+    every reclaimer that verifies a recorded pid against a start time would
+    otherwise read it as a stranger.
+
+  Park and wake on this transport ship behind `holder_hibernation_enabled`,
+  which is separate from `pty_holder_enabled` because that outer gate has to be
+  on for a holder row to exist at all and so cannot express "transport on,
+  hibernation not yet". With it off, every path that would newly park a holder
+  row refuses it, an unparked holder row asked to wake is refused by the same
+  name, and the reconcile arm deletes a finished holder session rather than
+  parking it — a park is only worth having where something can wake it.
+
+  What the flag deliberately does **not** gate is the wake of a row that is
+  already parked. Turning it off is the soak's abort gesture, and an abort that
+  stranded every session the soak had parked would be no abort at all: those
+  rows would answer the app's focus-wake with a failing RPC on every focus,
+  forever, with no route back to a live session. So the gate sits below the
+  parked check — new parks and the unparked classification consult it, an
+  already-parked row wakes regardless. For the same reason the startup arm that
+  heals parked holder rows is ungated: both of its verdicts are safety-only,
+  and a row parked before the flag was turned off still needs reconciling.
+
+  The same flag decides the **limit-resume rail**, which types "continue" into
+  a session whose usage limit has reset. On this transport it writes through
+  `HolderInjectionCourier` rather than tmux `send-keys`, in the tmux sequence's
+  own shape and timing: one write of `ESC`, the same 150 ms pause, then one
+  write of the literal and its carriage return. The Escape needs a read of its
+  own because an ink-style input parser reads `ESC` followed immediately by a
+  printable byte as a meta key, so a single combined write would compose Alt-c
+  and then "ontinue" on every attempt. The second write keeps its `\r` — nine
+  bytes, under the size at which an unwrapped write loses its trailing `\r`, so
+  no bracketed-paste wrapper is needed. Its pane-identity, pane-PID and
+  copy-mode rails are tmux's alone and are skipped; the verification that
+  follows the send reads hook-fed activity state and transcript growth, so it
+  is the same code for both transports. It belongs under this flag rather than
+  a flag of its own for the same reason as the park: a rail that resumes a
+  session is the counterpart of one that parks it, and soaking them apart
+  would leave a fleet where an auto-resume can fire at a session no sweep may
+  park. With the flag off it refuses a holder row by name, so a user who armed
+  auto-resume is told once rather than left watching a limit screen.
 - **Scrollback** — bounded emulator history while detached, SwiftTerm's own
   history while attached, transcripts as the durable record. tmux's 50k-line
   retention is not matched and deliberately so.

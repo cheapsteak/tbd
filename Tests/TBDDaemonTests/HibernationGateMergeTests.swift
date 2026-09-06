@@ -37,8 +37,13 @@ struct HibernationGateMergeTests {
         inputVetoEnabled: Bool = false,
         lastInputAt: Date? = nil
     ) -> HibernationGate.Decision {
+        // Every terminal in this suite is a tmux row, so the soak gate is
+        // passed off and named. The production signature has no default for
+        // it, and the tests that are about the gate live beside the holder
+        // fixtures in HolderTmuxAssumptionGateTests.
         HibernationGate.decideForMerge(
-            terminal: terminal, inputVetoEnabled: inputVetoEnabled, lastInputAt: lastInputAt)
+            terminal: terminal, inputVetoEnabled: inputVetoEnabled,
+            holderHibernationEnabled: false, lastInputAt: lastInputAt)
     }
 
     // MARK: - The go path: no idle window at all
@@ -67,6 +72,7 @@ struct HibernationGateMergeTests {
         let t = claudeTerminal(activityState: .idle)
         let sweepWithSwitchOff = HibernationGate.decide(
             terminal: t, autoHibernateEnabled: false,
+            holderHibernationEnabled: false,
             idleTimeout: 30 * 60,
             idleSince: Date(timeIntervalSince1970: 0), now: Date()
         )
@@ -199,5 +205,55 @@ struct HibernationGateMergeTests {
             hibernatedAt: now.addingTimeInterval(-60),
             activityStateObservedAt: now.addingTimeInterval(-10 * 60))
         #expect(decideForMerge(t, inputVetoEnabled: true, lastInputAt: now) == .alreadyHibernated)
+    }
+
+    // MARK: - The holder-transport soak gate, both branches
+
+    /// A holder-backed row that passes every other merge rail — including the
+    /// input veto's `activityStateObservedAt` requirement, so the only thing
+    /// these two tests vary is the flag.
+    private func holderTerminal() -> Terminal {
+        Terminal(
+            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude,
+            activityState: .idle,
+            activityStateObservedAt: now.addingTimeInterval(-10 * 60),
+            transport: .holder)
+    }
+
+    /// The argument cannot be omitted: `decideForMerge` carries no default for
+    /// it, the same as `decide`, so a park path that forgets the flag is a
+    /// compile error rather than a rail that silently disagrees with the app.
+    @Test func mergeParkRefusesAHolderRowWhileTheSoakGateIsOff() {
+        #expect(HibernationGate.decideForMerge(
+            terminal: holderTerminal(), inputVetoEnabled: false,
+            holderHibernationEnabled: false, lastInputAt: nil) == .holderTransport)
+    }
+
+    @Test func mergeParkElectsAHolderRowOnceTheSoakGateIsOn() {
+        #expect(HibernationGate.decideForMerge(
+            terminal: holderTerminal(), inputVetoEnabled: false,
+            holderHibernationEnabled: true, lastInputAt: nil) == .eligible)
+    }
+
+    /// With the gate on, a holder row still answers to every other rail — the
+    /// input veto included. The flag lifts one refusal, not all of them.
+    @Test func theSoakGateDoesNotLiftTheInputVetoOnAHolderRow() {
+        #expect(HibernationGate.decideForMerge(
+            terminal: holderTerminal(), inputVetoEnabled: true,
+            holderHibernationEnabled: true, lastInputAt: now) == .pendingTypedInput)
+    }
+
+    /// A tmux row is unaffected by either value, which is what makes the two
+    /// assertions above about the transport rather than about the flag alone.
+    @Test func aTmuxRowIsUnaffectedByTheSoakGate() {
+        for enabled in [false, true] {
+            #expect(HibernationGate.decideForMerge(
+                terminal: claudeTerminal(), inputVetoEnabled: false,
+                holderHibernationEnabled: enabled, lastInputAt: nil) == .eligible)
+            #expect(HibernationGate.decideForMerge(
+                terminal: claudeTerminal(keepWarm: true), inputVetoEnabled: false,
+                holderHibernationEnabled: enabled, lastInputAt: nil) == .keepWarm)
+        }
     }
 }

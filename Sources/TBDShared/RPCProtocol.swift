@@ -311,6 +311,11 @@ public enum RPCMethod {
     /// method of its own: `config.get` already carries the resolved value.
     public static let configSetRemoteDeleteEnabled = "config.setRemoteDeleteEnabled"
     public static let configSetHolderRowReconcileEnabled = "config.setHolderRowReconcileEnabled"
+    /// The pty-holder auto-hibernation gate (`holder_hibernation_enabled`) —
+    /// the soak switch on parking, waking and limit-resuming holder-backed
+    /// sessions. Reading needs no method of its own: `config.get` already
+    /// carries the resolved value.
+    public static let configSetHolderHibernationEnabled = "config.setHolderHibernationEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -3263,6 +3268,17 @@ public struct ConfigSetHolderRowReconcileEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setHolderHibernationEnabled` — the gate on parking,
+/// waking and limit-resuming Claude sessions on the pty-holder transport
+/// (default OFF during soak). This is how the soak is turned on: without it
+/// the sweep that kills a live holder-owned process would be reachable only by
+/// hand-editing `~/tbd/state.db`. Design:
+/// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
+public struct ConfigSetHolderHibernationEnabledParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setGCOrphanProcessesEnabled` — the gate for the
 /// orphaned-process collector, which reclaims processes that outlived the
 /// worktree they were rooted in (default OFF during soak, on top of the GC
@@ -3571,6 +3587,10 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// tmux — so Settings disables the toggle and says why rather than offering
     /// a switch that would change nothing.
     public let ptyHolderSupported: Bool
+    /// Whether the pty-holder auto-hibernation gate (`holder_hibernation_enabled`)
+    /// is set. Default OFF while it soaks. Read at sweep time, so the Settings
+    /// toggle reads it back from here rather than from a local guess.
+    public let holderHibernationEnabled: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -3588,7 +3608,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
                 updateMode: UpdateMode = Config.updateModeDefault,
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
-                ptyHolderSupported: Bool = false) {
+                ptyHolderSupported: Bool = false,
+                holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -3606,6 +3627,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.updateMode = updateMode
         self.ptyHolderEnabled = ptyHolderEnabled
         self.ptyHolderSupported = ptyHolderSupported
+        self.holderHibernationEnabled = holderHibernationEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -3664,6 +3686,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Bool.self, forKey: .ptyHolderEnabled) ?? Config.ptyHolderDefault
         ptyHolderSupported = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderSupported) ?? false
+        // New field for holder auto-hibernation. A daemon that does not send
+        // it runs no such sweep leg either, so fall through to the shipped
+        // default — one constant with the memberwise init above and with
+        // `ConfigRecord.toModel`, so a graduation moves all three at once —
+        // rather than assuming the gate is live.
+        holderHibernationEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .holderHibernationEnabled) ?? Config.holderHibernationEnabledDefault
     }
 }
 

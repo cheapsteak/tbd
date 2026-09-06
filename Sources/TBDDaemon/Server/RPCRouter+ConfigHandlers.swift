@@ -309,6 +309,22 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the pty-holder auto-hibernation gate — the default-off soak
+    /// switch for parking, waking and limit-resuming holder-backed sessions.
+    ///
+    /// This is how the soak is turned on. It is a separate verb from the
+    /// holder row reconcile gate above: that one reclaims a row whose holder
+    /// is already gone, this one parks (and can kill) a holder whose child
+    /// process is still running.
+    func handleConfigSetHolderHibernationEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetHolderHibernationEnabledParams.self, from: paramsData)
+        try await db.config.setHolderHibernationEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the orphaned-process collector gate — the default-off soak
     /// switch for reclaiming processes that outlived the worktree they were
     /// rooted in, read on top of the GC master switch.

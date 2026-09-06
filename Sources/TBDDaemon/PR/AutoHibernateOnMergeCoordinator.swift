@@ -48,7 +48,10 @@ public struct AutoHibernateOnMergeCoordinator: Sendable {
                 // an idle timeout is.
                 let result = await hibernation.hibernateForMerge(
                     terminalID: terminal.id,
-                    inputVetoEnabled: config.hibernateInputVetoEnabled)
+                    inputVetoEnabled: config.hibernateInputVetoEnabled,
+                    // The holder soak gate rides the same snapshot, for the
+                    // same reason: one config read decides the whole fan-out.
+                    holderHibernationEnabled: config.holderHibernationEnabled)
                 switch result {
                 case .ok:
                     parked += 1

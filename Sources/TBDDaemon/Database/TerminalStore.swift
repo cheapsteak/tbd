@@ -63,6 +63,10 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var holder_pid: Int32?
     /// PID of the job the holder `forkpty()`d, for holder-transport rows only.
     var child_pid: Int32?
+    /// When the job named by `child_pid` was started. NULL on a row that has
+    /// never been through a park/wake cycle, where `createdAt` is still the
+    /// right identity anchor — see `Terminal.holderChildStartedAt`.
+    var holder_child_started_at: Date?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -96,6 +100,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.transport = terminal.transport.rawValue
         self.holder_pid = terminal.holderPID
         self.child_pid = terminal.childPID
+        self.holder_child_started_at = terminal.holderChildStartedAt
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -145,7 +150,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // a newer daemon both degrade to tmux rather than throwing.
             transport: transport.flatMap(TerminalTransport.init(rawValue:)) ?? .tmux,
             holderPID: holder_pid,
-            childPID: child_pid
+            childPID: child_pid,
+            holderChildStartedAt: holder_child_started_at
         )
     }
 }
@@ -674,7 +680,8 @@ public struct TerminalStore: Sendable {
         watchDeskRole: WatchDeskRole? = nil,
         transport: TerminalTransport = .tmux,
         holderPID: Int32? = nil,
-        childPID: Int32? = nil
+        childPID: Int32? = nil,
+        holderChildStartedAt: Date? = nil
     ) async throws -> Terminal {
         let terminal = Terminal(
             id: id,
@@ -688,7 +695,8 @@ public struct TerminalStore: Sendable {
             watchDeskRole: watchDeskRole,
             transport: transport,
             holderPID: holderPID,
-            childPID: childPID
+            childPID: childPID,
+            holderChildStartedAt: holderChildStartedAt
         )
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
@@ -1766,6 +1774,30 @@ public struct TerminalStore: Sendable {
                 at: date)
             try record.update(db)
             return incarnationID
+        }
+    }
+
+    /// Record — or clear — which processes carry a holder-transport row, in one
+    /// write.
+    ///
+    /// The three facts move together on purpose. A pid without the start time
+    /// that identifies it is a pid nothing may signal (`ProcessIdentityCheck`
+    /// reads a missing start time as "not the same process"), and a start time
+    /// without a pid names nothing at all, so a caller that could set one and
+    /// forget another would leave the row saying something no reader can act
+    /// on. Wake passes all three; park passes `nil` for all three, which is
+    /// what a parked row means — no holder, no job, no anchor.
+    public func setHolderProcess(
+        id: UUID, holderPID: Int32?, childPID: Int32?, startedAt: Date?
+    ) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.holder_pid = holderPID
+            record.child_pid = childPID
+            record.holder_child_started_at = startedAt
+            try record.update(db)
         }
     }
 
