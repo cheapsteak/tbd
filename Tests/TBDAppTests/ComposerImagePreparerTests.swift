@@ -200,4 +200,42 @@ struct ComposerImagePreparerTests {
         #expect((try orientation(of: out) ?? 1) == 1,
                 "the output must carry no residual orientation tag")
     }
+
+    /// **A dropped file is validated before its bytes become an image.** The
+    /// drop path reads whatever URL the pasteboard carried, so without a check
+    /// a dragged source file or log would be handed to `onImageData` and only
+    /// fail later, deep inside the preparer, as an opaque "not an image".
+    @Test func aDroppedTextFileIsRefused() throws {
+        let root = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdimg"), isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("notes.txt")
+        try Data("not a picture, just prose".utf8).write(to: url)
+
+        #expect(ComposerImagePreparer.imageData(fromFileAt: url) == nil)
+    }
+
+    /// The same check must not refuse the thing it exists to let through.
+    @Test func aDroppedPNGFileIsRead() throws {
+        let root = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdimg"), isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("shot.png")
+        let written = try makeImage(width: 24, height: 24, type: .png)
+        try written.write(to: url)
+
+        #expect(ComposerImagePreparer.imageData(fromFileAt: url) == written)
+    }
+
+    /// A misnamed image is still an image: the type check falls back to
+    /// sniffing the bytes, so a screenshot saved without an extension works.
+    @Test func aPNGWithAMisleadingExtensionIsStillRead() throws {
+        let root = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdimg"), isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("screenshot.txt")
+        try makeImage(width: 24, height: 24, type: .png).write(to: url)
+
+        #expect(ComposerImagePreparer.imageData(fromFileAt: url) != nil)
+    }
 }

@@ -125,7 +125,27 @@ enum ComposerImagePreparer {
         return nil
     }
 
+    /// Read a dropped or copied file, **only if it really holds an image**.
+    ///
+    /// The drop path hands over whatever URL the pasteboard carried, so without
+    /// this a dragged source file, log or PDF would reach `onImageData` and be
+    /// written into the composer as an attachment, failing later — inside the
+    /// preparer, as an opaque "not an image" — rather than at the drop.
+    ///
+    /// The declared type is asked first because it is the cheap answer and the
+    /// one the filesystem already knows. It is not the last word: a screenshot
+    /// saved with the wrong extension is still an image, so bytes ImageIO can
+    /// open as an image are accepted regardless of what the file is called.
     static func imageData(fromFileAt url: URL) -> Data? {
-        try? Data(contentsOf: url)
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
+        if let declared = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType,
+           declared.conforms(to: .image) {
+            return data
+        }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetType(source) != nil,
+              CGImageSourceGetCount(source) > 0
+        else { return nil }
+        return data
     }
 }
