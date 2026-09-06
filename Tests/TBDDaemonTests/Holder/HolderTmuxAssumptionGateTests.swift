@@ -1026,7 +1026,9 @@ struct HolderTmuxAssumptionGateTests {
 
         let outcome = try #require(await Self.outcomeRow(of: rpc))
         #expect(outcome["result"] as? String == "dispatched")
-        #expect(outcome["modeSource"] as? String == "stale-daemon")
+        // Spelled exactly as `TerminalScreen.Source.staleDaemon` encodes, so a
+        // supervisor can match the row against the screen it read.
+        #expect(outcome["modeSource"] as? String == "staleDaemon")
         #expect(outcome["modeAgeMilliseconds"] as? Int == 2_460_000)
     }
 

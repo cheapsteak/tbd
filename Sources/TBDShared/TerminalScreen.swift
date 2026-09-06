@@ -84,7 +84,18 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     /// applied by accident: the hibernation pending-input check fails closed on
     /// `staleDaemon`, the input-path oracle proceeds and records it, and a
     /// person reading `tbd terminal output` is shown it.
-    public enum Source: String, Codable, Sendable {
+    ///
+    /// **The raw values must stay identical to `ActuationModeSource`'s.** A
+    /// supervisor correlates the `screen.source` it read from `tbd terminal
+    /// output --json` against the `modeSource` on the actuation row its send
+    /// produced, and it does that by string comparison — so two spellings of
+    /// one fact make exactly the case that matters, `staleDaemon`, fail to
+    /// match. The default synthesised raw values are the wire spellings
+    /// (`daemon`, `viewer`, `staleDaemon`); there is nothing to write out, and
+    /// a case added here must be added there with the same name.
+    /// `ActuationLogTests` pins the correspondence over `allCases`, which is
+    /// what `CaseIterable` is here for.
+    public enum Source: String, Codable, Sendable, CaseIterable {
         /// The daemon is this session's reader and rendered its live emulator.
         case daemon
         /// A viewer holds the pty and answered a pull from its own terminal.

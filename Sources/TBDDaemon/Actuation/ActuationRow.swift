@@ -202,6 +202,15 @@ enum ActuationOutcome: Sendable, Equatable {
 /// reading `dispatched, modeSource: staleDaemon` tells whoever reads the record
 /// afterwards that the composition was a guess, and the age says how old.
 ///
+/// **The three shared raw values must stay identical to
+/// `TerminalScreen.Source`'s.** A supervisor correlates the `screen.source` it
+/// read from `tbd terminal output --json` against the `modeSource` on the row
+/// its send produced, by string comparison — so a second spelling of
+/// `staleDaemon` would defeat exactly the case worth correlating. The default
+/// synthesised raw values are the wire spellings on both sides; do not write
+/// one out here without writing the same one there. `ActuationLogTests` pins
+/// the correspondence over `TerminalScreen.Source.allCases`.
+///
 /// New raw values are additive, like every other closed vocabulary here.
 enum ActuationModeSource: String, Codable, Sendable, CaseIterable, Equatable {
     /// The daemon is the session's reader and answered from its live emulator.
@@ -210,7 +219,7 @@ enum ActuationModeSource: String, Codable, Sendable, CaseIterable, Equatable {
     case viewer
     /// A viewer holds the pty and did not answer; the daemon's retained
     /// emulator answered instead, as of its last byte.
-    case staleDaemon = "stale-daemon"
+    case staleDaemon
     /// Nothing answered. No registry, or no reader for this session — it is
     /// gone or was never adopted, in which case the write is about to fail
     /// anyway. Composed bare, and carries no age, because there is no store
