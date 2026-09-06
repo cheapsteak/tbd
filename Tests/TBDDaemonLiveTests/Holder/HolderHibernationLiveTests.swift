@@ -34,6 +34,17 @@ struct HolderHibernationLiveTests {
         let childPID = try #require(terminal.childPID)
         let holderPID = try #require(terminal.holderPID)
 
+        // The rail's own precondition, asked of the registry this park will
+        // ask. `.daemon` is the only source the park may act on, and it is a
+        // fact about a real adopted reader draining a real pty — the scripted
+        // suites can state the other sources, but only a live holder can prove
+        // this one is what an ordinary detached session actually answers.
+        let reader = try #require(await fixture.registry.reader(for: terminal.id))
+        let observed = try await reader.screen(
+            maxLines: HibernationCoordinator.holderScreenLines)
+        #expect(observed.source == .daemon,
+                "a detached live session answered \(observed.source) rather than .daemon")
+
         let result = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
         #expect(result == .ok, "park refused: \(result)")
 
@@ -59,8 +70,12 @@ struct HolderHibernationLiveTests {
         #expect(signalled == -1 && signalErrno == ESRCH,
                 "the job survived a park that reported .ok (kill returned \(signalled), errno \(signalErrno))")
         #expect(!holderProcessIsAlive(holderPID), "the holder outlived the park")
+        // A released slot, not merely a suspended reader: `reader(for:)` answers
+        // for an adopted slot and keeps answering across an attach, so nil here
+        // means the registry let this session go rather than that the daemon is
+        // off the pty.
         #expect(await fixture.registry.reader(for: terminal.id) == nil,
-                "the daemon is still draining a pty for a parked session")
+                "the registry still holds a reader for a parked session")
     }
 
     /// Wake after that park: a fresh holder, a fresh job, and a row that names
@@ -95,7 +110,7 @@ struct HolderHibernationLiveTests {
             woken.holderChildStartedAt, "the woken row records no child start time")
         #expect(abs(startedAt.timeIntervalSince(Date())) < 300)
         #expect(await fixture.registry.reader(for: terminal.id) != nil,
-                "nothing is draining the woken session's pty")
+                "the registry did not adopt the woken session's holder")
 
         // WHAT it launched. Every assertion above is satisfied by a holder
         // running the wrong command entirely — a fresh session instead of a

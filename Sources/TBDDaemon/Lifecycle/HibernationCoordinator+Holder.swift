@@ -4,6 +4,18 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "Hibernation")
 
+/// What the park's pending-input rail got when it asked for a holder session's
+/// screen: a screen it may judge, or the refusal that stands in its place.
+///
+/// A type rather than an optional because the three ways to have no judgeable
+/// screen — no reader, a source the daemon is not the live store for, a
+/// projection that refused — carry different remedies and so different words,
+/// and collapsing them would hand the user a sentence that fits none of them.
+enum HolderScreenReading: Sendable {
+    case readable(TerminalScreen)
+    case refused(String)
+}
+
 /// Park and wake for the pty-holder transport.
 ///
 /// Split from `HibernationCoordinator` so the diff to that file is a set of
@@ -22,23 +34,44 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "Hibernation"
 /// invisible to every reconciler that reads rows.
 extension HibernationCoordinator {
 
-    /// The refusal for a holder session whose pty a viewer is holding.
+    /// How deep a tail of a holder session's screen the pending-input rail
+    /// judges.
     ///
-    /// Fail-closed, per the transport design's two-store rule: while a viewer
-    /// owns the pty the daemon's emulator is frozen at the moment of that
-    /// attach, so the pending-input rail would be asking a stale screen whether
-    /// there is unsent typed input — and answering that question wrongly is
-    /// exactly the harm the rail exists to prevent. Refusing is recoverable;
-    /// eating a half-composed prompt is not.
+    /// The depth `terminal.output` answers by default, and about a screen's
+    /// worth. The rail scans upward for the composer and stops at the first
+    /// prompt line it finds, so what it needs is the tail; asking for the whole
+    /// retained scrollback would put lines nobody is looking at under a check
+    /// that reads only the last of them.
+    static let holderScreenLines = 50
+
+    /// The refusal for a holder session whose screen the daemon is not the
+    /// live source of.
+    ///
+    /// Fail-closed, per the transport design's two-store rule, and decided from
+    /// the typed screen's own `source` rather than from a second question about
+    /// who holds the pty. A viewer's attach suspends the daemon's drain, and a
+    /// suspended reader's screen answers `.staleDaemon` — the daemon's emulator
+    /// frozen at the moment of that attach. Asking a frozen screen whether
+    /// there is unsent typed input is exactly the wrong answer the rail exists
+    /// to prevent. Refusing is recoverable; eating a half-composed prompt is
+    /// not.
+    ///
+    /// `.viewer` — a screen the viewer itself answered a pull with — refuses
+    /// here for a different reason that lands in the same place: that screen is
+    /// live, but somebody is sitting at the keyboard of the session about to be
+    /// parked. It is not reachable from a `HolderReader`, which answers only
+    /// `.daemon` or `.staleDaemon`; the arm exists because a source is the
+    /// question this rail asks, and a new source must be answered rather than
+    /// defaulted.
     ///
     /// It names an action the user can take, which is why it is a separate
     /// string from `holderNoReaderRefusal` below: closing the tab makes this
     /// park possible, and telling somebody to close a tab they have not got
     /// would be worse than saying nothing.
     static let holderViewerAttachedRefusal =
-        "A viewer is attached to this session, so the daemon cannot read its "
-        + "screen to check for unsent input; close the tab or wait for it to "
-        + "leave the viewer before hibernating"
+        "The daemon's screen for this session is not the live one — a viewer "
+        + "holds its pty — so it cannot check for unsent input; close the tab "
+        + "or wait for it to leave the viewer before hibernating"
 
     /// The refusal for a holder session this daemon is not reading at all.
     ///
@@ -53,23 +86,122 @@ extension HibernationCoordinator {
         "The daemon is not reading this session's terminal, so it cannot check "
         + "for unsent input before hibernating"
 
+    /// The refusal for a screen that could not be projected at all.
+    ///
+    /// `TerminalScreen` refuses a line carrying a control character, and its
+    /// own documentation argues why that is a bug in whatever rendered the line
+    /// rather than a state a session can put itself in. This rail cannot repair
+    /// it and must not guess past it: a screen it could not read is a screen it
+    /// cannot clear of unsent input, so it fails closed like every other half
+    /// of this rail. The third string exists because the remedy is neither a
+    /// tab to close nor a session to re-adopt — it is a defect to fix, and a
+    /// refusal that said "close the tab" would send somebody chasing the wrong
+    /// thing.
+    static let holderScreenProjectionRefusal =
+        "The daemon could not read this session's screen to check for unsent "
+        + "input before hibernating"
+
+    /// The refusal a screen's `source` implies, or nil when the daemon may
+    /// judge it.
+    ///
+    /// The whole policy, in one place, so the park and the idle sweep cannot
+    /// hold different opinions about which sources are judgeable. Both ask this
+    /// question; they differ only in how much of the screen they pay for to get
+    /// the answer.
+    static func holderRefusal(forScreenSource source: TerminalScreen.Source) -> String? {
+        switch source {
+        case .daemon: return nil
+        case .staleDaemon, .viewer: return holderViewerAttachedRefusal
+        }
+    }
+
+    /// The typed screen the park's rail judges, or the refusal that stands in
+    /// its place.
+    ///
+    /// One method so the two fail-closed halves and the projection failure are
+    /// stated once and the park reads a single answer.
+    func holderScreenReading(
+        terminalID: UUID, registry: HolderRegistry
+    ) async -> HolderScreenReading {
+        let screen: TerminalScreen?
+        do {
+            screen = try await holderScreen(terminalID: terminalID, registry: registry)
+        } catch {
+            logger.error(
+                """
+                hibernate: could not project \(terminalID, privacy: .public)'s screen for the \
+                pending-input rail: \(error.localizedDescription, privacy: .public)
+                """)
+            return .refused(Self.holderScreenProjectionRefusal)
+        }
+        guard let screen else { return .refused(Self.holderNoReaderRefusal) }
+        if let refusal = Self.holderRefusal(forScreenSource: screen.source) {
+            return .refused(refusal)
+        }
+        return .readable(screen)
+    }
+
     /// Whether the screen the park's pending-input rail would have to judge is
-    /// one this daemon cannot read — a viewer owns the pty, or no reader was
+    /// one this daemon may not judge — a viewer holds the pty, or no reader was
     /// ever adopted for the session.
     ///
-    /// The same question `performHolderHibernate` asks before its two
-    /// fail-closed refusals, lifted out so the sweep can ask it *first*.
+    /// The same question `performHolderHibernate` asks before its fail-closed
+    /// refusals, lifted out so the sweep can ask it *first*.
     /// `HibernationGate` is pure — it decides from the row, the config and the
     /// clock, and has no way to see who holds a pty — so the sweep is the only
     /// place with the registry in hand.
+    ///
+    /// **It reads the mode half of the oracle, not the whole screen.** `source`
+    /// is one fact taken from one reader under one lock, and
+    /// `HolderReader.modeReading` carries it without the whole-buffer walk that
+    /// `screen(maxLines:)` pays for — the same trade the send path's oracle
+    /// makes, and for the same reason: this runs on every sweep, for every idle
+    /// holder row, and the walk holds the emulator lock a live session's drain
+    /// thread needs. The two therefore agree on the question that decides the
+    /// refusal. They can differ on exactly one thing, a screen that will not
+    /// project at all: the sweep cannot foresee it, so such a row is armed here
+    /// and refused at the park. That is a producer bug rather than a session
+    /// state, and paying a request-and-refusal pair per sweep for one is better
+    /// than hiding it.
     ///
     /// A daemon with no registry at all answers false: that is the tmux-only
     /// configuration, where a holder row is a leftover and the park's own
     /// no-registry refusal is the right place to say so once.
     func holderScreenIsUnreadable(terminalID: UUID) async -> Bool {
         guard let registry = holderRegistry else { return false }
-        if await registry.viewerAttachment(for: terminalID) != nil { return true }
-        return await registry.reader(for: terminalID) == nil
+        if let oracle = holderScreenOracle {
+            do {
+                guard let screen = try await oracle(terminalID) else { return true }
+                return Self.holderRefusal(forScreenSource: screen.source) != nil
+            } catch {
+                // A refused projection, and the seam answers it the way the
+                // production path below does rather than better: that path
+                // reads only the source and never walks a line, so it cannot
+                // see one. The sweep arms, the park refuses. A seam that
+                // answered `true` here would make a test agree where the
+                // shipped code does not.
+                return false
+            }
+        }
+        guard let reader = await registry.reader(for: terminalID) else { return true }
+        let source = await reader.modeReading().source
+        return Self.holderRefusal(forScreenSource: source) != nil
+    }
+
+    /// The screen this daemon holds for a session, or nil when it holds none.
+    ///
+    /// The test seam first, so a park can be driven against each source without
+    /// a real holder, a real pty and a real attach; otherwise the registry's
+    /// own reader, which is the single source the design names. Both throw only
+    /// what `TerminalScreen`'s construction refuses.
+    private func holderScreen(
+        terminalID: UUID, registry: HolderRegistry
+    ) async throws -> TerminalScreen? {
+        if let holderScreenOracle {
+            return try await holderScreenOracle(terminalID)
+        }
+        guard let reader = await registry.reader(for: terminalID) else { return nil }
+        return try await reader.screen(maxLines: Self.holderScreenLines)
     }
 
     // MARK: - Park
@@ -115,13 +247,14 @@ extension HibernationCoordinator {
             return refusal
         }
 
-        // The three refusals below clear `idleSince` and `pendingKillSince`
-        // like every other refusal in this method. Each one names a condition
-        // that will still hold on the next sweep — no registry on this daemon,
-        // a viewer that owns the pty until its tab closes, a session this
-        // daemon never adopted — so leaving the markers armed would re-fire the
-        // identical refusal every pass. Clearing them makes the row start its
-        // idle clock again from the moment the condition clears.
+        // Every refusal below clears `idleSince` and `pendingKillSince` like
+        // every other refusal in this method. Each names a condition that will
+        // still hold on the next sweep — no registry on this daemon, a viewer
+        // that owns the pty until its tab closes, a session this daemon never
+        // adopted, a screen whose projection is broken — so leaving the markers
+        // armed would re-fire the identical refusal every pass. Clearing them
+        // makes the row start its idle clock again from the moment the
+        // condition clears.
 
         // No registry means no reader, no way to write `/exit`, and no way to
         // abandon the holder afterwards. Say so by name rather than parking a
@@ -132,29 +265,38 @@ extension HibernationCoordinator {
             return .notEligible(reason: "this daemon has no holder registry")
         }
 
-        // Rail: typed-but-unsent input, read off the daemon's own emulator.
-        // Fail-closed on both halves — a viewer holding the pty, or no reader
-        // at all — because either one means the screen this rail would judge is
-        // not the screen the session is showing. Each half answers with its own
-        // name: they differ in what the person reading the refusal can do next.
-        if await registry.viewerAttachment(for: terminal.id) != nil {
+        // Rail: typed-but-unsent input, read off the typed screen oracle.
+        // Fail-closed on every answer that is not a live daemon-rendered
+        // screen — a source the daemon is not the live store for, no reader at
+        // all, a projection that refused — because each one means the screen
+        // this rail would judge is not the screen the session is showing. Each
+        // answers with its own name: they differ in what the person reading the
+        // refusal can do next.
+        let capturedSnapshot: String?
+        switch await holderScreenReading(terminalID: terminal.id, registry: registry) {
+        case .refused(let refusal):
             idleSince[terminal.id] = nil
             pendingKillSince[terminal.id] = nil
-            logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — a viewer holds this session's pty")
-            return .notEligible(reason: Self.holderViewerAttachedRefusal)
+            logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — \(refusal, privacy: .public)")
+            return .notEligible(reason: refusal)
+        case .readable(let screen):
+            if HibernationSafetyChecks.hasPendingInput(paneCapture: screen.output) {
+                logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
+                return .notEligible(reason: "Terminal has unsent typed input")
+            }
+            capturedSnapshot = screen.output.isEmpty ? nil : screen.output
         }
+
+        // The reader the polite `/exit` below is written through. Read after
+        // the rail rather than inside it: the rail's subject is the screen, and
+        // a reader that answered a live screen a moment ago is the one this
+        // park writes to.
         guard let reader = await registry.reader(for: terminal.id) else {
             idleSince[terminal.id] = nil
             pendingKillSince[terminal.id] = nil
             logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — the daemon holds no reader for this session")
             return .notEligible(reason: Self.holderNoReaderRefusal)
         }
-        let screen = await reader.renderScreen()
-        if HibernationSafetyChecks.hasPendingInput(paneCapture: screen) {
-            logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
-            return .notEligible(reason: "Terminal has unsent typed input")
-        }
-        let capturedSnapshot: String? = screen.isEmpty ? nil : screen
 
         // Rail: transcript-tail validity, identical to the tmux path. Killing
         // mid-write can leave an unresumable jsonl.

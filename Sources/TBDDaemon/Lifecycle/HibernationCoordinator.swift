@@ -201,6 +201,22 @@ public actor HibernationCoordinator {
     /// a screen.
     var holderRegistry: HolderRegistry?
 
+    /// Answers a holder-backed session's screen, for the park's pending-input
+    /// rail to judge. A **test seam only** — production leaves it nil and
+    /// `holderScreenReading` falls through to the registry's own reader, which
+    /// is the single source the design names.
+    ///
+    /// It exists for the same reason the send path's `holderModeOracle` does:
+    /// reaching the rail's answers (`daemon`, `staleDaemon`, a screen that will
+    /// not project, and no screen at all) through a real registry means a real
+    /// holder, a real pty and a real attach for what is a pure question about
+    /// whether a park may proceed. The registry-backed path is exercised live;
+    /// this is how the rail's own branches are pinned.
+    ///
+    /// `nil` from the seam means the same thing as no reader: nothing answered.
+    /// A throw means the same thing as a refused projection.
+    var holderScreenOracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
+
     /// How the holder park observes and ends a child process. Injected so a
     /// test can state "the job declined `/exit`" in one line instead of
     /// arranging a real one.
@@ -277,6 +293,13 @@ public actor HibernationCoordinator {
     /// must share the one actor that holds the daemon's readers.
     func setHolderRegistry(_ registry: HolderRegistry?) {
         holderRegistry = registry
+    }
+
+    /// Wire the park rail's screen seam. Tests only — see `holderScreenOracle`.
+    func setHolderScreenOracle(
+        _ oracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
+    ) {
+        holderScreenOracle = oracle
     }
 
     func setInputActivity(_ tracker: InputActivityTracker) {

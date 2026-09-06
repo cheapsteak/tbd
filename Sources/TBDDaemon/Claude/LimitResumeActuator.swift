@@ -565,11 +565,13 @@ public struct LimitResumeActuator: LimitResumeActuating {
         // session that is over.
         //
         // The evidence has to be positive, which is why the seam asks about the
-        // holder's reported STATUS rather than about the daemon's reader. On
-        // this transport a session with no daemon reader is usually a session a
-        // viewer is holding — the most ordinary live state there is — so
-        // `reader(for:) == nil` would cancel the auto-resume of every session
-        // with a tab open on it.
+        // holder's reported STATUS rather than about the daemon's reader.
+        // `reader(for:)` answers which emulator is this session's, not whether
+        // the session is alive: the registry keeps that reader across an attach
+        // and hands out none while a slot is mid-adoption or mid-release. So
+        // `reader(for:) == nil` names a transition as often as a death, and a
+        // rail keyed on it would cancel auto-resumes on sessions that are
+        // running.
         if let sessionEnded = self.holderSessionEnded, await sessionEnded(terminal.id) {
             logger.info("""
                 actuate: terminal \(terminal.id.uuidString, privacy: .public) is holder-backed \

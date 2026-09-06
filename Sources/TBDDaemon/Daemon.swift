@@ -1732,9 +1732,10 @@ public final class Daemon: Sendable {
                 // The rail's liveness answer for a holder-backed row, and this
                 // transport's counterpart to `windowExists`. A positive exit
                 // report from the holder is the only evidence admitted: the
-                // absence of a daemon reader means a viewer owns the pty, which
-                // is the ordinary live state and would cancel the auto-resume of
-                // every session with a tab open on it.
+                // absence of a daemon reader says nothing about the child, since
+                // the registry keeps its reader across an attach and hands out
+                // none while a slot is mid-adoption or mid-release — so a rail
+                // keyed on it would cancel the auto-resume of live sessions.
                 holderSessionEnded: holderRegistry.map { registry in
                     let ended: @Sendable (UUID) async -> Bool = { terminalID in
                         switch await registry.lastKnownStatus(for: terminalID) {

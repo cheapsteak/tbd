@@ -424,17 +424,18 @@ struct HolderTmuxAssumptionGateTests {
 
     /// The gate's ON branch. The park is reached — which is the point — and
     /// stops at the fail-closed screen rail, because this registry adopted
-    /// nothing and so is not this session's reader.
+    /// nothing and so holds no screen for this session.
     ///
     /// That refusal is the whole rail stated without a live holder. It is the
-    /// no-reader half: this registry has adopted nothing, so the daemon holds
-    /// no emulator to judge. The viewer half answers with its own name
-    /// (`holderViewerAttachedRefusal`) because the remedies differ — one is a
-    /// tab to close, the other is a session the daemon has lost track of —
-    /// while the underlying rule is one rule: the daemon cannot see the screen
-    /// it would have to judge, so it fails closed. The row fingerprint is what
-    /// proves the park stopped BEFORE the intent was written rather than
-    /// after.
+    /// no-screen half: this registry has adopted nothing, so the oracle answers
+    /// nothing at all. The other halves answer with their own names — a source
+    /// the daemon is not the live store for gets
+    /// `holderViewerAttachedRefusal`, a screen that will not project gets
+    /// `holderScreenProjectionRefusal` — because the remedies differ: a tab to
+    /// close, a session the daemon has lost track of, a defect to fix. The
+    /// underlying rule is one rule: the daemon cannot judge the screen, so it
+    /// fails closed. The row fingerprint is what proves the park stopped BEFORE
+    /// the intent was written rather than after.
     @Test("with the flag on a holder row is hibernatable and reaches the screen rail")
     func flagOnMakesAHolderRowHibernatable() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -459,11 +460,200 @@ struct HolderTmuxAssumptionGateTests {
         #expect(
             HibernationCoordinator.holderNoReaderRefusal
                 != HibernationCoordinator.holderViewerAttachedRefusal,
-            "the two halves of the screen rail collapsed back into one string")
+            "two halves of the screen rail collapsed back into one string")
+        #expect(
+            HibernationCoordinator.holderScreenProjectionRefusal
+                != HibernationCoordinator.holderNoReaderRefusal,
+            "two halves of the screen rail collapsed back into one string")
 
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
                 "a park refused at the screen rail still wrote its intent to the row")
+    }
+
+    // MARK: - Gate 2a: the pending-input rail reads the typed screen
+
+    /// A screen the rail can judge, without a holder, a pty or an attach.
+    ///
+    /// The two facts these tests vary are the ones the rail turns on: the
+    /// `lines`, which `HibernationSafetyChecks.hasPendingInput` reads, and the
+    /// `source`, which decides whether the daemon may read them at all.
+    /// Everything else is a plausible constant, constructed through
+    /// `TerminalScreen`'s own initializer so a fixture cannot state a screen
+    /// the type would refuse.
+    private static func screen(
+        lines: [String], source: TerminalScreen.Source = .daemon
+    ) throws -> TerminalScreen {
+        try TerminalScreen(
+            lines: lines,
+            viewportStart: 0,
+            cursor: TerminalScreen.Cursor(row: 0, column: 0, visible: true),
+            size: TerminalScreen.Size(columns: 80, rows: 24),
+            modes: TerminalScreen.ChildModes(
+                bracketedPaste: true, applicationCursor: false, alternateScreen: false),
+            source: source,
+            ageMilliseconds: 0)
+    }
+
+    /// The composer as Claude draws it when nobody has typed anything.
+    private static let emptyComposer = [
+        "╭──────────────────────────────────────╮",
+        "│ > Try \"fix the failing test\"         │",
+        "╰──────────────────────────────────────╯",
+    ]
+
+    /// The same composer with a half-composed prompt in it.
+    private static let typedComposer = [
+        "╭──────────────────────────────────────╮",
+        "│ > refactor the auth module and add    │",
+        "╰──────────────────────────────────────╯",
+    ]
+
+    /// The park's screen seam, standing in for a registry-backed reader.
+    private static func screenOracle(
+        _ answer: @escaping @Sendable () throws -> TerminalScreen?
+    ) -> @Sendable (UUID) async throws -> TerminalScreen? {
+        { _ in try answer() }
+    }
+
+    /// A park driven against a screen this suite states, with a registry that
+    /// adopted nothing behind it.
+    ///
+    /// The registry's own reader is therefore never the answer — the seam is —
+    /// which is what lets each `source` be reached without a real attach. The
+    /// consequence is that a park which CLEARS the rail then stops at the
+    /// reader lookup the polite `/exit` needs, and `holderNoReaderRefusal` is
+    /// how "the rail passed" is stated here.
+    private func parkAgainst(
+        _ answer: @escaping @Sendable () throws -> TerminalScreen?,
+        db: TBDDatabase, terminal: Terminal
+    ) async -> HibernateResult {
+        let coord = await coordinator(
+            db, tmux: TmuxManager(dryRun: true),
+            registry: holderRegistry(listing: [terminal]))
+        await coord.setHolderScreenOracle(Self.screenOracle(answer))
+        return await coord.manualHibernate(terminalID: terminal.id)
+    }
+
+    /// The whole point of reading the typed screen rather than a string: a
+    /// screen the daemon did not render live is refused, and it is refused on
+    /// the `source` field rather than on a second question about who holds the
+    /// pty. A viewer's attach suspends the daemon's drain, so its retained
+    /// emulator answers `staleDaemon` — a screen frozen at the moment of that
+    /// attach, which cannot prove a composer is empty however empty it looks.
+    @Test("a park refuses a screen the daemon is not the live store for")
+    func parkRefusesAStaleScreen() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+        // An EMPTY composer, deliberately: the refusal must come from the
+        // source, not from anything the lines say. A stale screen showing a
+        // clear prompt is exactly the screen that would otherwise be parked
+        // over a person's half-typed message.
+        let stale = try Self.screen(lines: Self.emptyComposer, source: .staleDaemon)
+
+        let result = await parkAgainst({ stale }, db: db, terminal: terminal)
+        #expect(
+            result == .notEligible(reason: HibernationCoordinator.holderViewerAttachedRefusal),
+            "a stale screen did not fail the rail closed: \(result)")
+
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before,
+                "a park refused on a stale screen still wrote its intent to the row")
+    }
+
+    /// The `viewer` arm. Not reachable from a `HolderReader`, which answers only
+    /// `daemon` or `staleDaemon` — but the rail's policy is a switch over every
+    /// source, and this pins that a live screen somebody else is typing into is
+    /// still not one this park may act on.
+    @Test("a park refuses a screen a viewer answered")
+    func parkRefusesAViewerScreen() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let viewer = try Self.screen(lines: Self.emptyComposer, source: .viewer)
+
+        let result = await parkAgainst({ viewer }, db: db, terminal: terminal)
+        #expect(result == .notEligible(reason: HibernationCoordinator.holderViewerAttachedRefusal))
+    }
+
+    /// The `daemon` arm, with something typed. This is the rail doing the job
+    /// it exists for, and the refusal is the input one rather than any of the
+    /// fail-closed ones — which is what makes the tests above about the source.
+    @Test("a park refuses a live screen with a half-composed prompt on it")
+    func parkRefusesTypedInputOnALiveScreen() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+        let typed = try Self.screen(lines: Self.typedComposer, source: .daemon)
+
+        let result = await parkAgainst({ typed }, db: db, terminal: terminal)
+        #expect(result == .notEligible(reason: "Terminal has unsent typed input"))
+
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+    }
+
+    /// The `daemon` arm with a clear composer: the rail PASSES, and the park
+    /// goes on to the reader it would write `/exit` through.
+    ///
+    /// `holderNoReaderRefusal` is the proof, and it is a different string from
+    /// every refusal above: reaching it means the source was accepted and the
+    /// lines were judged empty. Without a live holder there is no further to
+    /// get, and inventing one for a question about a screen is what the seam
+    /// exists to avoid.
+    @Test("a live screen with a clear composer passes the rail")
+    func parkPassesTheRailOnALiveClearScreen() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let live = try Self.screen(lines: Self.emptyComposer, source: .daemon)
+
+        let result = await parkAgainst({ live }, db: db, terminal: terminal)
+        #expect(
+            result == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
+            "the rail refused a live screen with an empty composer: \(result)")
+    }
+
+    /// A screen that will not project at all. `TerminalScreen` refuses a line
+    /// carrying a control character, and the rail cannot read past that: it
+    /// fails closed with a name of its own, because the remedy is a defect to
+    /// fix rather than a tab to close.
+    @Test("a park refuses a screen that will not project")
+    func parkRefusesAScreenThatWillNotProject() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+
+        // Thrown by the type itself rather than by a hand-rolled error, so the
+        // test states the real failure a broken render produces.
+        let result = await parkAgainst(
+            { try Self.screen(lines: ["> \u{7}"], source: .daemon) },
+            db: db, terminal: terminal)
+        #expect(
+            result == .notEligible(reason: HibernationCoordinator.holderScreenProjectionRefusal),
+            "a refused projection did not fail the rail closed: \(result)")
+
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
     }
 
     /// The registry is not optional decoration: with none wired there is no
@@ -2256,7 +2446,8 @@ struct HolderTmuxAssumptionGateTests {
     /// may cost wall time.
     private func sweepCoordinator(
         _ db: TBDDatabase, logPath: String, dates: TestDateSource,
-        registry: HolderRegistry?
+        registry: HolderRegistry?,
+        screen: (@Sendable () throws -> TerminalScreen?)? = nil
     ) async -> HibernationCoordinator {
         let coordinator = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
@@ -2265,6 +2456,9 @@ struct HolderTmuxAssumptionGateTests {
             exitPollAttempts: 1, exitPollInterval: .milliseconds(1),
             actuationLog: ActuationLog(path: logPath))
         await coordinator.setHolderRegistry(registry)
+        if let screen {
+            await coordinator.setHolderScreenOracle(Self.screenOracle(screen))
+        }
         return coordinator
     }
 
@@ -2303,9 +2497,11 @@ struct HolderTmuxAssumptionGateTests {
         let before = RowFingerprint(terminal)
         let logPath = try sweepLogPath()
         let dates = TestDateSource()
-        // This registry adopted nothing, so it holds no reader for the session
-        // — the same state a daemon is in while a viewer owns the pty, reached
-        // without a live holder.
+        // This registry adopted nothing, so the oracle has no screen to answer
+        // with at all — the no-reader half of the rail, reached without a live
+        // holder. (A viewer-held session is the *other* half and answers a
+        // stale screen rather than none; `sweepSkipsAHolderRowWithAStaleScreen`
+        // states that one.)
         let coord = await sweepCoordinator(
             db, logPath: logPath, dates: dates,
             registry: holderRegistry(listing: [terminal]))
@@ -2387,5 +2583,80 @@ struct HolderTmuxAssumptionGateTests {
         let written = try logRows(at: logPath)
         #expect(written.count == 2, "expected one request row and its outcome, got \(written)")
         #expect(written.last?["result"] as? String == "dispatched")
+    }
+
+    /// The sweep and the park ask the same question of the same oracle, so a
+    /// screen the park would refuse is one the sweep never arms.
+    ///
+    /// A viewer holding the pty is exactly that state: the daemon's retained
+    /// emulator answers `staleDaemon`, the park fails closed on it, and a tab
+    /// somebody has open holds that condition for as long as it is open — so
+    /// arming would buy a request-and-refusal pair on every sweep, forever.
+    /// The assertion is on the RECORD being empty, because only the record can
+    /// tell "refused" from "never asked".
+    @Test("the sweep neither arms nor fires a holder row whose screen is stale")
+    func sweepSkipsAHolderRowWithAStaleScreen() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+        let logPath = try sweepLogPath()
+        let dates = TestDateSource()
+        // A clear composer, so nothing but the source can be what stops this.
+        let stale = try Self.screen(lines: Self.emptyComposer, source: .staleDaemon)
+        let coord = await sweepCoordinator(
+            db, logPath: logPath, dates: dates,
+            registry: holderRegistry(listing: [terminal]),
+            screen: { stale })
+
+        await sweepToTheActMoment(coord, dates: dates)
+        dates.advance(by: 61 + HibernationCoordinator.killDebounce + 1)
+        await coord.sweep()
+
+        let written = try logRows(at: logPath)
+        #expect(written.isEmpty,
+                "the sweep asked for a park it could never have completed: \(written)")
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+    }
+
+    /// The other side of the source check, and what makes the test above about
+    /// the source rather than about holder rows being skipped wholesale.
+    ///
+    /// The same fixture with a `daemon` screen arms and fires. The park then
+    /// refuses at the reader lookup the polite `/exit` needs — this registry
+    /// adopted nothing — so what the record shows is a request and its refusal
+    /// rather than a park, and `holderNoReaderRefusal` is the proof the sweep
+    /// got past its own screen check.
+    @Test("the sweep arms a holder row whose screen the daemon renders live")
+    func sweepArmsAHolderRowWithALiveScreen() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let logPath = try sweepLogPath()
+        let dates = TestDateSource()
+        let live = try Self.screen(lines: Self.emptyComposer, source: .daemon)
+        let coord = await sweepCoordinator(
+            db, logPath: logPath, dates: dates,
+            registry: holderRegistry(listing: [terminal]),
+            screen: { live })
+
+        await sweepToTheActMoment(coord, dates: dates)
+
+        let written = try logRows(at: logPath)
+        #expect(written.count == 2, "expected one request row and its outcome, got \(written)")
+        #expect(written.first?["kind"] as? String == "hibernate")
+        #expect(
+            written.last?["error"] as? String == HibernationCoordinator.holderNoReaderRefusal,
+            "the sweep fired, but not past its own screen check: \(written)")
+        #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
     }
 }
