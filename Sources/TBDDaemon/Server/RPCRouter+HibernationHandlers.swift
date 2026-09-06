@@ -148,7 +148,16 @@ extension RPCRouter {
             // these three cases and this function already returned above.
             // Kept explicit (rather than `default:`) so a new WakeResult case
             // added later must be classified deliberately in BOTH switches.
-            preconditionFailure("wakeResultPayload already handled \(result)")
+            //
+            // Fails SOFT rather than trapping. If the two switches ever drift
+            // apart, the caller gets an error naming the drift and the daemon —
+            // which is serving every other session on this machine — keeps
+            // running. A `preconditionFailure` here would take the whole fleet
+            // down over one wake.
+            return RPCResponse(
+                error: "terminal.wake produced an unclassified result (\(result)) — this is a "
+                    + "daemon bug: the wake may have happened. Re-read the terminal's state "
+                    + "before retrying.")
         }
     }
 
