@@ -629,9 +629,20 @@ Everything TBD does through tmux today, and its replacement:
   Park and wake on this transport ship behind `holder_hibernation_enabled`,
   which is separate from `pty_holder_enabled` because that outer gate has to be
   on for a holder row to exist at all and so cannot express "transport on,
-  hibernation not yet". With it off, every park and wake path refuses a holder
-  row and the reconcile arm deletes a finished holder session rather than
+  hibernation not yet". With it off, every path that would newly park a holder
+  row refuses it, an unparked holder row asked to wake is refused by the same
+  name, and the reconcile arm deletes a finished holder session rather than
   parking it — a park is only worth having where something can wake it.
+
+  What the flag deliberately does **not** gate is the wake of a row that is
+  already parked. Turning it off is the soak's abort gesture, and an abort that
+  stranded every session the soak had parked would be no abort at all: those
+  rows would answer the app's focus-wake with a failing RPC on every focus,
+  forever, with no route back to a live session. So the gate sits below the
+  parked check — new parks and the unparked classification consult it, an
+  already-parked row wakes regardless. For the same reason the startup arm that
+  heals parked holder rows is ungated: both of its verdicts are safety-only,
+  and a row parked before the flag was turned off still needs reconciling.
 
   The same flag decides the **limit-resume rail**, which types "continue" into
   a session whose usage limit has reset. On this transport it writes through

@@ -170,6 +170,50 @@ struct HolderStartupReconcileTests {
         #expect(after.holderPID == 8101)
     }
 
+    /// This arm is deliberately ungated, and the flag-off branch is the one
+    /// worth pinning: turning `holder_hibernation_enabled` off is the soak's
+    /// abort gesture, and the rows most needing reconciliation afterwards are
+    /// exactly the ones the soak parked. Gating the arm would strand them.
+    ///
+    /// Both verdicts are asserted in the same run, with the flag written
+    /// EXPLICITLY false rather than left NULL, so a future `guard` on the flag
+    /// fails here whichever of the tri-state's two off-values it reads.
+    @Test("both verdicts still move their row with holder hibernation turned off")
+    func bothVerdictsMoveTheirRowWithTheFlagOff() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(false)
+        #expect(try await db.config.get().holderHibernationEnabled == false)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let childStartedAt = Date().addingTimeInterval(-3600)
+        let signaller = FakeProcessSignaller()
+        // 8102: alive, identity verified → `.same` → un-park.
+        signaller.behaviors[8102] = .init(aliveInitially: true)
+        signaller.startTimes[8102] = childStartedAt
+        signaller.cmdlines[8102] = Self.holderChildCommand
+        // 8103: names nothing → `.notRunning` → clear the stale pids.
+        signaller.behaviors[8103] = .init(aliveInitially: false)
+
+        let live = try await seedParkedHolderRow(
+            db, worktreeID: wt.id, childStartedAt: childStartedAt, childPID: 8102)
+        let dead = try await seedParkedHolderRow(
+            db, worktreeID: wt.id, childStartedAt: childStartedAt, childPID: 8103)
+
+        await coordinator(db, signaller: signaller).reconcileOnStartup()
+
+        let afterLive = try #require(try await db.terminals.get(id: live.id))
+        #expect(!afterLive.isParked,
+                "the flag-off branch left a row parked over a verifiably live child")
+        #expect(afterLive.childPID == 8102, "un-parking must not forget the live child")
+
+        let afterDead = try #require(try await db.terminals.get(id: dead.id))
+        #expect(afterDead.isParked, "a parked row whose child is gone was un-parked")
+        #expect(afterDead.childPID == nil,
+                "the flag-off branch left pids naming a process the kernel has recycled")
+        #expect(afterDead.holderPID == nil)
+    }
+
     /// The tmux branch is untouched: its evidence is the window and the pane,
     /// and a dead window leaves a parked row exactly as it found it — whatever
     /// the process table says about pids the row does not carry.

@@ -510,8 +510,18 @@ struct HolderTmuxAssumptionGateTests {
 
     // MARK: - Gate 3: wake
 
-    @Test("wake refuses a parked holder row without touching tmux or the row")
-    func wakeRefusesParkedHolderRow() async throws {
+    /// The flag gates new parks, not the wake of a row that is already parked.
+    ///
+    /// Turning the flag off is the soak's abort gesture, and an abort that
+    /// stranded what the soak parked would be no abort at all: the app's
+    /// focus-wake would fire a failing RPC on every focus, forever. So a parked
+    /// holder row must reach the holder wake mechanic with the flag OFF — and
+    /// the way to state that without a live `TBDHolder` is the same refusal the
+    /// flag-on test uses, a registry that cannot spawn. `.respawnFailed` is
+    /// therefore the PROOF: `.holderTransport` here would mean the gate is
+    /// still above the parked check.
+    @Test("with the flag off a wake of a parked holder row still reaches the holder mechanic")
+    func flagOffWakeOfAParkedHolderRowProceedsPastTheGate() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -519,14 +529,47 @@ struct HolderTmuxAssumptionGateTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let terminal = try await seedClaudeTerminal(
             db, worktreeID: wt.id, transport: .holder)
-        // Park the row through the store directly. The coordinator now refuses
-        // to park it, but a row parked by an older daemon — or by a path this
-        // milestone has not yet gated — still has to survive a wake, and the
-        // parked branch is where the damage would be done.
+        #expect(try await db.config.get().holderHibernationEnabled == false,
+                "the fixture armed the flag it was meant to leave off")
         try await db.terminals.setHibernated(
             id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
         let before = RowFingerprint(try #require(try await db.terminals.get(id: terminal.id)))
         #expect(before.hibernatedAt != nil)
+
+        let registry = holderRegistry(listing: [terminal])
+        #expect(registry.canSpawn == false, "the fixture wired a spawner it was not meant to")
+
+        let result = await coordinator(db, tmux: tmux, registry: registry)
+            .wake(terminalID: terminal.id)
+        guard case .respawnFailed(let reason) = result else {
+            Issue.record("expected .respawnFailed — the flag still gates a parked wake, got \(result)")
+            return
+        }
+        #expect(reason.contains("TBDHolder"))
+
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(after.isParked, "a failed wake un-parked the row")
+        #expect(RowFingerprint(after) == before,
+                "a failed wake mutated the holder row")
+        #expect(recorded.snapshot().isEmpty,
+                "the holder wake path reached tmux: \(recorded.snapshot())")
+    }
+
+    /// The other side of the same gate: an UNPARKED holder row with the flag
+    /// off is refused by name, mutating nothing and asking the process table
+    /// nothing. This is what keeps the move above from being a removal — the
+    /// flag still decides whether this install classifies a holder row at all.
+    @Test("with the flag off a wake of an unparked holder row is refused by name")
+    func flagOffWakeOfAnUnparkedHolderRowIsRefused() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+        #expect(before.hibernatedAt == nil && before.suspendedAt == nil)
 
         let result = await coordinator(db, tmux: tmux).wake(terminalID: terminal.id)
         #expect(result == .holderTransport)

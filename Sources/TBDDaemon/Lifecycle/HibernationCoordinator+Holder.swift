@@ -308,6 +308,17 @@ extension HibernationCoordinator {
     /// Everything else — an unreadable start time, a mismatch, a foreign
     /// executable — is an uncertain identity, and an uncertain identity is not
     /// evidence in either direction.
+    ///
+    /// **It is deliberately ungated, and that is not an oversight.**
+    /// `holder_hibernation_enabled` decides whether a row may be parked; this
+    /// arm judges rows that already are, including the ones the soak parked
+    /// before the flag was turned off. Gating it would make turning the flag
+    /// off strand exactly the rows an abort most needs healed. Both of its
+    /// mutations are safety-only in the direction a disabled feature wants:
+    /// one un-parks a row over a child that is verifiably alive, the other
+    /// clears pids that verifiably name nothing. Neither ends a process,
+    /// neither parks anything, and neither can be undone into a worse state
+    /// than the row was already in.
     func reconcileParkedHolderRow(_ terminal: Terminal) async {
         guard let childPID = terminal.childPID, childPID > 1 else { return }
         let verdict = ProcessIdentityCheck.verify(

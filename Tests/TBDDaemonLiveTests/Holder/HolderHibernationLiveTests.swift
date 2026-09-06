@@ -129,9 +129,15 @@ struct HolderHibernationLiveTests {
         #expect(after.childPID == childPID, "a refused park still cleared the row's pids")
         #expect(holderProcessIsAlive(childPID), "a refused park still ended the job")
 
-        // And the wake half of the same gate, on a row parked out of band.
-        try await fixture.db.terminals.setHibernated(
-            id: terminal.id, sessionID: HibernationFixture.sessionID, reason: .manual)
+        // And the wake half of the same gate, on the same UNPARKED row: the
+        // flag decides whether this install classifies a holder row at all.
+        //
+        // The row is deliberately NOT parked out of band first. A row that is
+        // already parked wakes whatever the flag says — turning the flag off is
+        // the soak's abort gesture, not a way to strand what the soak parked —
+        // so parking it here would spawn a real replacement holder, which is
+        // the opposite of what this test asserts. That half is covered
+        // scripted, in `HolderTmuxAssumptionGateTests`.
         #expect(await fixture.coordinator.wake(terminalID: terminal.id) == .holderTransport)
         #expect(holderProcessIsAlive(childPID))
     }

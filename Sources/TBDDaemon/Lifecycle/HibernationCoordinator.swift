@@ -416,8 +416,10 @@ public actor HibernationCoordinator {
     /// keep-warm, which merge-park honors but manual bypasses — plus the
     /// pending-input veto, whose wording matches the backup TUI scrape's so a
     /// reader cannot tell which of the two rails fired and does not need to.
-    /// The one refusal text every park/wake path uses for a holder-backed row,
-    /// so the CLI, the app and the actuation record all name the same reason.
+    /// The one refusal text every gated path uses for a holder-backed row, so
+    /// the CLI, the app and the actuation record all name the same reason. What
+    /// the flag gates is a new park and the classification of an UNPARKED
+    /// holder row; a row that is already parked wakes without consulting it.
     static let holderTransportRefusal =
         "Session runs on the pty-holder transport and holder hibernation is off "
         + "(Settings → Hibernate pty-holder sessions, or `tbd config "
@@ -907,6 +909,14 @@ public actor HibernationCoordinator {
     /// That recovery covers parked rows ONLY, because it lives downstream of
     /// the parked check below. An UNPARKED row whose session died is reported
     /// (`.sessionGone`) but not repaired — see `classifyUnparkedWake`.
+    ///
+    /// **An already-parked holder row wakes whatever `holder_hibernation_enabled`
+    /// says.** The flag gates new parks and the classification of an UNPARKED
+    /// holder row; it does not gate the wake of a row the feature has already
+    /// parked. Turning the flag off is the soak's abort gesture, and an abort
+    /// that stranded everything the soak parked would be no abort at all — the
+    /// app's focus-wake would fire a failing RPC on every focus, forever, with
+    /// no way back to a live session.
     public func wake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, allowDefaultProfileFallback: Bool = false, initialPrompt: String? = nil) async -> WakeResult {
         // Claim synchronously, before the first suspension. Otherwise two wake
         // calls can both read the parked row, then each pass the in-flight check
@@ -925,14 +935,6 @@ public actor HibernationCoordinator {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
         }
-        // Ahead of the parked check, and therefore ahead of BOTH downstream
-        // paths. Read once, before anything is mutated: a holder row whose soak
-        // gate is off is refused here, mutating nothing, rather than reaching
-        // either branch below.
-        let holderHibernationEnabled = await resolvedHolderHibernationEnabled()
-        if terminal.transport == .holder, !holderHibernationEnabled {
-            return .holderTransport
-        }
         // Wake ANY parked row, not just `hibernatedAt`-marked ones: legacy rows
         // and the reconcile / recreate-window paths may carry only `suspendedAt`.
         // `clearHibernated` nils both columns, so this fully un-parks either.
@@ -943,9 +945,16 @@ public actor HibernationCoordinator {
         // `.sessionGone`. The holder classification asks the process table
         // instead.
         guard terminal.isParked else {
-            return terminal.transport == .holder
-                ? await classifyUnparkedHolderWake(terminal)
-                : await classifyUnparkedWake(terminal)
+            guard terminal.transport == .holder else {
+                return await classifyUnparkedWake(terminal)
+            }
+            // The soak gate belongs HERE and not above the parked check: it
+            // decides whether this install classifies an unparked holder row
+            // at all, and an install that has not armed the feature is told so
+            // rather than being handed a process-table verdict it never asked
+            // for. Nothing is mutated on the way out.
+            guard await resolvedHolderHibernationEnabled() else { return .holderTransport }
+            return await classifyUnparkedHolderWake(terminal)
         }
         guard let sessionID = terminal.claudeSessionID else { return .noSessionID }
         let expectedReplacementState = TerminalReplacementSnapshot(terminal: terminal)
