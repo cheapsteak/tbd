@@ -51,6 +51,86 @@ struct MessageComposerViewTests {
         #expect(MessageComposerView.menuOutcome(for: .menuClose, selectedIndex: 1) == .close)
     }
 
+    // MARK: - Enter accepts and sends when the command is the whole message
+
+    /// `/comp` plus Enter runs compact, as it does in the terminal: the token is
+    /// the entire message, so accepting it leaves nothing to write and the same
+    /// keystroke sends.
+    @Test func enterAcceptsAndSendsWhenTheCommandIsTheWholeMessage() {
+        let completed = MessageComposerView.acceptedWholeMessage(
+            text: "/comp", tokenRange: NSRange(location: 0, length: 5),
+            replacement: MessageComposerView.completionReplacement(
+                kind: .command, name: "compact"))
+
+        #expect(completed == "/compact", "the send carries the COMPLETED token")
+        #expect(
+            MessageComposerView.menuOutcome(
+                for: .menuAcceptOrSubmit, selectedIndex: 0,
+                acceptFillsTheMessage: completed != nil) == .acceptAndSubmit)
+    }
+
+    /// A command inside a sentence is part of that sentence. Accepting it
+    /// completes the name and stops; a second Return sends, once the person has
+    /// finished writing.
+    @Test func enterOnlyAcceptsWhenWordsSurroundTheToken() {
+        let completed = MessageComposerView.acceptedWholeMessage(
+            text: "hello /comp", tokenRange: NSRange(location: 6, length: 5),
+            replacement: MessageComposerView.completionReplacement(
+                kind: .command, name: "compact"))
+
+        #expect(completed == nil)
+        #expect(
+            MessageComposerView.menuOutcome(
+                for: .menuAcceptOrSubmit, selectedIndex: 0,
+                acceptFillsTheMessage: completed != nil) == .accept)
+    }
+
+    /// A staged image is text in the box like any other word, so a message
+    /// carrying one is not "just the command" however the words are arranged.
+    @Test func anImageTokenKeepsEnterFromSending() {
+        #expect(
+            MessageComposerView.acceptedWholeMessage(
+                text: "[Image #1] /comp", tokenRange: NSRange(location: 11, length: 5),
+                replacement: MessageComposerView.completionReplacement(
+                    kind: .command, name: "compact")) == nil)
+    }
+
+    /// **Tab never sends**, whatever is in the box. Its meaning is "take the
+    /// obvious completion and keep going"; a Tab that ran a command would be a
+    /// command nobody committed to.
+    @Test func tabNeverSubmitsEvenWhenTheCommandIsTheWholeMessage() {
+        #expect(
+            MessageComposerView.menuOutcome(
+                for: .menuAccept, selectedIndex: 0, acceptFillsTheMessage: true) == .accept)
+        #expect(
+            MessageComposerView.menuOutcome(
+                for: .menuAccept, selectedIndex: nil, acceptFillsTheMessage: true) == .accept)
+    }
+
+    /// With nothing highlighted the message goes as typed, and the whole-message
+    /// question never arises — Enter must not accept a row the person never
+    /// chose just because their text happens to be one token.
+    @Test func enterStillSendsAsTypedWithNothingHighlighted() {
+        #expect(
+            MessageComposerView.menuOutcome(
+                for: .menuAcceptOrSubmit, selectedIndex: nil,
+                acceptFillsTheMessage: true) == .submit)
+    }
+
+    /// A range the text no longer holds — the person kept typing while the menu
+    /// was deciding — yields no message rather than a clamped one. `NSNotFound`
+    /// is `Int.max`, so the bounds check must not add to it.
+    @Test func anOutOfBoundsTokenRangeProducesNoWholeMessage() {
+        #expect(
+            MessageComposerView.acceptedWholeMessage(
+                text: "/comp", tokenRange: NSRange(location: NSNotFound, length: 3),
+                replacement: "/compact ") == nil)
+        #expect(
+            MessageComposerView.acceptedWholeMessage(
+                text: "/comp", tokenRange: NSRange(location: 40, length: 2),
+                replacement: "/compact ") == nil)
+    }
+
     /// The menu handler is reached only for menu actions; anything else the
     /// router resolved is somebody else's business and must not be re-decided
     /// here.

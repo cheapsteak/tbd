@@ -204,6 +204,10 @@ struct MessageComposerView: View {
         case close
         /// Take `acceptTarget` — the highlighted row, or the first.
         case accept
+        /// Take `acceptTarget` and send in the same keystroke, because the
+        /// completed token is the whole message and there is nothing left to
+        /// write.
+        case acceptAndSubmit
         /// Send the text as typed.
         case submit
         /// Not a menu key at all.
@@ -211,7 +215,8 @@ struct MessageComposerView: View {
     }
 
     static func menuOutcome(
-        for action: ComposerKeyRouter.Action, selectedIndex: Int?
+        for action: ComposerKeyRouter.Action, selectedIndex: Int?,
+        acceptFillsTheMessage: Bool = false
     ) -> MenuOutcome {
         switch action {
         case .menuUp: return .moveUp
@@ -219,7 +224,9 @@ struct MessageComposerView: View {
         case .menuClose: return .close
         case .menuAccept:
             // Tab. Its whole meaning is "take the obvious one", so it accepts
-            // `acceptTarget` whether or not anything is highlighted.
+            // `acceptTarget` whether or not anything is highlighted — and it
+            // NEVER sends, whatever else is in the box. Tab is how a person puts
+            // the name in the message and keeps writing.
             return .accept
         case .menuAcceptOrSubmit:
             // Return. It accepts only a row the person actually arrowed to;
@@ -227,20 +234,85 @@ struct MessageComposerView: View {
             // mid-sentence, on a non-prefix query, and while the inventory is
             // still loading — every case where a fallback to `rows.first` would
             // be a guess at what somebody meant.
-            return selectedIndex == nil ? .submit : .accept
+            //
+            // A row that IS highlighted is accepted, and sent in the same
+            // keystroke when the completed token is the whole message: `/comp`
+            // plus Enter runs compact as it does in the terminal. With anything
+            // else in the box the accept stands alone, and a second Return
+            // sends.
+            guard selectedIndex != nil else { return .submit }
+            return acceptFillsTheMessage ? .acceptAndSubmit : .accept
         case .submit, .newline, .blur, .passThrough:
             return .ignore
         }
     }
 
+    /// What accepting a completion writes into the text: the sigil, the name, and
+    /// a trailing space, so the argument hint renders as an inline placeholder
+    /// and the menu closes because the token ended.
+    static func completionReplacement(
+        kind: CompletionTrigger.Kind, name: String
+    ) -> String {
+        sigil(kind) + name + " "
+    }
+
+    /// The message an accept would leave behind **when the completed token is the
+    /// whole message** — nil in every other case.
+    ///
+    /// Trimmed on both sides rather than compared span by span: what makes a
+    /// message "just the command" is that nothing else survives the trim — no
+    /// other words, and no `[Image #N]` token, which is ordinary text here and
+    /// so fails the comparison by itself.
+    ///
+    /// It returns the TEXT rather than a Bool because an accept reaches the text
+    /// view as a one-shot command, which lands a SwiftUI pass later. A send in
+    /// the same keystroke therefore has to carry the completed string; reading
+    /// `currentText()` would send the prefix the person typed.
+    static func acceptedWholeMessage(
+        text: String, tokenRange: NSRange, replacement: String
+    ) -> String? {
+        let ns = text as NSString
+        // The same refusal `apply` makes, for the same reason: a range the text
+        // no longer holds means the person edited while this was in flight.
+        // `NSNotFound` as a location is `Int.max`, so the addition is spelled as
+        // a subtraction to keep it from trapping.
+        guard tokenRange.location >= 0, tokenRange.length >= 0,
+              tokenRange.location <= ns.length,
+              tokenRange.length <= ns.length - tokenRange.location else { return nil }
+        let completed = ns.replacingCharacters(in: tokenRange, with: replacement)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty, completed == token else { return nil }
+        return completed
+    }
+
+    private static func acceptedWholeMessage(
+        text: String, match: CompletionTrigger.Match?, row: CommandRanker.Row?
+    ) -> String? {
+        guard let match, let row else { return nil }
+        return acceptedWholeMessage(
+            text: text, tokenRange: match.tokenRange,
+            replacement: completionReplacement(kind: match.kind, name: row.command.name))
+    }
+
     private func handleMenu(_ action: ComposerKeyRouter.Action) {
         guard let controller else { return }
-        switch Self.menuOutcome(for: action, selectedIndex: controller.selectedIndex) {
+        let completed = Self.acceptedWholeMessage(
+            text: currentText(), match: controller.match, row: controller.acceptTarget)
+        switch Self.menuOutcome(
+            for: action, selectedIndex: controller.selectedIndex,
+            acceptFillsTheMessage: completed != nil) {
         case .moveUp: controller.moveUp()
         case .moveDown: controller.moveDown()
         case .close: controller.close(suppressingCurrentToken: true)
         case .accept:
             if let row = controller.acceptTarget { accept(row) }
+        case .acceptAndSubmit:
+            guard let row = controller.acceptTarget, let completed else { return }
+            accept(row)
+            // The completed text, never `currentText()`: the accept above is a
+            // command the text view has not run yet.
+            submit(completed)
         case .submit: submit(currentText())
         case .ignore: break
         }
@@ -248,10 +320,9 @@ struct MessageComposerView: View {
 
     private func accept(_ row: CommandRanker.Row) {
         guard let controller, let match = controller.match else { return }
-        // A trailing space, so the argument hint renders as an inline placeholder
-        // and the menu closes because the token ended.
         issue(.replaceRange(
-            match.tokenRange, with: Self.sigil(match.kind) + row.command.name + " "))
+            match.tokenRange,
+            with: Self.completionReplacement(kind: match.kind, name: row.command.name)))
         controller.recordAcceptance(row)
     }
 
@@ -408,7 +479,12 @@ struct MessageComposerView: View {
                 Text(Self.sendButtonLabel(state: state, terminalLabel: terminal.label))
             }
         }
-        .keyboardShortcut(.return, modifiers: .command)
+        // **No key equivalent.** `ComposerKeyRouter` already maps Cmd+Return to
+        // `.submit`, and a SwiftUI key equivalent is live for the whole WINDOW
+        // while the composer is mounted — so a button shortcut here would fire
+        // this send from a sibling terminal pane of a split, where the person
+        // pressing Cmd+Return means the terminal they are typing into. The
+        // router owns the key; the button stays clickable.
         .disabled(!state.isEnabled || isSending)
         .help(Self.sendButtonHelp(state: state))
     }
