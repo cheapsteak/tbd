@@ -512,6 +512,11 @@ enum SwapProfileMenu {
 /// `isManuallyHibernatable` requires the terminal NOT be parked — so at most
 /// one item ever shows. Extracted from the view so each branch is
 /// unit-testable without SwiftUI (same pattern as `RowActionMenu`).
+///
+/// `holderHibernationEnabled` is the daemon's `holder_hibernation_enabled`
+/// capability. The menu must agree with the rail the daemon will apply: a
+/// Hibernate item offered on a holder tab while the soak gate is off would
+/// only ever produce a refusal the user cannot act on.
 enum TabParkMenuModel {
     enum ParkAction: Equatable {
         /// Terminal is live and manually hibernatable → offer "Hibernate".
@@ -522,9 +527,12 @@ enum TabParkMenuModel {
 
     /// nil = show neither item (no terminal, non-Claude terminal, or a Claude
     /// session that is mid-turn / waiting on a permission prompt).
-    static func action(for terminal: Terminal?) -> ParkAction? {
+    static func action(
+        for terminal: Terminal?, holderHibernationEnabled: Bool
+    ) -> ParkAction? {
         guard let terminal else { return nil }
-        if terminal.isManuallyHibernatable { return .hibernate }
+        if terminal.isManuallyHibernatable(
+            holderHibernationEnabled: holderHibernationEnabled) { return .hibernate }
         if terminal.isParked { return .wake }
         return nil
     }
@@ -980,7 +988,11 @@ private struct TabBarItem: View {
             // the worktree. A scheduled auto-resume can still be pending on a
             // live session that hit its limit, so keep the cancel affordance
             // here too (#341).
-            switch TabParkMenuModel.action(for: terminal) {
+            switch TabParkMenuModel.action(
+                for: terminal,
+                holderHibernationEnabled:
+                    appState.daemonCapabilities?.holderHibernationEnabled ?? false
+            ) {
             case .hibernate:
                 Button {
                     guard let terminalID = terminal?.id else { return }

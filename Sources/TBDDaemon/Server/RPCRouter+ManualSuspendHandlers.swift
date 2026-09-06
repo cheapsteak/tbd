@@ -102,7 +102,16 @@ extension RPCRouter {
         }
         await limitResumeScheduler?.wake()
 
-        let eligible = terminals.filter { $0.isManuallyHibernatable }
+        // One config read for the whole fan-out: every terminal in this
+        // worktree is judged by the same soak gate, and a per-row read could
+        // straddle a toggle mid-loop. A read that fails takes the shipped
+        // default, which refuses a holder row.
+        let holderHibernationEnabled =
+            (try? await db.config.get())?.holderHibernationEnabled
+            ?? Config.holderHibernationEnabledDefault
+        let eligible = terminals.filter {
+            $0.isManuallyHibernatable(holderHibernationEnabled: holderHibernationEnabled)
+        }
 
         // Fire in background — RPC returns immediately so the app can show
         // the parking overlay while the daemon does its work.

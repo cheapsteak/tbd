@@ -263,8 +263,8 @@ struct HolderTmuxAssumptionGateTests {
 
         // The pure property first: it is what the app's tab menu reads, so a
         // holder tab must not even offer Hibernate.
-        #expect(!terminal.isManuallyHibernatable)
-        #expect(!terminal.isAutoHibernationEligible)
+        #expect(!terminal.isManuallyHibernatable(holderHibernationEnabled: false))
+        #expect(!terminal.isAutoHibernationEligible(holderHibernationEnabled: false))
 
         let result = await coordinator(db, tmux: TmuxManager(dryRun: true))
             .manualHibernate(terminalID: terminal.id)
@@ -283,8 +283,8 @@ struct HolderTmuxAssumptionGateTests {
         let terminal = try await seedClaudeTerminal(
             db, worktreeID: wt.id, transport: .tmux)
 
-        #expect(terminal.isManuallyHibernatable)
-        #expect(terminal.isAutoHibernationEligible)
+        #expect(terminal.isManuallyHibernatable(holderHibernationEnabled: false))
+        #expect(terminal.isAutoHibernationEligible(holderHibernationEnabled: false))
 
         let result = await coordinator(db, tmux: TmuxManager(dryRun: true))
             .manualHibernate(terminalID: terminal.id)

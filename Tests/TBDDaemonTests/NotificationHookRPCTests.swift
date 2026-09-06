@@ -217,7 +217,7 @@ import TestSupport
         // rather than assumed.
         #expect(parkDecision(after) == parkDecision(before))
         #expect(parkDecision(after) == .eligible)
-        #expect(HibernationGate.blockingRail(terminal: after) == nil)
+        #expect(HibernationGate.blockingRail(terminal: after, holderHibernationEnabled: false) == nil)
 
         // A prompt on screen is the one class a human has to act on now, so
         // it, and only it, raises the attention notification behind the macOS

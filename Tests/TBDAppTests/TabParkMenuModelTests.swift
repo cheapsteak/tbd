@@ -5,7 +5,7 @@ import TBDShared
 
 /// The per-tab Hibernate/Wake context-menu affordance (the park control that
 /// returned to the tab after PR #362 retired the play/pause Suspend button).
-/// Tests the pure decision `TabParkMenuModel.action(for:)` across every
+/// Tests the pure decision `TabParkMenuModel.action(for:holderHibernationEnabled:)` across every
 /// branch without SwiftUI: hibernate for a live manually-hibernatable Claude
 /// session, wake for a parked one (authoritative `hibernatedAt` AND legacy
 /// `suspendedAt`), and neither for busy/nil/non-Claude terminals.
@@ -28,14 +28,14 @@ struct TabParkMenuModelTests {
     /// hibernatable → offer Hibernate.
     @Test func manuallyHibernatableTerminalOffersHibernate() {
         let terminal = claudeTerminal()
-        #expect(terminal.isManuallyHibernatable)
-        #expect(TabParkMenuModel.action(for: terminal) == .hibernate)
+        #expect(terminal.isManuallyHibernatable(holderHibernationEnabled: false))
+        #expect(TabParkMenuModel.action(for: terminal, holderHibernationEnabled: false) == .hibernate)
     }
 
     /// Branch 2: a parked session (authoritative `hibernatedAt`) → offer Wake.
     @Test func parkedTerminalOffersWake() {
         let terminal = claudeTerminal(hibernatedAt: Date())
-        #expect(TabParkMenuModel.action(for: terminal) == .wake)
+        #expect(TabParkMenuModel.action(for: terminal, holderHibernationEnabled: false) == .wake)
     }
 
     /// Branch 2 (legacy): a row parked by the pre-merge Suspend feature has
@@ -43,26 +43,26 @@ struct TabParkMenuModelTests {
     @Test func legacySuspendedOnlyTerminalOffersWake() {
         let terminal = claudeTerminal(suspendedAt: Date())
         #expect(terminal.hibernatedAt == nil)
-        #expect(TabParkMenuModel.action(for: terminal) == .wake)
+        #expect(TabParkMenuModel.action(for: terminal, holderHibernationEnabled: false) == .wake)
     }
 
     /// Branch 3: a Claude session mid-turn (`.working`) is neither parked nor
     /// manually hibernatable → no item.
     @Test func workingTerminalOffersNothing() {
         let terminal = claudeTerminal(activityState: .working)
-        #expect(TabParkMenuModel.action(for: terminal) == nil)
+        #expect(TabParkMenuModel.action(for: terminal, holderHibernationEnabled: false) == nil)
     }
 
     /// Branch 3: a Claude session waiting on a permission prompt — hibernating
     /// would eat the raised hand → no item.
     @Test func waitingForUserTerminalOffersNothing() {
         let terminal = claudeTerminal(activityState: .waitingForUser)
-        #expect(TabParkMenuModel.action(for: terminal) == nil)
+        #expect(TabParkMenuModel.action(for: terminal, holderHibernationEnabled: false) == nil)
     }
 
     /// Branch 3: no terminal backing the tab → no item.
     @Test func nilTerminalOffersNothing() {
-        #expect(TabParkMenuModel.action(for: nil) == nil)
+        #expect(TabParkMenuModel.action(for: nil, holderHibernationEnabled: false) == nil)
     }
 
     /// Branch 3: non-Claude terminals (plain shell, Codex) are never
@@ -72,7 +72,7 @@ struct TabParkMenuModelTests {
                              tmuxPaneID: "%1", kind: .shell, activityState: .idle)
         let codex = Terminal(id: UUID(), worktreeID: UUID(), tmuxWindowID: "@2",
                              tmuxPaneID: "%2", kind: .codex, activityState: .idle)
-        #expect(TabParkMenuModel.action(for: shell) == nil)
-        #expect(TabParkMenuModel.action(for: codex) == nil)
+        #expect(TabParkMenuModel.action(for: shell, holderHibernationEnabled: false) == nil)
+        #expect(TabParkMenuModel.action(for: codex, holderHibernationEnabled: false) == nil)
     }
 }

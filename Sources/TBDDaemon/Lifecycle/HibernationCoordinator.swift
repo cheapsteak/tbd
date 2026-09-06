@@ -11,12 +11,18 @@ public enum HibernateResult: Equatable, Sendable {
     case notFound
 }
 
+/// Which rails a park attempt is judged by, and the config facts those rails
+/// need. Every case carries `holderHibernationEnabled` because the park
+/// mechanic for the pty-holder transport is behind a soak gate whatever
+/// triggered it — the property the soak validates (a row never claims parked
+/// while its child runs) does not depend on who asked.
 private enum HibernateEligibilityPolicy: Sendable {
-    case manual
-    case merge(inputVetoEnabled: Bool)
+    case manual(holderHibernationEnabled: Bool)
+    case merge(inputVetoEnabled: Bool, holderHibernationEnabled: Bool)
     case automatic(
         enabled: Bool,
         inputVetoEnabled: Bool,
+        holderHibernationEnabled: Bool,
         idleTimeout: TimeInterval,
         idleSince: Date?)
 }
@@ -66,10 +72,11 @@ public enum WakeResult: Equatable, Sendable {
     /// default-profile fallback; the row stays parked and resumable. Carries
     /// the missing profile id for the message.
     case profileMissing(profileID: UUID)
-    /// The row runs on the pty-holder transport. Every branch below this point
-    /// — the unparked pane classification as much as the respawn — addresses a
-    /// tmux pane the row does not have, so wake refuses before reaching any of
-    /// them and leaves the row exactly as it found it.
+    /// The row runs on the pty-holder transport and
+    /// `holder_hibernation_enabled` is off. The transport has a wake mechanic —
+    /// spawn a fresh holder running `claude --resume` — and this soak gate says
+    /// it may not run here yet, so wake refuses before touching anything and
+    /// leaves the row exactly as it found it.
     case holderTransport
 }
 
@@ -263,18 +270,37 @@ public actor HibernationCoordinator {
             return .notFound
         }
         guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
-        guard terminal.isManuallyHibernatable else {
-            return .notEligible(reason: manualBlockReason(terminal))
+        // One read, carried into the policy so the rail re-checked under the
+        // lock cannot disagree with the one checked here. A config read that
+        // fails takes the shipped default, which refuses a holder row.
+        let holderHibernationEnabled = await resolvedHolderHibernationEnabled()
+        guard terminal.isManuallyHibernatable(
+            holderHibernationEnabled: holderHibernationEnabled) else {
+            return .notEligible(reason: manualBlockReason(
+                terminal, holderHibernationEnabled: holderHibernationEnabled))
         }
         return await performHibernate(
             terminal: terminal,
             reason: .manual,
-            policy: .manual)
+            policy: .manual(holderHibernationEnabled: holderHibernationEnabled))
+    }
+
+    /// `config.holderHibernationEnabled`, resolved through the shipped default
+    /// when the config row cannot be read. Failing toward the default is
+    /// failing toward refusal, which is the safe direction for a mechanic that
+    /// kills a live process.
+    private func resolvedHolderHibernationEnabled() async -> Bool {
+        (try? await db.config.get())?.holderHibernationEnabled
+            ?? Config.holderHibernationEnabledDefault
     }
 
     /// The reason a manual hibernate was refused, for the RPC error string.
-    private func manualBlockReason(_ terminal: Terminal) -> String {
-        if terminal.transport == .holder { return Self.holderTransportRefusal }
+    private func manualBlockReason(
+        _ terminal: Terminal, holderHibernationEnabled: Bool
+    ) -> String {
+        if terminal.transport == .holder, !holderHibernationEnabled {
+            return Self.holderTransportRefusal
+        }
         if !terminal.isClaudeResumable { return "Not a resumable Claude session" }
         if terminal.suspendedAt != nil { return "Terminal is suspended" }
         switch terminal.activityState {
@@ -301,7 +327,9 @@ public actor HibernationCoordinator {
     /// rails above, so — like the idle sweep — the row goes after the gate, at
     /// the moment this rail is actually about to act on a session.
     public func hibernateForMerge(
-        terminalID: UUID, inputVetoEnabled: Bool
+        terminalID: UUID,
+        inputVetoEnabled: Bool,
+        holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault
     ) async -> HibernateResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
@@ -310,7 +338,9 @@ public actor HibernationCoordinator {
         let decision = HibernationGate.decideForMerge(
             terminal: terminal,
             inputVetoEnabled: inputVetoEnabled,
-            lastInputAt: inputActivity.lastInput(paneID: terminal.tmuxPaneID))
+            holderHibernationEnabled: holderHibernationEnabled,
+            lastInputAt: inputActivity.lastInput(
+                paneID: InputActivityTracker.key(for: terminal)))
         guard decision == .eligible else {
             return .notEligible(reason: Self.mergeBlockReason(decision))
         }
@@ -332,7 +362,9 @@ public actor HibernationCoordinator {
         let result = await performHibernate(
             terminal: terminal,
             reason: .merged,
-            policy: .merge(inputVetoEnabled: inputVetoEnabled))
+            policy: .merge(
+                inputVetoEnabled: inputVetoEnabled,
+                holderHibernationEnabled: holderHibernationEnabled))
         await actuationLog.appendOutcome(
             confirms: actuationID,
             result: ActuationOutcome.classify(result),
@@ -348,8 +380,9 @@ public actor HibernationCoordinator {
     /// The one refusal text every park/wake path uses for a holder-backed row,
     /// so the CLI, the app and the actuation record all name the same reason.
     static let holderTransportRefusal =
-        "Session runs on the pty-holder transport, which has no tmux window to "
-        + "park or wake. Parking is not supported for it yet."
+        "Session runs on the pty-holder transport and holder hibernation is off "
+        + "(Settings → Hibernate pty-holder sessions, or `tbd config "
+        + "holder-hibernation on`)"
 
     private static func mergeBlockReason(_ decision: HibernationGate.Decision) -> String {
         switch decision {
@@ -645,31 +678,38 @@ public actor HibernationCoordinator {
         policy: HibernateEligibilityPolicy
     ) -> HibernateResult? {
         switch policy {
-        case .manual:
+        case let .manual(holderHibernationEnabled):
             guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
-            guard terminal.isManuallyHibernatable else {
-                return .notEligible(reason: manualBlockReason(terminal))
+            guard terminal.isManuallyHibernatable(
+                holderHibernationEnabled: holderHibernationEnabled) else {
+                return .notEligible(reason: manualBlockReason(
+                    terminal, holderHibernationEnabled: holderHibernationEnabled))
             }
             return nil
 
-        case let .merge(inputVetoEnabled):
+        case let .merge(inputVetoEnabled, holderHibernationEnabled):
             let decision = HibernationGate.decideForMerge(
                 terminal: terminal,
                 inputVetoEnabled: inputVetoEnabled,
-                lastInputAt: inputActivity.lastInput(paneID: terminal.tmuxPaneID))
+                holderHibernationEnabled: holderHibernationEnabled,
+                lastInputAt: inputActivity.lastInput(
+                    paneID: InputActivityTracker.key(for: terminal)))
             guard decision == .eligible else {
                 return .notEligible(reason: Self.mergeBlockReason(decision))
             }
             return nil
 
-        case let .automatic(enabled, inputVetoEnabled, idleTimeout, idleSince):
+        case let .automatic(
+            enabled, inputVetoEnabled, holderHibernationEnabled, idleTimeout, idleSince):
             let decision = HibernationGate.decide(
                 terminal: terminal,
                 autoHibernateEnabled: enabled,
                 inputVetoEnabled: inputVetoEnabled,
+                holderHibernationEnabled: holderHibernationEnabled,
                 idleTimeout: idleTimeout,
                 idleSince: idleSince,
-                lastInputAt: inputActivity.lastInput(paneID: terminal.tmuxPaneID),
+                lastInputAt: inputActivity.lastInput(
+                    paneID: InputActivityTracker.key(for: terminal)),
                 now: now())
             guard decision == .eligible else {
                 return .notEligible(reason: Self.mergeBlockReason(decision))
@@ -1325,17 +1365,22 @@ public actor HibernationCoordinator {
 
         // Prune markers for terminals that vanished.
         let liveIDs = Set(terminals.map { $0.id })
-        let livePaneIDs = Set(terminals.compactMap { $0.tmuxPaneID })
+        // The tracker's own keys, so a holder row's entry (keyed by its
+        // terminal id) survives a prune that a pane-id-only set would drop on
+        // the very first sweep.
+        let liveKeys = Set(terminals.map { InputActivityTracker.key(for: $0) })
         idleSince = idleSince.filter { liveIDs.contains($0.key) }
         pendingKillSince = pendingKillSince.filter { liveIDs.contains($0.key) }
-        inputActivity.prune(keeping: livePaneIDs)
+        inputActivity.prune(keeping: liveKeys)
 
         for terminal in terminals {
-            let lastInputAt = inputActivity.lastInput(paneID: terminal.tmuxPaneID)
+            let lastInputAt = inputActivity.lastInput(
+                paneID: InputActivityTracker.key(for: terminal))
             let decision = HibernationGate.decide(
                 terminal: terminal,
                 autoHibernateEnabled: config.autoHibernateEnabled,
                 inputVetoEnabled: config.hibernateInputVetoEnabled,
+                holderHibernationEnabled: config.holderHibernationEnabled,
                 idleTimeout: timeout,
                 idleSince: idleSince[terminal.id],
                 lastInputAt: lastInputAt,
@@ -1371,6 +1416,7 @@ public actor HibernationCoordinator {
                             policy: .automatic(
                                 enabled: config.autoHibernateEnabled,
                                 inputVetoEnabled: config.hibernateInputVetoEnabled,
+                                holderHibernationEnabled: config.holderHibernationEnabled,
                                 idleTimeout: timeout,
                                 idleSince: idleSince[terminal.id]))
                         await actuationLog.appendOutcome(

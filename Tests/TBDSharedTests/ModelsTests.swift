@@ -320,25 +320,25 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
     }
     // Manual-hibernatable: idle/unknown resumable Claude, not running/waiting/
     // hibernated/suspended. keep-warm does NOT block manual.
-    #expect(t(.idle).isManuallyHibernatable)
-    #expect(t(.unknown).isManuallyHibernatable)
-    #expect(t(.idle, keepWarm: true).isManuallyHibernatable)          // manual bypasses keep-warm
-    #expect(!t(.working).isManuallyHibernatable)                      // running rail
-    #expect(!t(.waitingForUser).isManuallyHibernatable)              // permission rail
-    #expect(!t(.idle, session: nil, kind: .shell).isManuallyHibernatable)  // not Claude
-    #expect(!t(.idle, kind: .codex).isManuallyHibernatable)          // Codex excluded
-    #expect(!t(.idle, hibernatedAt: Date()).isManuallyHibernatable)  // already hibernated
-    #expect(!t(.idle, suspendedAt: Date()).isManuallyHibernatable)   // suspended
+    #expect(t(.idle).isManuallyHibernatable(holderHibernationEnabled: false))
+    #expect(t(.unknown).isManuallyHibernatable(holderHibernationEnabled: false))
+    #expect(t(.idle, keepWarm: true).isManuallyHibernatable(holderHibernationEnabled: false))          // manual bypasses keep-warm
+    #expect(!t(.working).isManuallyHibernatable(holderHibernationEnabled: false))                      // running rail
+    #expect(!t(.waitingForUser).isManuallyHibernatable(holderHibernationEnabled: false))              // permission rail
+    #expect(!t(.idle, session: nil, kind: .shell).isManuallyHibernatable(holderHibernationEnabled: false))  // not Claude
+    #expect(!t(.idle, kind: .codex).isManuallyHibernatable(holderHibernationEnabled: false))          // Codex excluded
+    #expect(!t(.idle, hibernatedAt: Date()).isManuallyHibernatable(holderHibernationEnabled: false))  // already hibernated
+    #expect(!t(.idle, suspendedAt: Date()).isManuallyHibernatable(holderHibernationEnabled: false))   // suspended
 }
 
 @Test func testAutoHibernationEligibilityAddsKeepWarmRail() {
     let base = Terminal(worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
                         claudeSessionID: "s", kind: .claude, activityState: .idle)
-    #expect(base.isAutoHibernationEligible)
+    #expect(base.isAutoHibernationEligible(holderHibernationEnabled: false))
     var warm = base; warm.keepWarm = true
     // Auto adds the keep-warm rail that manual bypasses.
-    #expect(!warm.isAutoHibernationEligible)
-    #expect(warm.isManuallyHibernatable)
+    #expect(!warm.isAutoHibernationEligible(holderHibernationEnabled: false))
+    #expect(warm.isManuallyHibernatable(holderHibernationEnabled: false))
 }
 
 @Test func testConfigDecodesWithoutHibernationFields() throws {

@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 import os
 
 /// Tracks the timestamp of the last keystroke recorded for each tmux pane,
@@ -46,6 +47,22 @@ final class InputActivityTracker: @unchecked Sendable {
         lock.lock()
         lastInputByPane.removeValue(forKey: paneID)
         lock.unlock()
+    }
+
+    /// The tracker key for one terminal.
+    ///
+    /// The map is keyed by tmux pane id because the input router speaks pane
+    /// ids — but a holder-backed row has no pane, and its `tmuxPaneID` is the
+    /// empty string by construction. Keying every holder row on `""` would put
+    /// them all in ONE bucket: input typed into any one of them would veto a
+    /// park on every other, and forgetting one would forget them all. Their id
+    /// is the discriminator instead. The two namespaces cannot collide — a tmux
+    /// pane id is `%<n>` and a UUID string is neither.
+    static func key(for terminal: Terminal) -> String {
+        switch terminal.transport {
+        case .holder: return terminal.id.uuidString
+        case .tmux: return terminal.tmuxPaneID
+        }
     }
 
     /// Drop recorded entries for panes not in `livePaneIDs`. Called during the

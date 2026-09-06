@@ -961,25 +961,36 @@ public extension Terminal {
     ///     hand; hibernating would eat it).
     /// Manual "Hibernate now" bypasses the keep-warm and idle checks but keeps
     /// the running/permission rails (see `isManuallyHibernatable`).
-    var isAutoHibernationEligible: Bool {
-        isManuallyHibernatable && !keepWarm
+    ///
+    /// `holderHibernationEnabled` is `Config.holderHibernationEnabled` — see
+    /// `isManuallyHibernatable(holderHibernationEnabled:)`, which this defers
+    /// the whole transport question to.
+    func isAutoHibernationEligible(holderHibernationEnabled: Bool) -> Bool {
+        isManuallyHibernatable(holderHibernationEnabled: holderHibernationEnabled) && !keepWarm
     }
 
     /// Whether a MANUAL "Hibernate now" may act on this terminal. Same rails as
     /// auto except keep-warm and idle-time don't apply — the user asked
     /// explicitly. Still refuses to hibernate an in-flight turn or a raised
     /// permission hand.
-    var isManuallyHibernatable: Bool {
-        // Parking is a tmux mechanic end to end: it `respawn-window`s the pane
-        // to a bare shell and wake respawns `claude --resume` back into that
-        // same pane. A holder row has no pane — its `tmuxWindowID`/`tmuxPaneID`
-        // are empty strings by construction — so every step would address the
-        // empty coordinate, which tmux answers for by reporting the window
-        // gone. The row would flip to parked while the holder and its child
-        // kept running, unreclaimed. Until parking learns the holder transport,
-        // refuse: an ineligible session is recoverable, a row that lies about a
-        // live process is not.
-        guard transport != .holder else { return false }
+    ///
+    /// - Parameter holderHibernationEnabled: `Config.holderHibernationEnabled`,
+    ///   the soak gate for park and wake on the pty-holder transport. A
+    ///   holder-backed row IS parkable — the mechanic terminates the holder's
+    ///   child and wake spawns a fresh holder running `claude --resume` — and
+    ///   this flag decides only whether that mechanic has soaked long enough to
+    ///   run on this install. Not defaulted, deliberately: the flag reaches
+    ///   five call sites across the daemon and the app, and a missing argument
+    ///   is a compile error rather than a rail that quietly disagrees with the
+    ///   menu the user is looking at.
+    func isManuallyHibernatable(holderHibernationEnabled: Bool) -> Bool {
+        // Park and wake on the holder transport do not go through tmux at all:
+        // the park writes `/exit` to the holder's pty, confirms the child is
+        // gone, and clears the row's pids; the wake spawns a fresh holder. A
+        // holder row's `tmuxWindowID`/`tmuxPaneID` are empty strings by
+        // construction and neither path reads them. What this guard gates is
+        // the soak, not the capability.
+        if transport == .holder, !holderHibernationEnabled { return false }
         guard isClaudeResumable else { return false }
         guard hibernatedAt == nil, suspendedAt == nil else { return false }
         switch activityState {

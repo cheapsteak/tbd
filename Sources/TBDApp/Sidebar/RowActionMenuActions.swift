@@ -93,11 +93,23 @@ struct RowActionMenuActions {
         }?.gone ?? false
     }
 
+    /// The daemon's `holder_hibernation_enabled` soak gate, off until the
+    /// daemon has answered `daemon.capabilities`. The menu must offer only what
+    /// the daemon will actually do: with the gate off a holder-backed session
+    /// is refused a park, so offering one would produce an error and nothing
+    /// else.
+    private var holderHibernationEnabled: Bool {
+        appState.daemonCapabilities?.holderHibernationEnabled ?? false
+    }
+
     /// Build the pure model context from live `AppState`. Mirrors exactly the
     /// inputs the old `SidebarContextMenu` read inline.
     func context() -> RowActionMenu.Context {
         RowActionMenu.Context(
-            hasHibernatableClaude: terminals.contains { $0.isManuallyHibernatable },
+            hasHibernatableClaude: terminals.contains {
+                $0.isManuallyHibernatable(
+                    holderHibernationEnabled: holderHibernationEnabled)
+            },
             // "Wake" acts on any PARKED session (authoritative hibernatedAt OR
             // legacy suspendedAt) — the unified park state.
             hasHibernatedClaude: terminals.contains { $0.isParked },
@@ -173,7 +185,10 @@ struct RowActionMenuActions {
 
         case .hibernateNow:
             let wtID = worktree.id
-            let ids = terminals.filter { $0.isManuallyHibernatable }.map { $0.id }
+            let ids = terminals.filter {
+                $0.isManuallyHibernatable(
+                    holderHibernationEnabled: holderHibernationEnabled)
+            }.map { $0.id }
             Task {
                 for id in ids {
                     await appState.hibernateTerminal(terminalID: id, worktreeID: wtID)
