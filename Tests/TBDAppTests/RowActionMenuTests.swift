@@ -856,4 +856,67 @@ struct RowActionMenuCallSiteTests {
             #expect(built.location == .remote(provider: "fake", sessionID: "s1"))
         }
     }
+
+    private func localWorktree() -> Worktree {
+        Worktree(
+            repoID: UUID(), name: "acme", displayName: "acme",
+            branch: "b", path: "/tmp/acme", tmuxServer: "t")
+    }
+
+    private func holderTerminal(worktreeID: UUID) -> Terminal {
+        Terminal(
+            id: UUID(), worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            claudeSessionID: "session-1", kind: .claude, activityState: .idle,
+            transport: .holder)
+    }
+
+    /// A holder-backed session whose panel currently owns the pty is not
+    /// offered a park by the row menu either.
+    ///
+    /// This is the call-site half of `ManualParkAffordance`: the pure model is
+    /// exercised in `TabParkMenuModelTests`, and what this pins is that the row
+    /// menu asks the same question of the same registry. The daemon would
+    /// refuse such a park — its pending-input rail cannot read a screen it no
+    /// longer has — so an item offered here is one that always errors.
+    @Test("a holder session whose panel holds the pty is not offered a park")
+    func attachedHolderSessionIsNotOfferedAPark() {
+        withState { state in
+            let worktree = localWorktree()
+            let terminal = holderTerminal(worktreeID: worktree.id)
+            state.terminals[worktree.id] = [terminal]
+            state.daemonCapabilities = DaemonCapabilitiesResult(
+                controlModeEnabled: false, ptyHolderEnabled: true,
+                holderHibernationEnabled: true)
+            // The claim a panel takes the instant `attach.ready` is accepted.
+            let registration = state.terminalInjections.register(
+                terminalID: terminal.id) { _, _ in true }
+
+            #expect(!actions(state, worktree).context().hasHibernatableClaude)
+
+            // The discriminating half: release the claim and the same row, the
+            // same flag and the same terminal offer the park.
+            state.terminalInjections.unregister(registration)
+            #expect(actions(state, worktree).context().hasHibernatableClaude)
+        }
+    }
+
+    /// The same claim on a tmux session changes nothing — the daemon reads a
+    /// pane's screen with `capture-pane` whoever is looking at it — so the test
+    /// above is about the transport, not about an attached panel alone.
+    @Test("a tmux session with an attached panel is still offered a park")
+    func attachedTmuxSessionIsStillOfferedAPark() {
+        withState { state in
+            let worktree = localWorktree()
+            let terminal = Terminal(
+                id: UUID(), worktreeID: worktree.id, tmuxWindowID: "@1",
+                tmuxPaneID: "%1", claudeSessionID: "session-1", kind: .claude,
+                activityState: .idle)
+            state.terminals[worktree.id] = [terminal]
+            state.daemonCapabilities = DaemonCapabilitiesResult(
+                controlModeEnabled: false, holderHibernationEnabled: true)
+            _ = state.terminalInjections.register(terminalID: terminal.id) { _, _ in true }
+
+            #expect(actions(state, worktree).context().hasHibernatableClaude)
+        }
+    }
 }

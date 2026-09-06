@@ -3609,7 +3609,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 updateMode: UpdateMode = Config.updateModeDefault,
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
                 ptyHolderSupported: Bool = false,
-                holderHibernationEnabled: Bool = false) {
+                holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -3687,10 +3687,12 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         ptyHolderSupported = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderSupported) ?? false
         // New field for holder auto-hibernation. A daemon that does not send
-        // it runs no such sweep leg either, so an absent value is honestly
-        // false rather than assuming the gate is live.
+        // it runs no such sweep leg either, so fall through to the shipped
+        // default — one constant with the memberwise init above and with
+        // `ConfigRecord.toModel`, so a graduation moves all three at once —
+        // rather than assuming the gate is live.
         holderHibernationEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .holderHibernationEnabled) ?? false
+            Bool.self, forKey: .holderHibernationEnabled) ?? Config.holderHibernationEnabledDefault
     }
 }
 

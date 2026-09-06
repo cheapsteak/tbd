@@ -525,16 +525,50 @@ enum TabParkMenuModel {
         case wake
     }
 
-    /// nil = show neither item (no terminal, non-Claude terminal, or a Claude
-    /// session that is mid-turn / waiting on a permission prompt).
+    /// nil = show neither item (no terminal, non-Claude terminal, a Claude
+    /// session that is mid-turn / waiting on a permission prompt, or a holder
+    /// tab whose panel currently owns the pty).
     static func action(
-        for terminal: Terminal?, holderHibernationEnabled: Bool
+        for terminal: Terminal?, holderHibernationEnabled: Bool, panelHoldsPTY: Bool
     ) -> ParkAction? {
         guard let terminal else { return nil }
-        if terminal.isManuallyHibernatable(
-            holderHibernationEnabled: holderHibernationEnabled) { return .hibernate }
+        if ManualParkAffordance.isOfferable(
+            terminal, holderHibernationEnabled: holderHibernationEnabled,
+            panelHoldsPTY: panelHoldsPTY) { return .hibernate }
         if terminal.isParked { return .wake }
         return nil
+    }
+}
+
+/// Whether a manual "Hibernate now" may be *offered* for a terminal right now.
+///
+/// `Terminal.isManuallyHibernatable` answers whether the row is parkable in
+/// principle. This adds the one thing only the app knows: on the pty-holder
+/// transport the daemon's pending-input rail reads its OWN emulator, which is
+/// frozen for as long as a viewer holds the pty, so it fail-closes on any park
+/// asked for while a panel is attached. The app attaches a panel to every live
+/// tab, so an unconditional Hibernate item on a holder tab is an action that
+/// always errors — and an item that always errors is worse than no item.
+///
+/// The daemon's refusal stays as the backstop, because the two views of "is a
+/// viewer attached" can disagree for the width of an attach or detach RPC. What
+/// this removes is the *routine* failure, not the race.
+///
+/// **Why suppression rather than releasing the viewer first.** The orderly
+/// detach-and-handback lives in the panel coordinator's `cleanup()` path and is
+/// not reachable as a standalone awaitable step: it tears the attach down for
+/// good and nothing re-establishes one for a panel that stays on screen. A
+/// park that then refused — for unsent input, say — would leave a live tab
+/// showing a terminal nothing is driving. Suppressing the item costs the user
+/// one gesture (close the tab, or park the worktree from the sidebar); the
+/// alternative costs them the session's screen.
+enum ManualParkAffordance {
+    static func isOfferable(
+        _ terminal: Terminal, holderHibernationEnabled: Bool, panelHoldsPTY: Bool
+    ) -> Bool {
+        guard terminal.isManuallyHibernatable(
+            holderHibernationEnabled: holderHibernationEnabled) else { return false }
+        return !(terminal.transport == .holder && panelHoldsPTY)
     }
 }
 
@@ -991,7 +1025,12 @@ private struct TabBarItem: View {
             switch TabParkMenuModel.action(
                 for: terminal,
                 holderHibernationEnabled:
-                    appState.daemonCapabilities?.holderHibernationEnabled ?? false
+                    appState.daemonCapabilities?.holderHibernationEnabled ?? false,
+                // This tab's own panel is exactly the viewer that would make
+                // the daemon fail the park closed — see `ManualParkAffordance`.
+                panelHoldsPTY: terminal.map {
+                    appState.terminalInjections.holdsPTY(terminalID: $0.id)
+                } ?? false
             ) {
             case .hibernate:
                 Button {

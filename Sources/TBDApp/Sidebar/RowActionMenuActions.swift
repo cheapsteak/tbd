@@ -102,14 +102,27 @@ struct RowActionMenuActions {
         appState.daemonCapabilities?.holderHibernationEnabled ?? false
     }
 
+    /// The sessions this row's "Hibernate now" would actually act on.
+    ///
+    /// `ManualParkAffordance` adds the app-only half of the question to
+    /// `isManuallyHibernatable`: a holder-backed session whose panel currently
+    /// owns the pty would be refused by the daemon, whose pending-input rail
+    /// cannot read a screen it no longer has. The fan-out and the menu item's
+    /// visibility read the SAME list, so the row can never offer a park that
+    /// would sweep nothing.
+    private var manuallyParkableTerminals: [Terminal] {
+        terminals.filter {
+            ManualParkAffordance.isOfferable(
+                $0, holderHibernationEnabled: holderHibernationEnabled,
+                panelHoldsPTY: appState.terminalInjections.holdsPTY(terminalID: $0.id))
+        }
+    }
+
     /// Build the pure model context from live `AppState`. Mirrors exactly the
     /// inputs the old `SidebarContextMenu` read inline.
     func context() -> RowActionMenu.Context {
         RowActionMenu.Context(
-            hasHibernatableClaude: terminals.contains {
-                $0.isManuallyHibernatable(
-                    holderHibernationEnabled: holderHibernationEnabled)
-            },
+            hasHibernatableClaude: !manuallyParkableTerminals.isEmpty,
             // "Wake" acts on any PARKED session (authoritative hibernatedAt OR
             // legacy suspendedAt) — the unified park state.
             hasHibernatedClaude: terminals.contains { $0.isParked },
@@ -185,10 +198,7 @@ struct RowActionMenuActions {
 
         case .hibernateNow:
             let wtID = worktree.id
-            let ids = terminals.filter {
-                $0.isManuallyHibernatable(
-                    holderHibernationEnabled: holderHibernationEnabled)
-            }.map { $0.id }
+            let ids = manuallyParkableTerminals.map { $0.id }
             Task {
                 for id in ids {
                     await appState.hibernateTerminal(terminalID: id, worktreeID: wtID)
