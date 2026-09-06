@@ -1763,6 +1763,13 @@ public struct TerminalStore: Sendable {
     /// nonce and cannot be checked, which is the same reading every other hook
     /// handler gives it.
     ///
+    /// The stamp is tmux-only. On a holder-backed row the Claude process IS the
+    /// holder's whole job: there is no shell left in the pane for a send to
+    /// mis-execute, and the hibernation coordinator's wake respawns into a tmux
+    /// window, which cannot bring a holder session back. Parking such a row
+    /// would leave a park nothing can wake and no reconciler reclaims, so the
+    /// row stays unstamped and the holder path answers for its own liveness.
+    ///
     /// `date` follows the one-shot stamp seam (CLAUDE.md, "Duration is behavior,
     /// Date is data").
     @discardableResult
@@ -1773,6 +1780,7 @@ public struct TerminalStore: Sendable {
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 return false
             }
+            guard record.transport != TerminalTransport.holder.rawValue else { return false }
             guard record.hibernatedAt == nil else { return false }
             if let reportedIncarnationID {
                 guard record.sessionIncarnationID == reportedIncarnationID.uuidString else {
