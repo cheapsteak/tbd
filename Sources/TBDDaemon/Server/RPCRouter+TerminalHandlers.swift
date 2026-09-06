@@ -2925,10 +2925,17 @@ extension RPCRouter {
     /// its command line, so the kind picks the name and the same `ps` question
     /// answers for both.
     ///
+    /// A row with NO recorded kind predates the column and is a Claude
+    /// terminal — the reading `Terminal.isClaudeResumable` and the
+    /// continue-in-Codex path already give it, and the one this follows.
+    /// Defaulting a kindless row to `.shell` instead would skip the rail for
+    /// exactly the oldest rows on the machine, which are the likeliest to have
+    /// outlived the agent that once ran in them.
+    ///
     /// Pure and static so the mapping is testable without a database, a pane, or
     /// a process table.
     static func foregroundAgentName(for kind: TerminalKind?) -> String? {
-        switch kind ?? .shell {
+        switch kind ?? .claude {
         case .shell: return nil
         case .claude: return "claude"
         case .codex: return "codex"
@@ -3064,7 +3071,20 @@ extension RPCRouter {
         // is available only for a tmux-backed row with a live pane. Both are
         // machine facts — a column and `ps` — never the rendered screen, which
         // this codebase forbids reading for state.
-        if case .text(let body, _, _) = payload, !body.isEmpty {
+        //
+        // The two rails split on the EMPTY payload — a bare Enter, which
+        // `--submit` with no text is — and they split deliberately:
+        //
+        //   - The park rail takes it. A parked row's pane holds a shell and
+        //     nothing else, so an Enter there has no message to lose and no
+        //     purpose to serve, and the refusal already names wake as the
+        //     remedy. Letting it through would be the one text payload that
+        //     reaches a session everyone agrees is gone.
+        //   - The foreground rail does not. A bare Enter is how a caller
+        //     answers a prompt the agent is already showing, and the inspector
+        //     is the fallible fact of the two — a pane it cannot read must not
+        //     cost a live row its Enter.
+        if case .text(let body, _, _) = payload {
             if terminal.hibernatedAt != nil {
                 let message = Self.parkedSendRefusal(
                     terminalID: terminal.id, exited: terminal.isExitStamped)
@@ -3074,10 +3094,12 @@ extension RPCRouter {
             // The foreground rail is kind-aware, not Claude-only. The
             // inspector's question is "does a foreground process whose command
             // line contains <name> own this pane", and the kind supplies the
-            // name: "claude" for a Claude row, "codex" for a Codex one. A shell
-            // has no name to supply — its pane pid IS the shell, with no agent
-            // under it — so the rail never runs for one, and a shell send that
-            // would otherwise be refused every time goes through.
+            // name: "claude" for a Claude row, "codex" for a Codex one, and
+            // "claude" again for a row whose kind was never recorded, which is
+            // what every other liveness reading in this codebase makes of one.
+            // A shell has no name to supply — its pane pid IS the shell, with no
+            // agent under it — so the rail never runs for one, and a shell send
+            // that would otherwise be refused every time goes through.
             //
             // Covering Codex here matters more than it does for Claude: a Codex
             // row is never exit-stamped, because Codex ships no `SessionEnd`
@@ -3095,7 +3117,8 @@ extension RPCRouter {
             // cannot answer is not evidence that Claude left, and the pane
             // consultation below is the rail that judges a missing or dead pane,
             // properly.
-            if let agentName = Self.foregroundAgentName(for: terminal.kind),
+            if !body.isEmpty,
+               let agentName = Self.foregroundAgentName(for: terminal.kind),
                let panePIDString = try? await tmux.panePID(
                     server: worktree.tmuxServer, paneID: terminal.tmuxPaneID),
                let panePID = Int32(panePIDString), panePID > 0,
@@ -4389,8 +4412,8 @@ extension RPCRouter {
     /// runs the message as a shell command while reporting success. The park is
     /// deliberately the same state a hibernate produces — process gone, terminal
     /// alive, session id known — so one wake path and one UI cover both
-    /// (`docs/specs/2026-09-05-transcript-composer-design.md`, "Not-running
-    /// delivery").
+    /// (`docs/specs/2026-09-05-transcript-composer-design.md`, landing in
+    /// PR #821, "Not-running delivery").
     func handleTerminalSessionEnded(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionEndedParams.self, from: paramsData)
         await claudeDelegationTracker.clear(

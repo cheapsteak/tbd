@@ -53,7 +53,7 @@ struct TerminalSendNotRunningTests {
     /// supplies one through the `dryRunPanePID` hook this task adds — the shape
     /// every other dry-run answer in that file already uses.
     private func makeFixture(
-        foregroundByAgent: [String: Int32], kind: TerminalKind = .claude
+        foregroundByAgent: [String: Int32], kind: TerminalKind? = .claude
     ) async throws -> Fixture {
         let db = try TBDDatabase(inMemory: true)
         let worktree = try await db.worktrees.createScratch(
@@ -164,11 +164,59 @@ struct TerminalSendNotRunningTests {
 
     /// The kind picks the name, and nothing else does. Mapping it wrong in
     /// either direction is the whole bug this rail had.
+    ///
+    /// A row with NO recorded kind is a legacy Claude terminal, which is the
+    /// reading `Terminal.isClaudeResumable` and the continue-in-Codex path
+    /// already give it. Reading it as a shell instead would skip the rail
+    /// entirely for the oldest rows on the machine.
     @Test func theForegroundAgentNameFollowsTheKind() {
         #expect(RPCRouter.foregroundAgentName(for: .claude) == "claude")
         #expect(RPCRouter.foregroundAgentName(for: .codex) == "codex")
         #expect(RPCRouter.foregroundAgentName(for: .shell) == nil)
-        #expect(RPCRouter.foregroundAgentName(for: nil) == nil)
+        #expect(RPCRouter.foregroundAgentName(for: nil) == "claude")
+    }
+
+    /// The handler-level half of the same fact: a row whose `kind` column is
+    /// NULL still gets the foreground rail, and it gets the Claude one.
+    @Test func aKindlessTerminalWithNoForegroundClaudeIsRefused() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:], kind: nil)
+
+        let response = try await send(f)
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.contains("foreground process"))
+        #expect(error.contains("(claude)"), "a kindless row is read as a Claude row")
+    }
+
+    /// The two rails split on the empty payload, and the park rail takes it.
+    /// A bare Enter into a parked row carries no message, but it has no purpose
+    /// either — the pane holds a shell — and the refusal already names wake as
+    /// the remedy.
+    @Test func anEmptyTextSubmitToAHibernatedRowIsRefused() async throws {
+        let f = try await makeFixture(foregroundByAgent: ["claude": 4242])
+        try await f.db.terminals.setHibernated(
+            id: f.terminal.id, sessionID: "sess-1", reason: .manual,
+            at: Date(timeIntervalSince1970: 1_800_000_000))
+
+        let data = try JSONEncoder().encode(TerminalSendParams(
+            terminalID: f.terminal.id, text: "", submit: true))
+        let response = try await f.router.handleTerminalSend(data, actor: .app)
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.contains("is not running"))
+    }
+
+    /// The other side of that split, so the rule is asserted in both
+    /// directions: the FOREGROUND rail stays text-with-a-body, because a bare
+    /// Enter is how a caller answers a prompt, and an inspector that cannot see
+    /// the agent must not take that away from a live row.
+    @Test func anEmptyTextSubmitToALiveRowSkipsTheForegroundRail() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:])
+
+        let data = try JSONEncoder().encode(TerminalSendParams(
+            terminalID: f.terminal.id, text: "", submit: true))
+        let response = try await f.router.handleTerminalSend(data, actor: .app)
+        #expect(response.success, "error was: \(response.error ?? "none")")
     }
 
     /// The refusal is a text-send rail, not a terminal-wide one. `--keys` exists

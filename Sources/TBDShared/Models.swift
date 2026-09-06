@@ -588,8 +588,9 @@ public enum HibernateReason: String, Codable, Sendable {
     ///
     /// Deliberately the SAME state as a deliberate park: process gone, terminal
     /// alive, session id known. One state means one wake path and one UI; see
-    /// `docs/specs/2026-09-05-transcript-composer-design.md`, where "A separate
-    /// exited state beside hibernation" is a rejected alternative.
+    /// `docs/specs/2026-09-05-transcript-composer-design.md`, landing in
+    /// PR #821, where "A separate exited state beside hibernation" is a
+    /// rejected alternative.
     /// It behaves like `.auto` for wake-on-focus, which is what the
     /// lenient decoder above already gives an older app binary reading this value.
     case exited
