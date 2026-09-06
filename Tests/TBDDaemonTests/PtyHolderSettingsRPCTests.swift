@@ -194,4 +194,86 @@ struct PtyHolderSettingsRPCTests {
             #expect(decoded.enabled == value)
         }
     }
+
+    // MARK: - config.setHolderHibernationEnabled
+
+    private func setHolderHibernation(_ router: RPCRouter, enabled: Bool) async throws {
+        let request = try RPCRequest(
+            method: RPCMethod.configSetHolderHibernationEnabled,
+            params: ConfigSetHolderHibernationEnabledParams(enabled: enabled))
+        let response = await router.handle(request)
+        #expect(response.success, "error: \(response.error ?? "nil")")
+    }
+
+    /// The RPC persists on and off through the router — the round trip the
+    /// Settings toggle actually performs.
+    @Test("config.setHolderHibernationEnabled persists on and off through the router")
+    func setHolderHibernationPersistsBothDirections() async throws {
+        let (router, db) = try makeRouterAndDB()
+
+        try await setHolderHibernation(router, enabled: true)
+        #expect(try await db.config.get().holderHibernationEnabled == true)
+
+        try await setHolderHibernation(router, enabled: false)
+        #expect(try await db.config.get().holderHibernationEnabled == false)
+        let stored = try await db.writerForTests.read { conn in
+            try ConfigRecord.fetchOne(conn, key: ConfigStore.singletonID)?.holder_hibernation_enabled
+        }
+        #expect(stored == false, "an explicit off must be a stored 0, not a NULL")
+    }
+
+    /// An untouched install stores NULL, not a 0 — the third state, same shape
+    /// as the pty-holder transport gate above.
+    @Test("an untouched install stores NULL for holder hibernation")
+    func untouchedStoresNullForHolderHibernation() async throws {
+        let (_, db) = try makeRouterAndDB()
+        let stored = try await db.writerForTests.read { conn in
+            try ConfigRecord.fetchOne(conn, key: ConfigStore.singletonID)?.holder_hibernation_enabled
+        }
+        #expect(stored == nil)
+    }
+
+    @Test("capabilities reports holder hibernation OFF by default")
+    func capabilitiesHolderHibernationDefaultsOff() async throws {
+        let (router, _) = try makeRouterAndDB()
+        #expect(
+            try await capabilities(router).holderHibernationEnabled
+                == Config.holderHibernationEnabledDefault)
+        #expect(
+            Config.holderHibernationEnabledDefault == false,
+            "the shipped default is still OFF during the soak")
+    }
+
+    /// Capabilities re-evaluates the flag on every call, exactly like the
+    /// pty-holder transport gate — no daemon restart needed.
+    @Test("capabilities re-evaluates holder hibernation without a restart")
+    func capabilitiesReEvaluatesHolderHibernation() async throws {
+        let (router, _) = try makeRouterAndDB()
+
+        try await setHolderHibernation(router, enabled: true)
+        #expect(try await capabilities(router).holderHibernationEnabled == true)
+
+        try await setHolderHibernation(router, enabled: false)
+        #expect(try await capabilities(router).holderHibernationEnabled == false)
+    }
+
+    /// An older daemon sends no such field; the decoder falls through to
+    /// `false` rather than assuming the gate is live.
+    @Test("capabilities JSON without holder hibernation decodes to false")
+    func capabilitiesHolderHibernationDecodeBackCompat() throws {
+        let json = Data(#"{"controlModeEnabled":true,"controlModeSupported":false}"#.utf8)
+        let result = try JSONDecoder().decode(DaemonCapabilitiesResult.self, from: json)
+        #expect(result.holderHibernationEnabled == false)
+    }
+
+    @Test("ConfigSetHolderHibernationEnabledParams round-trips both values")
+    func holderHibernationParamsRoundTrip() throws {
+        for value in [true, false] {
+            let decoded = try JSONDecoder().decode(
+                ConfigSetHolderHibernationEnabledParams.self,
+                from: try JSONEncoder().encode(
+                    ConfigSetHolderHibernationEnabledParams(enabled: value)))
+            #expect(decoded.enabled == value)
+        }
+    }
 }

@@ -724,6 +724,16 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var holderPID: Int32?
     /// PID of the job the holder `forkpty()`d. Nil for tmux rows.
     public var childPID: Int32?
+    /// When the job named by `childPID` was started, for the identity checks
+    /// that guard against pid reuse.
+    ///
+    /// Nil means this row has never been through a park/wake cycle, so its
+    /// `createdAt` is still the moment its child was born and remains the right
+    /// anchor — every reader spells that `holderChildStartedAt ?? createdAt`. A
+    /// woken session's child is younger than its row by however long the
+    /// session was parked, which is exactly the case `createdAt` alone cannot
+    /// describe. Cleared with the two pid columns when a row parks.
+    public var holderChildStartedAt: Date?
 
     /// `activityState` as a fact — value, source, observed-at — or nil.
     ///
@@ -787,7 +797,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 awaitingInputObservedAt: Date? = nil,
                 transport: TerminalTransport = .tmux,
                 holderPID: Int32? = nil,
-                childPID: Int32? = nil) {
+                childPID: Int32? = nil,
+                holderChildStartedAt: Date? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -821,6 +832,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.transport = transport
         self.holderPID = holderPID
         self.childPID = childPID
+        self.holderChildStartedAt = holderChildStartedAt
     }
 
     enum CodingKeys: String, CodingKey {
@@ -832,7 +844,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt, watchDeskRole
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
-        case transport, holderPID, childPID
+        case transport, holderPID, childPID, holderChildStartedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -886,6 +898,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
             .flatMap(TerminalTransport.init(rawValue:)) ?? .tmux
         holderPID = try c.decodeIfPresent(Int32.self, forKey: .holderPID)
         childPID = try c.decodeIfPresent(Int32.self, forKey: .childPID)
+        holderChildStartedAt = try c.decodeIfPresent(Date.self, forKey: .holderChildStartedAt)
     }
 }
 
@@ -948,25 +961,36 @@ public extension Terminal {
     ///     hand; hibernating would eat it).
     /// Manual "Hibernate now" bypasses the keep-warm and idle checks but keeps
     /// the running/permission rails (see `isManuallyHibernatable`).
-    var isAutoHibernationEligible: Bool {
-        isManuallyHibernatable && !keepWarm
+    ///
+    /// `holderHibernationEnabled` is `Config.holderHibernationEnabled` — see
+    /// `isManuallyHibernatable(holderHibernationEnabled:)`, which this defers
+    /// the whole transport question to.
+    func isAutoHibernationEligible(holderHibernationEnabled: Bool) -> Bool {
+        isManuallyHibernatable(holderHibernationEnabled: holderHibernationEnabled) && !keepWarm
     }
 
     /// Whether a MANUAL "Hibernate now" may act on this terminal. Same rails as
     /// auto except keep-warm and idle-time don't apply — the user asked
     /// explicitly. Still refuses to hibernate an in-flight turn or a raised
     /// permission hand.
-    var isManuallyHibernatable: Bool {
-        // Parking is a tmux mechanic end to end: it `respawn-window`s the pane
-        // to a bare shell and wake respawns `claude --resume` back into that
-        // same pane. A holder row has no pane — its `tmuxWindowID`/`tmuxPaneID`
-        // are empty strings by construction — so every step would address the
-        // empty coordinate, which tmux answers for by reporting the window
-        // gone. The row would flip to parked while the holder and its child
-        // kept running, unreclaimed. Until parking learns the holder transport,
-        // refuse: an ineligible session is recoverable, a row that lies about a
-        // live process is not.
-        guard transport != .holder else { return false }
+    ///
+    /// - Parameter holderHibernationEnabled: `Config.holderHibernationEnabled`,
+    ///   the soak gate for park and wake on the pty-holder transport. A
+    ///   holder-backed row IS parkable — the mechanic terminates the holder's
+    ///   child and wake spawns a fresh holder running `claude --resume` — and
+    ///   this flag decides only whether that mechanic has soaked long enough to
+    ///   run on this install. Not defaulted, deliberately: the flag reaches
+    ///   five call sites across the daemon and the app, and a missing argument
+    ///   is a compile error rather than a rail that quietly disagrees with the
+    ///   menu the user is looking at.
+    func isManuallyHibernatable(holderHibernationEnabled: Bool) -> Bool {
+        // Park and wake on the holder transport do not go through tmux at all:
+        // the park writes `/exit` to the holder's pty, confirms the child is
+        // gone, and clears the row's pids; the wake spawns a fresh holder. A
+        // holder row's `tmuxWindowID`/`tmuxPaneID` are empty strings by
+        // construction and neither path reads them. What this guard gates is
+        // the soak, not the capability.
+        if transport == .holder, !holderHibernationEnabled { return false }
         guard isClaudeResumable else { return false }
         guard hibernatedAt == nil, suspendedAt == nil else { return false }
         switch activityState {
@@ -1592,6 +1616,24 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var holderRowReconcileEnabled: Bool
+    /// Gate for parking, waking and limit-resuming Claude sessions on the
+    /// pty-holder transport — auto-hibernation's holder leg. It ships OFF and
+    /// soaks behind its own switch rather than riding `ptyHolderEnabled`: that
+    /// outer gate has to be ON for a holder row to exist at all, so it cannot
+    /// express "transport on, hibernation not yet" — the same reason
+    /// `holderRowReconcileEnabled` is not folded into `ptyHolderEnabled`
+    /// either. What it gates is destructive in a way tmux hibernation is not:
+    /// a background sweep kills a live holder-owned agent process, and wake
+    /// starts a fresh holder running `claude --resume` rather than reattaching
+    /// to anything.
+    ///
+    /// **Resolved, not stored**, like `holderRowReconcileEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `holder_hibernation_enabled ?? Config.holderHibernationEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var holderHibernationEnabled: Bool
     /// The single opt-in for remote peer messaging
     /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
     /// rollout"): publishing a shadow peer for each remote session and carrying
@@ -1750,6 +1792,13 @@ public struct Config: Codable, Sendable, Equatable {
     /// reachable — is a change to this constant, with no forcing `UPDATE`
     /// migration and every explicit opt-out left alone.
     public static let holderRowReconcileEnabledDefault = false
+    /// The shipped default for `holderHibernationEnabled`, and the single
+    /// place it lives. Holder hibernation ships off; graduation — after a soak
+    /// in which no park ever finalized while its child was still running and
+    /// no wake ever left a holder without a row — is a change to this
+    /// constant, with no forcing `UPDATE` migration and every explicit opt-out
+    /// left alone.
+    public static let holderHibernationEnabledDefault = false
     /// The shipped default for `updateMode`, and the single place it lives.
     /// Updating ships off; graduation to `check` — after a soak in which the
     /// notice was accurate and the hourly `ls-remote` cost nothing anyone
@@ -1799,6 +1848,7 @@ public struct Config: Codable, Sendable, Equatable {
                 gcRetainedTranscriptsEnabled: Bool =
                     Config.gcRetainedTranscriptsEnabledDefault,
                 holderRowReconcileEnabled: Bool = Config.holderRowReconcileEnabledDefault,
+                holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault,
                 updateMode: UpdateMode = Config.updateModeDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
@@ -1841,6 +1891,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
         self.holderRowReconcileEnabled = holderRowReconcileEnabled
+        self.holderHibernationEnabled = holderHibernationEnabled
         self.updateMode = updateMode
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
@@ -1963,6 +2014,10 @@ public struct Config: Codable, Sendable, Equatable {
         holderRowReconcileEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .holderRowReconcileEnabled)
             ?? Config.holderRowReconcileEnabledDefault
+        // Same shape once more, for holder hibernation's gate.
+        holderHibernationEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .holderHibernationEnabled)
+            ?? Config.holderHibernationEnabledDefault
         // Same shape for the update mode, with one addition: an unrecognised
         // NAME from a newer daemon (a fourth mode) is as unusable as an absent
         // key, so it resolves to the shipped default instead of failing the

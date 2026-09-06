@@ -1191,6 +1191,17 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the pty-holder auto-hibernation gate (default OFF). Applies on
+    /// the next hibernation sweep — no daemon restart needed. Sending either
+    /// value is an explicit gesture that survives a later change to the
+    /// shipped default.
+    func setHolderHibernationEnabled(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetHolderHibernationEnabled,
+            params: ConfigSetHolderHibernationEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the Claude cloud sessions gate (default OFF). The daemon builds
     /// its provider manager only at boot, so this takes effect on the next
     /// daemon restart rather than the next gesture.

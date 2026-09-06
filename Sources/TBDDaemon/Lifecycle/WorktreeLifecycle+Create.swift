@@ -1622,7 +1622,16 @@ extension WorktreeLifecycle {
                 watchDeskRole: watchDeskRole,
                 transport: primaryTransport,
                 holderPID: holderHandle?.holderPID,
-                childPID: holderHandle?.childPID
+                childPID: holderHandle?.childPID,
+                // The identity anchor for the job just spawned. `createdAt`
+                // would say the same thing today and stop being true the first
+                // time this row is parked and woken, so it is recorded from the
+                // start rather than only on the wake path. Off this type's
+                // injected date seam, not a bare `Date()`: the stamp is
+                // persisted and later compared against a process start time by
+                // `ProcessIdentityCheck`, which is exactly the kind of fact a
+                // test has to be able to pin end to end.
+                holderChildStartedAt: holderHandle == nil ? nil : now()
             )
         } catch {
             // Best-effort creation-time cleanup on both transports: a resource

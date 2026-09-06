@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 import os
 
 /// Tracks the timestamp of the last keystroke recorded for each tmux pane,
@@ -46,6 +47,36 @@ final class InputActivityTracker: @unchecked Sendable {
         lock.lock()
         lastInputByPane.removeValue(forKey: paneID)
         lock.unlock()
+    }
+
+    /// The tracker key for one terminal.
+    ///
+    /// The map is keyed by tmux pane id because the input router speaks pane
+    /// ids — but a holder-backed row has no pane, and its `tmuxPaneID` is the
+    /// empty string by construction. Keying every holder row on `""` would put
+    /// them all in ONE bucket: input typed into any one of them would veto a
+    /// park on every other, and forgetting one would forget them all. Their id
+    /// is the discriminator instead. The two namespaces cannot collide — a tmux
+    /// pane id is `%<n>` and a UUID string is neither.
+    ///
+    /// **Nothing records under a holder key today, and that is the design, not
+    /// a gap.** This veto's fact source is the app's keystroke stream, and on
+    /// the holder transport those keystrokes go straight down the pty the
+    /// viewer holds — which is precisely the state the park refuses anyway, on
+    /// its own fail-closed screen rail. So the veto is vacuous for holder rows,
+    /// and the pending-input question is answered there by the screen rail
+    /// instead. Recording the daemon's own writes in its place would be worse
+    /// than recording nothing: an auto-resume or a peer's `terminal.send` would
+    /// read as typed-but-unsent input forever against the merge rail's
+    /// `activityStateObservedAt` anchor, vetoing every park of that row. The
+    /// key stays because it is the thing that keeps holder rows out of the
+    /// empty-pane-id bucket the moment anything does have a keystroke to
+    /// record — #816's viewer-side input reporting is the candidate.
+    static func key(for terminal: Terminal) -> String {
+        switch terminal.transport {
+        case .holder: return terminal.id.uuidString
+        case .tmux: return terminal.tmuxPaneID
+        }
     }
 
     /// Drop recorded entries for panes not in `livePaneIDs`. Called during the

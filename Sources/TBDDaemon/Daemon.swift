@@ -915,6 +915,17 @@ public final class Daemon: Sendable {
                     // every attached state. No reader means the session is gone
                     // or was never adopted, which is the one case with nothing
                     // to write to.
+                    //
+                    // Deliberately NOT recorded as input activity. The veto's
+                    // fact source is the app's keystroke stream, and a write
+                    // that starts here is the daemon's own — an auto-resume, a
+                    // peer's `terminal.send` — never something a person typed
+                    // and has not sent. Recording it would leave the merge
+                    // rail's `activityStateObservedAt` anchor behind a
+                    // "keystroke" that will never be consumed, vetoing every
+                    // park of that row forever. See `InputActivityTracker`'s
+                    // holder key for why the veto is vacuous on this transport
+                    // anyway.
                     guard let reader = await registry.reader(for: terminalID) else {
                         throw HolderInjectionCourier.Error.noDaemonDescriptor(
                             terminalID: terminalID)
@@ -1050,6 +1061,10 @@ public final class Daemon: Sendable {
         )
         // Wire the shared input activity tracker to the coordinator
         await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
+        // And the holder registry, for the same reason and on the same terms:
+        // the park path reads a holder session's screen through the reader the
+        // spawn path registered, so all three must hold ONE registry.
+        await rpcRouter.hibernationCoordinator.setHolderRegistry(holderRegistry)
         // Queued prompt, second half: route the parking RPC and the readiness
         // and confirmation hooks to the coordinator, and give it the paste
         // path's send seam.
@@ -1369,7 +1384,15 @@ public final class Daemon: Sendable {
                         terminalID: terminal.id,
                         holderPID: terminal.holderPID,
                         childPID: childPID,
-                        createdAt: terminal.createdAt)
+                        // The identity anchor, not the row's birthday. A row
+                        // woken from a park carries a child younger than
+                        // itself, and anchoring on `createdAt` there would make
+                        // every such session read as `.startTimeMismatch` —
+                        // which this leg spells "keep", so the orphan it exists
+                        // to reclaim would survive every sweep. NULL means the
+                        // row has never been parked, and there the two are the
+                        // same instant.
+                        createdAt: terminal.holderChildStartedAt ?? terminal.createdAt)
                 }
             }
             let reaper = AgentReaper(
@@ -1677,7 +1700,51 @@ public final class Daemon: Sendable {
                 },
                 // swiftlint:disable:next no_raw_task_sleep - already seamed: this closure IS the production value of `LimitResumeActuator`'s non-defaulted `waiter:` parameter (the seam itself), exercised by Tests/TBDDaemonTests/LimitResumeActuatorTests.swift which injects `waiter: { _ in }` at 5 construction sites; see docs/specs/2026-07-24-test-hardening-design.md
                 waiter: { duration in _ = try? await Task.sleep(for: duration) },
-                actuationLog: actuationLog
+                actuationLog: actuationLog,
+                // The rail's input path for a holder-backed row: the same
+                // courier `terminal.send` writes through, so an auto-resume is
+                // routed by who owns the pty exactly as a human's send is, and
+                // reduced to the yes/no this rail acts on. Both write answers
+                // are a delivery — `daemonWrote` names a fallback route, not a
+                // failure. Nil with no courier (mock mode, or no holder
+                // registry to build one on): the actuator then refuses a holder
+                // row by name instead of typing at coordinates it does not have.
+                //
+                // **`.daemonWrote(.ackDeadlineElapsed)` is counted as delivered
+                // with its eyes open.** It is the one branch that can duplicate:
+                // the app was holding the pty, never answered inside the ack
+                // deadline, and may yet write the bytes it was given — so the
+                // daemon's own write can land a second "continue". That trade is
+                // made deliberately in this direction. A doubled continue lands
+                // in a session that is working again, as a stray message the
+                // user can see and undo; a missed resume is the silent failure
+                // this whole rail exists to prevent, and it is discovered hours
+                // later by a limit screen nobody continued.
+                holderSend: holderInjectionCourier.map { courier in
+                    let send: @Sendable (UUID, Data) async -> Bool = { terminalID, bytes in
+                        switch await courier.deliver(terminalID: terminalID, bytes: bytes) {
+                        case .viewerWrote, .daemonWrote: return true
+                        case .notDelivered: return false
+                        }
+                    }
+                    return send
+                },
+                // The rail's liveness answer for a holder-backed row, and this
+                // transport's counterpart to `windowExists`. A positive exit
+                // report from the holder is the only evidence admitted: the
+                // absence of a daemon reader says nothing about the child, since
+                // the registry keeps its reader across an attach and hands out
+                // none while a slot is mid-adoption or mid-release — so a rail
+                // keyed on it would cancel the auto-resume of live sessions.
+                holderSessionEnded: holderRegistry.map { registry in
+                    let ended: @Sendable (UUID) async -> Bool = { terminalID in
+                        switch await registry.lastKnownStatus(for: terminalID) {
+                        case .exited, .exitedStatusUnknown: return true
+                        case .alive, nil: return false
+                        }
+                    }
+                    return ended
+                }
             )
             let resumeScheduler = LimitResumeScheduler(
                 store: database.scheduledResumes,

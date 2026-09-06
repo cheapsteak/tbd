@@ -57,8 +57,11 @@ public struct ProductionPaneProcessInspector: PaneProcessInspecting {
     }
 }
 
-/// Runs one actuation attempt for a scheduled resume: eligibility checks,
-/// the Escape/continue/Enter send sequence, and post-send verification.
+/// Runs one actuation attempt for a scheduled resume: eligibility checks, the
+/// send — tmux's Escape/continue/Enter key sequence, or the holder transport's
+/// two writes of the same three things — and post-send verification, which is
+/// the same for both because it reads hook-fed state and the transcript rather
+/// than anything the transport can see.
 public struct LimitResumeActuator: LimitResumeActuating {
 
     // MARK: - Timing constants (spec §Actuation 5-6)
@@ -67,17 +70,72 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// The literal typed into the pane, recorded verbatim in the rail's row.
     static let continueMessage = "continue"
 
-    /// The one refusal text this rail returns for a holder-backed row, so the
-    /// notification, the log line and this file's tests all name the same
-    /// reason rather than three near-misses.
+    /// The one refusal text this rail returns for a holder-backed row while
+    /// holder hibernation is off, so the notification, the log line and this
+    /// file's tests all name the same reason rather than three near-misses.
+    /// Same fact and the same repair as
+    /// `HibernationCoordinator.holderTransportRefusal`, which is the other half
+    /// of what that flag gates.
     ///
     /// Written to complete the daemon's sentence: the notification reads
     /// "Auto-resume failed — \(reason). Claude may still be parked at the
     /// limit screen."
     static let holderTransportRefusal =
-        "this session runs on the pty-holder transport, whose input path carries raw "
-        + "bytes and has no named-key table yet, so the Escape and Enter this rail "
-        + "sends cannot be expressed and nothing was typed"
+        "this session runs on the pty-holder transport and holder hibernation is off "
+        + "(Settings → Hibernate pty-holder sessions, or `tbd config "
+        + "holder-hibernation on`), so nothing was typed"
+
+    /// The refusal for a daemon that has no way to write to a holder's pty at
+    /// all — mock mode, or a daemon whose registry (and so whose injection
+    /// courier) was never built. Kept apart from `holderTransportRefusal`
+    /// because the two are different repairs: one is a flag the user can turn
+    /// on, the other is a daemon that cannot serve this transport at all.
+    static let holderInputPathMissing = "this daemon has no holder input path"
+
+    /// The failure for a write the holder input path took and could not
+    /// deliver. Distinct from the two refusals above: the rail tried.
+    static let holderWriteRefused =
+        "the resume could not be written to the holder-backed session"
+
+    /// The first of the holder arm's two writes: `ESC`, alone — one byte.
+    ///
+    /// The whole send is `ESC`, then `interKeyPause`, then
+    /// `holderContinuePayload`, which is the tmux arm's Escape/pause/text
+    /// timing expressed in raw bytes. There is no named-key table on this
+    /// transport (the child-as-contract-party design,
+    /// `docs/specs/2026-09-05-child-as-contract-party-design.md`, is where one
+    /// comes from: choosing bytes for a named key needs the child's cursor-key
+    /// mode), so the two keys this rail needs are written as the bytes a
+    /// terminal delivers for them — `0x1B` for Escape, `0x0D` for Return.
+    ///
+    /// **Why `ESC` gets a write and a pause of its own.** An ink-style input
+    /// parser reads `ESC` immediately followed by a printable byte as a meta
+    /// key, so `ESC` and the text arriving in one read compose Alt-c and then
+    /// "ontinue" — deterministically, on every attempt, which is why the retry
+    /// in `actuate` could not recover it. The pause goes through the same
+    /// `waiter` seam as the tmux arm's, so tests advance it virtually and only
+    /// production sleeps.
+    static let holderEscapePayload = Data([0x1B])
+
+    /// The second of the holder arm's two writes: the literal and the carriage
+    /// return that submits it — 9 bytes, one write.
+    ///
+    /// **Text and carriage return together, unlike Escape.** Nothing composes
+    /// them into a different key, and a message split across two courier calls
+    /// can be split across a routing decision — `HolderInjectionCourier` picks
+    /// the viewer or the daemon per call, so two calls are two independent
+    /// routings. `performHolderSend` composes its own body and `\r` as one
+    /// write for exactly that reason.
+    ///
+    /// **And no bracketed-paste wrapper.** Claude Code's stdin tokenizer
+    /// swallows the trailing `\r` of any single *unwrapped* write of 64 bytes
+    /// or more (measured on 2.1.261: 63 bytes submits, 64 does not). The
+    /// wrappers are the fix, and they are correct only when the child has
+    /// bracketed-paste mode on, which the daemon's emulator does not yet
+    /// expose. At 9 bytes this write is far under that threshold, so it
+    /// submits as bare bytes and needs no wrapper.
+    static let holderContinuePayload = Data((continueMessage + "\r").utf8)
+
     static let verifyPollInterval: Duration = .seconds(1)
     static let verifyPolls = 20   // ~20s window
 
@@ -93,7 +151,35 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// The daemon's actuation record. This rail bypasses the RPC router, so it
     /// writes its own row — with no `method`, and an actor naming the rail.
     private let actuationLog: ActuationLog
+    /// Writes bytes to one holder-backed session's pty, answering whether they
+    /// were delivered. Production passes `HolderInjectionCourier.deliver`,
+    /// which routes by who owns the pty; `nil` means this daemon has no holder
+    /// input path at all (mock mode, or no holder registry), which the holder
+    /// arm refuses by name rather than by pretending the transport is the
+    /// problem.
+    ///
+    /// The seam is the courier reduced to what this rail needs — bytes in, a
+    /// yes/no out — so the actuator neither imports the holder subsystem nor
+    /// has to fake an actor to be tested.
+    private let holderSend: (@Sendable (UUID, Data) async -> Bool)?
+    /// Whether the holder session behind a terminal has ended, as the daemon's
+    /// registry last heard it — this transport's answer to `windowExists`.
+    ///
+    /// Production passes "the last status this registry recorded is `.exited`
+    /// or `.exitedStatusUnknown`", which is a POSITIVE report from the holder
+    /// that its job is over. Nothing weaker is admissible here: in particular
+    /// **the absence of a daemon reader is not evidence**, because a viewer
+    /// holding the pty is the ordinary live state on this transport and would
+    /// cancel every armed resume on a session the user is looking at.
+    ///
+    /// `nil` — mock mode, or no registry — behaves exactly as before: the rail
+    /// asks nobody and proceeds to the courier, which fails by name if the
+    /// session really is gone.
+    private let holderSessionEnded: (@Sendable (UUID) async -> Bool)?
 
+    /// `holderSend` and `holderSessionEnded` default to `nil` so every existing
+    /// call site — and every test that has no holder row in it — constructs the
+    /// actuator unchanged.
     public init(
         db: TBDDatabase,
         tmux: any ResumeSendingTmux,
@@ -101,7 +187,9 @@ public struct LimitResumeActuator: LimitResumeActuating {
         readTranscript: @escaping @Sendable (String) -> Data?,
         transcriptModifiedAt: @escaping @Sendable (String) -> Date?,
         waiter: @escaping @Sendable (Duration) async -> Void,
-        actuationLog: ActuationLog
+        actuationLog: ActuationLog,
+        holderSend: (@Sendable (UUID, Data) async -> Bool)? = nil,
+        holderSessionEnded: (@Sendable (UUID) async -> Bool)? = nil
     ) {
         self.db = db
         self.tmux = tmux
@@ -110,6 +198,8 @@ public struct LimitResumeActuator: LimitResumeActuating {
         self.transcriptModifiedAt = transcriptModifiedAt
         self.waiter = waiter
         self.actuationLog = actuationLog
+        self.holderSend = holderSend
+        self.holderSessionEnded = holderSessionEnded
     }
 
     /// Early-cancel probe (see `LimitResumeActuating.userAlreadyContinued`).
@@ -197,18 +287,40 @@ public struct LimitResumeActuator: LimitResumeActuating {
                 return .failed("could not record the resume in the actuation log")
             }
 
-            do {
-                try await Self.sendContinueSequence(
-                    tmux: tmux, server: context.server, paneID: context.paneID, waiter: waiter)
+            switch context.delivery {
+            case .tmux(let server, let paneID):
+                do {
+                    try await Self.sendContinueSequence(
+                        tmux: tmux, server: server, paneID: paneID, waiter: waiter)
+                    await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
+                } catch {
+                    await actuationLog.appendOutcome(
+                        confirms: actuationID, result: .transportFailed, error: "\(error)")
+                    // Treat a thrown send like a failed verification: retry
+                    // (with a fresh eligibility re-check) rather than failing
+                    // instantly — only give up after attempt 2 also fails.
+                    logger.warning("actuate: send threw on attempt \(attempt, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    continue
+                }
+            case .holder(let send):
+                // Not retried, unlike a thrown tmux send. A wedged tmux server
+                // is a transient the next attempt may find recovered; the
+                // courier has already exhausted its own routes by the time it
+                // answers no — viewer, then the daemon's own descriptor — so a
+                // second identical write would take the same route to the same
+                // answer, ~20s of verification later. Either write answering no
+                // ends the actuation the same way: half a send is not a send.
+                guard await sendHolderContinue(send: send, terminalID: context.terminalID) else {
+                    await actuationLog.appendOutcome(
+                        confirms: actuationID, result: .transportFailed,
+                        error: Self.holderWriteRefused)
+                    logger.warning("""
+                        actuate: the holder input path took nothing for terminal \
+                        \(context.terminalID.uuidString, privacy: .public)
+                        """)
+                    return .failed(Self.holderWriteRefused)
+                }
                 await actuationLog.appendOutcome(confirms: actuationID, result: .dispatched)
-            } catch {
-                await actuationLog.appendOutcome(
-                    confirms: actuationID, result: .transportFailed, error: "\(error)")
-                // Treat a thrown send like a failed verification: retry
-                // (with a fresh eligibility re-check) rather than failing
-                // instantly — only give up after attempt 2 also fails.
-                logger.warning("actuate: send threw on attempt \(attempt, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                continue
             }
             if await verifyResumed(terminalID: context.terminalID,
                                    transcriptPath: context.transcriptPath,
@@ -228,9 +340,19 @@ public struct LimitResumeActuator: LimitResumeActuating {
         case notEligible(ResumeActuationOutcome)
     }
 
+    /// How an eligible pass will put the resume into the session.
+    ///
+    /// Typed rather than a transport flag plus optional coordinates, so the
+    /// holder arm cannot reach for a pane id that a holder row does not have
+    /// and the tmux arm cannot reach for a seam that may be nil: whichever
+    /// case a pass produced carries exactly what its send needs.
+    private enum ResumeDelivery {
+        case tmux(server: String, paneID: String)
+        case holder(send: @Sendable (UUID, Data) async -> Bool)
+    }
+
     private struct EligibilityContext {
-        let server: String
-        let paneID: String
+        let delivery: ResumeDelivery
         let terminalID: UUID
         let worktreeID: UUID
         let transcriptPath: String?
@@ -242,9 +364,10 @@ public struct LimitResumeActuator: LimitResumeActuating {
 
     /// Runs eligibility steps 1-4 (spec §Actuation), in order: terminal
     /// alive → user-already-continued → Claude foreground → copy-mode.
-    /// A transport guard runs between the terminal lookup and everything else,
+    /// The transport branches between the terminal lookup and everything else,
     /// because every one of those steps addresses a tmux pane and a
-    /// holder-backed row has none.
+    /// holder-backed row has none — see `holderEligibility` for what that arm
+    /// keeps and what it drops.
     /// Foreground is checked before copy-mode so a dead/backgrounded shell
     /// classifies `.failed` rather than endlessly rescheduling on a stale
     /// copy-mode flag. Two additional checks (0a the row's own limitType-aware toggle, 1b row
@@ -260,7 +383,12 @@ public struct LimitResumeActuator: LimitResumeActuating {
         //     EVERY call to `checkEligibility` (the initial pass and every
         //     attempt>1 re-check in `actuate`), so attempt 2 never fires
         //     after the user turns the row's gate off mid-flight.
-        guard ((try? await db.config.get())?.autoResumeEnabled(forLimitType: resume.limitType)) ?? false else {
+        //
+        //     One config read serves both this gate and the holder arm's
+        //     below, so a single pass cannot act on two different snapshots of
+        //     the same row.
+        guard let config = try? await db.config.get(),
+              config.autoResumeEnabled(forLimitType: resume.limitType) else {
             return .notEligible(.cancelledExternally)
         }
 
@@ -281,7 +409,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
         // `windowExists`, the pane-identity consultation, `panePID`, copy-mode,
         // and finally the keys themselves. A holder row's `tmuxWindowID` and
         // `tmuxPaneID` are the empty string by construction, so without this
-        // guard the rail exited at step 1 with `.terminalGone` — silently
+        // branch the rail exited at step 1 with `.terminalGone` — silently
         // cancelling the user's armed auto-resume on a session that is
         // perfectly alive, and recording "the terminal is gone" for a row that
         // is not.
@@ -292,19 +420,17 @@ public struct LimitResumeActuator: LimitResumeActuating {
         // would have sent this rail on to type "continue" at whatever pane the
         // empty coordinate resolved to.
         //
-        // Refused rather than served, because Milestone A wires no input path
-        // for the holder transport: the registry can render a session's screen
-        // and report its child's last known status, but nothing writes to a
-        // holder's pty. `.failed` rather than a silent cancel, because a user
-        // who armed auto-resume and will not get it should be told once, not
-        // left watching a limit screen behind an "auto-resume scheduled" badge
-        // that quietly expired.
-        guard terminal.transport != .holder else {
-            logger.info("""
-                actuate: terminal \(terminal.id.uuidString, privacy: .public) runs on the \
-                pty-holder transport — typing nothing
-                """)
-            return .notEligible(.failed(Self.holderTransportRefusal))
+        // Served rather than refused when holder hibernation is on: the
+        // transport now has an input path (`holderSend`), and this rail is
+        // gated by that same flag because a resume it delivers is the other
+        // half of a park it can undo.
+        if terminal.transport == .holder {
+            // Off the same snapshot step 0a read, and already carrying the
+            // shipped default for an install where nobody has chosen
+            // (`ConfigRecord.toModel` applies it).
+            return await holderEligibility(
+                resume, terminal: terminal,
+                hibernationEnabled: config.holderHibernationEnabled)
         }
 
         guard !terminal.isParked,
@@ -377,9 +503,112 @@ public struct LimitResumeActuator: LimitResumeActuating {
         }
 
         return .eligible(EligibilityContext(
-            server: server, paneID: terminal.tmuxPaneID, terminalID: terminal.id,
+            delivery: .tmux(server: server, paneID: terminal.tmuxPaneID),
+            terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
             transcriptPath: terminal.transcriptPath, preSendTranscriptData: preSendTranscriptData))
+    }
+
+    /// Eligibility for a holder-backed row: the transport-agnostic rails of
+    /// `checkEligibility`, with every tmux-shaped step dropped.
+    ///
+    /// Dropped, and why each one is tmux's alone:
+    ///
+    /// - **`windowExists` and the worktree lookup.** Both name a tmux server
+    ///   and window this row does not have. A holder session's liveness is its
+    ///   child process, and the courier addresses it by terminal id — so the
+    ///   liveness question is not dropped, it is asked of a different oracle:
+    ///   `holderSessionEnded`, in the same position and with the same silent
+    ///   `.terminalGone` cancel.
+    /// - **The pane-identity consultation (step 1a).** It exists because tmux
+    ///   reuses pane ids, so a stale coordinate can name a live stranger. There
+    ///   is no coordinate here to go stale: a holder row's pane id is `""` by
+    ///   construction, and the write is addressed to the terminal id itself,
+    ///   which nothing reuses.
+    /// - **`panePID` and the foreground check (step 3).** Both walk the process
+    ///   tree under a pane's shell. The holder's child IS the agent — there is
+    ///   no shell in front of it to be foreground instead of it.
+    /// - **Copy-mode (step 4).** tmux's scrollback mode. A holder session's
+    ///   scrollback belongs to whichever emulator is reading it, and there is
+    ///   no mode for typing to land in.
+    ///
+    /// Kept, because none of them was ever about tmux: the flag, the parked
+    /// backstop, the row's own cancellation status (1b), and the
+    /// user-already-continued check (2) — which also produces the pre-send
+    /// growth baseline `verifyResumed` compares against, so skipping it would
+    /// leave `preSize == 0` and make any later read look like a resume.
+    private func holderEligibility(
+        _ resume: ScheduledResume, terminal: Terminal, hibernationEnabled: Bool
+    ) async -> EligibilityCheckResult {
+        // The flag. Off, this rail refuses by name and `.failed` rather than
+        // silently cancelling, because a user who armed auto-resume and will
+        // not get it should be told once, not left watching a limit screen
+        // behind an "auto-resume scheduled" badge that quietly expired.
+        guard hibernationEnabled else {
+            logger.info("""
+                actuate: terminal \(terminal.id.uuidString, privacy: .public) runs on the \
+                pty-holder transport and holder hibernation is off — typing nothing
+                """)
+            return .notEligible(.failed(Self.holderTransportRefusal))
+        }
+
+        // Parked: the same fire-time backstop as the tmux path, and the same
+        // silent cancel. Parking already cancels the pending row; this catches
+        // a park that raced the scheduler.
+        guard !terminal.isParked else { return .notEligible(.terminalGone) }
+
+        // Liveness, in the position `windowExists` occupies on the tmux arm and
+        // with the same silent `.terminalGone` cancel. Without it the holder
+        // arm had no liveness answer at all: a row whose child exited without
+        // anything parking it would be typed at, and the write would land on a
+        // pty nobody is reading — an armed resume reported as delivered on a
+        // session that is over.
+        //
+        // The evidence has to be positive, which is why the seam asks about the
+        // holder's reported STATUS rather than about the daemon's reader.
+        // `reader(for:)` answers which emulator is this session's, not whether
+        // the session is alive: the registry keeps that reader across an attach
+        // and hands out none while a slot is mid-adoption or mid-release. So
+        // `reader(for:) == nil` names a transition as often as a death, and a
+        // rail keyed on it would cancel auto-resumes on sessions that are
+        // running.
+        if let sessionEnded = self.holderSessionEnded, await sessionEnded(terminal.id) {
+            logger.info("""
+                actuate: terminal \(terminal.id.uuidString, privacy: .public) is holder-backed \
+                and its holder reported the session over — cancelling
+                """)
+            return .notEligible(.terminalGone)
+        }
+
+        // 1b, unchanged: the row itself can be cancelled while a prior
+        // attempt's ~20s verify window runs.
+        guard ((try? await db.scheduledResumes.get(id: resume.id)) ?? nil)?.status == .pending else {
+            return .notEligible(.cancelledExternally)
+        }
+
+        // 2, unchanged — and ahead of the input-path check below on purpose:
+        // a session that has already moved on wants the silent cancel, not a
+        // notification saying auto-resume failed on it.
+        let continuation = transcriptContinuation(
+            path: terminal.transcriptPath, since: resume.createdAt, mtimeGated: false)
+        if continuation.alreadyContinued {
+            return .notEligible(.userAlreadyContinued)
+        }
+
+        guard let send = self.holderSend else {
+            logger.warning("""
+                actuate: terminal \(terminal.id.uuidString, privacy: .public) is holder-backed \
+                and this daemon has no holder input path — typing nothing
+                """)
+            return .notEligible(.failed(Self.holderInputPathMissing))
+        }
+
+        return .eligible(EligibilityContext(
+            delivery: .holder(send: send),
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            transcriptPath: terminal.transcriptPath,
+            preSendTranscriptData: continuation.data))
     }
 
     /// What the pane consultation concluded for step 1a.
@@ -454,7 +683,8 @@ public struct LimitResumeActuator: LimitResumeActuating {
         }
     }
 
-    /// The exact production send sequence (spec §Actuation 5):
+    /// The exact production send sequence for the tmux arm (spec §Actuation 5);
+    /// the holder arm's raw-bytes equivalent is `sendHolderContinue`:
     /// Escape first — at the limit, newer Claude Code opens the
     /// `/rate-limit-options` menu whose highlighted default can be "Upgrade
     /// your plan"; a blind Enter can confirm a paid upgrade. Escape
@@ -473,6 +703,27 @@ public struct LimitResumeActuator: LimitResumeActuating {
         try await tmux.sendKeys(server: server, paneID: paneID, text: continueMessage)
         await waiter(interKeyPause)
         try await tmux.sendKey(server: server, paneID: paneID, key: "Enter")
+    }
+
+    /// The holder arm's counterpart to `sendContinueSequence`: the same
+    /// Escape/pause/text-and-submit shape, written as bytes.
+    ///
+    /// Two writes with `interKeyPause` between them — `holderEscapePayload`
+    /// says why the pause is load-bearing rather than cosmetic here, and
+    /// `holderContinuePayload` says why the literal and its carriage return
+    /// stay together. The pause runs on the same injected `waiter` the tmux arm
+    /// uses, so a test advances it and only production sleeps.
+    ///
+    /// Answers whether the whole sequence was delivered. A `false` from the
+    /// first write skips the second: nothing is gained by typing "continue" at
+    /// a session that did not take the Escape, and the caller reports one named
+    /// failure either way.
+    private func sendHolderContinue(
+        send: @Sendable (UUID, Data) async -> Bool, terminalID: UUID
+    ) async -> Bool {
+        guard await send(terminalID, Self.holderEscapePayload) else { return false }
+        await waiter(Self.interKeyPause)
+        return await send(terminalID, Self.holderContinuePayload)
     }
 
     /// Success signal within ~20s: the activity hook reports `working`, or

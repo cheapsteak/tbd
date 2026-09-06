@@ -101,14 +101,13 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     /// Which of the transport's two stores answered.
     ///
     /// A consumer's policy is keyed on this field, so the policy cannot be
-    /// applied by accident. Of the consumers the design names, two are on the
-    /// contract today: the input-path oracle proceeds on `staleDaemon` modes
-    /// and records the source on the actuation row, and a person reading `tbd
-    /// terminal output` is shown the source and the age on stderr. The
-    /// hibernation pending-input check is still on its own screen read; the
-    /// policy it is to apply when it moves onto this contract is to fail closed
-    /// on `staleDaemon`, because a frozen screen cannot prove the composer is
-    /// empty.
+    /// applied by accident. The consumers the design names read it as follows:
+    /// the input-path oracle proceeds on `staleDaemon` modes and records the
+    /// source on the actuation row; the hibernation pending-input rail refuses
+    /// on anything but `daemon`, because a frozen screen cannot prove the
+    /// composer is empty and a live one a viewer answered has somebody at its
+    /// keyboard; and a person reading `tbd terminal output` is shown the source
+    /// and the age on stderr.
     ///
     /// **The raw values must stay identical to `ActuationModeSource`'s.** A
     /// supervisor correlates the `screen.source` it read from `tbd terminal

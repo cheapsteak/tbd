@@ -63,6 +63,23 @@ final class TerminalInjectionRouter {
         entries[terminalID]?.deliver
     }
 
+    /// Whether some panel currently owns this session's pty.
+    ///
+    /// A claim is taken the instant `attach.ready` is accepted and withdrawn by
+    /// `stopHolderReader`, so it is true over exactly the span in which the
+    /// daemon is NOT this session's reader. That makes it the app's answer to
+    /// the question the daemon fail-closes on: a manual park asked for now
+    /// would be refused, because the pending-input rail cannot read a screen
+    /// the daemon no longer has. The menu reads it so the refusal is never
+    /// offered as an action.
+    ///
+    /// It is a fact about *this app's* panels, not about the daemon's viewer
+    /// table, and the two can disagree for the width of an attach or detach
+    /// RPC. That is why the daemon keeps its own refusal: this one is the UX.
+    func holdsPTY(terminalID: UUID) -> Bool {
+        entries[terminalID] != nil
+    }
+
     func register(
         terminalID: UUID, deliver: @escaping @MainActor (UUID, Data) async -> Bool
     ) -> Registration {

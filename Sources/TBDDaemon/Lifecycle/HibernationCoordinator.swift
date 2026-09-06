@@ -11,12 +11,18 @@ public enum HibernateResult: Equatable, Sendable {
     case notFound
 }
 
-private enum HibernateEligibilityPolicy: Sendable {
-    case manual
-    case merge(inputVetoEnabled: Bool)
+/// Which rails a park attempt is judged by, and the config facts those rails
+/// need. Every case carries `holderHibernationEnabled` because the park
+/// mechanic for the pty-holder transport is behind a soak gate whatever
+/// triggered it — the property the soak validates (a row never claims parked
+/// while its child runs) does not depend on who asked.
+enum HibernateEligibilityPolicy: Sendable {
+    case manual(holderHibernationEnabled: Bool)
+    case merge(inputVetoEnabled: Bool, holderHibernationEnabled: Bool)
     case automatic(
         enabled: Bool,
         inputVetoEnabled: Bool,
+        holderHibernationEnabled: Bool,
         idleTimeout: TimeInterval,
         idleSince: Date?)
 }
@@ -66,10 +72,11 @@ public enum WakeResult: Equatable, Sendable {
     /// default-profile fallback; the row stays parked and resumable. Carries
     /// the missing profile id for the message.
     case profileMissing(profileID: UUID)
-    /// The row runs on the pty-holder transport. Every branch below this point
-    /// — the unparked pane classification as much as the respawn — addresses a
-    /// tmux pane the row does not have, so wake refuses before reaching any of
-    /// them and leaves the row exactly as it found it.
+    /// The row runs on the pty-holder transport and
+    /// `holder_hibernation_enabled` is off. The transport has a wake mechanic —
+    /// spawn a fresh holder running `claude --resume` — and this soak gate says
+    /// it may not run here yet, so wake refuses before touching anything and
+    /// leaves the row exactly as it found it.
     case holderTransport
 }
 
@@ -105,7 +112,7 @@ public enum WakeResult: Equatable, Sendable {
 /// full uncached input on its next message whether or not the process stayed
 /// alive — parking an idle session is therefore nearly free.
 public actor HibernationCoordinator {
-    private let db: TBDDatabase
+    let db: TBDDatabase
     private let tmux: TmuxManager
     private let modelProfileResolver: ModelProfileResolver?
     private let subscriptions: StateSubscriptionManager?
@@ -115,14 +122,14 @@ public actor HibernationCoordinator {
     private let configDirManager: ClaudeProfileConfigDirManager
     /// Default input activity tracker. Wired post-construction by Daemon.swift
     /// to the shared instance from the input router so both use the same tracker.
-    private var inputActivity: InputActivityTracker
-    private let now: @Sendable () -> Date
+    var inputActivity: InputActivityTracker
+    let now: @Sendable () -> Date
 
     /// Per-terminal "first time we observed it idle-at-rest" marker, maintained
     /// by `sweep`. In-memory only: a daemon restart clears it, so a freshly
     /// started daemon won't instantly hibernate long-idle sessions — it waits a
     /// full idle window first, which is the safe behavior.
-    private var idleSince: [UUID: Date] = [:]
+    var idleSince: [UUID: Date] = [:]
 
     /// Terminal ids with an in-flight wake respawn, so a double-focus can't
     /// spawn two `claude --resume` processes into the same window.
@@ -146,7 +153,7 @@ public actor HibernationCoordinator {
     /// holds. State can flip in the final instant (a turn starts, a permission
     /// prompt appears), so the kill decision is re-verified here, not at
     /// arm-time. (Knative/KEDA poll-cheaply / decide-against-window pattern.)
-    private var pendingKillSince: [UUID: Date] = [:]
+    var pendingKillSince: [UUID: Date] = [:]
 
     /// Settle window between crossing the idle threshold and the actual kill.
     static let killDebounce: TimeInterval = 20
@@ -167,10 +174,67 @@ public actor HibernationCoordinator {
     nonisolated let exitPollAttempts: Int
     nonisolated let exitPollInterval: Duration
 
+    /// How many times the holder park re-checks its child after sending it
+    /// `SIGTERM`, before escalating to the forced teardown.
+    ///
+    /// 25 at the production `exitPollInterval` of 200 ms is five seconds, and
+    /// the number is sized against what a Claude session actually does with a
+    /// `SIGTERM` it means to honour: run its Stop hooks, tear down its MCP
+    /// children, and flush the transcript it is mid-write on. Three seconds of
+    /// polite `/exit` has already passed by the time this rung is reached, so a
+    /// session that is shutting down cleanly and slowly gets eight seconds in
+    /// total before anything is killed — which is the whole reason this rung
+    /// exists, since the alternative it replaced was a `SIGKILL` of the process
+    /// group at three seconds. Injectable on the same terms as the pair above.
+    nonisolated let holderTerminateAttempts: Int
+
+    /// How many times the holder park re-checks its child AFTER escalating to
+    /// `HolderRegistry.abandon` — which forgets the holder, kills the job by
+    /// process group and reaps the corpse.
+    ///
+    /// Five at the production `exitPollInterval` of 200 ms is one second, and
+    /// it is a different budget from the poll before it: that one waits for a
+    /// session to shut itself down politely, this one waits for a `SIGKILL`ed
+    /// process to leave the process table. Injectable on the same terms as the
+    /// pair above, and for the same reason — a test proving the "the child
+    /// survived everything" branch must not pay a real second to do it.
+    nonisolated let holderEscalationAttempts: Int
+
     /// Delay seam for the verify-exit poll (`Duration` is behavior). Tests
     /// inject a `TestClock` so the poll's pacing is virtual and the
     /// "escalate after exactly N attempts" boundary is exact.
-    private let clock: any Clock<Duration>
+    let clock: any Clock<Duration>
+
+    /// The pty-holder registry, wired post-construction by Daemon.swift the way
+    /// `inputActivity` is — the registry is built before the RPC router that
+    /// owns this coordinator, and both must reach the SAME actor: the park path
+    /// reads a session's screen through the reader the spawn path registered.
+    ///
+    /// Nil in mock mode and in any composition with no holder transport, where
+    /// the park path refuses by name rather than pretending it could have read
+    /// a screen.
+    var holderRegistry: HolderRegistry?
+
+    /// Answers a holder-backed session's screen, for the park's pending-input
+    /// rail to judge. A **test seam only** — production leaves it nil and
+    /// `holderScreenReading` falls through to the registry's own reader, which
+    /// is the single source the design names.
+    ///
+    /// It exists for the same reason the send path's `holderModeOracle` does:
+    /// reaching the rail's answers (`daemon`, `staleDaemon`, a screen that will
+    /// not project, and no screen at all) through a real registry means a real
+    /// holder, a real pty and a real attach for what is a pure question about
+    /// whether a park may proceed. The registry-backed path is exercised live;
+    /// this is how the rail's own branches are pinned.
+    ///
+    /// `nil` from the seam means the same thing as no reader: nothing answered.
+    /// A throw means the same thing as a refused projection.
+    var holderScreenOracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
+
+    /// How the holder park observes and ends a child process. Injected so a
+    /// test can state "the job declined `/exit`" in one line instead of
+    /// arranging a real one.
+    let signaller: any ProcessSignaller
 
     /// The daemon's actuation record. The idle sweep and the merge-park rail
     /// are daemon-internal actuation sites — they bypass the router, so each
@@ -192,7 +256,10 @@ public actor HibernationCoordinator {
         now: @escaping @Sendable () -> Date = { Date() },
         exitPollAttempts: Int = 15,
         exitPollInterval: Duration = .milliseconds(200),
+        holderTerminateAttempts: Int = 25,
+        holderEscalationAttempts: Int = 5,
         clock: any Clock<Duration> = ContinuousClock(),
+        signaller: any ProcessSignaller = ProductionProcessSignaller(),
         actuationLog: ActuationLog
     ) {
         self.db = db
@@ -204,7 +271,10 @@ public actor HibernationCoordinator {
         self.now = now
         self.exitPollAttempts = exitPollAttempts
         self.exitPollInterval = exitPollInterval
+        self.holderTerminateAttempts = holderTerminateAttempts
+        self.holderEscalationAttempts = holderEscalationAttempts
         self.clock = clock
+        self.signaller = signaller
         self.actuationLog = actuationLog
     }
 
@@ -233,6 +303,21 @@ public actor HibernationCoordinator {
     /// Wire the input activity tracker so the sweep can veto parks based on
     /// pending typed input. Set once by Daemon.swift after construction so the
     /// shared tracker is used across the input router and coordinator.
+    /// Wire the pty-holder registry. Set once by Daemon.swift after
+    /// construction, for the same reason `setInputActivity` is: the registry
+    /// exists before the router that owns this coordinator, and every consumer
+    /// must share the one actor that holds the daemon's readers.
+    func setHolderRegistry(_ registry: HolderRegistry?) {
+        holderRegistry = registry
+    }
+
+    /// Wire the park rail's screen seam. Tests only — see `holderScreenOracle`.
+    func setHolderScreenOracle(
+        _ oracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
+    ) {
+        holderScreenOracle = oracle
+    }
+
     func setInputActivity(_ tracker: InputActivityTracker) {
         // Replace the default tracker with the shared one from the input router.
         // This is safe because nothing has accessed inputActivity yet at wiring time.
@@ -263,18 +348,37 @@ public actor HibernationCoordinator {
             return .notFound
         }
         guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
-        guard terminal.isManuallyHibernatable else {
-            return .notEligible(reason: manualBlockReason(terminal))
+        // One read, carried into the policy so the rail re-checked under the
+        // lock cannot disagree with the one checked here. A config read that
+        // fails takes the shipped default, which refuses a holder row.
+        let holderHibernationEnabled = await resolvedHolderHibernationEnabled()
+        guard terminal.isManuallyHibernatable(
+            holderHibernationEnabled: holderHibernationEnabled) else {
+            return .notEligible(reason: manualBlockReason(
+                terminal, holderHibernationEnabled: holderHibernationEnabled))
         }
         return await performHibernate(
             terminal: terminal,
             reason: .manual,
-            policy: .manual)
+            policy: .manual(holderHibernationEnabled: holderHibernationEnabled))
+    }
+
+    /// `config.holderHibernationEnabled`, resolved through the shipped default
+    /// when the config row cannot be read. Failing toward the default is
+    /// failing toward refusal, which is the safe direction for a mechanic that
+    /// kills a live process.
+    private func resolvedHolderHibernationEnabled() async -> Bool {
+        (try? await db.config.get())?.holderHibernationEnabled
+            ?? Config.holderHibernationEnabledDefault
     }
 
     /// The reason a manual hibernate was refused, for the RPC error string.
-    private func manualBlockReason(_ terminal: Terminal) -> String {
-        if terminal.transport == .holder { return Self.holderTransportRefusal }
+    private func manualBlockReason(
+        _ terminal: Terminal, holderHibernationEnabled: Bool
+    ) -> String {
+        if terminal.transport == .holder, !holderHibernationEnabled {
+            return Self.holderTransportRefusal
+        }
         if !terminal.isClaudeResumable { return "Not a resumable Claude session" }
         if terminal.suspendedAt != nil { return "Terminal is suspended" }
         switch terminal.activityState {
@@ -300,8 +404,18 @@ public actor HibernationCoordinator {
     /// fans out over every terminal in the worktree and most are refused by the
     /// rails above, so — like the idle sweep — the row goes after the gate, at
     /// the moment this rail is actually about to act on a session.
+    ///
+    /// `holderHibernationEnabled` is not defaulted, for the reason
+    /// `Terminal.isManuallyHibernatable(holderHibernationEnabled:)` gives: the
+    /// flag reaches several call sites across the daemon and the app, and a
+    /// missing argument should be a compile error rather than a rail that
+    /// quietly disagrees with the menu the user is looking at. A default that
+    /// leaned on "forgetting refuses, which is safe" would invert the day the
+    /// shipped constant flips, which is this flag's whole graduation plan.
     public func hibernateForMerge(
-        terminalID: UUID, inputVetoEnabled: Bool
+        terminalID: UUID,
+        inputVetoEnabled: Bool,
+        holderHibernationEnabled: Bool
     ) async -> HibernateResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
@@ -310,7 +424,9 @@ public actor HibernationCoordinator {
         let decision = HibernationGate.decideForMerge(
             terminal: terminal,
             inputVetoEnabled: inputVetoEnabled,
-            lastInputAt: inputActivity.lastInput(paneID: terminal.tmuxPaneID))
+            holderHibernationEnabled: holderHibernationEnabled,
+            lastInputAt: inputActivity.lastInput(
+                paneID: InputActivityTracker.key(for: terminal)))
         guard decision == .eligible else {
             return .notEligible(reason: Self.mergeBlockReason(decision))
         }
@@ -332,7 +448,9 @@ public actor HibernationCoordinator {
         let result = await performHibernate(
             terminal: terminal,
             reason: .merged,
-            policy: .merge(inputVetoEnabled: inputVetoEnabled))
+            policy: .merge(
+                inputVetoEnabled: inputVetoEnabled,
+                holderHibernationEnabled: holderHibernationEnabled))
         await actuationLog.appendOutcome(
             confirms: actuationID,
             result: ActuationOutcome.classify(result),
@@ -345,11 +463,14 @@ public actor HibernationCoordinator {
     /// keep-warm, which merge-park honors but manual bypasses — plus the
     /// pending-input veto, whose wording matches the backup TUI scrape's so a
     /// reader cannot tell which of the two rails fired and does not need to.
-    /// The one refusal text every park/wake path uses for a holder-backed row,
-    /// so the CLI, the app and the actuation record all name the same reason.
+    /// The one refusal text every gated path uses for a holder-backed row, so
+    /// the CLI, the app and the actuation record all name the same reason. What
+    /// the flag gates is a new park and the classification of an UNPARKED
+    /// holder row; a row that is already parked wakes without consulting it.
     static let holderTransportRefusal =
-        "Session runs on the pty-holder transport, which has no tmux window to "
-        + "park or wake. Parking is not supported for it yet."
+        "Session runs on the pty-holder transport and holder hibernation is off "
+        + "(Settings → Hibernate pty-holder sessions, or `tbd config "
+        + "holder-hibernation on`)"
 
     private static func mergeBlockReason(_ decision: HibernationGate.Decision) -> String {
         switch decision {
@@ -393,6 +514,17 @@ public actor HibernationCoordinator {
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .notFound
         }
+        // The two transports diverge here, ahead of the first tmux call. A
+        // holder-backed row has no tmux server to lock and no pane to capture:
+        // its park writes to the holder's pty, confirms the child is gone, and
+        // clears the row's pids. Everything above this line — the singleflight
+        // claim, the session-id and worktree lookups — is shared, and
+        // everything below it is the tmux mechanic, unchanged.
+        if terminal.transport == .holder {
+            return await performHolderHibernate(
+                terminal: terminal, worktree: worktree, reason: reason, policy: policy)
+        }
+
         let server = worktree.tmuxServer
         let paneID = terminal.tmuxPaneID
 
@@ -640,36 +772,43 @@ public actor HibernationCoordinator {
         return .ok
     }
 
-    private func hibernationRefusal(
+    func hibernationRefusal(
         terminal: Terminal,
         policy: HibernateEligibilityPolicy
     ) -> HibernateResult? {
         switch policy {
-        case .manual:
+        case let .manual(holderHibernationEnabled):
             guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
-            guard terminal.isManuallyHibernatable else {
-                return .notEligible(reason: manualBlockReason(terminal))
+            guard terminal.isManuallyHibernatable(
+                holderHibernationEnabled: holderHibernationEnabled) else {
+                return .notEligible(reason: manualBlockReason(
+                    terminal, holderHibernationEnabled: holderHibernationEnabled))
             }
             return nil
 
-        case let .merge(inputVetoEnabled):
+        case let .merge(inputVetoEnabled, holderHibernationEnabled):
             let decision = HibernationGate.decideForMerge(
                 terminal: terminal,
                 inputVetoEnabled: inputVetoEnabled,
-                lastInputAt: inputActivity.lastInput(paneID: terminal.tmuxPaneID))
+                holderHibernationEnabled: holderHibernationEnabled,
+                lastInputAt: inputActivity.lastInput(
+                    paneID: InputActivityTracker.key(for: terminal)))
             guard decision == .eligible else {
                 return .notEligible(reason: Self.mergeBlockReason(decision))
             }
             return nil
 
-        case let .automatic(enabled, inputVetoEnabled, idleTimeout, idleSince):
+        case let .automatic(
+            enabled, inputVetoEnabled, holderHibernationEnabled, idleTimeout, idleSince):
             let decision = HibernationGate.decide(
                 terminal: terminal,
                 autoHibernateEnabled: enabled,
                 inputVetoEnabled: inputVetoEnabled,
+                holderHibernationEnabled: holderHibernationEnabled,
                 idleTimeout: idleTimeout,
                 idleSince: idleSince,
-                lastInputAt: inputActivity.lastInput(paneID: terminal.tmuxPaneID),
+                lastInputAt: inputActivity.lastInput(
+                    paneID: InputActivityTracker.key(for: terminal)),
                 now: now())
             guard decision == .eligible else {
                 return .notEligible(reason: Self.mergeBlockReason(decision))
@@ -817,6 +956,14 @@ public actor HibernationCoordinator {
     /// That recovery covers parked rows ONLY, because it lives downstream of
     /// the parked check below. An UNPARKED row whose session died is reported
     /// (`.sessionGone`) but not repaired — see `classifyUnparkedWake`.
+    ///
+    /// **An already-parked holder row wakes whatever `holder_hibernation_enabled`
+    /// says.** The flag gates new parks and the classification of an UNPARKED
+    /// holder row; it does not gate the wake of a row the feature has already
+    /// parked. Turning the flag off is the soak's abort gesture, and an abort
+    /// that stranded everything the soak parked would be no abort at all — the
+    /// app's focus-wake would fire a failing RPC on every focus, forever, with
+    /// no way back to a live session.
     public func wake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, allowDefaultProfileFallback: Bool = false, initialPrompt: String? = nil) async -> WakeResult {
         // Claim synchronously, before the first suspension. Otherwise two wake
         // calls can both read the parked row, then each pass the in-flight check
@@ -835,18 +982,27 @@ public actor HibernationCoordinator {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
         }
-        // Ahead of the parked check, and therefore ahead of BOTH downstream
-        // paths: `classifyUnparkedWake` probes the pane, and the parked branch
-        // respawns into it. A holder row's pane id is the empty string, which
-        // tmux answers for by reporting the pane gone — so the unparked path
-        // would report a live session as `.sessionGone` and the parked path
-        // would respawn a second `claude --resume` for a session whose original
-        // process is still alive on the holder's pty. Refuse, mutating nothing.
-        guard terminal.transport != .holder else { return .holderTransport }
         // Wake ANY parked row, not just `hibernatedAt`-marked ones: legacy rows
         // and the reconcile / recreate-window paths may carry only `suspendedAt`.
         // `clearHibernated` nils both columns, so this fully un-parks either.
-        guard terminal.isParked else { return await classifyUnparkedWake(terminal) }
+        //
+        // The unparked answer is per-transport: `classifyUnparkedWake` probes a
+        // tmux pane, and a holder row's pane id is the empty string, which tmux
+        // answers for by reporting the pane gone — a live session reported as
+        // `.sessionGone`. The holder classification asks the process table
+        // instead.
+        guard terminal.isParked else {
+            guard terminal.transport == .holder else {
+                return await classifyUnparkedWake(terminal)
+            }
+            // The soak gate belongs HERE and not above the parked check: it
+            // decides whether this install classifies an unparked holder row
+            // at all, and an install that has not armed the feature is told so
+            // rather than being handed a process-table verdict it never asked
+            // for. Nothing is mutated on the way out.
+            guard await resolvedHolderHibernationEnabled() else { return .holderTransport }
+            return await classifyUnparkedHolderWake(terminal)
+        }
         guard let sessionID = terminal.claudeSessionID else { return .noSessionID }
         let expectedReplacementState = TerminalReplacementSnapshot(terminal: terminal)
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
@@ -863,11 +1019,21 @@ public actor HibernationCoordinator {
         let server = worktree.tmuxServer
         let paneID = terminal.tmuxPaneID
 
-        // `claude --resume` is cwd-scoped (session lookup is per-directory).
-        // Respawning inside the existing window already runs in the worktree,
-        // but assert it so a moved/relocated worktree can't silently resume in
-        // the wrong directory (or fail to find the session).
-        if let paneCwd = try? await tmux.paneCurrentPath(server: server, paneID: paneID),
+        // Assert that the process about to be resumed will run in THIS
+        // worktree. Not a lookup concern: `claude --resume <id>` is not
+        // cwd-scoped — measured on claude 2.1.261, a resume from another
+        // directory succeeds and appends to the original project directory's
+        // JSONL. What the check is for is belonging: a session resumed outside
+        // its worktree would edit the wrong tree while writing to the right
+        // transcript, which is the harder failure to notice. The respawn `-c`s
+        // into the worktree path regardless, so this only reports.
+        //
+        // tmux-only, and the guard is not decoration: a holder row's pane id is
+        // the empty string, so this would ask a tmux server — starting one, on
+        // a worktree whose sessions deliberately have none — about a
+        // coordinate that names nothing.
+        if terminal.transport != .holder,
+           let paneCwd = try? await tmux.paneCurrentPath(server: server, paneID: paneID),
            paneCwd != worktree.path {
             logger.warning("wake: pane cwd \(paneCwd, privacy: .public) != worktree path \(worktree.path, privacy: .public) for terminal \(terminal.id, privacy: .public); respawn will -c into the worktree path")
         }
@@ -1001,6 +1167,24 @@ public actor HibernationCoordinator {
             "TBD_TERMINAL_ID": terminal.id.uuidString,
         ]
         let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
+
+        // The transports diverge again, and for the last time. Everything above
+        // — profile, env, overlay, trust seed, transcript sync, the resume
+        // argv with its queued prompt — is shared verbatim, because it decides
+        // WHAT to resume and that is transport-independent. Below is the tmux
+        // mechanic.
+        if terminal.transport == .holder {
+            return await wakeHolderSection(
+                terminal: terminal,
+                worktree: worktree,
+                sessionID: sessionID,
+                expectedReplacementState: expectedReplacementState,
+                spawnCommand: spawn.command,
+                env: env,
+                sensitiveEnv: sensitiveEnv,
+                cols: cols,
+                rows: rows)
+        }
 
         // The window/pane the rest of wake must reference: the original ones
         // when the window survived, or the recreated window's fresh ones.
@@ -1325,22 +1509,51 @@ public actor HibernationCoordinator {
 
         // Prune markers for terminals that vanished.
         let liveIDs = Set(terminals.map { $0.id })
-        let livePaneIDs = Set(terminals.compactMap { $0.tmuxPaneID })
+        // The tracker's own keys, so a holder row's entry (keyed by its
+        // terminal id) survives a prune that a pane-id-only set would drop on
+        // the very first sweep.
+        let liveKeys = Set(terminals.map { InputActivityTracker.key(for: $0) })
         idleSince = idleSince.filter { liveIDs.contains($0.key) }
         pendingKillSince = pendingKillSince.filter { liveIDs.contains($0.key) }
-        inputActivity.prune(keeping: livePaneIDs)
+        inputActivity.prune(keeping: liveKeys)
 
         for terminal in terminals {
-            let lastInputAt = inputActivity.lastInput(paneID: terminal.tmuxPaneID)
+            let lastInputAt = inputActivity.lastInput(
+                paneID: InputActivityTracker.key(for: terminal))
             let decision = HibernationGate.decide(
                 terminal: terminal,
                 autoHibernateEnabled: config.autoHibernateEnabled,
                 inputVetoEnabled: config.hibernateInputVetoEnabled,
+                holderHibernationEnabled: config.holderHibernationEnabled,
                 idleTimeout: timeout,
                 idleSince: idleSince[terminal.id],
                 lastInputAt: lastInputAt,
                 now: reference
             )
+
+            // A holder row whose screen this daemon cannot read is not a
+            // candidate, however idle it is. `performHolderHibernate` fails
+            // closed on exactly this — a viewer owns the pty, or no reader was
+            // ever adopted — but it only reaches that refusal after the sweep
+            // has written a request row and its refused outcome. On a tab the
+            // user is looking at the condition holds for as long as the tab is
+            // open, so without this check an open tab costs one
+            // request+refusal pair per sweep, forever, for a park that could
+            // never have happened.
+            //
+            // The gate cannot make this call: it is pure, and the registry is
+            // only available here. So the sweep asks, and treats the answer the
+            // way it treats the `.running` family — reset the idle clock and
+            // any armed debounce, write nothing — which restarts the full idle
+            // window from the moment the viewer leaves.
+            if terminal.transport == .holder,
+               decision == .eligible || decision == .notIdleLongEnough,
+               await holderScreenIsUnreadable(terminalID: terminal.id) {
+                logger.debug("hibernate: not arming \(terminal.id, privacy: .public) — the daemon cannot read this holder session's screen")
+                idleSince[terminal.id] = nil
+                pendingKillSince[terminal.id] = nil
+                continue
+            }
 
             switch decision {
             case .eligible:
@@ -1371,6 +1584,7 @@ public actor HibernationCoordinator {
                             policy: .automatic(
                                 enabled: config.autoHibernateEnabled,
                                 inputVetoEnabled: config.hibernateInputVetoEnabled,
+                                holderHibernationEnabled: config.holderHibernationEnabled,
                                 idleTimeout: timeout,
                                 idleSince: idleSince[terminal.id]))
                         await actuationLog.appendOutcome(
@@ -1422,6 +1636,10 @@ public actor HibernationCoordinator {
         guard let allTerminals = try? await db.terminals.list() else { return }
 
         for terminal in allTerminals where terminal.isParked {
+            if terminal.transport == .holder {
+                await reconcileParkedHolderRow(terminal)
+                continue
+            }
             guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else { continue }
             let server = worktree.tmuxServer
 
@@ -1531,7 +1749,7 @@ public actor HibernationCoordinator {
     /// `hibernated` flip and reads the row's snapshot once, and wake-on-focus
     /// reads the row's reason — a later refetch is too late. Wake broadcasts
     /// leave them nil.
-    private func broadcastHibernation(
+    func broadcastHibernation(
         terminal: Terminal, hibernated: Bool, keepWarm: Bool,
         tmuxWindowID: String? = nil, tmuxPaneID: String? = nil,
         suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil

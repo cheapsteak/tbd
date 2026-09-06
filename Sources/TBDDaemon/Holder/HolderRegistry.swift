@@ -118,13 +118,39 @@ actor HolderRegistry {
         }
     }
 
-    /// A reader and the description the hand-over rode with.
+    /// A reader, the description the hand-over rode with, and the pid of the
+    /// holder that answered it.
     ///
     /// The description is not decoration: it is the one place a job that
     /// finished while no daemon was listening reports how it ended.
+    ///
+    /// The holder pid is read off the socket rather than off the wire — see
+    /// `HolderClient.peerPID` — so it is known for every adoption, including
+    /// one this daemon inherited from a previous one. It is optional because
+    /// the kernel may decline to answer, and because nothing here depends on
+    /// having it: the child pid is the anchor every reclaimer uses.
     private struct Adoption: Sendable {
         let reader: HolderReader
         let description: HolderChildDescription
+        let holderPID: Int32?
+    }
+
+    /// The processes behind a session this registry currently holds a reader
+    /// for.
+    ///
+    /// First-hand rather than inferred: both numbers come from the hand-over
+    /// that produced the reader, so a caller holding one of these is holding
+    /// what the *registry* observed, not what a row happens to say. That is
+    /// what makes it usable to repair a row whose pids were lost — a wake
+    /// interrupted between `spawn` publishing its reader and the row recording
+    /// its pids leaves exactly that, and after a restart `adoptAll` re-adopts
+    /// the holder anyway, so the reader is back while the row still names
+    /// nothing.
+    struct HolderAdoptedProcess: Sendable, Equatable {
+        /// The holder process, when the kernel would name it.
+        let holderPID: Int32?
+        /// The job the holder forked. The anchor every reclaimer sweeps by.
+        let childPID: Int32
     }
 
     /// What the registry knows about one session.
@@ -273,6 +299,13 @@ actor HolderRegistry {
     private var lastAttachGeneration: UInt64 = 0
 
     private var slots: [UUID: Slot] = [:]
+
+    /// What the hand-over said about each published session's processes.
+    ///
+    /// Keyed and cleared exactly like `slots`' `.adopted` case, in `publish`
+    /// and `release`, so it cannot outlive the reader it describes and point a
+    /// caller at pids this daemon stopped observing.
+    private var adoptedProcesses: [UUID: HolderAdoptedProcess] = [:]
     /// The last status a holder reported for a session, and the only home it
     /// has: no `terminal` column records an exit status, and the row's fate
     /// belongs to the holder reconciler Milestone B adds. Recorded here so a
@@ -452,6 +485,17 @@ actor HolderRegistry {
         return reader
     }
 
+    /// The processes behind a session this registry holds a published reader
+    /// for, or nil when it holds none.
+    ///
+    /// Answers for exactly the sessions `reader(for:)` answers for, because it
+    /// is written and cleared in the same two places. A caller that has just
+    /// seen a live reader can therefore rely on this answering, and one that
+    /// has not must be prepared for nil.
+    func adoptedProcess(for terminalID: UUID) -> HolderAdoptedProcess? {
+        adoptedProcesses[terminalID]
+    }
+
     /// The last status a holder reported for a session, if one ever has.
     func lastKnownStatus(for terminalID: UUID) -> HolderChildStatus? {
         statuses[terminalID]
@@ -539,7 +583,7 @@ actor HolderRegistry {
             throw error
         }
 
-        publish(reader: adoption.reader, status: adoption.description.status, for: terminalID)
+        publish(adoption, for: terminalID)
         Self.logger.info(
             """
             spawned and adopted a holder for session \(terminalID.uuidString, privacy: .public): \
@@ -898,7 +942,7 @@ actor HolderRegistry {
                 """)
             throw Error.superseded(terminalID: terminalID)
         }
-        publish(reader: adoption.reader, status: adoption.description.status, for: terminalID)
+        publish(adoption, for: terminalID)
         Self.logger.info(
             """
             adopted the holder for session \(terminalID.uuidString, privacy: .public): child \
@@ -1229,6 +1273,10 @@ actor HolderRegistry {
             await client.close()
             throw error
         }
+        // Read while the connection is still open — `LOCAL_PEERPID` is a
+        // property of the socket, not of the path — and after a verb has been
+        // answered, so it names a peer that has provably spoken the protocol.
+        let holderPID = await client.peerPID()
         await client.close()
 
         guard description.owner == owner else {
@@ -1279,7 +1327,7 @@ actor HolderRegistry {
             await reader.stop()
             throw error
         }
-        return Adoption(reader: reader, description: description)
+        return Adoption(reader: reader, description: description, holderPID: holderPID)
     }
 
     // MARK: - Handing a session to a viewer
@@ -2189,6 +2237,10 @@ actor HolderRegistry {
         // ID that no longer means anything.
         pendingAttaches[terminalID] = nil
         viewerAttachments[terminalID] = nil
+        // The processes are named only for as long as this daemon is reading
+        // them. A session it has let go of is one whose pids it has no
+        // first-hand claim about any more.
+        adoptedProcesses[terminalID] = nil
         switch slots[terminalID] {
         case nil:
             return
@@ -2220,11 +2272,14 @@ actor HolderRegistry {
     /// `liveDrainLoops` negative for a spawned session, and
     /// `peakLiveDrainLoops` could not see a second loop running beside a
     /// spawned one — the exact byte theft that counter exists to catch.
-    private func publish(
-        reader: HolderReader, status: HolderChildStatus, for terminalID: UUID
-    ) {
-        slots[terminalID] = .adopted(reader)
-        statuses[terminalID] = status
+    private func publish(_ adoption: Adoption, for terminalID: UUID) {
+        slots[terminalID] = .adopted(adoption.reader)
+        statuses[terminalID] = adoption.description.status
+        // Recorded with the reader and cleared with it, so "the registry holds
+        // a reader for this session" and "the registry can name that session's
+        // processes" are the same fact rather than two that can disagree.
+        adoptedProcesses[terminalID] = HolderAdoptedProcess(
+            holderPID: adoption.holderPID, childPID: adoption.description.childPID)
         drainLoopsStarted += 1
         liveDrainLoops += 1
         peakLiveDrainLoops = max(peakLiveDrainLoops, liveDrainLoops)

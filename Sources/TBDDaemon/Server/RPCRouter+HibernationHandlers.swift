@@ -8,17 +8,30 @@ extension RPCRouter {
     /// describe the same state differently. Always names
     /// `tbd terminal conversation`, which still reads a dead session's messages
     /// — context can be rebuilt before the terminal is closed.
+    ///
+    /// An empty `paneID` is a holder-backed row rather than a nameless pane:
+    /// those carry `tmuxPaneID == ""` by construction, and the classification
+    /// that produced this result asked the process table, not tmux. Naming "its
+    /// tmux pane ()" there would send a reader looking for a coordinate that
+    /// was never supposed to exist.
     static func unparkedWakeMessage(
         paneID: String, detail: UnparkedPaneDisagreement
     ) -> String {
+        let subject = paneID.isEmpty
+            ? "its holder-backed session"
+            : "its tmux pane (\(paneID))"
         let cause: String
         switch detail {
         case .paneMissing:
-            cause = "its tmux pane (\(paneID)) is gone"
+            cause = "\(subject) is gone"
         case .processExited:
-            cause = "its tmux pane (\(paneID)) is still there but its process has exited"
+            cause = paneID.isEmpty
+                ? "\(subject) has exited"
+                : "\(subject) is still there but its process has exited"
         case .paneBelongsToAnotherTerminal(let actual):
-            cause = "its pane coordinate (\(paneID)) now points at a different terminal (\(actual))"
+            cause = paneID.isEmpty
+                ? "\(subject) now belongs to a different terminal (\(actual))"
+                : "its pane coordinate (\(paneID)) now points at a different terminal (\(actual))"
         }
         return """
             TBD's row says this terminal is awake, but \(cause) — so nothing was woken and any \

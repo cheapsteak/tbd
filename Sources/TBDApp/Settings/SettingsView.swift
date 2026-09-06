@@ -269,6 +269,7 @@ struct GeneralSettingsTab: View {
                     .help("Experimental: best-effort exit idle Claude instances when the machine is about to sleep, so a tmux server that dies during a long sleep has less to recover. Off by default — may interrupt long-running work.")
                 controlModeToggle
                 ptyHolderToggle
+                holderHibernationToggle
                 hibernateInputVetoToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
@@ -322,6 +323,28 @@ struct GeneralSettingsTab: View {
         .disabled(!supported)
         if !supported {
             Text(AppState.ptyHolderUnsupportedCaption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Pty-holder auto-hibernation opt-in. Reads the persisted flag from
+    /// `daemon.capabilities` and writes via `config.setHolderHibernationEnabled`.
+    /// Disabled with the same "no TBDHolder helper" explanation as
+    /// `ptyHolderToggle`, since there is no holder-backed session for this
+    /// gate to ever act on without one.
+    @ViewBuilder
+    private var holderHibernationToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        let supported = capabilities?.ptyHolderSupported ?? false
+        Toggle("Hibernate pty-holder sessions", isOn: Binding(
+            get: { capabilities?.holderHibernationEnabled ?? false },
+            set: { newValue in Task { await appState.setHolderHibernationEnabled(newValue) } }
+        ))
+        .help(AppState.holderHibernationHelp)
+        .disabled(!supported)
+        if !supported {
+            Text(AppState.holderHibernationUnsupportedCaption)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
