@@ -4037,6 +4037,19 @@ extension RPCRouter {
             observedAt: observedAt
         ) else { return .ok() }
 
+        // The session is back, so an exit stamp describing its predecessor is
+        // stale. Scoped to `.exited` inside the store: SessionStart also fires on
+        // `/clear`, `/compact` and a resume inside a live process, and a blanket
+        // un-park there would silently undo an operator's deliberate hibernate.
+        // Placed after the identity check above, so a hook this pass rejected
+        // retracts nothing.
+        if (try? await db.terminals.clearSessionExitStamp(id: terminal.id)) == true {
+            logger.debug("""
+                sessionEvent: cleared the exit stamp on terminal \
+                \(terminal.id.uuidString, privacy: .public)
+                """)
+        }
+
         // The first accepted Codex session has no prior lifecycle to fence, and
         // its rollout can write task_started before this hook reaches TBD.
         // Later accepted starts capture the current EOF even when the path is
@@ -4241,15 +4254,43 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// A Claude session ended. Drops any standing delegation claim: a session
-    /// that exits while background subagents are live leaves a final
-    /// `turn_duration` record still reporting them, and no later turn ever
-    /// arrives to retract it.
+    /// A Claude session ended. Two effects, both retractions of something the
+    /// session can no longer be reporting.
+    ///
+    /// Drops any standing delegation claim: a session that exits while background
+    /// subagents are live leaves a final `turn_duration` record still reporting
+    /// them, and no later turn ever arrives to retract it.
+    ///
+    /// And, when the reason means the PROCESS is leaving, parks the row with
+    /// `HibernateReason.exited`. That stamp is what makes "Claude is not running
+    /// here" a fact a caller can act on: without it a send to the terminal finds a
+    /// live pane with a shell prompt in it, pastes the message, presses Enter, and
+    /// runs the message as a shell command while reporting success. The park is
+    /// deliberately the same state a hibernate produces — process gone, terminal
+    /// alive, session id known — so one wake path and one UI cover both
+    /// (design 2026-09-05, "Not-running delivery").
     func handleTerminalSessionEnded(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionEndedParams.self, from: paramsData)
         await claudeDelegationTracker.clear(
             terminalID: params.terminalID,
             sessionIncarnationID: params.sessionIncarnationID)
+
+        guard SessionEndReason.parksTheTerminal(params.reason) else {
+            logger.debug("""
+                sessionEnded: terminal=\(params.terminalID.uuidString, privacy: .public) \
+                reason=\(params.reason ?? "none", privacy: .public) — not a process exit, \
+                leaving the park state alone
+                """)
+            return .ok()
+        }
+        let stamped = (try? await db.terminals.stampSessionExited(
+            id: params.terminalID,
+            reportedIncarnationID: params.sessionIncarnationID,
+            at: now())) ?? false
+        logger.debug("""
+            sessionEnded: terminal=\(params.terminalID.uuidString, privacy: .public) \
+            reason=\(params.reason ?? "none", privacy: .public) stamped=\(stamped, privacy: .public)
+            """)
         return .ok()
     }
 
