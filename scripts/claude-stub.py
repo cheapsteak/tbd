@@ -487,8 +487,6 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
 
     queued = SIGNAL_TARGETS.pending_signum
     if child is None:
-        if queued is not None:
-            raise Terminated(queued)
         # Nothing was spawned and nothing else will be, so the same rule as
         # below applies: a stop signal from here on has nothing to act on.
         #
@@ -503,12 +501,29 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
         # together, for the reason the spawn arming above gives: apart, a
         # signal landing between the two is recorded and then swallowed by the
         # latch, which is the same bug one bytecode narrower.
+        #
+        # A signal queued across the spawn takes that same route rather than a
+        # shortcut of its own. It is the earlier of the two — it landed while
+        # `spawning` was still set — so it is the one that unwinds and owns the
+        # exit status, and an ownerless signal recorded after it is left in
+        # place for `main` to promote into the exiting summary, which reports
+        # both. Raising it ahead of the latch, as an unmasked shortcut here
+        # once did, left `finishing` unset for the whole unwind: a further
+        # signal arriving in that stretch was recorded as unowned and clobbered
+        # the record already sitting there.
         blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
         try:
-            raise_if_stopped()
+            if queued is None:
+                # `raise_if_stopped`'s job, done without raising: an exception
+                # must not leave this block before the latch is set, so the
+                # `Terminated` is born below instead.
+                queued = SIGNAL_TARGETS.unowned_signum
+                SIGNAL_TARGETS.unowned_signum = None
             SIGNAL_TARGETS.finishing = True
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+        if queued is not None:
+            raise Terminated(queued)
         return 127
 
     try:
@@ -592,6 +607,29 @@ def serve_until_signalled(
         # order has one, and a signal landing in it raises `Terminated`.
         SIGNAL_TARGETS.finishing = True
         SIGNAL_TARGETS.serving_event = None
+
+
+def report_late_signals() -> None:
+    """Report every stop signal recorded during the unwind, on any exit path.
+
+    Called from `main`'s outermost `finally` rather than from the normal-return
+    path, because a run that ends in a `Terminated` is exactly the run most
+    likely to be holding a second signal. The `Terminated` reports the stop
+    that produced the status; a signal recorded as unowned in a gap nothing
+    unwinds, or taken by the handler once `finishing` was latched, is recorded
+    only here. Printing the summary where the normal return reaches it and the
+    exception does not left those captured internally and never surfaced.
+
+    Every one of them, not the last: two stop signals in this window are two
+    facts about the run, and a summary that reports one is indistinguishable
+    from a run that only got one.
+    """
+    late = SIGNAL_TARGETS.late_signums
+    if not late:
+        return
+    noun = "signal" if len(late) == 1 else "signals"
+    rendered = ", ".join(str(signum) for signum in late)
+    report([f"{noun} {rendered} arrived while exiting; nothing left to stop"])
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -736,14 +774,6 @@ def main(argv: list[str]) -> int:
                     report([f"sandbox kept at {sandbox}"])
                 else:
                     shutil.rmtree(sandbox, ignore_errors=True)
-        if SIGNAL_TARGETS.late_signums:
-            # Every one of them, not the last: two stop signals in this window
-            # are two facts about the run, and a summary that reports one is
-            # indistinguishable from a run that only got one.
-            late = SIGNAL_TARGETS.late_signums
-            noun = "signal" if len(late) == 1 else "signals"
-            rendered = ", ".join(str(signum) for signum in late)
-            report([f"{noun} {rendered} arrived while exiting; nothing left to stop"])
         return status
     except Terminated as terminated:
         report([f"stopped by signal {terminated.signum}"])
@@ -759,6 +789,10 @@ def main(argv: list[str]) -> int:
         report([f"stopped by signal {int(signal.SIGINT)}"])
         return 128 + int(signal.SIGINT)
     finally:
+        # After the `stopped by signal` line and before the handlers go back:
+        # the summary belongs to every exit, and it is written while the
+        # wrapper still owns the signals it is reporting on.
+        report_late_signals()
         restore_signal_handlers(previous_handlers)
 
 

@@ -675,6 +675,48 @@ class SignalTargetsFiringWhenTheSpawnDisarms(claude_stub.SignalTargets):
             signal_from_a_context_that_ignores_exceptions(self._signum)
 
 
+class SignalTargetsQueueingThenFiringWhenTheSpawnDisarms(claude_stub.SignalTargets):
+    """A `SignalTargets` that ends the spawn holding two distinct signals.
+
+    Arming the spawn parks `queued` in `pending_signum`, which is what the
+    handler does when a stop signal lands inside `Popen` — a window
+    microseconds wide that cannot be hit on demand, and the same stand-in
+    `QueuedSpawnSignalTests` uses. Disarming it then fires `unowned` for real,
+    from a context that discards exceptions, so it takes the handler's
+    ownerless branch in the one stretch of the failed-spawn path where no
+    phase owns a stop signal.
+
+    The pair is the shape the failed-spawn path has to answer for: `queued`
+    arrived first and owns the exit status, `unowned` arrived second and can
+    only be reported, and a run that surfaces one of the two is
+    indistinguishable from a run that was sent one signal.
+    """
+
+    def __init__(self, queued: int, unowned: int) -> None:
+        self._queued = queued
+        self._unowned = unowned
+        self._fired = False
+        super().__init__()
+
+    @property
+    def spawning(self) -> bool:
+        return self._spawning
+
+    @spawning.setter
+    def spawning(self, value: bool) -> None:
+        was_spawning = getattr(self, "_spawning", False)
+        self._spawning = value
+        if not was_spawning and value:
+            # `run_claude` clears `pending_signum` and arms `spawning` under
+            # the mask, so the queue is filled after the arming rather than
+            # before it — the order a real handler firing inside `Popen`
+            # produces.
+            self.pending_signum = self._queued
+        elif was_spawning and not value and not self._fired:
+            self._fired = True
+            signal_from_a_context_that_ignores_exceptions(self._unowned)
+
+
 class StopSignalDroppedByAnIgnoredContextTests(SignalTargetsFixture):
     """The window the ubuntu harness job kept failing in, made deterministic.
 
@@ -808,6 +850,99 @@ class StopSignalDroppedByAnIgnoredContextTests(SignalTargetsFixture):
                     1, len(created), "the wrapper did not create a temp sandbox"
                 )
                 self.assertFalse(Path(created[0]).exists(), "the temp sandbox leaked")
+
+    def test_a_second_signal_on_the_failed_spawn_path_reaches_the_summary(self):
+        # Two distinct stops on the binary-not-found path: one queued across
+        # the spawn, one landing ownerless in the window after `spawning`
+        # clears. The queued one arrived first and is the status; the second
+        # can only be reported — and reporting it is the half that was
+        # missing. The failed-spawn branch used to raise `Terminated` straight
+        # out, skipping the mask-check-latch its siblings use, and the
+        # exiting-summary line sat on `main`'s normal-return path, which a
+        # propagating `Terminated` never reaches. `main`'s cleanup promoted
+        # the second signal into `late_signums` and nothing ever printed it,
+        # so a run sent two stops was indistinguishable from one sent one.
+        root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        created: list[str] = []
+        # Never created, so `Popen` raises `FileNotFoundError` for real.
+        missing = root / "no-such-claude"
+        queued, unowned = int(signal.SIGTERM), int(signal.SIGHUP)
+        targets = SignalTargetsQueueingThenFiringWhenTheSpawnDisarms(queued, unowned)
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), mock.patch.object(
+            claude_stub, "SIGNAL_TARGETS", targets
+        ), mock.patch.object(
+            claude_stub.tempfile, "mkdtemp", recording_mkdtemp(created, root)
+        ):
+            status = claude_stub.main(
+                ["--text", "x", "--claude-binary", str(missing), "--", "-p", "hi"]
+            )
+
+        self.assertEqual(
+            128 + queued, status, "the queued signal did not produce the status"
+        )
+        written = stderr.getvalue()
+        self.assertIn(f"stopped by signal {queued}", written)
+        self.assertIn(
+            f"signal {unowned} arrived while exiting; nothing left to stop",
+            written,
+            "the second signal was recorded but never reported",
+        )
+        self.assertEqual([unowned], targets.late_signums)
+        self.assertEqual(1, len(created), "the wrapper did not create a temp sandbox")
+        self.assertFalse(Path(created[0]).exists(), "the temp sandbox leaked")
+
+    def test_a_signal_during_the_failed_spawn_unwind_does_not_clobber_the_record(self):
+        # What the masked check-and-latch buys over raising straight out. The
+        # `Terminated` unwinds through the stub server's `__exit__` — a socket
+        # shutdown and a thread join — before `main`'s cleanup latches
+        # `finishing`. Raised ahead of the latch, a third stop arriving in that
+        # stretch is taken by the handler's ownerless branch and overwrites the
+        # single `unowned_signum` slot, so the second signal is destroyed on
+        # write and the summary names only the third. Latched first, the
+        # handler appends it to `late_signums` instead and all three survive:
+        # the first as the status, the other two in the summary, in order.
+        root = Path(tempfile.mkdtemp(prefix="claudestub-test-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        created: list[str] = []
+        missing = root / "no-such-claude"
+        queued, unowned = int(signal.SIGTERM), int(signal.SIGHUP)
+        during_unwind = int(signal.SIGINT)
+        targets = SignalTargetsQueueingThenFiringWhenTheSpawnDisarms(queued, unowned)
+
+        class ServerFiringOnTheWayOut(claude_stub.StubServer):
+            """Fires the third signal from the `__exit__` the unwind passes."""
+
+            def __exit__(self, *exc: object) -> None:
+                signal_from_a_context_that_ignores_exceptions(during_unwind)
+                return super().__exit__(*exc)
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), mock.patch.object(
+            claude_stub, "SIGNAL_TARGETS", targets
+        ), mock.patch.object(
+            claude_stub, "StubServer", ServerFiringOnTheWayOut
+        ), mock.patch.object(
+            claude_stub.tempfile, "mkdtemp", recording_mkdtemp(created, root)
+        ):
+            status = claude_stub.main(
+                ["--text", "x", "--claude-binary", str(missing), "--", "-p", "hi"]
+            )
+
+        self.assertEqual(128 + queued, status)
+        self.assertEqual(
+            [unowned, during_unwind],
+            targets.late_signums,
+            "a signal arriving during the unwind overwrote the earlier record",
+        )
+        self.assertIn(
+            f"signals {unowned}, {during_unwind} arrived while exiting; "
+            "nothing left to stop",
+            stderr.getvalue(),
+        )
+        self.assertFalse(Path(created[0]).exists(), "the temp sandbox leaked")
 
     def test_both_stop_signals_in_the_exit_window_are_reported(self):
         # Two arrive: one recorded as unowned in a gap nothing unwinds, one
