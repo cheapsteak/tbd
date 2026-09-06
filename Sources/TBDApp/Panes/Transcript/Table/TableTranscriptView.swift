@@ -38,6 +38,10 @@ struct TableTranscriptView: NSViewRepresentable {
     /// tells the Coordinator its composed rows were built against a stale one.
     let linkRoot: String
     let nodesProvider: @MainActor () -> [TranscriptRenderNode]
+    /// Handed the table view once it exists, so the pane can register it as the
+    /// place Escape in the composer returns focus to. Nil where nothing needs
+    /// that handle — Session History mounts no composer.
+    var onTableReady: (@MainActor (NSTableView) -> Void)?
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
 
@@ -159,6 +163,7 @@ struct TableTranscriptView: NSViewRepresentable {
         let makeNSViewMs = Double(DispatchTime.now().uptimeNanoseconds &- makeStart) / 1_000_000
         Self.log.debug(
             "table.open.makeNSViewDone ms=\(makeNSViewMs, format: .fixed(precision: 1), privacy: .public) rows=\(nodes.count, privacy: .public)")
+        onTableReady?(tableView)
         return scrollView
     }
 

@@ -177,5 +177,32 @@ private struct TerminalCommandsContent: View {
         }
         .keyboardShortcut("w", modifiers: .command)
         .disabled(!appState.canCloseFocusedTab)
+
+        Divider()
+
+        // ⌘/ is unbound in this app, unclaimed by the terminal view, inert in
+        // SwiftTerm, and not a system default. A terminal with no composer
+        // mounted answers the call with a no-op, which is the honest result for
+        // a pane that is closed or a session the composer's scope excludes.
+        Button("Focus Message Composer") {
+            Task { @MainActor in
+                guard let terminalID = appState.composerCommandTerminalID else { return }
+                appState.focusComposer(terminalID: terminalID)
+            }
+        }
+        .keyboardShortcut("/", modifiers: .command)
+        .disabled(appState.composerCommandTerminalID == nil)
+
+        // The way back, for people who reach for a menu rather than Escape —
+        // which the composer's own key handling already answers with this same
+        // call. ⌥ rather than ⇧, because ⌘⇧/ is macOS's Help search field.
+        Button("Focus Transcript") {
+            Task { @MainActor in
+                guard let terminalID = appState.composerCommandTerminalID else { return }
+                appState.focusTranscript(terminalID: terminalID)
+            }
+        }
+        .keyboardShortcut("/", modifiers: [.command, .option])
+        .disabled(appState.composerCommandTerminalID == nil)
     }
 }

@@ -18,6 +18,7 @@ struct TerminalSessionDeltaCodingTests {
 
         #expect(delta.terminalID == terminalID)
         #expect(delta.sessionOrderObservedAt == nil)
+        #expect(delta.sessionIncarnationID == nil)
     }
 
     @Test("the session order generation round trips")
@@ -35,5 +36,22 @@ struct TerminalSessionDeltaCodingTests {
             from: JSONEncoder().encode(original))
 
         #expect(decoded.sessionOrderObservedAt == observedAt)
+    }
+
+    @Test("the session incarnation ID round trips")
+    func sessionIncarnationIDRoundTrips() throws {
+        let incarnationID = UUID()
+        let original = TerminalSessionDelta(
+            terminalID: UUID(),
+            worktreeID: UUID(),
+            sessionID: "session",
+            transcriptPath: "/tmp/session.jsonl",
+            sessionIncarnationID: incarnationID)
+
+        let decoded = try JSONDecoder().decode(
+            TerminalSessionDelta.self,
+            from: JSONEncoder().encode(original))
+
+        #expect(decoded.sessionIncarnationID == incarnationID)
     }
 }

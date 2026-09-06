@@ -300,7 +300,14 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     ///     from `waitForSuspension`, whose derivation against `.clockDriven`'s
     ///     240 s limit is documented in `ClockTestSupport.swift` and
     ///     `Tests/CLAUDE.md` ("Population is the scheduler"); the value is kept
-    ///     so that a chain of these still tallies the same way. **On task
+    ///     so that a chain of these still tallies the same way. **Raise it to
+    ///     ``TestDeadlines/saturatedPass`` where the arming is not one hop from
+    ///     the test body** — where reaching the sleep costs a main-actor round
+    ///     trip, or an unstructured task that has to be given a thread first.
+    ///     45 s sits below fast pass 2's measured p90 per-test latency, so such
+    ///     a wait measures the runner rather than the code under test;
+    ///     `ComposerSendCoordinatorTests.theHoldTimesOutOnTheInjectedClock` is
+    ///     the worked example. **On task
     ///     cancellation the wait ends without a diagnostic**: the waiter is
     ///     still released, but the failure belongs to whatever cancelled the
     ///     test, not to this call site.
@@ -500,8 +507,10 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     /// `timeout` is the same hang guard, exposed here (where
     /// ``advanceWhenArmed(by:sourceLocation:)`` does not expose it) for one
     /// reason: the guard has to be drivable in a self-test, and a proof that
-    /// costs the full 45 s default is a proof nobody keeps. Every production
-    /// call site takes the default.
+    /// costs the full 45 s default is a proof nobody keeps. A production call
+    /// site takes the default unless its arming is gated behind a main-actor
+    /// round trip, where the budget is ``TestDeadlines/saturatedPass`` — see the
+    /// `timeout` note on ``sleeperArmed(timeout:sourceLocation:)``.
     public func requireAdvanceWhenArmed(by duration: Swift.Duration,
                                         timeout: Swift.Duration = .seconds(45),
                                         sourceLocation: SourceLocation = #_sourceLocation) async throws {

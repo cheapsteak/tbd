@@ -277,6 +277,13 @@ custom_rules:
       - "Sources/TBDApp/Panes/Transcript/TranscriptOverlayView\\.swift"
       # OverlayFileView is the body of a file frame in the overlay — outside the transcript list, real ScrollView is safe.
       - "Sources/TBDApp/Panes/Transcript/OverlayFileView\\.swift"
+      # CompletionOverlayView is the composer's completion menu, a fixed-height
+      # floating overlay above the composer — never hosted or measured as a
+      # transcript row card.
+      - "Sources/TBDApp/Panes/Transcript/Composer/CompletionOverlayView\\.swift"
+      # AttachmentStrip is the composer's thumbnail strip above the text field —
+      # also outside the transcript list's row-measurement path.
+      - "Sources/TBDApp/Panes/Transcript/Composer/AttachmentStrip\\.swift"
     regex: '\bScrollView\b'
     match_kinds:
       - identifier

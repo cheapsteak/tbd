@@ -4769,7 +4769,12 @@ extension RPCRouter {
             worktreeID: terminal.worktreeID,
             sessionID: sessionApplication.sessionID,
             transcriptPath: sessionApplication.transcriptPath,
-            sessionOrderObservedAt: sessionApplication.orderObservedAt
+            sessionOrderObservedAt: sessionApplication.orderObservedAt,
+            // The ACCEPTED hook's own incarnation. `applySessionStart` accepts
+            // only when the reported id equals the row's, so on this line the
+            // two are the same value and this is the id of the spawn that just
+            // reported in.
+            sessionIncarnationID: params.sessionIncarnationID
         )))
         if let application = sessionApplication.activityObservation {
             subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
