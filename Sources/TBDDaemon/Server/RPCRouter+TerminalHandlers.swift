@@ -4358,7 +4358,8 @@ extension RPCRouter {
     /// runs the message as a shell command while reporting success. The park is
     /// deliberately the same state a hibernate produces — process gone, terminal
     /// alive, session id known — so one wake path and one UI cover both
-    /// (design 2026-09-05, "Not-running delivery").
+    /// (`docs/specs/2026-09-05-transcript-composer-design.md`, "Not-running
+    /// delivery").
     func handleTerminalSessionEnded(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionEndedParams.self, from: paramsData)
         await claudeDelegationTracker.clear(
