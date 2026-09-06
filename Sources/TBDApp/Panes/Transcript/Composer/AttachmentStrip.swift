@@ -65,7 +65,13 @@ struct AttachmentStrip: View {
                 .foregroundStyle(detached ? Color.orange : Color.secondary)
         }
         .contentShape(Rectangle())
-        .onHover { inside in onHover(inside ? attachment.number : nil) }
+        .onHover { inside in
+            if inside {
+                onHover(attachment.number)
+            } else if hoveredNumber == attachment.number {
+                onHover(nil)
+            }
+        }
         .onTapGesture {
             if detached { onReinsert(attachment.number) } else { onReveal(attachment.number) }
         }

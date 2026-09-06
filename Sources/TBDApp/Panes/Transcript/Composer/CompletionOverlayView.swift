@@ -28,33 +28,44 @@ struct CompletionOverlayView: View {
     static let maxHeight: CGFloat = rowHeight * CGFloat(CompletionController.visibleRowCount)
 
     var body: some View {
-        Group {
-            switch controller.presentation {
-            case .closed:
-                EmptyView()
-            case .loading:
-                message("Loading commands")
-            case .noMatch:
+        // `.closed` renders nothing at all — no chrome, no zero-height frame —
+        // rather than falling through to the background/stroke/shadow modifiers
+        // below, which would otherwise paint a hairline and shadow around an
+        // empty layout.
+        if case .closed = controller.presentation {
+            EmptyView()
+        } else {
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(VisualEffectView(material: .menu, blendingMode: .withinWindow))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .shadow(radius: 8, y: 2)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch controller.presentation {
+        case .closed:
+            EmptyView()
+        case .loading:
+            message("Loading commands")
+        case .noMatch:
+            message("No commands match")
+        case .rows:
+            // A one-character query that matches nothing also stays
+            // `.rows` (the controller reserves "no commands match" for
+            // longer queries, so a fresh keystroke isn't noisy) — render
+            // it the same way rather than an empty scroll view.
+            if controller.rows.isEmpty {
                 message("No commands match")
-            case .rows:
-                // A one-character query that matches nothing also stays
-                // `.rows` (the controller reserves "no commands match" for
-                // longer queries, so a fresh keystroke isn't noisy) — render
-                // it the same way rather than an empty scroll view.
-                if controller.rows.isEmpty {
-                    message("No commands match")
-                } else {
-                    list
-                }
+            } else {
+                list
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(VisualEffectView(material: .menu, blendingMode: .withinWindow))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.secondary.opacity(0.2), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .shadow(radius: 8, y: 2)
     }
 
     /// A single dim row while the inventory is in flight, with nothing
@@ -84,7 +95,13 @@ struct CompletionOverlayView: View {
                         // Hover PREVIEWS: it emphasizes the row and moves
                         // nothing, so what Return would take does not change
                         // under a resting pointer.
-                        .onHover { inside in hoveredIndex = inside ? index : nil }
+                        .onHover { inside in
+                            if inside {
+                                hoveredIndex = index
+                            } else if hoveredIndex == index {
+                                hoveredIndex = nil
+                            }
+                        }
                         // A click HIGHLIGHTS rather than runs. Mouse mis-clicks
                         // on a list are common and these rows are much larger
                         // targets than a terminal's, so a click that ran a
@@ -102,8 +119,8 @@ struct CompletionOverlayView: View {
     }
 }
 
-/// One row: the name with a matched alias in parentheses, a source badge, the
-/// one-line description, and the argument hint. Matched characters highlighted.
+/// One row: the name with a matched alias in parentheses, the one-line
+/// description, and the argument hint. Matched characters highlighted.
 private struct CompletionRowView: View {
     let row: CommandRanker.Row
     let isSelected: Bool
@@ -163,23 +180,20 @@ private struct CompletionRowView: View {
     /// highlight and the match cannot disagree.
     private var highlightedName: some View {
         let name = row.command.name as NSString
-        var result = Text("")
+        var runs: [Text] = []
         var cursor = 0
         for range in row.matchedRanges {
             if range.location > cursor {
-                // swiftlint:disable:next shorthand_operator - Text has `+` but no `+=`; `result += …` fails to typecheck.
-                result = result + Text(
+                runs.append(Text(
                     name.substring(with: NSRange(
-                        location: cursor, length: range.location - cursor)))
+                        location: cursor, length: range.location - cursor))))
             }
-            // swiftlint:disable:next shorthand_operator - Text has `+` but no `+=`; `result += …` fails to typecheck.
-            result = result + Text(name.substring(with: range)).bold()
+            runs.append(Text(name.substring(with: range)).bold())
             cursor = range.location + range.length
         }
         if cursor < name.length {
-            // swiftlint:disable:next shorthand_operator - Text has `+` but no `+=`; `result += …` fails to typecheck.
-            result = result + Text(name.substring(from: cursor))
+            runs.append(Text(name.substring(from: cursor)))
         }
-        return result.font(.callout)
+        return runs.reduce(Text(""), +).font(.callout)
     }
 }
