@@ -59,15 +59,15 @@ extension AppState {
     /// wraps this. `fallbackToDefaultProfile` opts into the ambient default login
     /// when the pinned profile is gone (used by the fallback retry).
     func wakeTerminalOutcome(terminalID: UUID, worktreeID: UUID, userInitiated: Bool,
-                             fallbackToDefaultProfile: Bool) async -> WakeAttemptOutcome {
+                             fallbackToDefaultProfile: Bool,
+                             prompt: String? = nil) async -> WakeAttemptOutcome {
         guard !wakeInFlight.contains(terminalID) else { return .ok }  // in-flight dedupe = benign no-op
         wakeInFlight.insert(terminalID)
         defer { wakeInFlight.remove(terminalID) }
         do {
             let size = mainAreaTerminalSize()
-            try await daemonClient.terminalWake(
-                terminalID: terminalID, cols: size.cols, rows: size.rows,
-                fallbackToDefaultProfile: fallbackToDefaultProfile)
+            try await terminalWakeSender(
+                terminalID, size.cols, size.rows, fallbackToDefaultProfile, prompt)
             await refreshTerminals(worktreeID: worktreeID)
             return .ok
         } catch {
@@ -103,9 +103,11 @@ extension AppState {
     /// windows) fired a modal per parked terminal. `userInitiated` drives the
     /// failure log level (explicit action → error; background → warning).
     @discardableResult
-    func wakeTerminal(terminalID: UUID, worktreeID: UUID, userInitiated: Bool) async -> String? {
+    func wakeTerminal(terminalID: UUID, worktreeID: UUID, userInitiated: Bool,
+                      prompt: String? = nil) async -> String? {
         switch await wakeTerminalOutcome(terminalID: terminalID, worktreeID: worktreeID,
-                                         userInitiated: userInitiated, fallbackToDefaultProfile: false) {
+                                         userInitiated: userInitiated,
+                                         fallbackToDefaultProfile: false, prompt: prompt) {
         case .ok: return nil
         case .failed(let m): return m
         case .profileMissing(_, _, let m): return m

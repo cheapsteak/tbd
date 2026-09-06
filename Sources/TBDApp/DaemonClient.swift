@@ -1632,10 +1632,21 @@ actor DaemonClient {
 
     /// Wake a hibernated terminal: respawn `claude --resume` in its window.
     /// Idempotent — a double-call collapses to one respawn daemon-side.
-    func terminalWake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, fallbackToDefaultProfile: Bool = false) async throws {
+    ///
+    /// `prompt` is delivered as a trailing argv on `claude --resume`, atomic with
+    /// the respawn, so it reaches ONLY a session this call actually woke. On the
+    /// idempotent no-op paths (already awake, wake already in flight) the daemon
+    /// returns `woken: false` and delivers nothing — which is what makes the
+    /// parameter safe to pass from a UI that may be racing a background wake.
+    func terminalWake(
+        terminalID: UUID, cols: Int? = nil, rows: Int? = nil,
+        fallbackToDefaultProfile: Bool = false, prompt: String? = nil
+    ) async throws {
         try await callVoidAsync(
             method: RPCMethod.terminalWake,
-            params: TerminalWakeParams(terminalID: terminalID, cols: cols, rows: rows, fallbackToDefaultProfile: fallbackToDefaultProfile)
+            params: TerminalWakeParams(
+                terminalID: terminalID, cols: cols, rows: rows,
+                fallbackToDefaultProfile: fallbackToDefaultProfile, prompt: prompt)
         )
     }
 
