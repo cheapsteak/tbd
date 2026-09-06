@@ -60,7 +60,11 @@ final class FakeResumeTmux: ResumeSendingTmux, @unchecked Sendable {
 
 struct FakeInspector: PaneProcessInspecting {
     var claudePID: Int32?
-    func foregroundClaudePID(panePID: Int32) -> Int32? { claudePID }
+    /// Whatever owns the pane's foreground group. Defaults to the pane pid —
+    /// an idle shell — because no test in this file exercises that rail.
+    var foregroundPID: Int32?
+    func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32? { claudePID }
+    func paneForegroundPID(panePID: Int32) -> Int32? { foregroundPID ?? panePID }
 }
 
 @Suite struct LimitResumeActuatorTests {

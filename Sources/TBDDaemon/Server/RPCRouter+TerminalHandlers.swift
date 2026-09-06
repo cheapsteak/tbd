@@ -2881,6 +2881,69 @@ extension RPCRouter {
             + "input path wired for it. Nothing was typed and its session is unchanged."
     }
 
+    /// The refusal a text `terminal.send` gets for a terminal whose Claude
+    /// process is gone.
+    ///
+    /// Named separately from the transport refusals because the caller's remedy
+    /// is different and specific: wake the terminal, which delivers the message
+    /// atomically with the respawn. Without this rail the send finds a live pane
+    /// with a shell prompt in it, pastes the message, presses Enter, and runs the
+    /// message as a shell command while reporting success.
+    static func parkedSendRefusal(terminalID: UUID, exited: Bool) -> String {
+        let cause = exited
+            ? "its Claude session exited"
+            : "it is hibernated"
+        return "terminal.send was refused: terminal \(terminalID) is not running — \(cause), so "
+            + "nothing was typed. Wake it instead (`tbd terminal wake --terminal \(terminalID) "
+            + "--prompt \"…\"`), which delivers the message as the resumed session's first prompt."
+    }
+
+    /// The refusal a text `terminal.send` gets when the pane is alive but the
+    /// process table says the session's agent does not own its foreground
+    /// process group.
+    ///
+    /// The second of two independent rails, and the one that covers a MISSED
+    /// hook: a crashed session emits no `SessionEnd`, so nothing stamped the row.
+    /// It is the only rail a Codex row has, because Codex ships no `SessionEnd`
+    /// hook to stamp with — see `foregroundAgentName(kind:claudeSessionID:)`.
+    /// It asks the same inspector the limit-resume path has always asked, which
+    /// reads `ps` — a process-table fact, never the rendered screen.
+    static func agentNotForegroundRefusal(
+        terminalID: UUID, paneID: String, agentName: String
+    ) -> String {
+        "terminal.send was refused: the session's agent (\(agentName)) is not the foreground "
+            + "process of pane \(paneID) for terminal \(terminalID) — a shell is, so the message "
+            + "would have run as a command line. Nothing was typed."
+    }
+
+    /// The process name the foreground rail looks for in a pane, per terminal
+    /// kind — and `nil` for a kind the rail must not run for at all.
+    ///
+    /// A shell's pane pid IS the shell, with no agent under it, so asking the
+    /// inspector about one refuses every healthy shell send there is. Both
+    /// agent-bearing kinds do have a process to find, and each names itself on
+    /// its command line, so the kind picks the name and the same `ps` question
+    /// answers for both.
+    ///
+    /// A row with NO recorded kind predates the column, and gets exactly the
+    /// reading migration `v22_terminal_kind`'s backfill gave every such row
+    /// when the column was introduced — Claude when it carries a Claude
+    /// session id, shell otherwise — which is also what `Terminal
+    /// .isClaudeResumable` already requires of a kindless row. Reading every
+    /// kindless row as Claude regardless of session id would run this rail,
+    /// expecting a "claude" process, against a plain shell pane that never
+    /// had one.
+    ///
+    /// Pure and static so the mapping is testable without a database, a pane, or
+    /// a process table.
+    static func foregroundAgentName(kind: TerminalKind?, claudeSessionID: String?) -> String? {
+        switch kind ?? (claudeSessionID == nil ? .shell : .claude) {
+        case .shell: return nil
+        case .claude: return "claude"
+        case .codex: return "codex"
+        }
+    }
+
     func handleTerminalSend(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -2997,6 +3060,80 @@ extension RPCRouter {
             return await performHolderSend(
                 payload: payload, terminal: terminal, actuationID: actuationID,
                 actor: actor, envelope: envelope)
+        }
+
+        // ─── Is Claude actually running here? ───
+        //
+        // Text only. `--keys` exists to answer a dialog and to interrupt, and a
+        // key sequence into a shell is not the failure this rail exists to stop.
+        //
+        // Two independent facts, because each fails on its own. The park stamp is
+        // written by the `SessionEnd` hook and is missed whenever the process
+        // crashes; the foreground-process inspector reads the process table and
+        // is available only for a tmux-backed row with a live pane. Both are
+        // machine facts — a column and `ps` — never the rendered screen, which
+        // this codebase forbids reading for state.
+        //
+        // The two rails split on the EMPTY payload — a bare Enter, which
+        // `--submit` with no text is — and they split deliberately:
+        //
+        //   - The park rail takes it. A parked row's pane holds a shell and
+        //     nothing else, so an Enter there has no message to lose and no
+        //     purpose to serve, and the refusal already names wake as the
+        //     remedy. Letting it through would be the one text payload that
+        //     reaches a session everyone agrees is gone.
+        //   - The foreground rail does not. A bare Enter is how a caller
+        //     answers a prompt the agent is already showing, and the inspector
+        //     is the fallible fact of the two — a pane it cannot read must not
+        //     cost a live row its Enter.
+        if case .text(let body, _, _) = payload {
+            if terminal.hibernatedAt != nil {
+                let message = Self.parkedSendRefusal(
+                    terminalID: terminal.id, exited: terminal.isExitStamped)
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+            // The foreground rail is kind-aware, not Claude-only. The
+            // inspector's question is "does a foreground process whose command
+            // line contains <name> own this pane", and the kind supplies the
+            // name: "claude" for a Claude row, "codex" for a Codex one, and for
+            // a row whose kind was never recorded, whichever of the two the
+            // Claude session id decides — the same reading `v22_terminal_kind`
+            // backfilled onto every such row and `Terminal.isClaudeResumable`
+            // already requires. A shell has no name to supply — its pane pid IS
+            // the shell, with no agent under it — so the rail never runs for
+            // one, and a shell send that would otherwise be refused every time
+            // goes through.
+            //
+            // Covering Codex here matters more than it does for Claude: a Codex
+            // row is never exit-stamped, because Codex ships no `SessionEnd`
+            // hook, and stamping one would be worse than not — the wake path
+            // refuses a non-Claude row, so the stamp would park it unwakeably.
+            // This rail is therefore the ONLY thing standing between a Codex
+            // pane whose agent left and a message pasted into its shell and run.
+            // The park rail above stays kind-agnostic: a parked row of any kind
+            // has no live session behind it.
+            //
+            // A pane id that resolves to a pid is the precondition for asking at
+            // all, and `panePID > 0` is not decoration: a tmux that cannot answer
+            // reports "0", and asking the process table about pid 0 is a question
+            // with no meaning. An unreadable pid therefore proceeds — a tmux that
+            // cannot answer is not evidence that Claude left, and the pane
+            // consultation below is the rail that judges a missing or dead pane,
+            // properly.
+            if !body.isEmpty,
+               let agentName = Self.foregroundAgentName(
+                    kind: terminal.kind, claudeSessionID: terminal.claudeSessionID),
+               let panePIDString = try? await tmux.panePID(
+                    server: worktree.tmuxServer, paneID: terminal.tmuxPaneID),
+               let panePID = Int32(panePIDString), panePID > 0,
+               paneProcessInspector.foregroundAgentPID(
+                    panePID: panePID, matching: agentName) == nil {
+                let message = Self.agentNotForegroundRefusal(
+                    terminalID: terminal.id, paneID: terminal.tmuxPaneID, agentName: agentName)
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
         }
 
         // ─── The second refusal line: a well-formed act the daemon declines ───
@@ -4059,6 +4196,31 @@ extension RPCRouter {
             observedAt: observedAt
         ) else { return .ok() }
 
+        // The session is back, so an exit stamp describing its predecessor is
+        // stale. Scoped to `.exited` inside the store: SessionStart also fires on
+        // `/clear`, `/compact` and a resume inside a live process, and a blanket
+        // un-park there would silently undo an operator's deliberate hibernate.
+        // Placed after the identity check above, so a hook this pass rejected
+        // retracts nothing.
+        // A thrown store error is NOT the same fact as a refused retraction, and
+        // collapsing the two would leave a terminal parked as `.exited` while its
+        // Claude is live — refused (`false`) stays a trace, a failure is an error.
+        do {
+            if try await db.terminals.clearSessionExitStamp(id: terminal.id) {
+                await broadcastExitStampChange(terminalID: terminal.id, parked: false)
+                logger.debug("""
+                    sessionEvent: cleared the exit stamp on terminal \
+                    \(terminal.id.uuidString, privacy: .public)
+                    """)
+            }
+        } catch {
+            logger.error("""
+                sessionEvent: clearing the exit stamp on terminal \
+                \(terminal.id.uuidString, privacy: .public) FAILED, the row stays \
+                parked as exited: \(String(describing: error), privacy: .public)
+                """)
+        }
+
         // The first accepted Codex session has no prior lifecycle to fence, and
         // its rollout can write task_started before this hook reaches TBD.
         // Later accepted starts capture the current EOF even when the path is
@@ -4263,16 +4425,88 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// A Claude session ended. Drops any standing delegation claim: a session
-    /// that exits while background subagents are live leaves a final
-    /// `turn_duration` record still reporting them, and no later turn ever
-    /// arrives to retract it.
+    /// A Claude session ended. Two effects, both retractions of something the
+    /// session can no longer be reporting.
+    ///
+    /// Drops any standing delegation claim: a session that exits while background
+    /// subagents are live leaves a final `turn_duration` record still reporting
+    /// them, and no later turn ever arrives to retract it.
+    ///
+    /// And, when the reason means the PROCESS is leaving, parks the row with
+    /// `HibernateReason.exited`. That stamp is what makes "Claude is not running
+    /// here" a fact a caller can act on: without it a send to the terminal finds a
+    /// live pane with a shell prompt in it, pastes the message, presses Enter, and
+    /// runs the message as a shell command while reporting success. The park is
+    /// deliberately the same state a hibernate produces — process gone, terminal
+    /// alive, session id known — so one wake path and one UI cover both
+    /// (`docs/specs/2026-09-05-transcript-composer-design.md`, landing in
+    /// PR #821, "Not-running delivery").
     func handleTerminalSessionEnded(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionEndedParams.self, from: paramsData)
         await claudeDelegationTracker.clear(
             terminalID: params.terminalID,
             sessionIncarnationID: params.sessionIncarnationID)
+
+        guard SessionEndReason.parksTheTerminal(params.reason) else {
+            logger.debug("""
+                sessionEnded: terminal=\(params.terminalID.uuidString, privacy: .public) \
+                reason=\(params.reason ?? "none", privacy: .public) — not a process exit, \
+                leaving the park state alone
+                """)
+            return .ok()
+        }
+        // A thrown store error is NOT the same fact as a refused stamp, and
+        // collapsing the two into one `false` returns the feature to the bug it
+        // fixes — a terminal nobody parked, silently, at `.debug`. A refusal
+        // (`false`) stays a trace; a failure is an error.
+        let stamped: Bool
+        do {
+            stamped = try await db.terminals.stampSessionExited(
+                id: params.terminalID,
+                reportedIncarnationID: params.sessionIncarnationID,
+                at: now())
+        } catch {
+            logger.error("""
+                sessionEnded: stamping terminal \
+                \(params.terminalID.uuidString, privacy: .public) as exited FAILED, \
+                the row stays unparked: \(String(describing: error), privacy: .public)
+                """)
+            return .ok()
+        }
+        if stamped {
+            await broadcastExitStampChange(terminalID: params.terminalID, parked: true)
+        }
+        logger.debug("""
+            sessionEnded: terminal=\(params.terminalID.uuidString, privacy: .public) \
+            reason=\(params.reason ?? "none", privacy: .public) stamped=\(stamped, privacy: .public)
+            """)
         return .ok()
+    }
+
+    /// Publish an exit-stamp park or un-park on the same channel every other
+    /// writer of `hibernatedAt` uses (`HibernationCoordinator.broadcastHibernation`).
+    ///
+    /// The app applies `.terminalHibernationChanged` to its cached row IN PLACE,
+    /// and that is the only timely route: the parked view materializes on the
+    /// `isParked` flip and reads the row's snapshot once at creation, and
+    /// wake-on-focus filters on the cached `hibernateReason` — a value arriving
+    /// only in the next `terminal.list` refetch is too late for both. Without
+    /// this the moon appears whenever the app next happens to refetch.
+    ///
+    /// The row is re-read rather than reconstructed so the delta carries what
+    /// was actually committed, and `keepWarm`/`suspendedSnapshot` come from the
+    /// row for the same reason. A row that vanished between the write and the
+    /// read has nothing to publish about.
+    private func broadcastExitStampChange(terminalID: UUID, parked: Bool) async {
+        guard let row = try? await db.terminals.get(id: terminalID) else { return }
+        subscriptions.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(
+            terminalID: row.id,
+            worktreeID: row.worktreeID,
+            hibernated: parked,
+            keepWarm: row.keepWarm,
+            suspendedSnapshot: parked ? row.suspendedSnapshot : nil,
+            hibernateReason: parked ? row.hibernateReason : nil
+        )))
     }
 
     func handleTerminalActivityEvent(_ paramsData: Data) async throws -> RPCResponse {

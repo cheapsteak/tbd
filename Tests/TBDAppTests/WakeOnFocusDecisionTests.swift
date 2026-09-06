@@ -125,6 +125,23 @@ struct WakeOnFocusDecisionTests {
         #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == merged)
     }
 
+    /// An exit-stamped session (`hibernateReason == .exited`) must NOT
+    /// focus-wake: `stampSessionExited` writes only two DB columns and never
+    /// replaces the pane with an inert placeholder the way every other park
+    /// does, so waking it runs `tmux respawn-window -k` against the live
+    /// shell Claude's exit left behind — killing it. Excluded exactly like
+    /// `.manual`, but for a different reason (no placeholder, not "user
+    /// explicitly parked this").
+    @Test func skipsExitedParkedTerminalEvenWhenFocused() {
+        let state = AppState()
+        let wt = UUID()
+        let exited = UUID()
+        state.terminals[wt] = [parkedTerminal(exited, reason: .exited)]
+        focus(state, worktreeID: wt, terminalID: exited)
+
+        #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == nil)
+    }
+
     /// A legacy parked row with NO reason (pre-v46) still wakes on focus —
     /// the old behavior is preserved for rows the migration can't attribute.
     @Test func wakesLegacyNilReasonParkedTerminalOnFocus() {

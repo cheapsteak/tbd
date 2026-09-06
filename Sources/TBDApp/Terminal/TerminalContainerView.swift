@@ -407,6 +407,8 @@ enum HibernatedBannerModel {
             return "Parked after a restart — click anywhere in the pane to resume"
         case .merged:
             return "Hibernated after the PR merged — click anywhere in the pane to resume"
+        case .exited:
+            return "Claude exited — click anywhere in the pane to resume"
         case .auto, nil:
             return "Hibernated while idle — click anywhere in the pane to resume"
         }

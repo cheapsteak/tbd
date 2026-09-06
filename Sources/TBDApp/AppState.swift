@@ -1445,6 +1445,17 @@ final class AppState {
         { [daemonClient] enabled in
             try await daemonClient.setHolderHibernationEnabled(enabled: enabled)
         }
+    /// How `wakeTerminalOutcome` reaches the daemon — injectable for the same
+    /// reason as `controlModeSetter`, so the wake's prompt plumbing and its
+    /// failure branches are testable without a running daemon.
+    @ObservationIgnored
+    lazy var terminalWakeSender:
+        @MainActor (UUID, Int?, Int?, Bool, String?) async throws -> Void =
+        { [daemonClient] terminalID, cols, rows, fallback, prompt in
+            try await daemonClient.terminalWake(
+                terminalID: terminalID, cols: cols, rows: rows,
+                fallbackToDefaultProfile: fallback, prompt: prompt)
+        }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.

@@ -582,6 +582,18 @@ public enum HibernateReason: String, Codable, Sendable {
     /// Parked because the worktree's PR merged — system-initiated, so it
     /// auto-wakes on focus like `.auto`.
     case merged
+    /// Claude's own process left — reported by its `SessionEnd` hook, for the
+    /// reasons that mean the process is going away rather than starting a new
+    /// session inside the same process.
+    ///
+    /// Deliberately the SAME state as a deliberate park: process gone, terminal
+    /// alive, session id known. One state means one wake path and one UI; see
+    /// `docs/specs/2026-09-05-transcript-composer-design.md`, landing in
+    /// PR #821, where "A separate exited state beside hibernation" is a
+    /// rejected alternative.
+    /// It behaves like `.auto` for wake-on-focus, which is what the
+    /// lenient decoder above already gives an older app binary reading this value.
+    case exited
 
     // Custom lenient decoder: the SYNTHESIZED `Decodable` throws
     // `DecodingError.dataCorrupted` on any raw value this build doesn't know.
@@ -769,6 +781,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
             value: awaitingInputReason,
             source: .hookEvent(hookEventName),
             observedAt: awaitingInputObservedAt)
+    }
+
+    /// Whether this row is parked because Claude's own process left, rather than
+    /// because TBD parked it. Both columns are required: `hibernatedAt` is what
+    /// makes it a park at all, and the reason is what says who ended it.
+    public var isExitStamped: Bool {
+        hibernatedAt != nil && hibernateReason == .exited
     }
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,

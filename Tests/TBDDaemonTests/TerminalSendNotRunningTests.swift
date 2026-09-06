@@ -1,0 +1,330 @@
+import Foundation
+import Testing
+@testable import TBDDaemonLib
+import TBDShared
+import TestSupport
+
+/// The refusal the composer and the CLI both need: a text send to a terminal
+/// whose agent process is gone must not be pasted into the shell that is
+/// sitting in the pane and executed as a command line.
+///
+/// Two independent facts answer "is the agent running here", and each gets its
+/// own case because each fails on its own: the hook stamp (missed on a crash,
+/// and never written at all for Codex, which has no `SessionEnd` hook) and the
+/// pane's foreground process group (unavailable on a holder row). The
+/// foreground fact is kind-aware — it looks for the name the kind implies — so
+/// both agent-bearing kinds get discriminating cases and a shell gets none.
+///
+/// Tier 2: an in-memory database, a dry-run tmux manager and a stub inspector.
+@Suite("terminal.send refuses a not-running terminal")
+struct TerminalSendNotRunningTests {
+
+    /// A `PaneProcessInspecting` whose answer the test chooses, PER agent name
+    /// the rail asks about — so a fixture can say "codex is foreground here,
+    /// claude is not", which is exactly the discrimination the kind-aware rail
+    /// makes. A name absent from the dictionary answers nil, as the production
+    /// inspector does when no matching process owns the pane.
+    private struct StubInspector: PaneProcessInspecting {
+        let foregroundByAgent: [String: Int32]
+        func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32? {
+            foregroundByAgent[agentName]
+        }
+        /// The send rail never asks this one — it is the wake rail's question —
+        /// so answer the pane pid, which is "an idle shell", and let a failure
+        /// here mean the rail asked something it should not have.
+        func paneForegroundPID(panePID: Int32) -> Int32? { panePID }
+    }
+
+    private struct Fixture {
+        let router: RPCRouter
+        let db: TBDDatabase
+        let terminal: Terminal
+        /// Bodies the dry-run tmux was asked to paste into the pane. The
+        /// fail-open cases assert the send did not merely return success but
+        /// actually reached the pane.
+        let pastes: PastedBodies
+    }
+
+    /// Collects `dryRunPasteBytes` payloads. `@unchecked Sendable` behind a
+    /// lock because the hook is `@Sendable` and the send runs on the router's
+    /// executor.
+    private final class PastedBodies: @unchecked Sendable {
+        private let lock = NSLock()
+        private var bodies: [String] = []
+        func append(_ data: Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            bodies.append(String(bytes: data, encoding: .utf8) ?? "")
+        }
+        func snapshot() -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return bodies
+        }
+    }
+
+    /// An error the `dryRunPanePID` hook can throw, standing in for the tmux
+    /// invocation that fails — a server that went away between the row's read
+    /// and the query, most commonly.
+    private struct PanePIDUnavailable: Error {}
+
+    /// A throwaway actuation log per fixture. `ActuationLog` takes a PATH, not a
+    /// database — the record is an append-only JSONL file. It lands under the
+    /// run's fenced scratch dir, which `scripts/test.sh` removes even when the
+    /// test process is killed; a per-test `temporaryDirectory` would leak.
+    private static func scratchLogPath() -> String {
+        let directory = URL(
+            fileURLWithPath: fencedScratchRoot(prefix: "tbd-sendnotrunning"), isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("actuations.jsonl").path
+    }
+
+    /// `TmuxManager(dryRun:)` reports every pane pid as "0", so the fixture
+    /// supplies one through the `dryRunPanePID` hook this task adds — the shape
+    /// every other dry-run answer in that file already uses.
+    private func makeFixture(
+        foregroundByAgent: [String: Int32], kind: TerminalKind? = .claude,
+        claudeSessionID: String? = "sess-1",
+        panePID: @escaping @Sendable (String, String) throws -> String = { _, _ in "4242" }
+    ) async throws -> Fixture {
+        let db = try TBDDatabase(inMemory: true)
+        let worktree = try await db.worktrees.createScratch(
+            name: "wt", displayName: "wt",
+            path: "/tmp/tbd-nonexistent-\(UUID().uuidString)", tmuxServer: "tbd-test")
+        let terminal = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "claude", claudeSessionID: claudeSessionID, kind: kind)
+        let pastes = PastedBodies()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) },
+            dryRunPanePID: panePID,
+            dryRunPasteBytes: { _, _, bytes in pastes.append(bytes) })
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            tmux: tmux,
+            paneProcessInspector: StubInspector(foregroundByAgent: foregroundByAgent),
+            actuationLog: ActuationLog(path: Self.scratchLogPath()))
+        return Fixture(router: router, db: db, terminal: terminal, pastes: pastes)
+    }
+
+    private func send(_ f: Fixture) async throws -> RPCResponse {
+        let data = try JSONEncoder().encode(TerminalSendParams(
+            terminalID: f.terminal.id, text: "hello", submit: true))
+        return try await f.router.handleTerminalSend(data, actor: .app)
+    }
+
+    @Test func aHibernatedRowIsRefused() async throws {
+        let f = try await makeFixture(foregroundByAgent: ["claude": 4242])
+        try await f.db.terminals.setHibernated(
+            id: f.terminal.id, sessionID: "sess-1", reason: .manual,
+            at: Date(timeIntervalSince1970: 1_800_000_000))
+
+        let response = try await send(f)
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.contains("is not running"))
+    }
+
+    @Test func anExitStampedRowIsRefused() async throws {
+        let f = try await makeFixture(foregroundByAgent: ["claude": 4242])
+        _ = try await f.db.terminals.stampSessionExited(
+            id: f.terminal.id, reportedIncarnationID: nil,
+            at: Date(timeIntervalSince1970: 1_800_000_000))
+
+        let response = try await send(f)
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.contains("its Claude session exited"))
+    }
+
+    /// The rail that covers a MISSED hook: nothing is stamped, the pane is alive,
+    /// and the process table says Claude is not the foreground process.
+    @Test func aLiveRowWithNoForegroundClaudeIsRefused() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:])
+
+        let response = try await send(f)
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.contains("foreground process"))
+    }
+
+    /// The positive control. Without it the three refusals above could all be
+    /// passing because every send is refused.
+    @Test func aLiveRowWithClaudeForegroundIsNotRefused() async throws {
+        let f = try await makeFixture(foregroundByAgent: ["claude": 4242])
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+    }
+
+    /// A shell terminal has no Claude to be foreground, so the foreground rail
+    /// must never run for one. Without the kind gate this send is refused in
+    /// production: the pane pid is `-zsh`, it has no `claude` descendant, and the
+    /// inspector answers nil for every shell session there is.
+    @Test func aShellTerminalIsNotSubjectToTheForegroundRail() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:], kind: .shell)
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+    }
+
+    /// A Codex pane whose agent has left is the case NEITHER other rail catches:
+    /// Codex ships no `SessionEnd` hook, so the row is never exit-stamped, and a
+    /// stamp would be wrong anyway (the wake path refuses a non-Claude row, so
+    /// the stamp would park it unwakeably). The foreground rail is the only
+    /// thing between this send and a message run as a shell command.
+    @Test func aCodexTerminalWithNoForegroundCodexIsRefused() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:], kind: .codex)
+
+        let response = try await send(f)
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.contains("foreground process"))
+        #expect(error.contains("(codex)"), "the refusal must name the agent it looked for")
+    }
+
+    /// The positive control for the Codex leg: the rail asks about "codex", not
+    /// about "claude", so a healthy Codex session — whose command line contains
+    /// no "claude" at all — proceeds.
+    @Test func aCodexTerminalWithCodexForegroundIsNotRefused() async throws {
+        let f = try await makeFixture(foregroundByAgent: ["codex": 4242], kind: .codex)
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+    }
+
+    /// The kind picks the name, and nothing else does. Mapping it wrong in
+    /// either direction is the whole bug this rail had.
+    ///
+    /// A row with NO recorded kind gets exactly the reading migration
+    /// `v22_terminal_kind`'s backfill gave it — Claude when it carries a
+    /// Claude session id, shell otherwise — which is also what `Terminal
+    /// .isClaudeResumable` already requires. Reading every kindless row as
+    /// Claude regardless of session id, as an earlier version of this helper
+    /// did, ran the rail against a plain shell pane that never had a "claude"
+    /// process to find.
+    @Test func theForegroundAgentNameFollowsTheKind() {
+        #expect(RPCRouter.foregroundAgentName(kind: .claude, claudeSessionID: "sess-1") == "claude")
+        #expect(RPCRouter.foregroundAgentName(kind: .codex, claudeSessionID: nil) == "codex")
+        #expect(RPCRouter.foregroundAgentName(kind: .shell, claudeSessionID: nil) == nil)
+        #expect(RPCRouter.foregroundAgentName(kind: nil, claudeSessionID: "sess-1") == "claude")
+        #expect(RPCRouter.foregroundAgentName(kind: nil, claudeSessionID: nil) == nil)
+    }
+
+    /// The handler-level half of the same fact: a row whose `kind` column is
+    /// NULL still gets the foreground rail, and it gets the Claude one.
+    @Test func aKindlessTerminalWithNoForegroundClaudeIsRefused() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:], kind: nil)
+
+        let response = try await send(f)
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.contains("foreground process"))
+        #expect(error.contains("(claude)"), "a kindless row with a Claude session id is read as claude")
+    }
+
+    /// The other half of the same fact: a kindless row with NO Claude session
+    /// id either is the plain-shell shape the live suite's fixtures create
+    /// (`db.terminals.create` with neither `kind` nor `claudeSessionID`
+    /// supplied) — the regression this case guards is the rail reading such a
+    /// row as Claude and refusing a healthy shell send that never had a
+    /// "claude" process to find.
+    @Test func aKindlessTerminalWithNoSessionIsNotSubjectToTheForegroundRail() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:], kind: nil, claudeSessionID: nil)
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+    }
+
+    /// The two rails split on the empty payload, and the park rail takes it.
+    /// A bare Enter into a parked row carries no message, but it has no purpose
+    /// either — the pane holds a shell — and the refusal already names wake as
+    /// the remedy.
+    @Test func anEmptyTextSubmitToAHibernatedRowIsRefused() async throws {
+        let f = try await makeFixture(foregroundByAgent: ["claude": 4242])
+        try await f.db.terminals.setHibernated(
+            id: f.terminal.id, sessionID: "sess-1", reason: .manual,
+            at: Date(timeIntervalSince1970: 1_800_000_000))
+
+        let data = try JSONEncoder().encode(TerminalSendParams(
+            terminalID: f.terminal.id, text: "", submit: true))
+        let response = try await f.router.handleTerminalSend(data, actor: .app)
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.contains("is not running"))
+    }
+
+    /// The other side of that split, so the rule is asserted in both
+    /// directions: the FOREGROUND rail stays text-with-a-body, because a bare
+    /// Enter is how a caller answers a prompt, and an inspector that cannot see
+    /// the agent must not take that away from a live row.
+    @Test func anEmptyTextSubmitToALiveRowSkipsTheForegroundRail() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:])
+
+        let data = try JSONEncoder().encode(TerminalSendParams(
+            terminalID: f.terminal.id, text: "", submit: true))
+        let response = try await f.router.handleTerminalSend(data, actor: .app)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+    }
+
+    // MARK: - The rail fails OPEN on an unreadable pane pid
+
+    // All three cases below pass `foregroundByAgent: [:]` — the inspector would
+    // say "no claude here" if it were ever asked. That is what makes them
+    // discriminating: with a readable pid these fixtures are refused
+    // (`aLiveRowWithNoForegroundClaudeIsRefused` is the same fixture and the
+    // same stub), so a send that goes through went through because the pid
+    // could not be read, and for no other reason. Each asserts the paste
+    // actually reached the pane, not merely that the response said success.
+
+    /// tmux could not answer the pid query at all — the `try?` in the rail
+    /// swallows it. A tmux that cannot answer is not evidence that the agent
+    /// left, so the send proceeds.
+    @Test func anUnaskablePanePIDLetsTheSendThrough() async throws {
+        let f = try await makeFixture(
+            foregroundByAgent: [:], panePID: { _, _ in throw PanePIDUnavailable() })
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(f.pastes.snapshot().contains { $0.hasSuffix("hello") })
+    }
+
+    /// tmux answered, but with something that is not a pid. Same fail-open, and
+    /// for the same reason: an answer the daemon cannot parse is not an answer
+    /// about the agent.
+    @Test func aNonNumericPanePIDLetsTheSendThrough() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:], panePID: { _, _ in "abc" })
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(f.pastes.snapshot().contains { $0.hasSuffix("hello") })
+    }
+
+    /// tmux's own "I don't know" is the literal `0`, which is also what a
+    /// dry-run manager reports when no hook is supplied. Asking the process
+    /// table about pid 0 is a question with no meaning, so the rail declines to
+    /// ask and the send proceeds.
+    @Test func aZeroPanePIDLetsTheSendThrough() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:], panePID: { _, _ in "0" })
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(f.pastes.snapshot().contains { $0.hasSuffix("hello") })
+    }
+
+    /// The refusal is a text-send rail, not a terminal-wide one. `--keys` exists
+    /// to answer a dialog and to interrupt; refusing it on a parked row would
+    /// take away the one payload that has nothing to do with typing a message.
+    @Test func aKeysPayloadIsNotRefusedByTheseRails() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:])
+        let data = try JSONEncoder().encode(TerminalSendParams(
+            terminalID: f.terminal.id, keys: "Escape"))
+
+        let response = try await f.router.handleTerminalSend(data, actor: .app)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+    }
+}

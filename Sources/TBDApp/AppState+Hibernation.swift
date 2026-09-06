@@ -59,15 +59,15 @@ extension AppState {
     /// wraps this. `fallbackToDefaultProfile` opts into the ambient default login
     /// when the pinned profile is gone (used by the fallback retry).
     func wakeTerminalOutcome(terminalID: UUID, worktreeID: UUID, userInitiated: Bool,
-                             fallbackToDefaultProfile: Bool) async -> WakeAttemptOutcome {
+                             fallbackToDefaultProfile: Bool,
+                             prompt: String? = nil) async -> WakeAttemptOutcome {
         guard !wakeInFlight.contains(terminalID) else { return .ok }  // in-flight dedupe = benign no-op
         wakeInFlight.insert(terminalID)
         defer { wakeInFlight.remove(terminalID) }
         do {
             let size = mainAreaTerminalSize()
-            try await daemonClient.terminalWake(
-                terminalID: terminalID, cols: size.cols, rows: size.rows,
-                fallbackToDefaultProfile: fallbackToDefaultProfile)
+            try await terminalWakeSender(
+                terminalID, size.cols, size.rows, fallbackToDefaultProfile, prompt)
             await refreshTerminals(worktreeID: worktreeID)
             return .ok
         } catch {
@@ -103,9 +103,11 @@ extension AppState {
     /// windows) fired a modal per parked terminal. `userInitiated` drives the
     /// failure log level (explicit action → error; background → warning).
     @discardableResult
-    func wakeTerminal(terminalID: UUID, worktreeID: UUID, userInitiated: Bool) async -> String? {
+    func wakeTerminal(terminalID: UUID, worktreeID: UUID, userInitiated: Bool,
+                      prompt: String? = nil) async -> String? {
         switch await wakeTerminalOutcome(terminalID: terminalID, worktreeID: worktreeID,
-                                         userInitiated: userInitiated, fallbackToDefaultProfile: false) {
+                                         userInitiated: userInitiated,
+                                         fallbackToDefaultProfile: false, prompt: prompt) {
         case .ok: return nil
         case .failed(let m): return m
         case .profileMissing(_, _, let m): return m
@@ -309,9 +311,16 @@ extension AppState {
     /// the worktree. They wake only via the explicit affordances (parked-pane
     /// click, Wake menu). nil-reason (legacy), auto, and recovery parks still
     /// focus-wake.
+    ///
+    /// Exit-stamped sessions (`hibernateReason == .exited`) are excluded for a
+    /// different reason: `stampSessionExited` writes only two DB columns and
+    /// never replaces the pane with an inert placeholder the way every other
+    /// park path does, so a focus-wake would run `tmux respawn-window -k`
+    /// against the live shell Claude's exit left behind — killing it. They
+    /// wake only via the same explicit affordances as `.manual`.
     func terminalIDToWakeOnFocus(worktreeID: UUID) -> UUID? {
         let parked = (terminals[worktreeID] ?? []).filter {
-            $0.isParked && $0.isClaudeResumable && $0.hibernateReason != .manual
+            $0.isParked && $0.isClaudeResumable && $0.hibernateReason != .manual && $0.hibernateReason != .exited
         }
         guard !parked.isEmpty else { return nil }
         if let focusedID = terminalIDForAutofocus(worktreeID: worktreeID),
@@ -327,12 +336,21 @@ extension AppState {
     /// when the tab has no terminals, none are parked, or none are resumable.
     /// Called by `setActiveTab` to wake only what the user is about to see,
     /// never a parallel spawn storm.
+    ///
+    /// Excludes `.manual` (an explicit "Hibernate now" must not be undone by
+    /// tab activation) AND `.exited` (`stampSessionExited` never replaces the
+    /// pane with an inert placeholder, so waking it would `respawn-window -k`
+    /// the live shell Claude's exit left behind — killing it). Both wake only
+    /// via explicit affordances.
     func terminalIDsToWakeOnTabActivation(worktreeID: UUID, tabIndex: Int) -> [UUID] {
         guard let worktreeTabs = tabs[worktreeID], worktreeTabs.indices.contains(tabIndex) else { return [] }
         let tab = worktreeTabs[tabIndex]
         let terminalIDsInTab = terminalIDs(in: tab)
         return (terminals[worktreeID] ?? [])
-            .filter { terminalIDsInTab.contains($0.id) && $0.isParked && $0.isClaudeResumable && $0.hibernateReason != .manual }
+            .filter {
+                terminalIDsInTab.contains($0.id) && $0.isParked && $0.isClaudeResumable
+                    && $0.hibernateReason != .manual && $0.hibernateReason != .exited
+            }
             .map { $0.id }
     }
 }

@@ -20,14 +20,40 @@ public protocol ResumeSendingTmux: Sendable {
 
 extension TmuxManager: ResumeSendingTmux {}
 
-/// Finds the pane's foreground Claude process. `#{pane_current_command}`
+/// Finds the pane's foreground agent process. `#{pane_current_command}`
 /// reports `zsh` on macOS, so we walk the pane PID's process tree and check
 /// `ps -o stat=` for the `+` (foreground process group) flag instead
 /// (spec §Actuation 3).
 public protocol PaneProcessInspecting: Sendable {
-    /// PID of the Claude process that owns the pane's tty foreground group,
-    /// or nil when Claude is not foreground (bare shell, editor, …).
-    func foregroundClaudePID(panePID: Int32) -> Int32?
+    /// PID of the process that owns the pane's tty foreground group and whose
+    /// command line contains `agentName`, or nil when no such process is
+    /// foreground (bare shell, editor, an agent that exited, …).
+    ///
+    /// The name is a substring match on the lowercased command line, which is
+    /// how the Claude question has always been asked; passing "codex" asks the
+    /// same question about a Codex session.
+    func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32?
+
+    /// PID of the process that owns the pane's tty foreground process group,
+    /// whatever it is — no name to match. An idle interactive shell answers
+    /// with the pane's OWN pid; anything the person started under it answers
+    /// with that child's. Nil when nothing in the pane's tree claims the
+    /// foreground group, which is the same "nothing answered" a caller must
+    /// treat as no evidence either way.
+    ///
+    /// Separate from `foregroundAgentPID` because the question is different:
+    /// that one asks "is THIS agent running here" and is answered by the send
+    /// rail, this one asks "is ANYTHING running here" and is answered by the
+    /// wake rail before it respawns a pane out from under a live process.
+    func paneForegroundPID(panePID: Int32) -> Int32?
+}
+
+extension PaneProcessInspecting {
+    /// The Claude-shaped question, unchanged for every caller that only ever
+    /// asks it: the limit-resume actuator.
+    public func foregroundClaudePID(panePID: Int32) -> Int32? {
+        foregroundAgentPID(panePID: panePID, matching: "claude")
+    }
 }
 
 public struct ProductionPaneProcessInspector: PaneProcessInspecting {
@@ -37,19 +63,64 @@ public struct ProductionPaneProcessInspector: PaneProcessInspecting {
         self.signaller = signaller
     }
 
-    public func foregroundClaudePID(panePID: Int32) -> Int32? {
-        // Candidates: pane PID itself (zsh may have exec'd into Claude),
-        // its children, and grandchildren (wrapper-shell spawns).
-        var candidates: [Int32] = [panePID]
+    public func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32? {
+        // Candidates, cheapest first: the pane PID itself (zsh may have exec'd
+        // into the agent) and its direct children, which one `ps` table scan
+        // answers together.
         let children = signaller.children(ofServerPID: panePID)
-        candidates += children
-        for child in children {
-            candidates += signaller.children(ofServerPID: child)
+        if let match = firstForegroundAgent(in: [panePID] + children, matching: agentName) {
+            return match
         }
-        for pid in candidates {
+
+        // Grandchildren (wrapper-shell spawns) cost a FULL `ps -axo pid=,ppid=`
+        // scan each, so they are walked only after the cheap candidates came up
+        // empty — which is exactly the case this rail is asked about on the
+        // interactive send path, where the ordinary answer is the pane pid or one
+        // of its children. Scanning order is unchanged: a grandchild could only
+        // ever have won after every child lost anyway.
+        for child in children {
+            if let match = firstForegroundAgent(
+                in: signaller.children(ofServerPID: child), matching: agentName) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    public func paneForegroundPID(panePID: Int32) -> Int32? {
+        // Same candidate ladder as `foregroundAgentPID`, cheapest first and for
+        // the same reason: the pane pid itself, then its children, then — only
+        // once those came up empty — the grandchildren a wrapper shell spawns.
+        // The pane pid comes first deliberately: an idle shell holds the
+        // foreground group itself, so the common case costs one `ps`.
+        let children = signaller.children(ofServerPID: panePID)
+        if let match = firstForeground(in: [panePID] + children) { return match }
+        for child in children {
+            if let match = firstForeground(in: signaller.children(ofServerPID: child)) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    /// The first pid in `pids` whose `ps -o stat=` carries the `+` that means
+    /// "in the controlling terminal's foreground process group". No name is
+    /// matched — the caller wants whatever is there.
+    private func firstForeground(in pids: [Int32]) -> Int32? {
+        for pid in pids where signaller.stat(pid)?.contains("+") == true {
+            return pid
+        }
+        return nil
+    }
+
+    /// The first pid in `pids` that owns its tty's foreground process group and
+    /// whose command line names the agent. Two `ps` invocations per candidate,
+    /// so callers pass the cheapest candidate set they have.
+    private func firstForegroundAgent(in pids: [Int32], matching agentName: String) -> Int32? {
+        for pid in pids {
             guard let stat = signaller.stat(pid), stat.contains("+"),
                   let command = signaller.commandLine(pid)?.lowercased(),
-                  command.contains("claude")
+                  command.contains(agentName)
             else { continue }
             return pid
         }

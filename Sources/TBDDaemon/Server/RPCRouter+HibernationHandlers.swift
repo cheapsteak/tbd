@@ -119,6 +119,8 @@ extension RPCRouter {
                 code: RPCErrorCode.profileMissing.rawValue)
         case .holderTransport:
             return RPCResponse(error: HibernationCoordinator.holderTransportRefusal)
+        case .paneBusy(let pid):
+            return RPCResponse(error: HibernationCoordinator.paneBusyRefusal(pid: pid))
         }
     }
 

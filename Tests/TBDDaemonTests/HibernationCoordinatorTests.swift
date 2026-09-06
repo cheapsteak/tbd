@@ -1232,6 +1232,86 @@ struct HibernationCoordinatorTests {
                 "expected a respawn-window carrying claude --resume; got: \(joined)")
     }
 
+    // MARK: - Wake: the exit-stamped pane-busy guard
+    //
+    // An exit stamp parks the row while the pane's SHELL stays alive and
+    // usable — unlike every other park reason, whose pane holds an inert shell
+    // hibernate put there. Wake is `respawn-window -k`, so waking such a row
+    // kills whatever occupies that pane.
+    //
+    // The app excludes `.exited` from focus/tab auto-wake, and that stays the
+    // first line. It cannot be the only one: `docs/updating.md`'s `--no-app`
+    // makes "daemon newer than app" a supported skew, and an app binary older
+    // than the stamp decodes `.exited` through the lenient `HibernateReason`
+    // decoder as `.auto` and auto-wakes it. The three cases below pin the
+    // daemon-side guard, which answers the same way no matter who asked.
+
+    /// RED without the guard: an old app's focus-wake reaches a busy pane and
+    /// `respawn-window -k` kills the process running in it.
+    @Test func exitStampedWakeIsRefusedWhenThePaneIsBusy() async throws {
+        let (db, _, terminalID) = try await setup()
+        #expect(try await db.terminals.stampSessionExited(
+            id: terminalID, reportedIncarnationID: nil,
+            at: Date(timeIntervalSince1970: 1_800_000_000)))
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true, dryRunRecorder: recorded.append,
+            dryRunPanePID: { _, _ in "4242" })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            paneProcessInspector: FakeInspector(claudePID: nil, foregroundPID: 9999),
+            actuationLog: makeTestActuationLog())
+
+        #expect(await coord.wake(terminalID: terminalID) == .paneBusy(pid: 9999))
+        #expect(recorded.snapshot().filter { $0.contains("respawn-window") }.isEmpty,
+                "the refusal must not touch the pane")
+        let after = try #require(try await db.terminals.get(id: terminalID))
+        #expect(after.isExitStamped, "the row stays exit-stamped so a later retry still wakes")
+    }
+
+    /// The positive control, and the ordinary case: nothing is running in the
+    /// pane, so the pane's own pid owns the foreground group and the wake
+    /// proceeds exactly as it did before the guard.
+    @Test func exitStampedWakeProceedsWhenThePaneIsAnIdleShell() async throws {
+        let (db, _, terminalID) = try await setup()
+        #expect(try await db.terminals.stampSessionExited(
+            id: terminalID, reportedIncarnationID: nil,
+            at: Date(timeIntervalSince1970: 1_800_000_000)))
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true, dryRunRecorder: recorded.append,
+            dryRunPanePID: { _, _ in "4242" })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            paneProcessInspector: FakeInspector(claudePID: nil, foregroundPID: 4242),
+            actuationLog: makeTestActuationLog())
+
+        #expect(await coord.wake(terminalID: terminalID) == .ok)
+        #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        #expect(joined.contains { $0.contains("respawn-window") && $0.contains("claude --resume sess-1") },
+                "expected the ordinary respawn; got: \(joined)")
+    }
+
+    /// The guard is scoped to the exit stamp and to nothing else. A deliberate
+    /// park's pane holds the inert shell hibernate respawned into it, so a
+    /// foreground process there is that shell's own business and must not cost
+    /// the row its wake.
+    @Test func aDeliberatelyParkedRowIsUnaffectedByTheBusyPaneGuard() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(
+            id: terminalID, sessionID: "sess-1", reason: .manual,
+            at: Date(timeIntervalSince1970: 1_800_000_000))
+        let tmux = TmuxManager(dryRun: true, dryRunPanePID: { _, _ in "4242" })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            paneProcessInspector: FakeInspector(claudePID: nil, foregroundPID: 9999),
+            actuationLog: makeTestActuationLog())
+
+        #expect(await coord.wake(terminalID: terminalID) == .ok)
+        #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
+    }
+
     // MARK: - Wake: window-gone recreate branch
     //
     // A reboot destroys every tmux server, leaving parked rows pointing at
