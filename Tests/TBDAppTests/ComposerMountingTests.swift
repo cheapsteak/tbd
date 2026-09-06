@@ -455,22 +455,70 @@ struct ComposerMountingTests {
             label: "Transcript")
     }
 
-    /// Cmd+/ needs a terminal, and the focused tab names it — including for a
-    /// `.liveTranscript` tab, whose terminal the layout enumeration alone does
-    /// not report.
-    @Test func theComposerCommandNamesTheFocusedTabsTerminal() {
+    private func terminalTab(terminalID: UUID) -> TBDShared.Tab {
+        TBDShared.Tab(
+            id: UUID(), content: .terminal(terminalID: terminalID), label: "Agent")
+    }
+
+    /// **⌘/ from where somebody actually presses it.** Driven through the
+    /// production state only: a selected worktree, a `.liveTranscript` tab that
+    /// `resolvedActiveTab` resolves to, and a composer registered the way the
+    /// pane's mount registers one.
+    ///
+    /// Nothing writes `focusedTabCloseContext` for a transcript tab — only
+    /// terminal views do — and `resolvedFocusedTabCloseContext()` answers nil
+    /// for any first responder that is not a `TBDTerminalView`, which is every
+    /// responder in this pane. Resolving through those two alone therefore named
+    /// no terminal at all here.
+    @Test func theComposerCommandNamesTheSelectedWorktreesActiveTranscriptTerminal() {
         let (state, suiteName) = makeState()
         defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
         let worktreeID = UUID(), terminalID = UUID()
-        let tab = liveTranscriptTab(terminalID: terminalID)
-        state.tabs[worktreeID] = [tab]
-        state.focusedTabCloseContext = TabCloseContext(worktreeID: worktreeID, tabID: tab.id)
+        state.tabs[worktreeID] = [liveTranscriptTab(terminalID: terminalID)]
+        state.selectedWorktreeIDs = [worktreeID]
+        let composerView = NSView()
+        state.registerComposerView(composerView, for: terminalID)
 
         #expect(state.composerCommandTerminalID == terminalID)
     }
 
-    /// Nothing focused, nothing to act on — the menu items disable rather than
-    /// guessing at a terminal.
+    /// **The worse half of the same bug.** A stale last-focused context naming a
+    /// BACKGROUND terminal tab must not win over the transcript the person is
+    /// looking at — ⌘/ there moved the caret in a tab that is not on screen.
+    /// The registration is what decides: the terminal tab has no composer.
+    @Test func aStaleTerminalTabContextDoesNotStealTheComposerCommand() {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let worktreeID = UUID(), background = UUID(), transcript = UUID()
+        let backgroundTab = terminalTab(terminalID: background)
+        state.tabs[worktreeID] = [
+            liveTranscriptTab(terminalID: transcript), backgroundTab
+        ]
+        state.selectedWorktreeIDs = [worktreeID]
+        state.focusedTabCloseContext = TabCloseContext(
+            worktreeID: worktreeID, tabID: backgroundTab.id)
+        let composerView = NSView()
+        state.registerComposerView(composerView, for: transcript)
+
+        #expect(state.composerCommandTerminalID == transcript)
+    }
+
+    /// **The negative.** No composer registered anywhere — the flag is off, or
+    /// the pane has not mounted one — and the accessor answers nil, which is
+    /// what the two menu items' `.disabled(…)` reads. `focusComposer` on a
+    /// terminal with no registered composer is a no-op, so an enabled item there
+    /// would be an offer of nothing.
+    @Test func withNoComposerRegisteredTheComposerCommandNamesNothing() {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let worktreeID = UUID(), terminalID = UUID()
+        state.tabs[worktreeID] = [liveTranscriptTab(terminalID: terminalID)]
+        state.selectedWorktreeIDs = [worktreeID]
+
+        #expect(state.composerCommandTerminalID == nil)
+    }
+
+    /// Nothing selected and nothing focused — nothing to act on either.
     @Test func withNoFocusedTabTheComposerCommandNamesNothing() {
         let (state, suiteName) = makeState()
         defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
@@ -478,7 +526,7 @@ struct ComposerMountingTests {
         #expect(state.composerCommandTerminalID == nil)
     }
 
-    // MARK: - A closed tab takes its draft with it
+    // MARK: - A dead terminal takes its composer state with it
 
     @Test func closingATabDiscardsItsComposerDraft() {
         let (state, suiteName) = makeState()
@@ -491,6 +539,92 @@ struct ComposerMountingTests {
         state.closeTab(worktreeID: worktreeID, index: 0)
 
         #expect(state.composerDrafts[terminalID] == nil)
+    }
+
+    /// The focus registries hold their views weakly, so nothing leaks — but an
+    /// empty box per dead terminal accumulates for the app's lifetime. A closed
+    /// tab leaves neither entry behind, nor the incarnation latch.
+    @Test func closingATabLeavesNoComposerRegistryEntry() {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let worktreeID = UUID(), terminalID = UUID()
+        let tab = liveTranscriptTab(terminalID: terminalID)
+        state.tabs[worktreeID] = [tab]
+        let composerView = NSView(), transcriptView = NSView()
+        state.registerComposerView(composerView, for: terminalID)
+        state.registerTranscriptView(transcriptView, for: terminalID)
+        state.lastStartedIncarnation[terminalID] = UUID()
+
+        state.closeTab(worktreeID: worktreeID, index: 0)
+
+        #expect(state.composerFocusTargets[terminalID] == nil)
+        #expect(state.transcriptFocusTargets[terminalID] == nil)
+        #expect(state.lastStartedIncarnation[terminalID] == nil)
+    }
+
+    /// **The common death.** A tab close is the rarer one; every pane close,
+    /// archive and daemon-reported removal funnels through
+    /// `removeDeletedTerminalFromState`, which left the draft — and a send
+    /// finishing after the row was gone then minted a fresh empty one through
+    /// `composerDraft(for:)`.
+    @Test func removingADeletedTerminalForgetsItsComposerState() {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let worktreeID = UUID(), terminalID = UUID()
+        state.composerDraft(for: terminalID).text = "half a sentence"
+        let composerView = NSView(), transcriptView = NSView()
+        state.registerComposerView(composerView, for: terminalID)
+        state.registerTranscriptView(transcriptView, for: terminalID)
+        state.lastStartedIncarnation[terminalID] = UUID()
+
+        state.removeDeletedTerminalFromState(
+            terminalID: terminalID, worktreeID: worktreeID)
+
+        #expect(state.composerDrafts[terminalID] == nil)
+        #expect(state.composerFocusTargets[terminalID] == nil)
+        #expect(state.transcriptFocusTargets[terminalID] == nil)
+        #expect(state.lastStartedIncarnation[terminalID] == nil)
+    }
+
+    /// A waiter on a terminal that stops existing is RESUMED false, never
+    /// dropped: it is a suspended continuation, and one nobody resumes hangs its
+    /// send for the life of the app instead of timing out.
+    @Test func removingADeletedTerminalFailsItsPendingSessionStartWait() async throws {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let worktreeID = UUID(), terminalID = UUID()
+
+        let task = Task { @MainActor in
+            await state.awaitSessionStart(terminalID: terminalID, incarnationID: UUID())
+        }
+        try #require(await waiterRegistered(state, terminalID: terminalID))
+
+        state.removeDeletedTerminalFromState(
+            terminalID: terminalID, worktreeID: worktreeID)
+
+        #expect(await task.value == false)
+        #expect(state.sessionStartWaiters[terminalID] == nil)
+    }
+
+    /// The prune is scoped to the dead terminal. A live sibling's registrations
+    /// and latch survive.
+    @Test func forgettingOneTerminalLeavesAnothersRegistrationsAlone() {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let dying = UUID(), surviving = UUID()
+        let dyingView = NSView(), survivingView = NSView()
+        state.registerComposerView(dyingView, for: dying)
+        state.registerComposerView(survivingView, for: surviving)
+        state.registerTranscriptView(survivingView, for: surviving)
+        let incarnation = UUID()
+        state.lastStartedIncarnation[surviving] = incarnation
+
+        state.forgetComposerState(for: dying)
+
+        #expect(state.composerFocusTargets[dying] == nil)
+        #expect(state.composerFocusTargets[surviving]?.view === survivingView)
+        #expect(state.transcriptFocusTargets[surviving]?.view === survivingView)
+        #expect(state.lastStartedIncarnation[surviving] == incarnation)
     }
 
     /// The discard is scoped to the closed tab's own terminals. A sibling tab's

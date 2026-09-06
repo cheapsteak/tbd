@@ -85,6 +85,17 @@ extension AppState {
         for waiter in matched { waiter.resume(true) }
     }
 
+    /// Fail every waiter on this terminal, because the terminal has stopped
+    /// existing and the spawn they are holding for can no longer report in.
+    ///
+    /// Resumed `false` rather than dropped: the entry is a suspended
+    /// continuation, and a continuation nobody resumes hangs its send for the
+    /// life of the app rather than timing out.
+    func releaseSessionStartWaiters(terminalID: UUID) {
+        guard let waiters = sessionStartWaiters.removeValue(forKey: terminalID) else { return }
+        for waiter in waiters { waiter.resume(false) }
+    }
+
     private func withdrawSessionStartWaiter(terminalID: UUID, token: UUID) {
         guard let waiters = sessionStartWaiters[terminalID],
               let waiter = waiters.first(where: { $0.token == token })

@@ -578,6 +578,10 @@ extension AppState {
         date: Date = Date()
     ) {
         terminals[worktreeID]?.removeAll { $0.id == terminalID }
+        // This is the death every route shares — a pane close, an archive, a
+        // daemon-reported removal — so it is where the composer's per-terminal
+        // memory is reclaimed. Memory only, and safe: the row is gone above.
+        forgetComposerState(for: terminalID)
         // An already-dispatched recreation RPC cannot be unsent. Keep its
         // in-flight claim intact so no second request can race it, and defer
         // budget cleanup until its `finishTerminalRecreation` runs.

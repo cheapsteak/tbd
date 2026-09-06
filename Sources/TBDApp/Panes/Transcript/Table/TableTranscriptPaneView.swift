@@ -294,9 +294,10 @@ struct TableTranscriptPaneView: View {
     /// What the composer mount resolves to, or nil for no composer at all.
     ///
     /// A value rather than a `ComposerState`, because the view's initializer
-    /// needs the `LocalWorktree` too, and `LocalWorktree` is the second half of
-    /// the same question: a row that cannot produce one is remote, which is one
-    /// of the states `ComposerState.resolve` already answers `.hidden` for.
+    /// needs the `LocalWorktree` too, and a row that cannot produce one has no
+    /// files on this machine to send a message about — a remote row, or a local
+    /// `.creating` placeholder whose path is still empty. Either way: no local
+    /// worktree, no composer.
     struct ComposerMount {
         let terminal: Terminal
         let worktree: LocalWorktree

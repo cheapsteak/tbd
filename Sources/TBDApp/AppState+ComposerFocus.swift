@@ -134,27 +134,50 @@ extension AppState {
 }
 
 extension AppState {
-    /// The terminal the composer menu commands act on.
+    /// The terminal the composer menu commands act on: the first one, among the
+    /// tabs that could plausibly be on screen, that actually has a composer
+    /// mounted.
     ///
-    /// `resolvedFocusedTabCloseContext()` is the accessor the Terminal menu's
-    /// other items already use to name what has focus. It answers nil while
-    /// focus sits in something that is not a terminal view — the transcript
-    /// table and the composer itself both qualify, and both are exactly where
-    /// somebody pressing these shortcuts is — so the last-focused tab is the
-    /// fallback, which is the same value that method falls back to when nothing
-    /// has registered at all.
+    /// **The registration is the answer, not a tie-breaker.** ⌘/ is only ever
+    /// meaningful for a terminal whose composer exists; `focusComposer` on any
+    /// other terminal is a no-op. Naming the registered one — and nil when there
+    /// is none — is what makes the menu items' `.disabled(…)` honest instead of
+    /// offering an action that quietly does nothing.
+    ///
+    /// **Two candidate tabs, in order.** The focused-terminal context first, so
+    /// a split holding both a terminal and a transcript still answers for the
+    /// half the person is in. Then the selected worktree's active tab, which is
+    /// the only candidate that exists at all while focus sits in the transcript
+    /// table or the composer itself: `resolvedFocusedTabCloseContext()` answers
+    /// nil for anything that is not a `TBDTerminalView`, and nothing writes
+    /// `focusedTabCloseContext` for a `.liveTranscript` tab — so relying on it
+    /// alone made ⌘/ in a transcript pane name the last-focused *terminal* tab,
+    /// which is either a no-op or, worse, a caret moved in a background tab.
+    ///
+    /// The unconditional `resolvedFocusedTabCloseContext()` call also keeps the
+    /// observable dependency it documents: it reads `focusedTabCloseContext`,
+    /// the one observable property that moves when focus does, so `.disabled(…)`
+    /// re-evaluates. `composerFocusTargets` is `@ObservationIgnored`, so a
+    /// composer mounting or going away still does not re-evaluate the menu on
+    /// its own — the same staleness `canCloseFocusedTab` documents, and the
+    /// consequence is a stale menu state rather than a wrong action.
     ///
     /// `terminalIDs(in:)` rather than the layout's own enumeration, because a
     /// `.liveTranscript` tab — the composer's own home — is precisely the shape
     /// `allTerminalIDs()` does not report. A tab rendering several terminals
-    /// prefers whichever one has a composer registered, and names the tab's
-    /// first otherwise, so the command still points somewhere during the one
-    /// main-actor turn before the composer's deferred registration lands.
+    /// with composers picks among them by `Set` order, which is deterministic
+    /// and exact for the single-terminal tabs the composer actually lives in.
     var composerCommandTerminalID: UUID? {
-        guard let context = resolvedFocusedTabCloseContext() ?? focusedTabCloseContext,
-              let tab = tabs[context.worktreeID]?.first(where: { $0.id == context.tabID })
-        else { return nil }
-        let ids = terminalIDs(in: tab)
-        return ids.first(where: { composerFocusTargets[$0]?.view != nil }) ?? ids.first
+        let focusedTab = resolvedFocusedTabCloseContext().flatMap { context in
+            tabs[context.worktreeID]?.first(where: { $0.id == context.tabID })
+        }
+        let activeTab = selectedWorktreeIDs.first.flatMap { resolvedActiveTab(worktreeID: $0) }
+        for tab in [focusedTab, activeTab].compactMap({ $0 }) {
+            if let id = terminalIDs(in: tab).first(
+                where: { composerFocusTargets[$0]?.view != nil }) {
+                return id
+            }
+        }
+        return nil
     }
 }
