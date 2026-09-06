@@ -266,15 +266,22 @@ extension HibernationCoordinator {
     private func childIsGone(
         childPID: Int32, terminalID: UUID, registry: HolderRegistry
     ) async -> Bool {
-        if let status = await registry.lastKnownStatus(for: terminalID) {
-            switch status {
-            case .exited, .exitedStatusUnknown: return true
-            case .alive: break
-            }
+        let status = await registry.lastKnownStatus(for: terminalID)
+        switch status {
+        case .exited, .exitedStatusUnknown: return true
+        case .alive, nil: break
         }
+        let statusAlive = (status == .alive)
         // A pid of 0 or below names nothing this daemon may signal or wait on,
-        // and a row that never recorded a child pid has nothing to outlive.
-        guard childPID > 1 else { return true }
+        // so the process table has no answer to give and the registry's is the
+        // only evidence there is. An explicit `.alive` is a positive report
+        // from the holder that its job is still running, and it must not be
+        // thrown away because the row's `child_pid` column happened to be
+        // NULL — that reading would let a park finalize over a live child,
+        // which is the one thing this whole path exists to prevent. With no
+        // report either way, a row that never recorded a child pid has nothing
+        // to outlive.
+        guard childPID > 1 else { return !statusAlive }
         guard signaller.isAlive(childPID) else { return true }
         // `ps -o stat=` reports a corpse as `Z...`. It answers `kill(pid, 0)`,
         // so liveness alone cannot tell it from a running process — and the
