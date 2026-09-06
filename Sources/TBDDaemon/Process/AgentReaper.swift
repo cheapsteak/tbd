@@ -26,8 +26,21 @@ public struct HolderChildRecord: Sendable, Equatable {
     public var holderPID: Int32?
     /// The job the holder `forkpty`'d, as recorded on the row.
     public var childPID: Int32
-    /// When the session row was written. The anchor for the start-time half of
-    /// the identity check — see `decideHolderChild`.
+    /// **The child-identity anchor**: when the job this record names is
+    /// believed to have started. The start-time half of the identity check
+    /// measures against it — see `decideHolderChild`.
+    ///
+    /// It is no longer simply the session row's birthday, and the name has been
+    /// kept only because renaming a field costs every call site and buys
+    /// nothing this comment cannot say. `Daemon.start` fills it with
+    /// `holderChildStartedAt ?? createdAt`: a row that has never been parked
+    /// records no child start, and there the two are the same instant, because
+    /// the job is forked within milliseconds of the row being written. A row
+    /// woken from a park is the case that separates them — its child is younger
+    /// than the row, sometimes by days — and anchoring on the row's own
+    /// `createdAt` there would read every such job as `.startTimeMismatch`,
+    /// which this leg spells "keep". The orphan the leg exists to reclaim would
+    /// then survive every sweep it ever ran.
     public var createdAt: Date
 
     public init(terminalID: UUID, holderPID: Int32?, childPID: Int32, createdAt: Date) {
@@ -61,8 +74,9 @@ public struct AgentReaper: Sendable {
     /// `OrphanGC`. Defaulted to empty so every existing call site and test is
     /// unchanged by the leg's arrival.
     let holderSessions: @Sendable () async -> [HolderChildRecord]
-    /// How far a child's start time may sit from its session row's `createdAt`
-    /// and still be believed to be that session's job.
+    /// How far a child's start time may sit from its record's identity anchor
+    /// (`HolderChildRecord.createdAt`) and still be believed to be that
+    /// session's job.
     let holderIdentityWindow: TimeInterval
 
     public init(
@@ -230,7 +244,7 @@ public struct AgentReaper: Sendable {
     ///    also what the app-liveness arbitration consults, so a reused pid is
     ///    recognized the same way on both paths. A pid naming nothing is not
     ///    killed blindly; the process now holding it must have started within
-    ///    `holderIdentityWindow` of the row's `createdAt` and must present an
+    ///    `holderIdentityWindow` of the record's identity anchor and must present an
     ///    executable a holder's job could have; and an unreadable start time or
     ///    command line is an uncertain identity, which keeps. **Every one of
     ///    that check's answers except `.same` is a keep here**, and that

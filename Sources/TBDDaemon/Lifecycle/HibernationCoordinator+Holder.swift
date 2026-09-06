@@ -22,7 +22,7 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "Hibernation"
 /// invisible to every reconciler that reads rows.
 extension HibernationCoordinator {
 
-    /// The refusal for a holder session the daemon cannot read the screen of.
+    /// The refusal for a holder session whose pty a viewer is holding.
     ///
     /// Fail-closed, per the transport design's two-store rule: while a viewer
     /// owns the pty the daemon's emulator is frozen at the moment of that
@@ -30,10 +30,28 @@ extension HibernationCoordinator {
     /// there is unsent typed input — and answering that question wrongly is
     /// exactly the harm the rail exists to prevent. Refusing is recoverable;
     /// eating a half-composed prompt is not.
+    ///
+    /// It names an action the user can take, which is why it is a separate
+    /// string from `holderNoReaderRefusal` below: closing the tab makes this
+    /// park possible, and telling somebody to close a tab they have not got
+    /// would be worse than saying nothing.
     static let holderViewerAttachedRefusal =
         "A viewer is attached to this session, so the daemon cannot read its "
         + "screen to check for unsent input; close the tab or wait for it to "
         + "leave the viewer before hibernating"
+
+    /// The refusal for a holder session this daemon is not reading at all.
+    ///
+    /// The same fail-closed rail, reached from the opposite direction: nobody
+    /// holds the pty, and the daemon still has no emulator to judge — the
+    /// session was never adopted, or its reader is gone. Nothing the user does
+    /// to a tab changes that, so the text says what is true rather than
+    /// prescribing a gesture that would not help. The distinction is worth a
+    /// string of its own precisely because the remedies differ: one is a tab
+    /// to close, the other is a session the daemon has lost track of.
+    static let holderNoReaderRefusal =
+        "The daemon is not reading this session's terminal, so it cannot check "
+        + "for unsent input before hibernating"
 
     // MARK: - Park
 
@@ -88,11 +106,15 @@ extension HibernationCoordinator {
         // Rail: typed-but-unsent input, read off the daemon's own emulator.
         // Fail-closed on both halves — a viewer holding the pty, or no reader
         // at all — because either one means the screen this rail would judge is
-        // not the screen the session is showing.
-        guard await registry.viewerAttachment(for: terminal.id) == nil,
-              let reader = await registry.reader(for: terminal.id) else {
-            logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — the daemon is not this session's reader")
+        // not the screen the session is showing. Each half answers with its own
+        // name: they differ in what the person reading the refusal can do next.
+        if await registry.viewerAttachment(for: terminal.id) != nil {
+            logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — a viewer holds this session's pty")
             return .notEligible(reason: Self.holderViewerAttachedRefusal)
+        }
+        guard let reader = await registry.reader(for: terminal.id) else {
+            logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — the daemon holds no reader for this session")
+            return .notEligible(reason: Self.holderNoReaderRefusal)
         }
         let screen = await reader.renderScreen()
         if HibernationSafetyChecks.hasPendingInput(paneCapture: screen) {
@@ -174,8 +196,22 @@ extension HibernationCoordinator {
                         childPID: 0,
                         socketPath: socketPath))
             } catch {
-                // Nothing is leaked by skipping it: the job is confirmed gone
-                // and its holder exits when its child does.
+                // The processes are not the concern: the job is confirmed gone
+                // and a holder whose child has exited winds itself down. What
+                // does outlive this call is bookkeeping `abandon` would have
+                // cleared — this session's registry slot and its remembered
+                // status — and the collector for that is
+                // `reclaimIfSessionEnded`, which the reader's end-of-output
+                // notifier fires once the drain runs dry.
+                //
+                // Worth naming rather than glossing: that reclaimer derives the
+                // SAME rendezvous path, and the only thing that makes this
+                // throw is a path over `sun_path` — a persistent fact about
+                // this install's `TBD_HOME` and this session's id, not a
+                // transient. So the pairing is real but not a guarantee here;
+                // it is also the reason this branch is close to unreachable,
+                // since a session whose path cannot be represented could
+                // neither have been spawned nor adopted by this daemon.
                 logger.warning("hibernate: could not derive the rendezvous path for \(terminal.id, privacy: .public), so its holder was not told to let go: \(error.localizedDescription, privacy: .public)")
             }
         }
@@ -186,6 +222,15 @@ extension HibernationCoordinator {
             // spawn a second agent onto the same session. Roll the intent back
             // — `clearHibernated` nils both park columns and the pending
             // incarnation — and report the pid so an operator can act.
+            //
+            // "Left awake" is the row's state, not the session's, and the
+            // difference matters to whoever reads this. Reaching here means the
+            // escalation already ran: the holder was torn down and the job was
+            // signalled, so what is left is a child that survived `SIGKILL` or
+            // could not be confirmed gone. Leaving the row awake is the only
+            // honest record of that — it names live pids, so the reconcile arm
+            // and the reaper's holder leg can both judge it — but it is not a
+            // claim that the session is still usable.
             do {
                 try await db.terminals.clearHibernated(id: terminal.id)
             } catch {
@@ -193,9 +238,10 @@ extension HibernationCoordinator {
             }
             idleSince[terminal.id] = nil
             pendingKillSince[terminal.id] = nil
-            logger.error("hibernate: holder child \(childPID, privacy: .public) for terminal \(terminal.id, privacy: .public) did not exit; the row was left awake")
+            logger.error("hibernate: holder child \(childPID, privacy: .public) for terminal \(terminal.id, privacy: .public) survived the escalation; its holder was torn down and the row is left awake for reconciliation to judge")
             return .notEligible(
-                reason: "holder child \(childPID) did not exit; the session was left running")
+                reason: "holder child \(childPID) survived the escalation; its holder was torn "
+                    + "down and this session is left awake for reconciliation to judge")
         }
 
         do {

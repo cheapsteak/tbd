@@ -640,19 +640,19 @@ extension WorktreeLifecycle {
     private func reconcileTerminals(
         in worktrees: [LocalWorktree], actuationLog: ActuationLog
     ) async throws {
-        // Read once per pass, not per row: the gate decides what this whole
-        // sweep is allowed to do, and re-reading it mid-pass would let a flip
-        // land between two rows of one judgement.
+        // ONE read for both gates, once per pass rather than per row. They
+        // decide what this whole sweep may do — whether it judges holder rows
+        // at all, and what a finished holder session's row BECOMES — and both
+        // are one judgement for the pass: a flip landing between two rows would
+        // park one and delete its sibling for no reason a reader could
+        // reconstruct. Reading the row twice could also straddle a write and
+        // take the two answers from different configurations, which is the one
+        // way this could disagree with itself inside a single pass.
+        let config = try? await db.config.get()
         let holderArmEnabled =
-            (try? await db.config.get().holderRowReconcileEnabled)
-            ?? Config.holderRowReconcileEnabledDefault
-        // Read beside the arm's own gate and for the same reason: what a
-        // finished holder session's row BECOMES is one judgement per pass, and
-        // a flip landing between two rows would park one and delete its sibling
-        // for no reason a reader could reconstruct.
+            config?.holderRowReconcileEnabled ?? Config.holderRowReconcileEnabledDefault
         let holderHibernationEnabled =
-            (try? await db.config.get().holderHibernationEnabled)
-            ?? Config.holderHibernationEnabledDefault
+            config?.holderHibernationEnabled ?? Config.holderHibernationEnabledDefault
         // The budget covers the pass, not one server: the arm is serial across
         // every server this call reconciles, so a per-server budget would
         // multiply by the server count exactly the way a per-probe timeout

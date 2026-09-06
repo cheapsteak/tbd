@@ -398,11 +398,15 @@ struct HolderTmuxAssumptionGateTests {
     /// stops at the fail-closed screen rail, because this registry adopted
     /// nothing and so is not this session's reader.
     ///
-    /// That refusal is the whole rail stated without a live holder: it is the
-    /// answer a session whose viewer holds the pty gets too, and both mean the
-    /// same thing — the daemon cannot see the screen it would have to judge.
-    /// The row fingerprint is what proves the park stopped BEFORE the intent
-    /// was written rather than after.
+    /// That refusal is the whole rail stated without a live holder. It is the
+    /// no-reader half: this registry has adopted nothing, so the daemon holds
+    /// no emulator to judge. The viewer half answers with its own name
+    /// (`holderViewerAttachedRefusal`) because the remedies differ — one is a
+    /// tab to close, the other is a session the daemon has lost track of —
+    /// while the underlying rule is one rule: the daemon cannot see the screen
+    /// it would have to judge, so it fails closed. The row fingerprint is what
+    /// proves the park stopped BEFORE the intent was written rather than
+    /// after.
     @Test("with the flag on a holder row is hibernatable and reaches the screen rail")
     func flagOnMakesAHolderRowHibernatable() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -422,8 +426,12 @@ struct HolderTmuxAssumptionGateTests {
         ).manualHibernate(terminalID: terminal.id)
         #expect(
             result == .notEligible(
-                reason: HibernationCoordinator.holderViewerAttachedRefusal),
+                reason: HibernationCoordinator.holderNoReaderRefusal),
             "the park did not reach the screen rail: \(result)")
+        #expect(
+            HibernationCoordinator.holderNoReaderRefusal
+                != HibernationCoordinator.holderViewerAttachedRefusal,
+            "the two halves of the screen rail collapsed back into one string")
 
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before,
