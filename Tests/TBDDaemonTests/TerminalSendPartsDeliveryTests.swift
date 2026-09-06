@@ -41,6 +41,23 @@ struct TerminalSendPartsDeliveryTests {
         #expect(harness.tmux.sentKeys == ["Enter"])
     }
 
+    /// An image part before the first text part must carry no envelope; the
+    /// envelope belongs on the first TEXT part, not the first part outright.
+    @Test func anImagePartBeforeTextCarriesNoEnvelope() async throws {
+        let harness = try await SendHarness.make()
+        _ = try await harness.send(TerminalSendParams(
+            terminalID: harness.terminal.id, submit: true,
+            parts: [.imagePath("/tmp/a.png"), .text("hi")]),
+            actor: .app)
+
+        let bodies = harness.tmux.pastedBodies
+        #expect(bodies.count == 2)
+        #expect(bodies[0] == "'/tmp/a.png'")
+        #expect(bodies[1].hasPrefix("<tbd-dispatch"))
+        #expect(bodies[1].hasSuffix("\nhi"))
+        #expect(harness.tmux.sentKeys == ["Enter"])
+    }
+
     @Test func emptyTextPartsAreSkipped() async throws {
         let harness = try await SendHarness.make()
         _ = try await harness.send(TerminalSendParams(

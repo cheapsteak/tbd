@@ -54,7 +54,7 @@ struct SendHarness {
         func recordPaste(_ bytes: Data) {
             lock.lock()
             defer { lock.unlock() }
-            _pastes.append(String(decoding: bytes, as: UTF8.self))
+            _pastes.append(String(bytes: bytes, encoding: .utf8) ?? "")
         }
         /// Keys arrive as argv, because `sendKey` in dryRun hands the whole
         /// `send-keys` command to `dryRunRecorder` rather than to a key-shaped
