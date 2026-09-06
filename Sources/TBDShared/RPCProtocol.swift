@@ -2400,6 +2400,81 @@ public struct SessionStatesResult: Codable, Sendable {
     public init(reports: [SessionStateReport]) { self.reports = reports }
 }
 
+/// One piece of a composed message.
+///
+/// The composer splits its text at image tokens into an ordered list, and the
+/// daemon delivers each piece as its own bracketed paste. The split exists
+/// because of a measured property of Claude Code's paste handler: it turns a
+/// paste into an image attachment only when the WHOLE paste is one quoted path
+/// with an image extension. Measured on 2.1.261 — a bare quoted path pasted
+/// alone became a base64 image block in the user message, while the same path
+/// inside a sentence, and any path given as a command-line argument, stayed
+/// literal text. Pasting the parts in order reproduces what drag-and-drop
+/// produces: an `[Image #N]` placeholder at the caret between the words around
+/// it.
+///
+/// A tagged object rather than a bare string, deliberately. A reader has to be
+/// able to tell an image path from a sentence that happens to look like one, and
+/// a third kind later must not change the JSON type of a field that already
+/// exists.
+public enum SendPart: Codable, Sendable, Equatable {
+    /// Pasted as text.
+    case text(String)
+    /// Pasted as the bare quoted absolute path and nothing else.
+    case imagePath(String)
+
+    private enum CodingKeys: String, CodingKey { case kind, value }
+    private enum Kind: String, Codable { case text, imagePath }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let value = try c.decode(String.self, forKey: .value)
+        switch try c.decode(Kind.self, forKey: .kind) {
+        case .text: self = .text(value)
+        case .imagePath: self = .imagePath(value)
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .text(let value):
+            try c.encode(Kind.text, forKey: .kind)
+            try c.encode(value, forKey: .value)
+        case .imagePath(let value):
+            try c.encode(Kind.imagePath, forKey: .kind)
+            try c.encode(value, forKey: .value)
+        }
+    }
+}
+
+/// Whether a send carries the `<tbd-dispatch/>` line ahead of its body.
+///
+/// **Asking for suppression is not the same as getting it, and this field is the
+/// asking.** The daemon honors `.suppressed` only on a connection it has already
+/// authenticated as the app's — the peer pid the kernel reports for the socket,
+/// matched against the pid the FD-vending sidecar recorded for its current
+/// client and then re-verified through the daemon's one start-time and
+/// command-line check. It does **not** read the request's declared actor, which
+/// is an ambient self-declaration any local process can stamp.
+///
+/// The envelope is how an agent-to-agent dispatch stays attributed inside the
+/// receiving session. A suppression switch any caller could throw would let any
+/// agent inject unattributed text, which is the one property the envelope exists
+/// to provide.
+public enum EnvelopeDisposition: String, Codable, Sendable {
+    case attached
+    case suppressed
+
+    /// An unknown disposition from a newer client is as unusable as an absent
+    /// one, and must not fail the whole payload's decode: it resolves to the
+    /// conservative reading, which is to attach.
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = EnvelopeDisposition(rawValue: raw) ?? .attached
+    }
+}
+
 /// One `terminal.send` request. Exactly one payload kind per call — `text` or
 /// `keys`, never both and never neither (design §3, "Payloads, not verbs").
 ///
@@ -2429,15 +2504,39 @@ public struct TerminalSendParams: Codable, Sendable {
     /// transcript) and is incompatible with `keys`. Refused, never silently
     /// downgraded, while `delivery_verification_enabled` is off.
     public let verify: Bool?
+    /// An ordered list of pieces, delivered one bracketed paste each, then one
+    /// Enter. Mutually exclusive with both `text` and `keys`; empty text parts
+    /// are skipped. Absent on every request written before the composer existed,
+    /// which is what makes this additive.
+    public let parts: [SendPart]?
+    /// Whether the `<tbd-dispatch/>` envelope rides ahead of the body. Absent
+    /// means `.attached`, which is what every existing caller gets. Suppression
+    /// is a REQUEST, honored only on a connection the daemon has authenticated
+    /// as the app's — never on the strength of this field or of the declared
+    /// actor. See `EnvelopeDisposition`.
+    public let envelope: EnvelopeDisposition?
+    /// Opt in to the awaiting-input gate: refuse this send when the session has a
+    /// prompt on screen or an unrecognized awaiting-input reason.
+    ///
+    /// **Opt-in rather than daemon-wide, deliberately.** Agents use this verb to
+    /// answer permission dialogs on purpose, and a blanket gate would refuse
+    /// exactly those sends. The composer always opts in; existing CLI sends do
+    /// not, and absent means not gated.
+    public let gateOnAwaitingInput: Bool?
     public init(
         terminalID: UUID, text: String? = nil, keys: String? = nil,
-        submit: Bool? = nil, verify: Bool? = nil
+        submit: Bool? = nil, verify: Bool? = nil,
+        parts: [SendPart]? = nil, envelope: EnvelopeDisposition? = nil,
+        gateOnAwaitingInput: Bool? = nil
     ) {
         self.terminalID = terminalID
         self.text = text
         self.keys = keys
         self.submit = submit
         self.verify = verify
+        self.parts = parts
+        self.envelope = envelope
+        self.gateOnAwaitingInput = gateOnAwaitingInput
     }
 }
 
