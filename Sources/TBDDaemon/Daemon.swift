@@ -1234,7 +1234,8 @@ public final class Daemon: Sendable {
         // stopped accepting — independent of how badly any one of them is.
         // Binding first would instead open a window in which the socket answers while holder
         // sessions have no readers — `terminal.output` fails a live session
-        // with "its session is gone or was never adopted", a sentence no caller
+        // with "its session is gone, was never adopted, or is mid-transition", a
+        // sentence no caller
         // can tell apart from the truth about a genuinely dead one, and the
         // app's `attach.request` throws `noLiveReader` for the same session —
         // and it would not even make the daemon answerable, because steps 8b-8d

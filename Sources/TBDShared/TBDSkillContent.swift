@@ -101,13 +101,18 @@ tbd terminal output <id> [--lines N]
 ```
 
 **A session someone has open answers from a frozen screen.** While a viewer
-holds a session's pty, `tbd terminal output` no longer fails — it answers with
-the daemon's emulator as it stood when that viewer attached, and announces that
+holds a session's pty, `tbd terminal output` still answers: with the daemon's
+emulator as it stood when that viewer attached, and it announces that
 on stderr. Stdout stays exactly the screen text, so a reader that captures only
 stdout cannot tell a live screen from one that stopped updating hours ago. Read
 the stderr note, or pass `--json` and check `screen.source` (`daemon` is the
 live store, `staleDaemon` the at-attach one) and `screen.ageMilliseconds`,
 before acting on what you read.
+
+`screen` is there only for sessions on the pty-holder transport. A tmux-backed
+session answers with `output` alone, so a missing `screen` key means a tmux
+session rather than an error, and there is no staleness question to ask about
+one — tmux captures its pane live.
 
 ### Message a sibling session
 

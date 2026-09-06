@@ -1912,10 +1912,12 @@ extension RPCRouter {
     /// possible wrong answer.
     ///
     /// A missing reader is still reported rather than papered over. It means
-    /// the registry has no reader at all — the holder is gone, or startup
-    /// adoption found it unreachable — and an empty screen would read as "the
-    /// session is quiet", which is a different and much more comfortable claim
-    /// than the true one.
+    /// the registry has no reader to hand out: the holder is gone, startup
+    /// adoption found it unreachable, or the slot is mid-transition — an attach
+    /// in flight, or a release running — since `reader(for:)` answers only for
+    /// an adopted slot. The error names all three and says which of them a
+    /// retry helps, because an empty screen would read as "the session is
+    /// quiet", a different and much more comfortable claim than the true one.
     ///
     /// **A refused projection is an error, never an empty screen.** The screen
     /// type refuses a row carrying a control character, and such a row is a bug
@@ -1932,7 +1934,9 @@ extension RPCRouter {
         guard let reader = await holderRegistry.reader(for: terminal.id) else {
             return RPCResponse(
                 error: "No live holder reader for terminal \(terminal.id); "
-                    + "its session is gone or was never adopted")
+                    + "its session is gone, was never adopted, or is mid-transition "
+                    + "(being adopted or released); retry if it was just created "
+                    + "or is being closed")
         }
         let lines = params.lines ?? 50
         // Rendered to the requested depth directly. The tmux path asks for a
@@ -3208,15 +3212,33 @@ extension RPCRouter {
     /// non-empty body in `ESC[200~`…`ESC[201~` exactly when the child has
     /// bracketed paste on, and the submitting `\r` follows the end marker — so
     /// the Enter is provably outside the paste, which is the property the tmux
-    /// arm gets from delivering in two acts and this arm used to lack. A child
+    /// arm gets from delivering in two acts and a mode-blind composition cannot
+    /// have at all. A child
     /// that never asked for bracketing gets bare bytes, because markers it does
     /// not understand are markers it prints.
     ///
     /// The oracle is consulted at composition time, which is a moment, and the
-    /// child can change a mode between that moment and the write. tmux has the
-    /// same window — the server reads the pane's mode when it pastes, not when
-    /// the bytes land — and it is accepted for the same reason: a mode that
-    /// flips mid-send produces a visible mis-paste, not a silent loss.
+    /// child can change a mode between that moment and the write. **How wide
+    /// that window is depends on which store answered.** A live store — the
+    /// daemon's own emulator, or a viewer that answered the pull — leaves only
+    /// the moment between the read and the write, which is the window tmux has
+    /// too: its server reads the pane's mode when it pastes, not when the bytes
+    /// land. A `staleDaemon` reading leaves the whole attach, because that
+    /// emulator stopped consuming bytes when the viewer took the pty, so a mode
+    /// the child changed since then is invisible here for as long as the viewer
+    /// holds it — possibly hours.
+    ///
+    /// Both windows are accepted, and the wide one is accepted by ruling: the
+    /// design's "Proceeding on stale modes" section weighs a rare wrong
+    /// composition against rails that fail closed exactly when supervision most
+    /// needs to send. What a wrong reading costs is a wrong composition, and a
+    /// wrong composition is visible in the composer or diagnosable from the
+    /// row's `modeSource` and its age — never a send that vanished. Read as on
+    /// when it is off, a shell that has bracketing off prints the `ESC[200~` and
+    /// `ESC[201~` markers around the text and runs the line it made of them.
+    /// Read as off when it is on, a multi-line body goes bare to a TUI that
+    /// turned bracketing on after the attach, and its paste-burst heuristic can
+    /// absorb the submitting `\r` into the text.
     private func performHolderSend(
         payload: TerminalSendPayload, terminal: Terminal, actuationID: String,
         actor: ActuationActor?, envelope: DispatchEnvelopeDisposition
