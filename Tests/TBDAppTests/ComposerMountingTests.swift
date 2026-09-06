@@ -305,4 +305,210 @@ struct ComposerMountingTests {
         }
         #expect(message.contains("session gone"))
     }
+
+    // MARK: - The mount decision
+
+    private func terminal(
+        worktreeID: UUID,
+        id: UUID = UUID(),
+        kind: TerminalKind? = .claude,
+        hibernatedAt: Date? = nil
+    ) -> Terminal {
+        Terminal(
+            id: id, worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            kind: kind, hibernatedAt: hibernatedAt,
+            hibernateReason: hibernatedAt == nil ? nil : .manual)
+    }
+
+    private func worktree(id: UUID = UUID(), remote: Bool = false) -> Worktree {
+        let location: WorktreeLocation =
+            remote ? .remote(provider: "test", sessionID: "s1") : .local
+        return Worktree(
+            id: id, repoID: UUID(), name: "wt", displayName: "WT", branch: "main",
+            path: location.storagePath ?? "/tmp/wt", status: .active,
+            tmuxServer: "test-server", location: location)
+    }
+
+    private func mount(
+        terminal: Terminal?, worktree: Worktree?, enabled: Bool = true
+    ) -> TableTranscriptPaneView.ComposerMount? {
+        TableTranscriptPaneView.composerMount(
+            terminal: terminal, worktree: worktree, composerEnabled: enabled)
+    }
+
+    /// **The flag-off branch.** With the daemon capability off the pane renders
+    /// exactly as it did before: no composer is built at all, so
+    /// `MessageComposerView` — which reads `AppState` non-optionally from the
+    /// environment — is never evaluated.
+    @Test func theFlagOffMountsNoComposer() {
+        let wt = worktree()
+        #expect(mount(terminal: terminal(worktreeID: wt.id), worktree: wt, enabled: false) == nil)
+    }
+
+    /// **The flag-on branch.** A live Claude terminal on a local worktree gets a
+    /// running composer, and the mount carries the `LocalWorktree` the view's
+    /// initializer takes.
+    @Test func aLiveClaudeTerminalOnALocalWorktreeMounts() throws {
+        let wt = worktree()
+        let decision = try #require(mount(terminal: terminal(worktreeID: wt.id), worktree: wt))
+        #expect(decision.state == .running)
+        #expect(decision.worktree.id == wt.id)
+    }
+
+    /// A remote worktree has no composer, and it cannot even produce the
+    /// `LocalWorktree` the view requires — the two facts agree.
+    @Test func aRemoteWorktreeMountsNoComposer() {
+        let wt = worktree(remote: true)
+        #expect(mount(terminal: terminal(worktreeID: wt.id), worktree: wt) == nil)
+    }
+
+    @Test func aNonClaudeTerminalMountsNoComposer() {
+        let wt = worktree()
+        #expect(mount(terminal: terminal(worktreeID: wt.id, kind: .codex), worktree: wt) == nil)
+        #expect(mount(terminal: terminal(worktreeID: wt.id, kind: .shell), worktree: wt) == nil)
+        #expect(mount(terminal: terminal(worktreeID: wt.id, kind: nil), worktree: wt) == nil)
+    }
+
+    /// The pane can render before either row is cached — the transcript comes
+    /// from the daemon, the rows from their own RPCs — so both absences are
+    /// real states rather than impossible ones.
+    @Test func aMissingRowMountsNoComposer() {
+        let wt = worktree()
+        #expect(mount(terminal: nil, worktree: wt) == nil)
+        #expect(mount(terminal: terminal(worktreeID: wt.id), worktree: nil) == nil)
+    }
+
+    /// A parked session still gets a composer: sending resumes it. This is the
+    /// case a `state != .hidden` gate must keep and an `isEnabled` gate would
+    /// have dropped.
+    @Test func aHibernatedClaudeTerminalStillMounts() throws {
+        let wt = worktree()
+        let decision = try #require(mount(
+            terminal: terminal(worktreeID: wt.id, hibernatedAt: Date()), worktree: wt))
+        #expect(decision.state == .notRunning(exited: false))
+    }
+
+    // MARK: - The transcript as a focus target
+
+    @Test func transcriptRegistrationIsKeyedByTerminal() {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let id = UUID()
+        let table = NSTableView()
+
+        state.registerTranscriptView(table, for: id)
+        #expect(state.transcriptFocusTargets[id]?.view === table)
+
+        state.unregisterTranscriptView(table, for: id)
+        #expect(state.transcriptFocusTargets[id] == nil)
+    }
+
+    /// Same newer-wins rule as the composer registry, and for the same reason:
+    /// a session rollover rebuilds the table while the old one is still
+    /// deallocating.
+    @Test func aStaleTranscriptUnregisterDoesNotEvictTheLiveView() {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let id = UUID()
+        let old = NSTableView(), new = NSTableView()
+
+        state.registerTranscriptView(old, for: id)
+        state.registerTranscriptView(new, for: id)
+        state.unregisterTranscriptView(old, for: id)
+
+        #expect(state.transcriptFocusTargets[id]?.view === new)
+    }
+
+    /// **Escape's destination.** With a transcript table registered,
+    /// `focusTranscript` moves AppKit's first responder onto it rather than
+    /// taking the resign-first-responder fallback the earlier test pins.
+    @Test func focusTranscriptMakesTheRegisteredTableFirstResponder() {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        _ = NSApplication.shared
+        let id = UUID()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled], backing: .buffered, defer: true)
+        // A column-less NSTableView refuses first responder outright, so the
+        // fixture has to be shaped like the real one — `TableTranscriptView`
+        // adds exactly one column before the table is ever shown.
+        let table = NSTableView(frame: window.contentLayoutRect)
+        table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c")))
+        window.contentView?.addSubview(table)
+        state.registerTranscriptView(table, for: id)
+
+        state.focusTranscript(terminalID: id)
+
+        #expect(
+            window.firstResponder === table,
+            "focus went to \(String(describing: window.firstResponder)) instead")
+    }
+
+    // MARK: - Which terminal the menu commands act on
+
+    private func liveTranscriptTab(terminalID: UUID) -> TBDShared.Tab {
+        let tabID = UUID()
+        return TBDShared.Tab(
+            id: tabID,
+            content: .liveTranscript(id: tabID, terminalID: terminalID),
+            label: "Transcript")
+    }
+
+    /// Cmd+/ needs a terminal, and the focused tab names it — including for a
+    /// `.liveTranscript` tab, whose terminal the layout enumeration alone does
+    /// not report.
+    @Test func theComposerCommandNamesTheFocusedTabsTerminal() {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let worktreeID = UUID(), terminalID = UUID()
+        let tab = liveTranscriptTab(terminalID: terminalID)
+        state.tabs[worktreeID] = [tab]
+        state.focusedTabCloseContext = TabCloseContext(worktreeID: worktreeID, tabID: tab.id)
+
+        #expect(state.composerCommandTerminalID == terminalID)
+    }
+
+    /// Nothing focused, nothing to act on — the menu items disable rather than
+    /// guessing at a terminal.
+    @Test func withNoFocusedTabTheComposerCommandNamesNothing() {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+
+        #expect(state.composerCommandTerminalID == nil)
+    }
+
+    // MARK: - A closed tab takes its draft with it
+
+    @Test func closingATabDiscardsItsComposerDraft() {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let worktreeID = UUID(), terminalID = UUID()
+        let tab = liveTranscriptTab(terminalID: terminalID)
+        state.tabs[worktreeID] = [tab]
+        state.composerDraft(for: terminalID).text = "half a sentence"
+
+        state.closeTab(worktreeID: worktreeID, index: 0)
+
+        #expect(state.composerDrafts[terminalID] == nil)
+    }
+
+    /// The discard is scoped to the closed tab's own terminals. A sibling tab's
+    /// half-written message survives.
+    @Test func closingATabLeavesAnotherTabsDraftAlone() {
+        let (state, suiteName) = makeState()
+        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let worktreeID = UUID(), closing = UUID(), surviving = UUID()
+        state.tabs[worktreeID] = [
+            liveTranscriptTab(terminalID: closing),
+            liveTranscriptTab(terminalID: surviving)
+        ]
+        state.composerDraft(for: closing).text = "going away"
+        state.composerDraft(for: surviving).text = "staying"
+
+        state.closeTab(worktreeID: worktreeID, index: 0)
+
+        #expect(state.composerDrafts[closing] == nil)
+        #expect(state.composerDrafts[surviving]?.text == "staying")
+    }
 }

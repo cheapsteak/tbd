@@ -53,6 +53,24 @@ extension AppState {
         view.window?.makeFirstResponder(view)
     }
 
+    /// The transcript table this terminal is reading, so Escape in the composer
+    /// has somewhere to send focus back to.
+    ///
+    /// Written from `TableTranscriptView.makeNSView` rather than from a deferred
+    /// task: both registries are `@ObservationIgnored`, so the write publishes
+    /// nothing and cannot re-enter the view update that is making the view.
+    func registerTranscriptView(_ view: NSView, for terminalID: UUID) {
+        transcriptFocusTargets[terminalID] = ComposerFocusTarget(view)
+    }
+
+    /// Newer-wins, exactly as `unregisterComposerView` is: a session rollover
+    /// rebuilds the table under its `.id`, and the outgoing view must not evict
+    /// the replacement that has already registered.
+    func unregisterTranscriptView(_ view: NSView, for terminalID: UUID) {
+        guard transcriptFocusTargets[terminalID]?.view === view else { return }
+        transcriptFocusTargets.removeValue(forKey: terminalID)
+    }
+
     /// Escape from the composer — hand focus back to the transcript, which is
     /// where the person was reading.
     func focusTranscript(terminalID: UUID) {
@@ -112,5 +130,31 @@ extension AppState {
         } catch {
             return .failed(message: error.localizedDescription)
         }
+    }
+}
+
+extension AppState {
+    /// The terminal the composer menu commands act on.
+    ///
+    /// `resolvedFocusedTabCloseContext()` is the accessor the Terminal menu's
+    /// other items already use to name what has focus. It answers nil while
+    /// focus sits in something that is not a terminal view — the transcript
+    /// table and the composer itself both qualify, and both are exactly where
+    /// somebody pressing these shortcuts is — so the last-focused tab is the
+    /// fallback, which is the same value that method falls back to when nothing
+    /// has registered at all.
+    ///
+    /// `terminalIDs(in:)` rather than the layout's own enumeration, because a
+    /// `.liveTranscript` tab — the composer's own home — is precisely the shape
+    /// `allTerminalIDs()` does not report. A tab rendering several terminals
+    /// prefers whichever one has a composer registered, and names the tab's
+    /// first otherwise, so the command still points somewhere during the one
+    /// main-actor turn before the composer's deferred registration lands.
+    var composerCommandTerminalID: UUID? {
+        guard let context = resolvedFocusedTabCloseContext() ?? focusedTabCloseContext,
+              let tab = tabs[context.worktreeID]?.first(where: { $0.id == context.tabID })
+        else { return nil }
+        let ids = terminalIDs(in: tab)
+        return ids.first(where: { composerFocusTargets[$0]?.view != nil }) ?? ids.first
     }
 }

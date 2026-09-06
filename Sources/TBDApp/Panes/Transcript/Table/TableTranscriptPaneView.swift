@@ -234,24 +234,83 @@ struct TableTranscriptPaneView: View {
             sections: presentation.indexSections,
             onOpen: { itemID in openTranscriptOverlay?(itemID) }
         ) {
-            TableTranscriptView(
-                context: cardContext,
-                atBottom: $atBottom,
-                scrollToBottomToken: scrollToBottomToken,
-                activityToggleToken: activityToggleToken,
-                linkRoot: linkRoot,
-                nodesProvider: { timedRenderNodes(presentation.nodes) }
-            )
-            // Compose the terminal with its current Claude session so a session
-            // rollover within one terminal tears down and rebuilds the stateful
-            // Coordinator, re-resolving from a clean baseline rather than persisting
-            // the prior session's drilled-in subagent thread. (#129)
-            .id(PaneIdentity(terminalID: terminalID, sessionID: currentSessionID))
-            .overlay(alignment: .bottomLeading) {
-                jumpToBottomButton
-                    .animation(.easeInOut(duration: 0.2), value: atBottom)
+            VStack(spacing: 0) {
+                TableTranscriptView(
+                    context: cardContext,
+                    atBottom: $atBottom,
+                    scrollToBottomToken: scrollToBottomToken,
+                    activityToggleToken: activityToggleToken,
+                    linkRoot: linkRoot,
+                    nodesProvider: { timedRenderNodes(presentation.nodes) },
+                    onTableReady: { [appState, terminalID] table in
+                        appState.registerTranscriptView(table, for: terminalID)
+                    }
+                )
+                // Compose the terminal with its current Claude session so a session
+                // rollover within one terminal tears down and rebuilds the stateful
+                // Coordinator, re-resolving from a clean baseline rather than persisting
+                // the prior session's drilled-in subagent thread. (#129)
+                .id(PaneIdentity(terminalID: terminalID, sessionID: currentSessionID))
+                .overlay(alignment: .bottomLeading) {
+                    jumpToBottomButton
+                        .animation(.easeInOut(duration: 0.2), value: atBottom)
+                }
+
+                // OUTSIDE the `.id` above, deliberately: a `/clear` rebuilds the
+                // table, and it must not take a half-written message with it.
+                if let decision = Self.composerMount(
+                    terminal: terminal,
+                    worktree: appState.findWorktree(id: worktreeID),
+                    composerEnabled: appState.transcriptComposerEnabled) {
+                    Divider()
+                    MessageComposerView(
+                        terminal: decision.terminal,
+                        worktree: decision.worktree,
+                        state: decision.state)
+                        // A terminal switch reuses this pane, and the composer's
+                        // registration is keyed on the terminal it was made for.
+                        // A fresh view per terminal is what keeps the two agreeing.
+                        .id(decision.terminal.id)
+                }
             }
         }
+    }
+
+    // MARK: - The mount decision
+
+    /// What the composer mount resolves to, or nil for no composer at all.
+    ///
+    /// A value rather than a `ComposerState`, because the view's initializer
+    /// needs the `LocalWorktree` too, and `LocalWorktree` is the second half of
+    /// the same question: a row that cannot produce one is remote, which is one
+    /// of the states `ComposerState.resolve` already answers `.hidden` for.
+    struct ComposerMount {
+        let terminal: Terminal
+        let worktree: LocalWorktree
+        let state: ComposerState
+    }
+
+    /// Whether this pane mounts a composer, and with what.
+    ///
+    /// Static and taking its three inputs explicitly so the gate is assertable
+    /// without a view hierarchy — including both branches of the daemon
+    /// capability, which is the flag this whole feature ships behind.
+    ///
+    /// `!= .hidden` rather than `isEnabled`: a parked session's composer is
+    /// mounted and disabled-looking but very much present, because sending to it
+    /// is what resumes it.
+    static func composerMount(
+        terminal: Terminal?, worktree: Worktree?, composerEnabled: Bool
+    ) -> ComposerMount? {
+        guard let worktree else { return nil }
+        let state = ComposerState.resolve(
+            terminal: terminal,
+            isRemoteWorktree: !worktree.location.isLocal,
+            composerEnabled: composerEnabled)
+        guard state != .hidden, let terminal, let local = LocalWorktree(worktree) else {
+            return nil
+        }
+        return ComposerMount(terminal: terminal, worktree: local, state: state)
     }
 
     private func setActivityGroup(_ id: String, expanded: Bool) {

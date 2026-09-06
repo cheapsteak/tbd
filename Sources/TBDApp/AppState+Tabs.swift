@@ -381,6 +381,20 @@ extension AppState {
         // doesn't leak stale UUIDs into `unreadTerminals`.
         unreadTerminals.subtract(terminalIDsInTab)
 
+        // A closed tab takes its composers' unsent messages with it: the
+        // terminals below are being deleted, so a kept draft could never be
+        // sent and would only sit in the map for the app's lifetime. Safe from
+        // eating a send in flight — the send path clears the draft itself on
+        // success, and a tab cannot close while its own send is mid-flight
+        // without the person closing it deliberately.
+        //
+        // `terminalIDs(in:)` rather than `terminalIDsInTab`, because a
+        // `.liveTranscript` tab — the composer's own home — is exactly the
+        // shape `allTerminalIDs()` does not enumerate.
+        for terminalID in terminalIDs(in: tab) {
+            discardComposerDraft(for: terminalID)
+        }
+
         layouts.removeValue(forKey: tab.id)
         arr.remove(at: index)
         tabs[worktreeID] = arr
