@@ -1697,7 +1697,24 @@ public final class Daemon: Sendable {
                 },
                 // swiftlint:disable:next no_raw_task_sleep - already seamed: this closure IS the production value of `LimitResumeActuator`'s non-defaulted `waiter:` parameter (the seam itself), exercised by Tests/TBDDaemonTests/LimitResumeActuatorTests.swift which injects `waiter: { _ in }` at 5 construction sites; see docs/specs/2026-07-24-test-hardening-design.md
                 waiter: { duration in _ = try? await Task.sleep(for: duration) },
-                actuationLog: actuationLog
+                actuationLog: actuationLog,
+                // The rail's input path for a holder-backed row: the same
+                // courier `terminal.send` writes through, so an auto-resume is
+                // routed by who owns the pty exactly as a human's send is, and
+                // reduced to the yes/no this rail acts on. Both write answers
+                // are a delivery — `daemonWrote` names a fallback route, not a
+                // failure. Nil with no courier (mock mode, or no holder
+                // registry to build one on): the actuator then refuses a holder
+                // row by name instead of typing at coordinates it does not have.
+                holderSend: holderInjectionCourier.map { courier in
+                    let send: @Sendable (UUID, Data) async -> Bool = { terminalID, bytes in
+                        switch await courier.deliver(terminalID: terminalID, bytes: bytes) {
+                        case .viewerWrote, .daemonWrote: return true
+                        case .notDelivered: return false
+                        }
+                    }
+                    return send
+                }
             )
             let resumeScheduler = LimitResumeScheduler(
                 store: database.scheduledResumes,

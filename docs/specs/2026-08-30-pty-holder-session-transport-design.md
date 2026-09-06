@@ -632,6 +632,20 @@ Everything TBD does through tmux today, and its replacement:
   hibernation not yet". With it off, every park and wake path refuses a holder
   row and the reconcile arm deletes a finished holder session rather than
   parking it — a park is only worth having where something can wake it.
+
+  The same flag decides the **limit-resume rail**, which types "continue" into
+  a session whose usage limit has reset. On this transport it writes through
+  `HolderInjectionCourier` rather than tmux `send-keys` — one message of ESC,
+  the literal and a carriage return, ten bytes, far under the size at which an
+  unwrapped write loses its trailing `\r`. Its pane-identity, pane-PID and
+  copy-mode rails are tmux's alone and are skipped; the verification that
+  follows the send reads hook-fed activity state and transcript growth, so it
+  is the same code for both transports. It belongs under this flag rather than
+  a flag of its own for the same reason as the park: a rail that resumes a
+  session is the counterpart of one that parks it, and soaking them apart
+  would leave a fleet where an auto-resume can fire at a session no sweep may
+  park. With the flag off it refuses a holder row by name, so a user who armed
+  auto-resume is told once rather than left watching a limit screen.
 - **Scrollback** — bounded emulator history while detached, SwiftTerm's own
   history while attached, transcripts as the durable record. tmux's 50k-line
   retention is not matched and deliberately so.
