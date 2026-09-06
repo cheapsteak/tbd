@@ -84,7 +84,7 @@ extension RPCRouter {
     /// the act already ran, so a lost outcome row leaves the request
     /// unconfirmed rather than retroactively refused.
     ///
-    /// The two mode parameters are defaulted so no existing call site changes.
+    /// The three mode parameters are defaulted so no existing call site changes.
     /// Only a holder send passes them, and only for a row written after it
     /// composed something — see `ActuationRow.modeSource`.
     func finishActuation(
@@ -92,11 +92,13 @@ extension RPCRouter {
         _ result: ActuationOutcome,
         error: String? = nil,
         modeSource: ActuationModeSource? = nil,
-        modeAgeMilliseconds: Int? = nil
+        modeAgeMilliseconds: Int? = nil,
+        modesObserved: Bool? = nil
     ) async {
         await actuationLog.appendOutcome(
             confirms: id, result: result, error: error,
-            modeSource: modeSource, modeAgeMilliseconds: modeAgeMilliseconds)
+            modeSource: modeSource, modeAgeMilliseconds: modeAgeMilliseconds,
+            modesObserved: modesObserved)
     }
 
     /// Convenience for handlers whose only post-row failure mode is the daemon

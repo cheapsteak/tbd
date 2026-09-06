@@ -491,6 +491,7 @@ struct HolderTmuxAssumptionGateTests {
             size: TerminalScreen.Size(columns: 80, rows: 24),
             modes: TerminalScreen.ChildModes(
                 bracketedPaste: true, applicationCursor: false, alternateScreen: false),
+            modesObserved: true,
             source: source,
             ageMilliseconds: 0)
     }
@@ -1511,6 +1512,8 @@ struct HolderTmuxAssumptionGateTests {
         #expect(outcome["modeSource"] as? String == "unavailable")
         #expect(outcome["modeAgeMilliseconds"] == nil,
                 "an unavailable oracle has no store whose age could be recorded")
+        #expect(outcome["modesObserved"] == nil,
+                "an unavailable oracle has no store whose provenance could be recorded")
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(RowFingerprint(after) == before)
         // The strongest half: delivery sits ahead of the whole tmux mechanic,
@@ -1529,6 +1532,7 @@ struct HolderTmuxAssumptionGateTests {
     /// live; this is how the composition's own branches are pinned.
     private func oracle(
         bracketedPaste: Bool,
+        modesObserved: Bool = true,
         source: TerminalScreen.Source = .daemon,
         ageMilliseconds: Int = 0
     ) -> @Sendable (UUID) async -> TerminalModeReading? {
@@ -1538,6 +1542,7 @@ struct HolderTmuxAssumptionGateTests {
                     bracketedPaste: bracketedPaste,
                     applicationCursor: false,
                     alternateScreen: false),
+                modesObserved: modesObserved,
                 source: source,
                 ageMilliseconds: ageMilliseconds)
         }
@@ -1627,6 +1632,102 @@ struct HolderTmuxAssumptionGateTests {
         #expect(!text.contains("\u{1b}[200~"))
         #expect(!text.contains("\u{1b}[201~"))
         #expect(recorded.snapshot().isEmpty)
+
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["modesObserved"] as? Bool == true, """
+            an observed reading must say so, or a bare send is indistinguishable from a guess \
+            that happened to compose bare
+            """)
+    }
+
+    /// The daemon-restart case, and the reason the second axis exists. A reader
+    /// built over a child that was already running holds a fresh terminal's
+    /// defaults: its `bracketedPaste: false` is not a fact about the child, so
+    /// composing bare on it is the failure nobody can see — the receiver's
+    /// burst heuristic absorbs the `\r` and the message sits in the composer.
+    /// The oracle wraps instead, which at worst prints markers somebody can
+    /// read, and the row discloses that it guessed.
+    ///
+    /// **This is an AGENT session** (`seedClaudeTerminal` seeds a `.claude`
+    /// terminal), which is the only child kind whose bare-send failure is
+    /// silent and so the only one the uncertainty-wrap applies to — its
+    /// shell-kind counterpart is `sendStaysBareForAnUnobservedShell` below.
+    @Test("a send composed against unobserved agent defaults wraps anyway and says so on the row")
+    func sendWrapsForUnobservedDefaults() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(db, worktreeID: wt.id, transport: .holder)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: deadWindowTmux(recorded))
+        rpc.holderInjectionCourier = writes.courier()
+        rpc.holderModeOracle = oracle(
+            bracketedPaste: false, modesObserved: false, source: .daemon)
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        let written = try #require(writes.all.first)
+        let text = try #require(String(data: written, encoding: .utf8))
+        #expect(text.hasPrefix("\u{1b}[200~"))
+        #expect(text.hasSuffix("\u{1b}[201~\r"))
+
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["result"] as? String == "dispatched")
+        // The source alone would read as a live, trustworthy answer — the
+        // emulator IS live, and its lines are judgeable; only its modes are
+        // defaults. That is what the second field is for.
+        #expect(outcome["modeSource"] as? String == "daemon")
+        #expect(outcome["modesObserved"] as? Bool == false)
+    }
+
+    /// The regression guard for the narrowing: a re-adopted **shell** with
+    /// unobserved defaults composes bare, not wrapped.
+    ///
+    /// A shell's line editor (readline, zle) submits bare input of any length
+    /// and has no paste-burst heuristic to fool, so a bare send never stalls
+    /// there — the failure the wrap defends against is a property of the agent
+    /// TUI, not of any holder session. Wrapping a shell that never asked for
+    /// brackets would hand a `sudo`/`ssh`/`rm -i` prompt `ESC[200~` and
+    /// `ESC[201~` to answer on, for no benefit. If the wrap is not scoped to
+    /// agent sessions, this test's `hasPrefix` fails.
+    @Test("a send composed against an unobserved shell's defaults stays bare")
+    func sendStaysBareForAnUnobservedShell() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.shell, kind: .shell, transport: .holder,
+            holderPID: 9101, childPID: 9102)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: deadWindowTmux(recorded))
+        rpc.holderInjectionCourier = writes.courier()
+        rpc.holderModeOracle = oracle(
+            bracketedPaste: false, modesObserved: false, source: .daemon)
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(
+                terminalID: terminal.id, text: "hello", submit: true)))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        let written = try #require(writes.all.first)
+        let text = try #require(String(data: written, encoding: .utf8))
+        #expect(!text.contains("\u{1b}[200~"),
+                "a re-adopted shell was wrapped: the uncertainty-wrap is not scoped to agents")
+        #expect(!text.contains("\u{1b}[201~"))
+        #expect(text.hasSuffix("hello\r"))
+
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["result"] as? String == "dispatched")
+        #expect(outcome["modeSource"] as? String == "daemon")
+        #expect(outcome["modesObserved"] as? Bool == false)
     }
 
     /// The residue of the whole design, made examinable. When a viewer holds

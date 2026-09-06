@@ -32,6 +32,7 @@ struct TerminalOutputStalenessNoteTests {
             size: TerminalScreen.Size(columns: 80, rows: 24),
             modes: TerminalScreen.ChildModes(
                 bracketedPaste: false, applicationCursor: false, alternateScreen: false),
+            modesObserved: true,
             source: source,
             ageMilliseconds: ageMilliseconds)
     }

@@ -43,7 +43,8 @@ struct HolderAdoptionTests {
         // away, and the holder, the pty and the job are all untouched.
         let (_, ptyFD) = try await fixture.client.handOverPTY()
         let previous = HolderReader(
-            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
+            observedChildFromStart: true)
         try await previous.start()
         try await previous.write(Data("BEFORE\n".utf8))
         let sawBefore = await pollUntil("the job's answer before the outage") {
@@ -71,6 +72,15 @@ struct HolderAdoptionTests {
         let stored = await registry.reader(for: fixture.sessionID)
         #expect(stored === reader, "the registry did not keep the reader it adopted")
         #expect(holderProcessIsAlive(fixture.handle.childPID))
+
+        // The emulator this adoption built was constructed over a child that
+        // was already running, and no preamble seeded it, so its mode flags are
+        // a fresh terminal's defaults rather than anything the child was seen
+        // to do. Its lines are live — hence `.daemon` — and only its modes are
+        // unobserved, which is the whole reason the two facts are separate.
+        #expect(
+            await reader.modeReading().modesObserved == false,
+            "a re-adopted emulator reported its default modes as observations of the child")
     }
 
     /// The re-adopted emulator is built at the size of the **pty**, not the size
@@ -101,7 +111,8 @@ struct HolderAdoptionTests {
             described.launch.columns == 80 && described.launch.rows == 24,
             "the fixture no longer launches at 80x24, so this test proves nothing")
         let previous = HolderReader(
-            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24)
+            sessionID: fixture.sessionID, ptyFD: ptyFD, columns: 80, rows: 24,
+            observedChildFromStart: true)
         try await previous.start()
         await previous.resize(columns: 123, rows: 41)
         await previous.stop()

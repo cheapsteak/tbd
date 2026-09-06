@@ -89,6 +89,15 @@ struct HolderSpawnGateTests {
             FileManager.default.fileExists(atPath: socketPath),
             "no holder rendezvous at \(socketPath) for a holder-transport session")
 
+        // The reader was born with this job, so whatever the job says about its
+        // modes on startup lands in this emulator and its flags are the child's
+        // — the other half of the fact `HolderAdoptionTests` asserts negatively
+        // for a session adopted while it was already running.
+        let reader = try #require(await fixture.registry.reader(for: primary.id))
+        #expect(
+            await reader.modeReading().modesObserved,
+            "a freshly spawned reader reported its child's modes as unobserved")
+
         // The other half of the setup-hook decision: this repo has no setup
         // hook, so on the holder path no tmux server is started for a bare
         // shell — and no `new-window` was ever issued.

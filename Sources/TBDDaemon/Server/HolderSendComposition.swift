@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// Turns one `terminal.send` into the exact bytes the holder transport writes.
 ///
@@ -61,14 +62,49 @@ enum HolderSendComposition {
     /// pressed, and what tmux's `send-keys Enter` sends.
     static let submitByte: UInt8 = 0x0d
 
+    /// Whether to wrap, given what the oracle answered and whether an
+    /// unobserved guess should wrap for this child.
+    ///
+    /// **An observed flag is obeyed either way.** `modes.bracketedPaste` is
+    /// then a fact about the child — it was seen to ask for bracketing, or seen
+    /// not to — so `unobservedShouldWrap` does not enter into it: an observed
+    /// `true` wraps and an observed `false` composes bare, whatever the child
+    /// is running.
+    ///
+    /// **An unobserved reading is a guess**, and where the guess lands depends
+    /// on the child. `modesObserved: false` comes from an emulator built over a
+    /// child that was already running, so its flag is a fresh terminal's
+    /// default and says nothing about the child at all. Wrapping under that
+    /// uncertainty is right only where composing bare would fail *silently* —
+    /// a TUI whose paste-burst heuristic can absorb a bare submitting `\r` into
+    /// the text, leaving the message in the composer with nothing to say why.
+    /// That is the agent sessions, and the caller passes
+    /// `carriesDispatchEnvelope(terminal)` for the flag to name exactly them.
+    ///
+    /// A **shell** composes bare under the same uncertainty, because its line
+    /// editor (readline, zle) submits bare input of any length and has no burst
+    /// heuristic to fool — so a bare send never stalls there. Wrapping a shell
+    /// that never asked for brackets would only hand it markers to print, or a
+    /// line made of them to run, for a stall that cannot happen: markers at a
+    /// `sudo`/`ssh`/`rm -i` prompt answered on garbage, in exchange for nothing.
+    ///
+    /// A `nil` reading composes bare regardless — nothing answered, the write
+    /// is about to fail anyway, and bare bytes are what every child understood
+    /// before any of this existed.
+    static func bracketedPaste(
+        for reading: TerminalModeReading?, unobservedShouldWrap: Bool
+    ) -> Bool {
+        guard let reading else { return false }
+        if reading.modesObserved { return reading.modes.bracketedPaste }
+        return unobservedShouldWrap
+    }
+
     /// - Parameter body: everything the message says, envelope included. The
     ///   envelope goes *inside* the paste, because it is part of the text the
     ///   child is being handed and splitting it out would be a second chunk.
     /// - Parameter submit: whether a Return follows.
-    /// - Parameter bracketedPaste: what the child's mode is, as the oracle
-    ///   answered. `false` when the oracle could not answer at all — bare bytes
-    ///   are what every child understood before this existed, and markers a
-    ///   child never asked for are printed rather than obeyed.
+    /// - Parameter bracketedPaste: whether to wrap, as `bracketedPaste(for:)`
+    ///   decided from the oracle's answer.
     /// - Returns: one `Data`, written in one call, so the message is never
     ///   interleaved with another writer's.
     static func compose(body: String, submit: Bool, bracketedPaste: Bool) -> Data {

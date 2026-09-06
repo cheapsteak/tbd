@@ -400,6 +400,62 @@ import Testing
         #expect(screen.modeReading.ageMilliseconds == 7_000)
     }
 
+    // MARK: - Mode provenance
+
+    /// The ordinary case, and the one that must not report doubt: an emulator
+    /// built with its child sees the startup `DECSET`s, because they are still
+    /// waiting in the pty for whoever reads first.
+    ///
+    /// A handback does not lower provenance either — the emulator that captured
+    /// the preamble was seeded from this one, so it can take nothing away that
+    /// it did not put there. The ingest here is a `DECRST`, so the *value*
+    /// moves and the provenance must not.
+    @Test("a reader born with its child reports its modes as observed")
+    func aReaderBornWithItsChildReportsObservedModes() async throws {
+        let harness = try Harness(columns: 40, rows: 8)
+        defer { harness.tearDown() }
+
+        #expect(await harness.reader.modeReading().modesObserved)
+        #expect(try await harness.reader.screen(maxLines: 8).modesObserved)
+
+        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?2004l"))
+
+        #expect(await harness.reader.modeReading().modes.bracketedPaste == false)
+        #expect(await harness.reader.modeReading().modesObserved)
+        #expect(try await harness.reader.screen(maxLines: 8).modesObserved)
+    }
+
+    /// The daemon-restart case, and the reason provenance is fixed at
+    /// construction. Nothing in this emulator ever saw the child start, so its
+    /// flags are a fresh terminal's defaults — and a handback preamble does not
+    /// change that, however much it changes the flags.
+    ///
+    /// **A preamble cannot raise provenance**, because of where it comes from:
+    /// the viewer that captured it was painted by this reader's own attach
+    /// preamble, so what it hands back is what this reader gave it. Treating
+    /// the ingest as proof would turn the guess into a false certainty after
+    /// one open-and-close of a tab, and the next send would compose bare on a
+    /// row claiming the modes were observed.
+    ///
+    /// The preamble here is a **set**, deliberately: `bracketedPaste` moves to
+    /// `true`, so the assertions can tell the restored value apart from the
+    /// provenance that did not follow it.
+    @Test("a reader built over a running child stays unobserved across a preamble")
+    func aReaderOverARunningChildStaysUnobservedAcrossAPreamble() async throws {
+        let harness = try Harness(columns: 40, rows: 8, observedChildFromStart: false)
+        defer { harness.tearDown() }
+
+        #expect(await harness.reader.modeReading().modesObserved == false)
+        #expect(try await harness.reader.screen(maxLines: 8).modesObserved == false)
+
+        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?2004h"))
+
+        #expect(await harness.reader.modeReading().modes.bracketedPaste == true,
+                "the preamble did not restore the mode's value")
+        #expect(await harness.reader.modeReading().modesObserved == false)
+        #expect(try await harness.reader.screen(maxLines: 8).modesObserved == false)
+    }
+
     // MARK: - Harness
 
     private static func data(_ text: String) -> Data { Data(text.utf8) }
@@ -437,6 +493,7 @@ import Testing
 
         init(
             columns: Int, rows: Int,
+            observedChildFromStart: Bool = true,
             monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = {
                 ContinuousClock.now
             }
@@ -451,6 +508,7 @@ import Testing
                 columns: columns,
                 rows: rows,
                 scrollbackLines: 200,
+                observedChildFromStart: observedChildFromStart,
                 monotonicNow: monotonicNow)
         }
 
