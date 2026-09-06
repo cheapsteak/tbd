@@ -157,7 +157,7 @@ import Testing
     /// take the marker out of `ESC[2` + marker + `01~` and the neighbours join
     /// into a fresh one. The scan retracts a marker as the byte completing it
     /// is appended, so the output provably holds none.
-    @Test("a marker that would re-form across the removal is removed too")
+    @Test("an end marker that would re-form across the removal is removed too")
     func aReformingEndMarkerIsAlsoRemoved() {
         let body = "\u{1b}[2\u{1b}[201~01~tail"
         let composed = HolderSendComposition.compose(
@@ -168,21 +168,24 @@ import Testing
     }
 
     /// **Only the wrapped path touches the body.** With no paste open there is
-    /// nothing to break out of, and the bytes are the caller's to send — a
-    /// caller writing an end marker to a child that reads them literally is
-    /// entitled to have it arrive. Silently editing an unwrapped send would be
-    /// a second, invisible rule about what `terminal.send` delivers.
-    @Test("the same body unwrapped is delivered verbatim, marker included")
-    func anUnwrappedBodyKeepsItsEndMarker() {
-        let body = "before\u{1b}[201~after"
+    /// nothing to break out of or restart, and the bytes are the caller's to
+    /// send — a caller writing paste markers to a child that reads them
+    /// literally is entitled to have them arrive. Silently editing an unwrapped
+    /// send would be a second, invisible rule about what `terminal.send`
+    /// delivers, so the body carries both markers here and both survive.
+    @Test("the same body unwrapped is delivered verbatim, both markers included")
+    func anUnwrappedBodyKeepsItsPasteMarkers() {
+        let body = "before\u{1b}[200~middle\u{1b}[201~after"
         let composed = HolderSendComposition.compose(
             body: body, submit: true, bracketedPaste: false)
 
         #expect(composed == Self.expected(body: body, wrapped: false, submit: true))
         #expect(
+            Self.occurrences(of: Self.start, in: composed) == 1,
+            "the caller's own start marker did not survive an unwrapped send")
+        #expect(
             Self.occurrences(of: Self.end, in: composed) == 1,
             "the caller's own end marker did not survive an unwrapped send")
-        #expect(Self.occurrences(of: Self.start, in: composed) == 0)
     }
 
     /// A body that is *nothing but* an end marker has nothing left to paste,
@@ -212,17 +215,53 @@ import Testing
         #expect(composed.isEmpty)
     }
 
-    /// The start marker is deliberately *not* stripped: it opens nothing a
-    /// child has not already been told is open, so it cannot break out, and
-    /// removing it would edit a body for no gain. This pins the asymmetry so it
-    /// reads as a decision rather than an oversight.
-    @Test("a start marker inside the body is left alone")
-    func anEmbeddedStartMarkerIsLeftAlone() {
+    // MARK: - A body that tries to restart the paste itself
+
+    /// The other break-out, and the reason the start marker is stripped as
+    /// well: a child whose reader takes a nested `ESC[200~` as the beginning of
+    /// a new paste discards everything before it — the dispatch envelope
+    /// included — so what it acts on is not what the caller sent. A log or a
+    /// transcript that recorded raw terminal input carries one.
+    @Test("a start marker inside the body is removed rather than allowed to restart the paste")
+    func anEmbeddedStartMarkerIsRemoved() {
         let body = "before\u{1b}[200~after"
         let composed = HolderSendComposition.compose(
             body: body, submit: false, bracketedPaste: true)
 
-        #expect(composed == Self.expected(body: body, wrapped: true, submit: false))
-        #expect(Self.occurrences(of: Self.start, in: composed) == 2)
+        #expect(composed == Self.expected(body: "beforeafter", wrapped: true, submit: false))
+        #expect(
+            Self.occurrences(of: Self.start, in: composed) == 1,
+            "the composed message carries more than one start marker")
+    }
+
+    /// The re-formation property holds for the start marker too: take the
+    /// marker out of `ESC[2` + marker + `00~` and the neighbours join into a
+    /// fresh one, which the same append-and-retract scan catches as the byte
+    /// completing it is appended.
+    @Test("a start marker that would re-form across the removal is removed too")
+    func aReformingStartMarkerIsAlsoRemoved() {
+        let body = "\u{1b}[2\u{1b}[200~00~tail"
+        let composed = HolderSendComposition.compose(
+            body: body, submit: false, bracketedPaste: true)
+
+        #expect(composed == Self.expected(body: "tail", wrapped: true, submit: false))
+        #expect(Self.occurrences(of: Self.start, in: composed) == 1)
+    }
+
+    /// The two markers touching, which is what a body copied out of a recorded
+    /// paste looks like. They share their first four bytes, so removing one
+    /// must not leave a suffix that completes the other unnoticed — the scan
+    /// re-checks after every retraction, and both are gone.
+    @Test("a start and an end marker adjacent in the body are both removed")
+    func adjacentStartAndEndMarkersAreBothRemoved() {
+        let body = "head\u{1b}[200~\u{1b}[201~tail"
+        let composed = HolderSendComposition.compose(
+            body: body, submit: true, bracketedPaste: true)
+
+        #expect(composed == Self.expected(body: "headtail", wrapped: true, submit: true))
+        #expect(Self.occurrences(of: Self.start, in: composed) == 1)
+        #expect(Self.occurrences(of: Self.end, in: composed) == 1)
+        #expect(composed.last == 0x0d)
+        #expect(composed.dropLast().suffix(Self.end.count) == Self.end)
     }
 }

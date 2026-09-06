@@ -24,17 +24,22 @@ import Foundation
 /// press Enter, and a bracketed paste of nothing is a pair of markers the child
 /// has to interpret for no reason — a shell at its prompt would show them.
 ///
-/// **A wrapped body carries no end marker of its own.** `ESC[201~` inside the
-/// paste closes it early, so everything after it — the rest of the body and the
-/// submitting `\r` — arrives as keystrokes instead of text, which is precisely
-/// the failure the wrapping exists to prevent, reached by content rather than by
-/// chunk shape. `--text "$(cat some-file)"` is all it takes. An end marker
-/// inside a paste can only ever be a break-out: there is nothing a child could
-/// display for it, so removing it loses nothing a caller meant to send, and
-/// removal is done bytewise on the composed body so a marker cannot re-form
-/// across a removal. Only the wrapped path touches the body; an unwrapped send
-/// is delivered verbatim, because with no paste open there is nothing to break
-/// out of and the bytes are the caller's to send.
+/// **A wrapped body carries no paste marker of its own.** Both markers are
+/// taken out, for reasons that differ. `ESC[201~` inside the paste closes it
+/// early, so everything after it — the rest of the body and the submitting
+/// `\r` — arrives as keystrokes instead of text, which is precisely the failure
+/// the wrapping exists to prevent, reached by content rather than by chunk
+/// shape. `ESC[200~` inside the paste restarts it in a child whose reader takes
+/// a nested start marker as the beginning of a new paste, discarding everything
+/// before it — the dispatch envelope included — so what the child acts on is
+/// not what the caller sent. `--text "$(cat some-file)"` is all either takes: a
+/// log or a transcript that recorded raw terminal input holds both. A paste
+/// marker inside a paste can only ever be a break-out or a restart: there is
+/// nothing a child could display for one, so removing it loses nothing a caller
+/// meant to send, and removal is done bytewise on the composed body so a marker
+/// cannot re-form across a removal. Only the wrapped path touches the body; an
+/// unwrapped send is delivered verbatim, because with no paste open there is
+/// nothing to break out of and the bytes are the caller's to send.
 enum HolderSendComposition {
     /// `ESC [ 2 0 0 ~` — the start of a bracketed paste.
     static let pasteStart = Data([0x1b, 0x5b, 0x32, 0x30, 0x30, 0x7e])
@@ -56,10 +61,10 @@ enum HolderSendComposition {
     ///   interleaved with another writer's.
     static func compose(body: String, submit: Bool, bracketedPaste: Bool) -> Data {
         // Stripped before the emptiness test, not after, so the two rules
-        // compose: a body that was nothing but an end marker has nothing left
+        // compose: a body that was nothing but paste markers has nothing left
         // to paste, and wrapping it would put the markers the empty-body rule
         // exists to avoid in front of the Enter.
-        let payload = bracketedPaste ? removingEndMarkers(from: Data(body.utf8)) : Data(body.utf8)
+        let payload = bracketedPaste ? removingPasteMarkers(from: Data(body.utf8)) : Data(body.utf8)
         var message = Data()
         if !payload.isEmpty {
             if bracketedPaste { message.append(pasteStart) }
@@ -70,34 +75,59 @@ enum HolderSendComposition {
         return message
     }
 
-    /// `body` with every `ESC[201~` taken out, so the only end marker in the
-    /// composed message is the one this type puts there.
+    /// `body` with every `ESC[200~` and `ESC[201~` taken out, so the only paste
+    /// markers in the composed message are the pair this type puts there.
     ///
     /// Written as an append-and-retract scan rather than a search-and-replace
     /// because a single replacing pass is not enough: removing the marker from
-    /// `ESC[2` + `ESC[201~` + `01~` joins its neighbours into a fresh one. Here
-    /// a marker is retracted the moment the byte that completes it is appended,
-    /// so the invariant holds after every step and the output provably contains
-    /// none — in one pass over the body.
+    /// `ESC[2` + `ESC[201~` + `01~` joins its neighbours into a fresh one, and
+    /// the same holds for `ESC[200~`. Here a marker is retracted the moment the
+    /// byte that completes it is appended, and the retraction is followed by a
+    /// re-check, so neither pattern can leave a suffix that completes the other
+    /// unnoticed — the invariant holds after every step and the output provably
+    /// contains neither marker, in one pass over the body.
     ///
-    /// The suffix is compared **in place**, and the last byte of the pattern is
-    /// checked first. This runs inside the per-terminal send serializer on a
-    /// body with no size cap, and the obvious spelling — materialising
-    /// `kept.suffix(pattern.count)` into an `Array` — allocates once per input
-    /// byte for a comparison that ordinary text loses on its first byte.
-    static func removingEndMarkers(from body: Data) -> Data {
-        let pattern = [UInt8](pasteEnd)
-        guard let terminator = pattern.last else { return body }
+    /// The suffix is compared **in place**, and only when the byte just
+    /// appended is the `~` both markers end in. This runs inside the
+    /// per-terminal send serializer on a body with no size cap, and the obvious
+    /// spelling — materialising `kept.suffix(pattern.count)` into an `Array` —
+    /// allocates once per input byte for a comparison that ordinary text loses
+    /// on its first byte.
+    static func removingPasteMarkers(from body: Data) -> Data {
+        let patterns = [[UInt8](pasteStart), [UInt8](pasteEnd)]
+        // The shared last byte is what makes one cheap test enough to skip the
+        // suffix scan on every byte of ordinary text.
+        guard let terminator = pasteEnd.last, pasteStart.last == terminator else { return body }
         var kept: [UInt8] = []
         kept.reserveCapacity(body.count)
         for byte in body {
             kept.append(byte)
-            guard byte == terminator, kept.count >= pattern.count else { continue }
-            let start = kept.count - pattern.count
-            var index = 0
-            while index < pattern.count, kept[start + index] == pattern[index] { index += 1 }
-            if index == pattern.count { kept.removeLast(pattern.count) }
+            guard byte == terminator else { continue }
+            while retractTrailingMarker(from: &kept, patterns: patterns) {}
         }
         return Data(kept)
+    }
+
+    /// Removes one trailing marker from `kept`, answering whether it removed
+    /// one so the caller can look again: a retraction rejoins the bytes on
+    /// either side of what it took out, and the re-check is what keeps a
+    /// removal of one pattern from leaving the other's bytes touching.
+    ///
+    /// The comparison runs from the end of the pattern backwards, which is
+    /// where the two markers differ — they agree on everything but their
+    /// second-to-last byte.
+    private static func retractTrailingMarker(
+        from kept: inout [UInt8], patterns: [[UInt8]]
+    ) -> Bool {
+        for pattern in patterns where kept.count >= pattern.count {
+            let start = kept.count - pattern.count
+            var index = pattern.count - 1
+            while index >= 0, kept[start + index] == pattern[index] { index -= 1 }
+            if index < 0 {
+                kept.removeLast(pattern.count)
+                return true
+            }
+        }
+        return false
     }
 }

@@ -3298,9 +3298,10 @@ extension RPCRouter {
             // Nothing to write, reached two ways. `--text ""` with no
             // `--submit` is a well-formed act that names nothing — the tmux arm
             // reaches the same outcome by skipping both of its sub-steps. A
-            // body that was nothing but end markers reaches it too, because the
-            // composition strips those before it tests for emptiness, and a
-            // caller's `ESC[201~` cannot be allowed to leave an open paste.
+            // body that was nothing but paste markers reaches it too, because
+            // the composition strips those before it tests for emptiness, and a
+            // caller's `ESC[201~` cannot be allowed to leave an open paste nor
+            // its `ESC[200~` to restart one.
             //
             // Provenance is recorded whenever the caller's text was non-empty:
             // a composition did happen, against a store this asked, and what it
