@@ -97,6 +97,38 @@ struct HolderHibernationLiveTests {
         #expect(await fixture.registry.reader(for: terminal.id) != nil,
                 "nothing is draining the woken session's pty")
 
+        // WHAT it launched. Every assertion above is satisfied by a holder
+        // running the wrong command entirely — a fresh session instead of a
+        // resume, or one attributed to another terminal — because a row and a
+        // pid cannot see an argv. The stub can.
+        //
+        // Waiting on the env file is what makes the argv file safe to read:
+        // the stub writes the argv first and the environment last.
+        let launched = await pollUntil("the woken session to reach its claude stub") {
+            (try? String(contentsOfFile: fixture.launchEnvPath, encoding: .utf8))?
+                .contains("TBD_TERMINAL_ID=") ?? false
+        }
+        #expect(launched, "the wake never launched anything through the pinned shell")
+        let argv = ((try? String(contentsOfFile: fixture.launchArgvPath, encoding: .utf8)) ?? "")
+            .split(separator: "\n").map(String.init)
+        let resumeIndex = argv.firstIndex(of: "--resume")
+        #expect(resumeIndex != nil, "the wake did not resume anything: \(argv)")
+        if let resumeIndex, resumeIndex + 1 < argv.count {
+            // Adjacency, not mere presence: `--resume` and the session id have
+            // to be one flag, or a resume of some OTHER session would pass.
+            #expect(argv[resumeIndex + 1] == HibernationFixture.sessionID,
+                    "resumed the wrong session: \(argv)")
+        }
+        let launchEnv = (try? String(contentsOfFile: fixture.launchEnvPath, encoding: .utf8)) ?? ""
+        // The two ids every hook, notification and transcript write is
+        // attributed by. Delivered as inline exports ahead of the command, so
+        // reading them back OUT of the process environment is what proves the
+        // delivery, not just the composition.
+        #expect(launchEnv.contains("TBD_WORKTREE_ID=\(fixture.worktree.id.uuidString)"),
+                "the woken agent is attributed to the wrong worktree: \(launchEnv)")
+        #expect(launchEnv.contains("TBD_TERMINAL_ID=\(terminal.id.uuidString)"),
+                "the woken agent is attributed to the wrong terminal: \(launchEnv)")
+
         // Tear the woken session down through the same door the delete path
         // uses, so neither the holder nor its job outlives the test.
         _ = await fixture.registry.abandon(terminal: woken)
@@ -161,6 +193,13 @@ private final class HibernationFixture {
     let coordinator: HibernationCoordinator
     let environment: [String: String]
     let worktree: Worktree
+
+    /// Where the `claude` stub records the argv it was launched with, one
+    /// argument per line, and the `TBD_` environment it saw. Neither exists
+    /// until a wake has actually launched something.
+    var launchArgvPath: String { "\(home)/launch-argv" }
+    var launchEnvPath: String { "\(home)/launch-env" }
+
     private let home: String
     private let tempDir: URL
     private var torndown = false
@@ -172,17 +211,50 @@ private final class HibernationFixture {
         fencedScratchRoot(prefix: "tbdhib")
     }
 
-    /// The stand-in login shell the WAKE spawn runs. It ignores the
-    /// `-i -l -c <command>` argv the production composition hands it, which is
-    /// the point: the resumed "agent" is a controlled two-line program.
+    /// The stand-in login shell the WAKE spawn runs, plus the `claude` stub it
+    /// puts ahead of everything else on PATH.
+    ///
+    /// The shell HONOURS its `-i -l -c <command>` argv rather than ignoring it,
+    /// because that argv is the artifact under test. Evaluating it is what
+    /// turns the composition's inline `export TBD_…` statements into real
+    /// environment variables and what launches "claude" — so the stub can
+    /// record the argv and the environment the resumed agent would actually
+    /// have been given. Nothing here can reach a real agent: `claude` resolves
+    /// to the stub, which is a four-line script.
+    ///
+    /// The stub returns instead of blocking, so the shell reaches its
+    /// `exec sleep` and the job stays exactly one pid — the one the row names
+    /// and the one teardown kills. A stub that blocked would leave a grandchild
+    /// no row names.
     private static func writeGateShell(in home: String) throws -> String {
         try FileManager.default.createDirectory(
             atPath: home, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
-        let path = "\(home)/gate-shell"
+        let binDir = "\(home)/bin"
+        try FileManager.default.createDirectory(
+            atPath: binDir, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+
+        // The argv file is written first and the env file last, so a reader
+        // that waits for the env file has a complete argv file to read.
         try """
         #!/bin/sh
+        printf '%s\\n' "$@" > "\(home)/launch-argv"
         printf 'WOKE-OK\\n'
+        env | grep '^TBD_' > "\(home)/launch-env"
+        """.write(toFile: "\(binDir)/claude", atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: "\(binDir)/claude")
+
+        let path = "\(home)/gate-shell"
+        // The command is the LAST argument whatever flags precede it, which is
+        // what keeps this shell honest about a `shellFlags` change.
+        try """
+        #!/bin/sh
+        PATH="\(binDir):$PATH"
+        export PATH
+        for tbd_arg in "$@"; do tbd_command="$tbd_arg"; done
+        eval "$tbd_command"
         exec sleep 30
         """.write(toFile: path, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
@@ -322,18 +394,29 @@ private final class HibernationFixture {
         try? FileManager.default.removeItem(at: tempDir)
     }
 
-    /// Reads the terminal rows from a non-async `tearDown`. Bounded, and a
-    /// timeout simply means the sweep above has nothing to kill by pid — the
-    /// suite would rather report that than hang.
+    /// Reads the terminal rows from a non-async `tearDown`.
+    ///
+    /// `tearDown` runs from a `defer` in the test body, so the thread this
+    /// blocks belongs to the cooperative pool and cannot be moved from here.
+    /// What CAN be moved is the side that releases the gate: started with
+    /// `gateHoldingTask` it runs on a thread these tests own — and the
+    /// executor preference carries into the store actor it hops through — so
+    /// the read can always reach `signal()` however saturated the pool is.
+    /// `Task.detached` took no preference at all and queued the release behind
+    /// the very pool this wait is starving.
+    ///
+    /// `waitForGate` supplies the bound and names the gate if it ever expires,
+    /// which is all a teardown can usefully do about one: a timeout simply
+    /// means the sweep above has nothing to kill by pid.
     private func blockingTerminals() throws -> [Terminal] {
         let box = ResultBox()
         let done = DispatchSemaphore(value: 0)
         let db = self.db
-        Task.detached {
+        _ = gateHoldingTask {
             box.value = try? await db.terminals.list()
             done.signal()
         }
-        _ = done.wait(timeout: .now() + 5)
+        done.waitForGate("HibernationFixture.tearDown reading the terminal rows")
         return box.value ?? []
     }
 
