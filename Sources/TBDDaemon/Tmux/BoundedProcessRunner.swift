@@ -402,6 +402,15 @@ enum BoundedProcessRunnerError: Error, Equatable, LocalizedError {
 /// not be virtualized, or both halves lie in the same direction. It is also the
 /// one piece of `Instant` arithmetic here, which `any Clock<Duration>` cannot
 /// express — a constraint that costs nothing because this line must not move.
+/// `beforeDeadlineSnapshot` is a test-only seam, defaulted so no call site
+/// changes. It runs immediately before the deadline path's snapshot, *wherever
+/// that snapshot runs* — which is the whole point: a test that blocks in it
+/// blocks the caller's own task under the structure above, and would block the
+/// shared watchdog thread under the structure this replaced. That difference is
+/// what `BoundedProcessRunnerTests`'
+/// `aSecondDeadlineIsServedWhileAnotherCallsSnapshotIsWedged` observes without
+/// comparing any wall clock: with the snapshot held, a *second* bounded call
+/// must still get its deadline and its SIGKILL escalation.
 func runBoundedProcess(
     executable: String,
     arguments: [String],
@@ -410,7 +419,8 @@ func runBoundedProcess(
     stdin: Data? = nil,
     timeout: Duration,
     stdio: BoundedProcessStdio = .pipes,
-    clock: any Clock<Duration> = ContinuousClock()
+    clock: any Clock<Duration> = ContinuousClock(),
+    beforeDeadlineSnapshot: (@Sendable () -> Void)? = nil
 ) async throws -> BoundedProcessOutcome {
     if stdio == .pseudoTerminal, stdin != nil {
         throw BoundedProcessRunnerError.stdinUnsupportedOnPseudoTerminal
@@ -590,7 +600,10 @@ func runBoundedProcess(
                     if process.isRunning { kill(pid, SIGKILL) }
                 }
             }
-            deferredSnapshot.deposit { _ = snapshot() }
+            deferredSnapshot.deposit {
+                beforeDeadlineSnapshot?()
+                _ = snapshot()
+            }
             continuation.resume(returning: .timedOut)
         }
 
