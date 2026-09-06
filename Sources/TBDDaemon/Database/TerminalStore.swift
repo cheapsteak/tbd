@@ -1741,6 +1741,73 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Park a row because Claude's own process left, reported by its `SessionEnd`
+    /// hook. Returns whether the row actually changed.
+    ///
+    /// **Deliberately narrower than `setHibernated`.** That writer mints a new
+    /// session incarnation, cancels pending scheduled resumes and rewrites the
+    /// activity triple, because it describes a park TBD performed and a process
+    /// TBD is about to replace. A hook only *reports* that the process is gone:
+    /// nothing was replaced, nothing was interrupted, and the resume this row
+    /// already points at is still the right one. So exactly two columns move.
+    ///
+    /// It refuses on an already-parked row for the same reason the awaiting-input
+    /// rail refuses an uninformative overwrite: `hibernateReason` is the record of
+    /// WHO parked a session, `HibernationCoordinator`'s wake-on-focus sweep reads
+    /// it, and a late `SessionEnd` from the process TBD itself killed would
+    /// otherwise rewrite a deliberate `.manual` park into `.exited`.
+    ///
+    /// `reportedIncarnationID` is the hook's own process-incarnation nonce. A
+    /// mismatch means the hook describes a process TBD has already replaced, so
+    /// stamping would park a live successor; nil means the hook predates the
+    /// nonce and cannot be checked, which is the same reading every other hook
+    /// handler gives it.
+    ///
+    /// `date` follows the one-shot stamp seam (CLAUDE.md, "Duration is behavior,
+    /// Date is data").
+    @discardableResult
+    public func stampSessionExited(
+        id: UUID, reportedIncarnationID: UUID?, at date: Date = Date()
+    ) async throws -> Bool {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                return false
+            }
+            guard record.hibernatedAt == nil else { return false }
+            if let reportedIncarnationID {
+                guard record.sessionIncarnationID == reportedIncarnationID.uuidString else {
+                    return false
+                }
+            }
+            record.hibernatedAt = date
+            record.hibernateReason = HibernateReason.exited.rawValue
+            try record.update(db)
+            return true
+        }
+    }
+
+    /// Retract an exit stamp because the session came back — the `SessionStart`
+    /// hook. Returns whether the row actually changed.
+    ///
+    /// Scoped to `.exited` on purpose. `SessionStart` also fires on `/clear` and
+    /// `/compact` inside a live process, and on a resume; a blanket un-park there
+    /// would undo an operator's deliberate `.manual` hibernate. `clearHibernated`
+    /// stays the wake path's writer — it also clears `suspendedAt` and the pending
+    /// incarnation, which belong to a respawn this never performs.
+    @discardableResult
+    public func clearSessionExitStamp(id: UUID) async throws -> Bool {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                return false
+            }
+            guard record.hibernateReason == HibernateReason.exited.rawValue else { return false }
+            record.hibernatedAt = nil
+            record.hibernateReason = nil
+            try record.update(db)
+            return true
+        }
+    }
+
     /// Prepare a parked shell for a fresh agent before launch. Preserve the
     /// captured session identity and transcript needed for a failed launch to
     /// retry, while clearing process-local ordering/activity and rotating the
