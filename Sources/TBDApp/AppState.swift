@@ -806,6 +806,10 @@ final class AppState {
     /// Tab-close ownership keyed by terminal UUID for views that belong to a
     /// visible tab, used to resolve the currently focused closable tab.
     @ObservationIgnored var terminalTabCloseContexts: [UUID: TabCloseContext] = [:]
+    /// Per-terminal composer drafts. `@ObservationIgnored` because each
+    /// `ComposerDraft` is itself `@Observable` — an observable registry would
+    /// republish every composer in the app whenever any one of them appeared.
+    @ObservationIgnored var composerDrafts: [UUID: ComposerDraft] = [:]
     /// Visual screenshots taken at suspend-click time, shown while daemon works.
     /// Keyed by terminal UUID. Cleared when suspend completes.
     var suspendingSnapshots: [UUID: NSImage] = [:]

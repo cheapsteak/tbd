@@ -2207,6 +2207,16 @@ actor DaemonClient {
         )
     }
 
+    /// What slash commands, skills and subagents this terminal's session knows.
+    /// Refused by the daemon when the composer flag is off.
+    func terminalCompletions(terminalID: UUID) async throws -> TerminalCompletionsResult {
+        try await callAsync(
+            method: RPCMethod.terminalCompletions,
+            params: TerminalCompletionsParams(terminalID: terminalID),
+            resultType: TerminalCompletionsResult.self
+        )
+    }
+
     /// Notify the daemon whether the app is in the foreground (drives usage poller).
     func setAppForegroundState(isForeground: Bool) async throws {
         try await callVoidAsync(
