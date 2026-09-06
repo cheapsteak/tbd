@@ -29,13 +29,44 @@ struct TerminalSendNotRunningTests {
         func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32? {
             foregroundByAgent[agentName]
         }
+        /// The send rail never asks this one — it is the wake rail's question —
+        /// so answer the pane pid, which is "an idle shell", and let a failure
+        /// here mean the rail asked something it should not have.
+        func paneForegroundPID(panePID: Int32) -> Int32? { panePID }
     }
 
     private struct Fixture {
         let router: RPCRouter
         let db: TBDDatabase
         let terminal: Terminal
+        /// Bodies the dry-run tmux was asked to paste into the pane. The
+        /// fail-open cases assert the send did not merely return success but
+        /// actually reached the pane.
+        let pastes: PastedBodies
     }
+
+    /// Collects `dryRunPasteBytes` payloads. `@unchecked Sendable` behind a
+    /// lock because the hook is `@Sendable` and the send runs on the router's
+    /// executor.
+    private final class PastedBodies: @unchecked Sendable {
+        private let lock = NSLock()
+        private var bodies: [String] = []
+        func append(_ data: Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            bodies.append(String(bytes: data, encoding: .utf8) ?? "")
+        }
+        func snapshot() -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return bodies
+        }
+    }
+
+    /// An error the `dryRunPanePID` hook can throw, standing in for the tmux
+    /// invocation that fails — a server that went away between the row's read
+    /// and the query, most commonly.
+    private struct PanePIDUnavailable: Error {}
 
     /// A throwaway actuation log per fixture. `ActuationLog` takes a PATH, not a
     /// database — the record is an append-only JSONL file. It lands under the
@@ -54,7 +85,8 @@ struct TerminalSendNotRunningTests {
     /// every other dry-run answer in that file already uses.
     private func makeFixture(
         foregroundByAgent: [String: Int32], kind: TerminalKind? = .claude,
-        claudeSessionID: String? = "sess-1"
+        claudeSessionID: String? = "sess-1",
+        panePID: @escaping @Sendable (String, String) throws -> String = { _, _ in "4242" }
     ) async throws -> Fixture {
         let db = try TBDDatabase(inMemory: true)
         let worktree = try await db.worktrees.createScratch(
@@ -63,10 +95,12 @@ struct TerminalSendNotRunningTests {
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "claude", claudeSessionID: claudeSessionID, kind: kind)
+        let pastes = PastedBodies()
         let tmux = TmuxManager(
             dryRun: true,
             dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) },
-            dryRunPanePID: { _, _ in "4242" })
+            dryRunPanePID: panePID,
+            dryRunPasteBytes: { _, _, bytes in pastes.append(bytes) })
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
@@ -74,7 +108,7 @@ struct TerminalSendNotRunningTests {
             tmux: tmux,
             paneProcessInspector: StubInspector(foregroundByAgent: foregroundByAgent),
             actuationLog: ActuationLog(path: Self.scratchLogPath()))
-        return Fixture(router: router, db: db, terminal: terminal)
+        return Fixture(router: router, db: db, terminal: terminal, pastes: pastes)
     }
 
     private func send(_ f: Fixture) async throws -> RPCResponse {
@@ -235,6 +269,51 @@ struct TerminalSendNotRunningTests {
             terminalID: f.terminal.id, text: "", submit: true))
         let response = try await f.router.handleTerminalSend(data, actor: .app)
         #expect(response.success, "error was: \(response.error ?? "none")")
+    }
+
+    // MARK: - The rail fails OPEN on an unreadable pane pid
+
+    // All three cases below pass `foregroundByAgent: [:]` — the inspector would
+    // say "no claude here" if it were ever asked. That is what makes them
+    // discriminating: with a readable pid these fixtures are refused
+    // (`aLiveRowWithNoForegroundClaudeIsRefused` is the same fixture and the
+    // same stub), so a send that goes through went through because the pid
+    // could not be read, and for no other reason. Each asserts the paste
+    // actually reached the pane, not merely that the response said success.
+
+    /// tmux could not answer the pid query at all — the `try?` in the rail
+    /// swallows it. A tmux that cannot answer is not evidence that the agent
+    /// left, so the send proceeds.
+    @Test func anUnaskablePanePIDLetsTheSendThrough() async throws {
+        let f = try await makeFixture(
+            foregroundByAgent: [:], panePID: { _, _ in throw PanePIDUnavailable() })
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(f.pastes.snapshot().contains { $0.hasSuffix("hello") })
+    }
+
+    /// tmux answered, but with something that is not a pid. Same fail-open, and
+    /// for the same reason: an answer the daemon cannot parse is not an answer
+    /// about the agent.
+    @Test func aNonNumericPanePIDLetsTheSendThrough() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:], panePID: { _, _ in "abc" })
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(f.pastes.snapshot().contains { $0.hasSuffix("hello") })
+    }
+
+    /// tmux's own "I don't know" is the literal `0`, which is also what a
+    /// dry-run manager reports when no hook is supplied. Asking the process
+    /// table about pid 0 is a question with no meaning, so the rail declines to
+    /// ask and the send proceeds.
+    @Test func aZeroPanePIDLetsTheSendThrough() async throws {
+        let f = try await makeFixture(foregroundByAgent: [:], panePID: { _, _ in "0" })
+
+        let response = try await send(f)
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(f.pastes.snapshot().contains { $0.hasSuffix("hello") })
     }
 
     /// The refusal is a text-send rail, not a terminal-wide one. `--keys` exists

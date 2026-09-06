@@ -33,6 +33,19 @@ public protocol PaneProcessInspecting: Sendable {
     /// how the Claude question has always been asked; passing "codex" asks the
     /// same question about a Codex session.
     func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32?
+
+    /// PID of the process that owns the pane's tty foreground process group,
+    /// whatever it is — no name to match. An idle interactive shell answers
+    /// with the pane's OWN pid; anything the person started under it answers
+    /// with that child's. Nil when nothing in the pane's tree claims the
+    /// foreground group, which is the same "nothing answered" a caller must
+    /// treat as no evidence either way.
+    ///
+    /// Separate from `foregroundAgentPID` because the question is different:
+    /// that one asks "is THIS agent running here" and is answered by the send
+    /// rail, this one asks "is ANYTHING running here" and is answered by the
+    /// wake rail before it respawns a pane out from under a live process.
+    func paneForegroundPID(panePID: Int32) -> Int32?
 }
 
 extension PaneProcessInspecting {
@@ -70,6 +83,32 @@ public struct ProductionPaneProcessInspector: PaneProcessInspecting {
                 in: signaller.children(ofServerPID: child), matching: agentName) {
                 return match
             }
+        }
+        return nil
+    }
+
+    public func paneForegroundPID(panePID: Int32) -> Int32? {
+        // Same candidate ladder as `foregroundAgentPID`, cheapest first and for
+        // the same reason: the pane pid itself, then its children, then — only
+        // once those came up empty — the grandchildren a wrapper shell spawns.
+        // The pane pid comes first deliberately: an idle shell holds the
+        // foreground group itself, so the common case costs one `ps`.
+        let children = signaller.children(ofServerPID: panePID)
+        if let match = firstForeground(in: [panePID] + children) { return match }
+        for child in children {
+            if let match = firstForeground(in: signaller.children(ofServerPID: child)) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    /// The first pid in `pids` whose `ps -o stat=` carries the `+` that means
+    /// "in the controlling terminal's foreground process group". No name is
+    /// matched — the caller wants whatever is there.
+    private func firstForeground(in pids: [Int32]) -> Int32? {
+        for pid in pids where signaller.stat(pid)?.contains("+") == true {
+            return pid
         }
         return nil
     }

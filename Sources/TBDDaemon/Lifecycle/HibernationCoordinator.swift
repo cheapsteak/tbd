@@ -78,6 +78,12 @@ public enum WakeResult: Equatable, Sendable {
     /// it may not run here yet, so wake refuses before touching anything and
     /// leaves the row exactly as it found it.
     case holderTransport
+    /// The row is exit-stamped (`.exited`) and a process other than the pane's
+    /// own shell owns the pane's foreground process group. Wake is
+    /// `respawn-window -k`, which would kill it. Nothing was respawned and the
+    /// row stays exit-stamped, so a retry once the process finishes still
+    /// wakes. Carries the foreground pid so the message can name it.
+    case paneBusy(pid: Int32)
 }
 
 /// Owns session PARKING — the single unified "park a Claude session" feature
@@ -236,6 +242,12 @@ public actor HibernationCoordinator {
     /// arranging a real one.
     let signaller: any ProcessSignaller
 
+    /// Reads a tmux pane's foreground process group from the process table.
+    /// Used by exactly one rail — the exit-stamped wake guard — and injected
+    /// so a test can state "the pane's shell is idle" or "something is running
+    /// in it" without arranging a real process.
+    private let paneProcessInspector: any PaneProcessInspecting
+
     /// The daemon's actuation record. The idle sweep and the merge-park rail
     /// are daemon-internal actuation sites — they bypass the router, so each
     /// logs its own row. Deliberately NOT logged inside `performHibernate`: the
@@ -260,6 +272,7 @@ public actor HibernationCoordinator {
         holderEscalationAttempts: Int = 5,
         clock: any Clock<Duration> = ContinuousClock(),
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
+        paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
         actuationLog: ActuationLog
     ) {
         self.db = db
@@ -275,6 +288,7 @@ public actor HibernationCoordinator {
         self.holderEscalationAttempts = holderEscalationAttempts
         self.clock = clock
         self.signaller = signaller
+        self.paneProcessInspector = paneProcessInspector
         self.actuationLog = actuationLog
     }
 
@@ -471,6 +485,16 @@ public actor HibernationCoordinator {
         "Session runs on the pty-holder transport and holder hibernation is off "
         + "(Settings → Hibernate pty-holder sessions, or `tbd config "
         + "holder-hibernation on`)"
+
+    /// The one refusal text for an exit-stamped row whose pane is busy, so the
+    /// CLI, the app and the actuation record all name the same fact and the
+    /// same two ways out. Named here rather than at each call site for the same
+    /// reason `holderTransportRefusal` is.
+    static func paneBusyRefusal(pid: Int32) -> String {
+        "This session's agent process exited, but something is still running in its terminal "
+        + "(pid \(pid)), and waking would replace that shell and kill it. Finish or stop that "
+        + "process and retry, or wake the session from the terminal itself."
+    }
 
     private static func mergeBlockReason(_ decision: HibernationGate.Decision) -> String {
         switch decision {
@@ -1018,6 +1042,43 @@ public actor HibernationCoordinator {
         }
         let server = worktree.tmuxServer
         let paneID = terminal.tmuxPaneID
+
+        // ─── An exit-stamped row whose pane is busy is not ours to replace ───
+        //
+        // `.exited` parks the row while the pane's SHELL stays alive and usable
+        // — that is the whole point of the stamp — and wake is
+        // `respawn-window -k`, which kills whatever occupies the pane. For every
+        // other park reason that costs nothing: hibernate put an inert shell
+        // there itself. For an exit stamp the pane is the one the person was
+        // sitting in when the agent left, and they may have started something in
+        // it since.
+        //
+        // The app-side exclusion — `.exited` is not auto-woken on focus or tab
+        // activation — is the first line and stays the first line. It is not the
+        // only line, because it lives in the app: `docs/updating.md`'s
+        // `--no-app` makes "daemon newer than app" a supported skew, and an app
+        // binary older than this change reads `.exited` through the lenient
+        // `HibernateReason` decoder as `.auto` and auto-wakes it. So the daemon
+        // defends the respawn itself, and it does so for every caller — an old
+        // app, the CLI, the composer — rather than trusting who asked.
+        //
+        // Asked of the process table, never the rendered screen. The pane's own
+        // pid answering means an idle interactive shell and the wake proceeds
+        // exactly as before; a different pid means something is running under
+        // it. An unreadable pid proceeds too: a pane tmux cannot answer for is
+        // not evidence that a process is there, and refusing on it would strand
+        // an exit-stamped row behind a probe failure with no way back.
+        //
+        // tmux-only, for the same reason the cwd assertion below is: a holder
+        // row's pane id is the empty string and names no tmux coordinate.
+        if terminal.isExitStamped, terminal.transport != .holder,
+           let panePIDString = try? await tmux.panePID(server: server, paneID: paneID),
+           let panePID = Int32(panePIDString), panePID > 0,
+           let foregroundPID = paneProcessInspector.paneForegroundPID(panePID: panePID),
+           foregroundPID != panePID {
+            logger.info("wake: exit-stamped terminal \(terminal.id, privacy: .public) has foreground pid \(foregroundPID, privacy: .public) in pane \(paneID, privacy: .public) (pane pid \(panePID, privacy: .public)) — refusing the respawn rather than killing it")
+            return .paneBusy(pid: foregroundPID)
+        }
 
         // Assert that the process about to be resumed will run in THIS
         // worktree. Not a lookup concern: `claude --resume <id>` is not
