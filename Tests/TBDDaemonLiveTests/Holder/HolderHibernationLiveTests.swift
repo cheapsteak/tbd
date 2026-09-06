@@ -173,6 +173,145 @@ struct HolderHibernationLiveTests {
         #expect(await fixture.coordinator.wake(terminalID: terminal.id) == .holderTransport)
         #expect(holderProcessIsAlive(childPID))
     }
+
+    /// The safety rollback: the park's own invariant, on the one path that
+    /// reaches it.
+    ///
+    /// A real job cannot survive the `SIGKILL` the escalation sends, so this
+    /// branch is unreachable against a real process table — which is why it
+    /// shipped untested. The verdict does not come from the process table
+    /// directly, though: it comes from `childIsGone`, whose two sources are the
+    /// registry's remembered status and the coordinator's injected
+    /// `signaller`. `abandon(terminal:)` nils the first as part of the
+    /// escalation, by design, so a signaller that answers "alive" with a
+    /// non-zombie `stat` is enough to make the poll say "still running" for as
+    /// long as it is asked — whatever the kernel thinks.
+    ///
+    /// The escalation still really runs: the holder is torn down and the job is
+    /// killed for real, through the registry, which the fake cannot reach. What
+    /// is under test is only what the coordinator does with a verdict it cannot
+    /// turn into "gone" — roll the park intent back rather than finalize a row
+    /// that claims parked over a live child.
+    @Test func parkRollsBackWhenTheChildOutlivesTheEscalation() async throws {
+        let fixture = try await HibernationFixture.make(
+            holderEscalationAttempts: 3, signaller: AlwaysAliveSignaller())
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow()
+        let childPID = try #require(terminal.childPID)
+        let holderPID = try #require(terminal.holderPID)
+        let startedAt = try #require(terminal.holderChildStartedAt)
+        let incarnationBefore = terminal.sessionIncarnationID
+
+        // Arm the idle marker through the real sweep before parking, so the
+        // "the refusal cleared its markers" assertion below has something to
+        // clear. Without this the markers are nil going in and nil coming out,
+        // and the assertion passes whether or not the branch resets them.
+        //
+        // One sweep is all it takes and all that is wanted: the row is at rest
+        // but nowhere near a one-minute window, so the gate answers
+        // `.notIdleLongEnough`, which seeds `idleSince` and fires nothing.
+        try await fixture.db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
+        await fixture.coordinator.sweep()
+        let armed = await fixture.coordinator.idleSince[terminal.id]
+        #expect(armed != nil,
+                "the sweep never armed the idle marker, so nothing below discriminates")
+
+        let result = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
+
+        guard case .notEligible(let reason) = result else {
+            Issue.record(
+                "the park reported \(result) for a child it could never confirm gone")
+            return
+        }
+        // The pid is the whole operational value of this refusal — it is the
+        // only handle anybody has on a process whose holder has just been torn
+        // down — and "survived" is what stops the text reading like a park that
+        // worked.
+        #expect(reason.contains("\(childPID)"),
+                "the refusal does not name the child that outlived it: \(reason)")
+        #expect(reason.contains("survived"),
+                "the refusal does not say what happened: \(reason)")
+
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        // THE invariant. All three, because `isParked` is a disjunction and a
+        // rollback that nilled only one of the two columns would still satisfy
+        // the column assertion it happened to clear.
+        #expect(after.hibernatedAt == nil, "the row claims parked over a live child")
+        #expect(after.suspendedAt == nil, "the row claims suspended over a live child")
+        #expect(!after.isParked, "the row claims parked over a live child")
+        // The park intent is two writes, not one: the columns above and the
+        // pending incarnation `beginHibernatedShellRespawn` rotated in. A
+        // rollback that left the latter behind would fence the next legitimate
+        // replacement against an incarnation no launch will ever confirm.
+        #expect(after.pendingSessionIncarnationID == nil,
+                "the park intent's pending incarnation outlived the rollback")
+        #expect(after.sessionIncarnationID == incarnationBefore,
+                "the rollback promoted or rotated the durable incarnation")
+
+        // And the other half of "left awake for reconciliation to judge": the
+        // row must still name the processes. These three are the last record of
+        // a child whose holder is gone, so erasing them here would hide it from
+        // the reconcile arm and from the reaper's holder leg — the two things
+        // the refusal explicitly hands it to.
+        #expect(after.holderPID == holderPID, "the rollback erased the holder pid")
+        #expect(after.childPID == childPID, "the rollback erased the child pid")
+        #expect(after.holderChildStartedAt == startedAt,
+                "the rollback erased the child's identity anchor")
+
+        // The markers, cleared like every other refusal in the method. Leaving
+        // them armed would re-fire this identical doomed park on every sweep.
+        let idleMarker = await fixture.coordinator.idleSince[terminal.id]
+        let killMarker = await fixture.coordinator.pendingKillSince[terminal.id]
+        #expect(idleMarker == nil, "the rollback left the idle marker armed")
+        #expect(killMarker == nil, "the rollback left the kill debounce armed")
+
+        // Asked again, the coordinator refuses rather than reporting the
+        // session already parked — the state it would report if the rollback
+        // had left the row claiming a park. It refuses for the reader the
+        // escalation destroyed, which is the honest description of what this
+        // session now is.
+        let asked = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
+        #expect(asked == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
+                "a second park did not refuse on the torn-down holder: \(asked)")
+
+        // The escalation was not a dry run, and this is what makes the pid
+        // assertions above safe to leave standing: the numbers on that row name
+        // nothing now. Teardown reads the row, so clear them here rather than
+        // letting it signal pids the kernel is free to hand to somebody else.
+        let reclaimed = await pollUntil("the escalation to reclaim the job and the holder") {
+            !holderProcessIsAlive(childPID) && !holderProcessIsAlive(holderPID)
+        }
+        #expect(reclaimed, "the escalation did not tear down what the refusal says it did")
+        try await fixture.db.terminals.setHolderProcess(
+            id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
+    }
+}
+
+// MARK: - A process table that never concedes
+
+/// Answers "alive, and not a corpse" for every pid, forever.
+///
+/// The two members that matter are `isAlive` and `stat`: `childIsGone` treats a
+/// `Z…` stat as gone (a zombie is past its last instruction) and everything
+/// else as running, so a fake that answered nil for `stat` would be relying on
+/// that branch's nil handling rather than stating the case. Answering `"S"`
+/// states it.
+///
+/// The rest are stubs because the park path never reaches them — it signals
+/// through the registry, not through this seam — and stubbing them is
+/// deliberate rather than lazy: a signaller that quietly swallowed a real
+/// `kill` would turn "the escalation ran" into an untestable claim.
+private struct AlwaysAliveSignaller: ProcessSignaller {
+    func isAlive(_ pid: Int32) -> Bool { true }
+    func terminate(_ pid: Int32) {}
+    func forceKill(_ pid: Int32) {}
+    func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
+    func commandLine(_ pid: Int32) -> String? { nil }
+    func stat(_ pid: Int32) -> String? { "S" }
+    /// Nil, which every identity check must read as "not the same process".
+    /// Nothing on the park path asks, and a fake that invented a start time
+    /// would be answering a question it cannot know.
+    func startTime(_ pid: Int32) -> Date? { nil }
 }
 
 // MARK: - Fixture
@@ -262,7 +401,21 @@ private final class HibernationFixture {
         return path
     }
 
-    static func make(holderHibernationEnabled: Bool = true) async throws -> HibernationFixture {
+    /// - Parameters:
+    ///   - holderEscalationAttempts: how many times the post-escalation poll
+    ///     asks whether the job is gone. The shipped default is generous
+    ///     because a real `SIGKILL` lands on a real process table; a test that
+    ///     has arranged for the poll to NEVER succeed pays every attempt, so it
+    ///     passes a small number and buys back the wall time.
+    ///   - signaller: the process table the park's liveness poll reads. The
+    ///     real one by default — the whole point of this suite is the kernel's
+    ///     own answers — overridden only where the branch under test is one no
+    ///     real process can reach.
+    static func make(
+        holderHibernationEnabled: Bool = true,
+        holderEscalationAttempts: Int = 100,
+        signaller: any ProcessSignaller = ProductionProcessSignaller()
+    ) async throws -> HibernationFixture {
         let home = scratchHome()
         let shell = try writeGateShell(in: home)
         let environment = [
@@ -309,12 +462,15 @@ private final class HibernationFixture {
             // Two attempts at 100 ms is the polite window; the job cannot use
             // it, so the run pays 200 ms to reach the escalation rather than
             // the shipped three seconds. The escalation budget is generous by
-            // contrast — it is a real `SIGKILL` leaving a real process table on
+            // default — it is a real `SIGKILL` leaving a real process table on
             // a machine that may be loaded, and a short budget there would fail
-            // this test for scheduling rather than for behaviour.
+            // this test for scheduling rather than for behaviour. A caller that
+            // has arranged for that poll to fail every time overrides it, since
+            // there the generosity is pure wall time.
             exitPollAttempts: 2,
             exitPollInterval: .milliseconds(100),
-            holderEscalationAttempts: 100,
+            holderEscalationAttempts: holderEscalationAttempts,
+            signaller: signaller,
             actuationLog: makeTestActuationLog())
         await coordinator.setHolderRegistry(registry)
 
