@@ -419,9 +419,16 @@ production seams hand their work to an unstructured task on purpose —
 other callers await — and that work is then scheduled on the cooperative pool
 however the test started the call. It is not pinning a thread, and no
 `gateHoldingTask` can move it. Where the test owns the callee, inject the
-executor into the callee instead: `ShutdownLatch(executor:)` is that seam,
-and `ServerShutdownLatchTests` builds its latch on `GateExecutor.shared` so
-its run leaves the shared queue altogether.
+executor into the callee instead: `ShutdownLatch(executor:)` and
+`ControlModeInputRouter(executor:)` are those seams, and
+`ServerShutdownLatchTests` and the two control-mode input suites build on
+`GateExecutor.shared` so their work leaves the shared queue altogether. The
+router's case shows the reach: its consumer is one unstructured task, but the
+preference carries from there into the `TmuxControlCommandClient` actor and the
+paste sends beyond it, so injecting at that single seam takes the whole
+delivery pipeline off the pass's queue. Each seam is pinned by a test that
+reads `Thread.current.name` from inside the moved work, so dropping the
+argument goes red instead of quietly returning to the pool.
 
 **What starves such a handshake is hop count, not priority.** Every task in a
 test pass runs at one priority: a test body, a `Task { }`, a `Task.detached { }`
