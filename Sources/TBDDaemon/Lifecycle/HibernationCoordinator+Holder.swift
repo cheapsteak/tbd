@@ -487,7 +487,19 @@ extension HibernationCoordinator {
     /// same reason: the pids are persisted BEFORE the row stops being parked,
     /// so a failure in between leaves a parked row that names live processes —
     /// which `reconcileOnStartup` un-parks — rather than an awake row that
-    /// names nothing, which nothing would ever reconcile.
+    /// names nothing, which nothing would ever reconcile. Both orders can fail
+    /// in the middle; only this one fails into a state something owns.
+    ///
+    /// **What makes that order converge rather than compound is the adopt
+    /// guard below.** Without it, the window between the pid write and the
+    /// cleared park marker is not merely untidy, it multiplies: the row still
+    /// reads parked, so the app's next focus-wake re-enters this method,
+    /// `registry.spawn` runs unconditionally, `setHolderProcess` overwrites the
+    /// pids with a third generation, and the second generation — live, and no
+    /// longer named by any row — is beyond every reconciler, because the
+    /// reaper's holder leg sweeps by the pids a row carries. Healing the row
+    /// instead means the retry that used to widen the damage is now what
+    /// repairs it, and `reconcileOnStartup` stops being the only cure.
     func wakeHolderSection(
         terminal: Terminal,
         worktree: LocalWorktree,
@@ -503,17 +515,33 @@ extension HibernationCoordinator {
             return .respawnFailed(
                 reason: "this daemon has no holder registry, so the session cannot be resumed on the pty-holder transport")
         }
-        // "Registry present" is not "can spawn": a daemon whose `TBDHolder`
-        // binary has moved still builds a registry, because adoption of a
-        // running holder needs no executable. Only this fact may gate a spawn.
-        guard registry.canSpawn else {
-            return .respawnFailed(
-                reason: "the TBDHolder helper is missing beside the daemon, so no holder can be started for this session; the row stays parked")
-        }
 
         guard let currentTerminal = try? await db.terminals.get(id: terminal.id),
               expectedReplacementState.matches(currentTerminal) else {
             return .respawnFailed(reason: "terminal changed while wake was preparing; retry")
+        }
+
+        // The row said parked, but its holder may already be running — an
+        // earlier wake of this same row that got as far as the pids. Heal it
+        // rather than starting a second one.
+        if let adopted = await adoptLiveHolderInsteadOfRespawning(
+            currentTerminal, registry: registry) {
+            return adopted
+        }
+
+        // "Registry present" is not "can spawn": a daemon whose `TBDHolder`
+        // binary has moved still builds a registry, because adoption of a
+        // running holder needs no executable. Only this fact may gate a spawn.
+        //
+        // Asked here rather than at the top of the method because it gates a
+        // SPAWN, and the branch above does not spawn: a daemon whose helper has
+        // moved can still un-park a row over the holder it already adopted, and
+        // refusing that would strand exactly the row this method just proved is
+        // healthy. Everything between here and the guard is read-only, so
+        // moving the question down costs the refusal nothing.
+        guard registry.canSpawn else {
+            return .respawnFailed(
+                reason: "the TBDHolder helper is missing beside the daemon, so no holder can be started for this session; the row stays parked")
         }
 
         let incarnationID: UUID
@@ -589,6 +617,83 @@ extension HibernationCoordinator {
         // pane's screen, and this row has no pane. A holder session's resumed
         // id is recaptured the way every other fact about it is — from hooks.
         logger.info("woke holder-backed terminal \(terminal.id, privacy: .public) (resume \(sessionID, privacy: .public), holder \(handle.holderPID, privacy: .public), child \(handle.childPID, privacy: .public))")
+        return .ok
+    }
+
+    /// Un-park a parked row whose holder is already running, or answer nil so
+    /// the wake spawns as usual.
+    ///
+    /// The state this recognizes is a wake that half-finished: `setHolderProcess`
+    /// landed and `clearHibernated` did not, so the row names a live holder and
+    /// a live child while still claiming parked. `reconcileOnStartup` heals it,
+    /// but only at the next daemon start, and the periodic reconcile sweep skips
+    /// parked rows by design — so between those two events every retry used to
+    /// spawn again and abandon the generation before it.
+    ///
+    /// Two independent facts count as "already running", because they answer
+    /// from opposite ends and either one alone is enough:
+    ///
+    /// - **The registry still holds a reader for the session.** That reader
+    ///   exists only because a `spawn` on this daemon adopted the holder it
+    ///   started, which makes it first-hand evidence rather than an inference
+    ///   about a number. It is also what makes this a guard rather than a
+    ///   nicety: `HolderRegistry.spawn` refuses a session that already occupies
+    ///   a slot (`sessionAlreadyRegistered`), so without the guard the retry's
+    ///   spawn throws and the row stays parked forever — the guard is what turns
+    ///   that throw into a heal.
+    /// - **The recorded child pid is identity-verified alive**, through the same
+    ///   `ProcessIdentityCheck` the reaper's holder leg consults before it
+    ///   signals anything: alive, started within
+    ///   `AgentReaper.defaultHolderIdentityWindow` of the row's recorded child
+    ///   start, and running an executable a holder's job could be. This is the
+    ///   half that survives a daemon restart, where no reader exists but the
+    ///   child does. A pid the kernel has recycled fails it exactly as it fails
+    ///   there.
+    ///
+    /// Every other verdict — `.notRunning`, an unreadable start time or command
+    /// line, a mismatch, a foreign executable — returns nil and lets the spawn
+    /// proceed. That is the safe direction on this side: an uncertain identity
+    /// must not silently un-park a row over a session nobody is running, and a
+    /// spawn that turns out to be unnecessary is refused by the registry rather
+    /// than duplicated.
+    private func adoptLiveHolderInsteadOfRespawning(
+        _ terminal: Terminal, registry: HolderRegistry
+    ) async -> WakeResult? {
+        let evidence: String
+        if await registry.reader(for: terminal.id) != nil {
+            evidence = "this daemon is still reading its holder"
+        } else if let childPID = terminal.childPID, childPID > 1,
+                  ProcessIdentityCheck.verify(
+                    pid: childPID,
+                    startedWithin: AgentReaper.defaultHolderIdentityWindow,
+                    of: terminal.holderChildStartedAt ?? terminal.createdAt,
+                    executableIsAcceptable: AgentReaper.isHolderChildExecutable,
+                    signaller: signaller) == .same {
+            evidence = "its recorded child \(childPID) is identity-verified alive"
+        } else {
+            return nil
+        }
+
+        do {
+            try await db.terminals.clearHibernated(id: terminal.id)
+        } catch {
+            // Nothing was started and nothing is abandoned: the row is exactly
+            // as it was, still parked over its own live holder, and the next
+            // retry or the next daemon start reaches this same branch again.
+            logger.error("wake: \(terminal.id, privacy: .public) is parked over a holder that is already running, but the parked marker could not be cleared: \(error.localizedDescription, privacy: .public)")
+            return .respawnFailed(
+                reason: "this session's holder is already running, but clearing its parked "
+                    + "marker failed: \(error.localizedDescription)")
+        }
+
+        idleSince[terminal.id] = nil
+        // The same empty tmux coordinates the spawn path broadcasts, for the
+        // same reason: a holder row carries none, and a non-empty pair would
+        // send the terminal view looking for a window that does not exist.
+        broadcastHibernation(
+            terminal: terminal, hibernated: false, keepWarm: terminal.keepWarm,
+            tmuxWindowID: "", tmuxPaneID: "")
+        logger.info("wake: adopted the holder already running for \(terminal.id, privacy: .public) instead of spawning a second one — \(evidence, privacy: .public); the row was parked over it")
         return .ok
     }
 }

@@ -160,9 +160,14 @@ struct HolderTmuxAssumptionGateTests {
     /// test here that reaches code which would `kill()` it, and no fixture on a
     /// shared box may name a pid that could really exist. See
     /// `deleteDisposesHolderInsteadOfKillingAWindow`.
+    ///
+    /// `holderChildStartedAt` is the identity anchor `ProcessIdentityCheck`
+    /// measures a live pid's start time against. Left nil by default, which is
+    /// what a row that never recorded one carries; the wake tests that script a
+    /// living child set it, because a verdict of `.same` needs both halves.
     private func seedClaudeTerminal(
         _ db: TBDDatabase, worktreeID: UUID, transport: TerminalTransport,
-        childPID: Int32 = 9102
+        childPID: Int32 = 9102, holderChildStartedAt: Date? = nil
     ) async throws -> Terminal {
         let holder = transport == .holder
         let terminal = try await db.terminals.create(
@@ -174,7 +179,8 @@ struct HolderTmuxAssumptionGateTests {
             kind: .claude,
             transport: transport,
             holderPID: holder ? 9101 : nil,
-            childPID: holder ? childPID : nil)
+            childPID: holder ? childPID : nil,
+            holderChildStartedAt: holder ? holderChildStartedAt : nil)
         try await db.terminals.setActivityState(
             id: terminal.id, activityState: .idle, source: .derived)
         return try #require(try await db.terminals.get(id: terminal.id))
@@ -194,14 +200,36 @@ struct HolderTmuxAssumptionGateTests {
             listTerminals: { terminals })
     }
 
+    /// `signaller` is defaulted so every call site that does not care about the
+    /// process table keeps compiling unchanged — but the wake path now reads it
+    /// on holder rows, so a test whose verdict depends on whether a recorded
+    /// child is alive must script one rather than let the production signaller
+    /// ask the real kernel about a fixture pid.
     private func coordinator(
-        _ db: TBDDatabase, tmux: TmuxManager, registry: HolderRegistry? = nil
+        _ db: TBDDatabase, tmux: TmuxManager, registry: HolderRegistry? = nil,
+        signaller: any ProcessSignaller = ProductionProcessSignaller()
     ) async -> HibernationCoordinator {
         let coordinator = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
-            actuationLog: makeTestActuationLog())
+            signaller: signaller, actuationLog: makeTestActuationLog())
         await coordinator.setHolderRegistry(registry)
         return coordinator
+    }
+
+    /// The shape a holder's job presents to an identity check: the login shell
+    /// the holder forked, or the agent binary that shell `exec`d itself into.
+    private static let holderChildCommand = "/bin/zsh -i -l -c claude"
+
+    /// A process table in which the fixture's recorded child pid names nothing.
+    ///
+    /// The wake path asks about that pid before it spawns, and a fixture pid is
+    /// a number the kernel may well have handed to a real process on this box.
+    /// Scripting the answer is what keeps "the wake went on to spawn" a fact
+    /// about the code rather than about what happens to be running.
+    private func deadChildSignaller(_ childPID: Int32 = 9102) -> FakeProcessSignaller {
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[childPID] = .init(aliveInitially: false)
+        return signaller
     }
 
     /// Dry-run tmux that reports every window dead, recording every argv.
@@ -550,7 +578,10 @@ struct HolderTmuxAssumptionGateTests {
         let registry = holderRegistry(listing: [terminal])
         #expect(registry.canSpawn == false, "the fixture wired a spawner it was not meant to")
 
-        let result = await coordinator(db, tmux: tmux, registry: registry)
+        // The recorded child names nothing, so the wake goes on to spawn — and
+        // then refuses for the one reason this fixture can state.
+        let result = await coordinator(
+            db, tmux: tmux, registry: registry, signaller: deadChildSignaller())
             .wake(terminalID: terminal.id)
         guard case .respawnFailed(let reason) = result else {
             Issue.record("expected .respawnFailed — the flag still gates a parked wake, got \(result)")
@@ -635,7 +666,8 @@ struct HolderTmuxAssumptionGateTests {
         let registry = holderRegistry(listing: [terminal])
         #expect(registry.canSpawn == false, "the fixture wired a spawner it was not meant to")
 
-        let result = await coordinator(db, tmux: tmux, registry: registry)
+        let result = await coordinator(
+            db, tmux: tmux, registry: registry, signaller: deadChildSignaller())
             .wake(terminalID: terminal.id)
         guard case .respawnFailed(let reason) = result else {
             Issue.record("expected .respawnFailed, got \(result)")
@@ -649,6 +681,144 @@ struct HolderTmuxAssumptionGateTests {
                 "a refused wake mutated the holder row")
         #expect(recorded.snapshot().isEmpty,
                 "the holder wake path reached tmux: \(recorded.snapshot())")
+    }
+
+    /// A retried wake of a row whose holder is ALREADY running adopts it.
+    ///
+    /// The state under test is the one a wake leaves behind when its pid write
+    /// lands and its `clearHibernated` does not: the row reads parked while
+    /// naming a live holder and a live child. The periodic reconcile sweep
+    /// skips parked rows and `reconcileOnStartup` only runs at daemon boot, so
+    /// until this guard existed every retry in between spawned a SECOND agent
+    /// onto the same session and abandoned the first, which no reconciler could
+    /// then reach — the reaper's holder leg sweeps by the pids a row carries,
+    /// and the row had just been made to carry the third generation's.
+    ///
+    /// The registry deliberately cannot spawn, and that is the discriminator
+    /// rather than a limitation of the fixture: a wake that reached the spawn
+    /// would answer `.respawnFailed` here, so `.ok` can only mean it stopped
+    /// short of one. The pids surviving unchanged says the same thing from the
+    /// row's side.
+    @Test("a wake of a row parked over a live holder adopts it instead of spawning again")
+    func wakeAdoptsAHolderThatIsAlreadyRunning() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // An hour-old child, anchored on the row's recorded start rather than
+        // on `createdAt`: the shape a session woken a while ago has.
+        let childStartedAt = Date().addingTimeInterval(-3600)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[9109] = .init(aliveInitially: true)
+        signaller.startTimes[9109] = childStartedAt
+        signaller.cmdlines[9109] = Self.holderChildCommand
+
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder,
+            childPID: 9109, holderChildStartedAt: childStartedAt)
+        try await db.terminals.setHibernated(
+            id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
+
+        let registry = holderRegistry(listing: [terminal])
+        #expect(registry.canSpawn == false, "the fixture wired a spawner it was not meant to")
+
+        let result = await coordinator(
+            db, tmux: tmux, registry: registry, signaller: signaller)
+            .wake(terminalID: terminal.id)
+        #expect(result == .ok,
+                "a row parked over a live holder was not adopted")
+
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(!after.isParked, "the adopted row was left parked")
+        #expect(after.holderPID == 9101, "adoption re-identified the holder")
+        #expect(after.childPID == 9109, "adoption re-identified the child")
+        #expect(after.holderChildStartedAt != nil,
+                "adoption forgot the identity anchor the next check needs")
+        #expect(recorded.snapshot().isEmpty,
+                "the holder wake path reached tmux: \(recorded.snapshot())")
+    }
+
+    /// The other verdict on the same row: a recorded child that names nothing
+    /// is not a holder to adopt, so the wake goes on to spawn one — and this
+    /// fixture's registry cannot, which leaves the row parked.
+    ///
+    /// Without this leg the guard above would be indistinguishable from one
+    /// that un-parks every parked holder row it is handed.
+    @Test("a wake whose recorded child is gone still spawns, and the row stays parked")
+    func wakeWithADeadChildStillSpawns() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let childStartedAt = Date().addingTimeInterval(-3600)
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder,
+            childPID: 9109, holderChildStartedAt: childStartedAt)
+        try await db.terminals.setHibernated(
+            id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
+        let before = RowFingerprint(try #require(try await db.terminals.get(id: terminal.id)))
+
+        let registry = holderRegistry(listing: [terminal])
+        let result = await coordinator(
+            db, tmux: tmux, registry: registry, signaller: deadChildSignaller(9109))
+            .wake(terminalID: terminal.id)
+        guard case .respawnFailed(let reason) = result else {
+            Issue.record("expected .respawnFailed — a dead child must not be adopted, got \(result)")
+            return
+        }
+        #expect(reason.contains("TBDHolder"))
+
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(after.isParked, "a wake that could not spawn un-parked the row")
+        #expect(RowFingerprint(after) == before, "a failed wake mutated the holder row")
+        #expect(recorded.snapshot().isEmpty,
+                "the holder wake path reached tmux: \(recorded.snapshot())")
+    }
+
+    /// The tmux leg of the same guard: a parked tmux row is judged by its
+    /// window, never by the process table, so a signaller scripted to report a
+    /// perfect identity changes nothing about how it wakes.
+    @Test("a parked tmux row still wakes through tmux whatever the process table says")
+    func parkedTmuxRowIsUnaffectedByTheAdoptGuard() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Scripted alive with an unimpeachable identity, and the row is given
+        // the pids to match — a shape a tmux row would never really carry, and
+        // deliberately so: without them the process table says nothing about
+        // this row and the test could not tell a transport-blind guard from a
+        // correct one. With them, a guard that stopped discriminating on
+        // transport would adopt this row and drive no tmux at all.
+        let childStartedAt = Date()
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[9109] = .init(aliveInitially: true)
+        signaller.startTimes[9109] = childStartedAt
+        signaller.cmdlines[9109] = Self.holderChildCommand
+
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@7", tmuxPaneID: "%7",
+            label: TerminalLabel.claudeCode, claudeSessionID: "sess-holdergate",
+            kind: .claude, transport: .tmux,
+            holderPID: 9101, childPID: 9109, holderChildStartedAt: childStartedAt)
+        try await db.terminals.setHibernated(
+            id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
+
+        let result = await coordinator(db, tmux: tmux, signaller: signaller)
+            .wake(terminalID: terminal.id)
+        #expect(result == .ok)
+        #expect(try await db.terminals.get(id: terminal.id)?.isParked == false)
+        #expect(!recorded.snapshot().isEmpty,
+                "the tmux leg must still drive tmux to wake a parked row")
     }
 
     // MARK: - Gate 4: terminal.swapProfile, .inPlace
