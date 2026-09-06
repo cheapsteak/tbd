@@ -316,9 +316,11 @@ struct ActuationRow: Codable, Sendable, Equatable {
     ///
     /// Set on holder-send outcome rows and nowhere else — the tmux arm has no
     /// oracle (tmux tracks the pane's mode itself and pastes accordingly), and
-    /// no other act composes bytes against a child's modes. Absent on a row
-    /// where nothing was composed, which is what the empty-payload send is: it
-    /// wrote nothing, so it guessed nothing.
+    /// no other act composes bytes against a child's modes. Within that, it is
+    /// written whenever the send composed anything against the oracle's answer:
+    /// the caller's text was non-empty, or a submitting `\r` was written. The
+    /// one holder send without it is `--text ""` with no `--submit`, which
+    /// composed nothing, so it guessed nothing.
     ///
     /// **Per dispatch, not per act.** A verified send that is re-delivered
     /// recomposes against the modes as they are then, and each dispatch writes
