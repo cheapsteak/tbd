@@ -148,8 +148,25 @@ struct ClaudeCompletionProbeTests {
 
     /// A hung probe is killed. Without the kill, a wedged Claude Code holds a
     /// process and a pipe for as long as the daemon lives.
+    ///
+    /// **Wall clock is the only available witness, so the fixture is sized to
+    /// make it discriminate.** `.timedOut` is thrown on BOTH outcomes this test
+    /// has to tell apart: the deadline fired and killed the child, and the child
+    /// ran to natural completion with the runner's `ContinuousClock` authority
+    /// check refusing to call a late exit a success. So asserting on the error
+    /// proves nothing here, and elapsed time is what separates them.
+    ///
+    /// Elapsed time measured from the caller also includes how long the resumed
+    /// continuation waits for a cooperative thread, and in the whole-suite
+    /// parallel pass that is not small: 39 s and 49 s on two CI runs, while the
+    /// same test takes 0.4 s on an idle machine. A 60 s child and a 10 s bound
+    /// therefore overlapped the noise and failed with nothing wrong. The child
+    /// now sleeps five minutes and the bound is two, so the gap between "killed
+    /// at a 300 ms deadline" and "waited the child out" is far wider than any
+    /// scheduling delay — and a regression still FAILS at 300 s rather than
+    /// hanging the suite.
     @Test func aHangingExecutableIsKilledAtTheDeadline() async throws {
-        let fake = try Self.makeFakeExecutable(emitting: nil, sleepSeconds: 60)
+        let fake = try Self.makeFakeExecutable(emitting: nil, sleepSeconds: 300)
         defer { try? FileManager.default.removeItem(at: fake.deletingLastPathComponent()) }
 
         let started = Date()
@@ -160,8 +177,9 @@ struct ClaudeCompletionProbeTests {
                 environment: ["PATH": "/usr/bin:/bin"],
                 timeout: .milliseconds(300))
         }
-        #expect(Date().timeIntervalSince(started) < 10,
-                "the probe must not outlive its deadline by an order of magnitude")
+        let elapsed = Date().timeIntervalSince(started)
+        #expect(elapsed < 120,
+                "a 300 ms deadline resolved after \(elapsed) s — the probe waited its child out")
     }
 
     // MARK: - Fixtures
