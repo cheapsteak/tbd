@@ -216,6 +216,10 @@ public final class RPCRouter: Sendable {
     /// Which Claude terminals owe a delegation sample, and what their last
     /// sample claimed. Marked at every idle report; read during `terminal.list`.
     let claudeDelegationTracker = ClaudeDelegationTracker()
+    /// Answers `terminal.completions`. Holds the per-session inventory cache for
+    /// the daemon's lifetime, which is why it is a stored collaborator rather
+    /// than something the handler builds per request.
+    let completionInventory: CompletionInventoryService
     /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
     /// one (tests, older callers); when present, terminal handlers open a gated
     /// logging-only `tmux -CC` connection after each `ensureServer()`.
@@ -313,6 +317,7 @@ public final class RPCRouter: Sendable {
         transcriptDeltaInspector: @escaping TranscriptDeltaInspector
             = TranscriptDeltaInspection.live,
         paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
+        completionInventory: CompletionInventoryService = CompletionInventoryService(),
         actuationLog: ActuationLog
     ) {
         self.now = now
@@ -320,6 +325,7 @@ public final class RPCRouter: Sendable {
         self.transcriptFingerprinter = transcriptFingerprinter
         self.transcriptDeltaInspector = transcriptDeltaInspector
         self.paneProcessInspector = paneProcessInspector
+        self.completionInventory = completionInventory
         self.actuationLog = actuationLog
         self.db = db
         self.lifecycle = lifecycle
@@ -484,6 +490,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalAttachCommand(request.paramsData)
             case RPCMethod.terminalSend:
                 return try await handleTerminalSend(request.paramsData, actor: request.actor)
+            case RPCMethod.terminalCompletions:
+                return try await handleTerminalCompletions(request.paramsData)
             case RPCMethod.terminalDelete:
                 return try await handleTerminalDelete(request.paramsData, actor: request.actor)
             case RPCMethod.terminalSetPin:

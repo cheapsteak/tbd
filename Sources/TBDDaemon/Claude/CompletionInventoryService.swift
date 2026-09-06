@@ -42,7 +42,7 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "completions"
 ///
 /// Every probe runs inside `ClaudeConfigDirSerializer`, because the probe rewrites
 /// `.claude.json` and `ClaudeTrustSeeder` does too.
-actor CompletionInventoryService {
+public actor CompletionInventoryService {
 
     /// Everything one request needs, resolved by the handler from the terminal's
     /// row and its worktree — so this type never touches the database.
@@ -84,22 +84,50 @@ actor CompletionInventoryService {
     private let serializer: ClaudeConfigDirSerializer
     private var cache: [CacheKey: CacheEntry] = [:]
 
+    /// The live probe: start the session's own binary and ask it.
+    static let liveProbe: Prober = { executablePath, cwd, environment in
+        try await ClaudeCompletionProbe.run(
+            executablePath: executablePath,
+            workingDirectory: cwd,
+            environment: environment)
+    }
+
+    /// The live degraded reader, used when the binary does not answer.
+    static let liveScan: Scanner = { configDir, worktreePath in
+        ClaudeCompletionScan.scan(configDir: configDir, worktreePath: worktreePath)
+    }
+
+    static let liveExecutableResolver: @Sendable () -> String? = {
+        try? ClaudeExecutableResolver.resolve()
+    }
+
+    static let liveExecutablePathForPID: @Sendable (Int32) -> String? = { pid in
+        ProcessLiveness.executablePath(pid: pid)
+    }
+
+    /// The production instance, every seam at its live default.
+    ///
+    /// Public only because `RPCRouter`'s public initializer takes one of these
+    /// as a defaulted collaborator. The seam-taking initializer below stays
+    /// internal on purpose: its parameter types are the probe and scan
+    /// internals, and making them API to buy a default argument would be the
+    /// tail wagging the dog.
+    public init() {
+        self.probe = Self.liveProbe
+        self.scan = Self.liveScan
+        self.resolveExecutable = Self.liveExecutableResolver
+        self.executablePathForPID = Self.liveExecutablePathForPID
+        self.fingerprint = Self.liveFingerprint
+        self.serializer = .shared
+    }
+
     init(
-        probe: @escaping Prober = { executablePath, cwd, environment in
-            try await ClaudeCompletionProbe.run(
-                executablePath: executablePath,
-                workingDirectory: cwd,
-                environment: environment)
-        },
-        scan: @escaping Scanner = { configDir, worktreePath in
-            ClaudeCompletionScan.scan(configDir: configDir, worktreePath: worktreePath)
-        },
-        resolveExecutable: @escaping @Sendable () -> String? = {
-            try? ClaudeExecutableResolver.resolve()
-        },
-        executablePathForPID: @escaping @Sendable (Int32) -> String? = { pid in
-            ProcessLiveness.executablePath(pid: pid)
-        },
+        probe: @escaping Prober = CompletionInventoryService.liveProbe,
+        scan: @escaping Scanner = CompletionInventoryService.liveScan,
+        resolveExecutable: @escaping @Sendable () -> String?
+            = CompletionInventoryService.liveExecutableResolver,
+        executablePathForPID: @escaping @Sendable (Int32) -> String?
+            = CompletionInventoryService.liveExecutablePathForPID,
         fingerprint: @escaping @Sendable (String, String) -> String
             = CompletionInventoryService.liveFingerprint,
         serializer: ClaudeConfigDirSerializer = .shared
