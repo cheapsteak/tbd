@@ -179,6 +179,46 @@ struct EnvelopeSuppressionAuthTests {
         #expect(try #require(stranger.tmux.pastedBodies.first).hasPrefix("<tbd-dispatch"))
     }
 
+    // MARK: - The shape the composer actually sends
+
+    /// **The production call is `parts` + `envelope: .suppressed`**, not `text`.
+    /// Every row above states the authority rule on a text payload; this states
+    /// it on the payload the composer actually builds, so the rule cannot hold
+    /// for one shape and quietly not the other.
+    @Test func theAppsOwnConnectionSuppressesTheEnvelopeOnAPartsSend() async throws {
+        let harness = try await harness()
+        let response = try await harness.send(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true,
+                parts: [.text("look at "), .imagePath("/tmp/a.png"), .text(" and tell me")],
+                envelope: .suppressed),
+            actor: .app,
+            connection: RPCConnectionContext(peerPID: Self.appPID))
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(harness.tmux.pastedBodies == ["look at ", "'/tmp/a.png'", " and tell me"])
+    }
+
+    /// The negative for the same shape: a stranger's connection asking for
+    /// suppression gets the envelope on the first TEXT part, exactly as an
+    /// unasked parts send does.
+    @Test func aStrangersPartsSendKeepsTheEnvelopeOnTheFirstTextPart() async throws {
+        let harness = try await harness()
+        _ = try await harness.send(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true,
+                parts: [.text("look at "), .imagePath("/tmp/a.png")],
+                envelope: .suppressed),
+            actor: .app,
+            connection: RPCConnectionContext(peerPID: 4321))
+
+        let bodies = harness.tmux.pastedBodies
+        try #require(bodies.count == 2)
+        #expect(try #require(bodies.first).hasPrefix("<tbd-dispatch"))
+        #expect(try #require(bodies.first).hasSuffix("\nlook at "))
+        #expect(bodies[1] == "'/tmp/a.png'")
+    }
+
     /// A send that does not ASK for suppression never pays for the identity
     /// check, and gets the envelope on an authenticated connection like anyone
     /// else. The check runs on a composer send and nowhere else.

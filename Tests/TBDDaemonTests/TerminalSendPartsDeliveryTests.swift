@@ -65,10 +65,69 @@ struct TerminalSendPartsDeliveryTests {
             parts: [.text(""), .imagePath("/tmp/a.png"), .text("")]),
             actor: .app)
 
-        // Nothing empty was pasted. The envelope has no text part to ride on
-        // here, so it rides on nothing: an image part is NEVER prefixed.
+        // Nothing empty was pasted. Every text part being empty makes this an
+        // IMAGE-ONLY payload, so the envelope takes a leading paste of its own
+        // rather than being dropped — the image paste stays bare and alone.
+        let bodies = harness.tmux.pastedBodies
+        try #require(bodies.count == 2)
+        #expect(try #require(bodies.first).hasPrefix("<tbd-dispatch"))
+        #expect(bodies[1] == "'/tmp/a.png'")
+        #expect(harness.tmux.sentKeys == ["Enter"])
+    }
+
+    // MARK: - The image-only payload, and why it is not unattributed
+
+    /// **An image-only send is still a user turn, so it is still attributed.**
+    /// The envelope cannot ride ON the image part — Claude Code attaches an
+    /// image only when the whole paste is one quoted path — so it takes its own
+    /// leading paste instead. Each part is already its own bracketed paste, so
+    /// the image paste stays bare and alone and still attaches, and this is the
+    /// same "text + image as separate pastes" shape the design already relies on.
+    ///
+    /// Without it, any local process could submit an unattributed user turn
+    /// carrying an image, on a request that needs no authentication.
+    @Test func anUnauthenticatedImageOnlySendPastesTheEnvelopeFirst() async throws {
+        let harness = try await SendHarness.make()
+        _ = try await harness.send(TerminalSendParams(
+            terminalID: harness.terminal.id, submit: true,
+            parts: [.imagePath("/tmp/a.png")]),
+            actor: .app)
+
+        let bodies = harness.tmux.pastedBodies
+        try #require(bodies.count == 2)
+        #expect(try #require(bodies.first).hasPrefix("<tbd-dispatch"))
+        #expect(bodies[1] == "'/tmp/a.png'")
+        #expect(harness.tmux.sentKeys == ["Enter"])
+    }
+
+    /// The other branch: on an authenticated connection that asked for
+    /// suppression, the person is speaking in their own voice, so there is no
+    /// envelope to place anywhere and the image is the only paste.
+    @Test func anAuthenticatedImageOnlySendPastesOnlyThePath() async throws {
+        let harness = try await SendHarness.makeAuthenticated()
+        let response = try await harness.send(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true,
+                parts: [.imagePath("/tmp/a.png")], envelope: .suppressed),
+            actor: .app,
+            connection: SendHarness.AuthenticatedApp.connection)
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
         #expect(harness.tmux.pastedBodies == ["'/tmp/a.png'"])
         #expect(harness.tmux.sentKeys == ["Enter"])
+    }
+
+    /// A shell row carries no envelope at all, so an image-only send there has
+    /// nothing to place ahead of the path — the leading paste is the envelope's,
+    /// not the image-only shape's.
+    @Test func anImageOnlySendToAShellRowPastesOnlyThePath() async throws {
+        let harness = try await SendHarness.make(kind: .shell)
+        _ = try await harness.send(TerminalSendParams(
+            terminalID: harness.terminal.id, submit: true,
+            parts: [.imagePath("/tmp/a.png")]),
+            actor: .app)
+
+        #expect(harness.tmux.pastedBodies == ["'/tmp/a.png'"])
     }
 
     /// One envelope for one message, on the FIRST text part — not one per paste,

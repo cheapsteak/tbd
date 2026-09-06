@@ -154,6 +154,54 @@ struct SendHarness {
         return SendHarness(router: router, db: db, terminal: terminal, tmux: double)
     }
 
+    /// The one identity the envelope-suppression check accepts, and a harness
+    /// wired to accept it.
+    ///
+    /// Shared here rather than restated per suite: the parts-delivery and holder
+    /// suites need an AUTHENTICATED connection only to reach a suppressed
+    /// disposition, while `EnvelopeSuppressionAuthTests` keeps its own stub
+    /// because its subject is the ways the check FAILS.
+    enum AuthenticatedApp {
+        static let pid: Int32 = 909
+        static let startedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        static let commandLine = "/Applications/TBD.app/Contents/MacOS/TBDApp"
+
+        /// What a caller passes to `send` to arrive as the app.
+        static var connection: RPCConnectionContext { RPCConnectionContext(peerPID: pid) }
+
+        static var identity: ProcessIdentity {
+            ProcessIdentity(pid: pid, startedAt: startedAt, commandLine: commandLine)
+        }
+
+        /// Answers the re-verification with `.same` for that one pid. Inert on
+        /// the signalling half: a stub that could kill something is a stub that
+        /// will, on a mistake.
+        struct Signaller: ProcessSignaller {
+            func isAlive(_ pid: Int32) -> Bool { true }
+            func startTime(_ pid: Int32) -> Date? { AuthenticatedApp.startedAt }
+            func commandLine(_ pid: Int32) -> String? { AuthenticatedApp.commandLine }
+            func stat(_ pid: Int32) -> String? { nil }
+            func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
+            func terminate(_ pid: Int32) {}
+            func forceKill(_ pid: Int32) {}
+        }
+    }
+
+    /// A harness on which `AuthenticatedApp.connection` authenticates, so a send
+    /// that asks for `envelope: .suppressed` actually gets it.
+    static func makeAuthenticated(
+        transport: TerminalTransport = .tmux,
+        kind: TerminalKind = .claude,
+        holderDeliveryRecorder: (@Sendable (Data) -> Void)? = nil
+    ) async throws -> SendHarness {
+        try await make(
+            transport: transport,
+            kind: kind,
+            recordedAppIdentity: { AuthenticatedApp.identity },
+            processSignaller: AuthenticatedApp.Signaller(),
+            holderDeliveryRecorder: holderDeliveryRecorder)
+    }
+
     /// `connection` is what the daemon would have learned from the socket the
     /// request arrived on. Defaulted to nil — "not established" — which is what
     /// every non-socket caller of the router gets, and the answer that keeps the

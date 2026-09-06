@@ -2895,6 +2895,12 @@ extension RPCRouter {
     /// string sits unsent in Claude's composer. Splitting the message into
     /// several deliveries instead would reopen the at-least-once and routing
     /// questions that one delivery avoids, so this refuses rather than guessing.
+    /// It carries one more cause than "composite" suggests: an image-only
+    /// message whose write would also have to carry the dispatch envelope. The
+    /// tmux arm gives the envelope a separate leading paste; this transport has
+    /// no second delivery to give, and the envelope alone is 68 bytes, so the
+    /// combined write lands past the 64-byte cliff too.
+    ///
     /// PR #816 (child-as-contract-party) wraps in bracketed paste when the
     /// child's mode is on, in one write, and this refusal lifts with it.
     static func holderCompositeRefusal(terminalID: UUID, cause: String) -> String {
@@ -3065,7 +3071,7 @@ extension RPCRouter {
             submit: payload.recordedSubmit,
             verify: payload.recordedVerify)
 
-        // ─── The transport, ahead of every other declining rail ───
+        // ─── The transport's own declining rail ───
         //
         // A holder-backed session has no tmux pane: its `tmuxPaneID` is the
         // empty string by construction, so every tmux mechanic below — the
@@ -3074,13 +3080,19 @@ extension RPCRouter {
         // instead, which writes to the session's pty rather than to a pane
         // (see `performHolderSend`).
         //
-        // It sits ahead of the `--verify` rails because the holder path
-        // declines `--verify` for a *different* reason than they do — no
-        // delivery observation exists for this transport at all, rather than a
-        // flag being off — and a caller needs to be told which. It sits AFTER
-        // `beginActuation` for the reason the first refusal line above gives:
-        // a well-formed act the daemon declined gets a row and a refusal
-        // outcome, unlike a malformed payload that names no act.
+        // The transport decides WHICH rails apply, and dispatch happens below
+        // the awaiting-input gate rather than here, so both transports pass
+        // through that gate — the spec applies it before dispatching to
+        // either, and a holder row that skipped it would answer a permission
+        // dialog by committing whichever option is highlighted. Each rule
+        // therefore has exactly one code path: the tmux rails in the `else`
+        // arm, what the holder write cannot frame in this one, and one gate
+        // below covering both.
+        //
+        // This arm sits AFTER `beginActuation` for the reason the first
+        // refusal line above gives: a well-formed act the daemon declined gets
+        // a row and a refusal outcome, unlike a malformed payload that names
+        // no act.
         if terminal.transport == .holder {
             // ─── What the holder arm cannot carry yet ───
             //
@@ -3108,100 +3120,97 @@ extension RPCRouter {
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
-            return await performHolderSend(
-                payload: payload, terminal: terminal, actuationID: actuationID,
-                actor: actor, envelope: envelope)
-        }
-
-        // ─── Is Claude actually running here? ───
-        //
-        // Text and parts, never keys. `--keys` exists to answer a dialog and to
-        // interrupt, and a key sequence into a shell is not the failure this
-        // rail exists to stop. A parts payload is subject to both rails exactly
-        // as a non-empty text payload is: it is pasted into the pane the same
-        // way, and a validated parts payload always has content — Task 2's
-        // shape validation refuses an empty one — so there is no emptiness
-        // guard to mirror for it the way there is for text.
-        //
-        // Two independent facts, because each fails on its own. The park stamp is
-        // written by the `SessionEnd` hook and is missed whenever the process
-        // crashes; the foreground-process inspector reads the process table and
-        // is available only for a tmux-backed row with a live pane. Both are
-        // machine facts — a column and `ps` — never the rendered screen, which
-        // this codebase forbids reading for state.
-        //
-        // The two rails split on the EMPTY payload — a bare Enter, which
-        // `--submit` with no text is — and they split deliberately:
-        //
-        //   - The park rail takes it. A parked row's pane holds a shell and
-        //     nothing else, so an Enter there has no message to lose and no
-        //     purpose to serve, and the refusal already names wake as the
-        //     remedy. Letting it through would be the one text payload that
-        //     reaches a session everyone agrees is gone.
-        //   - The foreground rail does not. A bare Enter is how a caller
-        //     answers a prompt the agent is already showing, and the inspector
-        //     is the fallible fact of the two — a pane it cannot read must not
-        //     cost a live row its Enter.
-        let subjectToParkRail: Bool
-        let subjectToForegroundRail: Bool
-        switch payload {
-        case .text(let body, _, _):
-            subjectToParkRail = true
-            subjectToForegroundRail = !body.isEmpty
-        case .keys:
-            subjectToParkRail = false
-            subjectToForegroundRail = false
-        case .parts:
-            subjectToParkRail = true
-            subjectToForegroundRail = true
-        }
-        if subjectToParkRail {
-            if terminal.hibernatedAt != nil {
-                let message = Self.parkedSendRefusal(
-                    terminalID: terminal.id, exited: terminal.isExitStamped)
-                await finishActuation(actuationID, .refused(.notEligible), error: message)
-                return RPCResponse(error: message)
+        } else {
+            // ─── Is Claude actually running here? ───
+            //
+            // Text and parts, never keys. `--keys` exists to answer a dialog and to
+            // interrupt, and a key sequence into a shell is not the failure this
+            // rail exists to stop. A parts payload is subject to both rails exactly
+            // as a non-empty text payload is: it is pasted into the pane the same
+            // way, and a validated parts payload always has content — Task 2's
+            // shape validation refuses an empty one — so there is no emptiness
+            // guard to mirror for it the way there is for text.
+            //
+            // Two independent facts, because each fails on its own. The park stamp is
+            // written by the `SessionEnd` hook and is missed whenever the process
+            // crashes; the foreground-process inspector reads the process table and
+            // is available only for a tmux-backed row with a live pane. Both are
+            // machine facts — a column and `ps` — never the rendered screen, which
+            // this codebase forbids reading for state.
+            //
+            // The two rails split on the EMPTY payload — a bare Enter, which
+            // `--submit` with no text is — and they split deliberately:
+            //
+            //   - The park rail takes it. A parked row's pane holds a shell and
+            //     nothing else, so an Enter there has no message to lose and no
+            //     purpose to serve, and the refusal already names wake as the
+            //     remedy. Letting it through would be the one text payload that
+            //     reaches a session everyone agrees is gone.
+            //   - The foreground rail does not. A bare Enter is how a caller
+            //     answers a prompt the agent is already showing, and the inspector
+            //     is the fallible fact of the two — a pane it cannot read must not
+            //     cost a live row its Enter.
+            let subjectToParkRail: Bool
+            let subjectToForegroundRail: Bool
+            switch payload {
+            case .text(let body, _, _):
+                subjectToParkRail = true
+                subjectToForegroundRail = !body.isEmpty
+            case .keys:
+                subjectToParkRail = false
+                subjectToForegroundRail = false
+            case .parts:
+                subjectToParkRail = true
+                subjectToForegroundRail = true
             }
-            // The foreground rail is kind-aware, not Claude-only. The
-            // inspector's question is "does a foreground process whose command
-            // line contains <name> own this pane", and the kind supplies the
-            // name: "claude" for a Claude row, "codex" for a Codex one, and for
-            // a row whose kind was never recorded, whichever of the two the
-            // Claude session id decides — the same reading `v22_terminal_kind`
-            // backfilled onto every such row and `Terminal.isClaudeResumable`
-            // already requires. A shell has no name to supply — its pane pid IS
-            // the shell, with no agent under it — so the rail never runs for
-            // one, and a shell send that would otherwise be refused every time
-            // goes through.
-            //
-            // Covering Codex here matters more than it does for Claude: a Codex
-            // row is never exit-stamped, because Codex ships no `SessionEnd`
-            // hook, and stamping one would be worse than not — the wake path
-            // refuses a non-Claude row, so the stamp would park it unwakeably.
-            // This rail is therefore the ONLY thing standing between a Codex
-            // pane whose agent left and a message pasted into its shell and run.
-            // The park rail above stays kind-agnostic: a parked row of any kind
-            // has no live session behind it.
-            //
-            // A pane id that resolves to a pid is the precondition for asking at
-            // all, and `panePID > 0` is not decoration: a tmux that cannot answer
-            // reports "0", and asking the process table about pid 0 is a question
-            // with no meaning. An unreadable pid therefore proceeds — a tmux that
-            // cannot answer is not evidence that Claude left, and the pane
-            // consultation below is the rail that judges a missing or dead pane,
-            // properly.
-            if subjectToForegroundRail,
-               let agentName = Self.foregroundAgentName(
-                    kind: terminal.kind, claudeSessionID: terminal.claudeSessionID),
-               let panePIDString = try? await tmux.panePID(
-                    server: worktree.tmuxServer, paneID: terminal.tmuxPaneID),
-               let panePID = Int32(panePIDString), panePID > 0,
-               paneProcessInspector.foregroundAgentPID(
-                    panePID: panePID, matching: agentName) == nil {
-                let message = Self.agentNotForegroundRefusal(
-                    terminalID: terminal.id, paneID: terminal.tmuxPaneID, agentName: agentName)
-                await finishActuation(actuationID, .refused(.notEligible), error: message)
-                return RPCResponse(error: message)
+            if subjectToParkRail {
+                if terminal.hibernatedAt != nil {
+                    let message = Self.parkedSendRefusal(
+                        terminalID: terminal.id, exited: terminal.isExitStamped)
+                    await finishActuation(actuationID, .refused(.notEligible), error: message)
+                    return RPCResponse(error: message)
+                }
+                // The foreground rail is kind-aware, not Claude-only. The
+                // inspector's question is "does a foreground process whose command
+                // line contains <name> own this pane", and the kind supplies the
+                // name: "claude" for a Claude row, "codex" for a Codex one, and for
+                // a row whose kind was never recorded, whichever of the two the
+                // Claude session id decides — the same reading `v22_terminal_kind`
+                // backfilled onto every such row and `Terminal.isClaudeResumable`
+                // already requires. A shell has no name to supply — its pane pid IS
+                // the shell, with no agent under it — so the rail never runs for
+                // one, and a shell send that would otherwise be refused every time
+                // goes through.
+                //
+                // Covering Codex here matters more than it does for Claude: a Codex
+                // row is never exit-stamped, because Codex ships no `SessionEnd`
+                // hook, and stamping one would be worse than not — the wake path
+                // refuses a non-Claude row, so the stamp would park it unwakeably.
+                // This rail is therefore the ONLY thing standing between a Codex
+                // pane whose agent left and a message pasted into its shell and run.
+                // The park rail above stays kind-agnostic: a parked row of any kind
+                // has no live session behind it.
+                //
+                // A pane id that resolves to a pid is the precondition for asking at
+                // all, and `panePID > 0` is not decoration: a tmux that cannot answer
+                // reports "0", and asking the process table about pid 0 is a question
+                // with no meaning. An unreadable pid therefore proceeds — a tmux that
+                // cannot answer is not evidence that Claude left, and the pane
+                // consultation below is the rail that judges a missing or dead pane,
+                // properly.
+                if subjectToForegroundRail,
+                   let agentName = Self.foregroundAgentName(
+                        kind: terminal.kind, claudeSessionID: terminal.claudeSessionID),
+                   let panePIDString = try? await tmux.panePID(
+                        server: worktree.tmuxServer, paneID: terminal.tmuxPaneID),
+                   let panePID = Int32(panePIDString), panePID > 0,
+                   paneProcessInspector.foregroundAgentPID(
+                        panePID: panePID, matching: agentName) == nil {
+                    let message = Self.agentNotForegroundRefusal(
+                        terminalID: terminal.id, paneID: terminal.tmuxPaneID, agentName: agentName)
+                    await finishActuation(actuationID, .refused(.notEligible), error: message)
+                    return RPCResponse(error: message)
+                }
             }
         }
 
@@ -3231,6 +3240,29 @@ extension RPCRouter {
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
+        }
+
+        // Resolved ONCE, ahead of every delivery arm, so the holder write and
+        // the tmux pastes read the same answer. A rail's own `.suppressed`
+        // passes through; a request's is granted only on a connection the
+        // daemon authenticated.
+        let effectiveEnvelope = await effectiveEnvelope(
+            railDisposition: envelope,
+            requested: params.envelope,
+            connection: connection)
+
+        // ─── The holder dispatch ───
+        //
+        // Ahead of the `--verify` rails below because the holder path declines
+        // `--verify` for a *different* reason than they do — no delivery
+        // observation exists for this transport at all, rather than a flag being
+        // off — and a caller needs to be told which. It is handed the EFFECTIVE
+        // disposition, not the rail's: an authenticated suppression must reach
+        // this transport too.
+        if terminal.transport == .holder {
+            return await performHolderSend(
+                payload: payload, terminal: terminal, actuationID: actuationID,
+                actor: actor, envelope: effectiveEnvelope)
         }
 
         // ─── The second refusal line: a well-formed act the daemon declines ───
@@ -3316,14 +3348,6 @@ extension RPCRouter {
         // that pasted nothing (empty text, or keys). Handed to the arming seam
         // below so a retry can re-deliver byte-identically.
         var deliveredPayload: String?
-
-        // Resolved ONCE, ahead of the delivery block, so both arms below read
-        // the same answer. A rail's own `.suppressed` passes through; a
-        // request's is granted only on a connection the daemon authenticated.
-        let effectiveEnvelope = await effectiveEnvelope(
-            railDisposition: envelope,
-            requested: params.envelope,
-            connection: connection)
 
         do {
             switch payload {
@@ -3416,6 +3440,38 @@ extension RPCRouter {
                 // put a `<tbd-dispatch/>` line in the middle of a sentence.
                 var envelopePending = effectiveEnvelope == .attached
                     && Self.carriesDispatchEnvelope(terminal)
+
+                // ─── An image-only message is still attributed ───
+                //
+                // With no text part to ride on, the envelope takes a leading
+                // paste of ITS OWN rather than being dropped. Dropping it would
+                // let any local process submit an unattributed user turn
+                // carrying an image, on a request that needs no authentication
+                // — the one property the envelope exists to deny. It cannot
+                // ride ON the image part, because an image attaches only when
+                // the whole paste is the quoted path and nothing else.
+                //
+                // Every part is already its own bracketed paste, so this costs
+                // the image paste nothing: it stays bare and alone, which is the
+                // measured "text + image as separate pastes" shape the parts
+                // payload is built on.
+                let carriesText = parts.contains { part in
+                    switch part {
+                    case .text(let value): return !value.isEmpty
+                    case .imagePath: return false
+                    }
+                }
+                if envelopePending && !carriesText {
+                    try await tmux.pasteText(
+                        server: worktree.tmuxServer,
+                        paneID: terminal.tmuxPaneID,
+                        bytes: Data((Self.dispatchEnvelope(
+                            id: actuationID, from: (actor ?? .anonymous).dispatchLabel
+                        ) + "\n").utf8)
+                    )
+                    envelopePending = false
+                }
+
                 for part in parts {
                     let body: String
                     switch part {
@@ -3487,7 +3543,7 @@ extension RPCRouter {
     /// actuation row, the same dispatch envelope, the same per-terminal
     /// serializer lane (this runs inside it). What changes is the destination —
     /// `HolderInjectionCourier` routes by whether a viewer owns the pty — and
-    /// three things this transport cannot do yet, each refused by name rather
+    /// four things this transport cannot do yet, each refused by name rather
     /// than by "the holder transport", so a caller learns which capability is
     /// missing:
     ///
@@ -3499,12 +3555,18 @@ extension RPCRouter {
     ///   the holder arm cannot carry yet" there). The `.parts` case below
     ///   still turns away a multi-part payload defensively, but that gate
     ///   means it should never see one.
+    /// - An image-only message that would carry the dispatch envelope has
+    ///   nowhere to put it: the envelope cannot ride ahead of a path that
+    ///   attaches only when the paste is the path and nothing else, and there
+    ///   is no second write to give it. Refused in the `.parts` arm below,
+    ///   where the disposition is known.
     ///
     /// A daemon with no courier has no input path at all, and says so.
     ///
     /// **The whole send is one message.** The body, its envelope, its paste
-    /// markers and the carriage return that submits it are composed here and
-    /// handed to the courier in a single call, because a payload split across
+    /// markers and the carriage return that submits it are composed in
+    /// `deliverHolderText` below — which this function's arms converge on —
+    /// and handed to the courier in a single call, because a payload split across
     /// two writes can be split across a routing decision — and because
     /// `HolderReader.write` completes partial writes in a loop, so one call is
     /// one uninterrupted write.
@@ -3582,6 +3644,29 @@ extension RPCRouter {
                 text = value
                 envelopeEligible = true
             case .imagePath(let path):
+                // ─── One write cannot carry both ───
+                //
+                // An image attaches only when the WHOLE paste is the quoted path
+                // and nothing else (measured on 2.1.261), so the envelope that
+                // attributes this turn cannot ride ahead of it — and the tmux
+                // arm's answer, a separate leading paste, needs a second
+                // delivery this transport does not have. Dropping the envelope
+                // instead would let any local process submit an unattributed
+                // user turn carrying an image, which is the one property the
+                // envelope exists to deny.
+                //
+                // So this refuses while an envelope would be attached, and
+                // delivers the bare path when none would be — an authenticated
+                // suppression, or a row that carries no envelope at all.
+                // PR #816's bracketed-paste wrapping lifts it, exactly as it
+                // lifts the composite refusal.
+                guard envelope != .attached || !Self.carriesDispatchEnvelope(terminal) else {
+                    return await refuseHolderSend(
+                        actuationID, Self.holderCompositeRefusal(
+                            terminalID: terminal.id,
+                            cause: "an image on its own, which would have to share that one "
+                                + "write with the dispatch envelope attributing it,"))
+                }
                 text = Self.quotedImagePath(path)
                 envelopeEligible = false
             }

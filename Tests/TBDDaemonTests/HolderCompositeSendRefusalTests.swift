@@ -96,16 +96,20 @@ struct HolderCompositeSendRefusalTests {
         #expect(body.hasSuffix("\nhello\r"))
     }
 
-    /// Same as above for a single image part, EXCEPT for the envelope: it
-    /// must carry none, regardless of disposition — Claude Code attaches an
-    /// image only when the paste is the bare quoted path and nothing else
-    /// (measured on 2.1.261), so a prefix ahead of it turns the path into
-    /// literal text and attaches nothing. `connection: nil` (unauthenticated,
-    /// requesting no suppression) is the harness's default, spelled out here
-    /// because this is exactly the disposition an envelope would otherwise
-    /// attach under — proving the exclusion is the image part's own rule, not
-    /// suppression having been granted.
-    @Test func aSingleImagePartSendToAHolderRowIsNotRefused() async throws {
+    /// **An image-only send that would carry an envelope is refused here.**
+    ///
+    /// The holder arm writes the whole message in ONE unwrapped write, and that
+    /// one write cannot carry both a dispatch envelope and a bare image path:
+    /// Claude Code attaches an image only when the whole paste is the quoted
+    /// path and nothing else (measured on 2.1.261), so prefixing it attaches
+    /// nothing — and dropping the envelope instead would let any local process
+    /// submit an unattributed user turn carrying an image. The tmux arm escapes
+    /// the dilemma by pasting the envelope separately; this transport has no
+    /// second write to give. PR #816's bracketed-paste wrapping lifts it.
+    ///
+    /// `connection: nil` (unauthenticated, asking for no suppression) is the
+    /// disposition an envelope attaches under.
+    @Test func anUnauthenticatedSingleImagePartSendToAHolderRowIsRefused() async throws {
         let recorder = HolderWriteRecorder()
         let harness = try await SendHarness.make(
             transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
@@ -114,15 +118,72 @@ struct HolderCompositeSendRefusalTests {
                 terminalID: harness.terminal.id, submit: true, parts: [.imagePath("/tmp/a.png")]),
             actor: .app, connection: nil)
 
-        let error = response.error ?? ""
-        #expect(!error.contains("more than one part"))
-        #expect(!error.contains("newline"))
-        #expect(!error.contains("parts"))
-        #expect(response.success, "error was: \(error)")
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.contains("pty-holder"))
+        #expect(error.contains("image"))
+        #expect(recorder.writes.isEmpty, "nothing may be written")
+    }
+
+    /// The other branch: an authenticated connection that asked for suppression
+    /// carries no envelope, so the one write is the bare quoted path and the
+    /// image attaches exactly as it does on tmux.
+    @Test func anAuthenticatedSingleImagePartSendToAHolderRowIsDelivered() async throws {
+        let recorder = HolderWriteRecorder()
+        let harness = try await SendHarness.makeAuthenticated(
+            transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
+        let response = try await harness.send(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true,
+                parts: [.imagePath("/tmp/a.png")], envelope: .suppressed),
+            actor: .app, connection: SendHarness.AuthenticatedApp.connection)
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
         #expect(recorder.writes.count == 1)
         let body = String(bytes: try #require(recorder.writes.first), encoding: .utf8) ?? ""
         #expect(!body.contains("<tbd-dispatch"))
         #expect(body == "'/tmp/a.png'\r")
+    }
+
+    /// A shell row carries no envelope whatever the disposition, so the same
+    /// image-only send goes through unauthenticated — the refusal above belongs
+    /// to the envelope that would otherwise have to share the write, not to
+    /// image parts as such.
+    @Test func anImageOnlySendToAHolderShellRowIsDelivered() async throws {
+        let recorder = HolderWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, kind: .shell,
+            holderDeliveryRecorder: { recorder.record($0) })
+        let response = try await harness.send(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true, parts: [.imagePath("/tmp/a.png")]),
+            actor: .app, connection: nil)
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        let body = String(bytes: try #require(recorder.writes.first), encoding: .utf8) ?? ""
+        #expect(body == "'/tmp/a.png'\r")
+    }
+
+    /// **The rail disposition is not the effective one.** An authenticated
+    /// suppression request must reach the holder arm too: before the fix
+    /// `performHolderSend` was handed the RAIL disposition, so a composer send
+    /// to a holder-backed row silently got the envelope the person asked to
+    /// speak without.
+    @Test func anAuthenticatedTextSendToAHolderRowCarriesNoEnvelope() async throws {
+        let recorder = HolderWriteRecorder()
+        let harness = try await SendHarness.makeAuthenticated(
+            transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
+        let response = try await harness.send(
+            TerminalSendParams(
+                terminalID: harness.terminal.id, submit: true,
+                parts: [.text("hello")], envelope: .suppressed),
+            actor: .app, connection: SendHarness.AuthenticatedApp.connection)
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(recorder.writes.count == 1)
+        let body = String(bytes: try #require(recorder.writes.first), encoding: .utf8) ?? ""
+        #expect(!body.contains("<tbd-dispatch"))
+        #expect(body == "hello\r")
     }
 
     /// A tmux row is untouched by any of it.

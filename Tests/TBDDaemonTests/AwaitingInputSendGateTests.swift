@@ -142,4 +142,70 @@ struct AwaitingInputSendGateOptInTests {
             actor: .app)
         #expect(response.success, "error was: \(response.error ?? "none")")
     }
+
+    /// **The gate applies to BOTH transports.** It used to sit after the
+    /// early return that dispatches a holder-backed row to its own delivery
+    /// arm, so a holder row was never gated at all: a composer send answered a
+    /// permission dialog by committing whichever option was highlighted. The
+    /// spec applies the gate before dispatching to either transport.
+    @Test func anOptedInSendToAHolderRowIsRefused() async throws {
+        let recorder = HolderWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
+        try await harness.db.terminals.recordAwaitingInputReason(
+            id: harness.terminal.id,
+            reason: AwaitingInputReason(
+                message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
+                notificationType: "permission_prompt"),
+            observedAt: Date(timeIntervalSince1970: 1_800_000_000))
+
+        let response = try await harness.send(TerminalSendParams(
+            terminalID: harness.terminal.id, text: "yes", submit: true,
+            gateOnAwaitingInput: true),
+            actor: .app)
+
+        #expect(!response.success)
+        #expect(try #require(response.error).contains("Allow Bash(rm -rf)?"))
+        #expect(recorder.writes.isEmpty, "nothing may be written to the pty")
+    }
+
+    /// The load-bearing negative for the transport above: no opt-in, same row,
+    /// same prompt — the send goes through, because that is how an agent answers
+    /// a dialog on a holder-backed session too.
+    @Test func anOptedOutSendToAHolderRowIsNotGated() async throws {
+        let recorder = HolderWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
+        try await harness.db.terminals.recordAwaitingInputReason(
+            id: harness.terminal.id,
+            reason: AwaitingInputReason(
+                message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
+                notificationType: "permission_prompt"),
+            observedAt: Date(timeIntervalSince1970: 1_800_000_000))
+
+        let response = try await harness.send(TerminalSendParams(
+            terminalID: harness.terminal.id, text: "yes", submit: true),
+            actor: ActuationActor.session(worktree: "W", terminal: "T"))
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(recorder.writes.count == 1)
+    }
+}
+
+/// Collects the bytes the harness's stubbed `HolderInjectionCourier` was asked
+/// to write. Lock-guarded, because the courier's closure runs off the test's
+/// task.
+private final class HolderWriteRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _writes: [Data] = []
+    var writes: [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _writes
+    }
+    func record(_ bytes: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        _writes.append(bytes)
+    }
 }
