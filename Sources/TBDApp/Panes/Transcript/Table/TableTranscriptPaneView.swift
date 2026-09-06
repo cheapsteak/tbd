@@ -284,6 +284,12 @@ struct TableTranscriptPaneView: View {
                         // registration is keyed on the terminal it was made for.
                         // A fresh view per terminal is what keeps the two agreeing.
                         .id(decision.terminal.id)
+                        // The completion list is an overlay on the composer and
+                        // draws UPWARD, out over the transcript above it. The
+                        // table is its sibling in this stack and an AppKit view
+                        // besides, so it is stated here which of the two paints
+                        // on top rather than left to stacking order.
+                        .zIndex(1)
                 }
             }
         }
