@@ -81,7 +81,12 @@ struct SendHarness {
 
     static func make(
         transport: TerminalTransport = .tmux,
-        kind: TerminalKind = .claude
+        kind: TerminalKind = .claude,
+        // Overrides the inspector's answer, per agent name, so a test can ask
+        // for "no foreground agent here" — the foreground rail's negative case
+        // — without touching anything else about the harness. Defaulted to the
+        // live-agent answer every other call site relies on.
+        foregroundByAgent: [String: Int32] = ["claude": 4242, "codex": 4242]
     ) async throws -> SendHarness {
         let double = TmuxDouble()
         let tmux = TmuxManager(
@@ -103,8 +108,7 @@ struct SendHarness {
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
             tmux: tmux,
-            paneProcessInspector: StubInspector(
-                foregroundByAgent: ["claude": 4242, "codex": 4242]),
+            paneProcessInspector: StubInspector(foregroundByAgent: foregroundByAgent),
             actuationLog: ActuationLog(path: Self.scratchLogPath()))
 
         let repo = try await db.repos.create(

@@ -80,4 +80,47 @@ struct TerminalSendPartsDeliveryTests {
             actor: .app)
         #expect(harness.tmux.sentKeys.isEmpty)
     }
+
+    // MARK: - The not-running rails apply to parts too
+
+    /// A parts send into a parked row must be refused exactly as a text send
+    /// is — PR A's park rail was guarded on `.text` alone, which let a parts
+    /// payload paste into a pane whose Claude session had already exited.
+    @Test func aPartsSendIntoAParkedRowIsRefused() async throws {
+        let harness = try await SendHarness.make()
+        try await harness.db.terminals.setHibernated(
+            id: harness.terminal.id, sessionID: "sess-1", reason: .manual,
+            at: Date(timeIntervalSince1970: 1_800_000_000))
+
+        let response = try await harness.send(TerminalSendParams(
+            terminalID: harness.terminal.id, submit: true,
+            parts: [.text("look at "), .imagePath("/tmp/a.png")]),
+            actor: .app)
+
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.contains("is not running"))
+        #expect(harness.tmux.pastedBodies.isEmpty)
+        #expect(harness.tmux.sentKeys.isEmpty)
+    }
+
+    /// A parts send whose pane has no foreground agent must be refused exactly
+    /// as a text send is — PR A's foreground rail was guarded on `.text` alone,
+    /// which let a parts payload paste into a shell the agent had left behind.
+    /// No emptiness guard applies here: a validated parts payload always has
+    /// content.
+    @Test func aPartsSendWithNoForegroundAgentIsRefused() async throws {
+        let harness = try await SendHarness.make(foregroundByAgent: [:])
+
+        let response = try await harness.send(TerminalSendParams(
+            terminalID: harness.terminal.id, submit: true,
+            parts: [.text("look at "), .imagePath("/tmp/a.png")]),
+            actor: .app)
+
+        #expect(!response.success)
+        let error = try #require(response.error)
+        #expect(error.contains("foreground process"))
+        #expect(harness.tmux.pastedBodies.isEmpty)
+        #expect(harness.tmux.sentKeys.isEmpty)
+    }
 }

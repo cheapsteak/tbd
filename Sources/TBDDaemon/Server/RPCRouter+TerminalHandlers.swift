@@ -3077,8 +3077,13 @@ extension RPCRouter {
 
         // ─── Is Claude actually running here? ───
         //
-        // Text only. `--keys` exists to answer a dialog and to interrupt, and a
-        // key sequence into a shell is not the failure this rail exists to stop.
+        // Text and parts, never keys. `--keys` exists to answer a dialog and to
+        // interrupt, and a key sequence into a shell is not the failure this
+        // rail exists to stop. A parts payload is subject to both rails exactly
+        // as a non-empty text payload is: it is pasted into the pane the same
+        // way, and a validated parts payload always has content — Task 2's
+        // shape validation refuses an empty one — so there is no emptiness
+        // guard to mirror for it the way there is for text.
         //
         // Two independent facts, because each fails on its own. The park stamp is
         // written by the `SessionEnd` hook and is missed whenever the process
@@ -3099,7 +3104,20 @@ extension RPCRouter {
         //     answers a prompt the agent is already showing, and the inspector
         //     is the fallible fact of the two — a pane it cannot read must not
         //     cost a live row its Enter.
-        if case .text(let body, _, _) = payload {
+        let subjectToParkRail: Bool
+        let subjectToForegroundRail: Bool
+        switch payload {
+        case .text(let body, _, _):
+            subjectToParkRail = true
+            subjectToForegroundRail = !body.isEmpty
+        case .keys:
+            subjectToParkRail = false
+            subjectToForegroundRail = false
+        case .parts:
+            subjectToParkRail = true
+            subjectToForegroundRail = true
+        }
+        if subjectToParkRail {
             if terminal.hibernatedAt != nil {
                 let message = Self.parkedSendRefusal(
                     terminalID: terminal.id, exited: terminal.isExitStamped)
@@ -3134,7 +3152,7 @@ extension RPCRouter {
             // cannot answer is not evidence that Claude left, and the pane
             // consultation below is the rail that judges a missing or dead pane,
             // properly.
-            if !body.isEmpty,
+            if subjectToForegroundRail,
                let agentName = Self.foregroundAgentName(
                     kind: terminal.kind, claudeSessionID: terminal.claudeSessionID),
                let panePIDString = try? await tmux.panePID(
