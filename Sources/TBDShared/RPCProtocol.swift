@@ -253,6 +253,7 @@ public enum RPCMethod {
     public static let configSetScratchProfileOverride = "config.setScratchProfileOverride"
     public static let terminalHibernate = "terminal.hibernate"
     public static let terminalWake = "terminal.wake"
+    public static let terminalCompletions = "terminal.completions"
     public static let terminalSetKeepWarm = "terminal.setKeepWarm"
     public static let configSetAutoHibernate = "config.setAutoHibernate"
     public static let scratchCreate = "scratch.create"
@@ -2686,6 +2687,114 @@ public struct TerminalWakeResult: Codable, Sendable {
     /// A `prompt` param is delivered only when true.
     public let woken: Bool
     public init(woken: Bool) { self.woken = woken }
+}
+
+/// Params for `terminal.completions` — what slash commands, skills and subagents
+/// this terminal's Claude session knows about.
+///
+/// A terminal id and nothing else: the daemon already holds that session's
+/// profile config directory, spawn environment, working directory and child pid,
+/// and the app does not link the daemon library. Asking the app to supply any of
+/// them would move a daemon fact into a client that would then get it wrong.
+public struct TerminalCompletionsParams: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    public init(terminalID: UUID) { self.terminalID = terminalID }
+}
+
+/// One completable command, skill or plugin item, as the composer's menu shows
+/// it.
+///
+/// Named the way Claude Code's own control protocol names them — the probe's
+/// `initialize` response returns `name`, `description`, `argumentHint` and an
+/// optional `aliases` — so nothing has to be translated on the way through, and
+/// the filesystem scan fills the same shape from frontmatter.
+public struct CompletionCommand: Codable, Sendable, Equatable {
+    /// Fully qualified, including any `plugin:name` namespace, exactly as the
+    /// user must type it.
+    public let name: String
+    /// The one-line description the menu row shows. May be empty.
+    public let description: String
+    /// What arguments the command takes, shown as an inline placeholder once a
+    /// space follows the token. Absent for a command that takes none.
+    public let argumentHint: String?
+    /// Alternate names that select the same command. Empty rather than nil so
+    /// every consumer iterates one shape.
+    public let aliases: [String]
+
+    public init(
+        name: String, description: String,
+        argumentHint: String? = nil, aliases: [String] = []
+    ) {
+        self.name = name
+        self.description = description
+        self.argumentHint = argumentHint
+        self.aliases = aliases
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        description = try c.decodeIfPresent(String.self, forKey: .description) ?? ""
+        argumentHint = try c.decodeIfPresent(String.self, forKey: .argumentHint)
+        aliases = try c.decodeIfPresent([String].self, forKey: .aliases) ?? []
+    }
+}
+
+/// One subagent, offered under the at-sign.
+public struct CompletionAgent: Codable, Sendable, Equatable {
+    public let name: String
+    public let description: String
+    public init(name: String, description: String) {
+        self.name = name
+        self.description = description
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        description = try c.decodeIfPresent(String.self, forKey: .description) ?? ""
+    }
+}
+
+/// How current the inventory is.
+///
+/// Reported so a caller can tell a served cache from a re-probe, and a probe
+/// from the degraded answer — never so the UI can render three different menus.
+/// The app treats every shape identically.
+public enum CompletionFreshness: String, Codable, Sendable {
+    /// Produced by this request.
+    case fresh
+    /// Served from cache; the fingerprint said nothing had changed.
+    case stale
+    /// The probe failed or timed out and the filesystem scan answered instead.
+    case fallback
+}
+
+/// Which mechanism produced the inventory.
+public enum CompletionSource: String, Codable, Sendable {
+    /// The session's own Claude Code answered an `initialize` control request.
+    case probe
+    /// A filesystem scan of the same directories. Lists everything except
+    /// built-ins, because only the binary knows those.
+    case scan
+}
+
+/// Result of `terminal.completions`.
+public struct TerminalCompletionsResult: Codable, Sendable, Equatable {
+    public let commands: [CompletionCommand]
+    public let agents: [CompletionAgent]
+    public let freshness: CompletionFreshness
+    public let source: CompletionSource
+
+    public init(
+        commands: [CompletionCommand], agents: [CompletionAgent],
+        freshness: CompletionFreshness, source: CompletionSource
+    ) {
+        self.commands = commands
+        self.agents = agents
+        self.freshness = freshness
+        self.source = source
+    }
 }
 
 /// Params for `terminal.setKeepWarm` — pin/unpin a terminal against
