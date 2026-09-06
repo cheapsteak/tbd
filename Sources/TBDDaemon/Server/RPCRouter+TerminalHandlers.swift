@@ -2899,16 +2899,40 @@ extension RPCRouter {
     }
 
     /// The refusal a text `terminal.send` gets when the pane is alive but the
-    /// process table says Claude does not own its foreground process group.
+    /// process table says the session's agent does not own its foreground
+    /// process group.
     ///
     /// The second of two independent rails, and the one that covers a MISSED
     /// hook: a crashed session emits no `SessionEnd`, so nothing stamped the row.
+    /// It is the only rail a Codex row has, because Codex ships no `SessionEnd`
+    /// hook to stamp with — see `foregroundAgentName(for:)`.
     /// It asks the same inspector the limit-resume path has always asked, which
     /// reads `ps` — a process-table fact, never the rendered screen.
-    static func claudeNotForegroundRefusal(terminalID: UUID, paneID: String) -> String {
-        "terminal.send was refused: Claude is not the foreground process of pane \(paneID) for "
-            + "terminal \(terminalID) — a shell is, so the message would have run as a command "
-            + "line. Nothing was typed."
+    static func agentNotForegroundRefusal(
+        terminalID: UUID, paneID: String, agentName: String
+    ) -> String {
+        "terminal.send was refused: the session's agent (\(agentName)) is not the foreground "
+            + "process of pane \(paneID) for terminal \(terminalID) — a shell is, so the message "
+            + "would have run as a command line. Nothing was typed."
+    }
+
+    /// The process name the foreground rail looks for in a pane, per terminal
+    /// kind — and `nil` for a kind the rail must not run for at all.
+    ///
+    /// A shell's pane pid IS the shell, with no agent under it, so asking the
+    /// inspector about one refuses every healthy shell send there is. Both
+    /// agent-bearing kinds do have a process to find, and each names itself on
+    /// its command line, so the kind picks the name and the same `ps` question
+    /// answers for both.
+    ///
+    /// Pure and static so the mapping is testable without a database, a pane, or
+    /// a process table.
+    static func foregroundAgentName(for kind: TerminalKind?) -> String? {
+        switch kind ?? .shell {
+        case .shell: return nil
+        case .claude: return "claude"
+        case .codex: return "codex"
+        }
     }
 
     func handleTerminalSend(
@@ -3047,14 +3071,20 @@ extension RPCRouter {
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }
-            // The foreground rail is Claude-only, on the same predicate the
-            // `--verify` rails below use. The inspector's question is literally
-            // "does a foreground process whose command line contains `claude`
-            // own this pane" — which is `nil` for every healthy shell session
-            // (the pane pid IS the shell, with no children) and for every
-            // healthy Codex session (`codex …` contains no "claude"). Asking it
-            // about a non-Claude kind refuses a send that should have gone
-            // through, so the kind decides whether the question means anything.
+            // The foreground rail is kind-aware, not Claude-only. The
+            // inspector's question is "does a foreground process whose command
+            // line contains <name> own this pane", and the kind supplies the
+            // name: "claude" for a Claude row, "codex" for a Codex one. A shell
+            // has no name to supply — its pane pid IS the shell, with no agent
+            // under it — so the rail never runs for one, and a shell send that
+            // would otherwise be refused every time goes through.
+            //
+            // Covering Codex here matters more than it does for Claude: a Codex
+            // row is never exit-stamped, because Codex ships no `SessionEnd`
+            // hook, and stamping one would be worse than not — the wake path
+            // refuses a non-Claude row, so the stamp would park it unwakeably.
+            // This rail is therefore the ONLY thing standing between a Codex
+            // pane whose agent left and a message pasted into its shell and run.
             // The park rail above stays kind-agnostic: a parked row of any kind
             // has no live session behind it.
             //
@@ -3065,13 +3095,14 @@ extension RPCRouter {
             // cannot answer is not evidence that Claude left, and the pane
             // consultation below is the rail that judges a missing or dead pane,
             // properly.
-            if Self.supportsDeliveryObservation(terminal),
+            if let agentName = Self.foregroundAgentName(for: terminal.kind),
                let panePIDString = try? await tmux.panePID(
                     server: worktree.tmuxServer, paneID: terminal.tmuxPaneID),
                let panePID = Int32(panePIDString), panePID > 0,
-               paneProcessInspector.foregroundClaudePID(panePID: panePID) == nil {
-                let message = Self.claudeNotForegroundRefusal(
-                    terminalID: terminal.id, paneID: terminal.tmuxPaneID)
+               paneProcessInspector.foregroundAgentPID(
+                    panePID: panePID, matching: agentName) == nil {
+                let message = Self.agentNotForegroundRefusal(
+                    terminalID: terminal.id, paneID: terminal.tmuxPaneID, agentName: agentName)
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
             }

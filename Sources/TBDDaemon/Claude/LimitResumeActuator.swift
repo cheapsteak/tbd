@@ -20,14 +20,27 @@ public protocol ResumeSendingTmux: Sendable {
 
 extension TmuxManager: ResumeSendingTmux {}
 
-/// Finds the pane's foreground Claude process. `#{pane_current_command}`
+/// Finds the pane's foreground agent process. `#{pane_current_command}`
 /// reports `zsh` on macOS, so we walk the pane PID's process tree and check
 /// `ps -o stat=` for the `+` (foreground process group) flag instead
 /// (spec §Actuation 3).
 public protocol PaneProcessInspecting: Sendable {
-    /// PID of the Claude process that owns the pane's tty foreground group,
-    /// or nil when Claude is not foreground (bare shell, editor, …).
-    func foregroundClaudePID(panePID: Int32) -> Int32?
+    /// PID of the process that owns the pane's tty foreground group and whose
+    /// command line contains `agentName`, or nil when no such process is
+    /// foreground (bare shell, editor, an agent that exited, …).
+    ///
+    /// The name is a substring match on the lowercased command line, which is
+    /// how the Claude question has always been asked; passing "codex" asks the
+    /// same question about a Codex session.
+    func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32?
+}
+
+extension PaneProcessInspecting {
+    /// The Claude-shaped question, unchanged for every caller that only ever
+    /// asks it: the limit-resume actuator.
+    public func foregroundClaudePID(panePID: Int32) -> Int32? {
+        foregroundAgentPID(panePID: panePID, matching: "claude")
+    }
 }
 
 public struct ProductionPaneProcessInspector: PaneProcessInspecting {
@@ -37,12 +50,14 @@ public struct ProductionPaneProcessInspector: PaneProcessInspecting {
         self.signaller = signaller
     }
 
-    public func foregroundClaudePID(panePID: Int32) -> Int32? {
+    public func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32? {
         // Candidates, cheapest first: the pane PID itself (zsh may have exec'd
-        // into Claude) and its direct children, which one `ps` table scan
+        // into the agent) and its direct children, which one `ps` table scan
         // answers together.
         let children = signaller.children(ofServerPID: panePID)
-        if let match = firstForegroundClaude(in: [panePID] + children) { return match }
+        if let match = firstForegroundAgent(in: [panePID] + children, matching: agentName) {
+            return match
+        }
 
         // Grandchildren (wrapper-shell spawns) cost a FULL `ps -axo pid=,ppid=`
         // scan each, so they are walked only after the cheap candidates came up
@@ -51,7 +66,8 @@ public struct ProductionPaneProcessInspector: PaneProcessInspecting {
         // of its children. Scanning order is unchanged: a grandchild could only
         // ever have won after every child lost anyway.
         for child in children {
-            if let match = firstForegroundClaude(in: signaller.children(ofServerPID: child)) {
+            if let match = firstForegroundAgent(
+                in: signaller.children(ofServerPID: child), matching: agentName) {
                 return match
             }
         }
@@ -59,13 +75,13 @@ public struct ProductionPaneProcessInspector: PaneProcessInspecting {
     }
 
     /// The first pid in `pids` that owns its tty's foreground process group and
-    /// whose command line names Claude. Two `ps` invocations per candidate, so
-    /// callers pass the cheapest candidate set they have.
-    private func firstForegroundClaude(in pids: [Int32]) -> Int32? {
+    /// whose command line names the agent. Two `ps` invocations per candidate,
+    /// so callers pass the cheapest candidate set they have.
+    private func firstForegroundAgent(in pids: [Int32], matching agentName: String) -> Int32? {
         for pid in pids {
             guard let stat = signaller.stat(pid), stat.contains("+"),
                   let command = signaller.commandLine(pid)?.lowercased(),
-                  command.contains("claude")
+                  command.contains(agentName)
             else { continue }
             return pid
         }

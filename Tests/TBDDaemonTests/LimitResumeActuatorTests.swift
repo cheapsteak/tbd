@@ -60,7 +60,7 @@ final class FakeResumeTmux: ResumeSendingTmux, @unchecked Sendable {
 
 struct FakeInspector: PaneProcessInspecting {
     var claudePID: Int32?
-    func foregroundClaudePID(panePID: Int32) -> Int32? { claudePID }
+    func foregroundAgentPID(panePID: Int32, matching agentName: String) -> Int32? { claudePID }
 }
 
 @Suite struct LimitResumeActuatorTests {
