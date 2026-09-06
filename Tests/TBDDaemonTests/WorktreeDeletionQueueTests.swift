@@ -214,9 +214,19 @@ struct WorktreeDeletionQueueTests {
 
     /// Bounded poll (no wall-clock assertion): fails with a named diagnostic
     /// rather than hanging if the condition never becomes true.
+    ///
+    /// The deadline is the shared saturated-pass budget rather than a literal.
+    /// One of its two call sites waits for an unstructured `Task { }` to reach
+    /// its first statement, which SE-0417 leaves on the cooperative pool no
+    /// matter how the test was started (`gateHoldingTask`'s doc comment in
+    /// `Tests/TestSupport/BoundedGateSupport.swift`: the preference stops at an
+    /// unstructured task, and where the test cannot inject an executor into the
+    /// callee only the bound is left to get right). At ten seconds that wait
+    /// went red in CI on a healthy run — the gate then expired, the drain ran,
+    /// and the *middle* assertion failed, naming the wrong thing entirely.
     private func waitUntil(
         _ condition: @autoclosure () -> Bool, _ what: String,
-        timeout: Duration = .seconds(10)
+        timeout: Duration = TestDeadlines.saturatedPass
     ) async throws {
         let step = Duration.milliseconds(10)
         var waited = Duration.zero

@@ -270,8 +270,11 @@ private actor HangingRecheck {
     func release() { released = true }
 
     /// Whether the recheck was reached within `timeout`. Polled, because it is
-    /// issued from a detached task whose scheduling no test owns.
-    func wasEntered(within timeout: Duration = .seconds(10)) async -> Bool {
+    /// issued from a detached task whose scheduling no test owns — SE-0417
+    /// carries no executor preference across that hop, so the deadline is the
+    /// shared saturated-pass budget rather than a literal (`gateHoldingTask` in
+    /// `Tests/TestSupport/BoundedGateSupport.swift`).
+    func wasEntered(within timeout: Duration = TestDeadlines.saturatedPass) async -> Bool {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while !entered && ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(5))
@@ -299,8 +302,9 @@ private actor CancellableRecheck {
 
     /// Polled, because the recheck is issued from a detached task whose
     /// scheduling no test owns. The bound under test is virtual time; these
-    /// waits only cover that scheduling.
-    func wasEntered(within timeout: Duration = .seconds(10)) async -> Bool {
+    /// waits only cover that scheduling, so they take the shared saturated-pass
+    /// budget rather than a literal.
+    func wasEntered(within timeout: Duration = TestDeadlines.saturatedPass) async -> Bool {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while !entered && ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(5))
@@ -308,7 +312,7 @@ private actor CancellableRecheck {
         return entered
     }
 
-    func wasCancelled(within timeout: Duration = .seconds(10)) async -> Bool {
+    func wasCancelled(within timeout: Duration = TestDeadlines.saturatedPass) async -> Bool {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while !cancelled && ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(5))
@@ -325,7 +329,7 @@ private actor OneShot<Value: Sendable> {
 
     func fulfil(_ value: Value) { stored = value }
 
-    func value(within timeout: Duration = .seconds(10)) async -> Value? {
+    func value(within timeout: Duration = TestDeadlines.saturatedPass) async -> Value? {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while stored == nil && ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(5))

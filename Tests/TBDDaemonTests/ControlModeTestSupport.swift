@@ -214,7 +214,21 @@ final class ReplyFeed: @unchecked Sendable {
         // deallocate, and its `deinit` can end this loop, without a cycle.
         let box = self.box
         let counter = self.counter
-        self.drain = Task {
+        // `gateHoldingTask`, not a bare `Task`: this drain is long-lived and
+        // test-owned, and every reply it hands to the correlator is one hop on
+        // whatever queue it was started on. On the cooperative pool that hop
+        // costs the pass's own per-test latency (p50 65.6 s on a green fast
+        // pass 1), which is what left the router suites reporting partial
+        // progress — "observed 2 of 4 writes" — at their 90 s bounds while
+        // every assertion in them was sound. Running here takes the whole feed
+        // off the shared queue.
+        //
+        // It is STILL ONE TASK, so the single-consumer ordering this type
+        // exists to provide is untouched: `handle` is awaited for each event in
+        // turn, and completion order equals write order by construction exactly
+        // as before. `gateHoldingTask` changes where the task runs, never how
+        // many there are.
+        self.drain = gateHoldingTask {
             for await event in stream {
                 await box.client?.handle(event)
                 counter.increment()
@@ -297,6 +311,11 @@ final class ReplyFeed: @unchecked Sendable {
 /// One stream write may carry several `\n`-joined commands (`sendList`); each
 /// gets its own reply block, enqueued in command order. Callers must
 /// `await feed.finish()` when done.
+///
+/// The feed's drain runs on `GateExecutor.shared` (see `ReplyFeed.init`), so
+/// the reply half of the handshake leaves the saturated pass's queue. Give the
+/// router half the same treatment — `ControlModeInputRouter(executor:)` — or
+/// the pipeline is only half off the pool.
 ///
 /// **The replies are enqueued BEFORE the write is recorded, and that order is
 /// load-bearing** — it is what `ReplyFeed.finish()`'s happens-before rests on.

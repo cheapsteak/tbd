@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDApp
 import TBDShared
 
@@ -606,7 +607,18 @@ struct RemoteAttachStateTests {
 
     /// Bounded wait for a MainActor-isolated condition — the reporter fires
     /// from a `Task`, so the assertion can't be made synchronously.
-    private func waitUntil(_ condition: () -> Bool, timeout: TimeInterval = 2) async {
+    ///
+    /// The default is the shared saturated-pass budget rather than a literal:
+    /// what it waits for is reached through an unstructured `Task`, which
+    /// SE-0417 leaves on the cooperative pool whatever the test does at the
+    /// call site (see `gateHoldingTask` in
+    /// `Tests/TestSupport/BoundedGateSupport.swift`), so the wait queues behind
+    /// the whole fast pass. The one call site that passes an explicit, much
+    /// shorter window is asserting a negative and keeps its own number.
+    private func waitUntil(
+        _ condition: () -> Bool,
+        timeout: TimeInterval = TestDeadlines.saturatedPassSeconds
+    ) async {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return }

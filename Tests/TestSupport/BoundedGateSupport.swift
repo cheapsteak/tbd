@@ -241,7 +241,8 @@ public func waitFor(
 /// small fraction of the 30-minute step budget, so a wedge reports in minutes
 /// instead of consuming the job.
 ///
-/// It also stays inside `.clockDriven`'s `.timeLimit(.minutes(4))`, leaving
+/// It also stays inside the shared fast-pass suite limit,
+/// `.fastPassBounded` / `.clockDriven` (`.timeLimit(.minutes(4))`), leaving
 /// room for the rest of an ordinary test after one full gate timeout — the
 /// same invariant `Tests/CLAUDE.md` derives for `ciSafeDeadline` and
 /// `waitForSuspension`. Re-derive it together with those two when the test

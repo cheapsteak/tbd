@@ -2191,9 +2191,14 @@ struct CodexActivityReconciliationTests {
     }
 }
 
+/// The deadline is the shared saturated-pass budget rather than a literal: both
+/// call sites wait for a gate reached through production code that hands its
+/// work to an unstructured task, which stays on the cooperative pool behind the
+/// whole fast pass (`gateHoldingTask` in
+/// `Tests/TestSupport/BoundedGateSupport.swift`).
 private func waitUntilAsync(
     _ condition: @escaping @Sendable () async -> Bool,
-    timeout: Duration = .seconds(2)
+    timeout: Duration = TestDeadlines.saturatedPass
 ) async -> Bool {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)

@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import TBDShared
 
 /// Thread-safe collector for `onInput` callbacks, which fire on the receive
@@ -31,7 +32,20 @@ final class TaggedFrameSequence: @unchecked Sendable {
 }
 
 /// Poll `condition` until it holds or `timeout` elapses. Returns its final value.
-func waitUntil(_ condition: @Sendable () -> Bool, timeout: Duration = .seconds(2)) async -> Bool {
+///
+/// The default is the shared saturated-pass budget, not a literal. This helper
+/// is the most-used bounded wait in the daemon target and almost every call
+/// site waits for a gate to be entered from work the production code hands to
+/// an unstructured task — SE-0417 carries no executor preference across that
+/// hop (`gateHoldingTask` in `Tests/TestSupport/BoundedGateSupport.swift`), so
+/// the wait queues behind the whole fast pass and only the bound is the test's
+/// to get right. Two seconds was orders of magnitude below that pass's healthy
+/// per-test latency; the call sites that already spelled out `ciSafeDeadline`
+/// were compensating for it one at a time.
+func waitUntil(
+    _ condition: @Sendable () -> Bool,
+    timeout: Duration = TestDeadlines.saturatedPass
+) async -> Bool {
     let deadline = ContinuousClock.now + timeout
     while ContinuousClock.now < deadline {
         if condition() { return true }

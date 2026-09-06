@@ -39,20 +39,23 @@ struct ServerShutdownLatchTests {
     func latchRunsItsBodyOnceAndEveryCallerWaits() async throws {
         // Nothing this test waits on is scheduled on the cooperative pool.
         //
-        // It used to be: the callers were `Task.detached` and the latch's own
-        // run is an unstructured `Task`, which SE-0417 keeps off any executor
-        // preference its creator carries. Both land on the pool, and a
-        // detached task carries no priority, so in a parallel pass that
-        // admits ~5,000 tests against a 3-thread runner they queue behind
-        // every higher-priority test task for as long as the pass keeps the
-        // pool busy. CI observed exactly that: 0 of 8 callers back after
-        // 90 s, while this test's own polling loop — a test-priority task —
-        // kept running the whole time. No bound fixes queueing that never
-        // drains, so the pool is taken out of the picture instead: the
-        // callers start with `gateHoldingTask`, and the latch is built with
-        // the same `GateExecutor` so its run lands on threads these tests own
-        // too. `latchRunsItsBodyOnTheInjectedExecutor` pins that the seam
-        // actually carries the run.
+        // Both halves of the handshake would otherwise land there: a
+        // `Task.detached` caller, and the latch's own run, which is an
+        // unstructured `Task` that SE-0417 keeps off any executor preference
+        // its creator carries. Every task in a test pass runs at one priority
+        // (`TaskPriorityParityTests`), so nothing here is queued behind
+        // higher-priority work — the pool's queue is FIFO among the ~5,000
+        // tasks the pass keeps runnable, and each suspension hop costs the
+        // pass's own per-test latency, tens of seconds on a 3-thread runner.
+        // This handshake is three or four hops deep: a caller starts, reaches
+        // the latch and awaits the run; the run's task starts; then every
+        // caller resumes. CI measured 0 of 8 callers back after 90 s while
+        // this test's own polling loop, already runnable, kept reporting on
+        // time. No bound buys a hop its turn, so the hops are taken off the
+        // shared queue instead: the callers start with `gateHoldingTask`, and
+        // the latch is built with the same `GateExecutor` so its run lands on
+        // threads these tests own too. `latchRunsItsBodyOnTheInjectedExecutor`
+        // pins that the seam actually carries the run.
         //
         // With the run on a thread the test owns, the body can be *held*
         // rather than merely slowed: it blocks on a gate the test releases
@@ -117,9 +120,10 @@ struct ServerShutdownLatchTests {
         // The production configuration — `SocketServer` and `HTTPServer` both
         // build their latch with no executor — keeps its once-only coverage.
         // Sequential rather than concurrent callers, because this run does go
-        // to the cooperative pool: it is one task at the test's own priority,
-        // which is the same exposure every other test in the pass has, and not
-        // eight detached callers at default priority.
+        // to the cooperative pool: two awaits one after the other are two hops
+        // on the shared FIFO queue, the same exposure every other test in the
+        // pass has, rather than the several-hop concurrent handshake above
+        // whose depth is what turns that queue's latency into a wedge.
         let latch = ShutdownLatch()
         let runs = ShutdownCounter()
         await latch.run { runs.increment() }

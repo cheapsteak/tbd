@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+import TestSupport
 
 @testable import TBDDaemonLib
 
@@ -38,7 +39,11 @@ struct PaneFanoutReplayTests {
             thread.start()
         }
 
-        func join(timeout: TimeInterval = 15) -> Data? {
+        /// The shared saturated-pass budget, not a literal: this is a hang
+        /// guard on a real reader thread whose bytes come from the pane
+        /// fanout, and fifteen seconds is below the fast pass's healthy
+        /// per-test latency (`Tests/TestSupport/BoundedGateSupport.swift`).
+        func join(timeout: TimeInterval = TestDeadlines.saturatedPassSeconds) -> Data? {
             guard done.wait(timeout: .now() + timeout) == .success else { return nil }
             return received
         }

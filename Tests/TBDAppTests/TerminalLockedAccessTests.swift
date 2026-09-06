@@ -3,6 +3,7 @@ import Foundation
 import SwiftTerm
 import Testing
 @testable import TBDApp
+import TestSupport
 
 /// SwiftTerm 2.0 migration round-trips
 /// (docs/specs/2026-08-28-swiftterm-2-locked-terminal-access-design.md).
@@ -15,6 +16,14 @@ import Testing
 /// `getLine`/`getPayload` walk, the 777 test's continuation never resumes
 /// without a stored observation token, and the off-main feed exercises the
 /// IO-thread delivery path `directDelivery: true` puts `dataReceived` on.
+///
+/// **Three tests carry `.fastPassBounded`.** Each awaits a continuation that a
+/// missing piece of that wiring never resumes, which is a hang rather than a
+/// red, so they need a limit; the limit is a hang guard and takes the shared
+/// dial. It used to be a hand-written `.timeLimit(.minutes(1))`, and all three
+/// blew it at the same instant, twice in five days, with nothing hung — one
+/// minute is below the median *reported* duration of a healthy test in this
+/// pass. See `.fastPassBounded` in `Tests/TestSupport/ClockTestSupport.swift`.
 @MainActor
 @Suite("SwiftTerm 2.0 locked terminal access")
 struct TerminalLockedAccessTests {
@@ -89,7 +98,7 @@ struct TerminalLockedAccessTests {
     // MARK: - OSC 777 → onNotification (the notify-override replacement)
 
     @Test("OSC 777 notify fed through feed() reaches onNotification with title and body",
-          .timeLimit(.minutes(1)))
+          .fastPassBounded)
     func osc777RoutesToOnNotification() async {
         let view = makeView()
         let (title, body): (String, String) = await withCheckedContinuation { continuation in
@@ -117,7 +126,7 @@ struct TerminalLockedAccessTests {
     // MARK: - Off-main feed (the IO-thread delivery path)
 
     @Test("feed() from a background queue parses without loss — the directDelivery dataReceived path",
-          .timeLimit(.minutes(1)))
+          .fastPassBounded)
     func offMainFeedLandsInBuffer() async {
         let view = makeView()
         await withCheckedContinuation { continuation in
@@ -204,7 +213,7 @@ struct TerminalLockedAccessTests {
     }
 
     @Test("holder: concurrent withView racing clear neither crashes nor resurrects the view",
-          .timeLimit(.minutes(1)))
+          .fastPassBounded)
     func holderConcurrentClearIsSafe() async {
         let view = makeView()
         let holder = TerminalViewHolder()

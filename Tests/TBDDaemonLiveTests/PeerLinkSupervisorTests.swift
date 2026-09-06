@@ -119,73 +119,117 @@ struct PeerLinkSupervisorTests {
     // MARK: - Backoff
 
     /// A child that exits immediately must not be respawned in a hot loop, and
-    /// the wait must **grow**. Measured in virtual seconds, which is what makes
-    /// this exact rather than a tolerance window.
+    /// the wait must **grow**. Both halves are asserted exactly, in virtual
+    /// seconds, against numbers that no amount of load on this machine can
+    /// move.
     ///
-    /// **The two samples are compared to each other, never against an absolute
-    /// bound.** Each sample is the virtual time from one connection appearing
-    /// to the next, so each carries the same per-connection overhead: the 50 ms
-    /// drain grace, at most one 500 ms kill grace, and — the term that
-    /// dominates — every 0.25 s advance the driver spends while the previous
-    /// connection's watchdog and keepalive sleeps are still armed and the
-    /// child's EOF has not yet worked its way through to the supervisor. That
-    /// last term is paced by real time on a shared machine, so it is not
-    /// bounded by any constant in `PeerLinkSupervisor`: a bound derived from
-    /// the two graces alone comes to roughly half a second, and that is wrong
-    /// by a factor of four — a sample has been observed spending 3.25 virtual
-    /// seconds to reach connection 2, where that arithmetic predicts at most
-    /// 2.0. What *is* true of the term is that both windows draw it from the
-    /// same distribution, so it cancels in the difference — which is why the
-    /// assertion below subtracts.
+    /// **Spawn-to-spawn spacing is not a measurement of backoff, and that is
+    /// the trap this test is written around.** `advanceVirtualTime` spends a
+    /// `step` of virtual time whenever *anything* is armed on the clock, and
+    /// between one child exiting and the supervisor arming its backoff sleep
+    /// plenty is: the previous connection's silence watchdog and keepalive,
+    /// the drain grace the exit watcher parks on, and the kill grace a child
+    /// whose exit has not been reaped yet still costs. How many of those steps
+    /// a run spends is set by how fast the child's EOF works its way through
+    /// on a shared machine — real time, paced by the scheduler, with nothing
+    /// in `PeerLinkSupervisor` bounding it. It is tempting to argue that the
+    /// term cancels when two such spacings are subtracted, and it does cancel
+    /// in expectation; it does not cancel in variance, and a difference that
+    /// is supposed to be at least two virtual seconds has been observed
+    /// arriving negative. So this test does not subtract spacings. It reads
+    /// the delay the supervisor asks for, and then proves it waits for it.
     ///
-    /// The backoff inside each sample is disjoint: the wait before connection 2
-    /// is `2^0` seconds ±20% (0.8–1.2), the wait before connection 4 is `2^2`
-    /// ±20% (3.2–4.8), each rounded up to the 0.25 s advance granularity, so
-    /// at least 3.25 against at most 1.25. The difference therefore contains at
-    /// least **2.0** virtual seconds of growth, and a `1.0` margin leaves a full
-    /// second — four advances — for the two windows' overheads to disagree.
-    /// Failing it means the difference collapsed toward the overhead noise
-    /// around zero: backoff went flat, which is the regression this test exists
-    /// to catch.
+    /// **The delay the supervisor asks for** comes from the `jitter` seam,
+    /// which is handed the base the exponential produced and is pinned here to
+    /// add nothing. So the three reconnects must request exactly `2^0`, `2^1`
+    /// and `2^2` seconds — an equality, not a window, because the one random
+    /// term in that arithmetic is the term this seam replaces.
+    ///
+    /// **That it waits for it** is a probe rather than a measurement, and the
+    /// probe is race-free by construction. The seam records the virtual instant
+    /// at which the delay was computed, and the sleep that follows can only
+    /// register at that instant or later — nothing but this test moves the
+    /// clock — so the sleep's deadline is at least `computed + delay`. Advancing
+    /// to ten milliseconds short of that and finding the child *not* respawned
+    /// therefore proves the supervisor is still parked, whatever the scheduler
+    /// did in between. A backoff that went flat fails it twice over: the third
+    /// reconnect would come back after one virtual second where the probe
+    /// advances 3.99, and the requested delays would read `[1, 1, 1]`.
     ///
     /// `healthyResetUptime` is 3600 against a frozen date source, so the attempt
-    /// counter cannot reset mid-test and turn the growth back into a flat line.
+    /// counter cannot reset mid-test and turn the growth back into a flat line —
+    /// which the requested-delay sequence is what pins.
     @Test func reconnectBackoffGrowsAcrossRepeatedChildExit() async throws {
         let stub = try Stub("backoff", body: "exit 0")
         defer { stub.remove() }
         let clock = TestClock<Duration>()
+        let backoff = BackoffRequests(clock: clock)
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
-            handler: LinkRecorder(), healthyResetUptime: 3600, clock: clock,
+            handler: LinkRecorder(), healthyResetUptime: 3600,
+            jitter: { backoff.pinnedToZero(base: $0) }, clock: clock,
             now: TestDateSource().provider)
         await supervisor.start()
 
         _ = try await waitFor(
             "the first messages child to spawn",
             observed: { "spawns=\(stub.spawnCount())" }) { stub.spawnCount() >= 1 }
+        // No advance yet: the child is already gone, so a supervisor that
+        // reconnected without waiting on its clock would be at 2 by now.
+        #expect(stub.spawnCount() == 1, "the reconnect must wait on the injected clock, not spin")
 
-        let toSecond = await advanceVirtualTime(
-            clock, until: "connection 2",
-            observed: { "spawns=\(stub.spawnCount())" }) { stub.spawnCount() >= 2 }
-        let toThird = await advanceVirtualTime(
-            clock, until: "connection 3",
-            observed: { "spawns=\(stub.spawnCount())" }) { stub.spawnCount() >= 3 }
-        let toFourth = await advanceVirtualTime(
-            clock, until: "connection 4",
-            observed: { "spawns=\(stub.spawnCount())" }) { stub.spawnCount() >= 4 }
+        // `2^(attempt - 1)`, which is the whole of what the exponential may
+        // produce for the first three reconnects.
+        let expected: [TimeInterval] = [1, 2, 4]
+        // Short of the deadline by a hair, so "did not respawn" is attributable
+        // to the backoff and not to the probe stopping early.
+        let hair = Duration.milliseconds(10)
+        for (index, wait) in expected.enumerated() {
+            let attempt = index + 1
+            let computed = await advanceVirtualTime(
+                clock, until: "the backoff before connection \(attempt + 1) to be computed",
+                observed: { "requested=\(backoff.bases) spawns=\(stub.spawnCount())" }
+            ) { backoff.count >= attempt }
+            if computed == nil { break }
+            guard let request = backoff.request(index) else { break }
 
+            let floor = request.at.advanced(by: Duration.seconds(wait) - hair)
+            let room = clock.now.duration(to: floor)
+            // The advance the probe still has to make. Positive by a wide
+            // margin — `advanceVirtualTime` checks its condition after every
+            // advance, so it can overshoot the instant the delay was computed
+            // by at most one step, against the 0.99 s the shortest probe needs.
+            #expect(room > .zero, "the probe needs virtual room short of the deadline; had \(room)")
+            if room > .zero { await clock.advance(by: room) }
+            #expect(
+                stub.spawnCount() == attempt,
+                """
+                connection \(attempt + 1) opened before its backoff was up: the delay was \
+                computed as \(request.base)s and the clock is still short of it, so the \
+                supervisor must still be parked; spawns=\(stub.spawnCount())
+                """)
+
+            let opened = await advanceVirtualTime(
+                clock, until: "connection \(attempt + 1)",
+                observed: { "spawns=\(stub.spawnCount())" }
+            ) { stub.spawnCount() >= attempt + 1 }
+            if opened == nil { break }
+        }
+
+        // Captured before the stop, as `linkGoesUpOnHelloExchangeAndDownOnChildExit`
+        // explains: `stopDriven` advances the clock, which lets further
+        // connections open and further backoffs be computed.
+        let requested = backoff.bases
+        let spawns = stub.spawnCount()
         await stopDriven(supervisor, clock)
 
-        let second = try #require(toSecond)
-        let fourth = try #require(toFourth)
         #expect(
-            fourth - second > 1.0,
+            Array(requested.prefix(expected.count)) == expected,
             """
-            backoff must grow: the third reconnect waits ~4 virtual seconds where the \
-            first waits ~1, so the two samples must differ by at least a second once \
-            their shared per-connection overhead cancels; spent second=\(second)s \
-            fourth=\(fourth)s (third=\(String(describing: toThird)))
+            backoff must double on every consecutive child exit and must not be reset by \
+            a connection that never stayed healthy; the supervisor requested \(requested)
             """)
+        #expect(spawns == expected.count + 1, "one connection per backoff, plus the first")
     }
 
     // MARK: - Silence watchdog
@@ -1267,6 +1311,54 @@ private actor SendOutcome {
     func record(_ error: (any Error)?) {
         failure = error
         finished = true
+    }
+}
+
+/// Every reconnect delay `PeerLinkSupervisor` computes, and the virtual instant
+/// it computed each one at.
+///
+/// Stands in for the supervisor's jitter, and returns none — which is what lets
+/// a test state the requested delay as an equality rather than as the ±20%
+/// window the production closure draws from.
+///
+/// **The recorded instant is a floor on the backoff sleep's deadline**, and
+/// that is what the type is really for. The seam is called between `runOnce`
+/// returning and `clock.sleep` being reached, and nothing but the test moves a
+/// `TestClock` — so the sleep, whenever it registers, registers at this instant
+/// or later, and its deadline can only be at or beyond `at + base`. A probe
+/// that advances short of that and finds nothing respawned is therefore sound
+/// no matter how the two tasks were scheduled against each other.
+private final class BackoffRequests: @unchecked Sendable {
+    private let lock = NSLock()
+    private let clock: TestClock<Duration>
+    private var entries: [(base: TimeInterval, at: TestClock<Duration>.Instant)] = []
+
+    init(clock: TestClock<Duration>) {
+        self.clock = clock
+    }
+
+    /// The `jitter` seam: records the base and adds nothing to it.
+    func pinnedToZero(base: TimeInterval) -> TimeInterval {
+        let at = clock.now
+        lock.lock()
+        entries.append((base: base, at: at))
+        lock.unlock()
+        return 0
+    }
+
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }; return entries.count
+    }
+
+    /// The bases in the order the supervisor computed them — the sequence the
+    /// growth assertion reads.
+    var bases: [TimeInterval] {
+        lock.lock(); defer { lock.unlock() }; return entries.map { $0.base }
+    }
+
+    func request(_ index: Int) -> (base: TimeInterval, at: TestClock<Duration>.Instant)? {
+        lock.lock(); defer { lock.unlock() }
+        return index < entries.count ? entries[index] : nil
     }
 }
 

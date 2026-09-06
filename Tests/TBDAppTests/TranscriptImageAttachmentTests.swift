@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import SwiftUI
 import Testing
+import TestSupport
 @testable import TBDApp
 import TBDShared
 
@@ -701,6 +702,10 @@ struct TranscriptImageAttachmentTests {
         let waiter = Task { [self] in
             try await awaitRequest(
                 for: "/nonexistent/never-requested.png", maxPixelSize: 64, in: requests,
+                // Explicit, and deliberately not the shared default: this
+                // budget only has to dominate the 5 s bound asserted below
+                // while staying finite, so a swallowed cancellation spins for
+                // a knowable time rather than the whole pass budget.
                 drivingLayoutOf: view, what: "cancellation probe", within: .seconds(30))
         }
         waiter.cancel()
@@ -800,7 +805,7 @@ struct TranscriptImageAttachmentTests {
     private func awaitRequest(
         for path: String, maxPixelSize: Int, in log: ThumbnailRequestLog,
         drivingLayoutOf view: NSView, what: String,
-        within budget: Duration = .seconds(30)
+        within budget: Duration = TestDeadlines.saturatedPass
     ) async throws {
         let started = ContinuousClock.now
         let deadline = started + budget

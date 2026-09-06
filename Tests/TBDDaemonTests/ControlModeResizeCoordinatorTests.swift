@@ -143,7 +143,9 @@ struct ControlModeResizeCoordinatorTests {
 
         // Older resize: stamped first, then suspends in the provider hop.
         let older = Task { await coordinator.resize(server: "srv", windowID: "@0", cols: 80, rows: 24) }
-        #expect(await waitUntil({ calls.count == 1 }, timeout: .seconds(15)),
+        // Shared saturated-pass budget (the helper's default) rather than a
+        // literal: this is a hang guard on one scheduling hop.
+        #expect(await waitUntil({ calls.count == 1 }),
                 "older resize never reached the provider")
 
         // Newer resize: resolves and sends while the older is still parked.

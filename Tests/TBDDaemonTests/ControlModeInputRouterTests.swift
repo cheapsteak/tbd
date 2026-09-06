@@ -20,7 +20,8 @@ struct ControlModeInputRouterTests {
         let router = ControlModeInputRouter(
             commandProvider: { server in server == "srv" ? client : nil },
             latency: latency,
-            chunkSize: chunkSize)
+            chunkSize: chunkSize,
+            executor: GateExecutor.shared)
         return (router, recorder)
     }
 
@@ -102,7 +103,8 @@ struct ControlModeInputRouterTests {
         let (client, recorder, feed) = makeRespondingClient()
         let router = ControlModeInputRouter(
             commandProvider: { server in server == "srv" ? client : nil },
-            chunkSize: chunkSize)
+            chunkSize: chunkSize,
+            executor: GateExecutor.shared)
         return (router, recorder, feed)
     }
 
@@ -144,7 +146,8 @@ struct ControlModeInputRouterTests {
         let (client, recorder, feed) = makeRespondingClient(
             shouldFail: { $0.hasPrefix("paste-buffer") })
         let router = ControlModeInputRouter(
-            commandProvider: { server in server == "srv" ? client : nil })
+            commandProvider: { server in server == "srv" ? client : nil },
+            executor: GateExecutor.shared)
 
         let worktreeID = UUID()
         router.register(worktreeID: worktreeID, paneID: "%0", server: "srv")
@@ -181,5 +184,84 @@ struct ControlModeInputRouterTests {
         try #require(await waitForWrites(recorder, count: 50))
         #expect(latency.summarizeAndReset()?.count == 50)
         router.shutdown()
+    }
+
+    @Test("the delivery pipeline runs on the injected executor")
+    func deliveryRunsOnTheInjectedExecutor() async throws {
+        // The seam every bound in this suite and in `ControlModeInputHealth`
+        // now rests on, pinned rather than remembered — the same shape
+        // `ServerShutdownLatchTests.latchRunsItsBodyOnTheInjectedExecutor`
+        // uses for `ShutdownLatch(executor:)`.
+        //
+        // Delivering one keystroke costs several suspension hops — the
+        // consumer, the `commandProvider` lookup, the `TmuxControlCommandClient`
+        // actor, the reply feed's drain — and on a saturated pass each hop
+        // costs that pass's own per-test latency, which is how these suites
+        // came to report partial progress ("observed 2 of 4 writes") at a 90 s
+        // bound with every assertion in them sound. No bound buys a hop its
+        // turn; taking the hops off the shared queue is the fix. Drop the
+        // `executor:` argument below and this is what goes red.
+        let providerThread = DeliveryThreadNameBox()
+        let inputThread = DeliveryThreadNameBox()
+        let healthThread = DeliveryThreadNameBox()
+        // send-keys replies `%error`, so the health edge fires — and it is
+        // reported from inside the correlator actor, one SE-0417 default-actor
+        // hop past the consumer, which is the half a call-site-only
+        // `gateHoldingTask` could never have reached.
+        let (client, recorder, feed) = makeRespondingClient(
+            shouldFail: { $0.hasPrefix("send-keys") })
+        let router = ControlModeInputRouter(
+            commandProvider: { server in
+                providerThread.recordCurrentThread()
+                return server == "srv" ? client : nil
+            },
+            onHealthChange: { _, _, _, _ in healthThread.recordCurrentThread() },
+            onInput: { _ in inputThread.recordCurrentThread() },
+            executor: GateExecutor.shared)
+
+        let worktreeID = UUID()
+        router.register(worktreeID: worktreeID, paneID: "%0", server: "srv")
+        router.enqueue(header: SidecarInputHeader(worktreeID: worktreeID, paneID: "%0"),
+                       bytes: Data([0x41]))
+
+        try #require(await waitForWrites(recorder, count: 1))
+        // `reportDelivery` runs synchronously inside `client.handle`, so one
+        // delivered reply block means the health sink has already been called.
+        try #require(await feed.waitForDeliveries(1))
+
+        #expect(
+            providerThread.name == GateExecutor.threadName,
+            "the command-client lookup ran on \(providerThread.name ?? "an unnamed thread")")
+        #expect(
+            inputThread.name == GateExecutor.threadName,
+            "delivery resumed on \(inputThread.name ?? "an unnamed thread") after the lookup")
+        #expect(
+            healthThread.name == GateExecutor.threadName,
+            "the health edge fired on \(healthThread.name ?? "an unnamed thread")")
+        router.shutdown()
+        await feed.finish()
+    }
+}
+
+/// Records the thread a point in the router's delivery pipeline ran on, from
+/// inside that pipeline.
+///
+/// The read is synchronous on purpose: `Thread.current` is unavailable across a
+/// suspension point precisely because the answer can change there, and which
+/// thread each hop lands on is the thing under test.
+private final class DeliveryThreadNameBox: @unchecked Sendable {
+    private var value: String?
+    private let lock = NSLock()
+
+    func recordCurrentThread() {
+        lock.lock()
+        defer { lock.unlock() }
+        value = Thread.current.name
+    }
+
+    var name: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }

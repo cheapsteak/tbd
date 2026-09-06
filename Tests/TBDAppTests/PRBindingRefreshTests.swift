@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDApp
 @testable import TBDShared
 
@@ -403,9 +404,14 @@ private final class RefreshGate {
 }
 
 /// Poll `cond` on the main actor until true or the deadline. Returns success.
+///
+/// The deadline is the shared saturated-pass budget rather than a literal — it
+/// is a hang guard on work reached through a `Task`, and in the fast parallel
+/// pass a single scheduling hop can cost tens of seconds (`Tests/CLAUDE.md`,
+/// "Population is the scheduler").
 @MainActor
 private func waitUntil(
-    deadline: Duration = .seconds(15), _ cond: @MainActor () -> Bool
+    deadline: Duration = TestDeadlines.saturatedPass, _ cond: @MainActor () -> Bool
 ) async -> Bool {
     let clock = ContinuousClock()
     let start = clock.now

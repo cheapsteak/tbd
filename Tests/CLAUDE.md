@@ -329,6 +329,37 @@ child must outlive the limit), `GitManagerTimeoutTests` and
 `waitForSuspension`s exceed 60 s — is acceptable only because none of those
 suites chains two and a healthy handshake there returns in milliseconds.
 
+**No bounded wait in a fast-pass target carries a literal deadline, and no
+fast-pass suite carries a hand-written `.timeLimit`.** A wait takes its deadline
+from `TestDeadlines` (`saturatedPass` as a `Duration`, `saturatedPassSeconds` as
+a `TimeInterval`), and a suite or test hang guard takes `.fastPassBounded` —
+which `.clockDriven` is an alias of, so there is one dial. The evidence is what
+the pass's own numbers say about a small number: on a **green** run, fast pass 1
+(`^TBDDaemonTests\.`, ~5200 tests) reported p50 65.6 s, p99 92.1 s and max
+95.5 s per test, and fast pass 2 (everything else, ~4800 tests) reported p90
+51.4 s and max 55.3 s — reported duration being almost entirely time suspended
+behind other runnable tests. So a 2–30 s hand-rolled wait sits an order of
+magnitude below the healthy latency of the very hop it is guarding, and a
+one-minute suite limit sits below pass 1's median and five seconds above pass
+2's maximum. Both fire on healthy runs, and both did. Three exceptions, and only
+these: a **negative-assertion window** ("nothing fires within X") is the
+assertion and is never lengthened; a **discriminating threshold** that decides
+between two diagnoses (`FileWatcherTests`' `attemptWindow`) is likewise the
+assertion; and a **gate's own self-release cap** takes `TestGate.deadline`,
+which is sized to dominate `saturatedPass` so the hold cannot expire mid-
+observation. Everything else — including a wait reached only through production
+code that hands its work to `Task.detached`, where `gateHoldingTask` cannot
+follow and only the bound is yours (see "Thread-blocking gates" below) — takes
+the shared constant.
+
+One more thing a reader should not have to mine a log for: the **"71 known
+issues" pass 1 reports on every run, and the 11 in pass 2, are deliberate
+self-tests wrapped in `withKnownIssue`, not hidden failures** — almost all of
+them `EventDrivenTestClockSelfTests` driving its own hang guards to their
+diagnostics, plus `BoundedGateWaitTests`' unsignalled gate,
+`FlakyQuarantineSelfTests.retriesUntilPass`, and pass 2's
+`AppStatePublishFrequencyTests` excess-publish records.
+
 Three remedies are already refuted; don't re-litigate them.
 
 - **Per-suite `.serialized`.** "Archived search debounce" is already
@@ -388,16 +419,41 @@ production seams hand their work to an unstructured task on purpose —
 other callers await — and that work is then scheduled on the cooperative pool
 however the test started the call. It is not pinning a thread, and no
 `gateHoldingTask` can move it. Where the test owns the callee, inject the
-executor into the callee instead: `ShutdownLatch(executor:)` is that seam,
-and `ServerShutdownLatchTests` builds its latch on `GateExecutor.shared` so
-its run cannot queue behind the pass at all — a bound cannot fix a queue that
-never drains, and CI measured 0 of 8 detached callers back after 90 s while
-the test's own polling task ran on time: a detached task runs at default
-priority, behind every higher-priority test task the pass keeps runnable. Where the test reaches the hop through production
-code it does not construct — a server's `stop()` — bound a gate released from
-beyond it at `TestDeadlines.saturatedPass` (90 s) and give the outer
-observation a strictly larger budget, so a genuinely lost handshake still
-reports before the wedge does. A snappier inner bound reports
+executor into the callee instead: `ShutdownLatch(executor:)` and
+`ControlModeInputRouter(executor:)` are those seams, and
+`ServerShutdownLatchTests` and the two control-mode input suites build on
+`GateExecutor.shared` so their work leaves the shared queue altogether. The
+router's case shows the reach: its consumer is one unstructured task, but the
+preference carries from there into the `TmuxControlCommandClient` actor and the
+paste sends beyond it, so injecting at that single seam takes the whole
+delivery pipeline off the pass's queue. Each seam is pinned by a test that
+reads `Thread.current.name` from inside the moved work, so dropping the
+argument goes red instead of quietly returning to the pool.
+
+**What starves such a handshake is hop count, not priority.** Every task in a
+test pass runs at one priority: a test body, a `Task { }`, a `Task.detached { }`
+and a `gateHoldingTask { }` all read medium (21), measured on the 3-core CI
+runner and pinned by `TaskPriorityParityTests`
+(`Tests/TBDDaemonTests/TaskPriorityParityTests.swift`). So nothing in the pass
+is queued *behind higher-priority work* — the pool's queue is FIFO among the
+~5,000 tasks the pass keeps runnable, and one suspension hop costs the pass's
+own per-test latency: p50 65.6 s and p99 92.1 s on a green fast pass 1. A
+handshake that needs *k* hops therefore costs *k* × that, and the uninjected
+latch needs three or four — each caller starting, reaching the latch and
+awaiting the run; the run's own unstructured task starting; then every caller
+resuming. That is why CI measured 0 of 8 callers back after 90 s while the
+test's own polling task, already runnable, kept reporting on time: 90 s is one
+hop's worth of budget for a four-hop handshake. **A bound cannot buy a hop its
+turn** — sizing one to fit four hops taxes every healthy run, while injecting
+the executor removes the hops from the shared queue and costs nothing. (The one
+deliberate exception to the single priority is swift-clocks' `megaYield`, which
+creates background-QoS tasks on purpose; see "Clock and date seams".)
+
+Where the test reaches the hop through production code it does not construct —
+a server's `stop()` — the bound is all that is left: release a gate from beyond
+it at `TestDeadlines.saturatedPass` (90 s) and give the outer observation a
+strictly larger budget, so a genuinely lost handshake still reports before the
+wedge does. A snappier inner bound reports
 starvation the outer bound was sized to tolerate — which is exactly how
 `SocketServerSocketOwnershipTests` went red on a 30 s staging gate while every
 assertion in the test passed.
@@ -732,10 +788,15 @@ Two shapes, also not interchangeable:
 Don't roll your own test clock wrapper, advance helper, `.timeLimit` default,
 or date box. This file is the whole shared surface:
 
-- `@Suite(.clockDriven)` — a four-minute time limit (Swift Testing expresses
-  limits in whole minutes, so that is the dial). A hang-catcher, not a perf
-  budget; sized against the wall-clock waits a clock-driven test can sit on in
-  the **fast parallel pass** — see "Population is the scheduler" above for the
+- `@Suite(.fastPassBounded)` — the one suite/test hang guard for the fast
+  parallel pass: a four-minute time limit (Swift Testing expresses limits in
+  whole minutes, so that is the dial). A hang-catcher, not a perf budget; its
+  value is derived from the pass's measured per-test latency, and every
+  fast-pass suite that needs a limit takes it unless the limit is itself the
+  regression detector.
+- `@Suite(.clockDriven)` — the same value under the name a clock-driven suite
+  wants at its call site, because there the hang being caught is a `TestClock`
+  sleep nobody advances. See "Population is the scheduler" above for the
   triple, its invariant, and the three tier-3 live suites that pin their own
   `.timeLimit` instead because their limit is a regression detector.
 - `await clock.advanceWhenSuspended(by:)` — the one you want by default.
