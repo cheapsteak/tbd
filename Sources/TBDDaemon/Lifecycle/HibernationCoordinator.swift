@@ -174,6 +174,20 @@ public actor HibernationCoordinator {
     nonisolated let exitPollAttempts: Int
     nonisolated let exitPollInterval: Duration
 
+    /// How many times the holder park re-checks its child after sending it
+    /// `SIGTERM`, before escalating to the forced teardown.
+    ///
+    /// 25 at the production `exitPollInterval` of 200 ms is five seconds, and
+    /// the number is sized against what a Claude session actually does with a
+    /// `SIGTERM` it means to honour: run its Stop hooks, tear down its MCP
+    /// children, and flush the transcript it is mid-write on. Three seconds of
+    /// polite `/exit` has already passed by the time this rung is reached, so a
+    /// session that is shutting down cleanly and slowly gets eight seconds in
+    /// total before anything is killed — which is the whole reason this rung
+    /// exists, since the alternative it replaced was a `SIGKILL` of the process
+    /// group at three seconds. Injectable on the same terms as the pair above.
+    nonisolated let holderTerminateAttempts: Int
+
     /// How many times the holder park re-checks its child AFTER escalating to
     /// `HolderRegistry.abandon` — which forgets the holder, kills the job by
     /// process group and reaps the corpse.
@@ -242,6 +256,7 @@ public actor HibernationCoordinator {
         now: @escaping @Sendable () -> Date = { Date() },
         exitPollAttempts: Int = 15,
         exitPollInterval: Duration = .milliseconds(200),
+        holderTerminateAttempts: Int = 25,
         holderEscalationAttempts: Int = 5,
         clock: any Clock<Duration> = ContinuousClock(),
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
@@ -256,6 +271,7 @@ public actor HibernationCoordinator {
         self.now = now
         self.exitPollAttempts = exitPollAttempts
         self.exitPollInterval = exitPollInterval
+        self.holderTerminateAttempts = holderTerminateAttempts
         self.holderEscalationAttempts = holderEscalationAttempts
         self.clock = clock
         self.signaller = signaller

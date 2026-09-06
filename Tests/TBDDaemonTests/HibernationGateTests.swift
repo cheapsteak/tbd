@@ -275,6 +275,83 @@ struct HibernationGateTests {
             idleSince: idleSince, now: now) == .eligible)
     }
 
+    // MARK: - Parity with the predicate the app reads
+
+    /// `blockingRail` and `Terminal.isManuallyHibernatable` are two cascades
+    /// over the same rails, and this is what stops them drifting.
+    ///
+    /// They are duplicated on purpose — the gate needs a per-rail *reason* and
+    /// the model needs a yes or no — but nothing in the compiler notices when
+    /// one grows a rail the other has not got, and the two are read by
+    /// different halves of the product: the daemon refuses a park by the first
+    /// and the app decides whether to offer one by the second. A row they
+    /// disagree about is a menu item that fails when the user clicks it, or a
+    /// park the daemon performs that the app said was impossible.
+    ///
+    /// The equivalences, and why they are what they are:
+    ///
+    /// - `blockingRail == nil` ⇔ `isAutoHibernationEligible`. Both are "every
+    ///   hard rail passes, keep-warm included".
+    /// - `blockingRail == nil || blockingRail == .keepWarm` ⇔
+    ///   `isManuallyHibernatable`. A manual park is allowed to override
+    ///   keep-warm and nothing else, so keep-warm is the one blocker the
+    ///   manual predicate forgives.
+    ///
+    /// The structural fix — `isManuallyHibernatable` becoming
+    /// `blockingRail(...) == nil`, with the reason-bearing cascade moved into
+    /// `TBDShared` — is better than this test and larger than this change; it
+    /// is a follow-up. Until then this matrix is the ratchet.
+    @Test func blockingRailAgreesWithTheModelPredicateOverEveryRow() {
+        var rows = 0
+        var passedEveryRail = 0
+        for transport in [TerminalTransport.tmux, .holder] {
+            for holderHibernationEnabled in [false, true] {
+                for sessionID in [String?.none, "sess-1"] {
+                    for kind in [TerminalKind?.none, .claude, .codex, .shell] {
+                        for hibernatedAt in [Date?.none, now] {
+                            for suspendedAt in [Date?.none, now] {
+                                for keepWarm in [false, true] {
+                                    for activity in [TerminalActivityState.idle, .unknown,
+                                                     .working, .waitingForUser] {
+                                        let terminal = Terminal(
+                                            worktreeID: UUID(),
+                                            tmuxWindowID: transport == .holder ? "" : "@0",
+                                            tmuxPaneID: transport == .holder ? "" : "%0",
+                                            label: "claude", claudeSessionID: sessionID,
+                                            suspendedAt: suspendedAt, kind: kind,
+                                            activityState: activity, hibernatedAt: hibernatedAt,
+                                            keepWarm: keepWarm, transport: transport)
+                                        let rail = HibernationGate.blockingRail(
+                                            terminal: terminal,
+                                            holderHibernationEnabled: holderHibernationEnabled)
+                                        let auto = terminal.isAutoHibernationEligible(
+                                            holderHibernationEnabled: holderHibernationEnabled)
+                                        let manual = terminal.isManuallyHibernatable(
+                                            holderHibernationEnabled: holderHibernationEnabled)
+                                        #expect((rail == nil) == auto,
+                                                "blockingRail said \(String(describing: rail)) while isAutoHibernationEligible said \(auto) for \(transport) flag=\(holderHibernationEnabled) session=\(String(describing: sessionID)) kind=\(String(describing: kind)) hibernated=\(hibernatedAt != nil) suspended=\(suspendedAt != nil) keepWarm=\(keepWarm) activity=\(activity)")
+                                        #expect((rail == nil || rail == .keepWarm) == manual,
+                                                "blockingRail said \(String(describing: rail)) while isManuallyHibernatable said \(manual) for \(transport) flag=\(holderHibernationEnabled) session=\(String(describing: sessionID)) kind=\(String(describing: kind)) hibernated=\(hibernatedAt != nil) suspended=\(suspendedAt != nil) keepWarm=\(keepWarm) activity=\(activity)")
+                                        rows += 1
+                                        if rail == nil { passedEveryRail += 1 }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The matrix has to have actually run, and it has to contain both
+        // answers: a loop that produced only blocked rows would agree with any
+        // predicate that refuses everything.
+        #expect(rows == 2 * 2 * 2 * 4 * 2 * 2 * 2 * 4)
+        #expect(passedEveryRail > 0,
+                "no row in the matrix passed every rail, so the parity above agrees with any predicate that refuses everything")
+        #expect(passedEveryRail < rows,
+                "every row in the matrix passed every rail, so the parity above agrees with any predicate that allows everything")
+    }
+
     /// The flag decides what a HOLDER row gets and must not reach a tmux one:
     /// a condition written on the flag alone rather than on the flag AND the
     /// transport would still pass every assertion above.

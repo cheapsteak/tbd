@@ -629,6 +629,16 @@ Everything TBD does through tmux today, and its replacement:
     the session awake, because a row that claims parked over a live process is
     reclaimable by nothing: no sweep reads it, and a wake would put a second
     agent on the same session.
+  - **The park escalates in rungs, and each rung is identity-checked.** An
+    in-band `/exit`, then `SIGTERM` to the child pid alone, then telling the
+    holder to forget the pty and killing the job by process group — each with
+    its own bounded window, so a session whose Stop hooks and MCP teardown
+    outlast the polite one still gets to shut itself down rather than being
+    killed mid-write. Before any signal the recorded pid is verified as this
+    session's own child, the way every other signalling site in the daemon
+    verifies one; an identity that cannot be established signals nothing, lets
+    the holder go without a kill, and leaves the row awake for a reconciler to
+    judge.
   - **The pending-input rail acts only on a screen the daemon rendered live.**
     It reads the typed screen the machine-read contract answers with and
     branches on that answer's `source`. A `daemon` screen is judged for a

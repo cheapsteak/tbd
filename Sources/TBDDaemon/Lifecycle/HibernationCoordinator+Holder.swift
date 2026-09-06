@@ -16,6 +16,46 @@ enum HolderScreenReading: Sendable {
     case refused(String)
 }
 
+/// What the park's escalation ladder may do to the pid a holder row records —
+/// the whole decision table, in one type, because each rung asks the same
+/// question and the answers must not drift between them.
+///
+/// Three facts feed it: whether the row named a pid at all, whether that pid is
+/// a corpse, and `ProcessIdentityCheck` — the check every other signalling site
+/// in this daemon consults. The mapping is deliberately asymmetric, because the
+/// two mistakes are not: a refused park is recoverable on the next sweep, and a
+/// signal sent to a stranger's process is not.
+///
+/// - a corpse (`ps` says `Z…`) → `.gone`. Past its last instruction, and its
+///   number cannot be reissued while the entry stands.
+/// - `.same` → `.ours`. The one verdict that licenses a signal.
+/// - `.notRunning` → `.gone`. Nothing holds the pid, so the child this park set
+///   out to end is already past its last instruction. This is a *positive*
+///   answer about a real pid and may therefore lead to a finalize, exactly like
+///   the registry's `.exited`.
+/// - `.startTimeMismatch` / `.foreignExecutable` → `.unverifiable`. The pid
+///   names a stranger. In the narrow sense our child IS gone — nothing that
+///   survives is ours — but "gone" here would mean finalizing a park whose
+///   child this daemon never saw exit, over a row it can no longer describe. So
+///   the park refuses instead, and only `.notRunning` (and the registry's own
+///   `.exited`) are allowed to complete one.
+/// - `.startTimeUnreadable` / `.commandUnreadable` → `.unverifiable`. The
+///   kernel would not say. "Keep when uncertain" is the doctrine every
+///   signalling site here follows, and an unreadable answer is uncertainty, not
+///   absence.
+/// - no recorded pid → `.unrecorded`. There is nothing to verify and nothing to
+///   signal by number, but the holder is still reachable over its socket.
+enum HolderChildDisposition: Sendable, Equatable {
+    /// A live process this daemon verified as this session's own child.
+    case ours
+    /// The recorded pid names nothing.
+    case gone
+    /// The row records no usable child pid.
+    case unrecorded
+    /// Alive, and not provably this session's child.
+    case unverifiable(ProcessIdentityVerdict)
+}
+
 /// Park and wake for the pty-holder transport.
 ///
 /// Split from `HibernationCoordinator` so the diff to that file is a set of
@@ -272,6 +312,14 @@ extension HibernationCoordinator {
         // this rail would judge is not the screen the session is showing. Each
         // answers with its own name: they differ in what the person reading the
         // refusal can do next.
+        //
+        // One dependency this rail has and cannot check: after a daemon restart
+        // the emulator it reads is one that has seen only what arrived since
+        // re-adoption, so what it shows of the composer is whatever the
+        // attach-edge jiggle's repaint produced. The rail is relying on a real
+        // geometry change forcing an Ink-style TUI to redraw its composer, and
+        // so on a half-composed prompt being visible again. That is inferred
+        // from how such TUIs redraw on `SIGWINCH`, not measured.
         let capturedSnapshot: String?
         switch await holderScreenReading(terminalID: terminal.id, registry: registry) {
         case .refused(let refusal):
@@ -333,62 +381,94 @@ extension HibernationCoordinator {
         }
 
         let childPID = currentTerminal.childPID ?? 0
-        // Polite park: `/exit` in band, so Claude flushes its transcript, shuts
-        // down MCP children and fires Stop hooks. Written to the pty the daemon
-        // is already reading — the same descriptor `terminal.send` uses — rather
-        // than through tmux `send-keys`, which addresses a pane this row has
-        // not got.
-        try? await reader.write(Data("/exit\r".utf8))
+        // Rung 1 — polite park: `/exit` in band, so Claude flushes its
+        // transcript, shuts down MCP children and fires Stop hooks. Written to
+        // the pty the daemon is already reading — the same descriptor
+        // `terminal.send` uses — rather than through tmux `send-keys`, which
+        // addresses a pane this row has not got.
+        //
+        // A refused write is not a failure of the park; it is the reason the
+        // ladder below exists. It is logged rather than swallowed because it
+        // names the one thing the rungs after it cannot: that the session never
+        // got the chance to shut itself down, so a `SIGTERM` it did not deserve
+        // is about to arrive. `HolderReader.write` is all-or-nothing — it
+        // either delivers the whole buffer within its budget or throws — so
+        // there is no partial-write value to inspect here; if that ever becomes
+        // a short count, it belongs in this same log line.
+        do {
+            try await reader.write(Data("/exit\r".utf8))
+        } catch {
+            logger.warning("hibernate: could not write the polite /exit for \(terminal.id, privacy: .public), so the escalation is what will end its job: \(error.localizedDescription, privacy: .public)")
+        }
         var gone = await pollUntilChildIsGone(
             childPID: childPID, terminalID: terminal.id, registry: registry,
             attempts: exitPollAttempts)
+        // Whether the holder has already been told to let go. Only the forced
+        // rung does that, and only as part of killing the job; every other way
+        // out of the ladder still owes the holder its `forget`.
+        var abandoned = false
 
         if !gone {
-            // The polite exit did not take. `abandon` is the escalation: the
-            // holder is told to let go (closing the pty master), the job is
-            // killed by process group, and the holder's corpse is collected.
-            logger.debug("hibernate: /exit did not end the job for \(terminal.id, privacy: .public) within the poll window — abandoning the holder")
-            if let unfinished = await registry.abandon(terminal: currentTerminal) {
-                logger.warning("hibernate: holder teardown for \(terminal.id, privacy: .public) was incomplete: \(unfinished, privacy: .public)")
+            // Rung 2 — `SIGTERM` to the child, and to the child alone.
+            //
+            // The tmux ladder is `/exit` → Escape → C-c C-c → SIGTERM →
+            // forced replacement, and this is the rung the holder park was
+            // missing: without it a session whose Stop hooks or MCP teardown
+            // outlast the three-second polite window went straight to a
+            // `SIGKILL` of its process group, which is where a transcript gets
+            // cut mid-write. `terminateProcessOnly` is deliberate — widening to
+            // the group is the forced rung's job, and on a recycled pid
+            // `getpgid` resolves to a stranger's group entirely.
+            switch holderChildDisposition(childPID: childPID, terminal: currentTerminal) {
+            case .gone:
+                gone = true
+            case .unverifiable(let verdict):
+                return await refuseUnverifiableHolderChild(
+                    currentTerminal, childPID: childPID, verdict: verdict, registry: registry)
+            case .ours:
+                logger.debug("hibernate: /exit did not end the job for \(terminal.id, privacy: .public) within the poll window — sending SIGTERM to child \(childPID, privacy: .public)")
+                signaller.terminateProcessOnly(childPID)
+                gone = await pollUntilChildIsGone(
+                    childPID: childPID, terminalID: terminal.id, registry: registry,
+                    attempts: holderTerminateAttempts)
+            case .unrecorded:
+                // Nothing to signal by pid, so this rung has nothing to do.
+                // The forced rung still does: it reaches the holder over its
+                // socket, which needs no pid at all.
+                break
             }
-            gone = await pollUntilChildIsGone(
-                childPID: childPID, terminalID: terminal.id, registry: registry,
-                attempts: holderEscalationAttempts)
-        } else {
-            // Gone politely, so the holder was never told to let go — and a
-            // holder whose child has exited winds itself down, which is a race
-            // this call does not need to win. `childPID: 0` is the sentinel
-            // `dispose` refuses to signal, and that is the point: the recorded
-            // pid is now free and the next process to take that number is
-            // somebody else's.
-            do {
-                let socketPath = try HolderRendezvous.socketPath(
-                    sessionID: terminal.id, environment: registry.environment)
-                await registry.abandon(
-                    terminalID: terminal.id,
-                    handle: HolderHandle(
-                        holderPID: currentTerminal.holderPID ?? 0,
-                        childPID: 0,
-                        socketPath: socketPath))
-            } catch {
-                // The processes are not the concern: the job is confirmed gone
-                // and a holder whose child has exited winds itself down. What
-                // does outlive this call is bookkeeping `abandon` would have
-                // cleared — this session's registry slot and its remembered
-                // status — and the collector for that is
-                // `reclaimIfSessionEnded`, which the reader's end-of-output
-                // notifier fires once the drain runs dry.
-                //
-                // Worth naming rather than glossing: that reclaimer derives the
-                // SAME rendezvous path, and the only thing that makes this
-                // throw is a path over `sun_path` — a persistent fact about
-                // this install's `TBD_HOME` and this session's id, not a
-                // transient. So the pairing is real but not a guarantee here;
-                // it is also the reason this branch is close to unreachable,
-                // since a session whose path cannot be represented could
-                // neither have been spawned nor adopted by this daemon.
-                logger.warning("hibernate: could not derive the rendezvous path for \(terminal.id, privacy: .public), so its holder was not told to let go: \(error.localizedDescription, privacy: .public)")
+        }
+
+        if !gone {
+            // Rung 3 — forced. `abandon` is the escalation: the holder is told
+            // to let go (closing the pty master), the job is killed by process
+            // group, and the holder's corpse is collected. Identity-checked
+            // again rather than on the strength of the check above, because the
+            // `SIGTERM` rung's own poll window sits between them and a pid
+            // freed inside it is a pid the kernel may already have reissued.
+            switch holderChildDisposition(childPID: childPID, terminal: currentTerminal) {
+            case .gone:
+                gone = true
+            case .unverifiable(let verdict):
+                return await refuseUnverifiableHolderChild(
+                    currentTerminal, childPID: childPID, verdict: verdict, registry: registry)
+            case .ours, .unrecorded:
+                logger.debug("hibernate: SIGTERM did not end the job for \(terminal.id, privacy: .public) within the poll window — abandoning the holder")
+                if let unfinished = await registry.abandon(terminal: currentTerminal) {
+                    logger.warning("hibernate: holder teardown for \(terminal.id, privacy: .public) was incomplete: \(unfinished, privacy: .public)")
+                }
+                abandoned = true
+                gone = await pollUntilChildIsGone(
+                    childPID: childPID, terminalID: terminal.id, registry: registry,
+                    attempts: holderEscalationAttempts)
             }
+        }
+
+        if gone, !abandoned {
+            // The job ended without the forced rung, so the holder was never
+            // told to let go — and a holder whose child has exited winds itself
+            // down, which is a race this call does not need to win.
+            await letHolderGoWithoutKilling(currentTerminal, registry: registry)
         }
 
         guard gone else {
@@ -417,6 +497,22 @@ extension HibernationCoordinator {
             return .notEligible(
                 reason: "holder child \(childPID) survived the escalation; its holder was torn "
                     + "down and this session is left awake for reconciliation to judge")
+        }
+
+        // The transcript rail, asked a second time now that the child is gone.
+        //
+        // The first ask was before `/exit`, which is the only moment it can
+        // stop a park; this one cannot and must not. The process is gone, and
+        // the row parked is the truthful record of that — rolling back here
+        // would leave an awake row over a session that no longer exists, which
+        // is a worse lie than a transcript that needs repair. So it reports and
+        // continues: a tail that was parseable before the shutdown and is not
+        // parseable after it means the write was cut, and the resume that finds
+        // it will need to know why.
+        if let transcriptPath = currentTerminal.transcriptPath,
+           let body = try? String(contentsOfFile: transcriptPath, encoding: .utf8),
+           !HibernationSafetyChecks.isTranscriptTailValid(jsonlBody: body) {
+            logger.warning("hibernate: the transcript for \(terminal.id, privacy: .public) is not parseable after its child exited — it may have been cut mid-write; parking anyway, because the process is gone")
         }
 
         do {
@@ -496,6 +592,13 @@ extension HibernationCoordinator {
     /// not signal — and treating that silence as an exit is precisely how a row
     /// finalizes parked over a live child.
     ///
+    /// **It answers "did our child exit", not "who holds this number now".**
+    /// The second question is `holderChildDisposition`'s, and the two agree
+    /// where they overlap: both read a `Z…` stat as gone, and neither lets a
+    /// stranger on a recycled pid complete a park — this one because the
+    /// stranger is alive, that one because it refuses to signal what it cannot
+    /// identify. The full table is on `HolderChildDisposition`.
+    ///
     /// So when the pid is unusable, only a POSITIVE `.exited` /
     /// `.exitedStatusUnknown` from the registry counts as gone; nil and
     /// `.alive` alike answer "not gone". The consequence is that a NULL-pid
@@ -521,6 +624,121 @@ extension HibernationCoordinator {
         // distinction matters here: the job has finished, and the `waitpid`
         // still owed to it belongs to the holder, not to this park.
         return signaller.stat(childPID)?.hasPrefix("Z") ?? false
+    }
+
+    /// What the escalation ladder may do to this row's recorded child pid.
+    ///
+    /// Asked before every signal, and asked again between rungs, because the
+    /// poll window between them is exactly long enough for a pid to be freed
+    /// and reissued. The verdict-to-disposition mapping and the reasoning for
+    /// each arm live on `HolderChildDisposition`.
+    ///
+    /// The anchor is the row's own `holderChildStartedAt`, falling back to
+    /// `createdAt` for a row written before that column existed — the same pair
+    /// the reaper's holder leg and the wake's adopt guard measure against, so a
+    /// pid that passes here passes there.
+    func holderChildDisposition(
+        childPID: Int32, terminal: Terminal
+    ) -> HolderChildDisposition {
+        guard childPID > 1 else { return .unrecorded }
+        // A corpse is gone, and it is asked about FIRST so this agrees with
+        // `childIsGone`, which reads the same fact. It also has to come first
+        // to be right: `ps` prints a zombie's command in parentheses, which the
+        // executable check below would read as a stranger's — so a child that
+        // exited a moment after the poll gave up would be refused as a foreign
+        // process rather than recognized as the exit it is. A zombie is past
+        // its last instruction and its number cannot be reissued while the
+        // entry stands, so this is a positive answer either way: if some
+        // stranger's corpse holds the number, our child left it long ago.
+        if signaller.stat(childPID)?.hasPrefix("Z") == true { return .gone }
+        let verdict = ProcessIdentityCheck.verify(
+            pid: childPID,
+            startedWithin: AgentReaper.defaultHolderIdentityWindow,
+            of: terminal.holderChildStartedAt ?? terminal.createdAt,
+            executableIsAcceptable: AgentReaper.isHolderChildExecutable,
+            signaller: signaller)
+        switch verdict {
+        case .same: return .ours
+        case .notRunning: return .gone
+        case .startTimeUnreadable, .startTimeMismatch, .commandUnreadable, .foreignExecutable:
+            return .unverifiable(verdict)
+        }
+    }
+
+    /// Abandon a park whose child pid this daemon cannot prove is its own.
+    ///
+    /// "Keep when uncertain", spelled out on the park path: nothing is
+    /// signalled — not the pid, not its group — because the process at that
+    /// number may be a stranger's work on a machine running dozens of agent
+    /// sessions, and a wrong kill there is unrecoverable while a refused park
+    /// is not.
+    ///
+    /// The holder is still told to let go, without a kill. That is not a
+    /// contradiction: the `forget` addresses the holder over its own socket and
+    /// signals nothing, and leaving the daemon reading a pty whose job it can
+    /// no longer identify would keep a reader alive over a session nobody can
+    /// describe. What is left behind is a row that is awake and still names its
+    /// pids — the state the reconcile arm and the reaper's holder leg are built
+    /// to judge, both of which apply the same identity check and will keep for
+    /// the same reason.
+    private func refuseUnverifiableHolderChild(
+        _ terminal: Terminal,
+        childPID: Int32,
+        verdict: ProcessIdentityVerdict,
+        registry: HolderRegistry
+    ) async -> HibernateResult {
+        await letHolderGoWithoutKilling(terminal, registry: registry)
+        do {
+            try await db.terminals.clearHibernated(id: terminal.id)
+        } catch {
+            logger.error("hibernate: could not verify the child of \(terminal.id, privacy: .public) and could not roll the park intent back either: \(error.localizedDescription, privacy: .public)")
+        }
+        idleSince[terminal.id] = nil
+        pendingKillSince[terminal.id] = nil
+        logger.warning("hibernate: refusing to signal child \(childPID, privacy: .public) for terminal \(terminal.id, privacy: .public) — its identity is \(String(describing: verdict), privacy: .public); the row is left awake with its pids intact")
+        return .notEligible(
+            reason: "the process holding child pid \(childPID) could not be verified as this "
+                + "session's own (\(verdict)), so nothing was signalled and this session is "
+                + "left awake")
+    }
+
+    /// Tell the holder to let go of the pty without killing anything.
+    ///
+    /// `childPID: 0` is the sentinel `dispose` refuses to signal, and that is
+    /// the point on both paths that reach here: after a confirmed exit the
+    /// recorded pid is free and the next process to take that number is
+    /// somebody else's, and after an unverifiable identity the number was never
+    /// ours to signal in the first place.
+    private func letHolderGoWithoutKilling(
+        _ terminal: Terminal, registry: HolderRegistry
+    ) async {
+        do {
+            let socketPath = try HolderRendezvous.socketPath(
+                sessionID: terminal.id, environment: registry.environment)
+            await registry.abandon(
+                terminalID: terminal.id,
+                handle: HolderHandle(
+                    holderPID: terminal.holderPID ?? 0,
+                    childPID: 0,
+                    socketPath: socketPath))
+        } catch {
+            // The processes are not the concern: nothing here was going to be
+            // signalled anyway. What does outlive this call is bookkeeping
+            // `abandon` would have cleared — this session's registry slot and
+            // its remembered status — and the collector for that is
+            // `reclaimIfSessionEnded`, which the reader's end-of-output
+            // notifier fires once the drain runs dry.
+            //
+            // Worth naming rather than glossing: that reclaimer derives the
+            // SAME rendezvous path, and the only thing that makes this throw is
+            // a path over `sun_path` — a persistent fact about this install's
+            // `TBD_HOME` and this session's id, not a transient. So the pairing
+            // is real but not a guarantee here; it is also the reason this
+            // branch is close to unreachable, since a session whose path cannot
+            // be represented could neither have been spawned nor adopted by
+            // this daemon.
+            logger.warning("hibernate: could not derive the rendezvous path for \(terminal.id, privacy: .public), so its holder was not told to let go: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Startup reconciliation
@@ -787,10 +1005,21 @@ extension HibernationCoordinator {
     ///   `ProcessIdentityCheck` the reaper's holder leg consults before it
     ///   signals anything: alive, started within
     ///   `AgentReaper.defaultHolderIdentityWindow` of the row's recorded child
-    ///   start, and running an executable a holder's job could be. This is the
-    ///   half that survives a daemon restart, where no reader exists but the
-    ///   child does. A pid the kernel has recycled fails it exactly as it fails
-    ///   there.
+    ///   start, and running an executable a holder's job could be. A pid the
+    ///   kernel has recycled fails it exactly as it fails there.
+    ///
+    /// **What the second leg is actually for**, since the obvious answer is
+    /// wrong: it is not "a daemon restart, where no reader exists". `adoptAll`
+    /// filters on transport alone and adopts parked rows too, so after a
+    /// restart such a session normally *does* get a reader and the first leg
+    /// fires. The second leg is what is left when adoption itself failed — a
+    /// holder that would not answer the hand-over — and the recorded pid is
+    /// nonetheless certain. When identity is uncertain as well, this returns
+    /// nil, the wake proceeds to `registry.spawn`, and the holder's creation
+    /// lock refuses a second holder for a session that already has one: the row
+    /// then stays parked until that holder dies. Fail-safe, in that no second
+    /// agent is ever started, but the outcome is a session stuck parked, and it
+    /// is named here rather than left to be rediscovered.
     ///
     /// Every other verdict — `.notRunning`, an unreadable start time or command
     /// line, a mismatch, a foreign executable — returns nil and lets the spawn
@@ -804,6 +1033,11 @@ extension HibernationCoordinator {
         let evidence: String
         if await registry.reader(for: terminal.id) != nil {
             evidence = "this daemon is still reading its holder"
+            // Before the row stops being parked, and this is the ordering that
+            // matters: a row un-parked without pids on it is invisible to every
+            // reclaimer this transport has, all of which sweep by the numbers a
+            // row carries.
+            await restoreHolderPIDsFromRegistry(terminal, registry: registry)
         } else if let childPID = terminal.childPID, childPID > 1,
                   ProcessIdentityCheck.verify(
                     pid: childPID,
@@ -837,5 +1071,78 @@ extension HibernationCoordinator {
             tmuxWindowID: "", tmuxPaneID: "")
         logger.info("wake: adopted the holder already running for \(terminal.id, privacy: .public) instead of spawning a second one — \(evidence, privacy: .public); the row was parked over it")
         return .ok
+    }
+
+    /// Put the registry's own view of a session's processes back onto its row.
+    ///
+    /// The state this repairs is narrow and real: `HolderRegistry.spawn`
+    /// publishes its reader before `wakeHolderSection` persists the pids, and a
+    /// daemon that dies in that window — SIGKILL, OOM, a panic; not a thrown
+    /// error, which the spawn path already undoes itself — leaves a parked row
+    /// naming no processes behind a holder that is alive. `reconcileParkedHolderRow`
+    /// cannot repair it, because it has no pid to verify. `adoptAll` re-adopts
+    /// the holder regardless, so the next wake reaches the reader leg above and
+    /// would un-park the row with no pid on it — and from then on the reaper's
+    /// holder leg, the startup arm, and any later park's own escalation are all
+    /// blind to that session, permanently.
+    ///
+    /// The registry is the right source precisely because it is first-hand: the
+    /// child pid comes from the hand-over that produced the live reader, and
+    /// the holder pid from the socket that carried it. A registry that answers
+    /// nothing is logged and left alone rather than guessed at — this runs
+    /// under a live reader, so it should always answer, and inventing a pid
+    /// would be worse than recording none.
+    ///
+    /// The start time is the identity anchor every reclaimer measures that pid
+    /// against, so it is taken from the most trustworthy source available and
+    /// the log says which one: the row's own value when it still describes this
+    /// child, else the kernel's start time for the pid, else the current time —
+    /// which is a fallback rather than a fact, and is honest in the direction
+    /// that matters, since a wrong anchor makes the identity check refuse to
+    /// signal rather than signal wrongly.
+    private func restoreHolderPIDsFromRegistry(
+        _ terminal: Terminal, registry: HolderRegistry
+    ) async {
+        guard let observed = await registry.adoptedProcess(for: terminal.id) else {
+            logger.warning("wake: \(terminal.id, privacy: .public) is parked over a holder this daemon is reading, but the registry names no processes for it, so the row's pids cannot be repaired")
+            return
+        }
+        // A holder pid the kernel would not name is recorded as nil rather than
+        // faked. Nothing needs it: the child pid is the anchor every reclaimer
+        // sweeps by, `HolderRegistry.abandon(terminal:)` reaches the holder over
+        // its socket, and `AgentReaper.decideHolderChild` keeps — never kills —
+        // when the holder pid is missing.
+        let holderPID = observed.holderPID ?? terminal.holderPID
+        let startedAt: Date
+        let anchorSource: String
+        if let recorded = terminal.holderChildStartedAt, terminal.childPID == observed.childPID {
+            startedAt = recorded
+            anchorSource = "the row's own recorded start"
+        } else if let measured = signaller.startTime(observed.childPID) {
+            startedAt = measured
+            anchorSource = "the kernel's start time for the child"
+        } else {
+            startedAt = now()
+            anchorSource = "this moment, because the kernel would not say when the child started"
+        }
+        guard terminal.childPID != observed.childPID
+                || terminal.holderPID != holderPID
+                || terminal.holderChildStartedAt != startedAt else { return }
+        do {
+            try await db.terminals.setHolderProcess(
+                id: terminal.id, holderPID: holderPID, childPID: observed.childPID,
+                startedAt: startedAt)
+            // Hoisted rather than folded into the interpolation: `0` here is
+            // "the kernel would not name the holder", not a pid.
+            let loggedHolderPID = holderPID ?? 0
+            logger.info("wake: restored the holder pids on \(terminal.id, privacy: .public) from the registry — holder \(loggedHolderPID, privacy: .public), child \(observed.childPID, privacy: .public), anchored on \(anchorSource, privacy: .public)")
+        } catch {
+            // The un-park below still proceeds. A row that is awake and pid-less
+            // is the state this method exists to prevent, but refusing the wake
+            // over it would leave the session parked over a holder that is
+            // already running — which nothing else repairs either, and which the
+            // user cannot get out of.
+            logger.error("wake: could not restore the holder pids on \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 }

@@ -890,10 +890,12 @@ struct HibernationCoordinatorTests {
                 "must escalate once all \(attempts) attempts observed claude; got: \(recorded.snapshot())")
     }
 
-    /// Pins the SHIPPED poll window, which the two injected-pacing tests above
-    /// deliberately no longer run: 15 × 200ms ≈ 3s. Making the pacing
-    /// injectable must not quietly change what production waits before it
-    /// SIGTERMs a claude that is still shutting down.
+    /// Pins the SHIPPED poll windows, which the two injected-pacing tests above
+    /// deliberately no longer run: 15 × 200ms ≈ 3s for the polite rung, and the
+    /// two holder-park budgets that ride the same interval after it. Making the
+    /// pacing injectable must not quietly change what production waits before
+    /// it SIGTERMs a claude that is still shutting down, nor how long it then
+    /// waits before killing one.
     @Test func defaultPollPacingIsFifteenTimesTwoHundredMillis() async throws {
         let (db, _, _) = try await setup()
         let coord = coordinator(db)
@@ -901,10 +903,19 @@ struct HibernationCoordinatorTests {
         #expect(coord.exitPollInterval == .milliseconds(200))
         #expect(coord.exitPollInterval * coord.exitPollAttempts == .seconds(3),
                 "the shipped verify-exit window must stay ~3s")
-        // The holder park's escalation budget rides the same interval: five
-        // more checks after `abandon` has SIGKILLed the job, i.e. one second
-        // for a dead process to leave the process table. A different budget
-        // from the three seconds above, which waits for a polite shutdown.
+        // The holder park's middle rung rides the same interval: 25 checks
+        // after a `SIGTERM`, i.e. five seconds for a session to run its Stop
+        // hooks, tear down its MCP children and flush the transcript it is
+        // mid-write on. It is the rung that keeps the holder park from being
+        // harsher than the tmux one, so shortening it is a behaviour change
+        // rather than a tuning nudge.
+        #expect(coord.holderTerminateAttempts == 25)
+        #expect(coord.exitPollInterval * coord.holderTerminateAttempts == .seconds(5),
+                "the shipped SIGTERM window must stay ~5s")
+        // The escalation budget after it is a different budget again: five
+        // more checks once `abandon` has SIGKILLed the job, i.e. one second for
+        // a dead process to leave the process table. Neither of the two above
+        // waits for that, and it waits for neither of them.
         #expect(coord.holderEscalationAttempts == 5)
         #expect(coord.exitPollInterval * coord.holderEscalationAttempts == .seconds(1),
                 "the shipped holder escalation window must stay ~1s")

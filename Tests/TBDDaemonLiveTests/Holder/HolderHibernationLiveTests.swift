@@ -21,12 +21,17 @@ import Testing
 @Suite(.serialized)
 struct HolderHibernationLiveTests {
 
-    /// The park's whole point, against a job that cannot cooperate.
+    /// The park's whole point, against a job that cannot cooperate — and the
+    /// middle rung of the ladder, proved by the job's own hand.
     ///
-    /// `while :; do sleep 1; done` never reads its terminal, so the polite
-    /// `/exit` cannot possibly work and the escalation is what has to end it.
-    /// That is deliberately the harder half: a test whose job exited on `/exit`
-    /// would pass without the escalation ever running.
+    /// The job never reads its terminal, so the polite `/exit` cannot possibly
+    /// work and something further down has to end it. That is deliberately the
+    /// harder half: a test whose job exited on `/exit` would pass without any
+    /// escalation ever running. What ends it here is the `SIGTERM` rung, and
+    /// the marker file is what says so rather than leaving it to be inferred
+    /// from a dead pid — a `SIGKILL` cannot run a handler, so a park that
+    /// skipped the `SIGTERM` rung and went straight to the forced one would
+    /// leave that file absent while every other assertion below still passed.
     @Test func parkEndsTheJobAndClearsTheRow() async throws {
         let fixture = try await HibernationFixture.make()
         defer { fixture.tearDown() }
@@ -76,6 +81,43 @@ struct HolderHibernationLiveTests {
         // off the pty.
         #expect(await fixture.registry.reader(for: terminal.id) == nil,
                 "the registry still holds a reader for a parked session")
+        // WHICH rung ended it. The job wrote this from its own `SIGTERM`
+        // handler, so its existence is the one fact that separates the polite
+        // rung's successor from the forced teardown after it.
+        #expect(FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
+                "the job never caught a SIGTERM, so the park skipped the rung between /exit and the forced teardown")
+    }
+
+    /// The rung after that one, on a job that declines `SIGTERM`.
+    ///
+    /// `trap '' TERM` is what makes this a test of the forced teardown rather
+    /// than of the ladder generally: the polite `/exit` is unread, the
+    /// `SIGTERM` is ignored, and the only thing left that can end this process
+    /// is the `SIGKILL` `HolderRegistry.abandon` sends to its group. A park
+    /// that stopped at the middle rung would report the child survived and roll
+    /// itself back.
+    @Test func parkEscalatesToTheForcedRungWhenTheJobIgnoresSIGTERM() async throws {
+        // Three attempts rather than the fixture default: this poll is
+        // guaranteed to fail every time, so its budget is pure wall time.
+        let fixture = try await HibernationFixture.make(holderTerminateAttempts: 3)
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(job: HibernationFixture.signalDeafJob)
+        let childPID = try #require(terminal.childPID)
+        let holderPID = try #require(terminal.holderPID)
+
+        let result = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
+        #expect(result == .ok, "park refused: \(result)")
+
+        let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(parked.isParked)
+        #expect(parked.childPID == nil)
+        let signalled = kill(childPID, 0)
+        let signalErrno = errno
+        #expect(signalled == -1 && signalErrno == ESRCH,
+                "a job that ignores SIGTERM survived the park (kill returned \(signalled), errno \(signalErrno))")
+        #expect(!holderProcessIsAlive(holderPID), "the holder outlived the park")
+        #expect(!FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
+                "this job has no SIGTERM handler, so a marker here means the fixture wrote it")
     }
 
     /// Wake after that park: a fresh holder, a fresh job, and a row that names
@@ -209,7 +251,8 @@ struct HolderHibernationLiveTests {
     /// that claims parked over a live child.
     @Test func parkRollsBackWhenTheChildOutlivesTheEscalation() async throws {
         let fixture = try await HibernationFixture.make(
-            holderEscalationAttempts: 3, signaller: AlwaysAliveSignaller())
+            holderTerminateAttempts: 3, holderEscalationAttempts: 3,
+            signaller: AlwaysAliveSignaller())
         defer { fixture.tearDown() }
         let terminal = try await fixture.spawnHolderRow()
         let childPID = try #require(terminal.childPID)
@@ -300,33 +343,192 @@ struct HolderHibernationLiveTests {
         try await fixture.db.terminals.setHolderProcess(
             id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
     }
+
+    /// "Keep when uncertain", on the park path: a recorded pid that now names a
+    /// stranger is signalled by nothing at all.
+    ///
+    /// The stranger is arranged through the signaller rather than through the
+    /// process table, because a real pid reissued to somebody else's work is
+    /// the one condition a test cannot ask a kernel for. Everything else is
+    /// real: a real holder, a real job, and a real teardown afterwards.
+    ///
+    /// The job declines `SIGHUP` and nothing else, which is what makes its
+    /// survival mean something. Telling the holder to let go — which this
+    /// refusal still does, since a daemon reading a pty whose job it cannot
+    /// identify is worse than one that has let go — closes the pty master and
+    /// hangs the job up, so a default-disposition job would die of that and the
+    /// assertion below could not tell it from a park that signalled. This one
+    /// survives the hangup and would not survive either signal.
+    @Test func parkRefusesToSignalAChildItCannotVerify() async throws {
+        let stranger = StrangerSignaller()
+        let fixture = try await HibernationFixture.make(signaller: stranger)
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(job: HibernationFixture.hangupDeafJob)
+        let childPID = try #require(terminal.childPID)
+        let startedAt = try #require(terminal.holderChildStartedAt)
+
+        let result = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
+
+        guard case .notEligible(let reason) = result else {
+            Issue.record("the park reported \(result) for a pid it could not verify")
+            return
+        }
+        #expect(reason.contains("\(childPID)"),
+                "the refusal does not name the pid it declined to signal: \(reason)")
+        #expect(reason.contains("could not be verified"),
+                "the refusal does not say why it stopped: \(reason)")
+
+        // Nothing was asked of the process table, which is the whole claim.
+        // Asserting on the request rather than on the survivor is what makes
+        // this independent of what a signal would have done.
+        #expect(stranger.signalsRequested().isEmpty,
+                "the park signalled a pid it could not verify: \(stranger.signalsRequested())")
+        // And the job really is still there. A `SIGTERM` or a `SIGKILL` would
+        // have ended it; the hangup the holder's forget delivered did not.
+        #expect(holderProcessIsAlive(childPID),
+                "the job died, so something ended it after the identity check refused")
+
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(!after.isParked, "a refused park still parked the row")
+        #expect(after.pendingSessionIncarnationID == nil,
+                "the park intent's pending incarnation outlived the rollback")
+        // The pids stay, because the row left awake is the last record of a
+        // session the reconcile arm and the reaper's holder leg now have to
+        // judge — both of which apply this same identity check and will keep
+        // for this same reason.
+        #expect(after.childPID == childPID, "the refusal erased the child pid")
+        #expect(after.holderChildStartedAt == startedAt,
+                "the refusal erased the child's identity anchor")
+        // The holder was told to let go, so the daemon is off this pty.
+        #expect(await fixture.registry.reader(for: terminal.id) == nil,
+                "the daemon is still reading a session whose job it cannot identify")
+    }
+
+    /// The wake's adopt guard, on the row shape that made it necessary: parked,
+    /// naming no processes, behind a holder that is alive and adopted.
+    ///
+    /// That row is what a daemon killed between `HolderRegistry.spawn`
+    /// publishing its reader and `wakeHolderSection` persisting the pids leaves
+    /// behind, and `adoptAll` re-adopts the holder on the next start regardless
+    /// of park state — so the reader is back while the row still names nothing.
+    /// Un-parking it without restoring the pids would put that session beyond
+    /// every reclaimer this transport has, permanently and silently.
+    ///
+    /// The nil pids are written directly rather than produced by killing a
+    /// daemon, and that is the whole of the simulation: the state under test is
+    /// the row, and the registry either holds a live reader for the session or
+    /// it does not.
+    @Test func wakeRestoresThePidsOfARowThatLostThemMidSpawn() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow()
+        let childPID = try #require(terminal.childPID)
+        let holderPID = try #require(terminal.holderPID)
+
+        // The crash window, reproduced as state: the row is parked and names
+        // nothing, while the registry is still reading the session's holder.
+        try await fixture.db.terminals.setHolderProcess(
+            id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
+        try await fixture.db.terminals.setHibernated(
+            id: terminal.id, sessionID: HibernationFixture.sessionID)
+        #expect(await fixture.registry.reader(for: terminal.id) != nil,
+                "the fixture lost its reader, so this test would exercise the wrong branch")
+
+        let result = await fixture.coordinator.wake(terminalID: terminal.id)
+        #expect(result == .ok, "wake refused: \(result)")
+
+        let woken = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(!woken.isParked)
+        // The pid anchor, restored from what the registry itself observed.
+        #expect(woken.childPID == childPID,
+                "the woken row names \(String(describing: woken.childPID)) rather than the child the registry is reading")
+        #expect(woken.holderPID == holderPID,
+                "the woken row names \(String(describing: woken.holderPID)) rather than the holder the registry is reading")
+        #expect(woken.holderChildStartedAt != nil,
+                "the row was un-parked with no identity anchor for its child")
+        // Asked of the process table rather than of the row: the number is only
+        // an anchor if it still names this session's job.
+        #expect(holderProcessIsAlive(childPID), "the restored child pid names nothing")
+        let command = ProductionProcessSignaller().commandLine(childPID) ?? ""
+        #expect(AgentReaper.isHolderChildExecutable(command),
+                "the restored pid names something no holder would have forked: \(command)")
+
+        // And nothing was spawned. Two independent facts: the registry is still
+        // reading the ORIGINAL session (a spawn would have been refused by the
+        // creation lock, or would have replaced these pids with a second
+        // generation's), and the wake's pinned shell — which every spawned
+        // holder runs and this session's job does not — never ran.
+        #expect(await fixture.registry.reader(for: terminal.id) != nil,
+                "the wake released the reader it was supposed to adopt")
+        #expect(!FileManager.default.fileExists(atPath: fixture.launchArgvPath),
+                "the wake spawned a second holder instead of adopting the live one")
+    }
 }
 
 // MARK: - A process table that never concedes
 
-/// Answers "alive, and not a corpse" for every pid, forever.
+/// Answers "alive, this session's own child, and not a corpse" for every pid,
+/// forever.
 ///
-/// The two members that matter are `isAlive` and `stat`: `childIsGone` treats a
-/// `Z…` stat as gone (a zombie is past its last instruction) and everything
-/// else as running, so a fake that answered nil for `stat` would be relying on
-/// that branch's nil handling rather than stating the case. Answering `"S"`
-/// states it.
+/// Two questions have to be answered together, because the park asks both. The
+/// liveness pair — `isAlive` and `stat` — is what `childIsGone` reads: a `Z…`
+/// stat is gone (a zombie is past its last instruction) and everything else is
+/// running, so a fake that answered nil for `stat` would be relying on that
+/// branch's nil handling rather than stating the case. Answering `"S"` states
+/// it.
 ///
-/// The rest are stubs because the park path never reaches them — it signals
-/// through the registry, not through this seam — and stubbing them is
-/// deliberate rather than lazy: a signaller that quietly swallowed a real
-/// `kill` would turn "the escalation ran" into an untestable claim.
+/// The identity pair — `startTime` and `commandLine` — is what every rung of
+/// the ladder verifies before it signals, and it must pass here or this test
+/// would measure the identity refusal instead of the rollback it is named for.
+/// `Date()` sits well inside `AgentReaper.defaultHolderIdentityWindow` of the
+/// row's own anchor, and `/bin/sh` is what this fixture's job really is.
+///
+/// The signal members are no-ops, which is deliberate rather than lazy: the
+/// escalation the test is about reaches the job through the REGISTRY, not
+/// through this seam, so a fake that quietly swallowed a real `kill` would turn
+/// "the escalation ran" into an untestable claim — and a `SIGTERM` rung that
+/// went through here must land nowhere, or the job would die and the branch
+/// under test would never be reached.
 private struct AlwaysAliveSignaller: ProcessSignaller {
     func isAlive(_ pid: Int32) -> Bool { true }
     func terminate(_ pid: Int32) {}
     func forceKill(_ pid: Int32) {}
     func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
-    func commandLine(_ pid: Int32) -> String? { nil }
+    func commandLine(_ pid: Int32) -> String? { "/bin/sh" }
     func stat(_ pid: Int32) -> String? { "S" }
-    /// Nil, which every identity check must read as "not the same process".
-    /// Nothing on the park path asks, and a fake that invented a start time
-    /// would be answering a question it cannot know.
-    func startTime(_ pid: Int32) -> Date? { nil }
+    func startTime(_ pid: Int32) -> Date? { Date() }
+}
+
+/// A process table on which every pid is a stranger: alive, and started long
+/// before the row that names it.
+///
+/// The one shape the identity check exists for — a pid the kernel has reissued
+/// to somebody else's work — and the only one no real process table can be
+/// asked to produce on demand. Every signal it is asked for is RECORDED and
+/// none is delivered, so a test can assert what the park tried to do
+/// independently of what survived.
+private final class StrangerSignaller: ProcessSignaller, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls: [String] = []
+
+    /// Every signal this seam was asked to deliver, in order.
+    func signalsRequested() -> [String] { lock.withLock { calls } }
+
+    func isAlive(_ pid: Int32) -> Bool { true }
+    func terminate(_ pid: Int32) { lock.withLock { calls.append("terminate(\(pid))") } }
+    func forceKill(_ pid: Int32) { lock.withLock { calls.append("forceKill(\(pid))") } }
+    func terminateProcessOnly(_ pid: Int32) {
+        lock.withLock { calls.append("terminateProcessOnly(\(pid))") }
+    }
+    func forceKillProcessOnly(_ pid: Int32) {
+        lock.withLock { calls.append("forceKillProcessOnly(\(pid))") }
+    }
+    func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
+    func commandLine(_ pid: Int32) -> String? { "/bin/sh" }
+    func stat(_ pid: Int32) -> String? { "S" }
+    /// Two hours before any row in this suite was written — far outside
+    /// `AgentReaper.defaultHolderIdentityWindow`, which is five minutes.
+    func startTime(_ pid: Int32) -> Date? { Date(timeIntervalSinceNow: -7200) }
 }
 
 // MARK: - Fixture
@@ -338,9 +540,35 @@ private final class HibernationFixture {
     /// real Claude: the pinned shell ignores the argv it is handed.
     static let sessionID = "sess-holder-hibernation"
 
-    /// A job that cannot cooperate with `/exit`: it never reads its terminal,
-    /// so the polite poll must fail and the escalation must be what ends it.
-    private static let uncooperativeJob = "while :; do sleep 1; done"
+    /// The default job: deaf to `/exit`, and honest about `SIGTERM`.
+    ///
+    /// It never reads its terminal, so the polite rung cannot possibly work and
+    /// something further down the ladder has to end it. What it *does* do is
+    /// catch `SIGTERM` and leave a mark before exiting — which is what makes
+    /// "the SIGTERM rung ended this job" an observable claim rather than an
+    /// inference from a dead pid: a `SIGKILL` cannot run a handler, so the
+    /// marker exists if and only if the middle rung is what worked.
+    ///
+    /// The loop sleeps in fifths of a second because a POSIX shell runs a trap
+    /// only after the foreground command it was waiting on completes; a
+    /// one-second sleep would put up to a second of the poll window between the
+    /// signal and the handler for no benefit.
+    static func termAwareJob(markerPath: String) -> String {
+        "trap 'printf term > \"\(markerPath)\"; exit 0' TERM; while :; do sleep 0.2; done"
+    }
+
+    /// A job that ignores `SIGTERM` outright, so only the forced rung — the
+    /// holder let go of, the process group `SIGKILL`ed — can end it.
+    static let signalDeafJob = "trap '' TERM; while :; do sleep 0.2; done"
+
+    /// A job that ignores `SIGHUP` and nothing else.
+    ///
+    /// For the one test that must distinguish "the park signalled this pid"
+    /// from "the pty master closed underneath it": telling a holder to let go
+    /// hangs its job up, which a default-disposition job dies of, so a job that
+    /// declines the hangup is the only one whose survival proves nothing was
+    /// signalled. `SIGTERM` and `SIGKILL` both still end it.
+    static let hangupDeafJob = "trap '' HUP; while :; do sleep 0.2; done"
 
     let db: TBDDatabase
     let registry: HolderRegistry
@@ -353,6 +581,10 @@ private final class HibernationFixture {
     /// until a wake has actually launched something.
     var launchArgvPath: String { "\(home)/launch-argv" }
     var launchEnvPath: String { "\(home)/launch-env" }
+
+    /// Where `termAwareJob` records that it caught a `SIGTERM`. Absent until
+    /// one is actually delivered and handled.
+    var jobTermMarkerPath: String { "\(home)/job-caught-term" }
 
     private let home: String
     private let tempDir: URL
@@ -417,6 +649,12 @@ private final class HibernationFixture {
     }
 
     /// - Parameters:
+    ///   - holderTerminateAttempts: how many times the poll after the `SIGTERM`
+    ///     rung asks whether the job is gone. 25 at this fixture's 100 ms
+    ///     interval is 2.5 s, which is generous next to the fifth of a second a
+    ///     cooperating job takes to reach its trap and mean next to the shipped
+    ///     five seconds. A test that has arranged for that poll to NEVER
+    ///     succeed passes a small number and buys back the wall time.
     ///   - holderEscalationAttempts: how many times the post-escalation poll
     ///     asks whether the job is gone. The shipped default is generous
     ///     because a real `SIGKILL` lands on a real process table; a test that
@@ -428,6 +666,7 @@ private final class HibernationFixture {
     ///     real process can reach.
     static func make(
         holderHibernationEnabled: Bool = true,
+        holderTerminateAttempts: Int = 25,
         holderEscalationAttempts: Int = 100,
         signaller: any ProcessSignaller = ProductionProcessSignaller()
     ) async throws -> HibernationFixture {
@@ -484,6 +723,7 @@ private final class HibernationFixture {
             // there the generosity is pure wall time.
             exitPollAttempts: 2,
             exitPollInterval: .milliseconds(100),
+            holderTerminateAttempts: holderTerminateAttempts,
             holderEscalationAttempts: holderEscalationAttempts,
             signaller: signaller,
             actuationLog: makeTestActuationLog())
@@ -510,13 +750,13 @@ private final class HibernationFixture {
     /// A real holder supervising a real job, plus the row that names both —
     /// created in the order `WorktreeLifecycle+Create` creates them, so the
     /// registry has adopted the session before anything reads its screen.
-    func spawnHolderRow() async throws -> Terminal {
+    func spawnHolderRow(job: String? = nil) async throws -> Terminal {
         let terminalID = UUID()
         let handle = try await registry.spawn(
             terminalID: terminalID,
             launch: HolderLaunchRequest(
                 executable: "/bin/sh",
-                arguments: ["-c", Self.uncooperativeJob],
+                arguments: ["-c", job ?? Self.termAwareJob(markerPath: jobTermMarkerPath)],
                 workingDirectory: "/tmp",
                 environment: ["PATH": "/usr/bin:/bin", "TERM": "xterm-256color"],
                 columns: 80,
