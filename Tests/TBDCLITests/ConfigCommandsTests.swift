@@ -1,3 +1,4 @@
+import ArgumentParser
 import Foundation
 import Testing
 
@@ -112,5 +113,22 @@ struct ConfigCommandsTests {
         let rendered = ConfigGet.render(config)
         #expect(rendered.contains("update-mode: check"))
         #expect(rendered.contains("auto-archive-on-merge: off"))
+    }
+
+    // MARK: - tbd config holder-hibernation
+
+    /// The soak switch for a background sweep that can kill a live holder-owned
+    /// agent process needs a hand-reachable CLI leg, or "enable it for the
+    /// soak" means hand-editing `state.db` — which this project's rules put
+    /// out of bounds.
+    @Test func holderHibernationIsRegisteredOnTheConfigGroup() {
+        let names = ConfigCommand.configuration.subcommands.map { $0._commandName }
+        #expect(names.contains("holder-hibernation"))
+    }
+
+    @Test func holderHibernationTakesTheStateWordAsARequiredPositional() throws {
+        #expect(try ConfigHolderHibernation.parse(["on"]).state == "on")
+        #expect(try ConfigHolderHibernation.parse(["off"]).state == "off")
+        #expect(throws: (any Error).self) { try ConfigHolderHibernation.parse([]) }
     }
 }

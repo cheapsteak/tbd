@@ -1,0 +1,18 @@
+-- Gate for parking, waking and limit-resuming Claude sessions on the
+-- pty-holder transport — auto-hibernation's holder leg
+-- (docs/specs/2026-08-30-pty-holder-session-transport-design.md). A background
+-- sweep kills a live holder-owned agent process, and wake spawns a fresh
+-- holder running `claude --resume` rather than reattaching to anything, so
+-- this soaks behind its own switch rather than riding pty_holder_enabled —
+-- that outer gate has to be ON for a holder row to exist at all, so it cannot
+-- express "transport on, hibernation not yet", which is the whole protocol the
+-- sibling holder gates (gc_holder_rendezvous_enabled, reap_holder_children_enabled,
+-- holder_row_reconcile_enabled) exist for.
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" (0) — which is what made auto_hibernate_enabled impossible to
+-- graduate without a forcing UPDATE that also reset deliberate opt-ins.
+-- The shipped default lives in exactly one place:
+-- Config.holderHibernationEnabledDefault.
+ALTER TABLE config ADD COLUMN holder_hibernation_enabled INTEGER;

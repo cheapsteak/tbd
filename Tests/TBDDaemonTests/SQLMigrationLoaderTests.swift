@@ -504,6 +504,7 @@ import Testing
             "20260902140000_config_gc_retained_transcripts",
             "20260903193500_config_holder_row_reconcile",
             "20260904172536_config_update_mode",
+            "20260905213000_config_holder_hibernation",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)

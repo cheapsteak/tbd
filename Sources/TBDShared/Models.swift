@@ -1592,6 +1592,24 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var holderRowReconcileEnabled: Bool
+    /// Gate for parking, waking and limit-resuming Claude sessions on the
+    /// pty-holder transport — auto-hibernation's holder leg. It ships OFF and
+    /// soaks behind its own switch rather than riding `ptyHolderEnabled`: that
+    /// outer gate has to be ON for a holder row to exist at all, so it cannot
+    /// express "transport on, hibernation not yet" — the same reason
+    /// `holderRowReconcileEnabled` is not folded into `ptyHolderEnabled`
+    /// either. What it gates is destructive in a way tmux hibernation is not:
+    /// a background sweep kills a live holder-owned agent process, and wake
+    /// starts a fresh holder running `claude --resume` rather than reattaching
+    /// to anything.
+    ///
+    /// **Resolved, not stored**, like `holderRowReconcileEnabled`: the backing
+    /// column carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
+    /// `holder_hibernation_enabled ?? Config.holderHibernationEnabledDefault`.
+    /// NULL means "never chose" and follows the shipped default wherever it
+    /// goes; `0`/`1` is an explicit gesture and is honored forever.
+    public var holderHibernationEnabled: Bool
     /// The single opt-in for remote peer messaging
     /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
     /// rollout"): publishing a shadow peer for each remote session and carrying
@@ -1750,6 +1768,13 @@ public struct Config: Codable, Sendable, Equatable {
     /// reachable — is a change to this constant, with no forcing `UPDATE`
     /// migration and every explicit opt-out left alone.
     public static let holderRowReconcileEnabledDefault = false
+    /// The shipped default for `holderHibernationEnabled`, and the single
+    /// place it lives. Holder hibernation ships off; graduation — after a soak
+    /// in which no park ever finalized while its child was still running and
+    /// no wake ever left a holder without a row — is a change to this
+    /// constant, with no forcing `UPDATE` migration and every explicit opt-out
+    /// left alone.
+    public static let holderHibernationEnabledDefault = false
     /// The shipped default for `updateMode`, and the single place it lives.
     /// Updating ships off; graduation to `check` — after a soak in which the
     /// notice was accurate and the hourly `ls-remote` cost nothing anyone
@@ -1799,6 +1824,7 @@ public struct Config: Codable, Sendable, Equatable {
                 gcRetainedTranscriptsEnabled: Bool =
                     Config.gcRetainedTranscriptsEnabledDefault,
                 holderRowReconcileEnabled: Bool = Config.holderRowReconcileEnabledDefault,
+                holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault,
                 updateMode: UpdateMode = Config.updateModeDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
@@ -1841,6 +1867,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
         self.holderRowReconcileEnabled = holderRowReconcileEnabled
+        self.holderHibernationEnabled = holderHibernationEnabled
         self.updateMode = updateMode
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
@@ -1963,6 +1990,10 @@ public struct Config: Codable, Sendable, Equatable {
         holderRowReconcileEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .holderRowReconcileEnabled)
             ?? Config.holderRowReconcileEnabledDefault
+        // Same shape once more, for holder hibernation's gate.
+        holderHibernationEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .holderHibernationEnabled)
+            ?? Config.holderHibernationEnabledDefault
         // Same shape for the update mode, with one addition: an unrecognised
         // NAME from a newer daemon (a fourth mode) is as unusable as an absent
         // key, so it resolves to the shipped default instead of failing the

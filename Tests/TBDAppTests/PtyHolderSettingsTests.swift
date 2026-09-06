@@ -79,6 +79,46 @@ struct PtyHolderSettingsTests {
         }
     }
 
+    // MARK: - The holder-hibernation setter, both directions
+
+    @Test func holderHibernationSetterPersistsOnAndRefreshesCapabilities() async {
+        await withAppState { state in
+            var written: [Bool] = []
+            var refreshes = 0
+            state.holderHibernationFlagSetter = { @MainActor enabled in written.append(enabled) }
+            state.daemonCapabilitiesFetcher = { @MainActor in
+                refreshes += 1
+                return DaemonCapabilitiesResult(
+                    controlModeEnabled: false, holderHibernationEnabled: true)
+            }
+
+            await state.setHolderHibernationEnabled(true)
+
+            #expect(written == [true])
+            #expect(refreshes == 1)
+            #expect(state.daemonCapabilities?.holderHibernationEnabled == true)
+        }
+    }
+
+    /// The off branch is its own test rather than a second assertion, for the
+    /// same reason as `setterPersistsOffAndRefreshesCapabilities` above: a
+    /// setter that ignored its argument would pass the on-only test.
+    @Test func holderHibernationSetterPersistsOffAndRefreshesCapabilities() async {
+        await withAppState { state in
+            var written: [Bool] = []
+            state.holderHibernationFlagSetter = { @MainActor enabled in written.append(enabled) }
+            state.daemonCapabilitiesFetcher = { @MainActor in
+                DaemonCapabilitiesResult(
+                    controlModeEnabled: false, holderHibernationEnabled: false)
+            }
+
+            await state.setHolderHibernationEnabled(false)
+
+            #expect(written == [false])
+            #expect(state.daemonCapabilities?.holderHibernationEnabled == false)
+        }
+    }
+
     // MARK: - The help text
 
     /// The one claim the design spec forbids. Its §"why" is explicit that the

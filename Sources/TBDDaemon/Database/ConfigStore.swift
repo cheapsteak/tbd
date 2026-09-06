@@ -138,6 +138,14 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.holderRowReconcileEnabledDefault`, never through
     /// `?? false`.
     var holder_row_reconcile_enabled: Bool?
+    /// Gate for parking, waking and limit-resuming Claude sessions on the
+    /// pty-holder transport. **Genuinely tri-state**, same shape as
+    /// `holder_row_reconcile_enabled`: the
+    /// `20260905213000_config_holder_hibernation` migration carries no SQL
+    /// default, so `nil` here means "never chose" rather than "off". Resolve
+    /// it through `Config.holderHibernationEnabledDefault`, never through
+    /// `?? false`.
+    var holder_hibernation_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -206,6 +214,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   `holder_row_reconcile_enabled` — the holder row sweep's soak gate,
     ///   which is a separate opt-in from both because it deletes database rows
     ///   rather than files or processes.
+    /// - Parameter holderHibernationDefault: same shape once more, for
+    ///   `holder_hibernation_enabled` — the pty-holder transport's
+    ///   auto-hibernation gate, a separate opt-in from `holderRowReconcileDefault`
+    ///   because it kills a live agent process rather than reclaiming a
+    ///   already-dead row.
     /// - Parameter updateModeDefault: and truly, finally the last, for
     ///   `update_mode` — the only one of these that is not a Bool, so the
     ///   parameter proves both properties at once: a NULL row follows a changed
@@ -226,6 +239,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault,
         gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault,
         holderRowReconcileDefault: Bool = Config.holderRowReconcileEnabledDefault,
+        holderHibernationDefault: Bool = Config.holderHibernationEnabledDefault,
         updateModeDefault: UpdateMode = Config.updateModeDefault
     ) -> Config {
         Config(
@@ -306,6 +320,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // NOT `?? false`.
             holderRowReconcileEnabled:
                 holder_row_reconcile_enabled ?? holderRowReconcileDefault,
+            // And once more, for holder hibernation's gate — NOT `?? false`.
+            holderHibernationEnabled:
+                holder_hibernation_enabled ?? holderHibernationDefault,
             // Same reasoning once more, for the update mode — NOT `?? .off`.
             // The `flatMap` covers the second way a value can be absent: a
             // string no `UpdateMode` case matches is as unusable as NULL, so it
@@ -825,6 +842,23 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET holder_row_reconcile_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the pty-holder transport's auto-hibernation gate (default OFF,
+    /// soaking) — whether idle holder-backed sessions get parked, woken and
+    /// limit-resumed by the same sweep and rails as tmux sessions. Separate
+    /// from `setHolderRowReconcileEnabled` on purpose: that gate reclaims a
+    /// session row whose holder is already gone, this one parks (and can kill)
+    /// a holder whose child process is still very much alive. The column is
+    /// written on every call, because writing either value is the explicit
+    /// gesture that lifts it out of NULL forever after.
+    public func setHolderHibernationEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET holder_hibernation_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

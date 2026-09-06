@@ -6,7 +6,7 @@ struct ConfigCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "config",
         abstract: "Get or set global TBD settings",
-        subcommands: [ConfigGet.self, ConfigSet.self]
+        subcommands: [ConfigGet.self, ConfigSet.self, ConfigHolderHibernation.self]
     )
 }
 
@@ -132,5 +132,44 @@ struct ConfigSet: AsyncParsableCommand {
         default:
             throw CLIError.invalidArgument(Self.unknownKeyMessage(key))
         }
+    }
+}
+
+/// The soak switch for parking, waking and limit-resuming Claude sessions on
+/// the pty-holder transport — auto-hibernation's holder leg. Off — the shipped
+/// default — the sweep and the manual Hibernate action leave holder-backed
+/// sessions alone.
+///
+/// It is a switch of its own rather than a value under `pty_holder_enabled`:
+/// that outer gate has to be ON for a holder row to exist at all, so it cannot
+/// express "transport on, hibernation not yet" — both `pty_holder_enabled` and
+/// this flag are needed for a holder session to actually park.
+struct ConfigHolderHibernation: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "holder-hibernation",
+        abstract: "Enable or disable auto-hibernation for pty-holder sessions (default off)",
+        discussion: """
+            The soak switch for parking, waking and limit-resuming Claude \
+            sessions on the pty-holder transport. Off — the shipped default — \
+            the hibernation sweep and manual Hibernate leave holder-backed \
+            sessions alone.
+
+            Requires `pty_holder_enabled` to also be on: that outer gate has to \
+            be on for any holder session to exist, and this flag decides \
+            whether the ones that exist get hibernated.
+            """
+    )
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetHolderHibernationEnabled,
+            params: ConfigSetHolderHibernationEnabledParams(enabled: enabled))
+        print("Holder hibernation \(enabled ? "enabled" : "disabled").")
     }
 }
