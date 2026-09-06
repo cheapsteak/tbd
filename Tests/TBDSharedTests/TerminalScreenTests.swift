@@ -185,6 +185,24 @@ import Testing
         #expect(decoded.screen == screen, "the screen did not survive the round trip")
     }
 
+    /// The tmux arm's half of the same wire, and a contract a reader is told to
+    /// rely on: `TBDSkillContent` tells agents that a **missing** `screen` key
+    /// means a tmux-backed session. That reading is only sound while a nil
+    /// screen is omitted rather than encoded as `null` — an encoder configured
+    /// to write nulls would hand every tmux answer a `screen` key, and every
+    /// agent following the documented rule would read a tmux session as a
+    /// holder one whose screen it then cannot find.
+    @Test("the tmux arm's JSON omits the screen key rather than writing null")
+    func tmuxResultOmitsTheScreenKey() throws {
+        let data = try JSONEncoder().encode(TerminalOutputResult(output: "x"))
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["output"] as? String == "x")
+        #expect(
+            object.keys.contains("screen") == false,
+            "a tmux answer carried a screen key, so a missing key no longer means tmux")
+    }
+
     /// The other half: whatever an `output` key on the wire says, the decoded
     /// value derives it from `lines`. A producer and a consumer can therefore
     /// never disagree, and a payload written before the key existed decodes the
