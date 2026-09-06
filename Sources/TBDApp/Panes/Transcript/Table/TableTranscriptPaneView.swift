@@ -296,6 +296,14 @@ struct TableTranscriptPaneView: View {
                         // scrolled up. That is intended: the menu is a transient
                         // popup and, while it is open, it owns the pane. Escape
                         // or a token change closes it and the button is back.
+                        //
+                        // Defensive, not test-verified: the offscreen harness
+                        // already orders this SwiftUI overlay above the AppKit
+                        // sibling with or without this modifier, so no test
+                        // discriminates it. It guards the live app, where the
+                        // transcript's NSTableView may composite over a sibling
+                        // overlay instead of respecting SwiftUI's z-order — the
+                        // live pass is what actually verifies it.
                         .zIndex(1)
                 }
             }
