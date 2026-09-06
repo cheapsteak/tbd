@@ -27,7 +27,18 @@ enum ComposerKeyRouter {
         case menuUp
         case menuDown
         /// Accept the highlighted row, or the first when none is highlighted.
+        /// **Tab, and only Tab** — the gesture whose entire meaning is "take the
+        /// obvious completion", which is why it may fall back to the first row.
         case menuAccept
+        /// Return with the menu open. Accept the highlighted row if there is
+        /// one; otherwise **send the message as typed**.
+        ///
+        /// A separate case rather than `.menuAccept` because the two keys mean
+        /// different things and only the caller knows which row, if any, is
+        /// highlighted. Collapsing them would make Return take `rows.first`,
+        /// rewriting a person's own words into a command they never chose — the
+        /// one failure the Enter/Tab split exists to prevent.
+        case menuAcceptOrSubmit
         /// Close the menu, leaving the text untouched.
         case menuClose
         /// Give up first responder — Escape with no menu open, which returns
@@ -68,7 +79,10 @@ enum ComposerKeyRouter {
             // so the modifier is the only thing separating it from a plain
             // Return.
             if shiftHeld { return .newline }
-            return menuOpen ? .menuAccept : .submit
+            // With the menu up this is Return, not Tab, and the difference is
+            // load-bearing: the caller accepts only a row the person actually
+            // highlighted and otherwise sends what they typed.
+            return menuOpen ? .menuAcceptOrSubmit : .submit
         }
 
         guard menuOpen else {

@@ -40,7 +40,8 @@ struct ComposerKeyRouterTests {
             for shift in [false, true] {
                 let action = act(selector, shift: shift, menuOpen: false)
                 #expect(
-                    ![.menuUp, .menuDown, .menuAccept, .menuClose].contains(action),
+                    ![.menuUp, .menuDown, .menuAccept, .menuAcceptOrSubmit, .menuClose]
+                        .contains(action),
                     "\(selector) shift=\(shift) resolved to \(action) with no menu open")
             }
         }
@@ -77,7 +78,19 @@ struct ComposerKeyRouterTests {
         #expect(act(up, menuOpen: true) == .menuUp)
         #expect(act(down, menuOpen: true) == .menuDown)
         #expect(act(cancel, menuOpen: true) == .menuClose)
-        #expect(act(newline, menuOpen: true) == .menuAccept)
+        #expect(act(newline, menuOpen: true) == .menuAcceptOrSubmit)
+    }
+
+    /// **Return and Tab are not the same key.** Tab's whole meaning is "take the
+    /// obvious completion", so it may fall back to the first row; Return must
+    /// accept only a row the person actually highlighted and otherwise send what
+    /// they typed. The router cannot know which row is highlighted, so it names
+    /// the two gestures apart and lets the composer decide — collapsing them here
+    /// would silently rewrite somebody's words into a command they never chose.
+    @Test func returnAndTabAreDistinguishableWithTheMenuOpen() {
+        #expect(act(tab, menuOpen: true) != act(newline, menuOpen: true))
+        #expect(act(tab, menuOpen: true) == .menuAccept)
+        #expect(act(newline, menuOpen: true) == .menuAcceptOrSubmit)
     }
 
     /// Shift+Return keeps breaking the line even with the menu up: it is the one

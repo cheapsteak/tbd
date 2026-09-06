@@ -270,10 +270,13 @@ struct MessageComposerTextView: NSViewRepresentable {
             case .blur:
                 parent.onEscape()
                 return true
-            case .menuUp, .menuDown, .menuAccept, .menuClose:
+            case .menuUp, .menuDown, .menuAccept, .menuAcceptOrSubmit, .menuClose:
                 // Only reachable with the menu open — the router returns these
-                // four solely under `menuOpen`, so Tab still moves focus and the
+                // five solely under `menuOpen`, so Tab still moves focus and the
                 // arrows still move the caret when nothing is showing.
+                // `.menuAcceptOrSubmit` is Return, and the caller decides
+                // between accepting and sending: only it knows whether a row is
+                // highlighted.
                 parent.onMenuAction(action)
                 return true
             case .passThrough:
@@ -286,6 +289,16 @@ struct MessageComposerTextView: NSViewRepresentable {
 /// The text view, with the paste and drop overrides.
 final class ComposerTextView: NSTextView {
     var onImageData: ((Data) -> Void)?
+
+    /// The placeholder drawn after the caret, naming what an accepted command
+    /// takes. Set by the composer view whenever the text changes; nil hides it.
+    ///
+    /// **Drawn, never inserted.** Putting the hint in the storage would make it
+    /// part of the message — the composer's whole plain-text contract is that
+    /// what is in the view is what is sent.
+    var argumentHint: String? {
+        didSet { if argumentHint != oldValue { needsDisplay = true } }
+    }
 
     /// Text wins when the pasteboard advertises both, preserving ordinary Cmd-V.
     /// An image-only paste is lifted here and never handed to `super`, so
