@@ -3805,9 +3805,40 @@ public struct TerminalOutputParams: Codable, Sendable {
     }
 }
 
+/// The answer to `terminal.output`, on both transports.
+///
+/// `output` is the string every existing consumer already reads, and it is
+/// always the same string they read before — the CLI prints it, scripts match
+/// on it, and nothing about it changed when `screen` appeared beside it. That
+/// is what let the typed screen land in place rather than as a sibling method:
+/// a second method would have left this one answering wrongly for every
+/// attached session until the last consumer migrated.
+///
+/// **`screen` is present on the holder transport and absent on tmux**, and the
+/// asymmetry is honest rather than an omission. The screen contract is the
+/// holder transport's: `source` names which of that transport's two stores
+/// answered, `modes` come from the emulator that produced the lines, and
+/// `ageMilliseconds` is measured on the daemon's monotonic clock against that
+/// emulator's last byte. `capture-pane` supplies none of them — it returns text
+/// from a server that keeps no such record — so a `screen` on the tmux arm
+/// could only be fabricated, and a fabricated `source` is worse than an absent
+/// one, because a consumer's policy is keyed on exactly that field.
 public struct TerminalOutputResult: Codable, Sendable {
     public let output: String
-    public init(output: String) { self.output = output }
+    public let screen: TerminalScreen?
+
+    /// The tmux arm: text and nothing else.
+    public init(output: String) {
+        self.output = output
+        self.screen = nil
+    }
+
+    /// The holder arm. `output` is derived from the screen, so the two can
+    /// never disagree.
+    public init(screen: TerminalScreen) {
+        self.output = screen.output
+        self.screen = screen
+    }
 }
 
 // MARK: - Terminal Conversation

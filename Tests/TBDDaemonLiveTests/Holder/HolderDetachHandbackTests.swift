@@ -92,6 +92,36 @@ struct HolderDetachHandbackTests {
         })
     }
 
+    /// The far side of `staleDaemon`: once the take-back lands, the same reader
+    /// is the live store again and says so.
+    ///
+    /// It is asserted here rather than in a unit test because `.daemon` is the
+    /// one source that cannot be constructed without a running drain thread —
+    /// it is read from the reader's own state, so a reader that is not actually
+    /// on a pty cannot answer it. `HolderScreenContractTests` says as much in
+    /// place of building a fake.
+    @Test func aHandbackMakesTheDaemonTheLiveStoreAgain() async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+        defer { fixture.tearDown() }
+
+        let viewer = try await fixture.attachAViewer()
+        let suspended = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(try await suspended.screen(maxLines: 50).source == .staleDaemon)
+
+        viewer.close()
+        try await fixture.registry.acceptHandback(
+            terminal: fixture.terminalRow, generation: viewer.generation,
+            preamble: viewer.terminal.snapshot())
+
+        let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(await resumed.isDraining)
+        #expect(try await resumed.screen(maxLines: 50).source == .daemon, """
+            the daemon is draining this pty again but its screen still labels itself frozen, so \
+            every consumer keyed on `source` applies a stale policy to a live session
+            """)
+        #expect(await resumed.modeReading().source == .daemon)
+    }
+
     // MARK: - The unacknowledged attach, which kept its reader
 
     /// An attach that timed out unacknowledged keeps the claim *and* its

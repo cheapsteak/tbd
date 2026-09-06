@@ -1900,14 +1900,27 @@ extension RPCRouter {
         return try RPCResponse(result: TerminalOutputResult(output: trimmed))
     }
 
-    /// The holder half of `terminal.output`: render the daemon's own emulator
-    /// for a session whose pty master it is draining.
+    /// The holder half of `terminal.output`: the typed screen, from the
+    /// daemon's own emulator.
     ///
-    /// A missing reader is reported rather than papered over. It means the
-    /// registry never adopted this session — the holder is gone, or startup
+    /// **A session a person has open is answerable.** The daemon's reader is
+    /// retained across an attach — suspended, holding the screen as it stood
+    /// when the viewer arrived — so this reads it and labels the answer
+    /// `staleDaemon` with an age rather than failing. Before the reader was
+    /// retained, a machine read of any open session returned an error saying
+    /// the session was gone, which was both wrong and the most comfortable
+    /// possible wrong answer.
+    ///
+    /// A missing reader is still reported rather than papered over. It means
+    /// the registry has no reader at all — the holder is gone, or startup
     /// adoption found it unreachable — and an empty screen would read as "the
     /// session is quiet", which is a different and much more comfortable claim
     /// than the true one.
+    ///
+    /// **A refused projection is an error, never an empty screen.** The screen
+    /// type refuses a row carrying a control character, and such a row is a bug
+    /// in the render rather than a state a session can be in; the caller is
+    /// told which line, so the bug is findable.
     private func holderTerminalOutput(
         terminal: Terminal,
         params: TerminalOutputParams
@@ -1926,8 +1939,14 @@ extension RPCRouter {
         // whole pane and trims afterwards because `capture-pane` has no such
         // knob; the emulator does, and going through it means the scrollback
         // above the viewport is available rather than discarded.
-        let output = await reader.renderScreenWithScrollback(maxLines: lines)
-        return try RPCResponse(result: TerminalOutputResult(output: output))
+        let screen: TerminalScreen
+        do {
+            screen = try await reader.screen(maxLines: lines)
+        } catch {
+            return RPCResponse(
+                error: "Could not project terminal \(terminal.id)'s screen: \(error)")
+        }
+        return try RPCResponse(result: TerminalOutputResult(screen: screen))
     }
 
     func handleTerminalConversation(_ paramsData: Data) async throws -> RPCResponse {

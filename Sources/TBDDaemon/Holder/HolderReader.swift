@@ -1,6 +1,12 @@
 import Darwin
 import Foundation
 import SwiftTerm
+// Scoped, not a whole-module import: `TBDShared.Terminal` is the DB row model
+// and `SwiftTerm.Terminal` is the emulator, and this file is full of the
+// second. Naming the two types it needs keeps every bare `Terminal` here
+// meaning the emulator.
+import struct TBDShared.TerminalModeReading
+import struct TBDShared.TerminalScreen
 import TBDTerminalSerialization
 import os
 
@@ -131,6 +137,15 @@ actor HolderReader {
     ///   session's output is exhausted — see `hasReachedEndOfOutput`. It must
     ///   not block, and must not stop this reader inline; the registry's
     ///   reclaimer hops onto the actor instead.
+    /// - Parameter monotonicNow: reads the monotonic clock, for the two
+    ///   instants the emulator stamps — its adoption and its last consumed
+    ///   byte — whose difference is a screen's `age`. It sits *before* `clock`
+    ///   so `clock` stays the last parameter, per the repo's clock-seam rule,
+    ///   and it is a separate seam because `any Clock<Duration>` pins
+    ///   `Duration` and not `Instant`: it can express a delay but cannot do the
+    ///   instant arithmetic an age is. `ContinuousClock.Instant` can, which is
+    ///   what lets a test hand back `base + .minutes(41)` and assert an exact
+    ///   age rather than a tolerance window.
     init(
         sessionID: UUID,
         ptyFD: Int32,
@@ -140,6 +155,7 @@ actor HolderReader {
         stopTimeout: Duration = HolderReader.defaultStopTimeout,
         readFault: HolderReadFault? = nil,
         onEndOfOutput: (@Sendable () -> Void)? = nil,
+        monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.sessionID = sessionID
@@ -156,6 +172,7 @@ actor HolderReader {
             columns: columns,
             rows: rows,
             scrollback: scrollbackLines,
+            monotonicNow: monotonicNow,
             reply: { [descriptor] bytes in descriptor.replyBestEffort(bytes) })
     }
 
@@ -473,6 +490,41 @@ actor HolderReader {
     /// The tail of the scrollback plus the viewport, at most `maxLines` lines.
     func renderScreenWithScrollback(maxLines: Int) -> String {
         emulator.renderScreenWithScrollback(maxLines: maxLines)
+    }
+
+    /// The typed screen `terminal.output` answers with: the same lines
+    /// `renderScreenWithScrollback` produces, plus the facts a string cannot
+    /// carry — where the viewport starts, where the cursor is, what modes the
+    /// child is in, which store answered, and how stale that store is.
+    ///
+    /// **`source` is read from this reader's own drain state**, which is the
+    /// only place it can be read honestly. A reader that is draining is on the
+    /// pty and its emulator is live, so it answers `.daemon`. A reader in any
+    /// other state — suspended for an attach, idle, stopped — is holding a
+    /// screen it is no longer updating, and a consumer told `.daemon` about it
+    /// would apply a live-screen policy to a frozen one. `.viewer` never comes
+    /// from here: it is the app's answer to a pull, on a path this reader is
+    /// not part of.
+    ///
+    /// Throws only what `TerminalScreen`'s construction refuses. That is a
+    /// projection bug rather than a session state, and the handler above turns
+    /// it into an error naming the offending line rather than an empty screen.
+    func screen(maxLines: Int) throws -> TerminalScreen {
+        try emulator.screen(maxLines: maxLines, source: currentSource)
+    }
+
+    /// The child's modes, their provenance and their age, with no line walk.
+    ///
+    /// What the send path's oracle asks. A whole screen would be the same
+    /// answer at the price of walking the retained scrollback on every message
+    /// composed.
+    func modeReading() -> TerminalModeReading {
+        emulator.modeReading(source: currentSource)
+    }
+
+    /// Whether this reader's emulator is live or frozen — see `screen`.
+    private var currentSource: TerminalScreen.Source {
+        state == .draining ? .daemon : .staleDaemon
     }
 
     /// The session's whole screen — modes, scrollback, viewport, cursor — as a
@@ -1163,10 +1215,33 @@ private final class HolderEmulator: @unchecked Sendable {
     /// Held strongly: `Terminal.tdel` is `weak`, so a delegate nobody else
     /// retains is deallocated and the child's terminal queries go unanswered.
     private let delegate: ReplyForwardingDelegate
+    private let monotonicNow: @Sendable () -> ContinuousClock.Instant
+    /// When this emulator started existing — the floor for a screen's age.
+    ///
+    /// A store that has never consumed a byte reports its own age rather than
+    /// no age at all, so a fresh, silent session reads as exactly as old as it
+    /// is instead of as instantly current.
+    private let adoptedAt: ContinuousClock.Instant
+    /// When this emulator last consumed a byte **from the pty**.
+    ///
+    /// Under `terminalLock` like everything else here, and stamped in `feed`
+    /// only. That placement is the whole definition: `snapshotPreamble`'s
+    /// `DECRQM` probes and `screen`'s cursor-visibility probe feed the
+    /// `Terminal` directly rather than through this method, so the daemon
+    /// asking its own emulator a question can never make a stale screen look
+    /// fresh. Keep it that way — routing a probe through `feed` would make
+    /// every read reset the age it was taken to measure.
+    private var lastByteAt: ContinuousClock.Instant?
 
-    init(columns: Int, rows: Int, scrollback: Int, reply: @escaping @Sendable (ArraySlice<UInt8>) -> Void) {
+    init(
+        columns: Int, rows: Int, scrollback: Int,
+        monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant,
+        reply: @escaping @Sendable (ArraySlice<UInt8>) -> Void
+    ) {
         let delegate = ReplyForwardingDelegate(reply: reply)
         self.delegate = delegate
+        self.monotonicNow = monotonicNow
+        self.adoptedAt = monotonicNow()
         self.terminal = Terminal(
             delegate: delegate,
             options: TerminalOptions(
@@ -1177,6 +1252,7 @@ private final class HolderEmulator: @unchecked Sendable {
 
     func feed(_ bytes: ArraySlice<UInt8>) {
         terminal.terminalLock.withLock {
+            lastByteAt = monotonicNow()
             terminal.feed(buffer: bytes)
         }
     }
@@ -1213,6 +1289,119 @@ private final class HolderEmulator: @unchecked Sendable {
         }
     }
 
+    /// The typed screen, taken as **one observation** under a single
+    /// `terminalLock` hold.
+    ///
+    /// The lock is what makes lines, cursor, modes and size one fact rather
+    /// than four. Taken separately, a drain-thread feed between two of them
+    /// would produce a screen that never existed — modes from after a mode
+    /// change beside lines from before it, which is exactly the pairing the
+    /// input path must not compose against.
+    ///
+    /// The line walk is `renderScreenWithScrollback`'s: enumerate from
+    /// `totalLinesTrimmed` until `getScrollInvariantLine` returns nil, because
+    /// there is no public line count and `Buffer.lines` is internal.
+    ///
+    /// Two probes run inside the hold and neither touches `lastByteAt`. The
+    /// cursor's visibility is a `DECRQM` 25 answer, because `cursorHidden` is
+    /// not public, and it is read the way `snapshotPreamble` reads its modes —
+    /// through `DelegateModeReader` with the delegate switched to collecting,
+    /// so the answer reaches this method instead of arriving at the child as if
+    /// somebody had typed it.
+    func screen(maxLines: Int, source: TerminalScreen.Source) throws -> TerminalScreen {
+        try terminal.terminalLock.withLock {
+            var enumerated: [String] = []
+            var row = terminal.buffer.totalLinesTrimmed
+            while let line = terminal.getScrollInvariantLine(row: row) {
+                enumerated.append(Self.rowText(line))
+                row += 1
+            }
+            let enumeratedCount = enumerated.count
+
+            var lines = enumerated
+            if maxLines <= 0 {
+                lines = []
+            } else if lines.count > maxLines {
+                lines.removeFirst(lines.count - maxLines)
+            }
+            let droppedFromFront = enumeratedCount - lines.count
+            while let last = lines.last, last.isEmpty { lines.removeLast() }
+
+            // SwiftTerm's line list is always `yBase + rows` long, so the
+            // viewport is its tail — but `yBase` is not public, so the index of
+            // the viewport's first row is derived from the length instead. The
+            // tail cut then shifts it, which is why `droppedFromFront` comes
+            // off it: the result is an index into `lines`, not into the buffer.
+            // It can land outside `lines` in both directions, which the type's
+            // own documentation states and callers must bounds check.
+            let viewportStart = enumeratedCount - terminal.rows - droppedFromFront
+
+            let cursor = TerminalScreen.Cursor(
+                row: terminal.buffer.y,
+                column: terminal.buffer.x,
+                visible: cursorIsVisible())
+
+            return try TerminalScreen(
+                lines: lines,
+                viewportStart: viewportStart,
+                cursor: cursor,
+                size: TerminalScreen.Size(columns: terminal.cols, rows: terminal.rows),
+                modes: currentModes(),
+                source: source,
+                ageMilliseconds: ageMilliseconds())
+        }
+    }
+
+    /// The modes, their provenance and their age, without the line walk.
+    func modeReading(source: TerminalScreen.Source) -> TerminalModeReading {
+        terminal.terminalLock.withLock {
+            TerminalModeReading(
+                modes: currentModes(), source: source, ageMilliseconds: ageMilliseconds())
+        }
+    }
+
+    /// The three child modes, all readable from public properties.
+    ///
+    /// `TerminalModeCapture` reads these same three the same way, and its
+    /// comment records why 1049 in particular must come from the property:
+    /// `cmdDecRqm`'s switch does not carry it, so a `DECRQM` query answers
+    /// "unknown". Caller holds `terminalLock`.
+    private func currentModes() -> TerminalScreen.ChildModes {
+        TerminalScreen.ChildModes(
+            bracketedPaste: terminal.bracketedPasteMode,
+            applicationCursor: terminal.applicationCursor,
+            alternateScreen: terminal.isCurrentBufferAlternate)
+    }
+
+    /// `DECTCEM` (mode 25) through the collecting delegate. Caller holds
+    /// `terminalLock`.
+    ///
+    /// A terminal that does not answer is read as a visible cursor, which is
+    /// the state a terminal is in until a program hides it — the same default
+    /// the mode itself has.
+    private func cursorIsVisible() -> Bool {
+        let reader = DelegateModeReader(terminal: terminal, delegate: delegate)
+        delegate.beginCollectingReplies()
+        defer { delegate.endCollectingReplies() }
+        guard let answer = reader.requestMode(25, decPrivate: true) else { return true }
+        return answer == 1
+    }
+
+    /// How long ago this emulator last consumed a byte, in milliseconds, never
+    /// negative. Caller holds `terminalLock`.
+    ///
+    /// Clamped at zero rather than trusted: the clock is injected, and a seam
+    /// that ever moved backwards would otherwise produce an age the screen type
+    /// refuses — turning a test double's mistake into a failed machine read.
+    private func ageMilliseconds() -> Int {
+        let since = lastByteAt ?? adoptedAt
+        let elapsed = since.duration(to: monotonicNow())
+        let milliseconds =
+            elapsed.components.seconds * 1_000
+            + elapsed.components.attoseconds / 1_000_000_000_000_000
+        return Int(max(0, milliseconds))
+    }
+
     /// Serializes the whole terminal — modes, scrollback, viewport, cursor —
     /// into bytes that reconstruct it elsewhere.
     ///
@@ -1231,6 +1420,10 @@ private final class HolderEmulator: @unchecked Sendable {
     /// switched from forwarding to collecting for the duration, which is also
     /// how `DelegateModeReader` reads the answers at all. This is the
     /// daemon-side twin of the app's quiet ingest, in the opposite direction.
+    ///
+    /// Those queries feed the `Terminal` directly rather than through `feed`,
+    /// so they do not stamp `lastByteAt` — an attach must not make a session
+    /// that has been silent for an hour report an age of zero.
     func snapshotPreamble(maxScrollbackLines: Int) -> Data {
         terminal.terminalLock.withLock {
             let reader = DelegateModeReader(terminal: terminal, delegate: delegate)

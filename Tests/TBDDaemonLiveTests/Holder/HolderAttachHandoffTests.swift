@@ -205,6 +205,11 @@ struct HolderAttachHandoffTests {
     /// `reader(for:) != nil` is therefore not evidence the daemon is on the
     /// pty, and this suite no longer uses it as such. `isDraining` is the
     /// honest instrument: it reads the drain thread's own flag.
+    ///
+    /// **This is where `staleDaemon` comes from**, and it is asserted here
+    /// because it is the only place the state is real: a suspended reader
+    /// holding the screen it had at the attach, answering a machine read that
+    /// used to get an error saying the session was gone.
     @Test func acknowledgingAnAttachHandsTheSessionToTheViewer() async throws {
         let fixture = try await AttachFixture.start(command: Self.echoJob)
         defer { fixture.tearDown() }
@@ -215,6 +220,8 @@ struct HolderAttachHandoffTests {
         #expect(await pollUntil("the job's answer before the attach") {
             await fixture.reader.renderScreen().contains("GOT:BEFORE-ATTACH")
         })
+        // And the live store says so while it is still live.
+        #expect(try await fixture.reader.screen(maxLines: 50).source == .daemon)
 
         let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
         defer { close(vend.ptyFD) }
@@ -241,12 +248,15 @@ struct HolderAttachHandoffTests {
             await !retained.isDraining,
             "the daemon is still draining a pty it handed to a viewer")
 
-        // Retained with its contents, not merely retained: the screen the
-        // daemon was holding at the attach is still there to answer with.
-        let held = await retained.renderScreen()
-        #expect(held.contains("GOT:BEFORE-ATTACH"), """
-            the retained emulator lost the screen it was holding: \(held)
+        // The machine read a person's open session now gets: labelled as the
+        // frozen store it is, and carrying the screen as it stood at the
+        // attach rather than an error naming the wrong cause.
+        let screen = try await retained.screen(maxLines: 50)
+        #expect(screen.source == .staleDaemon)
+        #expect(screen.output.contains("GOT:BEFORE-ATTACH"), """
+            the retained emulator lost the screen it was holding: \(screen.output)
             """)
+        #expect(await retained.modeReading().source == .staleDaemon)
 
         // And the session belongs to the viewer: an adoption must refuse it
         // rather than build the second reader that would steal its bytes.
