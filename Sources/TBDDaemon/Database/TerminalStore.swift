@@ -1757,11 +1757,16 @@ public struct TerminalStore: Sendable {
     /// it, and a late `SessionEnd` from the process TBD itself killed would
     /// otherwise rewrite a deliberate `.manual` park into `.exited`.
     ///
-    /// `reportedIncarnationID` is the hook's own process-incarnation nonce. A
-    /// mismatch means the hook describes a process TBD has already replaced, so
-    /// stamping would park a live successor; nil means the hook predates the
-    /// nonce and cannot be checked, which is the same reading every other hook
-    /// handler gives it.
+    /// `reportedIncarnationID` is the hook's own process-incarnation nonce,
+    /// checked by exact equality against the record's — the same reading
+    /// `applySessionStart`, `applyActivityObservation` and
+    /// `updateSessionIDIfIncarnationMatches` each give it. A mismatch means the
+    /// hook describes a process TBD has already replaced, so stamping would
+    /// park a live successor. A `nil` report matches only a record that still
+    /// carries no incarnation of its own — once TBD mints one (a replacement
+    /// launch, via `updateTmuxIDs`), a delayed `SessionEnd` from the
+    /// pre-incarnation predecessor process reads as a mismatch too, not as an
+    /// unchecked report.
     ///
     /// The stamp is tmux-only. On a holder-backed row the Claude process IS the
     /// holder's whole job: there is no shell left in the pane for a send to
@@ -1782,10 +1787,8 @@ public struct TerminalStore: Sendable {
             }
             guard record.transport != TerminalTransport.holder.rawValue else { return false }
             guard record.hibernatedAt == nil else { return false }
-            if let reportedIncarnationID {
-                guard record.sessionIncarnationID == reportedIncarnationID.uuidString else {
-                    return false
-                }
+            guard record.sessionIncarnationID == reportedIncarnationID?.uuidString else {
+                return false
             }
             record.hibernatedAt = date
             record.hibernateReason = HibernateReason.exited.rawValue

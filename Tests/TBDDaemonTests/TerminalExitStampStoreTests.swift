@@ -70,6 +70,26 @@ struct TerminalExitStampStoreTests {
         #expect(row.hibernatedAt == nil)
     }
 
+    /// The mirror of the mismatch above, from the other side: a hook that
+    /// PREDATES the nonce (`reportedIncarnationID: nil`) must not stamp a row
+    /// TBD has since minted a durable incarnation for. `updateTmuxIDs` is the
+    /// production path that mints one on a replacement launch; the guard has
+    /// to read it as exact equality (nil matches only nil), not as "skip the
+    /// check whenever the report is nil" — a delayed `SessionEnd` from the
+    /// pre-incarnation predecessor process must not park a live successor.
+    @Test func stampDeclinesANilReportAgainstANamedIncarnation() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let terminal = try await makeTerminal(db)
+        try await db.terminals.updateTmuxIDs(id: terminal.id, windowID: "@2", paneID: "%2")
+
+        let changed = try await db.terminals.stampSessionExited(
+            id: terminal.id, reportedIncarnationID: nil, at: stamp)
+
+        #expect(!changed)
+        let row = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(row.hibernatedAt == nil)
+    }
+
     /// A holder-backed row is never stamped. The holder's whole job is the
     /// Claude process, so there is no shell for a send to mis-execute, and the
     /// coordinator's wake respawns into a tmux window it cannot use — a park
