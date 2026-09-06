@@ -539,9 +539,7 @@ actor HolderRegistry {
             throw error
         }
 
-        slots[terminalID] = .adopted(adoption.reader)
-        statuses[terminalID] = adoption.description.status
-        drainLoopsStarted += 1
+        publish(reader: adoption.reader, status: adoption.description.status, for: terminalID)
         Self.logger.info(
             """
             spawned and adopted a holder for session \(terminalID.uuidString, privacy: .public): \
@@ -900,11 +898,7 @@ actor HolderRegistry {
                 """)
             throw Error.superseded(terminalID: terminalID)
         }
-        slots[terminalID] = .adopted(adoption.reader)
-        statuses[terminalID] = adoption.description.status
-        drainLoopsStarted += 1
-        liveDrainLoops += 1
-        peakLiveDrainLoops = max(peakLiveDrainLoops, liveDrainLoops)
+        publish(reader: adoption.reader, status: adoption.description.status, for: terminalID)
         Self.logger.info(
             """
             adopted the holder for session \(terminalID.uuidString, privacy: .public): child \
@@ -2214,6 +2208,26 @@ actor HolderRegistry {
             await task.value
             clearIfStillReleasing(task, for: terminalID)
         }
+    }
+
+    /// Publishes an adopted reader into its slot, records the status that came
+    /// with it, and counts the drain loop it carries.
+    ///
+    /// The one publish site for both callers — `spawn` and `beginAdoption` —
+    /// because the counters only mean anything if *every* publish touches all
+    /// three. They diverged once: `spawn` incremented `drainLoopsStarted`
+    /// alone, so `stopPublished`'s unconditional decrement drove
+    /// `liveDrainLoops` negative for a spawned session, and
+    /// `peakLiveDrainLoops` could not see a second loop running beside a
+    /// spawned one — the exact byte theft that counter exists to catch.
+    private func publish(
+        reader: HolderReader, status: HolderChildStatus, for terminalID: UUID
+    ) {
+        slots[terminalID] = .adopted(reader)
+        statuses[terminalID] = status
+        drainLoopsStarted += 1
+        liveDrainLoops += 1
+        peakLiveDrainLoops = max(peakLiveDrainLoops, liveDrainLoops)
     }
 
     /// Stops a reader this registry published, and drops it from the live count
