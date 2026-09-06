@@ -245,8 +245,10 @@ class SignalTargets:
     be handed over the same way once the child has a name), because the
     fork may already exist under a name nothing has been handed yet; a
     `--print-env` server stops serving; otherwise nothing is running that can
-    take it, so it is recorded in `unowned_signum` for the next
-    `raise_if_stopped` to turn into a `Terminated`.
+    take it, so it is appended to `unowned_signums` — a list, because two can
+    land back-to-back with nothing running between them — and the next
+    `raise_if_stopped` pops the first to turn into a `Terminated`, leaving any
+    further ones for `main`'s cleanup to fold into `late_signums`.
     """
 
     def __init__(self) -> None:
@@ -263,9 +265,12 @@ class SignalTargets:
         # signal that landed while finishing and one recorded as unowned that
         # nothing unwound, and reporting one of the two is a silent drop.
         self.late_signums: list[int] = []
-        # A stop signal that arrived with nothing running that could take it.
-        # The handler only records it; `raise_if_stopped` is what unwinds.
-        self.unowned_signum: int | None = None
+        # Every stop signal that arrived with nothing running that could take
+        # it, in arrival order. The handler only appends; `raise_if_stopped`
+        # pops the first to unwind, leaving any further ones for `main`'s
+        # cleanup to fold into `late_signums` rather than lose them to a
+        # single slot's overwrite.
+        self.unowned_signums: list[int] = []
 
 
 SIGNAL_TARGETS = SignalTargets()
@@ -339,9 +344,10 @@ def handle_stop_signal(signum: int, _frame: Any) -> None:
     observed under load.
 
     So every branch here records or forwards and returns. A signal nobody can
-    take is parked in `unowned_signum`, and `raise_if_stopped` — called from
-    the main path, where an exception is a normal unwind — is what turns it
-    into a `Terminated`.
+    take is appended to `unowned_signums`, and `raise_if_stopped` — called
+    from the main path, where an exception is a normal unwind — pops the
+    first into a `Terminated`, leaving any later one to be reported rather
+    than lost.
     """
     if SIGNAL_TARGETS.finishing:
         # The child has already been waited for and the wrapper is at most a
@@ -365,7 +371,7 @@ def handle_stop_signal(signum: int, _frame: Any) -> None:
     if event is not None:
         event.set()
         return
-    SIGNAL_TARGETS.unowned_signum = signum
+    SIGNAL_TARGETS.unowned_signums.append(signum)
 
 
 def raise_if_stopped() -> None:
@@ -382,11 +388,14 @@ def raise_if_stopped() -> None:
     write or a socket bind, so recording rather than raising delays the exit
     by microseconds; the phases that really do wait — `claude` running, the
     `--print-env` server serving — each own the signal themselves and never
-    reach here.
+    reach here. Two truly ownerless signals can still land back-to-back in
+    that stretch, which is why `unowned_signums` is a list rather than a
+    slot: only the first is popped here to become the stop, and whatever is
+    left waits for `main`'s cleanup to fold it into `late_signums`, in the
+    order it arrived.
     """
-    signum = SIGNAL_TARGETS.unowned_signum
-    if signum is not None:
-        SIGNAL_TARGETS.unowned_signum = None
+    if SIGNAL_TARGETS.unowned_signums:
+        signum = SIGNAL_TARGETS.unowned_signums.pop(0)
         raise Terminated(signum)
 
 
@@ -505,20 +514,23 @@ def run_claude(binary: str, claude_args: list[str], env: dict[str, str]) -> int:
         # A signal queued across the spawn takes that same route rather than a
         # shortcut of its own. It is the earlier of the two — it landed while
         # `spawning` was still set — so it is the one that unwinds and owns the
-        # exit status, and an ownerless signal recorded after it is left in
-        # place for `main` to promote into the exiting summary, which reports
-        # both. Raising it ahead of the latch, as an unmasked shortcut here
-        # once did, left `finishing` unset for the whole unwind: a further
-        # signal arriving in that stretch was recorded as unowned and clobbered
-        # the record already sitting there.
+        # exit status, and any ownerless signal recorded after it is left in
+        # `unowned_signums` for `main` to promote into the exiting summary,
+        # which reports all of them. Raising ahead of the latch, as an
+        # unmasked shortcut here once did, left `finishing` unset for the
+        # whole unwind: a further signal arriving in that stretch was
+        # recorded as unowned too, which a single slot would have let
+        # overwrite the one already sitting there — the list is what keeps
+        # both.
         blocked = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
         try:
-            if queued is None:
+            if queued is None and SIGNAL_TARGETS.unowned_signums:
                 # `raise_if_stopped`'s job, done without raising: an exception
                 # must not leave this block before the latch is set, so the
-                # `Terminated` is born below instead.
-                queued = SIGNAL_TARGETS.unowned_signum
-                SIGNAL_TARGETS.unowned_signum = None
+                # `Terminated` is born below instead. Only the first is taken
+                # as the stop; any further ones stay in `unowned_signums` for
+                # `main`'s cleanup to fold into `late_signums`.
+                queued = SIGNAL_TARGETS.unowned_signums.pop(0)
             SIGNAL_TARGETS.finishing = True
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
@@ -683,7 +695,28 @@ def main(argv: list[str]) -> int:
     while a SIGINT arriving with no controlling terminal or from the background
     is forwarded like any other. SIGTERM is the signal for stopping the wrapper
     and its child from outside.
+
+    `SIGNAL_TARGETS` is module-level so the handler can reach it without a
+    closure, which means it also outlives a single call: a process that calls
+    `main` more than once (the in-process tests do) would otherwise start a
+    run already `finishing` from the previous one's own cleanup — swallowing
+    every stop signal instead of unwinding or forwarding it — and would report
+    a `late_signums` entry that a *previous* run answered as this run's own.
+    Resetting the three fields below, before a single handler is installed,
+    closes both: nothing can race the reset, because the handler is not
+    hooked up until `install_signal_handlers` returns just after it.
     """
+    SIGNAL_TARGETS.late_signums = []
+    SIGNAL_TARGETS.unowned_signums = []
+    SIGNAL_TARGETS.finishing = False
+    # `child`, `spawning`, `pending_signum` and `serving_event` need no reset
+    # here: each already returns to its rest value (`None`/`False`) on every
+    # exit from the run that sets it — `run_claude`'s and
+    # `serve_until_signalled`'s own `finally` blocks — so a previous run never
+    # leaves one of them in a state this run could misread. `pending_signum`
+    # is the partial exception: it is only ever consulted inside `run_claude`,
+    # immediately after that same function clears it, so a stale value between
+    # runs is never read.
     previous_handlers = install_signal_handlers()
     try:
         if "--" in argv:
@@ -755,20 +788,19 @@ def main(argv: list[str]) -> int:
             # their own way out — that covers the window between the child
             # exiting and control reaching this line.
             SIGNAL_TARGETS.finishing = True
-            # A signal recorded as unowned but never unwound — one that landed
-            # in the instant between a `raise_if_stopped` and the latch that
-            # gives the next phase an owner — is reported with the late ones
-            # rather than vanishing. On the `Terminated` route there is
-            # nothing here to promote: raising cleared the record. Cleared
-            # either way, so a signal this run already answered cannot unwind
-            # the next one in a process that calls `main` more than once.
+            # Every signal recorded as unowned but never popped by
+            # `raise_if_stopped` — one that landed in the instant between a
+            # check and the latch that gives the next phase an owner, or a
+            # second one that landed after the first was already popped and
+            # raised — is reported with the late ones rather than vanishing.
             #
-            # Prepended, not appended: such a record was made while `finishing`
-            # was still unset, so it predates every signal the handler took
-            # during the unwind, and the summary reads in arrival order.
-            if SIGNAL_TARGETS.unowned_signum is not None:
-                SIGNAL_TARGETS.late_signums.insert(0, SIGNAL_TARGETS.unowned_signum)
-            SIGNAL_TARGETS.unowned_signum = None
+            # Prepended, not appended: these records were made while
+            # `finishing` was still unset, so they predate every signal the
+            # handler took during the unwind, and the summary reads in
+            # arrival order.
+            if SIGNAL_TARGETS.unowned_signums:
+                SIGNAL_TARGETS.late_signums[0:0] = SIGNAL_TARGETS.unowned_signums
+            SIGNAL_TARGETS.unowned_signums = []
             if sandbox is not None:
                 if keep:
                     report([f"sandbox kept at {sandbox}"])
