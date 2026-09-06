@@ -4104,9 +4104,20 @@ public struct TerminalSessionEndedParams: Codable, Sendable, Equatable {
     /// Process incarnation planted by TBD before a managed replacement starts.
     /// Optional so older clients' payloads continue to decode unchanged.
     public let sessionIncarnationID: UUID?
-    public init(terminalID: UUID, sessionIncarnationID: UUID? = nil) {
+    /// Claude Code's `SessionEnd` hook `reason`, verbatim and unclassified —
+    /// `logout`, `clear`, `prompt_input_exit`, `other`, or a value this build has
+    /// never heard of. Carried, never parsed for meaning; the daemon files it
+    /// through `SessionEndReason.parksTheTerminal(_:)`, whose vocabulary is one
+    /// edit rather than a rule spread across three processes.
+    ///
+    /// Optional because `~/.local/bin/tbd` is routinely stale relative to a
+    /// running daemon: an older CLI sends no `reason`, which reads as "we do not
+    /// know" and parks nothing.
+    public let reason: String?
+    public init(terminalID: UUID, sessionIncarnationID: UUID? = nil, reason: String? = nil) {
         self.terminalID = terminalID
         self.sessionIncarnationID = sessionIncarnationID
+        self.reason = reason
     }
 }
 
