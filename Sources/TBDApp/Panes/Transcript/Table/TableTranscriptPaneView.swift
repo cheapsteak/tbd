@@ -289,6 +289,13 @@ struct TableTranscriptPaneView: View {
                         // table is its sibling in this stack and an AppKit view
                         // besides, so it is stated here which of the two paints
                         // on top rather than left to stacking order.
+                        //
+                        // This lifts the WHOLE composer subtree, so an open menu
+                        // also paints over the table's own bottom-leading
+                        // `jumpToBottomButton` overlay when the transcript is
+                        // scrolled up. That is intended: the menu is a transient
+                        // popup and, while it is open, it owns the pane. Escape
+                        // or a token change closes it and the button is back.
                         .zIndex(1)
                 }
             }
