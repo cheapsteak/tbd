@@ -197,7 +197,7 @@ struct ComposerSendCoordinatorTests {
     /// waiter that simply never answers is released by advancing virtual time
     /// past the timeout — which is the only way a 45-second bound is testable
     /// at all, and the reason the coordinator takes a clock.
-    @Test func theHoldTimesOutOnTheInjectedClock() async throws {
+    @Test(.clockDriven) func theHoldTimesOutOnTheInjectedClock() async throws {
         let recorder = Recorder()
         let clock = EventDrivenTestClock()
         let coordinator = ComposerSendCoordinator(
@@ -229,7 +229,22 @@ struct ComposerSendCoordinatorTests {
             text: "hi", paths: [:], state: .notRunning(exited: true),
             terminalID: UUID(), worktreeID: UUID())
 
-        try await clock.requireAdvanceWhenArmed(by: ComposerSendCoordinator.wakeHoldTimeout)
+        // **Wait for the sleeper, then advance — on the fast pass's budget, not
+        // on the handshake's.** Three things have to happen before the timeout
+        // child registers anything: the `async let` child has to get a thread,
+        // `send` has to run its `wake` double and reach the task group *on the
+        // main actor* — a process-wide serialization point every other
+        // `@MainActor` test in the pass queues on — and the group's timeout child
+        // has to get a thread of its own. None of that is the coordinator being
+        // slow, so the bound belongs to `TestDeadlines.saturatedPass` (90 s): the
+        // clock's 45 s default sits *below* fast pass 2's measured p90 per-test
+        // latency (51.4 s, max 55.3 s), which is how this test came back red on
+        // CI while passing on an idle machine. Nothing in the doubles can hold
+        // the group back — the waiter double releases the main actor at its first
+        // suspension and the timeout child never touches it — so the wait only
+        // ever pays for scheduling.
+        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        await clock.advance(by: ComposerSendCoordinator.wakeHoldTimeout)
 
         guard case .failed(let message) = await outcome else {
             Issue.record("the hold must expire on the injected clock")
