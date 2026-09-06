@@ -165,9 +165,15 @@ stale (`2026-08-30-pty-holder-session-transport-design.md:548-553`).
   For `viewer`, the app reports its own monotonic interval since its last
   byte and the daemon forwards it; the interval is a duration, so no clock
   has to be shared.
-- **`output: String`** – the lines joined with `\n`, kept for one reason:
-  scripts and skills read `tbd terminal output` today and the CLI prints it.
-  It is derived from `lines` and carries no information of its own.
+
+The screen is one field short of that list. **`output: String`** — the lines
+joined with `\n` — is kept for one reason, that scripts and skills read `tbd
+terminal output` today and the CLI prints it, and it lives at the top level of
+`TerminalOutputResult` rather than inside the screen: it is derived from
+`lines`, carries no information of its own, and a copy nested in the screen
+would put the same characters on the wire twice over for no consumer at all.
+The Swift-side screen exposes it as a computed property, so one derivation
+serves both.
 
 The typed screen is the answer of the existing `terminal.output` method, not
 a sibling method beside it. A second method would leave the first one
@@ -212,12 +218,12 @@ design builds is the pull the model has always required.
 - **Viewer holds the pty and does not answer** – the pull is bounded on an
   injected clock. On expiry the daemon answers from the emulator it suspended
   at attach, `source: .staleDaemon`, `age` per the one rule above. The
-  emulator is retained across an attach for exactly this — it is not stopped
-  at the acknowledgement, only suspended, which is what the transport spec's
-  "frozen-at-attach" fallback assumed and the current release path does not
-  do (`HolderRegistry.swift:1416-1431` stops it). The memory cost is one
-  emulator per attached session, which is the cost the transport spec already
-  budgeted for every session.
+  emulator is retained across an attach for exactly this — the acknowledgement
+  suspends the daemon's reader and never stops it
+  (`HolderRegistry.confirmAttach`), which is what the transport spec's
+  "frozen-at-attach" fallback assumes. The memory cost is one emulator per
+  attached session, which is the cost the transport spec already budgeted for
+  every session.
 - **No reader at all** – the session is gone or never adopted. An error, as
   today, and the error says which.
 
@@ -598,7 +604,7 @@ two entries struck.
   only pushes deltas today; a request-reply pair on it is a new direction on
   a channel with no reply discipline, where the sidecar already has one
   (`injection` / `injectionAck`).
-- **Stop the daemon's emulator at attach, as today.** Makes `staleDaemon` an
+- **Stop the daemon's emulator at attach.** Makes `staleDaemon` an
   empty screen with an age — honest and useless. Suspending it costs one
   emulator per attached session, which the transport spec budgets for every
   session regardless.

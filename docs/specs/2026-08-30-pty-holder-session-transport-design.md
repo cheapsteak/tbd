@@ -415,14 +415,15 @@ already written directly is recorded and dropped, never used to retract or
 dedupe the write that happened; acking before writing would trade a visible
 duplicate for exactly the invisible loss this rejects.
 
-One attached state does not fail open. Once a viewer has *acknowledged* its
-attach, the daemon has released its reader and closed its descriptor, so a
-fallback has nothing to write to and the sender is told the send did not land.
-Nothing is lost silently — the caller is told and the actuation row records a
-transport failure — but there the fallback is a report rather than a write.
-Closing it means the daemon keeping a **write-only** dup across an attach; the
+The fallback has a descriptor to write to in every attached state, because
+the daemon's reader is retained across an attach rather than released at the
+acknowledgement: it is suspended, off the pty, and still holding its dup. The
 one-reader invariant is about readers, and multiple writers to a master are
-fine.
+fine. That retention is also what keeps the daemon's emulator available as
+the frozen-at-attach store described under "Two stores, reconciled on demand"
+below, and the emulator's modes are what
+[`2026-09-05-child-as-contract-party-design.md`](2026-09-05-child-as-contract-party-design.md)
+composes input against.
 
 The viewer's half of the arrangement is what keeps an injection out of a
 paste's markers. Its outgoing queue is the only place that sees both the

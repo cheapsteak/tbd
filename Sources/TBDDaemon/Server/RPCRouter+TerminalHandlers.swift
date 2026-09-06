@@ -1900,14 +1900,29 @@ extension RPCRouter {
         return try RPCResponse(result: TerminalOutputResult(output: trimmed))
     }
 
-    /// The holder half of `terminal.output`: render the daemon's own emulator
-    /// for a session whose pty master it is draining.
+    /// The holder half of `terminal.output`: the typed screen, from the
+    /// daemon's own emulator.
     ///
-    /// A missing reader is reported rather than papered over. It means the
-    /// registry never adopted this session — the holder is gone, or startup
-    /// adoption found it unreachable — and an empty screen would read as "the
-    /// session is quiet", which is a different and much more comfortable claim
-    /// than the true one.
+    /// **A session a person has open is answerable.** The daemon's reader is
+    /// retained across an attach — suspended, holding the screen as it stood
+    /// when the viewer arrived — so this reads it and labels the answer
+    /// `staleDaemon` with an age rather than failing. Before the reader was
+    /// retained, a machine read of any open session returned an error saying
+    /// the session was gone, which was both wrong and the most comfortable
+    /// possible wrong answer.
+    ///
+    /// A missing reader is still reported rather than papered over. It means
+    /// the registry has no reader to hand out: the holder is gone, startup
+    /// adoption found it unreachable, or the slot is mid-transition — an attach
+    /// in flight, or a release running — since `reader(for:)` answers only for
+    /// an adopted slot. The error names all three and says which of them a
+    /// retry helps, because an empty screen would read as "the session is
+    /// quiet", a different and much more comfortable claim than the true one.
+    ///
+    /// **A refused projection is an error, never an empty screen.** The screen
+    /// type refuses a row carrying a control character, and such a row is a bug
+    /// in the render rather than a state a session can be in; the caller is
+    /// told which line, so the bug is findable.
     private func holderTerminalOutput(
         terminal: Terminal,
         params: TerminalOutputParams
@@ -1919,15 +1934,23 @@ extension RPCRouter {
         guard let reader = await holderRegistry.reader(for: terminal.id) else {
             return RPCResponse(
                 error: "No live holder reader for terminal \(terminal.id); "
-                    + "its session is gone or was never adopted")
+                    + "its session is gone, was never adopted, or is mid-transition "
+                    + "(being adopted or released); retry if it was just created "
+                    + "or is being closed")
         }
         let lines = params.lines ?? 50
         // Rendered to the requested depth directly. The tmux path asks for a
         // whole pane and trims afterwards because `capture-pane` has no such
         // knob; the emulator does, and going through it means the scrollback
         // above the viewport is available rather than discarded.
-        let output = await reader.renderScreenWithScrollback(maxLines: lines)
-        return try RPCResponse(result: TerminalOutputResult(output: output))
+        let screen: TerminalScreen
+        do {
+            screen = try await reader.screen(maxLines: lines)
+        } catch {
+            return RPCResponse(
+                error: "Could not project terminal \(terminal.id)'s screen: \(error)")
+        }
+        return try RPCResponse(result: TerminalOutputResult(screen: screen))
     }
 
     func handleTerminalConversation(_ paramsData: Data) async throws -> RPCResponse {
@@ -3169,31 +3192,53 @@ extension RPCRouter {
     /// actuation row, the same dispatch envelope, the same per-terminal
     /// serializer lane (this runs inside it). What changes is the destination —
     /// `HolderInjectionCourier` routes by whether a viewer owns the pty — and
-    /// three things this transport cannot do yet, each refused by name rather
+    /// two things this transport cannot do yet, each refused by name rather
     /// than by "the holder transport", so a caller learns which capability is
     /// missing:
     ///
-    /// - `--verify` has no delivery observation here (the verifier re-reads a
-    ///   tmux pane, and there is none).
+    /// - `--verify` has no delivery observation here.
     /// - `--keys` has no named-key → bytes mapping here (tmux owns that table).
-    /// - A daemon with no courier has no input path at all.
     ///
-    /// **The whole send is one message.** The body, its envelope and the
-    /// carriage return that submits it are composed here and handed to the
-    /// courier in a single call, because a payload split across two writes can
-    /// be split across a routing decision — and because `HolderReader.write`
-    /// completes partial writes in a loop, so one call is one uninterrupted
-    /// write. That is a deliberate divergence from the tmux arm, which pastes
-    /// the body and presses Enter as two separate acts.
+    /// A daemon with no courier has no input path at all, and says so.
     ///
-    /// The cost of that divergence is worth naming: the tmux arm wraps the
-    /// body in an *explicit* bracketed paste so a payload larger than the pty
-    /// buffer cannot have its trailing Enter absorbed by a TUI's paste-burst
-    /// detection. This arm cannot do the same, because the wrappers are correct
-    /// only when the child has bracketed-paste mode on and the daemon's holder
-    /// emulator does not expose that mode to callers. So a very large `--text
-    /// --submit` here can leave its Enter unpressed. Exposing the mode from the
-    /// emulator is what closes it.
+    /// **The whole send is one message.** The body, its envelope, its paste
+    /// markers and the carriage return that submits it are composed here and
+    /// handed to the courier in a single call, because a payload split across
+    /// two writes can be split across a routing decision — and because
+    /// `HolderReader.write` completes partial writes in a loop, so one call is
+    /// one uninterrupted write.
+    ///
+    /// **The child's modes decide the bytes.** `HolderSendComposition` wraps a
+    /// non-empty body in `ESC[200~`…`ESC[201~` exactly when the child has
+    /// bracketed paste on, and the submitting `\r` follows the end marker — so
+    /// the Enter is provably outside the paste, which is the property the tmux
+    /// arm gets from delivering in two acts and a mode-blind composition cannot
+    /// have at all. A child
+    /// that never asked for bracketing gets bare bytes, because markers it does
+    /// not understand are markers it prints.
+    ///
+    /// The oracle is consulted at composition time, which is a moment, and the
+    /// child can change a mode between that moment and the write. **How wide
+    /// that window is depends on which store answered.** A live store — the
+    /// daemon's own emulator, or a viewer that answered the pull — leaves only
+    /// the moment between the read and the write, which is the window tmux has
+    /// too: its server reads the pane's mode when it pastes, not when the bytes
+    /// land. A `staleDaemon` reading leaves the whole attach, because that
+    /// emulator stopped consuming bytes when the viewer took the pty, so a mode
+    /// the child changed since then is invisible here for as long as the viewer
+    /// holds it — possibly hours.
+    ///
+    /// Both windows are accepted, and the wide one is accepted by ruling: the
+    /// design's "Proceeding on stale modes" section weighs a rare wrong
+    /// composition against rails that fail closed exactly when supervision most
+    /// needs to send. What a wrong reading costs is a wrong composition, and a
+    /// wrong composition is visible in the composer or diagnosable from the
+    /// row's `modeSource` and its age — never a send that vanished. Read as on
+    /// when it is off, a shell that has bracketing off prints the `ESC[200~` and
+    /// `ESC[201~` markers around the text and runs the line it made of them.
+    /// Read as off when it is on, a multi-line body goes bare to a TUI that
+    /// turned bracketing on after the attach, and its paste-burst heuristic can
+    /// absorb the submitting `\r` into the text.
     private func performHolderSend(
         payload: TerminalSendPayload, terminal: Terminal, actuationID: String,
         actor: ActuationActor?, envelope: DispatchEnvelopeDisposition
@@ -3217,40 +3262,91 @@ extension RPCRouter {
                 actuationID, Self.holderKeysRefusal(terminalID: terminal.id))
         }
 
+        // Asked BEFORE anything is composed, because the answer decides the
+        // bytes. Two sources, in order: the test seam if one is installed, then
+        // the registry's own reader for this session.
+        //
+        // **A `nil` answer proceeds; it never refuses.** There is no reader,
+        // which means the session is gone or was never adopted — in which case
+        // the courier's write is about to fail and say so with the right cause.
+        // Refusing here would put a second, wronger refusal in front of that,
+        // and more importantly it would make every rail's send fail closed
+        // whenever the daemon cannot see a store: the moments that correlate
+        // exactly with supervision needing to send. The composition step's job
+        // is to record what it composed against, not to decide whether delivery
+        // is possible — the courier decides that, and it fails open.
+        let reading = await holderModeReading(terminalID: terminal.id)
+        let modeSource = reading.map { ActuationModeSource($0.source) } ?? .unavailable
+        // Absent for `unavailable`: nothing answered, so there is no store
+        // whose age this could be.
+        let modeAge = reading?.ageMilliseconds
+
         // Same envelope rule as the tmux arm, and for the same reasons — see
         // the long comment there. Empty text stays empty: `--text "" --submit`
         // is a real way to press Enter and must not start pasting a tag.
-        var message = Data()
-        if !text.isEmpty {
-            let composed = envelope == .attached && Self.carriesDispatchEnvelope(terminal)
+        let body = text.isEmpty
+            ? ""
+            : (envelope == .attached && Self.carriesDispatchEnvelope(terminal)
                 ? Self.dispatchEnvelope(
                     id: actuationID, from: (actor ?? .anonymous).dispatchLabel) + "\n" + text
-                : text
-            message.append(Data(composed.utf8))
-        }
-        // Carriage return, not newline: this is what a terminal delivers when
-        // Return is pressed, and what tmux's `send-keys Enter` sends.
-        if submit { message.append(0x0d) }
+                : text)
+        let message = HolderSendComposition.compose(
+            body: body, submit: submit,
+            bracketedPaste: reading?.modes.bracketedPaste ?? false)
 
         guard !message.isEmpty else {
-            // `--text ""` with no `--submit`: a well-formed act that names
-            // nothing to write. The tmux arm reaches the same outcome by
-            // skipping both of its sub-steps.
-            await finishActuation(actuationID, .dispatched)
+            // Nothing to write, reached two ways. `--text ""` with no
+            // `--submit` is a well-formed act that names nothing — the tmux arm
+            // reaches the same outcome by skipping both of its sub-steps. A
+            // body that was nothing but paste markers reaches it too, because
+            // the composition strips those before it tests for emptiness, and a
+            // caller's `ESC[201~` cannot be allowed to leave an open paste nor
+            // its `ESC[200~` to restart one.
+            //
+            // Provenance is recorded whenever the caller's text was non-empty:
+            // a composition did happen, against a store this asked, and what it
+            // composed against is a fact about the attempt however little the
+            // attempt came to. An empty text composed against nothing, so there
+            // is no guess to disclose.
+            let composed = !text.isEmpty
+            await finishActuation(
+                actuationID, .dispatched,
+                modeSource: composed ? modeSource : nil,
+                modeAgeMilliseconds: composed ? modeAge : nil)
             return .ok()
         }
 
         switch await courier.deliver(terminalID: terminal.id, bytes: message) {
         case .viewerWrote, .daemonWrote:
-            await finishActuation(actuationID, .dispatched)
+            await finishActuation(
+                actuationID, .dispatched,
+                modeSource: modeSource, modeAgeMilliseconds: modeAge)
             return .ok()
         case .notDelivered(let reason):
             // The transport, not a decision: the daemon tried to write and
             // could not. Classified as such so the record does not read like a
-            // rail that declined.
-            await finishActuation(actuationID, .transportFailed, error: reason)
+            // rail that declined. The provenance rides here too — what was
+            // composed is a fact about the attempt, not about its success.
+            await finishActuation(
+                actuationID, .transportFailed, error: reason,
+                modeSource: modeSource, modeAgeMilliseconds: modeAge)
             return RPCResponse(error: reason)
         }
+    }
+
+    /// What the child's modes are, as best this daemon can say.
+    ///
+    /// The seam first so a test can pin all three answers without a real
+    /// holder; otherwise the registry's reader for this session, which is
+    /// retained across an attach and so answers for an open session as well as
+    /// a detached one — `.daemon` while the daemon is draining, `.staleDaemon`
+    /// while a viewer holds the pty.
+    private func holderModeReading(terminalID: UUID) async -> TerminalModeReading? {
+        if let holderModeOracle {
+            return await holderModeOracle(terminalID)
+        }
+        guard let reader = await holderRegistry?.reader(for: terminalID) else { return nil }
+        return await reader.modeReading()
     }
 
     /// Close a holder send that never touched the transport. One helper because

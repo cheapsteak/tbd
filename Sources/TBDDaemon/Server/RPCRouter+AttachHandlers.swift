@@ -350,9 +350,10 @@ extension RPCRouter {
         return .descriptorNeverDelivered
     }
 
-    /// The holder half of `attach.ready`: the viewer is on the pty, so the
-    /// daemon's reader is released for good and the session becomes the
-    /// viewer's.
+    /// The holder half of `attach.ready`: the viewer is on the pty, so the pty
+    /// becomes the viewer's and the daemon's reader stays suspended and
+    /// retained — it is the session's screen and its mode oracle for as long as
+    /// the viewer holds the descriptor.
     ///
     /// There is no replay sequence to run here — the screen went out with the
     /// request, as the snapshot preamble — so this is only the ownership edge,

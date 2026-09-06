@@ -21,12 +21,12 @@ import Testing
 /// 123 columns into an 80-column grid — approached from the opposite direction,
 /// so it tracks the viewer whether or not the daemon touched the tty.
 ///
-/// The attached state used here is the one where the question is *observable*:
-/// an attach that was vended and never acknowledged. A confirmed attach
-/// releases the daemon's reader outright, so there is no emulator left to ask.
-/// This state is not contrived — it is the timed-out attach, where the viewer
-/// may already be live on its duplicate and the daemon is deliberately kept off
-/// the pty.
+/// The attached state used here is an attach that was vended and never
+/// acknowledged. The routing is the same on a confirmed attach — that reader is
+/// retained and suspended too — and this state is chosen because it is reached
+/// without a viewer standing in: the timed-out attach, where the viewer may
+/// already be live on its duplicate and the daemon is deliberately kept off the
+/// pty.
 ///
 /// **Tier 3.** A real `TBDHolder`, a real pty, and a real job.
 @Suite(.serialized)

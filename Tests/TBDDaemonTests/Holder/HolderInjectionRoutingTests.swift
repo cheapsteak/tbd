@@ -300,18 +300,16 @@ struct HolderInjectionRoutingTests {
     /// is not under test here and this test stays green whatever that
     /// ownership becomes — it is not a tripwire for the gap.
     ///
-    /// The gap itself: once a viewer has acknowledged an attach the daemon has
-    /// released its reader and closed its descriptor, so the fail-open branch
-    /// has nothing to write to. Nothing is lost *silently* — the caller is
-    /// told and `performHolderSend` records a transport failure — but the
-    /// fallback is not yet a write.
+    /// The situation itself is now a genuine fault rather than an attached
+    /// session's ordinary state: the daemon keeps its reader across an attach,
+    /// suspended, so its descriptor is open and the fail-open branch really
+    /// writes. `writeDirectly` throws only when the registry holds no reader at
+    /// all — the session is gone, was never adopted, or is mid-release.
     ///
     /// **`Daemon.swift`'s `writeDirectly` closure is covered by no test.** The
-    /// registry-level fact it rests on — an acknowledged attach leaves the
-    /// daemon with no reader for that session — is pinned live, in
-    /// `HolderAttachHandoffTests` ("the daemon kept a reader for a session it
-    /// no longer reads"). That is the assertion a write-only dup across an
-    /// attach would have to be reconciled with; it is not this one.
+    /// registry-level fact underneath it — that an acknowledged attach leaves
+    /// the daemon a suspended reader with an open descriptor — is pinned live,
+    /// in `HolderAttachHandoffTests`. This test pins only the propagation.
     @Test("With no descriptor and no viewer answer, nothing is written and the caller is told")
     func fallbackWithNoDaemonDescriptorReportsFailure() async throws {
         let harness = Harness()

@@ -20,9 +20,12 @@ struct HolderReconcileGateTests {
 
     // MARK: - Gate 2: a viewer owning the pty ends it
 
-    /// After `confirmAttach` the app holds the descriptor and the daemon has no
-    /// reader at all, so every probe below this gate would be asking about a
-    /// session somebody is looking at right now.
+    /// After `confirmAttach` the app holds the descriptor and the daemon's own
+    /// reader is suspended, so every probe below this gate would be asking
+    /// about a session somebody is looking at right now. The gate keys on the
+    /// viewer's claim rather than on the reader, deliberately: the daemon
+    /// retains its reader across an attach, so its presence says nothing about
+    /// who owns the pty.
     @Test func aViewerHoldingTheDescriptorEndsTheQuestioning() async throws {
         let fixture = try await HolderProcessFixture.start(command: "sleep 120")
         defer { fixture.tearDown() }
