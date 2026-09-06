@@ -183,6 +183,33 @@ import Testing
         #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == true)
     }
 
+    /// What a *reset* does to the tracked flag, pinned because the tracking is
+    /// by notification rather than by reading the emulator: a reset that
+    /// changed the cursor without saying so would leave this field disagreeing
+    /// with the terminal for as long as the session lived, and nothing else
+    /// here would notice.
+    ///
+    /// A soft reset (`DECSTR`, `CSI ! p`) shows the cursor and tells the
+    /// delegate, so the reading follows it out of hidden. A full reset (`RIS`,
+    /// `ESC c`) restores the visibility it found, so a hidden cursor stays
+    /// hidden across one. Both are asserted from hidden, which is the only
+    /// starting point at which either could diverge.
+    @Test("a soft reset shows the cursor and the tracking follows; a full reset preserves it")
+    func cursorVisibilityAcrossResets() async throws {
+        let harness = try Harness(columns: 40, rows: 8)
+        defer { harness.tearDown() }
+
+        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?25l"))
+        #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == false)
+        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[!p"))
+        #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == true)
+
+        await harness.reader.ingest(preamble: Self.data("\(Self.esc)[?25l"))
+        #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == false)
+        await harness.reader.ingest(preamble: Self.data("\(Self.esc)c"))
+        #expect(try await harness.reader.screen(maxLines: 8).cursor.visible == false)
+    }
+
     /// **A screen read must not feed the terminal.** This is the case that
     /// separates a tracked flag from a `DECRQM` probe.
     ///

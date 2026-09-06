@@ -42,6 +42,17 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
         /// Whether the child has asked for a visible cursor (`DECTCEM`, mode
         /// 25). A composer waiting for input and a program that has hidden the
         /// cursor to repaint look identical without it.
+        ///
+        /// **A tracked fact, not a probed one.** The holder producer keeps it
+        /// from the emulator's own notifications, because probing a parser that
+        /// may be mid-sequence would abort the child's sequence — so what this
+        /// field can promise is bounded by which changes the emulator
+        /// announces. Both resets stay inside that bound: a soft reset
+        /// (`DECSTR`, `CSI ! p`) shows the cursor and says so, and a full reset
+        /// (`RIS`) restores the visibility it found. A change made without a
+        /// notification would sit here undetected, and a bare `DECSET 25` would
+        /// not repair it, since an already-shown cursor is shown again silently
+        /// — the mechanism, and the bound, are `HolderReader`'s `cursorVisible`.
         public let visible: Bool
 
         public init(row: Int, column: Int, visible: Bool) {

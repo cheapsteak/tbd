@@ -1554,22 +1554,22 @@ private final class ReplyForwardingDelegate: TerminalDelegate {
     /// delegate from inside a parse, which always runs under `terminalLock`,
     /// and `HolderEmulator.screen` reads the flag under that same lock.
     ///
-    /// **One residual, and it is `DECSTR`.** A soft reset (`CSI ! p`,
-    /// `Terminal.cmdSoftReset`) clears `cursorHidden` by assignment, with no
-    /// delegate call, so a soft reset arriving while the cursor is hidden
-    /// leaves this reading hidden while the terminal is showing. `RIS` (`ESC
-    /// c`) does **not** have this problem, though its `setup(isReset:)` clears
-    /// the same field: `resetToInitialState` saves `cursorHidden` around the
-    /// call and restores it afterwards, so a full reset leaves the flag exactly
-    /// as it found it and this reading stays true.
+    /// **Both resets leave it true, by different mechanisms**, and each is
+    /// worth stating because a reset that moved the cursor silently would leave
+    /// this reading wrong for the rest of the session. A soft reset (`DECSTR`,
+    /// `CSI ! p`, `Terminal.cmdSoftReset`) shows the cursor and calls
+    /// `showCursor` on the delegate as its last act, so the flag follows it out
+    /// of hidden. A full reset (`RIS`, `ESC c`) makes no cursor call at all and
+    /// needs none: `resetToInitialState` saves `cursorHidden` around the
+    /// `setup(isReset:)` that clears it and restores it afterwards, so the
+    /// terminal ends where the flag already is.
     ///
-    /// The `DECSTR` residual self-corrects on the child's next
-    /// *hide-then-show* pair, not on a bare `DECSET 25`: `Terminal.showCursor`
-    /// returns early when `cursorHidden` is already false, so the call the flag
-    /// needs never happens until something has set it true again. A TUI hides
-    /// its cursor for a repaint and shows it afterwards, so in practice that is
-    /// the next repaint — but a child that soft-resets and only ever shows
-    /// reads hidden until it does hide once.
+    /// What a silent change *would* cost is why both are pinned in
+    /// `HolderScreenContractTests` rather than assumed. A divergence here does
+    /// not self-correct on a bare `DECSET 25`: `Terminal.showCursor` returns
+    /// early when `cursorHidden` is already false, so the delegate call the
+    /// flag needs never happens until something sets it true again, and only a
+    /// hide-then-show pair puts it back.
     private(set) var cursorVisible = true
 
     init(reply: @escaping @Sendable (ArraySlice<UInt8>) -> Void) {
