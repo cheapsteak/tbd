@@ -137,6 +137,23 @@ struct WakeOnTabActivationTests {
         #expect(toWake.isEmpty)
     }
 
+    /// Parked resumable terminal with hibernateReason == .exited
+    /// → NOT returned. `stampSessionExited` never replaces the pane with a
+    /// placeholder (unlike every other park path), so waking it on tab
+    /// activation would `respawn-window -k` the live shell Claude's exit
+    /// left behind, killing it. Excluded like `.manual`, different reason.
+    @Test func skipsExitedParkedTerminal() {
+        let state = AppState()
+        let wt = UUID()
+        let exited = UUID()
+        let tabID = UUID()
+        state.terminals[wt] = [terminal(exited, parked: true, reason: .exited)]
+        state.tabs[wt] = [Tab(id: tabID, content: .terminal(terminalID: exited), label: nil)]
+
+        let toWake = state.terminalIDsToWakeOnTabActivation(worktreeID: wt, tabIndex: 0)
+        #expect(toWake.isEmpty)
+    }
+
     /// Parked resumable with .auto reason in activated tab → included.
     @Test func wakesAutoParkedInActivatedTab() {
         let state = AppState()
