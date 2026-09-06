@@ -128,4 +128,88 @@ import Testing
             Self.occurrences(of: Self.start, in: composed) == 1,
             "the start marker appears more than once")
     }
+
+    // MARK: - A body that tries to close the paste itself
+
+    /// The break-out. A body carrying `ESC[201~` — one `--text "$(cat file)"`
+    /// away — closes the paste where it sits, so the rest of the body and the
+    /// submitting `\r` arrive as keystrokes: the exact defect the wrapping
+    /// exists to prevent, reached through content instead of chunk shape.
+    ///
+    /// Asserted as the whole `Data` *and* as a marker count, because they fail
+    /// differently: the equality says the composition is right, the count says
+    /// there is no second marker anywhere for a child to act on.
+    @Test("an end marker inside the body is removed rather than allowed to close the paste")
+    func embeddedEndMarkerIsRemoved() {
+        let body = "before\u{1b}[201~after"
+        let composed = HolderSendComposition.compose(
+            body: body, submit: true, bracketedPaste: true)
+
+        #expect(composed == Self.expected(body: "beforeafter", wrapped: true, submit: true))
+        #expect(
+            Self.occurrences(of: Self.end, in: composed) == 1,
+            "the composed message carries more than one end marker")
+        #expect(composed.last == 0x0d)
+        #expect(composed.dropLast().suffix(Self.end.count) == Self.end)
+    }
+
+    /// One replacing pass is not enough, and this is the body that shows it:
+    /// take the marker out of `ESC[2` + marker + `01~` and the neighbours join
+    /// into a fresh one. The scan retracts a marker as the byte completing it
+    /// is appended, so the output provably holds none.
+    @Test("a marker that would re-form across the removal is removed too")
+    func aReformingEndMarkerIsAlsoRemoved() {
+        let body = "\u{1b}[2\u{1b}[201~01~tail"
+        let composed = HolderSendComposition.compose(
+            body: body, submit: false, bracketedPaste: true)
+
+        #expect(composed == Self.expected(body: "tail", wrapped: true, submit: false))
+        #expect(Self.occurrences(of: Self.end, in: composed) == 1)
+    }
+
+    /// **Only the wrapped path touches the body.** With no paste open there is
+    /// nothing to break out of, and the bytes are the caller's to send — a
+    /// caller writing an end marker to a child that reads them literally is
+    /// entitled to have it arrive. Silently editing an unwrapped send would be
+    /// a second, invisible rule about what `terminal.send` delivers.
+    @Test("the same body unwrapped is delivered verbatim, marker included")
+    func anUnwrappedBodyKeepsItsEndMarker() {
+        let body = "before\u{1b}[201~after"
+        let composed = HolderSendComposition.compose(
+            body: body, submit: true, bracketedPaste: false)
+
+        #expect(composed == Self.expected(body: body, wrapped: false, submit: true))
+        #expect(
+            Self.occurrences(of: Self.end, in: composed) == 1,
+            "the caller's own end marker did not survive an unwrapped send")
+        #expect(Self.occurrences(of: Self.start, in: composed) == 0)
+    }
+
+    /// A body that is *nothing but* an end marker has nothing left to paste,
+    /// and the empty-body rule then applies to it: a bare Enter, not a pair of
+    /// markers wrapped around nothing. The stripping runs before the emptiness
+    /// test precisely so the two rules compose.
+    @Test("a body of only an end marker composes to a bare Enter")
+    func aBodyOfOnlyAnEndMarker() {
+        let composed = HolderSendComposition.compose(
+            body: "\u{1b}[201~", submit: true, bracketedPaste: true)
+
+        #expect(composed == Self.carriageReturn)
+        #expect(Self.occurrences(of: Self.end, in: composed) == 0)
+        #expect(Self.occurrences(of: Self.start, in: composed) == 0)
+    }
+
+    /// The start marker is deliberately *not* stripped: it opens nothing a
+    /// child has not already been told is open, so it cannot break out, and
+    /// removing it would edit a body for no gain. This pins the asymmetry so it
+    /// reads as a decision rather than an oversight.
+    @Test("a start marker inside the body is left alone")
+    func anEmbeddedStartMarkerIsLeftAlone() {
+        let body = "before\u{1b}[200~after"
+        let composed = HolderSendComposition.compose(
+            body: body, submit: false, bracketedPaste: true)
+
+        #expect(composed == Self.expected(body: body, wrapped: true, submit: false))
+        #expect(Self.occurrences(of: Self.start, in: composed) == 2)
+    }
 }

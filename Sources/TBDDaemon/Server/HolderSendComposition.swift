@@ -23,6 +23,18 @@ import Foundation
 /// **An empty body is never wrapped.** `--text "" --submit` is a real way to
 /// press Enter, and a bracketed paste of nothing is a pair of markers the child
 /// has to interpret for no reason — a shell at its prompt would show them.
+///
+/// **A wrapped body carries no end marker of its own.** `ESC[201~` inside the
+/// paste closes it early, so everything after it — the rest of the body and the
+/// submitting `\r` — arrives as keystrokes instead of text, which is precisely
+/// the failure the wrapping exists to prevent, reached by content rather than by
+/// chunk shape. `--text "$(cat some-file)"` is all it takes. An end marker
+/// inside a paste can only ever be a break-out: there is nothing a child could
+/// display for it, so removing it loses nothing a caller meant to send, and
+/// removal is done bytewise on the composed body so a marker cannot re-form
+/// across a removal. Only the wrapped path touches the body; an unwrapped send
+/// is delivered verbatim, because with no paste open there is nothing to break
+/// out of and the bytes are the caller's to send.
 enum HolderSendComposition {
     /// `ESC [ 2 0 0 ~` — the start of a bracketed paste.
     static let pasteStart = Data([0x1b, 0x5b, 0x32, 0x30, 0x30, 0x7e])
@@ -43,17 +55,40 @@ enum HolderSendComposition {
     /// - Returns: one `Data`, written in one call, so the message is never
     ///   interleaved with another writer's.
     static func compose(body: String, submit: Bool, bracketedPaste: Bool) -> Data {
+        // Stripped before the emptiness test, not after, so the two rules
+        // compose: a body that was nothing but an end marker has nothing left
+        // to paste, and wrapping it would put the markers the empty-body rule
+        // exists to avoid in front of the Enter.
+        let payload = bracketedPaste ? removingEndMarkers(from: Data(body.utf8)) : Data(body.utf8)
         var message = Data()
-        if !body.isEmpty {
-            if bracketedPaste {
-                message.append(pasteStart)
-                message.append(Data(body.utf8))
-                message.append(pasteEnd)
-            } else {
-                message.append(Data(body.utf8))
-            }
+        if !payload.isEmpty {
+            if bracketedPaste { message.append(pasteStart) }
+            message.append(payload)
+            if bracketedPaste { message.append(pasteEnd) }
         }
         if submit { message.append(submitByte) }
         return message
+    }
+
+    /// `body` with every `ESC[201~` taken out, so the only end marker in the
+    /// composed message is the one this type puts there.
+    ///
+    /// Written as an append-and-retract scan rather than a search-and-replace
+    /// because a single replacing pass is not enough: removing the marker from
+    /// `ESC[2` + `ESC[201~` + `01~` joins its neighbours into a fresh one. Here
+    /// a marker is retracted the moment the byte that completes it is appended,
+    /// so the invariant holds after every step and the output provably contains
+    /// none — in one pass over the body.
+    static func removingEndMarkers(from body: Data) -> Data {
+        let pattern = [UInt8](pasteEnd)
+        var kept: [UInt8] = []
+        kept.reserveCapacity(body.count)
+        for byte in body {
+            kept.append(byte)
+            if kept.count >= pattern.count, Array(kept.suffix(pattern.count)) == pattern {
+                kept.removeLast(pattern.count)
+            }
+        }
+        return Data(kept)
     }
 }
