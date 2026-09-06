@@ -4044,6 +4044,7 @@ extension RPCRouter {
         // Placed after the identity check above, so a hook this pass rejected
         // retracts nothing.
         if (try? await db.terminals.clearSessionExitStamp(id: terminal.id)) == true {
+            await broadcastExitStampChange(terminalID: terminal.id, parked: false)
             logger.debug("""
                 sessionEvent: cleared the exit stamp on terminal \
                 \(terminal.id.uuidString, privacy: .public)
@@ -4283,15 +4284,58 @@ extension RPCRouter {
                 """)
             return .ok()
         }
-        let stamped = (try? await db.terminals.stampSessionExited(
-            id: params.terminalID,
-            reportedIncarnationID: params.sessionIncarnationID,
-            at: now())) ?? false
+        // A thrown store error is NOT the same fact as a refused stamp, and
+        // collapsing the two into one `false` returns the feature to the bug it
+        // fixes — a terminal nobody parked, silently, at `.debug`. A refusal
+        // (`false`) stays a trace; a failure is an error.
+        let stamped: Bool
+        do {
+            stamped = try await db.terminals.stampSessionExited(
+                id: params.terminalID,
+                reportedIncarnationID: params.sessionIncarnationID,
+                at: now())
+        } catch {
+            logger.error("""
+                sessionEnded: stamping terminal \
+                \(params.terminalID.uuidString, privacy: .public) as exited FAILED, \
+                the row stays unparked: \(String(describing: error), privacy: .public)
+                """)
+            return .ok()
+        }
+        if stamped {
+            await broadcastExitStampChange(terminalID: params.terminalID, parked: true)
+        }
         logger.debug("""
             sessionEnded: terminal=\(params.terminalID.uuidString, privacy: .public) \
             reason=\(params.reason ?? "none", privacy: .public) stamped=\(stamped, privacy: .public)
             """)
         return .ok()
+    }
+
+    /// Publish an exit-stamp park or un-park on the same channel every other
+    /// writer of `hibernatedAt` uses (`HibernationCoordinator.broadcastHibernation`).
+    ///
+    /// The app applies `.terminalHibernationChanged` to its cached row IN PLACE,
+    /// and that is the only timely route: the parked view materializes on the
+    /// `isParked` flip and reads the row's snapshot once at creation, and
+    /// wake-on-focus filters on the cached `hibernateReason` — a value arriving
+    /// only in the next `terminal.list` refetch is too late for both. Without
+    /// this the moon appears whenever the app next happens to refetch.
+    ///
+    /// The row is re-read rather than reconstructed so the delta carries what
+    /// was actually committed, and `keepWarm`/`suspendedSnapshot` come from the
+    /// row for the same reason. A row that vanished between the write and the
+    /// read has nothing to publish about.
+    private func broadcastExitStampChange(terminalID: UUID, parked: Bool) async {
+        guard let row = try? await db.terminals.get(id: terminalID) else { return }
+        subscriptions.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(
+            terminalID: row.id,
+            worktreeID: row.worktreeID,
+            hibernated: parked,
+            keepWarm: row.keepWarm,
+            suspendedSnapshot: parked ? row.suspendedSnapshot : nil,
+            hibernateReason: parked ? row.hibernateReason : nil
+        )))
     }
 
     func handleTerminalActivityEvent(_ paramsData: Data) async throws -> RPCResponse {
