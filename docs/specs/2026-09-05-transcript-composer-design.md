@@ -190,10 +190,14 @@ therefore holds the text as sending until the session its own wake started
 reports in, and restores it on timeout. The hold is scoped to that one spawn,
 because a SessionStart on the same terminal is not evidence the composer's wake
 succeeded: a competing wake, a post-`--fork-session` recapture, and a person
-typing `claude --resume` in the pane all produce one. Every agent spawn already
-mints a session incarnation id, plants it in the spawned process's environment
-as `TBD_TERMINAL_INCARNATION_ID`, and gets it back on the hooks that process
-fires, so the discriminator exists and only needs returning: `terminal.wake`
+typing `claude --resume` in the pane all produce one. Every respawn that
+replaces a terminal's process, the wake path among them, already mints a
+session incarnation id, plants it in the spawned process's environment as
+`TBD_TERMINAL_INCARNATION_ID`, and gets it back on the hooks that process
+fires. A worktree's first spawn and an archive restore plant no such id, which
+is why a SessionStart without one never releases the hold. The discriminator
+therefore exists on the one path the composer uses and only needs returning:
+`terminal.wake`
 gains one additive optional field on its result, the incarnation id it minted,
 populated only on the `woken: true` path where a spawn actually happened. The
 app releases the hold on the SessionStart carrying that id and on no other. A
@@ -487,6 +491,9 @@ decides what is sent; the strip shows what is available.
 Each image is prepared in the app through ImageIO: decode, downscale to at most
 2000 pixels on the long edge with orientation applied, encode as PNG, and
 re-encode smaller if the result would exceed Claude Code's 5 MiB base64 cap.
+Both limits are Claude Code's own client-side caps, read from its binary: an
+image over 2000 pixels on either side is recompressed or refused there, so
+staying under them means the file arrives as sent.
 The thumbnail call passes the always-from-image option, because the if-absent
 variant can return a stale embedded EXIF thumbnail. Clipboard TIFF, clipboard
 PNG, and file drops share the path. The paste override reads the pasteboard
@@ -538,8 +545,11 @@ effect, and it runs only when a composer is shown.
 
 Two changes ship ahead of the composer with no flag, as bug fixes: the daemon's
 not-running refusal with its exit stamp and inspector rail, and the app passing
-the wake prompt it has never passed. The envelope option, the parts list, and
-the opt-in gate land with the composer.
+the wake prompt it has never passed. The wake-prompt wiring is inert until the
+composer exists: every parameter it adds is defaulted to nil, no existing call
+site passes a prompt, and a nil prompt encodes no field, so no input reaches a
+session through it before the flagged composer supplies one. The envelope
+option, the parts list, and the opt-in gate land with the composer.
 
 Graduation: after a soak with the toggle on, flip the default constant.
 
