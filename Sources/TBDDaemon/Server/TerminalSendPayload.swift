@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// What one `terminal.send` request is asking for, once its shape has passed
 /// `RPCRouter.validateSendShape`.
@@ -26,6 +27,11 @@ enum TerminalSendPayload: Sendable, Equatable {
     /// `verbatim` is the caller's string as written, which is what the record
     /// stores — the tokens are an implementation detail of delivery.
     case keys(names: [String], verbatim: String)
+    /// An ordered list of pieces, each delivered as its own bracketed paste,
+    /// then one Enter. `verify` is deliberately absent rather than defaulted:
+    /// the delivery observation re-reads a pane for ONE delivered payload, and a
+    /// multi-part send has no single payload to look for.
+    case parts([SendPart], submit: Bool)
 
     /// The `message` field of the request row. The caller's payload as written,
     /// for both kinds.
@@ -33,6 +39,18 @@ enum TerminalSendPayload: Sendable, Equatable {
         switch self {
         case .text(let text, _, _): return text
         case .keys(_, let verbatim): return verbatim
+        // The row records what the caller asked to deliver, in order, with the
+        // image parts named by path — which is what a human reading the
+        // actuation log needs in order to tell what arrived where. It is not the
+        // bytes: those are three pastes and an Enter, and no single string is
+        // the message.
+        case .parts(let parts, _):
+            return parts.map { part in
+                switch part {
+                case .text(let value): return value
+                case .imagePath(let path): return "[image \(path)]"
+                }
+            }.joined()
         }
     }
 
@@ -43,6 +61,7 @@ enum TerminalSendPayload: Sendable, Equatable {
         switch self {
         case .text(_, let submit, _): return submit
         case .keys: return nil
+        case .parts(_, let submit): return submit
         }
     }
 
@@ -53,6 +72,7 @@ enum TerminalSendPayload: Sendable, Equatable {
         switch self {
         case .text(_, _, let verify): return verify ? true : nil
         case .keys: return nil
+        case .parts: return nil
         }
     }
 

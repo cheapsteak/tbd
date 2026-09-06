@@ -2881,6 +2881,21 @@ extension RPCRouter {
             + "input path wired for it. Nothing was typed and its session is unchanged."
     }
 
+    /// The refusal `terminal.send` returns for a validated `.parts` payload
+    /// today. `validateSendShape` accepts parts (Task 2 of the composer send
+    /// path), but neither delivery arm — this one or the holder arm — yet
+    /// composes the per-part pastes; that lands with the case that actually
+    /// walks the list (Task 3). Refused by name, on both transports, so a
+    /// caller learns the payload was well-formed and the daemon simply cannot
+    /// act on it yet, rather than either crashing on an unhandled case or
+    /// silently dropping to a `default:` that would also swallow a real future
+    /// bug.
+    static func partsNotYetDeliverableRefusal(terminalID: UUID) -> String {
+        "terminal.send parts was refused: terminal \(terminalID) validated a well-formed "
+            + "parts payload, but delivery for parts is not implemented yet — nothing was "
+            + "sent. Send the pieces as separate --text sends for now."
+    }
+
     /// The refusal a text `terminal.send` gets for a terminal whose Claude
     /// process is gone.
     ///
@@ -3297,6 +3312,16 @@ extension RPCRouter {
                         key: key
                     )
                 }
+
+            case .parts:
+                // Shape-valid, not yet deliverable on this transport — see
+                // `partsNotYetDeliverableRefusal`. Refuse the same way every
+                // other well-formed-but-declined act in this function does:
+                // close the row that already exists rather than fall through
+                // to `.dispatched`.
+                let message = Self.partsNotYetDeliverableRefusal(terminalID: terminal.id)
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
             }
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
@@ -3397,6 +3422,13 @@ extension RPCRouter {
         case .keys:
             return await refuseHolderSend(
                 actuationID, Self.holderKeysRefusal(terminalID: terminal.id))
+        case .parts:
+            // Same "shape-valid, not yet deliverable" refusal as the tmux arm
+            // — see `partsNotYetDeliverableRefusal`. Not a holder-specific
+            // capability gap like the two refusals above: no transport
+            // composes the per-part pastes yet.
+            return await refuseHolderSend(
+                actuationID, Self.partsNotYetDeliverableRefusal(terminalID: terminal.id))
         }
 
         // Asked BEFORE anything is composed, because the answer decides the
@@ -3697,6 +3729,49 @@ extension RPCRouter {
     ) -> TerminalSendShape {
         let submit = params.submit == true
         let verify = params.verify == true
+
+        if let parts = params.parts {
+            // Exactly one payload kind, the rule the existing `(text, keys)`
+            // switch already enforces — extended rather than duplicated.
+            guard params.text == nil, params.keys == nil else {
+                return .malformed(
+                    "terminal.send takes exactly one payload: --text, --keys or parts, "
+                    + "not more than one")
+            }
+            guard !parts.isEmpty else {
+                return .malformed("terminal.send parts must name at least one part")
+            }
+            // A payload that is nothing but empty text names no act: every part
+            // is skipped at delivery, so this would press Enter on a composer
+            // nobody typed into.
+            let carriesSomething = parts.contains { part in
+                switch part {
+                case .text(let value): return !value.trimmingCharacters(
+                    in: .whitespacesAndNewlines).isEmpty
+                case .imagePath: return true
+                }
+            }
+            guard carriesSomething else {
+                return .malformed(
+                    "terminal.send parts must carry at least one non-empty text part or one "
+                    + "image path")
+            }
+            for case .imagePath(let path) in parts {
+                guard path.hasPrefix("/") else {
+                    return .malformed(
+                        "terminal.send image parts must name an absolute path; got \"\(path)\" "
+                        + "— a relative path would resolve against whatever directory the "
+                        + "receiving session happens to be in")
+                }
+            }
+            if verify {
+                return .malformed(
+                    "terminal.send --verify cannot be used with parts: the delivery observation "
+                    + "re-reads the pane for one delivered payload, and a multi-part send has no "
+                    + "single payload to look for")
+            }
+            return .valid(.parts(parts, submit: submit))
+        }
 
         switch (params.text, params.keys) {
         case (.some, .some):
