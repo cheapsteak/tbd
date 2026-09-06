@@ -173,6 +173,74 @@ struct OrphanGCAttachmentsTests {
         #expect(result.planned.contains("KEEP rows-unreadable attachments"))
     }
 
+    /// **An unreadable directory is not an empty one.** Reading its contents
+    /// through `try?` made a directory the sweep cannot open look like a
+    /// directory with nothing in it — and an empty orphan is reapable, so a
+    /// permissions problem destroyed the images it was hiding.
+    @Test func anUnreadableOrphanDirectoryIsKept() async throws {
+        let (home, restore) = isolateTBDHome()
+        defer { restore() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setTranscriptComposerEnabled(true)
+        let orphan = UUID()
+        let path = stage(orphan)
+        let directory = TBDConstants.attachmentsDir(worktreeID: orphan)
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: directory.path)
+        // Restored before teardown removes the tree: a mode-000 directory cannot
+        // be emptied, so leaving it would leak the fixture.
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        }
+
+        let result = await makeGC(db: db, home: home).sweep()
+
+        // Readable again before the assertions: `fileExists` on the staged file
+        // needs execute permission on its parent, which is what the fixture took
+        // away.
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        #expect(fm.fileExists(atPath: directory.path))
+        #expect(fm.fileExists(atPath: path))
+        #expect(result.planned.contains { $0.hasPrefix("KEEP contents-unreadable") })
+    }
+
+    /// An EMPTY orphan directory gets the floor too. It has nothing in it to age,
+    /// so its own mtime is the age — and a directory created moments ago is a
+    /// composer somebody has open, whose first image has not landed yet.
+    @Test func anEmptyOrphanYoungerThanTheFloorIsKept() async throws {
+        let (home, restore) = isolateTBDHome()
+        defer { restore() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setTranscriptComposerEnabled(true)
+        let orphan = UUID()
+        let directory = TBDConstants.attachmentsDir(worktreeID: orphan)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stamp = clock.addingTimeInterval(-3 * 86_400)
+        try fm.setAttributes([.modificationDate: stamp], ofItemAtPath: directory.path)
+
+        let result = await makeGC(db: db, home: home).sweep()
+
+        #expect(fm.fileExists(atPath: directory.path))
+        #expect(result.planned.contains { $0.hasPrefix("KEEP younger-than-floor") })
+    }
+
+    /// The discriminating other half: past the floor, an empty orphan goes.
+    @Test func anEmptyOrphanOlderThanTheFloorIsReaped() async throws {
+        let (home, restore) = isolateTBDHome()
+        defer { restore() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setTranscriptComposerEnabled(true)
+        let orphan = UUID()
+        let directory = TBDConstants.attachmentsDir(worktreeID: orphan)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stamp = clock.addingTimeInterval(-30 * 86_400)
+        try fm.setAttributes([.modificationDate: stamp], ofItemAtPath: directory.path)
+
+        let result = await makeGC(db: db, home: home).sweep()
+
+        #expect(!fm.fileExists(atPath: directory.path))
+        #expect(result.planned.contains { $0.hasPrefix("REAP attachments") })
+    }
+
     // MARK: - Reaps
 
     @Test func anOldOrphanIsReaped() async throws {
@@ -287,6 +355,41 @@ struct OrphanGCAttachmentsTests {
         #expect(!fm.fileExists(atPath: orphanDir.path))
         #expect(result.planned.contains { $0.hasPrefix("REAP attachments") })
         #expect(result.reaped >= 1)
+    }
+
+    /// The EVENT-DRIVEN half must read the same seam as the hourly one. It
+    /// re-resolved `TBDConstants.attachmentsDir` per call while the sweep cached
+    /// its base at init, so an injected base governed one of the pair and not
+    /// the other — and a test could green on a directory the archive path never
+    /// looked at.
+    @Test func removedWorktreeCleanupHonorsTheInjectedAttachmentsBase() async throws {
+        let (home, restore) = isolateTBDHome()
+        defer { restore() }
+        let attachmentsBase = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdgcaevt"))
+        try fm.createDirectory(at: attachmentsBase, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: attachmentsBase) }
+        let db = try TBDDatabase(inMemory: true)
+        let worktreeID = UUID()
+        let injected = attachmentsBase.appendingPathComponent(worktreeID.uuidString)
+        try fm.createDirectory(at: injected, withIntermediateDirectories: true)
+        fm.createFile(
+            atPath: injected.appendingPathComponent("x.png").path,
+            contents: Data([0x89, 0x50, 0x4E, 0x47]))
+        let fixed = clock
+
+        let gc = OrphanGC(
+            db: db, git: GitManager(), broadcast: { _ in }, liveCWDsProvider: { [] },
+            scratchpadBase: home.appendingPathComponent("s", isDirectory: true),
+            now: { fixed },
+            profileDirBase: home.appendingPathComponent("p", isDirectory: true),
+            holdersBase: home.appendingPathComponent("h", isDirectory: true),
+            attachmentsBase: attachmentsBase)
+        await gc.removedWorktreeCleanup(
+            worktreeID: worktreeID,
+            worktreePath: "/tmp/acme/tbd/worktrees/gone-\(worktreeID.uuidString)",
+            repoPath: "/tmp/acme/tbd")
+
+        #expect(!fm.fileExists(atPath: injected.path), "the injected base governs both halves")
     }
 }
 

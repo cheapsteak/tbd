@@ -64,6 +64,13 @@ public actor OrphanGC {
     private let profileDirCollector: ProfileDirCollector
     private let holderRendezvousCollector: HolderRendezvousCollector
     private let attachmentsCollector: AttachmentsCollector
+    /// The attachments root both halves of the reconciler pair read — the hourly
+    /// sweep through `attachmentsCollector`, and `removedWorktreeCleanup`
+    /// directly. Cached at init from the injected seam, so ONE seam governs
+    /// both: re-resolving `TBDConstants.attachmentsDir` per call would let an
+    /// injected base steer the sweep while the event-driven half kept walking
+    /// the process-global one.
+    private let attachmentsBase: URL
     private let rowlessHolderCollector: RowlessHolderCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
@@ -189,6 +196,7 @@ public actor OrphanGC {
             handshake: rowlessHolderHandshake,
             reclaimer: rowlessHolderReclaimer)
         let resolvedAttachmentsBase = attachmentsBase ?? TBDConstants.attachmentsDir
+        self.attachmentsBase = resolvedAttachmentsBase
         self.attachmentsCollector = AttachmentsCollector(
             base: resolvedAttachmentsBase, now: resolvedNow)
         self.processCWDsProvider = processCWDsProvider
@@ -1568,7 +1576,7 @@ public actor OrphanGC {
         // composer off afterwards would otherwise leave images behind
         // permanently — a flag that gates CREATION must not gate the reclaim of
         // what was already created.
-        let attachments = TBDConstants.attachmentsDir(worktreeID: worktreeID)
+        let attachments = attachmentsBase.appendingPathComponent(worktreeID.uuidString)
         if FileManager.default.fileExists(atPath: attachments.path) {
             do {
                 try FileManager.default.removeItem(at: attachments)

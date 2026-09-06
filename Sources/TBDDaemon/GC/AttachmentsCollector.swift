@@ -60,14 +60,31 @@ struct AttachmentsCollector: Sendable {
             return .keep(reason: "live-worktree")
         }
         let floor = now().addingTimeInterval(-Double(floorDays) * 86_400)
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        // An empty orphan directory is reapable: there is nothing left to protect.
+        // **An unreadable directory is not an empty one.** Reading through `try?`
+        // and falling back to `[]` made a directory the sweep cannot open — a
+        // permissions problem, a volume that answered badly — look like a
+        // directory with nothing in it, and an empty orphan is reapable. The
+        // failure would have destroyed exactly the files it could not see.
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else {
+            return .keep(reason: "contents-unreadable")
+        }
         for file in files {
             guard let attrs = try? FileManager.default.attributesOfItem(atPath: file.path),
                   let modified = attrs[.modificationDate] as? Date else {
                 // A file whose age cannot be read is a file whose age is unknown,
                 // and unknown is not old.
+                return .keep(reason: "age-unreadable")
+            }
+            if modified > floor { return .keep(reason: "younger-than-floor") }
+        }
+        // An EMPTY orphan directory gets the floor too, measured on its own
+        // mtime: it has no file to age, and a directory minted moments ago is a
+        // composer somebody has open whose first image has not landed yet. Only
+        // past the floor is there nothing left to protect.
+        if files.isEmpty {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: directory.path),
+                  let modified = attrs[.modificationDate] as? Date else {
                 return .keep(reason: "age-unreadable")
             }
             if modified > floor { return .keep(reason: "younger-than-floor") }
