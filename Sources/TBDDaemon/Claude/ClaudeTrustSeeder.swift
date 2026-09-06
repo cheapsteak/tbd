@@ -171,11 +171,20 @@ enum ClaudeTrustSeeder {
             projectKeys.append(resolvedPath)
         }
 
-        await writer.seed(
-            projectKeys: projectKeys,
-            configDirURL: configDirURL,
-            claudeJSONPath: claudeJSONPath,
-            worktreePath: worktree.localPath)
+        // Through the shared per-directory lane, so a completions probe running
+        // against this same config directory cannot interleave its own
+        // `.claude.json` rewrite with this read-merge-write. The inner actor is
+        // kept: it is what makes THIS body atomic, and the lane is what orders it
+        // against a suspending peer.
+        _ = try? await ClaudeConfigDirSerializer.shared.run(
+            configDir: configDirURL.path
+        ) { [writer = Self.writer, projectKeys] in
+            await writer.seed(
+                projectKeys: projectKeys,
+                configDirURL: configDirURL,
+                claudeJSONPath: claudeJSONPath,
+                worktreePath: worktree.localPath)
+        }
     }
 
     /// The process-wide lane every seed's read-merge-write runs on.
