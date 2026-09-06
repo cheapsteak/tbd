@@ -309,7 +309,8 @@ directory or the worktree's `.claude`, or the two plugin manifests. Checking
 staleness is a handful of stat calls. The probe runs only on a cache miss,
 never on a timer and never on a keystroke, and the app warms the cache when the
 composer first gains focus rather than when a slash is typed. A probe that
-hangs is killed at five seconds.
+hangs is killed at five seconds, ten times the measured cold start; the number
+is a soak knob, not a load-bearing one.
 
 ### Fallback
 
@@ -370,11 +371,16 @@ project commands, and plugin skills, each group alphabetical.
 The fuzzy score is a greedy leftmost subsequence match: sixteen points per
 query character, four for each adjacent pair, minus three plus the gap length
 for each gap, eight for a character at position zero or after a separator, six
-at a lowercase-to-uppercase transition, and a shortness bonus. Field weights
-are name three, display name two, segments two, aliases two, description one
-half. A query containing a colon is also split and matched segment by segment
-with a large bonus when every query segment prefixes a distinct candidate
-segment in order.
+at a lowercase-to-uppercase transition, and a shortness bonus. Those numbers
+are Claude Code's own, read from its binary: they are the scorer its composer
+applies to file paths under the at-sign, applied here to command names, and the
+field weights, name three, display name two, segments two, aliases two,
+description one half, are the weights its command menu gives the same fields.
+Copying them is the point: a query ranks the same way in this composer as in
+the terminal, so nothing has to be relearned. A query containing a colon is
+also split and matched segment by segment with a large bonus when every query
+segment prefixes a distinct candidate segment in order; that rule is TBD's
+own, because the terminal has no namespaced completions to need it.
 
 ### Rows and keys
 
