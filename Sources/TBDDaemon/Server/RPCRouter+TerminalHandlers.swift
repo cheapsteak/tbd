@@ -2881,17 +2881,43 @@ extension RPCRouter {
             + "input path wired for it. Nothing was typed and its session is unchanged."
     }
 
-    /// The refusal a validated `.parts` payload gets on the **holder**
-    /// transport today. The tmux arm delivers parts; the holder arm, which
-    /// writes to a pty rather than pasting into a pane, does not compose the
-    /// per-part writes yet. Refused by name so a caller learns the payload was
-    /// well-formed and this transport simply cannot act on it yet, rather than
-    /// either crashing on an unhandled case or silently dropping to a
-    /// `default:` that would also swallow a real future bug.
+    /// The refusal a multi-part or multi-line `terminal.send` gets for a
+    /// holder-backed row, until bracketed-paste wrapping lands there.
+    ///
+    /// It names the missing capability rather than "the holder transport",
+    /// because typing a single-line message into a holder session works and a
+    /// caller told otherwise would stop trying.
+    ///
+    /// The measurement: the holder arm writes body and carriage return in ONE
+    /// delivery with no bracketed-paste wrapping. Against 2.1.261 under a real
+    /// pty, a single unwrapped write of 63 bytes submits and 64 or more does not
+    /// — past that the carriage return is swallowed into the text and the whole
+    /// string sits unsent in Claude's composer. Splitting the message into
+    /// several deliveries instead would reopen the at-least-once and routing
+    /// questions that one delivery avoids, so this refuses rather than guessing.
+    /// PR #816 (child-as-contract-party) wraps in bracketed paste when the
+    /// child's mode is on, in one write, and this refusal lifts with it.
+    static func holderCompositeRefusal(terminalID: UUID, cause: String) -> String {
+        "terminal.send was refused: terminal \(terminalID) runs on the pty-holder transport, "
+            + "which delivers a message in one unwrapped write — and \(cause) cannot submit that "
+            + "way (past 64 bytes the carriage return is swallowed and the text sits unsent). "
+            + "Nothing was typed. Send a single-line message, or move the session to tmux."
+    }
+
+    /// The refusal a validated `.parts` payload still gets inside
+    /// `performHolderSend` after `holderCompositeRefusal` has already run
+    /// ahead of the holder branch in `performTerminalSend`. That gate only
+    /// catches a `.parts` payload that is multi-part or carries a newline —
+    /// the shapes this codebase's 64-byte measurement covers. A single-part,
+    /// single-line `.parts` payload (one image path, or one line of text named
+    /// through the parts wire shape instead of `--text`) is NOT composite and
+    /// passes that gate untouched, yet the holder arm still has no per-part
+    /// delivery of its own — Task 3 built that composition for the tmux arm
+    /// only. This is the defensive backstop for that remainder: kept so the
+    /// `switch` in `performHolderSend` stays exhaustive with no `default:`
+    /// that could also swallow a real future bug.
     static func partsNotYetDeliverableRefusal(terminalID: UUID) -> String {
-        "terminal.send parts was refused: terminal \(terminalID) validated a well-formed "
-            + "parts payload, but delivery for parts is not implemented yet — nothing was "
-            + "sent. Send the pieces as separate --text sends for now."
+        Self.holderCompositeRefusal(terminalID: terminalID, cause: "a message delivered as parts")
     }
 
     /// The refusal a text `terminal.send` gets for a terminal whose Claude
@@ -3071,6 +3097,36 @@ extension RPCRouter {
         // `beginActuation` for the reason the first refusal line above gives:
         // a well-formed act the daemon declined gets a row and a refusal
         // outcome, unlike a malformed payload that names no act.
+
+        // ─── What the holder arm cannot carry yet ───
+        //
+        // Placed ahead of the holder branch so `performHolderSend` sees only
+        // payloads it can deliver, and so nothing inside that arm changes: PR
+        // #816 owns it.
+        if terminal.transport == .holder {
+            let compositeCause: String?
+            switch payload {
+            case .parts(let parts, _) where parts.count > 1:
+                compositeCause = "a message in more than one part"
+            case .parts(let parts, _)
+                where parts.contains(where: { part in
+                    if case .text(let value) = part { return value.contains("\n") }
+                    return false
+                }):
+                compositeCause = "a message containing a newline"
+            case .text(let body, _, _) where body.contains("\n"):
+                compositeCause = "a message containing a newline"
+            default:
+                compositeCause = nil
+            }
+            if let compositeCause {
+                let message = Self.holderCompositeRefusal(
+                    terminalID: terminal.id, cause: compositeCause)
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+        }
+
         if terminal.transport == .holder {
             return await performHolderSend(
                 payload: payload, terminal: terminal, actuationID: actuationID,
@@ -3520,10 +3576,12 @@ extension RPCRouter {
             return await refuseHolderSend(
                 actuationID, Self.holderKeysRefusal(terminalID: terminal.id))
         case .parts:
-            // Shape-valid, not yet deliverable on THIS transport — see
-            // `partsNotYetDeliverableRefusal`. The tmux arm walks the list and
-            // pastes each part; this arm writes to a pty and has no equivalent
-            // yet, so the gap is holder-specific like the two refusals above.
+            // Shape-valid and NOT composite — `performTerminalSend`'s
+            // `holderCompositeRefusal` gate already turned away a multi-part or
+            // multi-line send before this arm was reached. What lands here is
+            // the remainder: a single-part, single-line `.parts` payload the
+            // holder arm still has no per-part delivery for — see
+            // `partsNotYetDeliverableRefusal`.
             return await refuseHolderSend(
                 actuationID, Self.partsNotYetDeliverableRefusal(terminalID: terminal.id))
         }
