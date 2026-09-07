@@ -407,8 +407,8 @@ test_restart_sh_launches_reclaim_async_and_silent() {
 # through — so that `build`, `test` and `run` plan identically. Two entry points
 # that disagree about the path make every transition between them a full
 # recompile, because SwiftPM bakes the path into .build/debug.yaml at plan time.
-# The invariant is therefore two-sided: the wrapper supplies both flags, and
-# restart.sh supplies neither.
+# The invariant is therefore two-sided: the wrapper supplies both flags, and no
+# caller of it — restart.sh, update.sh — supplies any.
 # See docs/specs/2026-08-30-shared-module-cache-design.md.
 test_the_shared_module_cache_is_selected_only_by_the_wrapper() {
   local restart="$HERE/restart.sh"
@@ -425,11 +425,15 @@ test_the_shared_module_cache_is_selected_only_by_the_wrapper() {
   # The wrapper creates it, so no build races a missing parent directory.
   assert_contains "the wrapper creates the shared cache dir" "$wrapper" 'path.mkdir(parents=True, exist_ok=True)'
 
-  # restart.sh must not select it a second time, in any spelling.
+  # No caller of the wrapper may select it a second time, in any spelling.
+  # update.sh matters as much as restart.sh: it builds the same products
+  # through the same wrapper, from the update clone.
   local body; body="$(cat "$restart")"
-  local restart_flags
-  restart_flags="$(grep -nE '^[^#]*(-module-cache-path|-fmodules-cache-path|MODULE_CACHE_FLAGS)' "$restart" || true)"
-  assert_eq "restart.sh selects no module cache of its own" "" "$restart_flags"
+  local caller caller_flags
+  for caller in restart.sh update.sh; do
+    caller_flags="$(grep -nEi '^[^#]*(-module-cache-path|-fmodules-cache-path|module_cache_flags|shared_module_cache)' "$HERE/$caller" || true)"
+    assert_eq "$caller selects no module cache of its own" "" "$caller_flags"
+  done
 
   # The build still runs through scripts/restart-build-lib.sh, which captures
   # swift-safe's real exit status instead of piping it away, and that lib is

@@ -68,7 +68,9 @@ new entries and hit no path error.
 
 `scripts/swift-safe` appends the module-cache flags to every compile subcommand
 (`build`, `test`, `run`), making it the single place that decides where precompiled
-modules live. `scripts/restart.sh` stops passing them.
+modules live. Its callers stop passing them: `scripts/restart.sh`, and
+`scripts/update.sh`, which builds the same products through the same wrapper from
+the update clone.
 
 **The wrapper is the right home.** It is already the one mandatory path to SwiftPM —
 the repository guardrail rejects raw `swift build`/`test`/`run`, and `scripts/test.sh`
@@ -222,8 +224,8 @@ the condition is absent, and absent when it is present.
 
 `scripts/reclaim-build.test.sh` currently asserts that `scripts/restart.sh` contains the
 flags. That invariant moves rather than disappears: it now asserts the wrapper supplies
-them and that `restart.sh` does not, so the assertion still fails if the behavior is
-lost.
+them and that neither caller — `restart.sh` nor `update.sh` — spells a cache of its own,
+so the assertion still fails if the behavior is lost or a third decider appears.
 
 ## Rejected alternatives
 

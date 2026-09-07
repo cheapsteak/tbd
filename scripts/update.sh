@@ -488,16 +488,15 @@ maybe_reexec() {
 
 build_products() {
     local repo_root="${1-}"
-    local shared_module_cache="$HOME/Library/Caches/tbd/swift-module-cache"
-    local module_cache_flags product build_out
+    local product build_out
 
-    mkdir -p "$shared_module_cache"
-    # The same shared clang/Swift module cache restart.sh uses: without it
-    # every tree accumulates its own ~640 MB of near-identical modules.
-    module_cache_flags=(
-        -Xswiftc -module-cache-path -Xswiftc "$shared_module_cache"
-        -Xcc "-fmodules-cache-path=$shared_module_cache"
-    )
+    # The shared clang/Swift module cache is NOT selected here.
+    # scripts/swift-safe points every governed compile at it, so this script,
+    # scripts/restart.sh and scripts/test.sh all plan identically. Naming it a
+    # second time is how that agreement gets lost: SwiftPM bakes the path into
+    # the build plan, so two callers that spell it differently make every
+    # transition between them a full recompile. See
+    # docs/specs/2026-08-30-shared-module-cache-design.md.
 
     # SwiftPM honors only the last --product, so these are separate
     # invocations. The list is RUNTIME_PRODUCTS in restart-bundle-lib.sh, shared
@@ -509,8 +508,7 @@ build_products() {
         # Capture the status, THEN print. Piping the build into `tail` would
         # make the pipeline's status tail's, which is always zero.
         if ! build_out="$( (cd "$repo_root" && scripts/swift-safe build \
-                -c "$BUILD_CONFIG" --product "$product" \
-                "${module_cache_flags[@]}") 2>&1 )"; then
+                -c "$BUILD_CONFIG" --product "$product") 2>&1 )"; then
             printf '%s\n' "$build_out" | tail -20 >&2
             log_error "build of $product failed — the running installation is untouched"
             return 1
