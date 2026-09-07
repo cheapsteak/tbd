@@ -52,4 +52,25 @@ struct GCCommandsTests {
         // changed nothing.
         #expect(throws: (any Error).self) { try GCHolderChildren.parse([]) }
     }
+
+    /// The hang-stack reclaimer deletes files rather than killing anything, so
+    /// it sits outside the group above — but it needs a leg for the same
+    /// reason. `gcEnabled` resolves as `gc_enabled ?? true`, so this phase's
+    /// own gate is what buys it a soak at all, and `tbd gc hang-stacks on` is
+    /// the only supported way to lift that gate out of NULL.
+    @Test func hangStackSwitchIsRegisteredOnTheGCGroup() {
+        let names = GCCommand.configuration.subcommands.map { $0._commandName }
+        #expect(names.contains("hang-stacks"))
+    }
+
+    /// A noun phrase naming what gets reclaimed, like every sibling.
+    @Test func hangStackSwitchIsNamedForWhatItReclaims() {
+        #expect(GCHangStacks.configuration.commandName == "hang-stacks")
+    }
+
+    @Test func hangStackSwitchTakesTheStateWordAsARequiredPositional() throws {
+        #expect(try GCHangStacks.parse(["on"]).state == "on")
+        #expect(try GCHangStacks.parse(["off"]).state == "off")
+        #expect(throws: (any Error).self) { try GCHangStacks.parse([]) }
+    }
 }
