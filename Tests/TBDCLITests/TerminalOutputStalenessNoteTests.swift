@@ -23,7 +23,7 @@ import Testing
 struct TerminalOutputStalenessNoteTests {
 
     private static func screen(
-        source: TerminalScreen.Source, ageMilliseconds: Int
+        source: TerminalScreen.Source, ageMilliseconds: Int, contentObserved: Bool = true
     ) throws -> TerminalScreen {
         try TerminalScreen(
             lines: ["composer"],
@@ -33,6 +33,7 @@ struct TerminalOutputStalenessNoteTests {
             modes: TerminalScreen.ChildModes(
                 bracketedPaste: false, applicationCursor: false, alternateScreen: false),
             modesObserved: true,
+            contentObserved: contentObserved,
             source: source,
             ageMilliseconds: ageMilliseconds)
     }
@@ -100,5 +101,58 @@ struct TerminalOutputStalenessNoteTests {
         let stale = try Self.screen(source: .staleDaemon, ageMilliseconds: milliseconds)
         let note = try #require(TerminalOutput.stalenessNote(for: stale))
         #expect(note.hasSuffix("(source staleDaemon, age \(rendered))"), "composed: \(note)")
+    }
+
+    /// The caveat the source cannot express. A daemon that restarts under a
+    /// running session builds its emulator over a child already in flight, so
+    /// the screen is live — nothing about it is stale — while every cell the
+    /// child has not repainted since holds text the child never wrote. A reader
+    /// shown that screen in silence reads a phantom composer line as the
+    /// session's present state, which is exactly what was measured in the
+    /// field.
+    @Test("a live screen whose emulator never saw the child start still carries a note")
+    func contentUnobservedScreenCarriesItsOwnNote() throws {
+        let unobserved = try Self.screen(
+            source: .daemon, ageMilliseconds: 12, contentObserved: false)
+        let note = try #require(TerminalOutput.stalenessNote(for: unobserved))
+
+        #expect(
+            note == """
+                note: screen comes from an emulator built over a child that was already \
+                running, so cells the child has not repainted since the daemon restarted \
+                may be stale or blank (contentObserved false)
+                """,
+            "composed note was: \(note)")
+    }
+
+    /// The other side of that check, and what makes the test above about the
+    /// content provenance rather than about `daemon` screens getting noisy: an
+    /// ordinary live read is still silent.
+    @Test("a live screen whose emulator saw the child start is still silent")
+    func observedLiveScreenStaysSilent() throws {
+        let observed = try Self.screen(
+            source: .daemon, ageMilliseconds: 12, contentObserved: true)
+        #expect(TerminalOutput.stalenessNote(for: observed) == nil)
+    }
+
+    /// Both caveats on one screen — a viewer attached to a session the daemon
+    /// had re-adopted — and both are told. The source note comes first: it is
+    /// the one carrying an age, and it is the one a script's existing prefix
+    /// match expects to find.
+    @Test("a stale, content-unobserved screen carries both notes, source first")
+    func staleAndUnobservedScreenCarriesBothNotes() throws {
+        let both = try Self.screen(
+            source: .staleDaemon, ageMilliseconds: 41 * 60_000 + 3_000, contentObserved: false)
+        let note = try #require(TerminalOutput.stalenessNote(for: both))
+
+        #expect(
+            note == """
+                note: screen is the daemon's emulator as it stood when a viewer attached \
+                (source staleDaemon, age 41m 3s)
+                note: screen comes from an emulator built over a child that was already \
+                running, so cells the child has not repainted since the daemon restarted \
+                may be stale or blank (contentObserved false)
+                """,
+            "composed note was: \(note)")
     }
 }

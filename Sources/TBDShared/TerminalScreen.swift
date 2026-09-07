@@ -171,6 +171,36 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     /// child happened to re-emit a mode escape of its own after the adoption,
     /// which nothing here can tell.
     public let modesObserved: Bool
+    /// Whether the answering emulator has witnessed everything the child has
+    /// painted.
+    ///
+    /// The second consequence of the fact `modesObserved` reports. That field
+    /// says whether the mode flags are **observations**; this one says whether
+    /// the cells are. They are two fields because they can diverge in
+    /// principle — a full repaint provoked from outside would restore every
+    /// cell and not one mode — and today both are the same construction fact,
+    /// so today they move together.
+    ///
+    /// It is true one way: the emulator was born with the child, so every byte
+    /// the child has ever written was parsed into this grid.
+    ///
+    /// It is false for an emulator built over an *already running* child — the
+    /// daemon re-adopting a session it did not spawn — and it stays false for
+    /// that emulator's whole life. A handback preamble restores the cells'
+    /// *values*, because the snapshot repaints the screen the departing viewer
+    /// held; it raises no provenance, because that viewer's emulator was itself
+    /// seeded by this emulator's own attach snapshot and can hand back no more
+    /// than it was given.
+    ///
+    /// **What `false` means for a reader.** A TUI paints differentially: it
+    /// positions the cursor and writes only the cells it is changing. So every
+    /// cell the child has not rewritten since this emulator was built holds
+    /// nothing the child ever painted — the screen can show blanks where the
+    /// session has text, and stale text where the session has cleared, mixed
+    /// in with the newly painted cells that are perfectly correct. The
+    /// projection cannot tell the three apart, and neither can a consumer
+    /// matching on the text.
+    public let contentObserved: Bool
     public let source: Source
     /// How long ago the answering store's emulator last consumed a byte from
     /// the pty, in milliseconds, on a monotonic clock — never wall time, so no
@@ -253,6 +283,7 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
         size: Size,
         modes: ChildModes,
         modesObserved: Bool,
+        contentObserved: Bool,
         source: Source,
         ageMilliseconds: Int
     ) throws {
@@ -270,6 +301,7 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
         self.size = size
         self.modes = modes
         self.modesObserved = modesObserved
+        self.contentObserved = contentObserved
         self.source = source
         self.ageMilliseconds = ageMilliseconds
     }
@@ -294,7 +326,8 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     // MARK: - Coding
 
     private enum CodingKeys: String, CodingKey {
-        case lines, viewportStart, cursor, size, modes, modesObserved, source, ageMilliseconds
+        case lines, viewportStart, cursor, size, modes, modesObserved, contentObserved, source
+        case ageMilliseconds
     }
 
     /// Written out field by field rather than synthesised, so the wire form is
@@ -310,6 +343,7 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
         try container.encode(size, forKey: .size)
         try container.encode(modes, forKey: .modes)
         try container.encode(modesObserved, forKey: .modesObserved)
+        try container.encode(contentObserved, forKey: .contentObserved)
         try container.encode(source, forKey: .source)
         try container.encode(ageMilliseconds, forKey: .ageMilliseconds)
     }
@@ -329,6 +363,13 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     /// field did not exist. An older daemon's screen therefore decodes to the
     /// behaviour it has always had, rather than to a refusal or a wrapping it
     /// never asked for.
+    ///
+    /// **A missing `contentObserved` decodes as observed**, for the same reason
+    /// and with the same consequence: a producer that predates the field could
+    /// not tell a grid it watched from birth apart from one it inherited, so
+    /// `true` is what every consumer assumed while the field did not exist. An
+    /// older daemon's screen decodes to the behaviour it has always had, rather
+    /// than to a refusal it never earned.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(
@@ -338,6 +379,7 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
             size: container.decode(Size.self, forKey: .size),
             modes: container.decode(ChildModes.self, forKey: .modes),
             modesObserved: container.decodeIfPresent(Bool.self, forKey: .modesObserved) ?? true,
+            contentObserved: container.decodeIfPresent(Bool.self, forKey: .contentObserved) ?? true,
             source: container.decode(Source.self, forKey: .source),
             ageMilliseconds: container.decode(Int.self, forKey: .ageMilliseconds))
     }

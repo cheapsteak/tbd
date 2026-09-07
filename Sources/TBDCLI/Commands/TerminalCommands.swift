@@ -490,6 +490,8 @@ struct TerminalOutput: AsyncParsableCommand {
             // stdout stays exactly the screen text — scripts pipe it, diff it
             // and match on it — so the provenance goes to stderr, where a
             // human and a supervising agent both see it and no pipeline does.
+            // One write, however many caveats the screen carries: they arrive
+            // already joined by newlines, so a reader gets whole lines.
             if let screen = result.screen, let note = Self.stalenessNote(for: screen) {
                 FileHandle.standardError.write(Data("\(note)\n".utf8))
             }
@@ -497,8 +499,8 @@ struct TerminalOutput: AsyncParsableCommand {
         }
     }
 
-    /// What to tell a reader about a screen that did not come from the live
-    /// store, or `nil` when it did.
+    /// What to tell a reader about a screen they cannot read at face value, or
+    /// `nil` when there is nothing to say.
     ///
     /// `tbd terminal output` is one of the consumers the screen contract makes
     /// declare a policy for `.staleDaemon`, and its declared policy is *accept
@@ -509,24 +511,46 @@ struct TerminalOutput: AsyncParsableCommand {
     /// and saying nothing would be the worse of the two, because a supervisor
     /// reading a three-hour-old composer sees a live one.
     ///
+    /// **Two caveats, two notes, and a screen can carry both.** The source says
+    /// which store answered and how old its view is; `contentObserved` says
+    /// whether that store's grid was ever painted by this child. A live
+    /// `daemon` screen from an emulator built over a running child is the case
+    /// the source alone cannot express — nothing about it is stale, and cells
+    /// nobody repainted since the daemon restarted are still text the child
+    /// never wrote. When both hold, the source note comes first: it is the one
+    /// with an age in it, and it is the one a script's existing prefix match
+    /// expects to find.
+    ///
     /// The source is spelled with the enum's own raw value, so the note and the
     /// `--json` field a script correlates against can never drift apart.
     static func stalenessNote(for screen: TerminalScreen) -> String? {
+        var notes: [String] = []
         let age = humaneAge(milliseconds: screen.ageMilliseconds)
         switch screen.source {
         case .daemon:
-            return nil
+            break
         case .viewer:
-            return """
+            notes.append(
+                """
                 note: screen came from the viewer holding this session's pty \
                 (source \(screen.source.rawValue), age \(age))
-                """
+                """)
         case .staleDaemon:
-            return """
+            notes.append(
+                """
                 note: screen is the daemon's emulator as it stood when a viewer attached \
                 (source \(screen.source.rawValue), age \(age))
-                """
+                """)
         }
+        if !screen.contentObserved {
+            notes.append(
+                """
+                note: screen comes from an emulator built over a child that was already \
+                running, so cells the child has not repainted since the daemon restarted \
+                may be stale or blank (contentObserved false)
+                """)
+        }
+        return notes.isEmpty ? nil : notes.joined(separator: "\n")
     }
 
     /// An age a person can judge at a glance: seconds under a minute, minutes

@@ -7,10 +7,11 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "Hibernation"
 /// What the park's pending-input rail got when it asked for a holder session's
 /// screen: a screen it may judge, or the refusal that stands in its place.
 ///
-/// A type rather than an optional because the three ways to have no judgeable
-/// screen — no reader, a source the daemon is not the live store for, a
-/// projection that refused — carry different remedies and so different words,
-/// and collapsing them would hand the user a sentence that fits none of them.
+/// A type rather than an optional because the four ways to have no judgeable
+/// screen — no reader, a source the daemon is not the live store for, a live
+/// screen whose emulator never saw the child start, a projection that refused
+/// — carry different remedies and so different words, and collapsing them
+/// would hand the user a sentence that fits none of them.
 enum HolderScreenReading: Sendable {
     case readable(TerminalScreen)
     case refused(String)
@@ -141,25 +142,57 @@ extension HibernationCoordinator {
         "The daemon could not read this session's screen to check for unsent "
         + "input before hibernating"
 
-    /// The refusal a screen's `source` implies, or nil when the daemon may
+    /// The refusal for a live daemon screen whose emulator was built over a
+    /// child that was already running.
+    ///
+    /// The re-adoption case, and the reason the source alone is not enough. An
+    /// emulator the daemon builds across a restart starts blank, and the TUI
+    /// above it paints differentially — it positions the cursor and writes only
+    /// the cells it is changing — so the cells nobody has repainted since hold
+    /// nothing the child ever wrote. The screen is honestly `daemon`, its bytes
+    /// really are being parsed live, and it is still not a screen anyone can
+    /// check for a half-composed prompt: a composer that has gone quiet reads
+    /// as whatever stood there before, and a composer somebody is typing into
+    /// can read as blank.
+    ///
+    /// A fourth string because the remedy is unlike the other three. There is
+    /// no tab to close and nothing lost to re-adopt; the screen becomes
+    /// checkable again the next time this daemon starts the session itself, and
+    /// saying anything else would send somebody chasing a gesture that does not
+    /// help.
+    static let holderContentUnobservedRefusal =
+        "The daemon's emulator for this session was built over a child that was "
+        + "already running — the daemon restarted under it — so its screen can "
+        + "show stale or missing text and cannot be checked for unsent input; it "
+        + "becomes checkable again when this daemon next starts the session"
+
+    /// The refusal a screen's provenance implies, or nil when the daemon may
     /// judge it.
     ///
-    /// The whole policy, in one place, so the park and the idle sweep cannot
-    /// hold different opinions about which sources are judgeable. Both ask this
-    /// question; they differ only in how much of the screen they pay for to get
-    /// the answer.
-    static func holderRefusal(forScreenSource source: TerminalScreen.Source) -> String? {
+    /// The whole policy, both axes, in one place, so the park and the idle
+    /// sweep cannot hold different opinions about which screens are judgeable.
+    /// Both ask this question; they differ only in how much of the screen they
+    /// pay for to get the answer.
+    ///
+    /// The source is asked first because it names an action the user can take
+    /// — close the tab — and a person told to close a tab has somewhere to go.
+    /// A `daemon` screen then still has to answer for its content: `source`
+    /// says which store is rendering live, and `contentObserved` says whether
+    /// that store's grid was ever painted by this child.
+    static func holderRefusal(
+        forScreenSource source: TerminalScreen.Source, contentObserved: Bool
+    ) -> String? {
         switch source {
-        case .daemon: return nil
         case .staleDaemon, .viewer: return holderViewerAttachedRefusal
+        case .daemon: return contentObserved ? nil : holderContentUnobservedRefusal
         }
     }
 
     /// The typed screen the park's rail judges, or the refusal that stands in
     /// its place.
     ///
-    /// One method so the two fail-closed halves and the projection failure are
-    /// stated once and the park reads a single answer.
+    /// One method so the three fail-closed refusals and the projection failure
+    /// are stated once and the park reads a single answer.
     func holderScreenReading(
         terminalID: UUID, registry: HolderRegistry
     ) async -> HolderScreenReading {
@@ -175,15 +208,17 @@ extension HibernationCoordinator {
             return .refused(Self.holderScreenProjectionRefusal)
         }
         guard let screen else { return .refused(Self.holderNoReaderRefusal) }
-        if let refusal = Self.holderRefusal(forScreenSource: screen.source) {
+        if let refusal = Self.holderRefusal(
+            forScreenSource: screen.source, contentObserved: screen.contentObserved) {
             return .refused(refusal)
         }
         return .readable(screen)
     }
 
     /// Whether the screen the park's pending-input rail would have to judge is
-    /// one this daemon may not judge — a viewer holds the pty, or no reader was
-    /// ever adopted for the session.
+    /// one this daemon may not judge — a viewer holds the pty, no reader was
+    /// ever adopted for the session, or the reader's emulator was built over a
+    /// child that was already running and so has never seen the whole screen.
     ///
     /// The same question `performHolderHibernate` asks before its fail-closed
     /// refusals, lifted out so the sweep can ask it *first*.
@@ -191,13 +226,15 @@ extension HibernationCoordinator {
     /// clock, and has no way to see who holds a pty — so the sweep is the only
     /// place with the registry in hand.
     ///
-    /// **It reads the mode half of the oracle, not the whole screen.** `source`
-    /// is one fact taken from one reader under one lock, and
-    /// `HolderReader.modeReading` carries it without the whole-buffer walk that
-    /// `screen(maxLines:)` pays for — the same trade the send path's oracle
-    /// makes, and for the same reason: this runs on every sweep, for every idle
-    /// holder row, and the walk holds the emulator lock a live session's drain
-    /// thread needs. The two therefore agree on the question that decides the
+    /// **It reads the mode half of the oracle, not the whole screen.** Both
+    /// facts the policy turns on are cheap: `source` is one field taken from
+    /// one reader under one lock, which `HolderReader.modeReading` carries
+    /// without the whole-buffer walk that `screen(maxLines:)` pays for, and
+    /// `observedChildFromStart` is fixed at that reader's construction and
+    /// needs no lock at all. The same trade the send path's oracle makes, and
+    /// for the same reason: this runs on every sweep, for every idle holder
+    /// row, and the walk holds the emulator lock a live session's drain thread
+    /// needs. The two therefore agree on the question that decides the
     /// refusal. They can differ on exactly one thing, a screen that will not
     /// project at all: the sweep cannot foresee it, so such a row is armed here
     /// and refused at the park. That is a producer bug rather than a session
@@ -212,11 +249,12 @@ extension HibernationCoordinator {
         if let oracle = holderScreenOracle {
             do {
                 guard let screen = try await oracle(terminalID) else { return true }
-                return Self.holderRefusal(forScreenSource: screen.source) != nil
+                return Self.holderRefusal(
+                    forScreenSource: screen.source, contentObserved: screen.contentObserved) != nil
             } catch {
                 // A refused projection, and the seam answers it the way the
                 // production path below does rather than better: that path
-                // reads only the source and never walks a line, so it cannot
+                // reads two cheap facts and never walks a line, so it cannot
                 // see one. The sweep arms, the park refuses. A seam that
                 // answered `true` here would make a test agree where the
                 // shipped code does not.
@@ -225,7 +263,8 @@ extension HibernationCoordinator {
         }
         guard let reader = await registry.reader(for: terminalID) else { return true }
         let source = await reader.modeReading().source
-        return Self.holderRefusal(forScreenSource: source) != nil
+        return Self.holderRefusal(
+            forScreenSource: source, contentObserved: reader.observedChildFromStart) != nil
     }
 
     /// The screen this daemon holds for a session, or nil when it holds none.
@@ -306,20 +345,25 @@ extension HibernationCoordinator {
         }
 
         // Rail: typed-but-unsent input, read off the typed screen oracle.
-        // Fail-closed on every answer that is not a live daemon-rendered
-        // screen — a source the daemon is not the live store for, no reader at
-        // all, a projection that refused — because each one means the screen
-        // this rail would judge is not the screen the session is showing. Each
-        // answers with its own name: they differ in what the person reading the
-        // refusal can do next.
+        // Fail-closed on every answer that is not a live daemon-rendered screen
+        // of observed content — a source the daemon is not the live store for,
+        // a live screen whose emulator was built over a running child, no
+        // reader at all, a projection that refused — because each one means the
+        // screen this rail would judge is not the screen the session is
+        // showing. Each answers with its own name: they differ in what the
+        // person reading the refusal can do next.
         //
-        // One dependency this rail has and cannot check: after a daemon restart
-        // the emulator it reads is one that has seen only what arrived since
-        // re-adoption, so what it shows of the composer is whatever the
-        // attach-edge jiggle's repaint produced. The rail is relying on a real
-        // geometry change forcing an Ink-style TUI to redraw its composer, and
-        // so on a half-composed prompt being visible again. That is inferred
-        // from how such TUIs redraw on `SIGWINCH`, not measured.
+        // The re-adoption case is the subtle one, and it is why the source is
+        // not the whole question. An emulator the daemon builds across a
+        // restart starts blank over a child that is already painting, and an
+        // Ink-style TUI paints differentially — it moves the cursor and writes
+        // only the cells it is changing. So every cell nobody has repainted
+        // since holds nothing the child ever wrote, and the projection mixes
+        // correct cells with blanks where there is text and stale text where
+        // the session has cleared. Measured in the field: a phantom composer
+        // line stood for over a minute while the real composer was empty. The
+        // screen carries that as `contentObserved`, and this rail refuses it
+        // like every other screen it may not judge.
         let capturedSnapshot: String?
         switch await holderScreenReading(terminalID: terminal.id, registry: registry) {
         case .refused(let refusal):

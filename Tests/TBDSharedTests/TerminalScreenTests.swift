@@ -24,6 +24,7 @@ import Testing
         lines: [String],
         viewportStart: Int = 0,
         modesObserved: Bool = true,
+        contentObserved: Bool = true,
         source: TerminalScreen.Source = .daemon,
         ageMilliseconds: Int = 0
     ) throws -> TerminalScreen {
@@ -35,6 +36,7 @@ import Testing
             modes: TerminalScreen.ChildModes(
                 bracketedPaste: false, applicationCursor: false, alternateScreen: false),
             modesObserved: modesObserved,
+            contentObserved: contentObserved,
             source: source,
             ageMilliseconds: ageMilliseconds)
     }
@@ -273,6 +275,7 @@ import Testing
             modes: TerminalScreen.ChildModes(
                 bracketedPaste: true, applicationCursor: true, alternateScreen: false),
             modesObserved: false,
+            contentObserved: false,
             source: .staleDaemon,
             ageMilliseconds: 41)
         #expect(
@@ -314,5 +317,43 @@ import Testing
             """
         let decoded = try JSONDecoder().decode(TerminalScreen.self, from: Data(payload.utf8))
         #expect(decoded.modesObserved)
+    }
+
+    /// The content axis crosses the wire for the same reason the mode axis
+    /// does: the consumer that refuses to park on an unobserved screen reads a
+    /// value that arrived over the socket, and a field dropped in transit turns
+    /// a refusal into a park over somebody's half-typed message.
+    @Test("contentObserved survives a round trip")
+    func contentObservedRoundTrips() throws {
+        for observed in [true, false] {
+            let screen = try Self.make(lines: ["x"], contentObserved: observed)
+            let decoded = try JSONDecoder().decode(
+                TerminalScreen.self, from: try JSONEncoder().encode(screen))
+            #expect(decoded.contentObserved == observed)
+            #expect(decoded == screen)
+        }
+    }
+
+    /// A producer that predates the field could not tell a grid it watched from
+    /// birth apart from one it inherited, so it has no answer to withhold — and
+    /// `true` is what every consumer assumed while the field did not exist. An
+    /// older daemon's screen must decode to the behaviour it has always had,
+    /// not to a refusal nobody asked for.
+    @Test("a payload without contentObserved decodes as observed")
+    func absentContentObservedDecodesAsObserved() throws {
+        let cursor = #"{"row":1,"column":2,"visible":true}"#
+        let size = #"{"columns":80,"rows":24}"#
+        let modes =
+            #"{"bracketedPaste":false,"applicationCursor":false,"alternateScreen":false}"#
+        let payload = """
+            {"lines":["alpha"],"viewportStart":0,"cursor":\(cursor),"size":\(size),\
+            "modes":\(modes),"modesObserved":false,"source":"daemon","ageMilliseconds":5}
+            """
+        let decoded = try JSONDecoder().decode(TerminalScreen.self, from: Data(payload.utf8))
+        #expect(decoded.contentObserved)
+        // The two axes are independent on the wire as well as in the type: a
+        // payload that states one and omits the other must not have its stated
+        // value dragged onto the missing one.
+        #expect(decoded.modesObserved == false)
     }
 }

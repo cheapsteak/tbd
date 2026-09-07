@@ -112,6 +112,17 @@ actor HolderReader {
     }
 
     let sessionID: UUID
+    /// Whether this reader's emulator was born with its child — the one fact
+    /// behind both `TerminalScreen.modesObserved` and
+    /// `TerminalScreen.contentObserved`.
+    ///
+    /// Exposed beside the emulator's own copy because the idle sweep needs it
+    /// next to `modeReading().source` and must not pay for a whole-buffer walk
+    /// to get it: `screen(maxLines:)` holds the emulator lock a live session's
+    /// drain thread needs, and the sweep asks this of every idle holder row on
+    /// every pass. `nonisolated` for the same reason it is a `let` — it is
+    /// fixed at construction, so reading it can never race the actor.
+    nonisolated let observedChildFromStart: Bool
     private let descriptor: PTYDescriptor
     private let emulator: HolderEmulator
     private let stopTimeout: Duration
@@ -140,12 +151,19 @@ actor HolderReader {
     /// - Parameter observedChildFromStart: whether this reader's emulator will
     ///   see every byte the child has ever written. `true` at spawn, where the
     ///   child's startup `DECSET`s are still sitting in the pty buffer waiting
-    ///   for the first reader, so the emulator's modes become the child's. It
-    ///   is `false` when the reader is built over a child that was already
-    ///   running — the daemon re-adopting a session across a restart — where
-    ///   the setup has long since been read by somebody else and this emulator
-    ///   holds a fresh terminal's defaults for as long as it lives. Reported
-    ///   as `modesObserved` on every screen and mode reading this reader gives.
+    ///   for the first reader, so the emulator's modes become the child's and
+    ///   its grid is painted by every write the child makes. It is `false` when
+    ///   the reader is built over a child that was already running — the daemon
+    ///   re-adopting a session across a restart — where the setup has long
+    ///   since been read by somebody else, this emulator holds a fresh
+    ///   terminal's defaults for as long as it lives, and its grid starts
+    ///   blank under a TUI that paints only the cells it is changing.
+    ///
+    ///   Reported as **both** `modesObserved` and `contentObserved` on every
+    ///   screen this reader gives, and as `modesObserved` on every mode
+    ///   reading: the flags are unobserved and so are the cells, from the one
+    ///   fact that this emulator was not there when the child started.
+    ///
     ///   Required and named at every construction site, for the same reason
     ///   `take` names it: a default would be right on one path — a test harness
     ///   feeding its own emulator from the start, `true` — and a silent lie on
@@ -174,6 +192,7 @@ actor HolderReader {
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.sessionID = sessionID
+        self.observedChildFromStart = observedChildFromStart
         self.stopTimeout = stopTimeout
         self.clock = clock
         self.onEndOfOutput = onEndOfOutput
@@ -187,7 +206,7 @@ actor HolderReader {
             columns: columns,
             rows: rows,
             scrollback: scrollbackLines,
-            modesObserved: observedChildFromStart,
+            observedChildFromStart: observedChildFromStart,
             monotonicNow: monotonicNow,
             reply: { [descriptor] bytes in descriptor.replyBestEffort(bytes) })
     }
@@ -559,9 +578,10 @@ actor HolderReader {
     ///
     /// **What it does not encode is whether the emulator has watched this child
     /// since birth.** A reader draining a session it re-adopted after a restart
-    /// answers `.daemon`, correctly — its lines are live — while its modes are
-    /// a fresh terminal's defaults. That is the separate axis `modesObserved`
-    /// carries.
+    /// answers `.daemon`, correctly — every byte arriving now is parsed live —
+    /// while its modes are a fresh terminal's defaults and its grid holds
+    /// whatever the child has happened to repaint since. That is the separate
+    /// axis `modesObserved` and `contentObserved` carry.
     private var currentSource: TerminalScreen.Source {
         state == .draining ? .daemon : .staleDaemon
     }
@@ -600,14 +620,15 @@ actor HolderReader {
     /// by it — output the viewer never saw and the daemon then throws away.
     /// A stopped reader ignores the feed: its screen has no further readers.
     ///
-    /// **A preamble restores the modes' values and not their provenance.** The
-    /// writer states every mode the capture carries, so the flags after the
-    /// feed are the departing viewer's — but that viewer's emulator was itself
-    /// seeded by *this* reader's attach preamble, so what comes back is what
-    /// this reader handed out. A preamble can carry no more provenance than the
-    /// reader already had. Nothing here therefore moves `modesObserved`: a
-    /// re-adopted session stays unobserved across every attach and handback,
-    /// and only a session this daemon spawned is ever observed.
+    /// **A preamble restores values and not provenance.** The writer states
+    /// every mode the capture carries and repaints the screen it held, so the
+    /// flags and the cells after the feed are the departing viewer's — but that
+    /// viewer's emulator was itself seeded by *this* reader's attach preamble,
+    /// so what comes back is what this reader handed out. A preamble can carry
+    /// no more provenance than the reader already had. Nothing here therefore
+    /// moves `modesObserved` or `contentObserved`: a re-adopted session stays
+    /// unobserved on both axes across every attach and handback, and only a
+    /// session this daemon spawned is ever observed.
     func ingest(preamble: Data) {
         guard state != .stopped, !preamble.isEmpty else { return }
         emulator.feed([UInt8](preamble)[...])
@@ -1291,26 +1312,33 @@ private final class HolderEmulator: @unchecked Sendable {
     ///
     /// `screen` asks nothing at all: it reads the delegate's `DECTCEM` flag.
     private var lastByteAt: ContinuousClock.Instant?
-    /// Whether this emulator's mode flags are observations of the child rather
-    /// than a fresh terminal's defaults — the `modesObserved` every screen and
-    /// mode reading carries.
+    /// Whether this emulator was built with its child, so that both its mode
+    /// flags and its grid are observations rather than a fresh terminal's
+    /// defaults over a blank screen.
+    ///
+    /// One fact with two consequences, and it is reported as both: as
+    /// `modesObserved` on every screen and mode reading, and as
+    /// `contentObserved` on every screen. Unobserved modes are a terminal's
+    /// defaults; unobserved content is a grid whose cells the child has not
+    /// repainted since this emulator existed, and a TUI repaints only what it
+    /// is changing.
     ///
     /// Set at construction by whoever knows how this emulator came to exist,
     /// and never moved afterwards: nothing this emulator can be fed carries
     /// provenance it was not built with, because every preamble in the system
     /// originates from a daemon emulator's own snapshot. Read under
     /// `terminalLock`, like `lastByteAt` and everything else here.
-    private let modesObserved: Bool
+    private let observedChildFromStart: Bool
 
     init(
         columns: Int, rows: Int, scrollback: Int,
-        modesObserved: Bool,
+        observedChildFromStart: Bool,
         monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant,
         reply: @escaping @Sendable (ArraySlice<UInt8>) -> Void
     ) {
         let delegate = ReplyForwardingDelegate(reply: reply)
         self.delegate = delegate
-        self.modesObserved = modesObserved
+        self.observedChildFromStart = observedChildFromStart
         self.monotonicNow = monotonicNow
         self.adoptedAt = monotonicNow()
         self.terminal = Terminal(
@@ -1322,10 +1350,13 @@ private final class HolderEmulator: @unchecked Sendable {
     }
 
     /// Bytes from outside — the drain loop's reads, the quiesce remainder, a
-    /// handback preamble. **None of it marks the modes observed**: the child's
-    /// running output says nothing about the modes it set before this emulator
-    /// existed, so a session that happens to print a lot must not talk its way
-    /// into a provenance it never earned.
+    /// handback preamble. **None of it marks the modes or the content
+    /// observed**: the child's running output says nothing about the modes it
+    /// set or the cells it painted before this emulator existed, so a session
+    /// that happens to print a lot must not talk its way into a provenance it
+    /// never earned. A busy child repaints some of the grid and leaves the rest
+    /// exactly as blank as it found it, which is the state `contentObserved`
+    /// exists to name.
     func feed(_ bytes: ArraySlice<UInt8>) {
         terminal.terminalLock.withLock {
             lastByteAt = monotonicNow()
@@ -1417,7 +1448,8 @@ private final class HolderEmulator: @unchecked Sendable {
                 cursor: cursor,
                 size: TerminalScreen.Size(columns: terminal.cols, rows: terminal.rows),
                 modes: currentModes(),
-                modesObserved: modesObserved,
+                modesObserved: observedChildFromStart,
+                contentObserved: observedChildFromStart,
                 source: source,
                 ageMilliseconds: ageMilliseconds())
         }
@@ -1427,7 +1459,7 @@ private final class HolderEmulator: @unchecked Sendable {
     func modeReading(source: TerminalScreen.Source) -> TerminalModeReading {
         terminal.terminalLock.withLock {
             TerminalModeReading(
-                modes: currentModes(), modesObserved: modesObserved, source: source,
+                modes: currentModes(), modesObserved: observedChildFromStart, source: source,
                 ageMilliseconds: ageMilliseconds())
         }
     }

@@ -646,11 +646,16 @@ Everything TBD does through tmux today, and its replacement:
     own, because the remedies differ — a `staleDaemon` or `viewer` screen
     means somebody has the session open and the tab is what to close, a
     session with no reader is one the daemon has lost track of, and a screen
-    that will not project is a defect to fix. Refusing is recoverable; eating
-    a half-composed prompt is not. The idle sweep asks the same question
-    before it arms a row, reading the source alone rather than paying for the
-    lines, so a session the park could never complete costs no
-    request-and-refusal pair on every pass.
+    that will not project is a defect to fix. A live `daemon` screen is also
+    refused, by a name of its own, when its emulator did not observe the child
+    from that child's start — the re-adoption case the screen carries as
+    `contentObserved`: such an emulator inherited a blank grid under a child
+    that repaints only what it is changing, so its screen can show a phantom
+    composer where the session is idle and a blank one where somebody is
+    typing. Refusing is recoverable; eating a half-composed prompt is not. The
+    idle sweep asks the same question before it arms a row, reading those two
+    facts alone rather than paying for the lines, so a session the park could
+    never complete costs no request-and-refusal pair on every pass.
   - **Revive re-anchors the identity check.** The row records when its current
     child started, because a woken session's child is younger than its row and
     every reclaimer that verifies a recorded pid against a start time would

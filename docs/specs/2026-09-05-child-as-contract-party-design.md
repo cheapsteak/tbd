@@ -159,6 +159,29 @@ stale (`2026-08-30-pty-holder-session-transport-design.md:548-553`).
   which store, and is its screen live — and a re-adopted draining reader is
   honestly `daemon` with `modesObserved: false`, its lines live and its modes
   unobserved.
+- **`contentObserved`** – whether the answering emulator has witnessed
+  everything the child has painted, so a reader can tell a screen the child
+  wrote from a grid that was blank when the emulator inherited it. It comes
+  from the same construction fact as `modesObserved` and is true and false in
+  the same two cases: true for an emulator born with the child at spawn, which
+  has parsed every byte the child has ever written; false, for that emulator's
+  whole life, for one built over an already-running child. A handback preamble
+  restores the cells' *values*, since the snapshot repaints the screen the
+  departing viewer held; it raises no provenance, because that viewer's
+  emulator was seeded by this one's attach snapshot. It is a second field
+  rather than a second reading of `modesObserved` because the two can diverge
+  in principle — a full repaint provoked from outside would restore every cell
+  and not one mode — and because they are what different consumers ask about:
+  the input path asks whether the modes are facts, and the pending-input rail
+  asks whether the cells are. It is orthogonal to `source` in the same way
+  `modesObserved` is: a re-adopted draining reader is honestly `daemon` with
+  both flags false, its bytes parsed live and its screen part inheritance.
+  What `false` costs a reader is worth stating plainly, because a TUI paints
+  differentially — it positions the cursor and writes only the cells it is
+  changing. Every cell the child has not rewritten since the emulator was
+  built holds nothing the child ever painted, so the screen mixes correct
+  newly-painted cells with blanks where the session has text and stale text
+  where the session has cleared, and the projection cannot tell them apart.
 - **`source`** – which store answered: `daemon` (the daemon is the reader and
   rendered its live emulator), `viewer` (a viewer holds the pty and answered a
   pull), or `staleDaemon` (a viewer holds the pty, did not answer, and this is
@@ -250,10 +273,19 @@ is in the consumer, where a reviewer can see it:
   source on the actuation row. This is the one place the design knowingly
   acts on possibly-stale information, and it gets its own section below.
 - **The hibernation pending-input check** – fails closed, as the transport
-  spec rules: a stale screen cannot prove the composer is empty.
+  spec rules: a stale screen cannot prove the composer is empty. It fails
+  closed on the other axis too, refusing a live `daemon` screen whose
+  `contentObserved` is false, because a grid the emulator inherited blank can
+  show a phantom composer where the session is idle and a blank one where
+  somebody is typing — the two mistakes this rail exists to prevent, in one
+  screen. That refusal has a name of its own: there is no tab to close, and
+  the screen becomes checkable again when the daemon next starts the session.
 - **Fleet supervision, `tbd terminal output`** – accept, and surface the
-  source and age. A desk that reads `staleDaemon, 40 minutes` has learned
-  something a string could never tell it.
+  source and age on stderr, plus the content caveat when `contentObserved` is
+  false. A desk that reads `staleDaemon, 40 minutes` has learned something a
+  string could never tell it, and a desk told that cells nobody has repainted
+  since the daemon restarted may be stale or blank will not read a phantom
+  composer line as the session's present state.
 
 ### The same object is the input side's mode oracle
 
