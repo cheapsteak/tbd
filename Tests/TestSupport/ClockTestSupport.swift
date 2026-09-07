@@ -435,38 +435,18 @@ public extension TestClock {
     func waitForSuspension(timeout: Swift.Duration = .seconds(45),
                            pollInterval: Swift.Duration = .milliseconds(25),
                            sourceLocation: SourceLocation = #_sourceLocation) async {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        repeat {
+        // `checkSuspension()` throws when a sleeper *is* registered, so the
+        // probe reads inverted — that polarity is the whole reason this helper
+        // cannot share `advanceUntil`'s condition shape directly.
+        let armed = await pollUntilTrue(timeout: timeout, pollInterval: pollInterval) {
             do {
                 try await checkSuspension()
+                return false
             } catch {
-                return  // A sleeper is registered — that is what we were waiting for.
+                return true
             }
-            // Cancellation is not expiry, and `try?` cannot tell them apart: a
-            // cancelled `Task.sleep` throws instantly, so without this the loop
-            // stops yielding and busy-spins its remaining budget on a
-            // cooperative thread — 149 call sites reach this helper through
-            // `advanceWhenSuspended`, and every other test in the process is
-            // queued behind the thread it pins.
-            if Task.isCancelled { break }
-            try? await Task.sleep(for: pollInterval)
-        } while ContinuousClock.now < deadline
-        // One last probe, so the verdict is a fresh read rather than the loop's
-        // exit. The deadline is tested *after* the poll sleep, so the last probe
-        // is already `pollInterval` old before that test runs — and under the
-        // fast parallel pass a 25 ms step aside can return its turn tens of
-        // seconds later, by which time an arming that happened during the sleep
-        // would be reported as never having happened. Same shape as
-        // `advanceUntil` above, which re-reads its condition here for the same
-        // reason. Costs one extra probe, and only on the path about to fail.
-        do {
-            try await checkSuspension()
-        } catch {
-            return
         }
-        // A cancelled wait reports nothing: attribution belongs to whatever did
-        // the cancelling, as `EventDrivenTestClock.sleeperArmed` documents.
-        if Task.isCancelled { return }
+        guard case .timedOut = armed else { return }
         Issue.record(
             """
             TestClock: no task was suspended on the clock within \(timeout) — the \

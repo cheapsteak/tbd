@@ -41,36 +41,16 @@ struct EventDrivenTestClockSelfTests {
                                   sourceLocation: SourceLocation = #_sourceLocation,
                                   _ condition: () -> Bool) async {
         let start = ContinuousClock.now
-        let deadline = start.advanced(by: timeout)
-        while ContinuousClock.now < deadline {
-            if condition() { return }
-            // Cancellation is not expiry, and `try?` cannot tell them apart: a
-            // cancelled `Task.sleep` throws instantly, so without this the loop
-            // stops yielding and busy-spins on `ContinuousClock.now` for the
-            // rest of its budget — burning a cooperative thread, in a process
-            // where every other test is queued behind one.
-            if Task.isCancelled { break }
-            try? await Task.sleep(for: .milliseconds(5))
+        switch await pollUntilTrue(timeout: timeout, condition) {
+        case .satisfied, .cancelled:
+            return
+        case .timedOut:
+            Issue.record(
+                HandshakeTimeout(what: what, timeout: timeout,
+                                 elapsed: ContinuousClock.now - start),
+                sourceLocation: sourceLocation
+            )
         }
-        // The verdict must come from a *fresh* read, never from the loop's exit.
-        // The loop tests the deadline before the condition, so its last sample
-        // is up to `timeout` old: a poller that steps aside for 5 ms and gets
-        // its next turn 40 s later exits here having looked exactly once, at
-        // the top, before the task it is waiting on had run at all. Reporting
-        // that as "still not true" is a false red, and under the fast parallel
-        // pass — one process, no concurrency cap, p50 per-test latency 56-70 s
-        // — it is the *expected* outcome rather than a rare one. Same shape as
-        // `advanceUntil` and `watchForSleeper`, which both re-read here.
-        if condition() { return }
-        // A cancelled wait reports nothing: attribution belongs to whatever did
-        // the cancelling, exactly as `EventDrivenTestClock.sleeperArmed`
-        // documents for its own hang guard.
-        if Task.isCancelled { return }
-        Issue.record(
-            HandshakeTimeout(what: what, timeout: timeout,
-                             elapsed: ContinuousClock.now - start),
-            sourceLocation: sourceLocation
-        )
     }
 
     /// Lock-guarded latch for observing a specific issue from

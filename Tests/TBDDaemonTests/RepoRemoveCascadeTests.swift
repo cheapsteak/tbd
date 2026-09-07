@@ -68,16 +68,8 @@ private final class PathGate: @unchecked Sendable {
     func wait(_ path: String, timeout: Duration = TestGate.deadline,
               sourceLocation: SourceLocation = #_sourceLocation) async {
         lock.withLock { entered.append(path) }
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while !isOpen(path), ContinuousClock.now < deadline {
-            if Task.isCancelled { break }
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-        if isOpen(path) { return }
-        // Cancellation is not expiry: `try?` above cannot tell them apart, so
-        // the loop breaks on it, and attribution for a cancelled test belongs
-        // to whatever did the cancelling rather than to this gate.
-        if Task.isCancelled { return }
+        guard case .timedOut = await pollUntilTrue(timeout: timeout, { isOpen(path) })
+        else { return }
         Issue.record(
             TestGateTimeout(gate: "PathGate(\(path))", after: timeout),
             sourceLocation: sourceLocation)
@@ -108,17 +100,9 @@ struct RepoRemoveCascadeTests {
         observed: @Sendable () async -> String = { "still false" },
         _ condition: @Sendable () async -> Bool
     ) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if await condition() { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        // Fresh read before giving up: the loop tests the deadline before the
-        // condition, so its last sample is up to `timeout` old, and a poller
-        // whose 10 ms step aside returns its turn late under the fast parallel
-        // pass would otherwise throw a timeout at a condition that already
-        // holds. Same re-read as `SidecarTestSupport.waitUntil`.
-        if await condition() { return }
+        guard case .timedOut = await pollUntilTrue(
+            timeout: .seconds(timeout), pollInterval: .milliseconds(10), condition
+        ) else { return }
         throw CascadeWaitTimeout(what: what, observed: await observed(), seconds: timeout)
     }
 
