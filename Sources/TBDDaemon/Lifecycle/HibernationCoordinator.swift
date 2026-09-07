@@ -929,13 +929,12 @@ public actor HibernationCoordinator {
     /// the parked check below. An UNPARKED row whose session died is reported
     /// (`.sessionGone`) but not repaired — see `classifyUnparkedWake`.
     ///
-    /// **An already-parked holder row wakes whatever `holder_hibernation_enabled`
-    /// says.** The flag gates new parks and the classification of an UNPARKED
-    /// holder row; it does not gate the wake of a row the feature has already
-    /// parked. Turning the flag off is the soak's abort gesture, and an abort
-    /// that stranded everything the soak parked would be no abort at all — the
-    /// app's focus-wake would fire a failing RPC on every focus, forever, with
-    /// no way back to a live session.
+    /// **Transport decides which mechanic runs, never whether one may.** A
+    /// parked holder row wakes by spawning a fresh holder running
+    /// `claude --resume`; a parked tmux row respawns its window. An UNPARKED
+    /// holder row is classified against the process table rather than against a
+    /// pane, because a holder row's pane id is the empty string by construction
+    /// and tmux answers for it by reporting the pane gone.
     public func wake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, allowDefaultProfileFallback: Bool = false, initialPrompt: String? = nil) async -> WakeResult {
         // Claim synchronously, before the first suspension. Otherwise two wake
         // calls can both read the parked row, then each pass the in-flight check

@@ -2415,8 +2415,10 @@ struct HolderTmuxAssumptionGateTests {
         #expect(RowFingerprint(after) == before)
     }
 
-    /// The tmux leg. An inverted transport comparison would disable auto-resume
-    /// for the transport that still has a pane to type into.
+    /// The tmux leg: transport decides how a row is resumed and nothing else.
+    /// A tmux row still gets the three-key sequence through `send-keys`, and
+    /// the holder input path is never touched. An inverted transport comparison
+    /// would disable auto-resume for the transport that has a pane to type into.
     @Test("auto-resume still types the continue sequence into a tmux row")
     func autoResumeStillActsOnTmuxRow() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -2426,29 +2428,6 @@ struct HolderTmuxAssumptionGateTests {
             db, worktreeID: wt.id, transport: .tmux)
         // The activity hook already reports working, so the first verification
         // poll succeeds without a transcript on disk.
-        try await db.terminals.setActivityState(
-            id: terminal.id, activityState: .working, source: .derived)
-        let resume = try await armedResume(db, terminal: terminal)
-
-        let tmux = FakeResumeTmux()
-        tmux.windowAlive = true
-        let outcome = await resumeActuator(db, tmux: tmux).actuate(resume)
-
-        #expect(outcome == .sent, "expected .sent, got \(outcome)")
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
-    }
-
-    /// The tmux leg of the flag itself. `holder_hibernation_enabled` decides
-    /// how a HOLDER row is resumed and nothing about a tmux one: with it on, a
-    /// tmux row still gets the three-key sequence through `send-keys` and the
-    /// holder input path is never touched.
-    @Test("auto-resume still types the continue sequence into a tmux row with holder hibernation on")
-    func autoResumeStillActsOnTmuxRowWithHolderHibernationOn() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let (wt, dir) = try await seedWorktree(db)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let terminal = try await seedClaudeTerminal(
-            db, worktreeID: wt.id, transport: .tmux)
         try await db.terminals.setActivityState(
             id: terminal.id, activityState: .working, source: .derived)
         let resume = try await armedResume(db, terminal: terminal)

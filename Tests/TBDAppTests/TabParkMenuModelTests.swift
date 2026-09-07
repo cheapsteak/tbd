@@ -6,7 +6,7 @@ import TBDShared
 /// The per-tab Hibernate/Wake context-menu affordance (the park control that
 /// returned to the tab after PR #362 retired the play/pause Suspend button).
 /// Tests the pure decision
-/// `TabParkMenuModel.action(for:holderHibernationEnabled:panelHoldsPTY:)`
+/// `TabParkMenuModel.action(for:panelHoldsPTY:)`
 /// across every branch without SwiftUI: hibernate for a live
 /// manually-hibernatable Claude session, wake for a parked one (authoritative
 /// `hibernatedAt` AND legacy `suspendedAt`), and neither for
