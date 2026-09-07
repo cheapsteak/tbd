@@ -852,7 +852,7 @@ struct HolderTmuxAssumptionGateTests {
     /// executable — and the row staying parked is what proves the wake refused
     /// rather than half-ran.
     @Test("a wake that cannot spawn a holder leaves the row parked")
-    func flagOnWakeWithoutASpawnerLeavesTheRowParked() async throws {
+    func wakeWithoutASpawnerLeavesTheRowParked() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -2151,16 +2151,21 @@ struct HolderTmuxAssumptionGateTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let terminal = try await seedClaudeTerminal(
             db, worktreeID: wt.id, transport: .holder)
+        // `.working` is what the post-send verification reads as "the
+        // session took the resume", so the outcome can be pinned to `.sent`
+        // rather than merely to "not cancelled".
+        try await db.terminals.setActivityState(
+            id: terminal.id, activityState: .working, source: .derived)
         let resume = try await armedResume(db, terminal: terminal)
 
         let tmux = FakeResumeTmux()
         tmux.windowAlive = false   // what a real server answers for ""
         let holder = RecordedHolderWrites()
-        let outcome = await resumeActuator(db, tmux: tmux, holderSend: holder.send)
-            .actuate(resume)
+        let outcome = await resumeActuator(
+            db, tmux: tmux, holderSend: holder.send, waiter: holder.waiter
+        ).actuate(resume)
 
-        #expect(outcome != .terminalGone,
-                "the rail cancelled an armed resume on a live holder session")
+        #expect(outcome == .sent, "expected .sent, got \(outcome)")
         #expect(tmux.sends.isEmpty,
                 "the holder arm reached tmux: \(tmux.sends)")
         #expect(!holder.writes().isEmpty,
@@ -2181,7 +2186,7 @@ struct HolderTmuxAssumptionGateTests {
     /// actuator's own constants, because those constants are what this test
     /// exists to pin.
     @Test("auto-resume writes ESC, a pause, then continue + CR to a holder session")
-    func autoResumeWritesTheContinueMessageToHolderRowWithFlagOn() async throws {
+    func autoResumeWritesTheContinueMessageToHolderRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }

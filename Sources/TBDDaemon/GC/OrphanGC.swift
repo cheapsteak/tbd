@@ -1273,9 +1273,10 @@ public actor OrphanGC {
     /// (`docs/specs/2026-08-18-orphan-process-gc-design.md`).
     ///
     /// Gated by `gcOrphanProcessesEnabled` on top of `gcEnabled`, the same
-    /// shape `reclaimProfileDirs` uses and for the same reason: this is the
-    /// only GC phase that signals processes rather than moving bytes, and what
-    /// it misjudges cannot be restored. `dryRun` bypasses the flag exactly as
+    /// shape `reclaimProfileDirs` uses and for the same reason: this phase
+    /// signals processes rather than moving bytes, and what it misjudges
+    /// cannot be restored. (`reclaimRowlessHolders` signals too, but only
+    /// holders this installation verifiably owns, under `gcEnabled` alone.) `dryRun` bypasses the flag exactly as
     /// `sweep` lets it bypass `gcEnabled` — someone deciding whether to enable
     /// a default-off flag needs to see what enabling it would reclaim first —
     /// and touches nothing either way.

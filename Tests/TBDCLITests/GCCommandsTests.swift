@@ -12,11 +12,11 @@ import Testing
 /// to a live daemon, and is not exercised here.
 @Suite("tbd gc soak-switch registration and parsing")
 struct GCCommandsTests {
-    /// Every gate that kills something needs a CLI leg, or "enable it for the
-    /// soak" means hand-editing `state.db` — which this project's rules put out
-    /// of bounds. Named by string so the assertion is about the typed command,
-    /// not about which Swift type happens to back it.
-    @Test func killingSoakSwitchesAreAllRegisteredOnTheGCGroup() {
+    /// Every GC leg that soaks behind a switch of its own needs a CLI leg, or
+    /// "enable it for the soak" means hand-editing `state.db` — which this
+    /// project's rules put out of bounds. Named by string so the assertion is
+    /// about the typed command, not about which Swift type happens to back it.
+    @Test func soakSwitchesAreAllRegisteredOnTheGCGroup() {
         let names = GCCommand.configuration.subcommands.map { $0._commandName }
         #expect(names.contains("orphan-processes"))
         #expect(names.contains("profile-dirs"))

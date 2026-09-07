@@ -1065,10 +1065,9 @@ extension WorktreeLifecycle {
     /// signals nothing, ever.
     ///
     /// **Naming that contingency honestly: the loop does not always close.**
-    /// The reaper keeps rather than signals
-    /// whenever identity is uncertain — `holder-unrecorded`,
-    /// `start-time-mismatch`, `foreign-executable` — and each of those is a
-    /// permanent keep here too. A pid the row names that has been reused by a
+    /// The reaper keeps rather than signals whenever identity is uncertain —
+    /// `holder-unrecorded`, `start-time-mismatch`, `foreign-executable` — and
+    /// each of those is a permanent keep here too. A pid the row names that has been reused by a
     /// stranger therefore keeps the row indefinitely instead of killing that
     /// stranger. That is the direction to fail in, and a kept row is a visible
     /// session the user can close by hand.
