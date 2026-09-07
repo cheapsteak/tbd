@@ -80,14 +80,35 @@ final class FakeUpstream: @unchecked Sendable {
 
         let bound = try bootstrap.bind(host: "127.0.0.1", port: 0).wait()
         channel = bound
-        return bound.localAddress?.port ?? 0
+        // Thrown rather than defaulted: port 0 is a legal thing to *ask* for
+        // and means "the kernel picks one", so handing it back as the bound
+        // port would send every later request to a port nothing listens on and
+        // fail the test that used it instead of the bind that broke.
+        guard let port = bound.localAddress?.port else {
+            throw FakeUpstreamError.boundAddressUnreadable
+        }
+        return port
     }
 
-    /// Closes the listener and shuts the event loop down. Safe to call twice.
+    /// Closes the listener and shuts the event loop down. Safe to call twice,
+    /// and safe to call after a `start()` that threw — which is why callers
+    /// register their `defer { stop() }` *before* starting, so a failed bind
+    /// cannot leak the event-loop group.
     func stop() {
         try? channel?.close().wait()
         channel = nil
         try? group.syncShutdownGracefully()
+    }
+}
+
+enum FakeUpstreamError: LocalizedError {
+    case boundAddressUnreadable
+
+    var errorDescription: String? {
+        switch self {
+        case .boundAddressUnreadable:
+            return "the fake upstream bound a channel whose local address has no port"
+        }
     }
 }
 
@@ -175,9 +196,11 @@ private final class ScriptedUpstreamHandler: ChannelInboundHandler, @unchecked S
 /// uses: `message_start` → `content_block_start` → one `content_block_delta`
 /// per delta → `content_block_stop` → `message_delta` → `message_stop`.
 ///
-/// The shape is the fake model API's
-/// (`.github/workflows/claude-review-v2/tests/e2e/stub_server.py`,
-/// `sse_events`) with tool blocks omitted, since the tee only reads text.
+/// It emits the same event sequence and payload shape as `sse_events` in the
+/// fake model API (`.github/workflows/claude-review-v2/tests/e2e/stub_server.py`),
+/// rendered with the real API's compact separators, and with the tool blocks
+/// omitted since the tee only reads text. It is a fixture modelled on that
+/// stream, not a byte-for-byte copy of any one recorded turn.
 /// Payloads are hand-written rather than encoded from dictionaries so the
 /// bytes are fixed: a `JSONEncoder` over a dictionary orders keys however it
 /// likes, and a fixture whose bytes move cannot witness a byte-identical

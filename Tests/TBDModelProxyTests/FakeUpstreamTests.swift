@@ -12,8 +12,11 @@ struct FakeUpstreamTests {
     func servesScript() async throws {
         let script = sseTextAnswer(messageID: "msg_fake_1", deltas: ["Hel", "lo"])
         let upstream = FakeUpstream { _, _ in script }
-        let port = try upstream.start()
+        // Registered before the start, not after it: `stop()` is idempotent and
+        // safe on an unstarted server, and a bind that throws would otherwise
+        // leave the event-loop group running for the rest of the test process.
         defer { upstream.stop() }
+        let port = try upstream.start()
 
         let requestBody = Data(#"{"model":"claude-stub","stream":true}"#.utf8)
         var request = URLRequest(url: try #require(URL(string: "http://127.0.0.1:\(port)/v1/messages")))
