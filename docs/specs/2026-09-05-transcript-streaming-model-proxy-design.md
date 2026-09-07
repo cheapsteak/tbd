@@ -113,6 +113,27 @@ calls `setsid` first, ignores `SIGHUP` and `SIGPIPE`, and orphans to launchd
 when the daemon exits. Its binary is a sibling of the daemon's, never copied
 out of the build tree; a running image survives rebuilds as the holder's does.
 
+### Why one per TBD home
+
+The proxy is one process per `~/tbd` directory rather than one per machine or
+one per session. The home is the smallest unit that is already an ownership
+boundary: it has one config row to hold the port, one rendezvous directory,
+one daemon whose version the proxy should match and whose supervisor respawns
+it, and one set of holders. A machine-wide proxy would need a machine-wide
+version of each, and TBD has none; two checkouts on one machine each run a
+daemon, and the holder owner token exists so one cannot adopt the other's
+holders. One global proxy would put two daemons of different versions in
+charge of one process with no rule for which wins. A per-session proxy would
+live in the holder, which is kept frozen precisely because sessions run the
+holder they were born with, and would cost one port per session for no gain:
+a shared proxy's crash fails no turn, since Claude retries for 183 seconds and
+the supervisor respawns in seconds.
+
+Because every path derives from `TBD_HOME`, the test fence that redirects a
+test's home gives that test its own proxy with no injection seam added for the
+purpose. For an ordinary single-checkout install, per home and per machine are
+the same thing.
+
 ### Port
 
 The port lives in a new `model_proxy_port` config column. The first proxy is
