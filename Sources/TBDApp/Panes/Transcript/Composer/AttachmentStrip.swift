@@ -40,6 +40,8 @@ struct AttachmentStrip: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
             }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(ComposerAccessibility.attachments)
         }
     }
 
@@ -68,6 +70,8 @@ struct AttachmentStrip: View {
                 .buttonStyle(.plain)
                 .padding(2)
                 .accessibilityLabel("Remove image \(attachment.number)")
+                .accessibilityIdentifier(
+                    ComposerAccessibility.attachmentRemove(number: attachment.number))
             }
             Text(detached ? "not in message" : "#\(attachment.number)")
                 .font(.system(size: 9))
@@ -88,11 +92,26 @@ struct AttachmentStrip: View {
                 onFocusToken(attachment.number)
             }
         }
-        .accessibilityElement(children: .combine)
+        // `.contain` rather than `.combine`. Combining folds the remove button
+        // into this one element, and a button that is not its own element is a
+        // button neither a driver nor VoiceOver can press separately from the
+        // thumbnail it sits on. The group keeps the sentence it always had, and
+        // carries the thumbnail's own click as an explicit action instead of
+        // relying on the merge to expose it.
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(
             detached
                 ? "Image \(attachment.number), not in message. Click to re-insert."
                 : "Image \(attachment.number), in message. Click to go to it.")
+        .accessibilityIdentifier(
+            ComposerAccessibility.attachmentItem(number: attachment.number))
+        .accessibilityAction {
+            if detached {
+                onReinsert(attachment.number)
+            } else {
+                onFocusToken(attachment.number)
+            }
+        }
     }
 }
 
