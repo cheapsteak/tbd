@@ -100,10 +100,20 @@ struct RepoRemoveCascadeTests {
         observed: @Sendable () async -> String = { "still false" },
         _ condition: @Sendable () async -> Bool
     ) async throws {
-        guard case .timedOut = await pollUntilTrue(
+        switch await pollUntilTrue(
             timeout: .seconds(timeout), pollInterval: .milliseconds(10), condition
-        ) else { return }
-        throw CascadeWaitTimeout(what: what, observed: await observed(), seconds: timeout)
+        ) {
+        case .satisfied:
+            return
+        case .cancelled:
+            // A throwing waiter propagates cancellation rather than returning,
+            // which is what it did before this loop was shared. Returning would
+            // walk a cancelled test into the assertions that follow and pin the
+            // failure on them — the mis-attribution this file exists to remove.
+            throw CancellationError()
+        case .timedOut:
+            throw CascadeWaitTimeout(what: what, observed: await observed(), seconds: timeout)
+        }
     }
 
     /// Router sharing one `StateSubscriptionManager` with its lifecycle, with

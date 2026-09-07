@@ -93,13 +93,20 @@ struct BoundedPollSelfTests {
     /// condition is read **before** cancellation is consulted, so work that
     /// completed at the same moment the task was cancelled is still honoured.
     /// Reversing the two would discard a real success and report `.cancelled`.
+    ///
+    /// The zero budget is what makes this reach the branch it claims to pin: the
+    /// loop body never runs, so the only read of the condition is the post-loop
+    /// one that sits immediately above the cancellation check. With a live
+    /// budget the loop would satisfy the wait on its first read and the ordering
+    /// would never be exercised.
     @Test("a condition true at cancellation time still wins")
     func conditionBeatsCancellation() async {
         let task = Task { () -> PollOutcome in
             while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(2)) }
-            return await pollUntilTrue(timeout: .seconds(30)) { true }
+            return await pollUntilTrue(timeout: .zero) { true }
         }
         task.cancel()
-        #expect(await task.value == .satisfied)
+        #expect(await task.value == .satisfied,
+                "cancellation must not discard a condition that already holds")
     }
 }
