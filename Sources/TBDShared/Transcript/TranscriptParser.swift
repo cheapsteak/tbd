@@ -8,15 +8,6 @@ import os
 /// Code may be partial during live polling; we tolerate that.
 public enum TranscriptParser {
     private static let perfLog = Logger(subsystem: "com.tbd.shared", category: "perf-transcript")
-    /// Shared ISO8601 formatter that accepts Claude Code's fractional-seconds
-    /// timestamps (e.g. `2026-05-05T03:06:16.813Z`). Without
-    /// `.withFractionalSeconds`, every such timestamp silently fails to parse.
-    /// `ISO8601DateFormatter` is documented as thread-safe for read-only use.
-    nonisolated(unsafe) private static let iso8601: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
 
     /// Parse a top-level Claude session JSONL into transcript items in file order.
     ///
@@ -213,6 +204,31 @@ public enum TranscriptParser {
         toolResultsByID: [String: ToolResult]
     ) -> [TranscriptItem] {
         var items: [TranscriptItem] = []
+
+        // Local, not shared. This was a `nonisolated(unsafe)` static justified
+        // by a comment claiming `ISO8601DateFormatter` "is documented as
+        // thread-safe for read-only use". It is not: `NSISO8601DateFormatter.h`
+        // sits inside `NS_HEADER_AUDIT_BEGIN(nullability, sendability)` and
+        // carries no `NS_SWIFT_SENDABLE`, while its superclass `DateFormatter`
+        // in the same audit regime does. Swift reports the conformance as
+        // explicitly unavailable (`@_nonSendable(_assumed)`), so
+        // `nonisolated(unsafe)` was asserting a guarantee the platform
+        // withholds — on a site reached concurrently, since `TranscriptParser`
+        // is a nonisolated enum called from unstructured RPC handler tasks.
+        //
+        // A lock would restore safety but put the ICU parse inside the critical
+        // section, serializing concurrent whole-file parses. A local formatter
+        // shares nothing instead. Construction measured ~130us against ~25us
+        // per `date(from:)`: free for the whole-file paths, which amortize it
+        // over thousands of lines, and a real but sub-millisecond cost for
+        // `IncrementalTranscript`'s per-batch and single-line patch calls,
+        // which is the same order as the JSON work already in those calls.
+        //
+        // `.withFractionalSeconds` is required: Claude Code emits
+        // `2026-05-05T03:06:16.813Z`, and without it every such timestamp
+        // silently fails to parse.
+        let iso8601 = ISO8601DateFormatter()
+        iso8601.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
         for (i, json) in rawLines.enumerated() {
             // Subagent (sidechain) lines belong to a nested agent's own
