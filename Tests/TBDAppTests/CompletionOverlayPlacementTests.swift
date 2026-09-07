@@ -75,11 +75,8 @@ struct CompletionOverlayPlacementTests {
         #expect(
             listFrame.height == CompletionOverlayView.maxHeight,
             "eight rows and no more: \(listFrame.height)")
-        #expect(listFrame.width == Self.listWidth)
+        #expect(listFrame.width == CompletionOverlayView.width)
     }
-
-    /// The list's own width, as the composer's overlay states it.
-    private static let listWidth: CGFloat = 460
 
     // MARK: - The height itself
 

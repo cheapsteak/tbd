@@ -105,7 +105,7 @@ struct MessageComposerView: View {
             // in the first place.
             if let controller, controller.isOpen {
                 Color.clear
-                    .frame(width: 460, height: 0)
+                    .frame(width: CompletionOverlayView.width, height: 0)
                     .overlay(alignment: .bottomLeading) {
                         CompletionOverlayView(
                             controller: controller,
@@ -113,7 +113,7 @@ struct MessageComposerView: View {
                             // Reached only from an explicit click; hover is
                             // handled inside the overlay and moves nothing.
                             onHighlight: { controller.moveTo(index: $0) })
-                        .frame(width: 460)
+                        .frame(width: CompletionOverlayView.width)
                     }
             }
         }

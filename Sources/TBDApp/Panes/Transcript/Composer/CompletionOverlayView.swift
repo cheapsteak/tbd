@@ -27,6 +27,10 @@ struct CompletionOverlayView: View {
     /// so a pointer resting over the list cannot change what Return would take.
     @State private var hoveredIndex: Int?
 
+    /// The list's own width — the composer proposes it, rather than the list
+    /// proposing itself, so this is the one place that width is spelled.
+    static let width: CGFloat = 460
+
     static let rowHeight: CGFloat = 44
     /// The tallest the list ever gets: eight rows, and a scroller past that.
     static var maxHeight: CGFloat {
