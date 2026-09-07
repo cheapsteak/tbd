@@ -310,8 +310,7 @@ public actor OrphanGC {
         // Before the rendezvous file sweep, deliberately. A holder this phase
         // kills leaves a socket behind that nothing else will ever unlink, and
         // running the file sweep next means one pass reclaims both the process
-        // and its residue — for an installation that has opted into both, which
-        // is the only way either runs.
+        // and its residue.
         await reclaimRowlessHolders(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
