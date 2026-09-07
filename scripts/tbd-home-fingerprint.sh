@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
-# Prints a stable fingerprint of the REAL `~/tbd`, `~/.claude`, `~/.codex` and
-# tmux socket directory — deliberately `$HOME/...` and the CALLER's
-# `$TMUX_TMPDIR`, never `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME` /
+# Prints a stable fingerprint of the REAL `~/tbd`, `~/.claude`, `~/.codex`,
+# `~/Library/Logs/TBD/hang-stacks` and the tmux socket directory — deliberately
+# `$HOME/...` and the CALLER's `$TMUX_TMPDIR`, never
+# `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME` /
 # `$TBD_TEST_CODEX_HOME` or the fenced socket dir, because the whole point is
 # to observe the directories a test run is supposed to leave alone even while
 # those overrides point somewhere else.
@@ -35,6 +36,10 @@ set -euo pipefail
 real_home="${HOME}/tbd"
 real_claude="${HOME}/.claude"
 real_codex="${HOME}/.codex"
+# The hang-stack diagnostics directory. `HangStackWriter` derives it from the
+# user library directory, which follows `$HOME`/`CFFIXED_USER_HOME` — so it is
+# spelled from `$HOME` here for the same reason as the three stores above.
+real_hang_stacks="${HOME}/Library/Logs/TBD/hang-stacks"
 # The shared tmux socket directory, resolved exactly as tmux resolves it for a
 # `-L <name>` invocation. Read from the CALLER's environment, the same
 # deliberate choice as `$HOME` above: `scripts/test.sh` applies its overrides
@@ -183,8 +188,8 @@ else
   echo "~/.codex/plugins/cache <absent>"
 fi
 
-# The tmux socket directory — the fourth root, and the only one that is not a
-# dot-directory in `$HOME`. It is flat, so depth 1 sees everything: one socket
+# The tmux socket directory — the fourth root, and the only one that lives
+# outside `$HOME` entirely. It is flat, so depth 1 sees everything: one socket
 # file per server, named after the `-L <name>` it was started with.
 #
 # WHAT IT CATCHES. A run that starts a tmux server with `TMUX_TMPDIR` dropped
@@ -212,4 +217,38 @@ if [ -d "$real_tmux" ]; then
     | LC_ALL=C sort
 else
   echo "<tmux-sockets> <absent>"
+fi
+
+# ~/Library/Logs/TBD/hang-stacks — the fifth root, and the only one a sweep
+# DELETES from. `HangStackCollector` (`OrphanGC`'s hang-stack phase) reclaims
+# files here, and `HangStackWriter` creates them, so this directory is reachable
+# in both directions: a test that escapes the fence can leave a hang stack
+# behind, and one that escapes it while the reclaimer runs can destroy a
+# developer's real diagnostics. It is the first GC target outside `~/tbd`, which
+# is precisely why it needs an arm of its own — none of the four above covers a
+# path under `~/Library`.
+#
+# Depth 1, and NAMES ONLY, like every arm here. The directory is flat by
+# construction — one file per hang event, `hang-<timestamp>-<pid>.txt`, appended
+# to in place — so depth 1 sees the whole thing, and a name is what changes when
+# a file is created or reclaimed. Contents grow continuously while a hang is in
+# progress, which is exactly the churn a size- or mtime-based fingerprint would
+# report as a leak.
+#
+# Like the tmux arm, this one reports the MACHINE rather than the run on a
+# developer box: a real app hang during a local `--fingerprint` run writes a
+# file here legitimately. That is another reason detection stays CI-only, where
+# no TBDApp is running.
+#
+# On a CI runner the directory typically does not exist at all, so both
+# snapshots read `<absent>` — thinner coverage than on a populated box, not
+# zero: a run that CREATES it flips `<absent>` to a listing and goes red.
+if [ -d "$real_hang_stacks" ]; then
+  find "$real_hang_stacks" -maxdepth 1 \
+    \( "${name_args[@]}" -print \) \
+    2>/dev/null \
+    | sed "s|^${real_hang_stacks}|~/Library/Logs/TBD/hang-stacks|" \
+    | LC_ALL=C sort
+else
+  echo "~/Library/Logs/TBD/hang-stacks <absent>"
 fi

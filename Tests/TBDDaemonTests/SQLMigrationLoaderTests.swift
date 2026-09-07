@@ -492,6 +492,7 @@ import Testing
             "20260825060216_terminal_session_incarnation",
             "20260829210843_pending_terminal_incarnation",
             "20260830003851_config_remote_peer_messaging",
+            "20260830021944_config_gc_hang_stacks",
             "20260830022625_shadow_peer_artifacts",
             "20260831055718_config_pty_holder",
             "20260831055719_terminal_transport",
