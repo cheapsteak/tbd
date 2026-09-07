@@ -24,7 +24,9 @@ import Testing
 struct ModelProxyFlagTests {
 
     /// The last migration identifier that predates the columns. Migrating only
-    /// this far reproduces the schema a real pre-flag daemon ran on.
+    /// this far reproduces the schema a real pre-flag daemon ran on. Any
+    /// identifier that predates the four columns would do — this one is just
+    /// whatever landed last before them.
     private static let lastIdentifierBeforeTheFlags = "20260905220000_terminal_holder_child_started_at"
 
     private func fetchConfigRecord(_ db: TBDDatabase) async throws -> ConfigRecord? {
@@ -233,6 +235,27 @@ struct ModelProxyFlagTests {
         #expect(
             try await db.config.get().transcriptStreamingEnabled == false,
             "streaming must stay off until it is asked for again")
+    }
+
+    /// The off-write fires even when streaming was never touched: a fresh row
+    /// has `transcript_streaming_enabled` at NULL, and turning the proxy off
+    /// is still the gesture that lifts it into an explicit `false` — not a
+    /// value that merely happens to resolve to false through the default.
+    @Test func turningTheProxyOffFromAFreshRowWritesStreamingExplicitlyFalse() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let before = try #require(try await fetchConfigRecord(db))
+        #expect(before.transcript_streaming_enabled == nil)
+
+        try await db.config.setModelProxyEnabled(false)
+
+        let after = try #require(try await fetchConfigRecord(db))
+        #expect(
+            after.transcript_streaming_enabled == false,
+            """
+            turning the proxy off from a fresh row must write streaming to an \
+            explicit 0, not leave it NULL — read back \
+            \(String(describing: after.transcript_streaming_enabled)).
+            """)
     }
 
     /// Turning the proxy ON is not coupled: it must leave streaming exactly

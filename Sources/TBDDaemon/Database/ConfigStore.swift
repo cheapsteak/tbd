@@ -906,10 +906,16 @@ public struct ConfigStore: Sendable {
     /// silently re-arm it the next time the proxy came back on. The reverse
     /// coupling lives in `setTranscriptStreamingEnabled`.
     ///
-    /// Both columns are written on every call, because writing either value is
-    /// the explicit gesture that lifts them out of NULL forever after. Applies
-    /// to sessions started after the change: a session's `ANTHROPIC_BASE_URL`
-    /// is fixed in its environment at spawn.
+    /// The proxy column is written on every call. The streaming column is
+    /// written only when the proxy is turned off — that is the one gesture
+    /// here that lifts streaming out of NULL, and it does so as a deliberate
+    /// side effect: the effective value readers see is the conjunction of the
+    /// two columns (`Config.transcriptStreamingEffective`), so streaming must
+    /// never be left holding a stale `1` once the proxy it depends on is off.
+    /// Turning the proxy back **on** leaves streaming untouched — see
+    /// `turningTheProxyOnLeavesStreamingAlone`. Applies to sessions started
+    /// after the change: a session's `ANTHROPIC_BASE_URL` is fixed in its
+    /// environment at spawn.
     public func setModelProxyEnabled(_ enabled: Bool) async throws {
         try await writer.write { db in
             try db.execute(
