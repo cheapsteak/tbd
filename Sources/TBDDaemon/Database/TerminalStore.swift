@@ -67,6 +67,11 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// never been through a park/wake cycle, where `createdAt` is still the
     /// right identity anchor — see `Terminal.holderChildStartedAt`.
     var holder_child_started_at: Date?
+    /// Absolute path of the model proxy's transcript stream file for this
+    /// session. NULL on every row spawned without a proxy route, which is
+    /// every row written before the column existed — see
+    /// `Terminal.transcriptStreamPath`.
+    var transcript_stream_path: String?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -101,6 +106,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.holder_pid = terminal.holderPID
         self.child_pid = terminal.childPID
         self.holder_child_started_at = terminal.holderChildStartedAt
+        self.transcript_stream_path = terminal.transcriptStreamPath
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -151,7 +157,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             transport: transport.flatMap(TerminalTransport.init(rawValue:)) ?? .tmux,
             holderPID: holder_pid,
             childPID: child_pid,
-            holderChildStartedAt: holder_child_started_at
+            holderChildStartedAt: holder_child_started_at,
+            transcriptStreamPath: transcript_stream_path
         )
     }
 }
@@ -304,6 +311,10 @@ struct TerminalReplacementSnapshot: Sendable {
     let kind: TerminalKind?
     let claudeSessionID: String?
     let transcriptPath: String?
+    /// The proxy route the observed process was launched on. Stamped at spawn
+    /// and never changed, so a mismatch here says the row's session was
+    /// replaced under the caller — exactly what the rest of the snapshot says.
+    let transcriptStreamPath: String?
     let profileID: UUID?
     let suspendedAt: Date?
     let hibernatedAt: Date?
@@ -314,6 +325,7 @@ struct TerminalReplacementSnapshot: Sendable {
         kind = terminal.kind
         claudeSessionID = terminal.claudeSessionID
         transcriptPath = terminal.transcriptPath
+        transcriptStreamPath = terminal.transcriptStreamPath
         profileID = terminal.profileID
         suspendedAt = terminal.suspendedAt
         hibernatedAt = terminal.hibernatedAt
@@ -325,6 +337,7 @@ struct TerminalReplacementSnapshot: Sendable {
             && record.kind == kind?.rawValue
             && record.claudeSessionID == claudeSessionID
             && record.transcriptPath == transcriptPath
+            && record.transcript_stream_path == transcriptStreamPath
             && record.profile_id == profileID?.uuidString
             && record.suspendedAt == suspendedAt
             && record.hibernatedAt == hibernatedAt
@@ -336,6 +349,7 @@ struct TerminalReplacementSnapshot: Sendable {
             && terminal.kind == kind
             && terminal.claudeSessionID == claudeSessionID
             && terminal.transcriptPath == transcriptPath
+            && terminal.transcriptStreamPath == transcriptStreamPath
             && terminal.profileID == profileID
             && terminal.suspendedAt == suspendedAt
             && terminal.hibernatedAt == hibernatedAt
@@ -1876,6 +1890,29 @@ public struct TerminalStore: Sendable {
             record.child_pid = childPID
             record.holder_child_started_at = startedAt
             try record.update(db)
+        }
+    }
+
+    /// Record — or clear — the model proxy stream file this terminal's session
+    /// was launched against.
+    ///
+    /// Written once, at spawn, right after the row exists and before the app is
+    /// told about it; `nil` clears the route when a session is spawned without
+    /// one. A single-column `UPDATE` rather than a read-modify-write of the
+    /// whole record on purpose: spawn runs concurrently with the first hooks
+    /// from the process it just started, and rewriting every column here would
+    /// let this write reinstate the session and activity columns those hooks
+    /// had already moved.
+    ///
+    /// A row that has since vanished is a no-op, matching `setProfileID`: the
+    /// terminal this route belonged to is gone, and so is anything that could
+    /// read the route.
+    public func setTranscriptStreamPath(terminalID: UUID, path: String?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE terminal SET transcript_stream_path = ? WHERE id = ?",
+                arguments: [path, terminalID.uuidString]
+            )
         }
     }
 

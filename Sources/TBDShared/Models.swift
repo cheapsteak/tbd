@@ -746,6 +746,15 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// session was parked, which is exactly the case `createdAt` alone cannot
     /// describe. Cleared with the two pid columns when a row parks.
     public var holderChildStartedAt: Date?
+    /// Absolute path of the model proxy's transcript stream file for this
+    /// session, or nil when the session was never routed through the proxy.
+    ///
+    /// Stamped at spawn and never changed afterwards: a session's base URL is
+    /// fixed in the environment it starts with, so a terminal either has a
+    /// stream file for its whole life or never gets one, and flipping the
+    /// flags later changes neither. A nil here means "register no stream" —
+    /// the app renders exactly what it renders today.
+    public var transcriptStreamPath: String?
 
     /// `activityState` as a fact — value, source, observed-at — or nil.
     ///
@@ -817,7 +826,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 transport: TerminalTransport = .tmux,
                 holderPID: Int32? = nil,
                 childPID: Int32? = nil,
-                holderChildStartedAt: Date? = nil) {
+                holderChildStartedAt: Date? = nil,
+                transcriptStreamPath: String? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -852,6 +862,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.holderPID = holderPID
         self.childPID = childPID
         self.holderChildStartedAt = holderChildStartedAt
+        self.transcriptStreamPath = transcriptStreamPath
     }
 
     enum CodingKeys: String, CodingKey {
@@ -864,6 +875,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
         case transport, holderPID, childPID, holderChildStartedAt
+        case transcriptStreamPath
     }
 
     public init(from decoder: Decoder) throws {
@@ -918,6 +930,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         holderPID = try c.decodeIfPresent(Int32.self, forKey: .holderPID)
         childPID = try c.decodeIfPresent(Int32.self, forKey: .childPID)
         holderChildStartedAt = try c.decodeIfPresent(Date.self, forKey: .holderChildStartedAt)
+        transcriptStreamPath = try c.decodeIfPresent(String.self, forKey: .transcriptStreamPath)
     }
 }
 
