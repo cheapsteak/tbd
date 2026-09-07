@@ -43,6 +43,7 @@ struct MessageComposerView: View {
                     .foregroundStyle(.red)
                     .padding(.horizontal, 10)
                     .padding(.top, 6)
+                    .accessibilityIdentifier(ComposerAccessibility.error)
             }
             if case .blocked(let message) = state {
                 blockedBanner(message)
@@ -53,6 +54,7 @@ struct MessageComposerView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
                     .padding(.top, 6)
+                    .accessibilityIdentifier(ComposerAccessibility.note)
             }
             AttachmentStrip(
                 draft: draft,
@@ -115,6 +117,17 @@ struct MessageComposerView: View {
                     }
             }
         }
+        // A container rather than a leaf, and stated rather than left to
+        // SwiftUI: a `VStack` is not an accessibility element at all by default,
+        // so an identifier on it alone would name nothing, and `.combine` would
+        // flatten the field, the button and the banners into one element — the
+        // opposite of what a driver needs. `.contain` keeps every child
+        // addressable and gives the group itself a name to start a walk from.
+        //
+        // After the overlay, so the completion list is inside the composer for a
+        // driver that scopes its search to `composer.root`.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(ComposerAccessibility.root)
         .onDisappear {
             // The flag first, and unconditionally: it is what stops a
             // registration still sitting in the deferred queue from installing a
@@ -501,6 +514,9 @@ struct MessageComposerView: View {
         // router owns the key; the button stays clickable.
         .disabled(!state.isEnabled || isSending)
         .help(Self.sendButtonHelp(state: state))
+        // The label is the terminal's name and changes with it; the identifier
+        // does not, which is the whole point of having both.
+        .accessibilityIdentifier(ComposerAccessibility.send)
     }
 
     /// The button names the target, so an injection is never anonymous.
@@ -535,12 +551,16 @@ struct MessageComposerView: View {
     private func blockedBanner(_ message: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
-            Text(message).font(.caption).lineLimit(2)
+            Text(message)
+                .font(.caption)
+                .lineLimit(2)
+                .accessibilityIdentifier(ComposerAccessibility.blockedMessage)
             Spacer(minLength: 0)
             Button("Reveal Terminal") {
                 appState.revealTerminal(terminalID: terminal.id)
             }
             .controlSize(.small)
+            .accessibilityIdentifier(ComposerAccessibility.blockedReveal)
         }
         .padding(.horizontal, 10)
         .padding(.top, 6)

@@ -165,6 +165,10 @@ struct MessageComposerTextView: NSViewRepresentable {
         textView.autoresizingMask = [.width]
         textView.onImageData = onImageData
         textView.registerForDraggedTypes([.fileURL])
+        // Set here rather than in `updateNSView`: an identifier is a property of
+        // the view, not of a render pass, and a driver looking for the field
+        // must find it on the first one.
+        textView.setAccessibilityIdentifier(ComposerAccessibility.field)
 
         scrollView.documentView = textView
         coordinator.textView = textView

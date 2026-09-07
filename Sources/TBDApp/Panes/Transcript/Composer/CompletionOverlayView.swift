@@ -54,6 +54,10 @@ struct CompletionOverlayView: View {
             EmptyView()
         } else {
             content
+                // A container, so every row underneath stays individually
+                // addressable rather than collapsing into one element.
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(ComposerAccessibility.menu)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(VisualEffectView(material: .menu, blendingMode: .withinWindow))
                 .overlay(
@@ -188,6 +192,10 @@ private struct CompletionRowView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        // Named by the command, not by position: the ranking reorders these
+        // rows as the query changes, so an index would name a different row
+        // from one keystroke to the next.
+        .accessibilityIdentifier(ComposerAccessibility.menuRow(command: row.command.name))
     }
 
     private var accessibilityLabel: String {
