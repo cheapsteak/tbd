@@ -492,6 +492,136 @@ struct ConfigStoreTests {
         #expect(try await db.config.get().gcOrphanProcessesEnabled == false)
     }
 
+    // MARK: - `gc_hang_stacks_enabled` is genuinely tri-state
+
+    /// **The storage guard.** The `config` singleton row is inserted by v1, so
+    /// every install — fresh or years old — has a row that predates
+    /// `20260830021944_config_gc_hang_stacks`. After it, that row's
+    /// `gc_hang_stacks_enabled` must read NULL, not `0`: a SQL default would
+    /// backfill it and make "never chose" indistinguishable from a deliberate
+    /// opt-out. If someone adds a `DEFAULT` clause to the migration, this goes
+    /// red — that is its only job.
+    @Test func gcHangStacksIsNullBeforeAnyGesture() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let record = try #require(try await fetchConfigRecord(db))
+        #expect(
+            record.gc_hang_stacks_enabled == nil,
+            """
+            config.gc_hang_stacks_enabled must be NULL until the toggle is \
+            touched — read back \
+            \(String(describing: record.gc_hang_stacks_enabled)). A non-nil \
+            value here means 20260830021944_config_gc_hang_stacks grew a \
+            `DEFAULT` clause; remove it.
+            """
+        )
+    }
+
+    /// The same guard against a row written by a real daemon build that
+    /// predates the column: migrate only up to the migration immediately
+    /// before it, write to the config row, then finish migrating.
+    @Test func rowWrittenBeforeTheHangStackColumnStillReadsNull() throws {
+        let queue = try DatabaseQueue()
+        let migrator = TBDDatabase.buildMigratorForTests()
+        try migrator.migrate(queue, upTo: "20260829210843_pending_terminal_incarnation")
+
+        try queue.write { db in
+            try db.execute(
+                sql: "UPDATE config SET gc_enabled = 1 WHERE id = ?",
+                arguments: [ConfigStore.singletonID]
+            )
+        }
+
+        try migrator.migrate(queue)
+
+        try queue.read { db in
+            let row = try #require(try Row.fetchOne(
+                db, sql: "SELECT * FROM config WHERE id = ?",
+                arguments: [ConfigStore.singletonID]))
+            let raw: DatabaseValue = row["gc_hang_stacks_enabled"]
+            #expect(
+                raw.isNull,
+                "a config row written before the hang-stack column must read NULL, not \(raw)"
+            )
+            // The pre-existing write survived — the migration is purely additive.
+            #expect(row["gc_enabled"] == true)
+        }
+    }
+
+    /// NULL follows `Config.gcHangStacksEnabledDefault` wherever it goes; an
+    /// explicit `false` does not. That property is what makes graduation a
+    /// one-line constant change with no forcing `UPDATE` migration. Exercised
+    /// against BOTH possible default values, so it fails if the resolution is
+    /// ever wired as `?? false`.
+    @Test func gcHangStacksExplicitFalseSurvivesADefaultFlipWhileNullFollowsIt() async throws {
+        let db = try TBDDatabase(inMemory: true)
+
+        let untouched = try #require(try await fetchConfigRecord(db))
+        #expect(untouched.gc_hang_stacks_enabled == nil)
+        #expect(untouched.toModel(gcHangStacksDefault: false).gcHangStacksEnabled == false)
+        #expect(
+            untouched.toModel(gcHangStacksDefault: true).gcHangStacksEnabled == true,
+            "a never-chosen row must pick up a changed shipped default"
+        )
+
+        try await db.config.setGCHangStacksEnabled(false)
+        let explicitlyOff = try #require(try await fetchConfigRecord(db))
+        #expect(explicitlyOff.gc_hang_stacks_enabled == false)
+        #expect(explicitlyOff.toModel(gcHangStacksDefault: false).gcHangStacksEnabled == false)
+        #expect(
+            explicitlyOff.toModel(gcHangStacksDefault: true).gcHangStacksEnabled == false,
+            "an explicit opt-out must be honored forever, whatever the shipped default becomes"
+        )
+    }
+
+    /// Mirrored for an explicit `true`: an operator who opted into the soak
+    /// stays opted in even if the shipped default never moves.
+    @Test func gcHangStacksExplicitTrueSticks() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCHangStacksEnabled(true)
+        let explicitlyOn = try #require(try await fetchConfigRecord(db))
+        #expect(explicitlyOn.gc_hang_stacks_enabled == true)
+        #expect(explicitlyOn.toModel(gcHangStacksDefault: false).gcHangStacksEnabled == true)
+        #expect(explicitlyOn.toModel(gcHangStacksDefault: true).gcHangStacksEnabled == true)
+    }
+
+    /// Isolates the RESOLUTION guard from the STORAGE guard by constructing a
+    /// `ConfigRecord` directly — no database, no migration. It catches a
+    /// hardening of `?? gcHangStacksDefault` into `?? false` even if the
+    /// migration guard were broken at the same time.
+    @Test func gcHangStacksToModelResolvesNullThroughTheInjectedDefault() {
+        let record = ConfigRecord(id: "unstored", gc_hang_stacks_enabled: nil)
+        #expect(record.toModel(gcHangStacksDefault: false).gcHangStacksEnabled == false)
+        #expect(
+            record.toModel(gcHangStacksDefault: true).gcHangStacksEnabled == true,
+            "a NULL record must pick up whatever default is injected, not a hardcoded false"
+        )
+    }
+
+    /// The shipped default today: OFF. The phase deletes persisted state from a
+    /// background sweep, so it soaks first. Graduation edits this constant and
+    /// nothing else.
+    @Test func gcHangStacksShipsOff() async throws {
+        #expect(Config.gcHangStacksEnabledDefault == false)
+        let db = try TBDDatabase(inMemory: true)
+        #expect(try await db.config.get().gcHangStacksEnabled == false)
+    }
+
+    @Test func setGCHangStacksEnabledRoundtrips() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCHangStacksEnabled(true)
+        #expect(try await db.config.get().gcHangStacksEnabled == true)
+        try await db.config.setGCHangStacksEnabled(false)
+        #expect(try await db.config.get().gcHangStacksEnabled == false)
+    }
+
+    /// An absent JSON key means the sender knew nothing about the flag — the
+    /// NULL column's situation — so it follows the shipped default rather than
+    /// decoding as a hardcoded `false`.
+    @Test func gcHangStacksDecodesFromJSONWithoutTheKey() throws {
+        let decoded = try JSONDecoder().decode(Config.self, from: Data("{}".utf8))
+        #expect(decoded.gcHangStacksEnabled == Config.gcHangStacksEnabledDefault)
+    }
+
     /// An absent JSON key means the sender knew nothing about the flag — the
     /// NULL column's situation — so it follows the shipped default rather than
     /// decoding as a hardcoded `false`.
