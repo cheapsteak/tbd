@@ -92,11 +92,11 @@ final class OffscreenHost<Root: View> {
     static var offscreenOrigin: NSPoint { NSPoint(x: -20_000, y: -20_000) }
 
     /// The window the hierarchy lives in. Borderless, offscreen, never key.
-    let window: NSWindow
+    var window: NSWindow { live(mountedWindow, "window") }
 
     /// The hosting view for `Root`, pinned to `contentView` at the requested
     /// size.
-    let hostingView: NSHostingView<Root>
+    var hostingView: NSHostingView<Root> { live(mountedHostingView, "hostingView") }
 
     /// The window's content view: an opaque, layer-backed ground under the
     /// hosting view, and the root every measurement and capture is taken
@@ -106,7 +106,29 @@ final class OffscreenHost<Root: View> {
     /// of it alone comes back transparent wherever the SwiftUI tree did not
     /// paint, which turns "this region is empty" into "this region is whatever
     /// the PNG viewer puts behind alpha".
-    let contentView: NSView
+    var contentView: NSView { live(mountedContentView, "contentView") }
+
+    /// The mount itself, held as `Optional` for one reason: `tearDown()` has to
+    /// be able to **drop** these references. A hosting view and the ground
+    /// under it are released when the last reference to them goes, and a host
+    /// that kept them until its own deallocation would carry a whole SwiftUI
+    /// tree to the end of whatever test mounted it. See `tearDown()`.
+    private var mountedWindow: NSWindow?
+    private var mountedHostingView: NSHostingView<Root>?
+    private var mountedContentView: NSView?
+
+    /// Read one of them, or say plainly that the mount is gone.
+    ///
+    /// A torn-down host is a programming error rather than a state a caller
+    /// handles, so the accessors stay non-optional and this traps: no existing
+    /// call site changes, and a use-after-teardown names itself instead of
+    /// arriving as an empty capture.
+    private func live<T>(_ value: T?, _ name: String) -> T {
+        guard let value else {
+            preconditionFailure("OffscreenHost.\(name) was used after tearDown()")
+        }
+        return value
+    }
 
     /// Mount `root` at `size`.
     ///
@@ -166,31 +188,50 @@ final class OffscreenHost<Root: View> {
             }
         }
 
-        self.hostingView = hosting
-        self.contentView = ground
-        self.window = window
+        mountedHostingView = hosting
+        mountedContentView = ground
+        mountedWindow = window
         window.orderFront(nil)
     }
 
-    /// Take the window back down. Idempotent, and safe to call from a `defer`.
+    /// Take the window down and let the hosted tree go. Idempotent, and safe to
+    /// call from a `defer`; the host is unusable afterwards.
     ///
-    /// `orderOut` alone leaves the window sitting in `NSApp.windows` for the
-    /// rest of the process — the same trap documented at
-    /// `TabBarHitAreaTests.keyViewProxyMaxWidth`, except `close()` alone does
-    /// not clear it either. **Measured**, not merely reasoned: with
-    /// `isReleasedWhenClosed = false`, `NSWindow.close()` removes the window
-    /// from the screen but leaves it in `NSApp.windows` — AppKit only drops a
-    /// window from that list as part of releasing it, so a window told never
-    /// to release itself never leaves the list, no matter how many times
-    /// `close()` runs. Flipping the flag to `true` immediately before closing
-    /// is what actually removes it; a caller's own strong reference to
-    /// `window` (this type keeps one) is enough to survive the release AppKit
-    /// then performs, so nothing here is unsafe to touch afterwards.
+    /// `orderOut` hides the window; clearing `contentView` and dropping the
+    /// references below releases the hosting view and the ground under it.
+    /// **Measured**: both deallocate right here, with the host still alive, and
+    /// they are the expensive half of a mount.
+    ///
+    /// **The `NSWindow` shell does not deallocate, and stays in `NSApp.windows`
+    /// for the life of the process.** Measured against a bare `NSWindow` with
+    /// no SwiftUI in it at all: a window that has been ordered front carries
+    /// dozens of references belonging to AppKit, and neither `close()` nor
+    /// dropping every reference this process owns brings it to zero. What is
+    /// left behind is one hidden, content-less shell per mount, and it is
+    /// AppKit's to release.
+    ///
+    /// `isReleasedWhenClosed` therefore stays `false` — set once at creation,
+    /// never flipped on the way out. Flipping it *does* take the window out of
+    /// `NSApp.windows`, which is what makes it tempting, but it does so by
+    /// sending a `release` ARC never balanced against an object that is still
+    /// owned. The list gets tidier and the ownership becomes wrong: the
+    /// use-after-free lands later, in whatever unrelated test is running when
+    /// the last real owner lets go, which is how it reached CI as a signal 11
+    /// in a whole-suite run while every narrow local run stayed green. Apple's
+    /// guidance for ARC is to leave the flag `false`.
+    ///
+    /// So "did teardown work" is asked of the hosted tree. The window list is
+    /// read only in the negative: a window *missing* from it has been released
+    /// once too often. Both questions are in `OffscreenHostLifecycleTests`, and
+    /// the first is asked through `pumpUntilReleased`.
     func tearDown() {
+        guard let window = mountedWindow else { return }
         window.orderOut(nil)
         window.contentView = nil
-        window.isReleasedWhenClosed = true
         window.close()
+        mountedHostingView = nil
+        mountedContentView = nil
+        mountedWindow = nil
     }
 
     // MARK: - Pumping
@@ -577,4 +618,31 @@ func withDrawingAppearance<T>(
 private func axAttribute(_ node: NSObject, _ name: String) -> Any? {
     guard node.responds(to: Selector((name))) else { return nil }
     return node.value(forKey: name)
+}
+
+/// Poll until `probe` reports its object gone, bounded by a pump count rather
+/// than by elapsed time.
+///
+/// This is how a test asks whether something was actually **released**: a
+/// `weak` reference is the only honest way to ask, because a test that still
+/// holds the object cannot tell "released" from "released once too often". Its
+/// subject is the hosted view tree — see `OffscreenHost.tearDown()` for why the
+/// window shell is not a thing to ask this about.
+///
+/// The pumps are here because AppKit does not necessarily let go on the turn of
+/// the run loop that asked it to: the object can be sitting in an autorelease
+/// pool the next turn drains.
+@MainActor
+func pumpUntilReleased(
+    maxPumps: Int = OffscreenHostDefaults.maxPumps,
+    spin: TimeInterval = OffscreenHostDefaults.runLoopSpin,
+    _ probe: () -> AnyObject?
+) -> Bool {
+    for _ in 0..<maxPumps {
+        if probe() == nil { return true }
+        autoreleasepool {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(spin))
+        }
+    }
+    return probe() == nil
 }

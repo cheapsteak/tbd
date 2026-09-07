@@ -184,48 +184,46 @@ struct WorkbenchSnapshotTests {
                 scrollView.asSwiftUIView()
             }
 
-            let host = OffscreenHost(
-                root: AnyView(
-                    workbenchView
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .environment(appState)),
-                size: size,
-                appearance: appearance)
-            let window = host.window
-            // Guarantee teardown on every exit, including the `throw` below —
-            // a `defer` after this point would run before the assertion that
-            // follows it in this same scope could observe the result, so
-            // teardown and the assertion both happen explicitly instead.
-            defer {
-                host.tearDown()
-                // `tearDown()` must actually release the window rather than
-                // merely hide it — with `isReleasedWhenClosed = false` and no
-                // `close()`, every mounted window otherwise stays in
-                // `NSApp.windows` for the process lifetime (see
-                // `OffscreenHost.tearDown()` and the same trap at
-                // `TabBarHitAreaTests.keyViewProxyMaxWidth`). This suite
-                // mounts five of these per run, so a regression here would
-                // leave five orphaned windows behind every `swift test`
-                // invocation.
-                #expect(
-                    !NSApp.windows.contains(window),
-                    "OffscreenHost.tearDown() left its window in NSApp.windows")
-            }
+            // Weak on purpose, and pointed at the hosted tree rather than at
+            // the window: the tree is what costs anything — this suite mounts
+            // five of them per run — and it is the half a teardown can really
+            // release. The window shell AppKit keeps regardless; see
+            // `OffscreenHost.tearDown()` for why asking `NSApp.windows` about
+            // it can only be answered by an over-release.
+            weak var hostedTree: NSView?
+            // The render runs inside a pool of its own so the question after it
+            // can be answered honestly: every `host.hostingView` here hands back
+            // an autoreleased reference, and in the enclosing pool those keep
+            // the tree alive until the whole test ends, whatever teardown did.
+            try autoreleasepool {
+                let host = OffscreenHost(
+                    root: AnyView(
+                        workbenchView
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .environment(appState)),
+                    size: size,
+                    appearance: appearance)
+                hostedTree = host.hostingView
+                defer { host.tearDown() }
 
-            // Layout and pump the run loop
-            host.contentView.layoutSubtreeIfNeeded()
-            host.hostingView.layoutSubtreeIfNeeded()
-            host.pumpSynchronously(times: Self.settlePumps, spin: Self.settleSpin)
-            tableCoordinator.precomputeBottomWindow()
-            tableView.layoutSubtreeIfNeeded()
-            host.pumpSynchronously(times: Self.settlePumps, spin: Self.settleSpin)
+                // Layout and pump the run loop
+                host.contentView.layoutSubtreeIfNeeded()
+                host.hostingView.layoutSubtreeIfNeeded()
+                host.pumpSynchronously(times: Self.settlePumps, spin: Self.settleSpin)
+                tableCoordinator.precomputeBottomWindow()
+                tableView.layoutSubtreeIfNeeded()
+                host.pumpSynchronously(times: Self.settlePumps, spin: Self.settleSpin)
 
-            let shot = try host.capture()
-            let variance = shot.luminanceVariance()
-            if variance < OffscreenHostDefaults.minLuminanceVariance {
-                throw RenderError.blankRender(path: path, variance: variance)
+                let shot = try host.capture()
+                let variance = shot.luminanceVariance()
+                if variance < OffscreenHostDefaults.minLuminanceVariance {
+                    throw RenderError.blankRender(path: path, variance: variance)
+                }
+                try shot.writePNG(to: URL(fileURLWithPath: path))
             }
-            try shot.writePNG(to: URL(fileURLWithPath: path))
+            #expect(
+                pumpUntilReleased { hostedTree },
+                "tearDown() left this render's hosting view mounted")
         }
     }
 
