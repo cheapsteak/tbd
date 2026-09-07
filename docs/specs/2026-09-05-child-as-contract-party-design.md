@@ -590,10 +590,10 @@ exists, under a query-time delivery rule that leaves nothing stale.
   re-adoption after a daemon restart, where the emulator is empty — because
   an Ink-style TUI's runtime emits a resize event only on a real geometry
   change, so a bare `SIGWINCH` heals nothing there. It is redundant on attach
-  (`HolderRegistry.swift:1414`: the preamble already carries a current screen
+  (`confirmAttach` in `HolderRegistry.swift`: the preamble already carries a current screen
   from an emulator that was draining continuously, and the viewer already owns
   the size ioctl per the transport spec's "resize follows the reader") and on
-  handback (`:1701`: the preamble carries the app's screen). When it does run,
+  handback (`takeBackFromViewer`: the preamble carries the app's screen). When it does run,
   the grid should move with the tty so the emulator is never at a width the
   child is not, and adoption should assert the size so a stranded width heals.
   Its own spec.

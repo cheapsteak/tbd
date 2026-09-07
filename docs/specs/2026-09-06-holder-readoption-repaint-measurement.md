@@ -196,7 +196,7 @@ already covers, that window is harmless: a preamble screen already exists,
 so nobody reads the emulator mid-flight. Re-adoption has no such preamble —
 the emulator is empty until the jiggle runs, so a read that lands inside the
 window, or a jiggle whose restore edge is lost or coalesced (a live 221-cell
-row in a 220-column pty has been observed on this codebase), leaves exactly
+row in a 220-column pty has been seen in the field on this transport), leaves exactly
 the shifted-and-fragmented screen this measurement produced, not a blank
 one.
 
