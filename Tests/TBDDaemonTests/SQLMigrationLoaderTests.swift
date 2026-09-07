@@ -508,6 +508,10 @@ import Testing
             "20260905120000_config_transcript_composer",
             "20260905213000_config_holder_hibernation",
             "20260905220000_terminal_holder_child_started_at",
+            "20260907215724_config_model_proxy",
+            "20260907215725_config_transcript_streaming",
+            "20260907215726_config_model_proxy_port",
+            "20260907215727_terminal_transcript_stream_path",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)

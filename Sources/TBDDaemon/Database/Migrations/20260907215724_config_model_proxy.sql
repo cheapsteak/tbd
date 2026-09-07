@@ -1,0 +1,14 @@
+-- Gate for the TBD model proxy: routing a pty-holder session's Messages API
+-- traffic through the loopback proxy, and the per-session tee that proxy
+-- writes.
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" (0) — which is what made auto_hibernate_enabled impossible to
+-- graduate without a forcing UPDATE that also reset deliberate opt-ins.
+-- The shipped default lives in exactly one place: Config.modelProxyDefault.
+--
+-- The proxy is useful on its own, independently of the transcript's
+-- provisional row, so it is a separate switch from transcript_streaming_enabled
+-- rather than one flag covering both.
+ALTER TABLE config ADD COLUMN model_proxy_enabled INTEGER;
