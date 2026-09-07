@@ -230,9 +230,12 @@ class RunnerFixture(unittest.TestCase):
         argument for routing both halves through a named helper rather than
         remembering the environment at each call site.
         """
-        env = dict(os.environ)
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith("TBD_SWIFT_")
+        }
         env.pop("CI", None)
-        env.pop("TBD_SWIFT_SHARED_MODULE_CACHE", None)
         env.update(overrides)
         with mock.patch.dict(os.environ, env, clear=True):
             yield
@@ -674,9 +677,7 @@ class SharedModuleCacheTests(RunnerFixture):
         `Path.home()` reads `$HOME` first and is the same bug spelled shorter.
         """
         with tempfile.TemporaryDirectory() as fence:
-            with mock.patch.dict(
-                os.environ, {"HOME": fence, "CFFIXED_USER_HOME": fence}
-            ):
+            with self.in_process_environment(HOME=fence, CFFIXED_USER_HOME=fence):
                 resolved = swift_safe._shared_module_cache_path()
         self.assertEqual(resolved, self.shipped_path)
         self.assertNotIn(fence, str(resolved))
@@ -828,6 +829,30 @@ class SharedModuleCacheTests(RunnerFixture):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "build --jobs 2")
         self.assertIn("shared module cache", result.stderr)
+
+    def test_an_unwritable_cache_directory_falls_back_rather_than_failing(self):
+        """`mkdir(exist_ok=True)` is happy with a directory it cannot write to.
+
+        Creation succeeding therefore says nothing about whether the compiler
+        can put a module there, and naming a cache it cannot write into would
+        fail the build — the one outcome the fallback exists to prevent.
+        Both directions: writable gets the flags, unwritable gets none.
+        """
+        blocked = Path(self.temp.name) / "read-only-cache"
+        blocked.mkdir()
+
+        warm = self.run_sharing("build", TBD_SWIFT_MODULE_CACHE_PATH=str(blocked))
+        self.assertEqual(warm.returncode, 0, warm.stderr)
+        self.assertIn(self.flags_for(blocked), warm.stdout)
+
+        blocked.chmod(0o500)
+        try:
+            result = self.run_sharing("build", TBD_SWIFT_MODULE_CACHE_PATH=str(blocked))
+        finally:
+            blocked.chmod(0o700)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "build --jobs 2")
+        self.assertIn("not writable", result.stderr)
 
     def test_a_uid_with_no_passwd_entry_falls_back_rather_than_crashing(self):
         """The same promise, one step earlier: home resolution can fail too.

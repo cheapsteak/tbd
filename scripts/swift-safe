@@ -354,9 +354,13 @@ def _module_cache_arguments(subcommand: str, swiftpm_arguments: list[str]) -> li
     dependency shim targets (CNIOAtomics and friends) that the Swift flag
     alone misses.
 
-    A directory that cannot be created costs a slower build, never a failed
-    one — SwiftPM's per-worktree default still works — so this says so once
-    and adds nothing, rather than failing a build over a cache.
+    A directory that cannot be used costs a slower build, never a failed one —
+    SwiftPM's per-worktree default still works — so this says so once and adds
+    nothing, rather than failing a build over a cache.  "Cannot be used" covers
+    one it cannot create AND one that is already there but not writable:
+    `mkdir(exist_ok=True)` succeeds on the latter, and naming a cache the
+    compiler cannot write into would turn a disposable optimisation into a
+    failed build, which is the one outcome this must never cause.
     """
     if not _shares_the_module_cache(subcommand, swiftpm_arguments):
         return []
@@ -374,6 +378,14 @@ def _module_cache_arguments(subcommand: str, swiftpm_arguments: list[str]) -> li
         _report(
             f"swift-safe: could not create the shared module cache at {path} "
             f"({error}); building with SwiftPM's per-worktree cache instead"
+        )
+        return []
+    # An existing directory satisfies `exist_ok=True` whatever its mode, so
+    # creation succeeding is not yet evidence the compiler can write there.
+    if not os.access(path, os.W_OK | os.X_OK):
+        _report(
+            f"swift-safe: the shared module cache at {path} is not writable; "
+            "building with SwiftPM's per-worktree cache instead"
         )
         return []
     return [
