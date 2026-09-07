@@ -830,6 +830,10 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetPtyHolderEnabled(request.paramsData)
             case RPCMethod.configSetTranscriptComposerEnabled:
                 return try await handleConfigSetTranscriptComposerEnabled(request.paramsData)
+            case RPCMethod.configSetModelProxyEnabled:
+                return try await handleConfigSetModelProxyEnabled(request.paramsData)
+            case RPCMethod.configSetTranscriptStreamingEnabled:
+                return try await handleConfigSetTranscriptStreamingEnabled(request.paramsData)
             case RPCMethod.peerStatus:
                 return try await handlePeerStatus()
             case RPCMethod.gcList:
@@ -896,7 +900,7 @@ public final class RPCRouter: Sendable {
             version = nil
         }
         let config = try await db.config.get()
-        return try RPCResponse(result: DaemonCapabilitiesResult(
+        var result = DaemonCapabilitiesResult(
             controlModeEnabled: enabled,
             tmuxVersion: version?.description,
             controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
@@ -919,7 +923,22 @@ public final class RPCRouter: Sendable {
             // falls back to tmux silently. Reported so Settings can say so
             // instead of offering a switch that would change nothing.
             ptyHolderSupported: holderRegistry?.canSpawn == true,
-            transcriptComposerEnabled: config.transcriptComposerEnabled))
+            transcriptComposerEnabled: config.transcriptComposerEnabled)
+        // Assigned rather than passed: this initializer's argument list is at
+        // the Swift type-checker's expression budget — adding to it produces
+        // "unable to type-check this expression in reasonable time" — so the
+        // model-proxy fields are set after construction instead.
+        result.modelProxyEnabled = config.modelProxyEnabled
+        // The conjunction, not the raw column: a hand-edited row holding
+        // streaming on with the proxy off streams nothing, and the app should
+        // not have to re-derive that.
+        result.transcriptStreamingEnabled = config.transcriptStreamingEffective
+        // `modelProxySupported`, `modelProxyPort` and `modelProxyVersion` keep
+        // their initializer defaults — false, nil, nil — because there is no
+        // supervisor yet. Until it arrives no daemon can route a session, so
+        // "not supported, no port, no version" is the honest answer rather than
+        // a placeholder, and Settings greys the toggle out on it.
+        return try RPCResponse(result: result)
     }
 
     // MARK: - PR Status

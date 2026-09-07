@@ -420,6 +420,54 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the model-proxy gate — the default-off soak switch for routing a
+    /// pty-holder session's Messages API traffic through the loopback proxy.
+    /// This is how the soak is turned on: the flag is the feature's only opt-in,
+    /// and leaving it reachable only by hand-editing `~/tbd/state.db` would put
+    /// the sole way to enable it behind a database the project's own rules say
+    /// not to go into.
+    ///
+    /// **It applies to sessions created after the call, and to no others.** A
+    /// session's `ANTHROPIC_BASE_URL` is fixed in its environment at spawn, so
+    /// flipping this on never re-routes a running session and flipping it off
+    /// never un-routes one.
+    ///
+    /// The coupling — turning the proxy off also writes streaming off, in one
+    /// transaction — lives in `ConfigStore.setModelProxyEnabled`, not here, so
+    /// every caller of the store gets it, not only this RPC.
+    func handleConfigSetModelProxyEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetModelProxyEnabledParams.self, from: paramsData)
+        try await db.config.setModelProxyEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the transcript-streaming gate — the default-off soak switch for
+    /// the transcript's provisional assistant row, read from the file the proxy
+    /// writes.
+    ///
+    /// **It applies to sessions created after the call**, for the same reason
+    /// the proxy gate does: only a session spawned with a route has a stream
+    /// file to read.
+    ///
+    /// The coupling — turning streaming on also writes the proxy on, in one
+    /// transaction — lives in `ConfigStore.setTranscriptStreamingEnabled`. What
+    /// readers act on is `Config.transcriptStreamingEffective`, the conjunction
+    /// of the two columns, because a hand-edited row can hold a combination no
+    /// gesture here can produce.
+    func handleConfigSetTranscriptStreamingEnabled(
+        _ paramsData: Data
+    ) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetTranscriptStreamingParams.self, from: paramsData)
+        try await db.config.setTranscriptStreamingEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the update mode — the daemon's only policy about updating
     /// itself, and the default-off gate on a feature that rebuilds and replaces
     /// the whole installation.
