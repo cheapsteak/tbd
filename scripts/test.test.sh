@@ -345,9 +345,10 @@ sun_path_verdict() {
 # The real thing cannot be used here: it is a compiled product binary, and this
 # harness builds nothing. What the sweep actually keys on is not the binary at
 # all — it is "who has this rendezvous socket open", so anything that binds the
-# socket and parents a job stands in exactly. `nc -lU` binds it; `exec` keeps the
-# socket's owner and the job's parent the same pid, which is what a real holder
-# is; and `sleep` is the job. Both are `kill -9`able and neither writes anywhere.
+# socket and parents a job stands in exactly. A four-line `python3` binds and
+# holds it; `exec` keeps the socket's owner and the job's parent the same pid,
+# which is what a real holder is; and `sleep` is the job. Both are `kill -9`able
+# and neither writes anywhere.
 mk_fake_holder() {
   local fix="$1"
   mkdir -p "$fix/bin"
