@@ -3638,6 +3638,54 @@ final class AppState {
     /// "Experimental" section of the General settings tab.
     static let terminalAutoResizeKey = "enableTerminalAutoResize"
 
+    /// UserDefaults key for the experimental Metal terminal renderer. When on,
+    /// every terminal surface calls `applyMetalRendererPreference(enabled:)` on
+    /// the view it has just built, swapping SwiftTerm's CoreGraphics draw path
+    /// for its GPU one. Off by default: replacing a load-bearing rendering path is
+    /// exactly the category that ships default-off and soaks first.
+    ///
+    /// App-side `UserDefaults` rather than a daemon `config` column because the
+    /// behavior is entirely app-side rendering with no daemon participation —
+    /// the same placement as `enableTranscriptKey`, and on the same store as it:
+    /// the Settings toggle binds `@AppStorage`, which always targets
+    /// `UserDefaults.standard`, so every reader must land on `.standard` too or
+    /// the writer and the readers drift apart and the toggle stops doing
+    /// anything. Reads go through `metalTerminalRendererEnabled(defaults:)` —
+    /// never `bool(forKey:)` — so "nobody has chosen" stays distinguishable
+    /// from an explicit `false`.
+    static let useMetalTerminalRendererKey = "useMetalTerminalRenderer"
+
+    /// The one default for `useMetalTerminalRendererKey`, for the reason
+    /// spelled out on `enableTranscriptDefault`. Off until the A/B against a
+    /// standalone emulator says otherwise; graduation is a one-line change
+    /// here, which reaches everyone who never touched the toggle while
+    /// preserving every deliberate opt-out.
+    static let useMetalTerminalRendererDefault = false
+
+    /// Whether newly created terminal views should request SwiftTerm's Metal
+    /// renderer. Three-state read: an unset key takes the shipped default, and
+    /// an explicit `false` survives a change to that constant.
+    ///
+    /// Only `makeNSView` consults this, so flipping the toggle applies to
+    /// terminals opened afterwards — the Settings copy says so, and an app
+    /// restart is the way to move every already-open terminal at once.
+    static func metalTerminalRendererEnabled(defaults: UserDefaults = .standard) -> Bool {
+        metalTerminalRendererEnabled(stored: defaults.object(forKey: useMetalTerminalRendererKey) as? Bool)
+    }
+
+    /// The three-state decision on its own, with the shipped default injected.
+    ///
+    /// Split out so a test can prove the property that makes graduation safe:
+    /// `nil` — nobody chose — follows `shippedDefault`, while an explicit
+    /// `false` holds against a `shippedDefault` of `true`. Reading through
+    /// `bool(forKey:)` instead would collapse those two into one.
+    static func metalTerminalRendererEnabled(
+        stored: Bool?,
+        shippedDefault: Bool = useMetalTerminalRendererDefault
+    ) -> Bool {
+        stored ?? shippedDefault
+    }
+
     /// UserDefaults key for showing the sidebar's Scratch section (repo-less
     /// scratch spaces). Default on.
     static let showScratchSectionKey = "showScratchSection"
