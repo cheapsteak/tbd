@@ -141,24 +141,29 @@ fi
 
 # MARK: - Build
 #
-# Shared clang/Swift module cache across ALL TBD worktrees. By default every
-# worktree's `.build` accumulates its own ~640 MB ModuleCache with near-
-# identical contents; pointing both the Swift frontend (-module-cache-path)
-# and clang (-fmodules-cache-path, reaches the C-shim dependency targets like
-# CNIOAtomics) at one $HOME-level directory keeps a single ~610 MB copy total,
-# concurrency-safe across parallel builds. Verified empirically (Swift 6.2.4):
-# local ModuleCache drops to ~0 MB with this flag combo.
-#
-# Stickiness note: SwiftPM bakes the cache path into .build/debug.yaml at plan
-# time, so a later build in this worktree silently keeps using
-# the shared cache until a manifest re-plan — expected, not a bug. See
-# docs/reclaim-build.md ("Shared module cache").
-SHARED_MODULE_CACHE="$HOME/Library/Caches/tbd/swift-module-cache"
-mkdir -p "$SHARED_MODULE_CACHE"
-MODULE_CACHE_FLAGS=(
-    -Xswiftc -module-cache-path -Xswiftc "$SHARED_MODULE_CACHE"
-    -Xcc -fmodules-cache-path="$SHARED_MODULE_CACHE"
-)
+# The shared clang/Swift module cache is NOT selected here. scripts/swift-safe
+# points every governed compile at it, so `build`, `test` and `run` all plan
+# identically. Passing the flags from here as well is how that agreement was
+# lost before: SwiftPM bakes the cache path into .build/debug.yaml at plan
+# time, so a tree that alternated between this script and the wrapper fully
+# recompiled on every transition, in both directions. See
+# docs/specs/2026-08-30-shared-module-cache-design.md.
+
+# Everything below this point ships what is in .build/<config> — it assembles
+# the bundle, copies it over /Applications/TBD.app, and restarts the shared
+# daemon. So a build that did not succeed must stop the script here, before
+# any of that. The status of the governed build is CAPTURED, never read
+# through a pipe: `scripts/swift-safe … | tail -3` reports tail's status
+# (always 0), so `set -e` never fires and a build that compiled nothing is
+# indistinguishable from one that succeeded — which is how an 1800s lock
+# timeout (exit 75) once relaunched the app and daemon machine-wide from
+# stale binaries. run_governed_build keeps the output trimming and returns
+# the real status; see scripts/restart-build-lib.sh (harness:
+# scripts/restart-build-lib.test.sh). `--quick`/`--skip-build` is unaffected:
+# shipping the existing binaries is the point there, and no build was
+# attempted to have a status.
+# shellcheck source=/dev/null
+source "$REPO_ROOT/scripts/restart-build-lib.sh"
 
 # Stamp the build identity BEFORE the compiler runs, so the sidecar beside a
 # binary always names the tree that binary came from. A build that skips this
@@ -188,22 +193,22 @@ if [ "$skip_build" = false ]; then
     # looks for beside its own binary (see the list for what each one does
     # when it is missing). The test targets are scripts/test.sh's job, not
     # the restart path's.
-    build_ok=true
+    #
+    # run_governed_build captures scripts/swift-safe's real status, trims the
+    # output to its last few lines, and explains a non-zero status in
+    # swift-safe's own vocabulary. Piping the build straight into `tail` would
+    # make the pipeline's status `tail`'s (always 0) — the very
+    # status-discarding bug the lib exists to prevent. The status is kept
+    # rather than flattened to 1, so a caller can still tell "nothing was
+    # compiled, retry later" (75/76) from "the compiler said no".
+    build_status=0
     for product in "${RUNTIME_PRODUCTS[@]}"; do
-        # Capture the status, THEN print. Piping the build straight into
-        # `tail` would make the pipeline's status `tail`'s (always 0) — the
-        # very status-discarding bug this block exists to fix.
-        if ! build_out=$( (cd "$REPO_ROOT" && scripts/swift-safe build \
-                -c "$build_config" --product "$product" \
-                "${MODULE_CACHE_FLAGS[@]}") 2>&1 ); then
-            build_ok=false
-            # The rest would build behind the same machine-global lock and
-            # scroll the failure off the screen, and the restart below is
-            # abandoned either way.
-            printf '%s\n' "$build_out" | tail -3
-            break
-        fi
-        printf '%s\n' "$build_out" | tail -3
+        run_governed_build "$REPO_ROOT" \
+            -c "$build_config" --product "$product" || build_status=$?
+        # The rest would build behind the same machine-global lock and scroll
+        # the failure off the screen, and the restart below is abandoned
+        # either way.
+        [ "$build_status" -eq 0 ] || break
     done
     echo "  Build: $((SECONDS - t0))s"
 
@@ -211,10 +216,9 @@ if [ "$skip_build" = false ]; then
     # `tail`, discarding its status, so a broken build fell through to the
     # bundle assembly and daemon restart and silently relaunched the STALE
     # binary — a failed build that looked like a successful restart.
-    if [ "$build_ok" = false ]; then
-        echo "ERROR: build failed — not restarting. The running daemon/app are unchanged." >&2
-        exit 1
-    fi
+    # run_governed_build has already said what went wrong and that nothing was
+    # shipped, so this only has to stop.
+    [ "$build_status" -eq 0 ] || exit "$build_status"
 fi
 
 # MARK: - Assemble TBD.app bundle

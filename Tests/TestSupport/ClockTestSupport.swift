@@ -298,6 +298,12 @@ public extension TestClock {
         var advances = 0
         repeat {
             if await condition() { return true }
+            // This loop cannot delegate to `pollUntilTrue` — it *advances* the
+            // clock rather than only reading — so it carries the cancellation
+            // guard itself. Placed before both branches: the armed branch does
+            // not suspend at all, so a cancelled task would spin there just as
+            // readily as on the `try?` sleep below.
+            if Task.isCancelled { break }
             if await isArmed() {
                 await advance(by: interval)
                 advances += 1
@@ -306,6 +312,7 @@ public extension TestClock {
             }
         } while ContinuousClock.now < deadline
         if await condition() { return true }
+        if Task.isCancelled { return false }
         Issue.record(
             ClockAdvanceTimeout(what: what, advances: advances, timeout: timeout),
             sourceLocation: sourceLocation)
@@ -435,15 +442,18 @@ public extension TestClock {
     func waitForSuspension(timeout: Swift.Duration = .seconds(45),
                            pollInterval: Swift.Duration = .milliseconds(25),
                            sourceLocation: SourceLocation = #_sourceLocation) async {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        repeat {
+        // `checkSuspension()` throws when a sleeper *is* registered, so the
+        // probe reads inverted — that polarity is the whole reason this helper
+        // cannot share `advanceUntil`'s condition shape directly.
+        let armed = await pollUntilTrue(timeout: timeout, pollInterval: pollInterval) {
             do {
                 try await checkSuspension()
+                return false
             } catch {
-                return  // A sleeper is registered — that is what we were waiting for.
+                return true
             }
-            try? await Task.sleep(for: pollInterval)
-        } while ContinuousClock.now < deadline
+        }
+        guard case .timedOut = armed else { return }
         Issue.record(
             """
             TestClock: no task was suspended on the clock within \(timeout) — the \
