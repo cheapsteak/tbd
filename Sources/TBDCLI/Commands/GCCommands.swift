@@ -8,9 +8,7 @@ struct GCCommand: ParsableCommand {
         abstract: "Orphan GC: list reaps, restore a reaped agent worktree, trigger a sweep",
         subcommands: [
             GCList.self, GCRestore.self, GCSweep.self, GCProfileDirs.self,
-            GCOrphanProcesses.self, GCHolders.self, GCRowlessHolders.self,
-            GCHolderChildren.self, GCRetainedTranscripts.self,
-            GCHolderRows.self, GCHangStacks.self,
+            GCOrphanProcesses.self, GCRetainedTranscripts.self, GCHangStacks.self,
         ]
     )
 }
@@ -83,83 +81,6 @@ struct GCHangStacks: AsyncParsableCommand {
     }
 }
 
-/// The soak switch for the holder rendezvous sweep. It unlinks the socket a
-/// SIGKILLed pty holder could not unlink, plus that holder's sibling lock and
-/// log — files nothing else reclaims, so they accumulate one triple per session
-/// forever. It ships off and is opted into by hand, like every other GC phase
-/// whose classifier is new.
-struct GCHolders: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "holders",
-        abstract: "Enable or disable unlinking rendezvous files of dead pty holders (default off)")
-    @Argument(help: "on | off") var state: String
-    mutating func run() async throws {
-        let enabled: Bool
-        switch state.lowercased() {
-        case "on", "true", "enable": enabled = true
-        case "off", "false", "disable": enabled = false
-        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
-        }
-        try SocketClient().callVoid(
-            method: RPCMethod.configSetGCHolderRendezvousEnabled,
-            params: ConfigSetGCHolderRendezvousEnabledParams(enabled: enabled))
-        print("Holder rendezvous GC \(enabled ? "enabled" : "disabled").")
-    }
-}
-
-/// The soak switch for the row-less holder sweep. It **kills** a pty holder
-/// this installation owns which no session row claims — the child first, then
-/// the holder — and is therefore a separate opt-in from `tbd gc holders`, which
-/// only unlinks files. A holder that will not talk to us, one another
-/// installation owns, and one younger than the GC grace window are all left
-/// running, whatever this is set to.
-struct GCRowlessHolders: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "rowless-holders",
-        abstract: "Enable or disable killing pty holders no session row claims (default off)")
-    @Argument(help: "on | off") var state: String
-    mutating func run() async throws {
-        let enabled: Bool
-        switch state.lowercased() {
-        case "on", "true", "enable": enabled = true
-        case "off", "false", "disable": enabled = false
-        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
-        }
-        try SocketClient().callVoid(
-            method: RPCMethod.configSetGCRowlessHoldersEnabled,
-            params: ConfigSetGCRowlessHoldersEnabledParams(enabled: enabled))
-        print("Row-less holder GC \(enabled ? "enabled" : "disabled").")
-    }
-}
-
-/// The soak switch for the reaper leg that kills the surviving job of a pty
-/// holder that died. It is the `AgentReaper` counterpart to `tbd gc
-/// rowless-holders`, and lives here rather than under a group of its own
-/// because this is where a soak participant already looks for the switch on a
-/// reclaimer that signals processes. The two cover disjoint halves: this leg
-/// reaches the child through the session row the database still has, while
-/// `rowless-holders` covers the holders no row names at all.
-///
-/// Off — the shipped default — the leg walks nothing and signals nothing.
-struct GCHolderChildren: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "holder-children",
-        abstract: "Enable or disable killing the surviving job of a dead pty holder (default off)")
-    @Argument(help: "on | off") var state: String
-    mutating func run() async throws {
-        let enabled: Bool
-        switch state.lowercased() {
-        case "on", "true", "enable": enabled = true
-        case "off", "false", "disable": enabled = false
-        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
-        }
-        try SocketClient().callVoid(
-            method: RPCMethod.configSetReapHolderChildrenEnabled,
-            params: ConfigSetReapHolderChildrenEnabledParams(enabled: enabled))
-        print("Holder-child reaping \(enabled ? "enabled" : "disabled").")
-    }
-}
-
 /// The soak switch for the retained-transcript collector. It reclaims the
 /// residue of the transcript exchange on this machine: JSONL files under
 /// `~/tbd/transcripts/` that no `retained_transcript` row references, and rows
@@ -201,34 +122,6 @@ struct GCRetainedTranscripts: AsyncParsableCommand {
             method: RPCMethod.configSetGCRetainedTranscriptsEnabled,
             params: ConfigSetGCRetainedTranscriptsParams(enabled: enabled))
         print("Retained-transcript GC \(enabled ? "enabled" : "disabled").")
-    }
-}
-
-/// The soak switch for the reconcile arm that judges holder-backed session
-/// rows. It is the third of the pty-holder transport's named reclaimers and the
-/// only one that destroys database rows, so it is a switch of its own: enabling
-/// `tbd gc holders` (files) or `tbd gc holder-children` (processes) must never
-/// silently enable it. It lives under `gc` because that is where a soak
-/// participant already looks for a reclaimer's switch, though the arm itself
-/// runs on the reconcile rail rather than the GC timer.
-///
-/// Off — the shipped default — the arm judges nothing and deletes nothing.
-struct GCHolderRows: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "holder-rows",
-        abstract: "Enable or disable reconciling session rows whose pty holder is gone (default off)")
-    @Argument(help: "on | off") var state: String
-    mutating func run() async throws {
-        let enabled: Bool
-        switch state.lowercased() {
-        case "on", "true", "enable": enabled = true
-        case "off", "false", "disable": enabled = false
-        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
-        }
-        try SocketClient().callVoid(
-            method: RPCMethod.configSetHolderRowReconcileEnabled,
-            params: ConfigSetHolderRowReconcileEnabledParams(enabled: enabled))
-        print("Holder row reconciliation \(enabled ? "enabled" : "disabled").")
     }
 }
 

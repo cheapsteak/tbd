@@ -310,8 +310,7 @@ public actor OrphanGC {
         // Before the rendezvous file sweep, deliberately. A holder this phase
         // kills leaves a socket behind that nothing else will ever unlink, and
         // running the file sweep next means one pass reclaims both the process
-        // and its residue — for an installation that has opted into both, which
-        // is the only way either runs.
+        // and its residue.
         await reclaimRowlessHolders(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
@@ -797,16 +796,15 @@ public actor OrphanGC {
     /// (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
     /// "Reconciliation").
     ///
-    /// Gated by `gcHolderRendezvousEnabled` on top of `gcEnabled`, both because
-    /// every new background sweep that unlinks files soaks behind its own
-    /// switch and because the transport it reclaims after is itself still
-    /// behind `ptyHolderEnabled` — a machine that has never spawned a holder
-    /// has nothing here for this phase to be right or wrong about.
+    /// Runs under `gcEnabled`, the same keep-biased gate as the agent-worktree
+    /// loop: holder-ness is a transport property, not a separate opt-in, so a
+    /// machine that collects orphans collects these too. A machine that has
+    /// never spawned a holder has an empty `~/tbd/holders` and this phase
+    /// finds nothing to be right or wrong about.
     ///
-    /// `dryRun` bypasses the flag exactly as `sweep` lets it bypass `gcEnabled`:
-    /// planning is read-only, and someone deciding whether to enable a
-    /// default-off flag needs to see what enabling it would reclaim before
-    /// flipping it. A NON-dry run still requires the flag.
+    /// `dryRun` bypasses `gcEnabled` here exactly as `sweep` lets it: planning
+    /// is read-only, and someone deciding whether to enable GC needs to see
+    /// what enabling it would reclaim before flipping it.
     ///
     /// This phase deliberately reads no rows. It reclaims files whose *process*
     /// is gone, which the socket and the lock answer directly; the
@@ -816,7 +814,6 @@ public actor OrphanGC {
     private func reclaimHolderRendezvous(
         config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
-        guard config.gcHolderRendezvousEnabled || dryRun else { return }
         for candidate in holderRendezvousCollector.candidates() {
             switch await holderRendezvousCollector.decide(
                 candidate, graceSeconds: config.gcGraceSeconds
@@ -828,8 +825,8 @@ public actor OrphanGC {
                 """)
             case .reap:
                 planned.append("REAP holder-rendezvous \(candidate.socketPath)")
-                // This arm's guard is `gcHolderRendezvousEnabled || dryRun`, so
-                // every line below runs only with the flag actually on.
+                // The outer `gcEnabled || dryRun` guard means every line below
+                // runs only with gcEnabled == true.
                 guard !dryRun else { continue }
                 let removed = holderRendezvousCollector.reap(candidate)
                 if removed.isEmpty {
@@ -1175,14 +1172,12 @@ public actor OrphanGC {
     /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
     /// "Reconciliation". The child first, then the holder.
     ///
-    /// Gated by `gcRowlessHoldersEnabled` on top of `gcEnabled`, and **not** by
-    /// `gcHolderRendezvousEnabled`: that flag unlinks files, this one signals
-    /// processes, and enabling the first must never enable the second.
+    /// Runs under `gcEnabled`, the same keep-biased gate as the agent-worktree
+    /// loop: holder-ness is a transport property, not a separate opt-in.
     ///
-    /// `dryRun` bypasses the flag exactly as `sweep` lets it bypass `gcEnabled`:
-    /// planning is read-only, and somebody deciding whether to enable a
-    /// default-off process killer needs to see what enabling it would kill. A
-    /// NON-dry run still requires the flag.
+    /// `dryRun` bypasses `gcEnabled` here exactly as `sweep` lets it: planning
+    /// is read-only, and somebody deciding whether to enable a sweep that kills
+    /// processes needs to see what enabling it would kill.
     ///
     /// Two reads bound what this may do, and both fail toward keeping:
     ///
@@ -1203,7 +1198,6 @@ public actor OrphanGC {
     private func reclaimRowlessHolders(
         config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
-        guard config.gcRowlessHoldersEnabled || dryRun else { return }
         let candidates = rowlessHolderCollector.candidates()
         guard !candidates.isEmpty else { return }
 
@@ -1227,8 +1221,8 @@ public actor OrphanGC {
                 """)
             case .kill(let childPID, let holderPID):
                 planned.append("REAP rowless-holder \(candidate.socketPath)")
-                // This arm's guard is `gcRowlessHoldersEnabled || dryRun`, so
-                // every line below runs only with the flag actually on.
+                // The outer `gcEnabled || dryRun` guard means every line below
+                // runs only with gcEnabled == true.
                 guard !dryRun else { continue }
                 // The late gate. A row that committed during the handshake makes
                 // this holder somebody's live session after all.
@@ -1279,9 +1273,10 @@ public actor OrphanGC {
     /// (`docs/specs/2026-08-18-orphan-process-gc-design.md`).
     ///
     /// Gated by `gcOrphanProcessesEnabled` on top of `gcEnabled`, the same
-    /// shape `reclaimProfileDirs` uses and for the same reason: this is the
-    /// only GC phase that signals processes rather than moving bytes, and what
-    /// it misjudges cannot be restored. `dryRun` bypasses the flag exactly as
+    /// shape `reclaimProfileDirs` uses and for the same reason: this phase
+    /// signals processes rather than moving bytes, and what it misjudges
+    /// cannot be restored. (`reclaimRowlessHolders` signals too, but only
+    /// holders this installation verifiably owns, under `gcEnabled` alone.) `dryRun` bypasses the flag exactly as
     /// `sweep` lets it bypass `gcEnabled` — someone deciding whether to enable
     /// a default-off flag needs to see what enabling it would reclaim first —
     /// and touches nothing either way.

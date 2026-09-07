@@ -5,6 +5,16 @@ import TBDShared
 
 private let configLogger = Logger(subsystem: "com.tbd.daemon", category: "config")
 
+/// The `config` table's singleton row.
+///
+/// Five columns exist in the table and are deliberately absent here —
+/// `gc_holder_rendezvous_enabled`, `gc_rowless_holders_enabled`,
+/// `reap_holder_children_enabled`, `holder_row_reconcile_enabled` and
+/// `holder_hibernation_enabled`. Holder-ness is a transport property, not a
+/// separate opt-in: each of those legs now derives from the subsystem flag it
+/// belongs to (`gc_enabled`, `auto_hibernate_enabled`) or runs unconditionally,
+/// so nothing reads the columns. They stay in the schema because a landed
+/// migration is never edited and GRDB ignores columns a record does not name.
 struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "config"
 
@@ -100,32 +110,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.ptyHolderDefault`, never through `?? false`.
     var pty_holder_enabled: Bool?
-    /// Gate for the GC phase that unlinks holder rendezvous files whose holder
-    /// is gone. **Genuinely tri-state**, same shape as `pty_holder_enabled`:
-    /// the `20260901135111_config_gc_holder_rendezvous` migration carries no SQL
-    /// default, so `nil` here means "never chose" rather than "off". Resolve it
-    /// through `Config.gcHolderRendezvousEnabledDefault`, never through
-    /// `?? false`.
-    var gc_holder_rendezvous_enabled: Bool?
-    /// Gate for the GC phase that kills a row-less pty holder this installation
-    /// owns. **Genuinely tri-state**, same shape as
-    /// `gc_holder_rendezvous_enabled`: the
-    /// `20260901161500_config_gc_rowless_holders` migration carries no SQL
-    /// default, so `nil` here means "never chose" rather than "off". Resolve it
-    /// through `Config.gcRowlessHoldersEnabledDefault`, never through
-    /// `?? false`.
-    var gc_rowless_holders_enabled: Bool?
-    /// Gate for the `AgentReaper` leg that kills a holder session's surviving
-    /// child process. **Genuinely tri-state**, same shape as
-    /// `gc_holder_rendezvous_enabled`: the
-    /// `20260901180118_config_reap_holder_children` migration carries no SQL
-    /// default, so `nil` here means "never chose" rather than "off". Resolve it
-    /// through `Config.reapHolderChildrenEnabledDefault`, never through
-    /// `?? false`.
-    var reap_holder_children_enabled: Bool?
     /// Gate for `remote.delete`, the verb that destroys a provider-hosted agent
-    /// session. **Genuinely tri-state**, same shape as
-    /// `reap_holder_children_enabled`: the
+    /// session. **Genuinely tri-state**, same shape as `pty_holder_enabled`:
+    /// the
     /// `20260902130000_config_remote_delete` migration carries no SQL default,
     /// so `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.remoteDeleteEnabledDefault`, never through `?? false`.
@@ -138,23 +125,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.gcRetainedTranscriptsEnabledDefault`, never through
     /// `?? false`.
     var gc_retained_transcripts_enabled: Bool?
-    /// Gate for the reconcile arm that judges holder-backed session rows.
-    /// **Genuinely tri-state**, same shape as `gc_holder_rendezvous_enabled`:
-    /// the `20260903193500_config_holder_row_reconcile` migration carries no SQL
-    /// default, so `nil` here means "never chose" rather than "off". Resolve it
-    /// through `Config.holderRowReconcileEnabledDefault`, never through
-    /// `?? false`.
-    var holder_row_reconcile_enabled: Bool?
-    /// Gate for parking, waking and limit-resuming Claude sessions on the
-    /// pty-holder transport. **Genuinely tri-state**, same shape as
-    /// `holder_row_reconcile_enabled`: the
-    /// `20260905213000_config_holder_hibernation` migration carries no SQL
-    /// default, so `nil` here means "never chose" rather than "off". Resolve
-    /// it through `Config.holderHibernationEnabledDefault`, never through
-    /// `?? false`.
-    var holder_hibernation_enabled: Bool?
     /// The live-transcript message composer's gate. **Genuinely tri-state**,
-    /// same shape as `holder_row_reconcile_enabled`: the
+    /// same shape as `gc_retained_transcripts_enabled`: the
     /// `20260905120000_config_transcript_composer` migration carries no SQL
     /// default, so `nil` here means "never chose" rather than "off". Resolve it
     /// through `Config.transcriptComposerEnabledDefault`, never through
@@ -210,16 +182,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   soak gate.
     /// - Parameter ptyHolderDefault: same shape once more, for
     ///   `pty_holder_enabled` — the pty-holder transport's soak gate.
-    /// - Parameter gcHolderRendezvousDefault: and once more, for
-    ///   `gc_holder_rendezvous_enabled` — the holder rendezvous sweep's soak
-    ///   gate.
-    /// - Parameter gcRowlessHoldersDefault: and once more, for
-    ///   `gc_rowless_holders_enabled` — the row-less holder sweep's soak gate,
-    ///   which is a separate opt-in because it kills processes rather than
-    ///   unlinking files.
-    /// - Parameter reapHolderChildrenDefault: same shape once more, for
-    ///   `reap_holder_children_enabled` — the `AgentReaper` holder leg's soak
-    ///   gate.
     /// - Parameter remoteDeleteDefault: and the last of them, for
     ///   `remote_delete_enabled` — the gate on destroying a provider-hosted
     ///   session, whose soak is the one that matters most, because what it
@@ -227,15 +189,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter gcRetainedTranscriptsDefault: and truly the last, for
     ///   `gc_retained_transcripts_enabled` — the retained-transcript GC leg's
     ///   soak gate.
-    /// - Parameter holderRowReconcileDefault: same shape again, for
-    ///   `holder_row_reconcile_enabled` — the holder row sweep's soak gate,
-    ///   which is a separate opt-in from both because it deletes database rows
-    ///   rather than files or processes.
-    /// - Parameter holderHibernationDefault: same shape once more, for
-    ///   `holder_hibernation_enabled` — the pty-holder transport's
-    ///   auto-hibernation gate, a separate opt-in from `holderRowReconcileDefault`
-    ///   because it kills a live agent process rather than reclaiming a
-    ///   already-dead row.
     /// - Parameter transcriptComposerDefault: same shape once more, for
     ///   `transcript_composer_enabled` — the live-transcript composer's gate,
     ///   which is one switch for the composer UI, its completions probe,
@@ -255,13 +208,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         gcHangStacksDefault: Bool = Config.gcHangStacksEnabledDefault,
         remotePeerMessagingDefault: Bool = Config.remotePeerMessagingDefault,
         ptyHolderDefault: Bool = Config.ptyHolderDefault,
-        gcHolderRendezvousDefault: Bool = Config.gcHolderRendezvousEnabledDefault,
-        gcRowlessHoldersDefault: Bool = Config.gcRowlessHoldersEnabledDefault,
-        reapHolderChildrenDefault: Bool = Config.reapHolderChildrenEnabledDefault,
         remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault,
         gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault,
-        holderRowReconcileDefault: Bool = Config.holderRowReconcileEnabledDefault,
-        holderHibernationDefault: Bool = Config.holderHibernationEnabledDefault,
         transcriptComposerDefault: Bool = Config.transcriptComposerEnabledDefault,
         updateModeDefault: UpdateMode = Config.updateModeDefault
     ) -> Config {
@@ -326,15 +274,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             remotePeerMessagingEnabled: remote_peer_messaging_enabled ?? remotePeerMessagingDefault,
             // And once more, for the pty-holder transport's gate — NOT `?? false`.
             ptyHolderEnabled: pty_holder_enabled ?? ptyHolderDefault,
-            // And the last of them, for the holder rendezvous sweep's gate —
-            // NOT `?? false`.
-            gcHolderRendezvousEnabled: gc_holder_rendezvous_enabled ?? gcHolderRendezvousDefault,
-            // And its process-killing sibling, resolved the same way and from
-            // its own column — NOT `?? false`, and NOT the rendezvous flag.
-            gcRowlessHoldersEnabled: gc_rowless_holders_enabled ?? gcRowlessHoldersDefault,
-            // And truly the last of them, for the `AgentReaper` holder leg's
-            // gate — NOT `?? false`.
-            reapHolderChildrenEnabled: reap_holder_children_enabled ?? reapHolderChildrenDefault,
             // And truly the last of them, for the remote-delete gate —
             // NOT `?? false`.
             remoteDeleteEnabled: remote_delete_enabled ?? remoteDeleteDefault,
@@ -342,13 +281,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // gate — NOT `?? false`.
             gcRetainedTranscriptsEnabled:
                 gc_retained_transcripts_enabled ?? gcRetainedTranscriptsDefault,
-            // Once more, for the holder row sweep's gate —
-            // NOT `?? false`.
-            holderRowReconcileEnabled:
-                holder_row_reconcile_enabled ?? holderRowReconcileDefault,
-            // And once more, for holder hibernation's gate — NOT `?? false`.
-            holderHibernationEnabled:
-                holder_hibernation_enabled ?? holderHibernationDefault,
             // And once more, for the composer's gate — NOT `?? false`.
             transcriptComposerEnabled:
                 transcript_composer_enabled ?? transcriptComposerDefault,
@@ -805,47 +737,6 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist the holder rendezvous sweep gate (default OFF, soaking) — read
-    /// on top of the GC master switch, so both must be on for the phase to run.
-    /// The column is written on every call, because writing either value is the
-    /// explicit gesture that lifts it out of NULL forever after.
-    public func setGCHolderRendezvousEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET gc_holder_rendezvous_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the row-less holder sweep gate (default OFF, soaking) — read on
-    /// top of the GC master switch, so both must be on for the phase to run.
-    /// Separate from `setGCHolderRendezvousEnabled` on purpose: that gate
-    /// unlinks files, this one kills processes. The column is written on every
-    /// call, because writing either value is the explicit gesture that lifts it
-    /// out of NULL forever after.
-    public func setGCRowlessHoldersEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET gc_rowless_holders_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the `AgentReaper` holder leg's gate (default OFF, soaking) — the
-    /// sweep that kills the surviving job of a dead holder. The column is
-    /// written on every call, because writing either value is the explicit
-    /// gesture that lifts it out of NULL forever after.
-    public func setReapHolderChildrenEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET reap_holder_children_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
     /// Persist the remote-delete gate (default OFF, soaking) — the single
     /// opt-in for destroying a provider-hosted agent session. The column is
     /// written on every call, because writing either value is the explicit
@@ -870,39 +761,6 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET gc_retained_transcripts_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the holder row sweep's gate (default OFF, soaking) — the
-    /// reconcile arm that deletes a session row whose holder is gone. Separate
-    /// from `setReapHolderChildrenEnabled` and `setGCRowlessHoldersEnabled` on
-    /// purpose: those signal processes, this one destroys database rows, and
-    /// enabling one must never silently enable another. The column is written
-    /// on every call, because writing either value is the explicit gesture that
-    /// lifts it out of NULL forever after.
-    public func setHolderRowReconcileEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET holder_row_reconcile_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the pty-holder transport's auto-hibernation gate (default OFF,
-    /// soaking) — whether idle holder-backed sessions get parked, woken and
-    /// limit-resumed by the same sweep and rails as tmux sessions. Separate
-    /// from `setHolderRowReconcileEnabled` on purpose: that gate reclaims a
-    /// session row whose holder is already gone, this one parks (and can kill)
-    /// a holder whose child process is still very much alive. The column is
-    /// written on every call, because writing either value is the explicit
-    /// gesture that lifts it out of NULL forever after.
-    public func setHolderHibernationEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET holder_hibernation_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

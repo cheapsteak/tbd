@@ -981,11 +981,11 @@ public extension Terminal {
     /// Manual "Hibernate now" bypasses the keep-warm and idle checks but keeps
     /// the running/permission rails (see `isManuallyHibernatable`).
     ///
-    /// `holderHibernationEnabled` is `Config.holderHibernationEnabled` — see
-    /// `isManuallyHibernatable(holderHibernationEnabled:)`, which this defers
-    /// the whole transport question to.
-    func isAutoHibernationEligible(holderHibernationEnabled: Bool) -> Bool {
-        isManuallyHibernatable(holderHibernationEnabled: holderHibernationEnabled) && !keepWarm
+    /// Transport does not enter into it: a holder-backed row is as eligible as
+    /// a tmux-backed one, because both have a park mechanic and a wake path —
+    /// see `isManuallyHibernatable`, which this defers the rails to.
+    func isAutoHibernationEligible() -> Bool {
+        isManuallyHibernatable() && !keepWarm
     }
 
     /// Whether a MANUAL "Hibernate now" may act on this terminal. Same rails as
@@ -993,23 +993,14 @@ public extension Terminal {
     /// explicitly. Still refuses to hibernate an in-flight turn or a raised
     /// permission hand.
     ///
-    /// - Parameter holderHibernationEnabled: `Config.holderHibernationEnabled`,
-    ///   the soak gate for park and wake on the pty-holder transport. A
-    ///   holder-backed row IS parkable — the mechanic terminates the holder's
-    ///   child and wake spawns a fresh holder running `claude --resume` — and
-    ///   this flag decides only whether that mechanic has soaked long enough to
-    ///   run on this install. Not defaulted, deliberately: the flag reaches
-    ///   five call sites across the daemon and the app, and a missing argument
-    ///   is a compile error rather than a rail that quietly disagrees with the
-    ///   menu the user is looking at.
-    func isManuallyHibernatable(holderHibernationEnabled: Bool) -> Bool {
-        // Park and wake on the holder transport do not go through tmux at all:
-        // the park writes `/exit` to the holder's pty, confirms the child is
-        // gone, and clears the row's pids; the wake spawns a fresh holder. A
-        // holder row's `tmuxWindowID`/`tmuxPaneID` are empty strings by
-        // construction and neither path reads them. What this guard gates is
-        // the soak, not the capability.
-        if transport == .holder, !holderHibernationEnabled { return false }
+    ///
+    /// The rails are the same on every transport. Park and wake on the holder
+    /// transport do not go through tmux at all — the park writes `/exit` to the
+    /// holder's pty, confirms the child is gone, and clears the row's pids, and
+    /// the wake spawns a fresh holder running `claude --resume`. A holder row's
+    /// `tmuxWindowID`/`tmuxPaneID` are empty strings by construction and
+    /// neither path reads them.
+    func isManuallyHibernatable() -> Bool {
         guard isClaudeResumable else { return false }
         guard hibernatedAt == nil, suspendedAt == nil else { return false }
         switch activityState {
@@ -1544,54 +1535,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// means "never chose" and follows the shipped default wherever it goes;
     /// `0`/`1` is an explicit gesture and is honored forever.
     public var gcHangStacksEnabled: Bool
-    /// Gate for the orphan-GC phase that unlinks holder rendezvous files whose
-    /// holder is gone — the socket, and its sibling lock and log
-    /// (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
-    /// "Reconciliation"). Read on top of `gcEnabled`: both must be on for the
-    /// phase to run. It ships OFF because it is a brand-new background sweep
-    /// that unlinks files, and the holder transport it reclaims after is itself
-    /// still soaking behind `ptyHolderEnabled`.
-    ///
-    /// **Resolved, not stored**, like `gcProfileDirsEnabled`: the backing
-    /// column carries no SQL default and stays NULL until somebody touches the
-    /// toggle, so this property is
-    /// `gc_holder_rendezvous_enabled ?? Config.gcHolderRendezvousEnabledDefault`.
-    /// NULL means "never chose" and follows the shipped default wherever it
-    /// goes; `0`/`1` is an explicit gesture and is honored forever.
-    public var gcHolderRendezvousEnabled: Bool
-    /// Gate for the orphan-GC phase that **kills** a pty holder this
-    /// installation owns which no session row claims — the holder-versus-
-    /// database half of
-    /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
-    /// "Reconciliation". Read on top of `gcEnabled`: both must be on.
-    ///
-    /// **Deliberately not `gcHolderRendezvousEnabled`.** That flag unlinks
-    /// files; this one signals processes. They are independent opt-ins because
-    /// somebody enabling file cleanup must not silently acquire a process
-    /// killer, and because what this phase misjudges cannot be restored.
-    /// Gate for the `AgentReaper` leg that kills the surviving child of a dead
-    /// holder (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
-    /// "Reconciliation"). The existing sweep enumerates children of tmux server
-    /// pids and structurally cannot see a job re-parented to launchd, so this
-    /// leg sweeps by each holder session's recorded child pid instead.
-    ///
-    /// It ships OFF because it is a background sweep that kills processes
-    /// without a user gesture — the exact shape CLAUDE.md requires to soak
-    /// behind its own switch — and because the transport it backstops is itself
-    /// still behind `ptyHolderEnabled`, so a machine that has never spawned a
-    /// holder has no row for this leg to be right or wrong about.
-    ///
-    /// **Resolved, not stored**, like `gcHolderRendezvousEnabled`: the backing
-    /// column carries no SQL default and stays NULL until somebody touches the
-    /// toggle, so this property is
-    /// `gc_rowless_holders_enabled ?? Config.gcRowlessHoldersEnabledDefault`.
-    /// NULL means "never chose" and follows the shipped default wherever it
-    /// goes; `0`/`1` is an explicit gesture and is honored forever.
-    public var gcRowlessHoldersEnabled: Bool
-    /// `reap_holder_children_enabled ?? Config.reapHolderChildrenEnabledDefault`.
-    /// NULL means "never chose" and follows the shipped default wherever it
-    /// goes; `0`/`1` is an explicit gesture and is honored forever.
-    public var reapHolderChildrenEnabled: Bool
     /// The single opt-in for `remote.delete` — destroying a provider-hosted
     /// agent session outright
     /// (`docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`,
@@ -1604,7 +1547,7 @@ public struct Config: Codable, Sendable, Equatable {
     /// add records rather than removing them, so the provider's declared
     /// capabilities are their whole gate and this flag says nothing about them.
     ///
-    /// **Resolved, not stored**, like `reapHolderChildrenEnabled`: the backing
+    /// **Resolved, not stored**, like `gcOrphanProcessesEnabled`: the backing
     /// column carries no SQL default and stays NULL until somebody touches the
     /// toggle, so this property is
     /// `remote_delete_enabled ?? Config.remoteDeleteEnabledDefault`. NULL means
@@ -1623,51 +1566,13 @@ public struct Config: Codable, Sendable, Equatable {
     /// `retain`, `import` or `recall` — so a machine with no such provider has
     /// nothing here for this leg to be right or wrong about.
     ///
-    /// **Resolved, not stored**, like `gcHolderRendezvousEnabled`: the backing
+    /// **Resolved, not stored**, like `gcProfileDirsEnabled`: the backing
     /// column carries no SQL default and stays NULL until somebody touches the
     /// toggle, so this property is
     /// `gc_retained_transcripts_enabled ?? Config.gcRetainedTranscriptsEnabledDefault`.
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcRetainedTranscriptsEnabled: Bool
-    /// Gate for the reconcile arm that judges holder-backed session rows — the
-    /// inventory half of
-    /// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
-    /// "Reconciliation": the holder is gone and the session row is still there.
-    ///
-    /// **Deliberately its own opt-in, not `ptyHolderEnabled`.** That gate must
-    /// be ON for any holder row to exist, so it cannot express the soak
-    /// protocol its two siblings were given one for — transport on, one
-    /// destructive reclaimer on at a time. And it is deliberately neither
-    /// `gcHolderRendezvousEnabled` (which unlinks files) nor
-    /// `reapHolderChildrenEnabled` (which signals processes): this arm deletes
-    /// terminal and tab rows, in a background sweep, with no user gesture.
-    ///
-    /// **Resolved, not stored**, like `gcHolderRendezvousEnabled`: the backing
-    /// column carries no SQL default and stays NULL until somebody touches the
-    /// toggle, so this property is
-    /// `holder_row_reconcile_enabled ?? Config.holderRowReconcileEnabledDefault`.
-    /// NULL means "never chose" and follows the shipped default wherever it
-    /// goes; `0`/`1` is an explicit gesture and is honored forever.
-    public var holderRowReconcileEnabled: Bool
-    /// Gate for parking, waking and limit-resuming Claude sessions on the
-    /// pty-holder transport — auto-hibernation's holder leg. It ships OFF and
-    /// soaks behind its own switch rather than riding `ptyHolderEnabled`: that
-    /// outer gate has to be ON for a holder row to exist at all, so it cannot
-    /// express "transport on, hibernation not yet" — the same reason
-    /// `holderRowReconcileEnabled` is not folded into `ptyHolderEnabled`
-    /// either. What it gates is destructive in a way tmux hibernation is not:
-    /// a background sweep kills a live holder-owned agent process, and wake
-    /// starts a fresh holder running `claude --resume` rather than reattaching
-    /// to anything.
-    ///
-    /// **Resolved, not stored**, like `holderRowReconcileEnabled`: the backing
-    /// column carries no SQL default and stays NULL until somebody touches the
-    /// toggle, so this property is
-    /// `holder_hibernation_enabled ?? Config.holderHibernationEnabledDefault`.
-    /// NULL means "never chose" and follows the shipped default wherever it
-    /// goes; `0`/`1` is an explicit gesture and is honored forever.
-    public var holderHibernationEnabled: Bool
     /// The single opt-in for the live transcript's message composer
     /// (`docs/specs/2026-09-05-transcript-composer-design.md`, "Flag"): the
     /// composer UI, the `terminal.completions` probe, attachment writes under
@@ -1681,7 +1586,7 @@ public struct Config: Codable, Sendable, Equatable {
     /// A **config column** rather than an app default, because the GC leg lives
     /// in the daemon and cannot read the app's `UserDefaults`.
     ///
-    /// **Resolved, not stored**, like `holderRowReconcileEnabled`: the backing
+    /// **Resolved, not stored**, like `gcProfileDirsEnabled`: the backing
     /// column carries no SQL default and stays NULL until somebody touches the
     /// toggle, so this property is
     /// `transcript_composer_enabled ?? Config.transcriptComposerEnabledDefault`.
@@ -1814,24 +1719,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// change to this constant, with no forcing `UPDATE` migration and every
     /// explicit opt-out left alone.
     public static let ptyHolderDefault = false
-    /// The shipped default for `gcHolderRendezvousEnabled`, and the single place
-    /// it lives. The rendezvous sweep ships off; graduation — after a soak in
-    /// which it never unlinks a socket a live holder was using — is a change to
-    /// this constant, with no forcing `UPDATE` migration and every explicit
-    /// opt-out left alone.
-    public static let gcHolderRendezvousEnabledDefault = false
-    /// The shipped default for `gcRowlessHoldersEnabled`, and the single place
-    /// it lives. The row-less holder sweep ships off; graduation — after a soak
-    /// in which it never kills a holder that turned out to be somebody's live
-    /// session — is a change to this constant, with no forcing `UPDATE`
-    /// migration and every explicit opt-out left alone.
-    public static let gcRowlessHoldersEnabledDefault = false
-    /// The shipped default for `reapHolderChildrenEnabled`, and the single
-    /// place it lives. The holder leg ships off; graduation — after a soak in
-    /// which it never signals a process that was not the recorded child of a
-    /// dead holder — is a change to this constant, with no forcing `UPDATE`
-    /// migration and every explicit opt-out left alone.
-    public static let reapHolderChildrenEnabledDefault = false
     /// The shipped default for `remoteDeleteEnabled`, and the single place it
     /// lives. Delete ships off; graduation — after a soak in which no delete
     /// destroyed a session its user had not confirmed, and every delete that
@@ -1845,19 +1732,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// claim — is a change to this constant, with no forcing `UPDATE` migration
     /// and every explicit opt-out left alone.
     public static let gcRetainedTranscriptsEnabledDefault = false
-    /// The shipped default for `holderRowReconcileEnabled`, and the single
-    /// place it lives. The holder row sweep ships off; graduation — after a
-    /// soak in which it never deletes a row whose session turned out to be
-    /// reachable — is a change to this constant, with no forcing `UPDATE`
-    /// migration and every explicit opt-out left alone.
-    public static let holderRowReconcileEnabledDefault = false
-    /// The shipped default for `holderHibernationEnabled`, and the single
-    /// place it lives. Holder hibernation ships off; graduation — after a soak
-    /// in which no park ever finalized while its child was still running and
-    /// no wake ever left a holder without a row — is a change to this
-    /// constant, with no forcing `UPDATE` migration and every explicit opt-out
-    /// left alone.
-    public static let holderHibernationEnabledDefault = false
     /// The shipped default for `transcriptComposerEnabled`, and the single place
     /// it lives. The composer ships off; graduation — after a soak in which no
     /// message reached a session that was not running, no probe left a process or
@@ -1908,14 +1782,9 @@ public struct Config: Codable, Sendable, Equatable {
                 gcHangStacksEnabled: Bool = Config.gcHangStacksEnabledDefault,
                 remotePeerMessagingEnabled: Bool = Config.remotePeerMessagingDefault,
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
-                gcHolderRendezvousEnabled: Bool = Config.gcHolderRendezvousEnabledDefault,
-                gcRowlessHoldersEnabled: Bool = Config.gcRowlessHoldersEnabledDefault,
-                reapHolderChildrenEnabled: Bool = Config.reapHolderChildrenEnabledDefault,
                 remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
                 gcRetainedTranscriptsEnabled: Bool =
                     Config.gcRetainedTranscriptsEnabledDefault,
-                holderRowReconcileEnabled: Bool = Config.holderRowReconcileEnabledDefault,
-                holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault,
                 transcriptComposerEnabled: Bool = Config.transcriptComposerEnabledDefault,
                 updateMode: UpdateMode = Config.updateModeDefault,
                 remoteCreateDefaults: [String: String] = [:],
@@ -1954,13 +1823,8 @@ public struct Config: Codable, Sendable, Equatable {
         self.gcHangStacksEnabled = gcHangStacksEnabled
         self.remotePeerMessagingEnabled = remotePeerMessagingEnabled
         self.ptyHolderEnabled = ptyHolderEnabled
-        self.gcHolderRendezvousEnabled = gcHolderRendezvousEnabled
-        self.gcRowlessHoldersEnabled = gcRowlessHoldersEnabled
-        self.reapHolderChildrenEnabled = reapHolderChildrenEnabled
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
-        self.holderRowReconcileEnabled = holderRowReconcileEnabled
-        self.holderHibernationEnabled = holderHibernationEnabled
         self.transcriptComposerEnabled = transcriptComposerEnabled
         self.updateMode = updateMode
         self.remoteCreateDefaults = remoteCreateDefaults
@@ -2057,22 +1921,6 @@ public struct Config: Codable, Sendable, Equatable {
         // rather than hardcoding `false`.
         ptyHolderEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderEnabled) ?? Config.ptyHolderDefault
-        // And the last of them: absent means the sender knew nothing about the
-        // flag, which is the NULL column's situation — follow the shipped
-        // default rather than hardcoding `false`.
-        gcHolderRendezvousEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .gcHolderRendezvousEnabled)
-            ?? Config.gcHolderRendezvousEnabledDefault
-        // Same reading for the row-less holder sweep's gate: absent means the
-        // sender knew nothing about the flag, which is the NULL column's
-        // situation — follow the shipped default, never a hardcoded `false`.
-        gcRowlessHoldersEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .gcRowlessHoldersEnabled)
-            ?? Config.gcRowlessHoldersEnabledDefault
-        // Same shape again, for the `AgentReaper` holder leg.
-        reapHolderChildrenEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .reapHolderChildrenEnabled)
-            ?? Config.reapHolderChildrenEnabledDefault
         // And the same shape for the remote-delete gate: absent means the sender
         // knew nothing about the flag, which is the NULL column's situation —
         // follow the shipped default, never a hardcoded `false`.
@@ -2085,14 +1933,6 @@ public struct Config: Codable, Sendable, Equatable {
         gcRetainedTranscriptsEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcRetainedTranscriptsEnabled)
             ?? Config.gcRetainedTranscriptsEnabledDefault
-        // And once more, for the holder row sweep's gate.
-        holderRowReconcileEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .holderRowReconcileEnabled)
-            ?? Config.holderRowReconcileEnabledDefault
-        // Same shape once more, for holder hibernation's gate.
-        holderHibernationEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .holderHibernationEnabled)
-            ?? Config.holderHibernationEnabledDefault
         // And once more, for the composer's gate: absent means the sender knew
         // nothing about the flag, which is the NULL column's situation — follow
         // the shipped default rather than hardcoding `false`.

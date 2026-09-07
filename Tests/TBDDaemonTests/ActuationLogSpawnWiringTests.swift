@@ -262,8 +262,7 @@ struct ActuationLogSpawnWiringTests {
         let coordinator = makeCoordinator(db: fixture.db, logPath: logPath)
 
         let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: false,
-            holderHibernationEnabled: false)
+            terminalID: fixture.terminalID, inputVetoEnabled: false)
         #expect(result == .ok)
 
         let written = try rows(at: logPath)
@@ -288,8 +287,7 @@ struct ActuationLogSpawnWiringTests {
         let coordinator = makeCoordinator(db: fixture.db, logPath: logPath)
 
         let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: false,
-            holderHibernationEnabled: false)
+            terminalID: fixture.terminalID, inputVetoEnabled: false)
         #expect(result == .notEligible(reason: "Terminal is pinned keep-warm"))
         #expect(try rows(at: logPath).isEmpty)
     }
@@ -313,8 +311,7 @@ struct ActuationLogSpawnWiringTests {
         await coordinator.setInputActivity(tracker)
 
         let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: true,
-            holderHibernationEnabled: false)
+            terminalID: fixture.terminalID, inputVetoEnabled: true)
         #expect(result == .notEligible(reason: "Terminal has unsent typed input"))
         #expect(try rows(at: logPath).isEmpty)
         #expect(try await fixture.db.terminals.get(id: fixture.terminalID)?.hibernatedAt == nil)
@@ -336,8 +333,7 @@ struct ActuationLogSpawnWiringTests {
         await coordinator.setInputActivity(tracker)
 
         let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: false,
-            holderHibernationEnabled: false)
+            terminalID: fixture.terminalID, inputVetoEnabled: false)
         #expect(result == .ok)
         #expect(try rows(at: logPath).count == 2)
         #expect(try await fixture.db.terminals.get(id: fixture.terminalID)?.hibernatedAt != nil)
@@ -349,8 +345,7 @@ struct ActuationLogSpawnWiringTests {
         let coordinator = makeCoordinator(db: fixture.db, logPath: try makeUnwritablePath())
 
         let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: false,
-            holderHibernationEnabled: false)
+            terminalID: fixture.terminalID, inputVetoEnabled: false)
         guard case .notEligible(let reason) = result else {
             Issue.record("expected the park to be skipped, got \(result)")
             return

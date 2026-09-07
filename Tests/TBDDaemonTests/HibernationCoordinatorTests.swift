@@ -655,8 +655,7 @@ struct HibernationCoordinatorTests {
         let hibernate = gateHoldingTask {
             await coord.hibernateForMerge(
                 terminalID: terminalID,
-                inputVetoEnabled: true,
-                holderHibernationEnabled: false)
+                inputVetoEnabled: true)
         }
         await capture.waitForFirstCapture()
         inputActivity.recordInput(paneID: before.tmuxPaneID)

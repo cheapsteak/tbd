@@ -58,7 +58,7 @@ struct AgentReaperHolderLegTests {
         let reaper = reaper(signaller, records: [Self.record()])
         #expect(reaper.decideHolderChild(Self.record()) == .reap)
 
-        await reaper.sweepHolderChildren(enabled: true)
+        await reaper.sweepHolderChildren()
         #expect(signaller.terminated == [Self.childPID])
     }
 
@@ -71,37 +71,25 @@ struct AgentReaperHolderLegTests {
             aliveInitially: true, aliveAfterTerminate: true, aliveAfterKill: false)
         let reaper = reaper(signaller, records: [Self.record()])
 
-        await reaper.sweepHolderChildren(enabled: true)
+        await reaper.sweepHolderChildren()
         #expect(signaller.terminated == [Self.childPID])
         #expect(signaller.killed == [Self.childPID])
     }
 
-    // MARK: - Both branches of the gate
+    // MARK: - The leg carries no gate of its own
 
-    @Test func theLegSignalsNothingWhenTheFlagIsOff() async {
+    /// `AgentReaper` has no switch, and neither does its holder leg: an
+    /// orphaned job is reclaimed on the ordinary sweep, exactly as the tmux leg
+    /// reclaims an orphaned pane process. Nothing here arms anything.
+    @Test func theLegReapsAnOrphanWithNothingArmed() async {
         let signaller = orphanSignaller()
-        let reaper = reaper(signaller, records: [Self.record()])
-
-        await reaper.sweepHolderChildren(enabled: false)
-        #expect(signaller.terminated.isEmpty)
-        #expect(signaller.killed.isEmpty)
+        await reaper(signaller, records: [Self.record()]).sweepHolderChildren()
+        #expect(signaller.terminated == [Self.childPID])
     }
 
-    /// The gate must be the only thing separating the two runs: same reaper,
-    /// same scripted process table, opposite verdicts.
-    @Test func theSameOrphanIsReapedOnlyWithTheFlagOn() async {
-        let off = orphanSignaller()
-        await reaper(off, records: [Self.record()]).sweepHolderChildren(enabled: false)
-        #expect(off.terminated.isEmpty)
-
-        let on = orphanSignaller()
-        await reaper(on, records: [Self.record()]).sweepHolderChildren(enabled: true)
-        #expect(on.terminated == [Self.childPID])
-    }
-
-    /// The flag gates the enumeration too, not just the kill: a disabled leg
-    /// must not pay for a `ps` per holder row on every sweep.
-    @Test func theFlagOffSkipsEnumerationEntirely() async {
+    /// The enumeration happens on every pass too — the leg walks the rows it
+    /// is given rather than consulting a flag first.
+    @Test func theLegEnumeratesOnEveryPass() async {
         let signaller = orphanSignaller()
         let enumerated = Enumerated()
         let reaper = AgentReaper(
@@ -112,10 +100,10 @@ struct AgentReaperHolderLegTests {
                 return [Self.record()]
             })
 
-        await reaper.sweepHolderChildren(enabled: false)
-        #expect(enumerated.count == 0)
-        await reaper.sweepHolderChildren(enabled: true)
+        await reaper.sweepHolderChildren()
         #expect(enumerated.count == 1)
+        await reaper.sweepHolderChildren()
+        #expect(enumerated.count == 2)
     }
 
     // MARK: - Every reason the leg keeps
@@ -126,7 +114,7 @@ struct AgentReaperHolderLegTests {
         let reaper = reaper(signaller, records: [Self.record()])
         #expect(reaper.decideHolderChild(Self.record()) == .keep(reason: "holder-alive"))
 
-        await reaper.sweepHolderChildren(enabled: true)
+        await reaper.sweepHolderChildren()
         #expect(signaller.terminated.isEmpty)
     }
 
@@ -147,7 +135,7 @@ struct AgentReaperHolderLegTests {
             let record = Self.record(childPID: pid)
             let reaper = reaper(signaller, records: [record])
             #expect(reaper.decideHolderChild(record) == .keep(reason: "invalid-child-pid"))
-            await reaper.sweepHolderChildren(enabled: true)
+            await reaper.sweepHolderChildren()
             #expect(signaller.terminated.isEmpty)
             #expect(signaller.killed.isEmpty)
         }
@@ -159,7 +147,7 @@ struct AgentReaperHolderLegTests {
         let reaper = reaper(signaller, records: [Self.record()])
         #expect(reaper.decideHolderChild(Self.record()) == .keep(reason: "child-gone"))
 
-        await reaper.sweepHolderChildren(enabled: true)
+        await reaper.sweepHolderChildren()
         #expect(signaller.terminated.isEmpty)
         #expect(signaller.killed.isEmpty)
     }
@@ -172,7 +160,7 @@ struct AgentReaperHolderLegTests {
         let reaper = reaper(signaller, records: [Self.record()])
         #expect(reaper.decideHolderChild(Self.record()) == .keep(reason: "start-time-mismatch"))
 
-        await reaper.sweepHolderChildren(enabled: true)
+        await reaper.sweepHolderChildren()
         #expect(signaller.terminated.isEmpty)
     }
 
@@ -200,7 +188,7 @@ struct AgentReaperHolderLegTests {
         let reaper = reaper(signaller, records: [Self.record()])
         #expect(reaper.decideHolderChild(Self.record()) == .keep(reason: "start-time-unreadable"))
 
-        await reaper.sweepHolderChildren(enabled: true)
+        await reaper.sweepHolderChildren()
         #expect(signaller.terminated.isEmpty)
     }
 
@@ -210,7 +198,7 @@ struct AgentReaperHolderLegTests {
         let reaper = reaper(signaller, records: [Self.record()])
         #expect(reaper.decideHolderChild(Self.record()) == .keep(reason: "command-unreadable"))
 
-        await reaper.sweepHolderChildren(enabled: true)
+        await reaper.sweepHolderChildren()
         #expect(signaller.terminated.isEmpty)
     }
 
@@ -224,7 +212,7 @@ struct AgentReaperHolderLegTests {
         let reaper = reaper(signaller, records: [Self.record()])
         #expect(reaper.decideHolderChild(Self.record()) == .keep(reason: "command-unreadable"))
 
-        await reaper.sweepHolderChildren(enabled: true)
+        await reaper.sweepHolderChildren()
         #expect(signaller.terminated.isEmpty)
     }
 
@@ -234,7 +222,7 @@ struct AgentReaperHolderLegTests {
         let reaper = reaper(signaller, records: [Self.record()])
         #expect(reaper.decideHolderChild(Self.record()) == .keep(reason: "foreign-executable"))
 
-        await reaper.sweepHolderChildren(enabled: true)
+        await reaper.sweepHolderChildren()
         #expect(signaller.terminated.isEmpty)
     }
 
@@ -284,7 +272,7 @@ struct AgentReaperHolderLegTests {
             signaller.cmdlines[Self.childPID] = "/usr/bin/vim README.md"
         }
 
-        await reaper.sweepHolderChildren(enabled: true)
+        await reaper.sweepHolderChildren()
         #expect(signaller.terminated == [Self.childPID])
         #expect(
             signaller.killed.isEmpty,

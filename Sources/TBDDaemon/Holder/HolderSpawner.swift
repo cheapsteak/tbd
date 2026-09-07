@@ -70,10 +70,10 @@ struct HolderSpawnResult: Sendable {
 /// direct child of the daemon, so a daemon that outlives it must reap its exit
 /// status, and a holder orphaned by a daemon crash is reclaimed by nothing
 /// today. Both belong to the reconcilers Milestone B adds, and all three now
-/// exist — the `OrphanGC` rendezvous sweep (`HolderRendezvousCollector`, gated
-/// on `gcHolderRendezvousEnabled`) unlinks the files a dead holder left behind,
-/// `AgentReaper.sweepHolderChildren` (gated on `reapHolderChildrenEnabled`)
-/// kills the **job** a dead holder left running, and the
+/// exist — the `OrphanGC` rendezvous sweep (`HolderRendezvousCollector`, under
+/// `gcEnabled`) unlinks the files a dead holder left behind,
+/// `AgentReaper.sweepHolderChildren` kills the **job** a dead holder left
+/// running, and the
 /// `WorktreeLifecycle+Reconcile` holder inventory
 /// (`holderRowVerdict(for:)`) parks or deletes the *row* whose holder is gone.
 /// What none of them reclaims is a row-less holder's job after the holder has

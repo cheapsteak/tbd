@@ -28,10 +28,6 @@ struct HibernationGateTests {
         )
     }
 
-    /// Every terminal this helper is called with is a tmux row, so the soak
-    /// gate is passed off and named rather than defaulted: the production
-    /// signature has no default, and the tests that are ABOUT the gate call it
-    /// directly with both answers.
     private func decide(
         _ terminal: Terminal,
         enabled: Bool = true,
@@ -43,7 +39,6 @@ struct HibernationGateTests {
         HibernationGate.decide(
             terminal: terminal, autoHibernateEnabled: enabled,
             inputVetoEnabled: inputVetoEnabled,
-            holderHibernationEnabled: false,
             idleTimeout: timeout, idleSince: idleSince, lastInputAt: lastInputAt, now: now
         )
     }
@@ -242,11 +237,11 @@ struct HibernationGateTests {
         // The gate alone blocks, so even if the scrape is broken the park is safe.
     }
 
-    // MARK: - The holder-transport soak gate, both branches
+    // MARK: - Auto-hibernation derives from the master switch on every transport
 
     /// A holder-backed row that passes every other rail. Only `transport`
-    /// differs from the baseline above, so the two tests below are about the
-    /// flag and nothing else.
+    /// differs from the baseline above, so the tests below are about the
+    /// transport and nothing else.
     private func holderTerminal() -> Terminal {
         Terminal(
             worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
@@ -254,25 +249,41 @@ struct HibernationGateTests {
             activityState: .idle, transport: .holder)
     }
 
-    /// The argument cannot be omitted: `decide` carries no default for it, so
-    /// a call site that forgets the flag is a compile error rather than a rail
-    /// that silently disagrees with the app's menu. That is what replaced the
-    /// old "forgetting fails toward refusing" reading, which would have
-    /// inverted the day the shipped constant flips.
-    @Test func holderRowIsRefusedWhileTheSoakGateIsOff() {
+    /// The ON branch of the derived condition. Holder-ness is a transport
+    /// property, not a separate opt-in: with `auto_hibernate_enabled` on, an
+    /// idle holder row is as eligible as an idle tmux one.
+    @Test func holderRowIsEligibleWhenAutoHibernateIsOn() {
         let idleSince = now.addingTimeInterval(-31 * 60)
         #expect(HibernationGate.decide(
             terminal: holderTerminal(), autoHibernateEnabled: true,
-            holderHibernationEnabled: false, idleTimeout: 30 * 60,
-            idleSince: idleSince, now: now) == .holderTransport)
+            idleTimeout: 30 * 60,
+            idleSince: idleSince, now: now) == .eligible)
     }
 
-    @Test func holderRowIsEligibleOnceTheSoakGateIsOn() {
+    /// The OFF branch, and it reports the master switch by name — `.featureDisabled`,
+    /// exactly what a tmux row gets — rather than anything transport-shaped.
+    @Test func holderRowIsRefusedWhenAutoHibernateIsOff() {
         let idleSince = now.addingTimeInterval(-31 * 60)
         #expect(HibernationGate.decide(
-            terminal: holderTerminal(), autoHibernateEnabled: true,
-            holderHibernationEnabled: true, idleTimeout: 30 * 60,
-            idleSince: idleSince, now: now) == .eligible)
+            terminal: holderTerminal(), autoHibernateEnabled: false,
+            idleTimeout: 30 * 60,
+            idleSince: idleSince, now: now) == .featureDisabled)
+        // …and the same answer a tmux row gets, so the two transports are not
+        // merely both refused but refused for the same stated reason.
+        #expect(HibernationGate.decide(
+            terminal: claudeTerminal(), autoHibernateEnabled: false,
+            idleTimeout: 30 * 60,
+            idleSince: idleSince, now: now) == .featureDisabled)
+    }
+
+    /// Manual park needs no flag at all, on either transport — the user asked.
+    @Test func manualParkIsPermittedOnBothTransportsRegardlessOfTheAutoFlag() {
+        #expect(holderTerminal().isManuallyHibernatable())
+        #expect(claudeTerminal().isManuallyHibernatable())
+        // The hard rails still apply on both.
+        var busyHolder = holderTerminal()
+        busyHolder.activityState = .working
+        #expect(!busyHolder.isManuallyHibernatable())
     }
 
     // MARK: - Parity with the predicate the app reads
@@ -317,41 +328,35 @@ struct HibernationGateTests {
         var rows = 0
         var passedEveryRail = 0
         for transport in [TerminalTransport.tmux, .holder] {
-            for holderHibernationEnabled in [false, true] {
-                for sessionID in [String?.none, "sess-1"] {
-                    for kind in [TerminalKind?.none, .claude, .codex, .shell] {
-                        for hibernatedAt in [Date?.none, now] {
-                            for suspendedAt in [Date?.none, now] {
-                                for keepWarm in [false, true] {
-                                    for activity in [TerminalActivityState.idle, .unknown,
-                                                     .working, .waitingForUser] {
-                                        let terminal = Terminal(
-                                            worktreeID: UUID(),
-                                            tmuxWindowID: transport == .holder ? "" : "@0",
-                                            tmuxPaneID: transport == .holder ? "" : "%0",
-                                            label: "claude", claudeSessionID: sessionID,
-                                            suspendedAt: suspendedAt, kind: kind,
-                                            activityState: activity, hibernatedAt: hibernatedAt,
-                                            keepWarm: keepWarm, transport: transport)
-                                        let rail = HibernationGate.blockingRail(
-                                            terminal: terminal,
-                                            holderHibernationEnabled: holderHibernationEnabled)
-                                        var withoutKeepWarm = terminal
-                                        withoutKeepWarm.keepWarm = false
-                                        let railIgnoringKeepWarm = HibernationGate.blockingRail(
-                                            terminal: withoutKeepWarm,
-                                            holderHibernationEnabled: holderHibernationEnabled)
-                                        let auto = terminal.isAutoHibernationEligible(
-                                            holderHibernationEnabled: holderHibernationEnabled)
-                                        let manual = terminal.isManuallyHibernatable(
-                                            holderHibernationEnabled: holderHibernationEnabled)
-                                        #expect((rail == nil) == auto,
-                                                "blockingRail said \(String(describing: rail)) while isAutoHibernationEligible said \(auto) for \(transport) flag=\(holderHibernationEnabled) session=\(String(describing: sessionID)) kind=\(String(describing: kind)) hibernated=\(hibernatedAt != nil) suspended=\(suspendedAt != nil) keepWarm=\(keepWarm) activity=\(activity)")
-                                        #expect((railIgnoringKeepWarm == nil) == manual,
-                                                "blockingRail with keep-warm cleared said \(String(describing: railIgnoringKeepWarm)) while isManuallyHibernatable said \(manual) for \(transport) flag=\(holderHibernationEnabled) session=\(String(describing: sessionID)) kind=\(String(describing: kind)) hibernated=\(hibernatedAt != nil) suspended=\(suspendedAt != nil) keepWarm=\(keepWarm) activity=\(activity)")
-                                        rows += 1
-                                        if rail == nil { passedEveryRail += 1 }
-                                    }
+            for sessionID in [String?.none, "sess-1"] {
+                for kind in [TerminalKind?.none, .claude, .codex, .shell] {
+                    for hibernatedAt in [Date?.none, now] {
+                        for suspendedAt in [Date?.none, now] {
+                            for keepWarm in [false, true] {
+                                for activity in [TerminalActivityState.idle, .unknown,
+                                                 .working, .waitingForUser] {
+                                    let terminal = Terminal(
+                                        worktreeID: UUID(),
+                                        tmuxWindowID: transport == .holder ? "" : "@0",
+                                        tmuxPaneID: transport == .holder ? "" : "%0",
+                                        label: "claude", claudeSessionID: sessionID,
+                                        suspendedAt: suspendedAt, kind: kind,
+                                        activityState: activity, hibernatedAt: hibernatedAt,
+                                        keepWarm: keepWarm, transport: transport)
+                                    let rail = HibernationGate.blockingRail(
+                                        terminal: terminal)
+                                    var withoutKeepWarm = terminal
+                                    withoutKeepWarm.keepWarm = false
+                                    let railIgnoringKeepWarm = HibernationGate.blockingRail(
+                                        terminal: withoutKeepWarm)
+                                    let auto = terminal.isAutoHibernationEligible()
+                                    let manual = terminal.isManuallyHibernatable()
+                                    #expect((rail == nil) == auto,
+                                            "blockingRail said \(String(describing: rail)) while isAutoHibernationEligible said \(auto) for \(transport) session=\(String(describing: sessionID)) kind=\(String(describing: kind)) hibernated=\(hibernatedAt != nil) suspended=\(suspendedAt != nil) keepWarm=\(keepWarm) activity=\(activity)")
+                                    #expect((railIgnoringKeepWarm == nil) == manual,
+                                            "blockingRail with keep-warm cleared said \(String(describing: railIgnoringKeepWarm)) while isManuallyHibernatable said \(manual) for \(transport) session=\(String(describing: sessionID)) kind=\(String(describing: kind)) hibernated=\(hibernatedAt != nil) suspended=\(suspendedAt != nil) keepWarm=\(keepWarm) activity=\(activity)")
+                                    rows += 1
+                                    if rail == nil { passedEveryRail += 1 }
                                 }
                             }
                         }
@@ -362,28 +367,32 @@ struct HibernationGateTests {
         // The matrix has to have actually run, and it has to contain both
         // answers: a loop that produced only blocked rows would agree with any
         // predicate that refuses everything.
-        #expect(rows == 2 * 2 * 2 * 4 * 2 * 2 * 2 * 4)
+        #expect(rows == 2 * 2 * 4 * 2 * 2 * 2 * 4)
         #expect(passedEveryRail > 0,
                 "no row in the matrix passed every rail, so the parity above agrees with any predicate that refuses everything")
         #expect(passedEveryRail < rows,
                 "every row in the matrix passed every rail, so the parity above agrees with any predicate that allows everything")
     }
 
-    /// The flag decides what a HOLDER row gets and must not reach a tmux one:
-    /// a condition written on the flag alone rather than on the flag AND the
-    /// transport would still pass every assertion above.
-    @Test func aTmuxRowIsUnaffectedByTheSoakGate() {
+    /// The rails read the row, never the transport: the same facts produce the
+    /// same decision on tmux and on holder. An implementation that special-cased
+    /// either transport would fail one half of this.
+    @Test func bothTransportsGetTheSameDecisionFromTheSameFacts() {
         let idleSince = now.addingTimeInterval(-31 * 60)
-        for enabled in [false, true] {
-            #expect(HibernationGate.decide(
-                terminal: claudeTerminal(), autoHibernateEnabled: true,
-                holderHibernationEnabled: enabled, idleTimeout: 30 * 60,
-                idleSince: idleSince, now: now) == .eligible)
-            #expect(HibernationGate.decide(
-                terminal: claudeTerminal(activityState: .working),
-                autoHibernateEnabled: true,
-                holderHibernationEnabled: enabled, idleTimeout: 30 * 60,
-                idleSince: idleSince, now: now) == .running)
-        }
+        var busyHolder = holderTerminal()
+        busyHolder.activityState = .working
+        #expect(HibernationGate.decide(
+            terminal: claudeTerminal(), autoHibernateEnabled: true,
+            idleTimeout: 30 * 60, idleSince: idleSince, now: now) == .eligible)
+        #expect(HibernationGate.decide(
+            terminal: holderTerminal(), autoHibernateEnabled: true,
+            idleTimeout: 30 * 60, idleSince: idleSince, now: now) == .eligible)
+        #expect(HibernationGate.decide(
+            terminal: claudeTerminal(activityState: .working),
+            autoHibernateEnabled: true,
+            idleTimeout: 30 * 60, idleSince: idleSince, now: now) == .running)
+        #expect(HibernationGate.decide(
+            terminal: busyHolder, autoHibernateEnabled: true,
+            idleTimeout: 30 * 60, idleSince: idleSince, now: now) == .running)
     }
 }

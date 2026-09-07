@@ -210,51 +210,6 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the holder rendezvous sweep gate — the default-off soak switch
-    /// for unlinking the socket, lock and log a dead holder left behind, read
-    /// on top of the GC master switch. Like that master switch, flipping it off
-    /// does not cancel an in-progress sweep: `OrphanGC.sweep` re-reads the flag
-    /// on its next pass.
-    func handleConfigSetGCHolderRendezvousEnabled(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(
-            ConfigSetGCHolderRendezvousEnabledParams.self, from: paramsData)
-        try await db.config.setGCHolderRendezvousEnabled(params.enabled)
-        // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
-    /// Persist the row-less holder sweep gate — the default-off soak switch for
-    /// killing a pty holder this installation owns which no session row claims,
-    /// read on top of the GC master switch. Deliberately a different verb from
-    /// the rendezvous gate above: enabling file cleanup must never enable a
-    /// process killer. Like the master switch, flipping it off does not cancel
-    /// an in-progress sweep: `OrphanGC.sweep` re-reads the flag on its next
-    /// pass.
-    func handleConfigSetGCRowlessHoldersEnabled(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(
-            ConfigSetGCRowlessHoldersEnabledParams.self, from: paramsData)
-        try await db.config.setGCRowlessHoldersEnabled(params.enabled)
-        // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
-    /// Persist the `AgentReaper` holder leg's gate — the default-off soak
-    /// switch for killing the surviving job of a dead pty holder.
-    ///
-    /// This is how the soak is turned on. Flipping it off does not cancel an
-    /// in-progress sweep: the reaper task re-reads the flag on its next pass,
-    /// the same contract the GC gates keep.
-    func handleConfigSetReapHolderChildrenEnabled(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(
-            ConfigSetReapHolderChildrenEnabledParams.self, from: paramsData)
-        try await db.config.setReapHolderChildrenEnabled(params.enabled)
-        // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
     /// Persist the retained-transcript GC gate — the default-off soak switch
     /// for the `OrphanGC` leg that unlinks retained transcripts nobody
     /// references and drops receipts whose expiry has passed, read on top of
@@ -287,39 +242,6 @@ extension RPCRouter {
         let params = try decoder.decode(
             ConfigSetRemoteDeleteEnabledParams.self, from: paramsData)
         try await db.config.setRemoteDeleteEnabled(params.enabled)
-        // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
-    /// Persist the holder row sweep's gate — the default-off soak switch for
-    /// the reconcile arm that deletes a session row whose holder is gone.
-    ///
-    /// This is how the soak is turned on. It is a third verb rather than a
-    /// reuse of either holder gate above, because those reclaim a file and a
-    /// process and this one destroys the database row that names both. Flipping
-    /// it off does not cancel an in-progress sweep: the arm re-reads the flag
-    /// on its next pass, the same contract the GC gates keep.
-    func handleConfigSetHolderRowReconcileEnabled(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(
-            ConfigSetHolderRowReconcileEnabledParams.self, from: paramsData)
-        try await db.config.setHolderRowReconcileEnabled(params.enabled)
-        // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
-    /// Persist the pty-holder auto-hibernation gate — the default-off soak
-    /// switch for parking, waking and limit-resuming holder-backed sessions.
-    ///
-    /// This is how the soak is turned on. It is a separate verb from the
-    /// holder row reconcile gate above: that one reclaims a row whose holder
-    /// is already gone, this one parks (and can kill) a holder whose child
-    /// process is still running.
-    func handleConfigSetHolderHibernationEnabled(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(
-            ConfigSetHolderHibernationEnabledParams.self, from: paramsData)
-        try await db.config.setHolderHibernationEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

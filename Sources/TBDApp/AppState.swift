@@ -1463,13 +1463,6 @@ final class AppState {
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var ptyHolderFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPtyHolderEnabled(enabled: enabled) }
-    /// How `setHolderHibernationEnabled` persists the pty-holder
-    /// auto-hibernation gate — injectable for the same reason as
-    /// `controlModeSetter`.
-    @ObservationIgnored lazy var holderHibernationFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in
-            try await daemonClient.setHolderHibernationEnabled(enabled: enabled)
-        }
     /// How `wakeTerminalOutcome` reaches the daemon — injectable for the same
     /// reason as `controlModeSetter`, so the wake's prompt plumbing and its
     /// failure branches are testable without a running daemon.

@@ -151,9 +151,6 @@ import TestSupport
         HibernationGate.decide(
             terminal: terminal,
             autoHibernateEnabled: true,
-            // A tmux fixture; the gate takes no default for this, so it is
-            // named rather than omitted.
-            holderHibernationEnabled: false,
             idleTimeout: 60,
             idleSince: Self.baselineActivityAt,
             now: Self.baselineActivityAt.addingTimeInterval(3600))
@@ -220,7 +217,7 @@ import TestSupport
         // rather than assumed.
         #expect(parkDecision(after) == parkDecision(before))
         #expect(parkDecision(after) == .eligible)
-        #expect(HibernationGate.blockingRail(terminal: after, holderHibernationEnabled: false) == nil)
+        #expect(HibernationGate.blockingRail(terminal: after) == nil)
 
         // A prompt on screen is the one class a human has to act on now, so
         // it, and only it, raises the attention notification behind the macOS

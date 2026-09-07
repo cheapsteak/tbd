@@ -396,7 +396,7 @@ struct AgentReaperHolderLegLiveTests {
 
         let signaller = RecordingProcessSignaller()
         await reaper(signaller, records: [record(holderPID: deadHolder, childPID: childPID)])
-            .sweepHolderChildren(enabled: true)
+            .sweepHolderChildren()
 
         #expect(
             await Self.waitForPIDToVanish(childPID),
@@ -423,7 +423,7 @@ struct AgentReaperHolderLegLiveTests {
             subject.decideHolderChild(record(holderPID: deadHolder, childPID: strangerPID))
                 == .keep(reason: "foreign-executable"))
 
-        await subject.sweepHolderChildren(enabled: true)
+        await subject.sweepHolderChildren()
 
         #expect(signaller.terminated.isEmpty, "a stranger's pid must never be signalled")
         #expect(signaller.killed.isEmpty)
@@ -448,7 +448,7 @@ struct AgentReaperHolderLegLiveTests {
         let subject = reaper(signaller, records: [ancientRow])
         #expect(subject.decideHolderChild(ancientRow) == .keep(reason: "start-time-mismatch"))
 
-        await subject.sweepHolderChildren(enabled: true)
+        await subject.sweepHolderChildren()
 
         #expect(signaller.terminated.isEmpty)
         #expect(Self.pidExists(strangerPID), "pid \(strangerPID) was killed and should not have been")
@@ -474,7 +474,7 @@ struct AgentReaperHolderLegLiveTests {
             subject.decideHolderChild(record(holderPID: deadHolder, childPID: spent))
                 == .keep(reason: "child-gone"))
 
-        await subject.sweepHolderChildren(enabled: true)
+        await subject.sweepHolderChildren()
 
         #expect(signaller.terminated.isEmpty, "no signal may be sent to a pid naming nothing")
         #expect(signaller.killed.isEmpty)
@@ -494,16 +494,19 @@ struct AgentReaperHolderLegLiveTests {
             records: [
                 record(holderPID: holder.processIdentifier, childPID: child.processIdentifier)
             ]
-        ).sweepHolderChildren(enabled: true)
+        ).sweepHolderChildren()
 
         #expect(signaller.terminated.isEmpty)
         #expect(Self.pidExists(child.processIdentifier))
         #expect(child.isRunning)
     }
 
-    // MARK: - Both branches of the gate, against a real process
+    // MARK: - The leg carries no gate of its own, against a real process
 
-    @Test func theFlagOffLeavesARealOrphanRunning() async throws {
+    /// The reaper's holder leg reclaims a real orphaned job on the ordinary
+    /// sweep. Nothing is armed here: `AgentReaper` carries no switch, and
+    /// neither does this leg.
+    @Test func aRealOrphanIsReapedWithNothingArmed() async throws {
         let deadHolder = try Self.spentPID()
         let child = try Self.spawnHangupProofShell()
         defer { Self.killAndReap(child) }
@@ -512,12 +515,8 @@ struct AgentReaperHolderLegLiveTests {
         let signaller = RecordingProcessSignaller()
         let records = [record(holderPID: deadHolder, childPID: childPID)]
 
-        await reaper(signaller, records: records).sweepHolderChildren(enabled: false)
-        #expect(signaller.terminated.isEmpty)
-        #expect(Self.pidExists(childPID), "the flag is off; pid \(childPID) must still be running")
-
-        // Same orphan, same reaper shape, flag on: now it goes.
-        await reaper(signaller, records: records).sweepHolderChildren(enabled: true)
+        await reaper(signaller, records: records).sweepHolderChildren()
+        #expect(signaller.terminated == [childPID])
         #expect(await Self.waitForPIDToVanish(childPID))
     }
 
@@ -544,7 +543,7 @@ struct AgentReaperHolderLegLiveTests {
         let deadHolder = try Self.spentPID()
         let signaller = RecordingProcessSignaller()
         await reaper(signaller, records: [record(holderPID: deadHolder, childPID: job)])
-            .sweepHolderChildren(enabled: true)
+            .sweepHolderChildren()
 
         #expect(signaller.terminated.contains(job))
         #expect(
@@ -588,7 +587,7 @@ struct AgentReaperHolderLegLiveTests {
         let deadHolder = try Self.spentPID()
         let signaller = RecordingProcessSignaller()
         await reaper(signaller, records: [record(holderPID: deadHolder, childPID: job)])
-            .sweepHolderChildren(enabled: true)
+            .sweepHolderChildren()
 
         #expect(signaller.killed.contains(job))
         #expect(await Self.waitForOwnChildToExit(job))
@@ -622,7 +621,7 @@ struct AgentReaperHolderLegLiveTests {
         let deadHolder = try Self.spentPID()
         let signaller = RecordingProcessSignaller()
         await reaper(signaller, records: [record(holderPID: deadHolder, childPID: job)])
-            .sweepHolderChildren(enabled: true)
+            .sweepHolderChildren()
         #expect(await Self.waitForOwnChildToExit(job))
 
         let events = signaller.events

@@ -1205,17 +1205,6 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the pty-holder auto-hibernation gate (default OFF). Applies on
-    /// the next hibernation sweep — no daemon restart needed. Sending either
-    /// value is an explicit gesture that survives a later change to the
-    /// shipped default.
-    func setHolderHibernationEnabled(enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetHolderHibernationEnabled,
-            params: ConfigSetHolderHibernationEnabledParams(enabled: enabled)
-        )
-    }
-
     /// Persist the transcript-composer gate (default OFF). Read per request by
     /// the daemon, so no restart is needed; the app re-reads capabilities right
     /// after writing so the toggle reflects the daemon's persisted state.

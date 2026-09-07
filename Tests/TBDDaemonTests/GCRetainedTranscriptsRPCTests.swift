@@ -110,9 +110,6 @@ struct GCRetainedTranscriptsRPCTests {
         #expect(config.remoteDeleteEnabled == false)
         #expect(config.gcProfileDirsEnabled == false)
         #expect(config.gcOrphanProcessesEnabled == false)
-        #expect(config.gcHolderRendezvousEnabled == false)
-        #expect(config.gcRowlessHoldersEnabled == false)
-        #expect(config.reapHolderChildrenEnabled == false)
         // The master switch is untouched in the other direction: this verb
         // neither turns GC on nor off.
         #expect(config.gcEnabled == before.gcEnabled)

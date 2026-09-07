@@ -54,9 +54,6 @@ extension ActuationOutcome {
         // The row is there but cannot be woken as asked: nothing to resume, or
         // the profile it was pinned to no longer exists.
         case .noSessionID, .profileMissing: return .refused(.notEligible)
-        // The row's transport has a park/wake mechanic, but this install has
-        // not armed it: `holder_hibernation_enabled` is off.
-        case .holderTransport: return .refused(.notEligible)
         // The row is exit-stamped and its pane is busy: a well-formed wake the
         // daemon declines, and nothing was respawned.
         case .paneBusy: return .refused(.notEligible)
@@ -81,7 +78,6 @@ extension ActuationOutcome {
             }
         case .profileMissing(let profileID):
             return "Profile no longer exists: \(profileID.uuidString)"
-        case .holderTransport: return HibernationCoordinator.holderTransportRefusal
         case .paneBusy(let pid): return HibernationCoordinator.paneBusyRefusal(pid: pid)
         }
     }

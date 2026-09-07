@@ -91,10 +91,10 @@ struct OrphanGCRowlessHolderTests: ~Copyable {
             now: { fixed },
             profileDirBase: sandbox.appendingPathComponent("p", isDirectory: true),
             holdersBase: holdersBase,
-            // The rendezvous sweep shares this directory and would unlink the
-            // fixture out from under these assertions if it ever ran. It cannot:
-            // its own flag is off. Pinned anyway so a future default flip does
-            // not silently rewrite what this suite measures.
+            // The rendezvous sweep shares this directory and runs on the same
+            // pass. Every fixture socket here answers "a process is listening",
+            // so that sweep keeps them all and cannot unlink the fixture out
+            // from under these assertions.
             holderListenerProbe: { _ in true },
             rowlessHolderHandshake: handshake,
             rowlessHolderReclaimer: reclaimer)
@@ -102,10 +102,9 @@ struct OrphanGCRowlessHolderTests: ~Copyable {
 
     /// An installation that has minted a token and has a holder socket that no
     /// session row claims — the setup every test below varies one thing from.
-    private func armedDatabase(enabled: Bool = true) async throws -> TBDDatabase {
+    private func armedDatabase() async throws -> TBDDatabase {
         let db = try TBDDatabase(inMemory: true)
         _ = try await db.config.ensureHolderOwnerToken(minting: owner.rawValue)
-        if enabled { try await db.config.setGCRowlessHoldersEnabled(true) }
         return db
     }
 
@@ -273,7 +272,6 @@ struct OrphanGCRowlessHolderTests: ~Copyable {
     /// none is probed.
     @Test func anInstallationWithNoOwnerTokenKillsNothing() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setGCRowlessHoldersEnabled(true)
         let id = UUID()
         let path = makeHolderSocket(id)
         let reclaimer = RecordingReclaimer()
@@ -289,80 +287,32 @@ struct OrphanGCRowlessHolderTests: ~Copyable {
 
     // MARK: - The gate
 
-    /// The off branch — the state every install ships in. The same fixture the
-    /// kill test reclaims is left completely alone, and the sweep does not even
-    /// plan it.
-    @Test func aSweepWithTheFlagOffKillsNothing() async throws {
-        let db = try await armedDatabase(enabled: false)
-        #expect(try await db.config.get().gcRowlessHoldersEnabled == false,
-                "the shipped default must be off")
-        let id = UUID()
-        makeHolderSocket(id)
-        let reclaimer = RecordingReclaimer()
-        let mine = owner
-
-        let result = await makeGC(db: db, reclaimer: reclaimer, handshake: { _ in
-            Self.described(owner: mine)
-        }).sweep()
-
-        #expect(await reclaimer.calls.isEmpty)
-        #expect(result.planned.contains { $0.contains("rowless-holder") } == false)
-    }
-
-    /// An explicit `false` is the same as never having chosen, for behavior.
-    @Test func anExplicitOptOutKillsNothing() async throws {
-        let db = try await armedDatabase(enabled: false)
-        try await db.config.setGCRowlessHoldersEnabled(false)
-        let id = UUID()
-        makeHolderSocket(id)
-        let reclaimer = RecordingReclaimer()
-        let mine = owner
-        _ = await makeGC(db: db, reclaimer: reclaimer, handshake: { _ in
-            Self.described(owner: mine)
-        }).sweep()
-        #expect(await reclaimer.calls.isEmpty)
-    }
-
-    /// **The file sweep's flag does not arm the process killer.** Enabling
-    /// `gcHolderRendezvousEnabled` alone must leave every holder running: the
-    /// two gates are independent opt-ins precisely because one unlinks files and
-    /// the other kills processes.
-    @Test func theRendezvousFlagDoesNotArmTheProcessKiller() async throws {
-        let db = try await armedDatabase(enabled: false)
-        try await db.config.setGCHolderRendezvousEnabled(true)
-        let id = UUID()
-        makeHolderSocket(id)
-        let reclaimer = RecordingReclaimer()
-        let mine = owner
-
-        let result = await makeGC(db: db, reclaimer: reclaimer, handshake: { _ in
-            Self.described(owner: mine)
-        }).sweep()
-
-        #expect(await reclaimer.calls.isEmpty,
-                "the rendezvous file gate must never license a kill")
-        #expect(result.planned.contains { $0.contains("rowless-holder") } == false)
-    }
-
-    /// The GC master switch is read on top of the phase flag: both must be on.
-    @Test func theMasterSwitchStillGovernsThePhase() async throws {
+    /// The off branch of the derived condition. Holder-ness is a transport
+    /// property, not a separate opt-in, so this arm runs under `gcEnabled` like
+    /// the agent-worktree loop — and with the master switch off the same
+    /// fixture the kill test reclaims is left completely alone, unplanned.
+    @Test func aSweepWithGCDisabledKillsNothing() async throws {
         let db = try await armedDatabase()
         try await db.config.setGCEnabled(false)
         let id = UUID()
         makeHolderSocket(id)
         let reclaimer = RecordingReclaimer()
         let mine = owner
-        _ = await makeGC(db: db, reclaimer: reclaimer, handshake: { _ in
+
+        let result = await makeGC(db: db, reclaimer: reclaimer, handshake: { _ in
             Self.described(owner: mine)
         }).sweep()
+
         #expect(await reclaimer.calls.isEmpty)
+        #expect(result.planned.contains { $0.contains("rowless-holder") } == false)
     }
 
-    /// `dryRun` bypasses the flag, exactly as it bypasses `gcEnabled`: someone
-    /// deciding whether to turn a default-off process killer on needs to see
-    /// what it would kill first. It plans and signals nothing.
-    @Test func aDryRunPlansWithTheFlagOffAndKillsNothing() async throws {
-        let db = try await armedDatabase(enabled: false)
+    /// `dryRun` bypasses `gcEnabled` here exactly as it does everywhere else:
+    /// someone deciding whether to turn GC on needs to see what a sweep that
+    /// kills processes would kill first. It plans and signals nothing.
+    @Test func aDryRunPlansWithGCDisabledAndKillsNothing() async throws {
+        let db = try await armedDatabase()
+        try await db.config.setGCEnabled(false)
         let id = UUID()
         let path = makeHolderSocket(id)
         let reclaimer = RecordingReclaimer()

@@ -153,7 +153,7 @@ struct RemoteDeleteFlagTests {
         let config = try await db.config.get()
         #expect(config.remoteDeleteEnabled == true)
         #expect(config.remoteBackendsEnabled == false)
-        #expect(config.reapHolderChildrenEnabled == Config.reapHolderChildrenEnabledDefault)
+        #expect(config.gcOrphanProcessesEnabled == Config.gcOrphanProcessesEnabledDefault)
     }
 
     /// JSON from a daemon that predates the flag still decodes, and the absent

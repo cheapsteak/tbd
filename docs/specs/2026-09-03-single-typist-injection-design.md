@@ -357,13 +357,12 @@ appends to.
 
 - **The holder's outbox** is memory inside a process that already has named
   reconcilers. Its rendezvous files are swept by `OrphanGC`
-  (`Sources/TBDDaemon/GC/OrphanGC.swift:699-702`, gated by
-  `gcHolderRendezvousEnabled`); its child is swept by `AgentReaper`
-  (`Sources/TBDDaemon/Process/AgentReaper.swift:285`, gated by
-  `reapHolderChildrenEnabled`); a session row whose holder is gone is
-  reclaimed by the reconcile arm gated on `holderRowReconcileEnabled`
-  (`Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+Reconcile.swift:631`). An
-  outbox cannot outlive the holder that holds it, so it inherits all three.
+  (`Sources/TBDDaemon/GC/OrphanGC.swift`, under `gcEnabled`); its child is
+  swept by `AgentReaper` (`Sources/TBDDaemon/Process/AgentReaper.swift`,
+  unflagged like its tmux leg); a session row whose holder is gone is reclaimed
+  by the reconcile arm in
+  `Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+Reconcile.swift`. An outbox
+  cannot outlive the holder that holds it, so it inherits all three.
 - **The paste lease** is daemon memory bounded by an injected clock. Expiry is
   the reclaim, and it happens whether or not anybody sweeps.
 - **The keystroke hold** is viewer memory bounded by its own clock, released on
@@ -375,20 +374,12 @@ appends to.
 
 **This ships under `pty_holder_enabled`, and takes no flag of its own.**
 
-The reasoning, since two sibling behaviors in this same subsystem each took one
-anyway. `gcHolderRendezvousEnabled`, `reapHolderChildrenEnabled` and
-`holderRowReconcileEnabled` are separate gates because each is a *destructive
-reclaimer that acts with no user gesture* — unlinking files, signalling
-processes, deleting rows in a background sweep — and because
-`pty_holder_enabled` must be ON for their subject to exist at all, so it cannot
-express the soak protocol they need: transport on, one destructive reclaimer on
-at a time (`Models.swift:1538-1548`).
-
-Injection is not that shape. It acts only on an explicit dispatch that would
-have written to the session anyway, it destroys nothing, and it is reachable
-only on holder-backed sessions — which exist only when `pty_holder_enabled` is
-on, and which have never shipped with it on
-(`Models.swift:1587-1590`, `:1655-1660`). The repo's rule does name
+The repo's rule reserves a flag of its own for behavior that acts without a
+user gesture, or that kills processes, deletes state or sends input on its own
+initiative. Injection is not that shape: it acts only on an explicit dispatch
+that would have written to the session anyway, it destroys nothing, and it is
+reachable only on holder-backed sessions — which exist only when
+`pty_holder_enabled` is on, and which have never shipped with it on. The rule does name
 "wholesale-replaces a load-bearing path (input routing)" as flag-worthy, and
 this is that; the flag it lands behind is the one already wrapped around the
 entire path, which has no users to protect.
