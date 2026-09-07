@@ -77,6 +77,19 @@ Every claim in this section was produced against the installed CLI
   `ping` events and comment lines toward liveness (gateway guide). A proxy
   that coalesces or drops those aborts long thinking pauses.
 
+- **The mechanism works end to end against the real API.** A throwaway
+  streaming tee proxy (Python, forwarding chunk by chunk, `accept-encoding`
+  stripped, every SSE event flushed) sat between an interactive TUI session
+  with a claude.ai login and `api.anthropic.com`. For a three-sentence answer
+  the tee wrote its first text delta at 17:29:29.216, five deltas followed
+  over three seconds, and the JSONL assistant line for the same message id
+  landed at 17:29:32.328, 3.1 seconds after the first token and 0.17 seconds
+  after `message_stop`. The `HEAD /api/hello` probe was forwarded, the
+  no-tools title request was skipped by the filter, and an upstream 429 on a
+  side request was relayed unchanged and handled by Claude's own retry. The
+  same proxy in front of the fake model API produced the same tee for a
+  scripted turn at zero tokens.
+
 ## Architecture
 
 Three pieces, each with one job.
@@ -444,9 +457,11 @@ SSE shape and costs zero tokens.
   published while the file still updates. Chunk-split equivalence over a
   captured stream file.
 - **Live verification, deferred until a restart is permitted on the
-  development machine:** an interactive claude.ai-login session on a holder
-  terminal behind the proxy completes a turn and the pane shows its text
-  before the JSONL line lands.
+  development machine:** the shipped `TBDModelProxy` on a holder terminal
+  carries an interactive claude.ai-login turn and the pane shows its text
+  before the JSONL line lands. The login-through-loopback and tee-before-JSONL
+  halves are already shown by the prototype above; what remains is the
+  production binary on the production spawn path.
 
 ## Success criteria
 
