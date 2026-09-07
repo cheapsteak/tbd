@@ -936,7 +936,7 @@ flag with a soak and a stated graduation plan.
   `gc_enabled` for the two GC arms, nothing for the reaper and reconcile legs,
   which their tmux counterparts also run without. Holder-ness is a transport
   property, not a second opt-in; the rule and its consequences are in
-  [`2026-09-06-holder-flag-collapse-design.md`](2026-09-06-holder-flag-collapse-design.md).
+  [`2026-09-07-holder-flag-consolidation-design.md`](2026-09-07-holder-flag-consolidation-design.md).
 - **Coexistence cost, stated honestly.** Both paths live until graduation:
   two reconciliation ground truths, a doubled test surface, and — counted
   accurately — a **third** attach path in the app, not a second. The app
@@ -1023,8 +1023,11 @@ flag with a soak and a stated graduation plan.
   than inferred. Graduation reads those two numbers.
 - **Graduation.** Flip `Config.ptyHolderDefault` to `true` — a one-line
   change that reaches everyone who never chose while preserving every
-  explicit opt-out. Removing the tmux path entirely is separate, later work,
-  undertaken once no `tmux`-transport session rows remain in the wild.
+  explicit opt-out. That is the transport's only graduation event: its holder
+  legs in hibernation, orphan GC, the reaper and the reconcile pass carry no
+  switch of their own and so have nothing to graduate. Removing the tmux path
+  entirely is separate, later work, undertaken once no `tmux`-transport
+  session rows remain in the wild.
 
 New delays introduced by this design — the re-adoption grace window, the
 holder's exit-report timeout, any handoff ack timeout — take an injected

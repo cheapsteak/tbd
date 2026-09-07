@@ -30,7 +30,10 @@ gate from the subsystem they belong to:
 
 The transport itself stays behind `pty_holder_enabled`, default off. That flag
 gates spawning, not servicing: it decides which transport a new session gets,
-and every leg above runs whenever a row of its transport exists.
+and every leg above runs whenever a row of its transport exists. It is also
+the transport's soak gate, and flipping its default is the single graduation
+event the transport spec's Rollout section names; no holder leg has a
+graduation of its own.
 
 ## The decision, and who made it
 
@@ -115,11 +118,15 @@ and are removed.
 
 ## Rejected alternatives
 
-- **Flip each switch's default to on, delete later.** The two-step protects
-  explicit opt-outs, which is the wrong thing to protect here: the opt-out is
-  the disagreeing state. It would also leave five switches in the schema and
-  the CLI for one more release, advertising a choice that no longer means
-  anything.
+- **Keep the per-leg switches and graduate them one at a time.** Each would
+  have its default flipped on after its own soak and be deleted later. That
+  keeps five pieces of state each derivable from two facts the system already
+  has, the subsystem switch and the row's transport, and every one of them is
+  a compiled default: flipping it ships by rebuild and release, and the
+  two-step it needs, flip then delete, protects explicit opt-outs, which are
+  the wrong thing to protect here because the opt-out is the disagreeing
+  state. It would also leave five switches in the schema and the CLI for one
+  more release, advertising a choice that means nothing.
 - **Fold the five into `pty_holder_enabled`.** That flag gates spawning. Tying
   servicing to it would strand every existing holder row the moment the flag
   was turned off: no park, no reclamation, no reconcile, for rows that still
