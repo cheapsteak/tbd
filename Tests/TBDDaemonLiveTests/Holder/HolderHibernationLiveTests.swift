@@ -430,6 +430,52 @@ struct HolderHibernationLiveTests {
         #expect(!FileManager.default.fileExists(atPath: fixture.launchArgvPath),
                 "the wake spawned a second holder instead of adopting the live one")
     }
+
+    /// Teardown's second pass, against the branch where the first one has
+    /// nothing to read.
+    ///
+    /// `tearDown` kills what the ROWS still name, which is the right default —
+    /// a park clears the pids off its row precisely because those processes are
+    /// gone, so a teardown working from a remembered list alone would signal
+    /// numbers the kernel has since reissued. But the read can come back empty:
+    /// its gate is bounded, and an expiry returns `[]`. On that branch the
+    /// by-rows sweep kills nothing, and what it failed to kill is a process
+    /// built to outlive this one — `TBDHolder` `setsid`s away and ignores
+    /// `SIGHUP` so it survives the daemon's death, which means it survives a
+    /// dead test process too, re-parents to launchd, and keeps its job running.
+    /// One did, for 24 hours.
+    ///
+    /// **The row is deleted rather than the gate starved**, because what that
+    /// branch means to `tearDown` is "there is no row here to read", and an
+    /// empty terminals table is exactly that — immediately, instead of after a
+    /// two-minute gate this test would otherwise have to sit through.
+    ///
+    /// Reverting `sweepRememberedProcesses` fails this test: both pids are
+    /// still alive when the poll gives up.
+    @Test func tearDownKillsWhatItSpawnedWhenNoRowNamesItAnyMore() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow()
+        let holderPID = try #require(terminal.holderPID)
+        let childPID = try #require(terminal.childPID)
+        #expect(holderProcessIsAlive(holderPID), "the holder never came up")
+        #expect(holderProcessIsAlive(childPID), "the job never came up")
+
+        // The state the expired gate leaves teardown in: a live holder, a live
+        // job, and nothing in the database naming either.
+        try await fixture.db.terminals.delete(id: terminal.id)
+        #expect(try await fixture.db.terminals.list().isEmpty,
+                "the row is still there, so the by-rows sweep would cover this")
+
+        fixture.tearDown()
+
+        #expect(await pollUntil("the holder to be killed by the remembered-pid sweep") {
+            !holderProcessIsAlive(holderPID)
+        })
+        #expect(await pollUntil("the job to be killed by the remembered-pid sweep") {
+            !holderProcessIsAlive(childPID)
+        })
+    }
 }
 
 // MARK: - A process table that never concedes
@@ -556,6 +602,29 @@ private final class HibernationFixture {
     private let home: String
     private let tempDir: URL
     private var torndown = false
+
+    /// A pid this fixture spawned, and the kernel's record of when that pid
+    /// started.
+    ///
+    /// The start time is what makes the pid safe to signal later. A pid is free
+    /// the instant its corpse is collected, and on a box running dozens of
+    /// agent sessions the next process to take it is somebody else's — so
+    /// `tearDown` signals a remembered pid only when the kernel still reports
+    /// the same start instant, which is the answer `AgentReaper` gives to the
+    /// same question about a holder row.
+    private struct SpawnedProcess {
+        let pid: Int32
+        /// nil when the pid was already gone by the time it was recorded, which
+        /// makes it unidentifiable and therefore never signalled.
+        let startedAt: Date?
+        /// Whether this process is a child of the test process itself. The
+        /// holder is — `HolderSpawner` `posix_spawn`s it directly — so its
+        /// corpse must be reaped or it outlives the suite. The job is the
+        /// holder's child, not ours, and the kernel reaps it.
+        let ourChild: Bool
+    }
+
+    private var spawned: [SpawnedProcess] = []
 
     /// A short scratch root under the run root `scripts/test.sh` reclaims: the
     /// rendezvous socket lives under it and `sun_path` is 104 bytes, so a deeper
@@ -726,6 +795,7 @@ private final class HibernationFixture {
                 environment: ["PATH": "/usr/bin:/bin", "TERM": "xterm-256color"],
                 columns: 80,
                 rows: 24))
+        remember(handle)
         _ = try await db.terminals.create(
             id: terminalID,
             worktreeID: worktree.id,
@@ -741,13 +811,43 @@ private final class HibernationFixture {
         return try #require(try await db.terminals.get(id: terminalID))
     }
 
-    /// Kills whatever the ROWS still name, then clears the scratch roots.
+    /// Records the pair this spawn produced, and names it in the run log.
+    ///
+    /// **The log line is the diagnosis, and it is written because one was
+    /// missing.** A holder that outlived a run was found a day later with its
+    /// job still looping, and nothing could be said about how it got there: the
+    /// worktree that ran the suite had been archived and deleted, so there was
+    /// no way to tell a crashed test process from a teardown that ran and
+    /// missed. A pid and the scratch root it belongs to, printed at spawn,
+    /// makes the next occurrence answerable from the run log alone.
+    ///
+    /// stderr rather than `print`, for the same reason `FlakyTestSupport` uses
+    /// it: stdout is Swift Testing's, and both streams reach the tee'd run log.
+    private func remember(_ handle: HolderHandle) {
+        spawned.append(SpawnedProcess(
+            pid: handle.holderPID,
+            startedAt: ProcessStartTime.startTime(pid: handle.holderPID),
+            ourChild: true))
+        spawned.append(SpawnedProcess(
+            pid: handle.childPID,
+            startedAt: ProcessStartTime.startTime(pid: handle.childPID),
+            ourChild: false))
+        let line = "HibernationFixture: holder pid \(handle.holderPID), "
+            + "job pid \(handle.childPID), scratch root \(home)\n"
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+
+    /// Kills whatever the ROWS still name, sweeps whatever they no longer do,
+    /// then clears the scratch roots.
     ///
     /// Reading the rows rather than a list of everything ever spawned is the
     /// safety property: a park clears the pids off its row precisely because
     /// those processes are gone, and a teardown working from a remembered list
     /// would signal numbers the kernel has already handed to somebody else — on
-    /// a box running dozens of agent sessions, to somebody else's work.
+    /// a box running dozens of agent sessions, to somebody else's work. The
+    /// remembered list is still swept, in `sweepRememberedProcesses`, but only
+    /// where the kernel's start time still says the pid is the one this fixture
+    /// spawned — which is how that pass gets the rows' safety without the rows.
     func tearDown() {
         guard !torndown else { return }
         torndown = true
@@ -762,12 +862,57 @@ private final class HibernationFixture {
                 kill(childPID, SIGKILL)
             }
         }
+        sweepRememberedProcesses()
         // Whatever a reader is still draining is named only by the registry, so
         // release them all. Detached because teardown is not async.
         let registry = self.registry
         Task.detached { await registry.releaseAll() }
         try? FileManager.default.removeItem(atPath: home)
         try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    /// The second pass, for the branch where the first one has nothing to work
+    /// from.
+    ///
+    /// **Reading the rows is the right default and it has one hole.**
+    /// `blockingTerminals` waits up to `TestGate.deadline` and returns `[]` on
+    /// expiry — and on that branch the sweep above kills nothing at all, while
+    /// the holder it would have killed is a process built to outlive this one:
+    /// `TBDHolder` calls `setsid()` and ignores `SIGHUP`
+    /// (`Sources/TBDHolder/Holder.swift`) so it survives the daemon's death,
+    /// which means it survives a dead test process just as well. It re-parents
+    /// to launchd and keeps its job running, and nothing in the product
+    /// reclaims it: `OrphanGC` enumerates the real `~/tbd/holders` and
+    /// `AgentReaper` works from `terminal` rows this in-memory database never
+    /// gave anyone. One such holder ran for 24 hours.
+    ///
+    /// So the pids this fixture spawned are remembered as well, and swept here
+    /// — **identity-checked**, which is what makes remembering safe. The reason
+    /// the by-rows pass exists is that a park CLEARS the pids off its row
+    /// precisely because those processes are gone, and a teardown working from
+    /// a remembered list alone would signal numbers the kernel has since handed
+    /// to somebody else's work. Comparing the kernel's start time against the
+    /// one recorded at spawn answers that: a reissued pid reports a different
+    /// instant and is left alone, exactly as `AgentReaper` leaves one alone.
+    ///
+    /// The two passes cannot fight. A pid the rows already accounted for is
+    /// either reaped — `ProcessStartTime` reports nothing and it is skipped —
+    /// or a corpse waiting to be, which a second `SIGKILL` cannot disturb.
+    private func sweepRememberedProcesses() {
+        for process in spawned {
+            guard let anchor = process.startedAt,
+                  let current = ProcessStartTime.startTime(pid: process.pid),
+                  // Both values come from the same kernel field, so a match is
+                  // exact; the tolerance only keeps the comparison from turning
+                  // on floating-point equality.
+                  abs(current.timeIntervalSince(anchor)) < 0.001
+            else { continue }
+            kill(process.pid, SIGKILL)
+            if process.ourChild {
+                var ignored: Int32 = 0
+                _ = waitpid(process.pid, &ignored, 0)
+            }
+        }
     }
 
     /// Reads the terminal rows from a non-async `tearDown`.

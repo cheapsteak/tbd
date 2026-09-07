@@ -72,6 +72,40 @@ orphan profile dirs, ~2.9k fake worktrees and ~7,100 dead tmux sockets
 accumulated that way before anyone noticed. Read `swift test …` below
 as `scripts/test.sh …`.
 
+**Two of the things a run leaves behind are processes, and no amount of path
+fencing touches either.** A tmux server outlives the socket that named it, and a
+`TBDHolder` outlives the test process that spawned it *by design* — it calls
+`setsid()` and ignores `SIGHUP` so it can survive the daemon's death
+(`Sources/TBDHolder/Holder.swift`), which means it survives a dead test process
+just as well, re-parents to launchd, and keeps its job running. Nothing in the
+product reclaims a fixture's holder: `OrphanGC`'s rowless-holder collector
+enumerates the real `~/tbd/holders`, and `AgentReaper`'s holder leg works from
+`terminal` rows an in-memory fixture database never had. One measured instance
+ran for 24 hours with its job still looping. Three layers cover the three ways
+one can be left behind, and each covers exactly one:
+
+- **A teardown that runs** kills what its rows name, then sweeps the pids it
+  remembers — refusing any whose kernel start time no longer matches the one
+  recorded at spawn. That identity check is what makes remembering a pid safe:
+  a pid is free the instant its corpse is collected, and on this box the next
+  process to take it is somebody else's. It is the same answer `AgentReaper`
+  gives to the same question.
+- **A run that dies without reaching a teardown** leaves its rendezvous sockets
+  behind, and `cleanup` kills whoever `lsof` says owns each one before the
+  `rm -rf`. **By resource, never by pattern**: the socket path is unique to the
+  run, while a `pkill` on the holder's name would end live production holders
+  and other agents' sessions on the same machine. Note the ordering this
+  implies — a teardown that ran and removed its scratch root has taken the
+  socket with it, which is precisely why the layer above exists.
+- **A wrapper that is SIGKILLed**, where not even the EXIT trap runs, is
+  reclaimed by the *next* run: `reclaim_abandoned_run_roots` gives every sibling
+  `/tmp/tbd-test-home.*` older than a day the same two sweeps and then removes
+  it. No run lasts a day — the nightly stress harness mints one root per
+  iteration — so age alone is a safe discriminator, and every run being a sweep
+  means the machine heals as soon as anybody tests again. It is the named
+  reconciler for fixture holders in the sense
+  `docs/specs/2026-08-15-named-reconciler-doctrine-design.md` means it.
+
 The tmux leg is the one with no teardown remedy: **tmux never unlinks its
 socket file when a server exits.** It unlinks a stale socket lazily instead, at
 bind time, when a new server claims that exact path — and every test mints a
@@ -156,7 +190,8 @@ The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
 runs in the `lint` CI job: it drives the symlink and ownership refusals on the
 fake home, the post-run mode-000 recheck, the fingerprint's seven arms (five
 roots, two of which are read twice), the tmux socket fence (its `sun_path`
-budget and its kill-server sweep) and the
+budget and its kill-server sweep), the holder sweep and the abandoned-run-root
+reconciler, and the
 shared-lock pin against fixture directories with a stub `swift`, so it takes
 ~11 s, builds nothing, and touches no real store. **Every case there is
 mutation-checked** — the assertion is shown going red against a deliberately

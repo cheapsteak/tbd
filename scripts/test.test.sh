@@ -148,6 +148,34 @@ if [ -n "${FAKE_SWIFT_TMUX_SOCKETS:-}" ]; then
   mkdir -p "$socket_dir"
   for socket_name in $FAKE_SWIFT_TMUX_SOCKETS; do : > "$socket_dir/$socket_name"; done
 fi
+# Leave a LIVE holder behind, the way a leaked fixture holder does: a process
+# that owns the rendezvous socket plus a job it supervises, in the parent/child
+# relation `pgrep -P` reads. FAKE_SWIFT_HOLDERS names the fixture roots to mint
+# one under, mirroring `fencedScratchRoot(prefix:)`; each holder's pid pair is
+# appended to "$FAKE_SWIFT_DUMP.holders" as "<holder> <job>".
+if [ -n "${FAKE_SWIFT_HOLDERS:-}" ]; then
+  for holder_name in $FAKE_SWIFT_HOLDERS; do
+    holder_dir="${TBD_TEST_SCRATCH_ROOT:-/nonexistent}/$holder_name/holders"
+    mkdir -p "$holder_dir"
+    "$FAKE_HOLDER_START" "$holder_dir/$holder_name.sock" \
+      "$holder_dir/$holder_name.child" >> "$FAKE_SWIFT_DUMP.holders"
+  done
+fi
+# Leave a DEAD one: the ordinary case, and a genuine orphaned socket inode
+# rather than a regular file standing in for one. A holder that is SIGKILLed
+# never unlinks its socket, so binding one and killing the binder is what
+# actually produces the shape the sweep has to tolerate.
+if [ -n "${FAKE_SWIFT_DEAD_HOLDER_SOCKETS:-}" ]; then
+  for holder_name in $FAKE_SWIFT_DEAD_HOLDER_SOCKETS; do
+    holder_dir="${TBD_TEST_SCRATCH_ROOT:-/nonexistent}/$holder_name/holders"
+    mkdir -p "$holder_dir"
+    # Bind one and SIGKILL it: the same binder the live case uses, killed
+    # before it can unlink anything, which is exactly how a real holder leaves
+    # a socket inode behind.
+    kill -9 $("$FAKE_HOLDER_START" "$holder_dir/$holder_name.sock" \
+      "$holder_dir/$holder_name.child") 2>/dev/null
+  done
+fi
 # Unquoted on purpose: FAKE_SWIFT_RC is a space-separated list.
 fake_swift_codes=(${FAKE_SWIFT_RC:-0})
 fake_swift_index=$((fake_swift_invocation - 1))
@@ -216,6 +244,8 @@ run_script() {
                  -u TBD_SWIFT_HEARTBEAT_SECONDS -u TBD_SWIFT_ALLOW_ORPHAN \
                  -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_RC \
                  -u FAKE_SWIFT_TMUX_SOCKETS -u FAKE_SWIFT_TEST_COUNT \
+                 -u FAKE_SWIFT_HOLDERS -u FAKE_SWIFT_DEAD_HOLDER_SOCKETS \
+                 -u FAKE_HOLDER_START \
                  -u TBD_REMOTE_VERIFY -u TBD_REMOTE_VERIFY_YIELD_SECONDS \
                  -u TBD_SWIFT_QUEUE_YIELD_SECONDS \
                  -u FAKE_REMOTE_VERIFY_RC -u FAKE_REMOTE_VERIFY_LOG \
@@ -309,6 +339,117 @@ sun_path_verdict() {
     echo "over (${#path} > $SUN_PATH_BUDGET)"
   fi
 }
+
+# A stand-in for a leaked `TBDHolder`, and for the job it supervises.
+#
+# The real thing cannot be used here: it is a compiled product binary, and this
+# harness builds nothing. What the sweep actually keys on is not the binary at
+# all — it is "who has this rendezvous socket open", so anything that binds the
+# socket and parents a job stands in exactly. `nc -lU` binds it; `exec` keeps the
+# socket's owner and the job's parent the same pid, which is what a real holder
+# is; and `sleep` is the job. Both are `kill -9`able and neither writes anywhere.
+mk_fake_holder() {
+  local fix="$1"
+  mkdir -p "$fix/bin"
+  cat > "$fix/bin/fake-holder" <<'HOLDER'
+#!/usr/bin/env bash
+# $1 rendezvous socket to bind, $2 file to record the job's pid in.
+#
+# The job is started BEFORE the exec so it is the socket owner's own child, the
+# relation the sweep reads with `pgrep -P`, and the pid file is written before
+# the bind so a caller that waits for the socket has a complete pid file.
+#
+# PYTHON RATHER THAN `nc -lU`, WHICH LOOKS LIKE THE OBVIOUS CHOICE AND IS NOT:
+# nc reads its stdin and exits the moment it sees EOF, so a binder started with
+# its stdio detached — which it must be, see `start-fake-holder` — is gone
+# before anything can sweep it, and the case then passes for the wrong reason.
+# A socket that is bound and simply held has no such behaviour.
+sleep 600 &
+echo $! > "$2"
+exec python3 -c '
+import socket, sys, time
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(sys.argv[1])
+listener.listen(1)
+time.sleep(3600)
+' "$1"
+HOLDER
+  chmod +x "$fix/bin/fake-holder"
+  cat > "$fix/bin/start-fake-holder" <<'START'
+#!/usr/bin/env bash
+# Starts one stand-in holder and prints "<holder pid> <job pid>".
+#
+# ITS STDIO IS DETACHED, and that is load-bearing rather than tidy: `run_script`
+# reads a run through a command substitution, and a background process holding
+# that pipe open would block the substitution until the process died — which is
+# exactly what the "left alone" cases assert does not happen.
+socket="$1"; child_file="$2"
+"$(dirname "$0")/fake-holder" "$socket" "$child_file" >/dev/null 2>&1 </dev/null &
+holder_pid=$!
+waited=0
+while [ ! -S "$socket" ] && [ "$waited" -lt 100 ]; do sleep 0.05; waited=$((waited + 1)); done
+printf '%s %s\n' "$holder_pid" "$(cat "$child_file" 2>/dev/null)"
+START
+  chmod +x "$fix/bin/start-fake-holder"
+}
+
+# The pid pairs the stub left behind, space-separated on one line.
+holder_pids_of() { tr '\n' ' ' < "$1/swift-invocation.holders" 2>/dev/null | sed 's/ *$//'; }
+
+# Which of the given pids can still be signalled, space-joined. Immediate: for
+# the mutation cases, where the answer is "all of them" and waiting proves
+# nothing.
+live_pids() {
+  local pid out=""
+  for pid in "$@"; do
+    if kill -0 "$pid" 2>/dev/null; then out="${out:+$out }$pid"; fi
+  done
+  printf '%s\n' "$out"
+}
+
+# The same question with a five-second bound, for the cases that assert a pid is
+# GONE. A `kill -9`ed process is a zombie until whoever adopted it reaps it, and
+# `kill -0` answers yes for a zombie — so an immediate check there would be
+# racy in the direction that fails a working sweep.
+pids_still_alive() {
+  local attempts=50 remaining
+  while [ "$attempts" -gt 0 ]; do
+    remaining="$(live_pids "$@")"
+    [ -n "$remaining" ] || break
+    attempts=$((attempts - 1))
+    sleep 0.1
+  done
+  printf '%s\n' "$remaining"
+}
+
+# Never by pattern, here either: every pid this file signals is one it captured.
+kill_pids() {
+  local pid
+  for pid in "$@"; do kill -9 "$pid" 2>/dev/null; done
+  return 0
+}
+
+dir_exists() { if [ -d "$1" ]; then echo yes; else echo no; fi; }
+
+# A short parent for fixture run roots, and it has to be short for the same
+# reason `scripts/test.sh` mints the real one in `/tmp`: a rendezvous socket
+# under it is bound against a 104-byte `sun_path`, and `$TMPDIR` on darwin is a
+# ~49-byte `/var/folders/...` path that leaves no room for one. A stand-in
+# holder under a too-long path dies on the bind, and every assertion about
+# sweeping it then passes for the wrong reason.
+mk_roots_dir() { mktemp -d "/tmp/testsh-roots.XXXXXX"; }
+
+# A run root under `$1`, named the way `mktemp` names a real one.
+mk_run_root() {
+  local root="$1/${RUN_ROOT_PREFIX}$2"
+  mkdir -p "$root"
+  : > "$root/marker"
+  printf '%s\n' "$root"
+}
+
+# Ages a directory past `ABANDONED_RUN_ROOT_MINUTES` without waiting a day for
+# it. 25 hours, so the case is not sitting on the boundary.
+age_run_root() { touch -t "$(date -v-25H +%Y%m%d%H%M)" "$1"; }
 
 # ---------------------------------------------------------------------------
 # 1. The symlink refusal — the guard that could chmod 000 a real ~/tbd
@@ -912,7 +1053,7 @@ test_cleanup_sweeps_the_runs_tmux_servers() {
 # exactly the silent failure: the files are gone and the servers are not.
 test_cleanup_sweep_is_load_bearing() {
   local fix mutant; fix="$(mkfix)"; mk_stub_tmux "$fix"
-  mutant="$(mutant_of "$SCRIPT" 's/sweep_tmux_servers; rm -rf/rm -rf/')"
+  mutant="$(mutant_of "$SCRIPT" '/^  sweep_tmux_servers "\$scratch_home"$/d')"
   RUN_ENV=(PATH="$fix/tmuxbin:$PATH" FAKE_TMUX_LOG="$fix/tmux-invocations"
            FAKE_SWIFT_TMUX_SOCKETS="tbd-sweep-a tbd-sweep-b")
   run_script "$mutant" "$fix"
@@ -958,6 +1099,212 @@ test_fingerprint_detects_a_leaked_tmux_socket() {
   assert_contains "the entry is named" "$RUN_OUT" "+  <tmux-sockets>/tbd-leaked-socket"
   assert_contains "and the fix is named" "$RUN_OUT" "the fix is TMUX_TMPDIR"
   rmfix "$fix"
+}
+
+# ---------------------------------------------------------------------------
+# 6b. The holder sweep, and the reconciler for the run that never reached its
+#     own trap
+#
+# A `TBDHolder` is built to OUTLIVE its spawner: it calls `setsid()` and ignores
+# `SIGHUP` (`Sources/TBDHolder/Holder.swift`) so it can survive the daemon's
+# death. A fixture's holder inherits that, so it survives the test process too,
+# re-parents to launchd, and keeps its job running — and `rm -rf` on the scratch
+# root unlinks its socket without touching it. Nothing in the product reclaims
+# one: `OrphanGC`'s rowless-holder collector enumerates the real `~/tbd/holders`,
+# and `AgentReaper`'s holder leg works from `terminal` rows a fixture's in-memory
+# database never had. One measured instance ran for 24 hours with its job still
+# looping.
+#
+# THE SWEEP IS BY RESOURCE, NEVER BY PATTERN, and that is the constraint the
+# cases here are shaped around: this machine runs live production holders and
+# other people's agents, so a `pkill` on the binary's name would end somebody
+# else's session. Only "who has this exact socket open" is safe.
+# ---------------------------------------------------------------------------
+
+test_cleanup_kills_a_leaked_holder_and_its_job() {
+  local fix pids; fix="$(mkfix)"; mk_fake_holder "$fix"
+  RUN_ENV=(FAKE_SWIFT_HOLDERS="tbdhib-aaaaaaaa"
+           FAKE_HOLDER_START="$fix/bin/start-fake-holder")
+  run_wrapper "$fix"
+  RUN_ENV=()
+  assert_ok "a run that leaked a holder still exits 0" "$RUN_RC"
+  pids="$(holder_pids_of "$fix")"
+  assert_eq "the stub really left a holder AND a job behind" "2" \
+    "$(echo $pids | wc -w | tr -d ' ')"
+  assert_eq "and both are gone once cleanup has run" "" "$(pids_still_alive $pids)"
+  kill_pids $pids
+  rmfix "$fix"
+}
+
+# MUTATION. Drop the sweep and the scratch dir still disappears — which is
+# exactly the silent failure this closes: the socket is gone and the holder is
+# not, so nothing can ever reach it and nothing will ever reclaim it.
+test_the_holder_sweep_is_load_bearing() {
+  local fix mutant pids; fix="$(mkfix)"; mk_fake_holder "$fix"
+  mutant="$(mutant_of "$SCRIPT" '/^  sweep_holders "\$scratch_home"$/d')"
+  RUN_ENV=(FAKE_SWIFT_HOLDERS="tbdhib-bbbbbbbb"
+           FAKE_HOLDER_START="$fix/bin/start-fake-holder")
+  run_script "$mutant" "$fix"
+  RUN_ENV=()
+  assert_ok "the mutant run is green (a sweep is not a correctness gate)" "$RUN_RC"
+  pids="$(holder_pids_of "$fix")"
+  assert_eq "without the sweep the holder and its job outlive the run" \
+    "$pids" "$(live_pids $pids)"
+  kill_pids $pids
+  rmfix "$fix"
+}
+
+# THE ORDINARY CASE, AND THE ONE A NAIVE SWEEP GETS WRONG. Almost every socket
+# the sweep finds has nobody behind it — a holder that exits cleanly unlinks its
+# socket, and one that is killed leaves the file with no owner at all. `lsof`
+# answers nothing and exits non-zero for those, which must be a skip rather than
+# a failed run.
+test_a_holder_socket_with_no_owner_is_swept_without_error() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(FAKE_SWIFT_DEAD_HOLDER_SOCKETS="tbdh7-cccccccc")
+  run_wrapper "$fix"
+  RUN_ENV=()
+  assert_ok "an orphaned socket does not fail the run" "$RUN_RC"
+  assert_missing "and nothing is said about it" "$RUN_OUT" "lsof"
+  rmfix "$fix"
+}
+
+# THE AGE FILTER IS THE WHOLE DISCRIMINATOR, so both sides of it are pinned. A
+# run still in flight owns its root, and reclaiming one would delete a `TBD_HOME`
+# a live suite is writing into.
+test_a_run_root_minted_today_is_left_alone() {
+  local roots recent; roots="$(mk_roots_dir)"
+  recent="$(mk_run_root "$roots" "recent")"
+  reclaim_abandoned_run_roots "$roots"
+  assert_eq "a root that could still be in flight survives" "yes" "$(dir_exists "$recent")"
+  rm -rf "$roots"
+}
+
+test_an_abandoned_run_root_is_reclaimed() {
+  local roots old; roots="$(mk_roots_dir)"
+  old="$(mk_run_root "$roots" "abandoned")"
+  age_run_root "$old"
+  reclaim_abandoned_run_roots "$roots"
+  assert_eq "a root older than a day is reclaimed" "no" "$(dir_exists "$old")"
+  rm -rf "$roots"
+}
+
+# MUTATION. Widen the age filter to "anything at all" and a live run's root goes
+# with it — the failure that would make this reconciler far worse than the leak.
+test_the_run_root_age_filter_is_load_bearing() {
+  local mutant roots recent; roots="$(mk_roots_dir)"
+  # `-mmin "+0"` would NOT be a widening: BSD find rounds the age UP to whole
+  # minutes and `+n` is a strict "more than", so a directory seconds old matches
+  # neither bound. Dropping the predicate is the real "no age filter".
+  mutant="$(mutant_of "$SCRIPT" 's/ -mmin "\+\$ABANDONED_RUN_ROOT_MINUTES"//')"
+  recent="$(mk_run_root "$roots" "recent")"
+  # shellcheck source=/dev/null
+  ( source "$mutant"; reclaim_abandoned_run_roots "$roots" )
+  assert_eq "without the age filter a live run's root is destroyed" "no" \
+    "$(dir_exists "$recent")"
+  rm -rf "$roots"
+}
+
+# PROCESSES FIRST, FILES SECOND — the reconciler runs the same two sweeps the
+# EXIT trap does, and this is the case that says so. Removing the root without
+# the sweep would leave the holder running with its socket unlinked, which is
+# the state that produced the 24-hour leak in the first place.
+test_an_abandoned_run_root_has_its_holder_killed_before_it_goes() {
+  local fix roots old pids; fix="$(mkfix)"; mk_fake_holder "$fix"
+  roots="$(mk_roots_dir)"
+  old="$(mk_run_root "$roots" "leaky")"
+  mkdir -p "$old/tbdhib-dddddddd/holders"
+  pids="$("$fix/bin/start-fake-holder" \
+    "$old/tbdhib-dddddddd/holders/dddddddd.sock" "$fix/leaky.child")"
+  # PROVE THE STAND-IN IS UP BEFORE ASSERTING IT WENT DOWN. A binder that died
+  # on its own — a `sun_path` overflow is the way it happens — would make the
+  # sweep assertion below pass with nothing swept.
+  assert_eq "the stand-in holder and its job are up" "$pids" "$(live_pids $pids)"
+  # After the socket exists, or creating it would refresh the root's mtime.
+  age_run_root "$old"
+  reclaim_abandoned_run_roots "$roots"
+  assert_eq "the abandoned root is gone" "no" "$(dir_exists "$old")"
+  assert_eq "and its holder and job went with it" "" "$(pids_still_alive $pids)"
+  kill_pids $pids
+  rm -rf "$roots"
+  rmfix "$fix"
+}
+
+# MUTATION. Reclaim the files without the processes and the leak survives its
+# own cleanup, invisibly.
+test_the_reconcilers_holder_sweep_is_load_bearing() {
+  local fix mutant roots old pids; fix="$(mkfix)"; mk_fake_holder "$fix"
+  mutant="$(mutant_of "$SCRIPT" '/^    sweep_holders "\$root"$/d')"
+  roots="$(mk_roots_dir)"
+  old="$(mk_run_root "$roots" "leaky")"
+  mkdir -p "$old/tbdhib-eeeeeeee/holders"
+  pids="$("$fix/bin/start-fake-holder" \
+    "$old/tbdhib-eeeeeeee/holders/eeeeeeee.sock" "$fix/leaky.child")"
+  assert_eq "the stand-in holder and its job are up" "$pids" "$(live_pids $pids)"
+  age_run_root "$old"
+  # shellcheck source=/dev/null
+  ( source "$mutant"; reclaim_abandoned_run_roots "$roots" )
+  assert_eq "the root is removed either way" "no" "$(dir_exists "$old")"
+  assert_eq "but without the sweep the holder outlives it" "$pids" "$(live_pids $pids)"
+  kill_pids $pids
+  rm -rf "$roots"
+  rmfix "$fix"
+}
+
+# THE CALL SITE, AGAINST THE DIRECTORY IT REALLY WATCHES. `RUN_ROOT_DIR` is
+# `/tmp` — every case in this file already has the wrapper mint its own run root
+# there — so this is the one property no fixture directory can show: that an
+# ordinary run reconciles its siblings on the way in, before it mints a root of
+# its own.
+#
+# The window a concurrent `scripts/test.sh` could reclaim this fixture root in is
+# the ~2 s of the run below, and in the `lint` job that runs this harness no
+# suite runs at all. If it ever does flake, the concurrent run did the sweep's
+# job for it.
+test_a_real_run_reclaims_an_abandoned_sibling_root() {
+  local fix abandoned; fix="$(mkfix)"
+  abandoned="$(mktemp -d "$RUN_ROOT_DIR/${RUN_ROOT_PREFIX}XXXXXXXX")"
+  : > "$abandoned/marker"
+  age_run_root "$abandoned"
+  run_wrapper "$fix"
+  assert_ok "the run itself is unaffected" "$RUN_RC"
+  assert_eq "the abandoned sibling is reclaimed on the way in" "no" \
+    "$(dir_exists "$abandoned")"
+  rm -rf "$abandoned"
+  rmfix "$fix"
+}
+
+# MUTATION. Drop the call and the sibling survives forever, which is the state
+# every run before this one left behind.
+test_the_startup_reconcile_call_is_load_bearing() {
+  local fix mutant abandoned; fix="$(mkfix)"
+  mutant="$(mutant_of "$SCRIPT" '/^reclaim_abandoned_run_roots "\$RUN_ROOT_DIR"$/d')"
+  abandoned="$(mktemp -d "$RUN_ROOT_DIR/${RUN_ROOT_PREFIX}XXXXXXXX")"
+  : > "$abandoned/marker"
+  age_run_root "$abandoned"
+  run_script "$mutant" "$fix"
+  assert_eq "without the call the abandoned sibling survives" "yes" \
+    "$(dir_exists "$abandoned")"
+  rm -rf "$abandoned"
+  rmfix "$fix"
+}
+
+# `-a` IS LOAD-BEARING, AND GETTING IT WRONG DOES NOT FAIL LOUDLY. lsof ORs its
+# selection options, so `lsof -t -U <path>` means "every unix-socket holder on
+# the machine, OR this path" and answers with hundreds of pids — most of the
+# process table on a developer box. The sweep would then `kill -9` all of them.
+# Pinned as text rather than driven, because the only way to drive it is to
+# perform the catastrophe.
+test_the_holder_lookup_ands_its_selectors() {
+  local body; body="$(cat "$SCRIPT")"
+  assert_contains "the socket lookup ANDs -U with the path" "$body" \
+    '"$lsof_bin" -t -a -U "$socket"'
+  assert_missing "and never ORs them" "$body" '"$lsof_bin" -t -U "$socket"'
+  # Comments stripped: the paragraphs above the sweep NAME the pattern kill in
+  # order to refuse it, and matching prose would make this fire on its own
+  # rationale.
+  assert_missing "no pattern kill is ever executed" \
+    "$(printf '%s\n' "$body" | grep -v '^[[:space:]]*#')" "pkill"
 }
 
 # ---------------------------------------------------------------------------

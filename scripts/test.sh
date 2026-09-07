@@ -48,6 +48,31 @@
 #      every test passed. This is now a backstop rather than the primary
 #      guard; see "WHY THE TRIPWIRE SUPERSEDES THE FINGERPRINT".
 #
+# WHAT THE FENCE CANNOT DO ON ITS OWN: KILL A PROCESS. Containment is about
+# paths, and two of the things a run leaves behind are not files. A tmux server
+# outlives the socket that named it, and a `TBDHolder` outlives the test process
+# that spawned it BY DESIGN — it calls `setsid()` and ignores `SIGHUP` so it can
+# survive the daemon's death (`Sources/TBDHolder/Holder.swift`), which means it
+# survives a killed test process just as well, re-parents to launchd, and keeps
+# its job running. Deleting the scratch root does not touch either one. So
+# `cleanup` sweeps both by resource — a `kill-server` per socket file, and a
+# `kill -9` for whoever `lsof` says holds each holder rendezvous socket — before
+# the `rm -rf`, and never by name pattern: this machine runs live production
+# holders and other people's agents, and a `pkill -f` on the holder's name would
+# end them.
+#
+# AND THE RUN THAT NEVER REACHES ITS OWN TRAP. `trap cleanup EXIT` fires on a
+# fatal signal as well as a normal exit, but nothing in-process runs after a
+# SIGKILL, a panic or a power cut — and a holder inside that abandoned root
+# keeps running with nobody left who remembers it. Nothing in the product
+# reclaims one: `OrphanGC` enumerates the real `~/tbd/holders` and `AgentReaper`
+# works from `terminal` rows, and a fixture's socket is under a scratch root
+# with no row anywhere. `reclaim_abandoned_run_roots` is the named reconciler
+# for that case (docs/specs/2026-08-15-named-reconciler-doctrine-design.md): at
+# START-UP, every sibling run root older than a day gets the same two sweeps and
+# then `rm -rf`. Every run is a sweep, so the machine heals as soon as anybody
+# tests again.
+#
 # READING A PERMISSION-DENIED FAILURE. If a test under this wrapper fails with
 # "You don't have permission to save the file …" or `EACCES`/`NSFileWriteNoPermissionError`
 # on a path ending in `/tbd/…` or `/.claude/…`, that is not a broken machine and
@@ -302,6 +327,175 @@ require_owned_dir_after_mkdir() {
   [ -d "$path" ] || fence_bail "$what is not a directory: $path"
   owner="$(stat -f '%u' "$path")"
   [ "$owner" = "$(id -u)" ] || fence_bail "$what is owned by uid $owner, not $(id -u): $path"
+}
+
+# WHERE A RUN ROOT LIVES, IN ONE PLACE. The mint below and the reconciler above
+# it have to agree on both halves: a reconciler looking in the wrong directory,
+# or for the wrong prefix, sweeps nothing and says nothing about it. `/tmp`
+# rather than `$TMPDIR` for the `sun_path` reason spelled out at the mint.
+RUN_ROOT_DIR="/tmp"
+RUN_ROOT_PREFIX="tbd-test-home."
+
+# How old a sibling run root has to be before it is certainly abandoned. No run
+# lasts a day — the nightly stress harness mints a fresh root per iteration —
+# so age alone is a safe discriminator, and one that needs no scheduler, no
+# daemon and no bookkeeping file. A run still in flight is hours away from it.
+ABANDONED_RUN_ROOT_MINUTES=1440
+
+# THE SWEEP KILLS SERVERS; THE `rm -rf` ONLY REMOVES FILES. Those are not the
+# same leak, and the expensive one is the process: unlinking a socket out from
+# under a live tmux server leaves it running forever with nothing able to reach
+# it. So every socket the run created is issued a `kill-server` BEFORE the
+# scratch dir goes away. Most will already be dead — a dead server's file is
+# still there, because tmux never unlinks one — so errors are ignored throughout.
+#
+# It takes the run root as an argument rather than reading the global, because
+# `reclaim_abandoned_run_roots` runs it against somebody else's abandoned root.
+sweep_tmux_servers() {
+  local root="${1:-}" tmux_bin socket_dir socket
+  tmux_bin="$(command -v tmux || true)"
+  # No tmux on PATH means no server this run could have started.
+  [ -n "$tmux_bin" ] || return 0
+  [ -n "$root" ] || return 0
+  socket_dir="$root/tmux/tmux-$(id -u)"
+  [ -d "$socket_dir" ] || return 0
+  for socket in "$socket_dir"/*; do
+    # `-e` rather than `-S`: it skips the unmatched-glob case, and tmux owns
+    # this directory exclusively, so anything in it is one of its sockets.
+    [ -e "$socket" ] || continue
+    "$tmux_bin" -S "$socket" kill-server >/dev/null 2>&1 || true
+  done
+  return 0
+}
+
+# Every rendezvous socket a holder fixture may have bound under `$1`.
+#
+# Two depths, and both are real. A holder fixture mints its own short root
+# (`fencedScratchRoot`) directly under the run root, so its socket is
+# `<run root>/<prefix>-xxxxxxxx/holders/<uuid>.sock` — depth 3. Anything that
+# spawns a holder through the plain fenced `TBD_HOME` instead lands at
+# `<run root>/sanctioned/tbd/holders/<uuid>.sock` — depth 4. `-maxdepth 4`
+# covers both and bounds the walk, which matters because the sanctioned root
+# also holds profile directories and git checkouts.
+holder_sockets_under() {
+  local root="${1:-}"
+  [ -n "$root" ] || return 0
+  [ -d "$root" ] || return 0
+  # `-H` for the reason spelled out at `reclaim_abandoned_run_roots`: a run root
+  # reached through `/tmp` is reached through a symlink, and find descends into
+  # a symlinked STARTING POINT only when told to.
+  find -H "$root" -maxdepth 4 -path '*/holders/*.sock' 2>/dev/null || true
+}
+
+# THE HOLDER SWEEP, AND WHY `rm -rf` IS NOT ENOUGH ON ITS OWN.
+#
+# A `TBDHolder` is built to outlive the thing that spawned it: it calls
+# `setsid()` and ignores `SIGHUP` on purpose (`Sources/TBDHolder/Holder.swift`),
+# so the death of the test process that spawned it ends neither the holder nor
+# the job it supervises. It re-parents to launchd and keeps running. Nothing in
+# the product reclaims one of these: `OrphanGC`'s rowless-holder collector
+# enumerates the REAL `~/tbd/holders`, a fixture's socket is under this scratch
+# root instead, and `AgentReaper`'s holder leg works from `terminal` rows that a
+# fixture's in-memory database never had. One measured instance ran for 24 hours
+# with its job still looping.
+#
+# BY RESOURCE, NEVER BY PATTERN. This machine runs other people's agents and
+# live production holders, so `pkill -f TBDHolder` would kill somebody's real
+# session. The socket path is unique to this run and lives inside a directory
+# this run created, so the only processes that can hold it open are this run's
+# own — which makes "who has this exact file open" the safe discriminator and
+# the name of the binary an unsafe one.
+#
+# `-a` IS LOAD-BEARING. lsof ORs its selection options by default, so
+# `lsof -t -U <path>` means "every unix-socket holder on the machine, OR this
+# path" and answers with hundreds of pids — every process with any unix socket
+# open, which on this box is most of them. `-a` ANDs them instead. Getting this
+# wrong does not fail loudly; it kills the machine.
+#
+# CHILDREN ARE ENUMERATED BEFORE THE PARENT DIES, because a holder's job
+# re-parents to launchd the moment the holder is gone and no `pgrep -P` can
+# reach it afterwards.
+#
+# WHAT THIS DELIBERATELY DOES NOT COVER, so the layering is not mistaken for a
+# hole. A socket is the only safe handle on a holder, so a holder whose socket
+# is ALREADY GONE is invisible here — and a fixture teardown that ran and missed
+# removes its scratch root, socket included, before this ever looks. That case
+# belongs to the fixture, which remembers the pids it spawned and sweeps them
+# identity-checked (`HibernationFixture.sweepRememberedProcesses`); this sweep
+# owns the case where no teardown ran at all, which is the one where the socket
+# is still there. The alternative — matching the holder's argv or its name —
+# is what must never be done: this machine runs live production holders and
+# other people's agents, and no pattern can tell them from ours.
+sweep_holders() {
+  local root="${1:-}" lsof_bin socket owners pid children child
+  lsof_bin="$(command -v lsof || true)"
+  # No lsof means no way to ask who owns the socket, and guessing is exactly
+  # what this must not do.
+  [ -n "$lsof_bin" ] || return 0
+  while IFS= read -r socket; do
+    [ -n "$socket" ] || continue
+    # A socket whose owner is already gone — the ordinary case, since a holder
+    # that exits cleanly unlinks it and one that was killed leaves the file
+    # behind — answers nothing and costs nothing. `rm -rf` removes the file.
+    owners="$("$lsof_bin" -t -a -U "$socket" 2>/dev/null || true)"
+    [ -n "$owners" ] || continue
+    for pid in $owners; do
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      [ "$pid" -gt 1 ] || continue
+      children="$(pgrep -P "$pid" 2>/dev/null || true)"
+      kill -9 "$pid" 2>/dev/null || true
+      for child in $children; do
+        case "$child" in ''|*[!0-9]*) continue ;; esac
+        [ "$child" -gt 1 ] || continue
+        kill -9 "$child" 2>/dev/null || true
+      done
+    done
+  done < <(holder_sockets_under "$root")
+  return 0
+}
+
+# THE RECONCILER FOR THE RUN THAT COULD NOT CLEAN UP AFTER ITSELF.
+#
+# `trap cleanup EXIT` covers a normal exit and a TERMed wrapper alike — bash
+# runs an EXIT trap on a fatal signal too. What no in-process teardown can cover
+# is a SIGKILLed wrapper, a panicked kernel or a machine that lost power
+# mid-run: the trap never runs, the scratch root survives, and any holder inside
+# it keeps running with nobody left who remembers it.
+#
+# So the reclaim for that case is somebody ELSE's run, at start-up, over the
+# siblings this directory has accumulated. It is the named reconciler for
+# fixture holders in the doctrine's sense
+# (`docs/specs/2026-08-15-named-reconciler-doctrine-design.md`): a background
+# pass that enumerates ground truth — the run roots actually on disk — compares
+# it against intent (nothing older than a day is anybody's), and reclaims the
+# difference. Every run is a sweep, so the machine self-heals as soon as anyone
+# tests again, and there is no timer, no daemon and no state to keep.
+#
+# ORDER MATTERS: the processes go first and the files second, for the same
+# reason the tmux sweep runs before its `rm -rf`. Removing a socket out from
+# under a live holder leaves the holder running with nothing able to reach it.
+#
+# `-user` and `-type d` keep it to directories this uid owns — `/tmp` is mode
+# 1777, so anybody can create a name that matches — and a symlink is `-type l`,
+# so a planted one is never followed and never removed.
+#
+# `-H` IS NOT OPTIONAL HERE, AND ITS ABSENCE FAILS SILENTLY. On darwin `/tmp` is
+# itself a symlink to `/private/tmp`, and find will not descend into a symlinked
+# starting point unless told to: without `-H` this enumerates exactly nothing,
+# exits 0, and reclaims nothing, forever. `-H` follows only the paths named on
+# the command line, so a symlink planted INSIDE the directory is still never
+# followed.
+reclaim_abandoned_run_roots() {
+  local dir="${1:-$RUN_ROOT_DIR}" root
+  [ -d "$dir" ] || return 0
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    sweep_tmux_servers "$root"
+    sweep_holders "$root"
+    rm -rf "$root" 2>/dev/null || true
+  done < <(find -H "$dir" -maxdepth 1 -type d -name "$RUN_ROOT_PREFIX*" \
+             -user "$(id -u)" -mmin "+$ABANDONED_RUN_ROOT_MINUTES" 2>/dev/null || true)
+  return 0
 }
 
 # THE SHARED ADMISSION LOCK. The branches mirror `_lock_path()` in
@@ -598,6 +792,12 @@ if [ "$fingerprint" -eq 1 ]; then
   fingerprint_before="$(scripts/tbd-home-fingerprint.sh)"
 fi
 
+# THE SIBLING ROOTS COME FIRST, BEFORE THIS RUN MINTS ONE OF ITS OWN. Running
+# it here rather than at exit is what makes it a reconciler rather than a second
+# teardown: it reclaims what runs that never reached their own trap left behind,
+# and it cannot see — or delete — the root this run is about to create.
+reclaim_abandoned_run_roots "$RUN_ROOT_DIR"
+
 # `/tmp`, not `mktemp -d`'s default `$TMPDIR`: on darwin TMPDIR is a ~50-char
 # path under /var/folders, and `sun_path` for a unix socket caps at ~104 bytes,
 # so `$TMPDIR/<scratch>/sock` can overflow.
@@ -651,35 +851,21 @@ fi
 # this directory any deeper spends that headroom and every live tmux test
 # starts failing at once. `scripts/test.test.sh` asserts the budget so a
 # refactor that moves it cannot land quietly.
-scratch_home="$(mktemp -d /tmp/tbd-test-home.XXXXXXXX)"
+scratch_home="$(mktemp -d "$RUN_ROOT_DIR/${RUN_ROOT_PREFIX}XXXXXXXX")"
 tmux_tmpdir="$scratch_home/tmux"
 
-# THE SWEEP KILLS SERVERS; THE `rm -rf` ONLY REMOVES FILES. Those are not the
-# same leak, and the expensive one is the process: unlinking a socket out from
-# under a live tmux server leaves it running forever with nothing able to reach
-# it. So every socket the run created is issued a `kill-server` BEFORE the
-# scratch dir goes away. Most will already be dead — a dead server's file is
-# still there (see above) — so errors are ignored throughout.
-sweep_tmux_servers() {
-  local tmux_bin socket_dir socket
-  tmux_bin="$(command -v tmux || true)"
-  # No tmux on PATH means no server this run could have started.
-  [ -n "$tmux_bin" ] || return 0
-  # `${var:-}` — defensive under `set -u`. The assignment above precedes the
-  # trap today; this keeps that ordering from being load-bearing.
-  [ -n "${tmux_tmpdir:-}" ] || return 0
-  socket_dir="$tmux_tmpdir/tmux-$(id -u)"
-  [ -d "$socket_dir" ] || return 0
-  for socket in "$socket_dir"/*; do
-    # `-e` rather than `-S`: it skips the unmatched-glob case, and tmux owns
-    # this directory exclusively, so anything in it is one of its sockets.
-    [ -e "$socket" ] || continue
-    "$tmux_bin" -S "$socket" kill-server >/dev/null 2>&1 || true
-  done
-  return 0
+# CLEANUP IS PROCESSES FIRST, FILES SECOND. `rm -rf` unlinks; it does not kill,
+# and both leaks this run can leave behind are processes. A tmux server whose
+# socket is deleted keeps running with nothing able to reach it; a holder
+# `setsid`s away from its spawner on purpose and outlives the whole test process
+# regardless. So both sweeps run BEFORE the scratch dir goes away, and both take
+# it as an argument so `reclaim_abandoned_run_roots` can run the same two passes
+# over a root some earlier run never got to.
+cleanup() {
+  sweep_tmux_servers "$scratch_home"
+  sweep_holders "$scratch_home"
+  rm -rf "$scratch_home"
 }
-
-cleanup() { sweep_tmux_servers; rm -rf "$scratch_home"; }
 # EXIT alone is sufficient, including when this wrapper is killed:
 # `scripts/nightly-flake-stress.sh` TERMs it when its outer deadline fires, and
 # bash runs an EXIT trap on a fatal signal as well as on a normal exit —
