@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for scripts/restart-build-lib.sh — run: bash scripts/restart-build-lib.test.sh
 #
-# The invariant under test: restart.sh may only ship .build/debug when the
+# The invariant under test: restart.sh may only ship .build/<config> when the
 # build it just ran actually succeeded. The failure this guards against is a
 # pipeline swallowing the status — `scripts/swift-safe build … | tail -3`
 # exits with tail's status (0) even when swift-safe exited 75 having compiled

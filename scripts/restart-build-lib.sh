@@ -4,7 +4,7 @@
 #
 # restart.sh's job after the build is destructive and machine-wide — it
 # assembles a bundle, copies it over /Applications/TBD.app, and restarts the
-# shared daemon. Everything it ships comes out of .build/debug, so it may only
+# shared daemon. Everything it ships comes out of .build/<config>, so it may only
 # run when the build it just asked for actually produced those binaries. That
 # makes "did the build succeed?" a load-bearing decision rather than a
 # formality, which is why it lives here as a pure function with its own
@@ -21,7 +21,7 @@
 # wait yielded its place in the queue). Both compiled nothing at all.
 SWIFT_SAFE_SLOT_NOT_OBTAINED_STATUSES=(75 76)
 
-# May restart.sh ship what is in .build/debug, given the status of the build
+# May restart.sh ship what is in .build/<config>, given the status of the build
 # it just ran? Only a clean zero says yes. Deliberately not "is it one of the
 # statuses I recognize" — an unrecognized non-zero is still a build that did
 # not finish, and a whitelist of known-good is the only shape that stays safe
@@ -74,7 +74,7 @@ describe_build_failure() {
 # because the pipeline is exactly the bug this function exists to prevent:
 # a pipeline's exit status is the LAST command's, so `swift-safe … | tail -3`
 # always reports 0, `set -e` never fires, and restart.sh happily ships
-# whatever stale binaries were already in .build/debug. That is not
+# whatever stale binaries were already in .build/<config>. That is not
 # hypothetical — a 1800s lock timeout (exit 75, nothing compiled) was read as
 # a successful build and the app and daemon were relaunched machine-wide.
 # scripts/swift-safe prints its numeric status on a final stderr line
