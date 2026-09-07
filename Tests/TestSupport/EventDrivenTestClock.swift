@@ -931,10 +931,9 @@ public func settle() async {
 ///   none appeared within `window`.
 public func watchForSleeper(on clock: EventDrivenTestClock,
                             upTo window: Swift.Duration = .seconds(1)) async -> Bool {
-    let deadline = ContinuousClock.now.advanced(by: window)
-    repeat {
-        if clock.hasSleeper { return true }
-        try? await Task.sleep(for: .milliseconds(10))
-    } while ContinuousClock.now < deadline
-    return clock.hasSleeper
+    // Absence is what this reports, so a cancelled watch reports absence too —
+    // and, unlike the loop this replaced, stops burning a thread to do it.
+    return await pollUntilTrue(
+        timeout: window, pollInterval: .milliseconds(10), { clock.hasSleeper }
+    ) == .satisfied
 }

@@ -186,12 +186,17 @@ extension RPCRouterTests {
         _ what: String, timeout: TimeInterval = TestDeadlines.saturatedPassSeconds,
         _ condition: @Sendable () async -> Bool
     ) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if await condition() { return }
-            try await Task.sleep(for: .milliseconds(10))
+        switch await pollUntilTrue(
+            timeout: .seconds(timeout), pollInterval: .milliseconds(10), condition
+        ) {
+        case .satisfied:
+            return
+        case .cancelled:
+            // Propagated, not swallowed — see `RepoRemoveCascadeTests.waitUntil`.
+            throw CancellationError()
+        case .timedOut:
+            throw RepoRemoveWaitTimeout(what: what, seconds: timeout)
         }
-        throw RepoRemoveWaitTimeout(what: what, seconds: timeout)
     }
 
     /// Medium-2 review finding: `repo.remove` hard-deletes every worktree

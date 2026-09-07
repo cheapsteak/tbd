@@ -183,11 +183,9 @@ func awaitDeliveryCycle(
         await verifier.awaitPendingObservations()
         completion.set()
     }
-    let deadline = ContinuousClock.now.advanced(by: timeout)
-    while ContinuousClock.now < deadline {
-        if completion.isDone { return }
-        try? await Task.sleep(for: .milliseconds(10))
-    }
+    guard case .timedOut = await pollUntilTrue(
+        timeout: timeout, pollInterval: .milliseconds(10), { completion.isDone }
+    ) else { return }
     Issue.record(
         DeliveryCycleUnfinished(timeout: timeout, observed: observed()),
         sourceLocation: sourceLocation)

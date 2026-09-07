@@ -52,17 +52,27 @@ private final class PathGate: @unchecked Sendable {
         return opened.contains(path)
     }
 
+    /// Parks the caller until `open(path)` is called.
+    ///
     /// The self-release cap must strictly dominate the `waitUntil` that
     /// observes this hold, or the gate opens itself mid-observation and the
     /// test measures nothing. `TestGate.deadline` is sized for exactly that
     /// relationship against `TestDeadlines.saturatedPass` — see
     /// `Tests/TestSupport/BoundedGateSupport.swift`.
-    func wait(_ path: String, timeout: Duration = TestGate.deadline) async {
+    ///
+    /// Giving up is also **loud**, because a gate that self-releases in silence
+    /// hands the test a cascade it believes is still held, and the
+    /// mis-attributed failure then lands on whatever the test asserted next.
+    /// Sizing keeps that unreachable on a healthy run; the diagnostic is what
+    /// makes it legible when the sizing is wrong.
+    func wait(_ path: String, timeout: Duration = TestGate.deadline,
+              sourceLocation: SourceLocation = #_sourceLocation) async {
         lock.withLock { entered.append(path) }
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while !isOpen(path), ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(5))
-        }
+        guard case .timedOut = await pollUntilTrue(timeout: timeout, { isOpen(path) })
+        else { return }
+        Issue.record(
+            TestGateTimeout(gate: "PathGate(\(path))", after: timeout),
+            sourceLocation: sourceLocation)
     }
 }
 
@@ -90,12 +100,20 @@ struct RepoRemoveCascadeTests {
         observed: @Sendable () async -> String = { "still false" },
         _ condition: @Sendable () async -> Bool
     ) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if await condition() { return }
-            try await Task.sleep(for: .milliseconds(10))
+        switch await pollUntilTrue(
+            timeout: .seconds(timeout), pollInterval: .milliseconds(10), condition
+        ) {
+        case .satisfied:
+            return
+        case .cancelled:
+            // A throwing waiter propagates cancellation rather than returning,
+            // which is what it did before this loop was shared. Returning would
+            // walk a cancelled test into the assertions that follow and pin the
+            // failure on them — the mis-attribution this file exists to remove.
+            throw CancellationError()
+        case .timedOut:
+            throw CascadeWaitTimeout(what: what, observed: await observed(), seconds: timeout)
         }
-        throw CascadeWaitTimeout(what: what, observed: await observed(), seconds: timeout)
     }
 
     /// Router sharing one `StateSubscriptionManager` with its lifecycle, with
