@@ -51,6 +51,13 @@ assert_no_file() {
     if [ -f "$2" ]; then fail "$1: unexpected $2"; else pass "$1"; fi
 }
 
+# A resource bundle is a directory, so "it is gone" has to be asserted on the
+# directory itself — an emptied-but-surviving bundle is still an orphan the
+# next person debugging a resource lookup has to rule out.
+assert_no_dir() {
+    if [ -d "$2" ]; then fail "$1: unexpected $2"; else pass "$1"; fi
+}
+
 # Read one top-level field out of the sidecar without assuming jq is installed.
 sidecar_field() {
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"
@@ -299,6 +306,76 @@ test_assemble_bundle_drops_a_stale_sidecar() {
         "$bundle/Contents/TBDBuildIdentity.json"
 }
 
+# The app binary is hard-linked into the .app, so `Bundle.main` is TBD.app and
+# a dependency that looks its own bundle up by name finds only what was staged
+# there. Staging just the app's own bundle is what left SwiftTerm's Metal
+# renderer without Shaders.metal and silently on CoreGraphics.
+test_assemble_bundle_stages_every_dependency_resource_bundle() {
+    local repo build bundle
+    repo="$(mkrepo)"
+    build="$repo/.build/release"
+    mkbuild "$build"
+    mkdir -p "$build/SwiftTerm_SwiftTerm.bundle" "$build/OtherDep_OtherDep.bundle"
+    printf 'shaders' > "$build/SwiftTerm_SwiftTerm.bundle/Shaders.metal"
+    printf 'asset' > "$build/OtherDep_OtherDep.bundle/Asset.txt"
+
+    assert_ok "assemble_app_bundle succeeds with several resource bundles" \
+        assemble_app_bundle "$repo" "$build" "/usr/bin:/bin"
+
+    bundle="$(bundle_dir_for_build "$build")"
+    assert_file "the bundle carrying the Metal shaders is staged" \
+        "$bundle/Contents/Resources/SwiftTerm_SwiftTerm.bundle/Shaders.metal"
+    assert_file "a second dependency bundle is staged too" \
+        "$bundle/Contents/Resources/OtherDep_OtherDep.bundle/Asset.txt"
+    # Copying everything must not come at the cost of the one bundle whose
+    # absence the assembly already warns about.
+    assert_file "the app's own resource bundle survives the wider copy" \
+        "$bundle/Contents/Resources/TBD_TBDApp.bundle/Localizable.strings"
+}
+
+test_assemble_bundle_skips_test_fixture_bundles() {
+    local repo build bundle
+    repo="$(mkrepo)"
+    build="$repo/.build/release"
+    mkbuild "$build"
+    mkdir -p "$build/TBD_TBDAppTests.bundle" "$build/SwiftTerm_SwiftTerm.bundle"
+    printf 'fixture' > "$build/TBD_TBDAppTests.bundle/Fixture.json"
+    printf 'shaders' > "$build/SwiftTerm_SwiftTerm.bundle/Shaders.metal"
+
+    assemble_app_bundle "$repo" "$build" "/usr/bin:/bin" >/dev/null 2>&1
+
+    bundle="$(bundle_dir_for_build "$build")"
+    assert_no_dir "test-target fixtures stay out of the shipped app" \
+        "$bundle/Contents/Resources/TBD_TBDAppTests.bundle"
+    # Paired with the exclusion so a copy loop that stages nothing at all
+    # cannot pass this case by accident.
+    assert_file "a real dependency bundle beside the fixture is still staged" \
+        "$bundle/Contents/Resources/SwiftTerm_SwiftTerm.bundle/Shaders.metal"
+}
+
+test_assemble_bundle_clears_a_dropped_resource_bundle() {
+    local repo build bundle
+    repo="$(mkrepo)"
+    build="$repo/.build/release"
+    mkbuild "$build"
+    mkdir -p "$build/OldDep_OldDep.bundle"
+    printf 'asset' > "$build/OldDep_OldDep.bundle/Asset.txt"
+    assemble_app_bundle "$repo" "$build" "/usr/bin:/bin" >/dev/null 2>&1
+
+    bundle="$(bundle_dir_for_build "$build")"
+    assert_file "the first assembly stages the dependency" \
+        "$bundle/Contents/Resources/OldDep_OldDep.bundle/Asset.txt"
+
+    # A dependency that is dropped or renamed must not leave its bundle in the
+    # .app forever: the staged set is rebuilt from what the build produced.
+    rm -rf "$build/OldDep_OldDep.bundle"
+    assemble_app_bundle "$repo" "$build" "/usr/bin:/bin" >/dev/null 2>&1
+    assert_no_dir "a bundle the build no longer produces is cleared" \
+        "$bundle/Contents/Resources/OldDep_OldDep.bundle"
+    assert_file "clearing the stale set keeps the bundles that remain" \
+        "$bundle/Contents/Resources/TBD_TBDApp.bundle/Localizable.strings"
+}
+
 # MARK: - Signing
 
 test_sign_prefers_the_stable_identity() {
@@ -453,6 +530,9 @@ test_json_escape_string
 test_assemble_bundle_produces_a_launchable_bundle
 test_assemble_bundle_rejects_an_empty_path
 test_assemble_bundle_drops_a_stale_sidecar
+test_assemble_bundle_stages_every_dependency_resource_bundle
+test_assemble_bundle_skips_test_fixture_bundles
+test_assemble_bundle_clears_a_dropped_resource_bundle
 test_sign_prefers_the_stable_identity
 test_sign_rejects_a_missing_bundle_argument
 test_install_replaces_the_previous_bundle

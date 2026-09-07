@@ -32,6 +32,8 @@ struct TerminalSettingsView: View {
     @EnvironmentObject var appearance: AppearanceSettings
     @Environment(AppState.self) var appState
     @AppStorage(AppState.terminalAutoResizeKey) private var enableTerminalAutoResize: Bool = false
+    @AppStorage(AppState.useMetalTerminalRendererKey) private var useMetalTerminalRenderer: Bool =
+        AppState.useMetalTerminalRendererDefault
 
     @StateObject private var editorVM = TerminalThemeEditorViewModel()
     @State private var showingSaveAsDialog = false
@@ -219,10 +221,15 @@ struct TerminalSettingsView: View {
             Section {
                 Toggle("Auto-resize tmux windows to match the app pane (WIP)", isOn: $enableTerminalAutoResize)
                     .help("When on, TBD broadcasts the live pane size to the daemon and resizes every tmux window on app resize. Currently unstable — can leave panes smaller than the visible area and clip the bottom rows.")
+                Toggle("GPU terminal rendering (Metal)", isOn: $useMetalTerminalRenderer)
+                    .help("Draws terminals through SwiftTerm's Metal renderer instead of its CoreGraphics path. If the GPU path is unavailable, terminals stay on CoreGraphics. While on, terminals already open keep the glyphs they have already drawn, so a Thin Strokes change reaches them only as new characters appear.")
+                Text("Takes effect for terminals opened after the change — restart the app to switch every open terminal at once.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } header: {
                 Text("Experimental")
             } footer: {
-                Text("Off by default — under active development. Known bugs around tmux \"window-size manual\" lock-in can clip the bottom rows of a pane. To bail out, turn it off and restart the app.")
+                Text("Both off by default — under active development. Auto-resize has known bugs around tmux \"window-size manual\" lock-in that can clip the bottom rows of a pane; to bail out of either setting, turn it off and restart the app.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
