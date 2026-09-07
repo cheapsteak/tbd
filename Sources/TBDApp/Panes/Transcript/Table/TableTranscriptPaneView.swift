@@ -284,6 +284,27 @@ struct TableTranscriptPaneView: View {
                         // registration is keyed on the terminal it was made for.
                         // A fresh view per terminal is what keeps the two agreeing.
                         .id(decision.terminal.id)
+                        // The completion list is an overlay on the composer and
+                        // draws UPWARD, out over the transcript above it. The
+                        // table is its sibling in this stack and an AppKit view
+                        // besides, so it is stated here which of the two paints
+                        // on top rather than left to stacking order.
+                        //
+                        // This lifts the WHOLE composer subtree, so an open menu
+                        // also paints over the table's own bottom-leading
+                        // `jumpToBottomButton` overlay when the transcript is
+                        // scrolled up. That is intended: the menu is a transient
+                        // popup and, while it is open, it owns the pane. Escape
+                        // or a token change closes it and the button is back.
+                        //
+                        // Defensive, not test-verified: the offscreen harness
+                        // already orders this SwiftUI overlay above the AppKit
+                        // sibling with or without this modifier, so no test
+                        // discriminates it. It guards the live app, where the
+                        // transcript's NSTableView may composite over a sibling
+                        // overlay instead of respecting SwiftUI's z-order — the
+                        // live pass is what actually verifies it.
+                        .zIndex(1)
                 }
             }
         }

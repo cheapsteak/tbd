@@ -1491,6 +1491,16 @@ final class AppState {
             try await daemonClient.terminalWakeReporting(
                 terminalID: terminalID, cols: cols, rows: rows, prompt: prompt)
         }
+    /// How the composer's completion inventory is fetched — injectable for the
+    /// same reason as `composerWakeSender`, so a mounted composer can open its
+    /// menu with real rows in a test, with no daemon on the other end of the
+    /// socket.
+    @ObservationIgnored
+    lazy var composerCompletionsFetcher:
+        @MainActor (UUID) async throws -> TerminalCompletionsResult =
+        { [daemonClient] terminalID in
+            try await daemonClient.terminalCompletions(terminalID: terminalID)
+        }
     /// How `setTranscriptComposerEnabled` persists the composer gate —
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored

@@ -87,18 +87,32 @@ struct MessageComposerView: View {
             .padding(8)
         }
         .background(.background.secondary)
-        .overlay(alignment: .bottomLeading) {
-            // Opens UPWARD from the composer, offset by the composer's own
-            // height so it never covers the text being typed.
+        .overlay(alignment: .topLeading) {
+            // Opens UPWARD, out over the transcript, so it never covers the
+            // text being typed.
+            //
+            // Two nested alignments rather than one alignment guide.
+            // `.topLeading` pins a zero-height anchor to the composer's TOP
+            // edge, and the list is that anchor's bottom-aligned overlay, so
+            // its bottom edge lands on that line and its rows stack up from
+            // there. `.overlay` aligns EDGES — an overlay taller than the view
+            // it hangs off simply overflows in the direction the alignment
+            // leaves free — and moving the guide instead
+            // (`.alignmentGuide(.top) { $0[.bottom] }`) is silently ignored
+            // here, which is how the list came to open downward over the field
+            // in the first place.
             if let controller, controller.isOpen {
-                CompletionOverlayView(
-                    controller: controller,
-                    onAccept: { accept($0) },
-                    // Reached only from an explicit click; hover is handled
-                    // inside the overlay and moves nothing.
-                    onHighlight: { controller.moveTo(index: $0) })
-                .frame(width: 460)
-                .alignmentGuide(.bottom) { $0[.top] }
+                Color.clear
+                    .frame(width: 460, height: 0)
+                    .overlay(alignment: .bottomLeading) {
+                        CompletionOverlayView(
+                            controller: controller,
+                            onAccept: { accept($0) },
+                            // Reached only from an explicit click; hover is
+                            // handled inside the overlay and moves nothing.
+                            onHighlight: { controller.moveTo(index: $0) })
+                        .frame(width: 460)
+                    }
             }
         }
         .onDisappear {

@@ -11,9 +11,12 @@ import SwiftUI
 /// the floating-panel code documents that adding a child window to the split-view
 /// window raises an exception.
 ///
-/// It opens **upward** from the composer, and its height is fixed at eight rows
-/// with a scroller, so a change in row count never shifts the text field under
-/// the caret.
+/// It opens **upward** from the composer: its BOTTOM edge is pinned to the top
+/// of the composer and the rows stack up from there, out over the transcript, so
+/// the list never covers the text being typed. Eight rows at most, with a
+/// scroller past that — and because the pinned edge is the bottom one, a change
+/// in row count grows the list away from the text field rather than shifting the
+/// field under the caret.
 struct CompletionOverlayView: View {
     let controller: CompletionController
     let onAccept: (CommandRanker.Row) -> Void
@@ -25,7 +28,22 @@ struct CompletionOverlayView: View {
     @State private var hoveredIndex: Int?
 
     static let rowHeight: CGFloat = 44
-    static let maxHeight: CGFloat = rowHeight * CGFloat(CompletionController.visibleRowCount)
+    /// The tallest the list ever gets: eight rows, and a scroller past that.
+    static var maxHeight: CGFloat {
+        listHeight(rowCount: CompletionController.visibleRowCount)
+    }
+
+    /// How tall the list is for a given number of rows: as many rows as it has,
+    /// up to eight.
+    ///
+    /// **A definite height, not a cap.** This is an overlay on the composer, and
+    /// an overlay is proposed the composer's own size — so a list that only
+    /// bounded itself with `.frame(maxHeight:)` came out the height of the text
+    /// field, three rows of an eight-row menu, however many rows it had. Stating
+    /// the height is what lets it be taller than the view it hangs off.
+    static func listHeight(rowCount: Int) -> CGFloat {
+        rowHeight * CGFloat(min(max(rowCount, 1), CompletionController.visibleRowCount))
+    }
 
     var body: some View {
         // `.closed` renders nothing at all — no chrome, no zero-height frame —
@@ -114,7 +132,7 @@ struct CompletionOverlayView: View {
                     }
                 }
             }
-            .frame(maxHeight: Self.maxHeight)
+            .frame(height: Self.listHeight(rowCount: controller.rows.count))
             .onChange(of: controller.selectedIndex) { _, index in
                 guard let index, controller.rows.indices.contains(index) else { return }
                 proxy.scrollTo(controller.rows[index].id, anchor: .center)
