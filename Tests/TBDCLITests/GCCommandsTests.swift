@@ -26,8 +26,8 @@ struct GCCommandsTests {
     /// The holder legs take no switch of their own: holder-ness is a transport
     /// property, so the rendezvous and row-less sweeps run under `gcEnabled`
     /// and the reaper's holder leg runs unconditionally. A `tbd gc` group that
-    /// still offered a name for any of them would advertise a gate that no
-    /// longer exists.
+    /// offered a name for any of them would advertise a gate that does not
+    /// exist.
     @Test func theHolderLegsHaveNoSwitchOfTheirOwn() {
         let names = GCCommand.configuration.subcommands.map { $0._commandName }
         #expect(!names.contains("holders"))

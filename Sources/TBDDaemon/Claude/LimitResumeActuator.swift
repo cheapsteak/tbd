@@ -439,10 +439,6 @@ public struct LimitResumeActuator: LimitResumeActuating {
         //     EVERY call to `checkEligibility` (the initial pass and every
         //     attempt>1 re-check in `actuate`), so attempt 2 never fires
         //     after the user turns the row's gate off mid-flight.
-        //
-        //     One config read serves both this gate and the holder arm's
-        //     below, so a single pass cannot act on two different snapshots of
-        //     the same row.
         guard let config = try? await db.config.get(),
               config.autoResumeEnabled(forLimitType: resume.limitType) else {
             return .notEligible(.cancelledExternally)

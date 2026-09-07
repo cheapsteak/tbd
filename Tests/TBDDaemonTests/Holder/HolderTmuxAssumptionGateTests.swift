@@ -710,7 +710,7 @@ struct HolderTmuxAssumptionGateTests {
     /// The auto rail's two branches on a holder row, and they turn on the
     /// idle sweep's own master switch and nothing transport-shaped.
     @Test("the auto rail elects a holder row when auto-hibernate is on and refuses it when off")
-    func autoRailFollowsTheMasterSwitchOnAHolderRow() async throws {
+    func autoRailFollowsTheAutoHibernateSwitchOnAHolderRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -811,7 +811,11 @@ struct HolderTmuxAssumptionGateTests {
         let before = RowFingerprint(terminal)
         #expect(before.hibernatedAt == nil && before.suspendedAt == nil)
 
-        let result = await coordinator(db, tmux: tmux).wake(terminalID: terminal.id)
+        // The verdict is the process table's answer about the recorded child,
+        // so script it: the production signaller would ask the real kernel
+        // about a fixture pid.
+        let result = await coordinator(db, tmux: tmux, signaller: deadChildSignaller())
+            .wake(terminalID: terminal.id)
         #expect(result == .sessionGone(paneID: "", detail: .processExited))
 
         let after = try #require(try await db.terminals.get(id: terminal.id))
