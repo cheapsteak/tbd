@@ -25,8 +25,9 @@ import TBDShared
 /// **Each shot asserts it is not blank.** A view that was never laid out renders
 /// as a large, perfectly plausible white rectangle, and a harness that wrote one
 /// out would report success and hand over a picture of nothing. The luminance
-/// variance of the capture has to clear `minLuminanceVariance` before the file
-/// is written, so a broken render fails instead.
+/// variance of the capture has to clear `OffscreenHostDefaults.minLuminanceVariance`
+/// before the file is written, so a broken render fails instead of landing a
+/// blank PNG beside the real ones.
 @MainActor
 @Suite("composer render harness")
 struct ComposerRenderHarness {
@@ -50,10 +51,6 @@ struct ComposerRenderHarness {
     /// Pixels per point. 2x because these are read on a Retina display and a 1x
     /// capture of 9pt caption text is unreadable.
     private static let captureScale: CGFloat = 2
-
-    /// Far below anything a real render produces, far above the zero a flat
-    /// field scores. See `OffscreenHost.Capture.luminanceVariance()`.
-    private static let minLuminanceVariance = 0.0005
 
     /// Pumps spent after the state under test has settled, so the asynchronous
     /// parts of a composer — a thumbnail decoding off the main thread, the
@@ -150,19 +147,35 @@ struct ComposerRenderHarness {
     }
 
     /// Capture, check the capture is a picture of something, and write it.
+    ///
+    /// The check gates the write for real: a blank capture throws before
+    /// `writePNG` runs, so a broken render never lands a picture of nothing
+    /// beside the three that rendered correctly.
     private static func write(
         _ shot: Shot, of harness: ComposerHarness, into directory: URL
     ) async throws {
         await harness.host.pump(times: extraDrawPumps)
         let capture = try harness.host.capture(scale: captureScale)
         let variance = capture.luminanceVariance()
-        #expect(
-            variance >= minLuminanceVariance,
-            .init(rawValue: """
-                \(shot.rawValue).png is a flat field (luminance variance \(variance)) — \
-                the composer rendered blank rather than being captured
-                """))
+        guard variance >= OffscreenHostDefaults.minLuminanceVariance else {
+            throw RenderError.blankRender(shot: shot, variance: variance)
+        }
         try capture.writePNG(to: directory.appendingPathComponent("\(shot.rawValue).png"))
+    }
+
+    /// What can go wrong writing a shot out. A distinct type, rather than
+    /// `#expect`, because the whole point is that a blank render must stop the
+    /// write rather than merely fail the test alongside it.
+    private enum RenderError: Error, CustomStringConvertible {
+        case blankRender(shot: Shot, variance: Double)
+
+        var description: String {
+            switch self {
+            case let .blankRender(shot, variance):
+                return "\(shot.rawValue).png is a flat field (luminance variance \(variance)) — "
+                    + "the composer rendered blank rather than being captured"
+            }
+        }
     }
 
     /// A small, deliberately recognisable PNG for the attachment thumbnail:

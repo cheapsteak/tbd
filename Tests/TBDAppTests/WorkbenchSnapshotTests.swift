@@ -24,14 +24,6 @@ struct WorkbenchSnapshotTests {
     /// loudly rather than pass and be mistaken for a rendering defect.
     private static let minPlausiblePNGBytes = 20_000
 
-    /// The other half of that guard, and the sharper one: a PNG can be large and
-    /// still be a picture of nothing — a flat field compresses badly once it
-    /// carries any gradient or vibrancy. Luminance variance is near zero for a
-    /// blank capture and two orders of magnitude above this for a screenful of
-    /// transcript, so the threshold sits far below anything a real render
-    /// produces and far above zero.
-    private static let minLuminanceVariance = 0.0005
-
     /// Turns of the run loop between building the hierarchy and capturing it,
     /// and how long each one may block. Synchronous because the whole render
     /// happens inside a drawing-appearance closure, which cannot await.
@@ -199,7 +191,26 @@ struct WorkbenchSnapshotTests {
                         .environment(appState)),
                 size: size,
                 appearance: appearance)
-            defer { host.tearDown() }
+            let window = host.window
+            // Guarantee teardown on every exit, including the `throw` below —
+            // a `defer` after this point would run before the assertion that
+            // follows it in this same scope could observe the result, so
+            // teardown and the assertion both happen explicitly instead.
+            defer {
+                host.tearDown()
+                // `tearDown()` must actually release the window rather than
+                // merely hide it — with `isReleasedWhenClosed = false` and no
+                // `close()`, every mounted window otherwise stays in
+                // `NSApp.windows` for the process lifetime (see
+                // `OffscreenHost.tearDown()` and the same trap at
+                // `TabBarHitAreaTests.keyViewProxyMaxWidth`). This suite
+                // mounts five of these per run, so a regression here would
+                // leave five orphaned windows behind every `swift test`
+                // invocation.
+                #expect(
+                    !NSApp.windows.contains(window),
+                    "OffscreenHost.tearDown() left its window in NSApp.windows")
+            }
 
             // Layout and pump the run loop
             host.contentView.layoutSubtreeIfNeeded()
@@ -211,7 +222,7 @@ struct WorkbenchSnapshotTests {
 
             let shot = try host.capture()
             let variance = shot.luminanceVariance()
-            if variance < Self.minLuminanceVariance {
+            if variance < OffscreenHostDefaults.minLuminanceVariance {
                 throw RenderError.blankRender(path: path, variance: variance)
             }
             try shot.writePNG(to: URL(fileURLWithPath: path))

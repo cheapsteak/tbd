@@ -48,12 +48,16 @@ final class ComposerHarness {
     /// that a full-height list has somewhere to open.
     static let defaultSize = NSSize(width: 720, height: 520)
 
+    /// More commands than the list's eight-row cap, so the cap is exercised
+    /// rather than assumed.
+    private static let inventoryCommandCount = 20
+
     /// A completions inventory with more commands than the list's eight-row cap,
     /// so the cap is exercised rather than assumed, and every name is derived
     /// from its index so a test can name a row it expects to see.
-    static func inventory(commandCount: Int = 20) -> TerminalCompletionsResult {
+    static func inventory() -> TerminalCompletionsResult {
         TerminalCompletionsResult(
-            commands: (0..<commandCount).map {
+            commands: (0..<inventoryCommandCount).map {
                 CompletionCommand(
                     name: "compact\($0)",
                     description: "Compact the conversation, take \($0)")
@@ -75,11 +79,15 @@ final class ComposerHarness {
     /// access are what the composer restores on appearance.
     var draft: ComposerDraft { appState.composerDraft(for: terminal.id) }
 
+    /// Aqua, always: a suite's capture must not depend on the developer's
+    /// system appearance. No caller has ever needed another one — a suite
+    /// asking a dark-mode question mounts `OffscreenHost` directly, the way
+    /// `WorkbenchSnapshotTests` does.
+    private static let appearance = NSAppearance(named: .aqua)
+
     private let defaults: UserDefaults
     private let suiteName: String
     private let scratchDirectory: URL
-    private let size: NSSize
-    private let appearance: NSAppearance?
     private let backdrop: Backdrop
     private var mounted: OffscreenHost<AnyView>?
 
@@ -98,9 +106,6 @@ final class ComposerHarness {
     init(
         name: String,
         terminal: ((UUID) -> Terminal)? = nil,
-        size: NSSize = ComposerHarness.defaultSize,
-        appearance: NSAppearance? = NSAppearance(named: .aqua),
-        inventory: TerminalCompletionsResult = ComposerHarness.inventory(),
         backdrop: Backdrop = .empty,
         prepare: (Setup) throws -> Void = { _ in }
     ) throws {
@@ -112,7 +117,7 @@ final class ComposerHarness {
         }
         self.defaults = defaults
         appState = AppState(userDefaults: defaults)
-        appState.composerCompletionsFetcher = { _ in inventory }
+        appState.composerCompletionsFetcher = { _ in Self.inventory() }
 
         let worktree = Self.worktree()
         self.worktree = worktree
@@ -121,15 +126,24 @@ final class ComposerHarness {
         state = ComposerState.resolve(
             terminal: terminal, isRemoteWorktree: false, composerEnabled: true)
 
-        self.size = size
-        self.appearance = appearance
         self.backdrop = backdrop
         scratchDirectory = URL(
             fileURLWithPath: fencedScratchRoot(prefix: "tbdcomposer"), isDirectory: true)
 
-        try prepare(Setup(
-            draft: appState.composerDraft(for: terminal.id),
-            scratchDirectory: scratchDirectory))
+        // `prepare` can throw for real — `renderStagedAttachment` writes a
+        // fixture file to disk in it — and when it does, `self` is never
+        // returned, so no caller ever gets a harness whose `tearDown()` could
+        // remove the `UserDefaults` domain just registered above. Remove it
+        // here instead, or a suite whose `prepare` fails leaks one persistent
+        // domain per failure.
+        do {
+            try prepare(Setup(
+                draft: appState.composerDraft(for: terminal.id),
+                scratchDirectory: scratchDirectory))
+        } catch {
+            defaults.removePersistentDomain(forName: suiteName)
+            throw error
+        }
     }
 
     /// Put the window away, drop the defaults suite, and remove anything staged.
@@ -230,7 +244,8 @@ final class ComposerHarness {
     /// The mounted composer, mounting it on first use.
     var host: OffscreenHost<AnyView> {
         if let mounted { return mounted }
-        let host = OffscreenHost(root: root(), size: size, appearance: appearance)
+        let host = OffscreenHost(
+            root: root(), size: Self.defaultSize, appearance: Self.appearance)
         mounted = host
         return host
     }

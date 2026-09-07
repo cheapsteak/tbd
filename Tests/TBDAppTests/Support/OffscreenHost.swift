@@ -27,6 +27,15 @@ enum OffscreenHostDefaults {
     /// "what colour is this region" and "did anything paint at all", and neither
     /// wants to walk four million pixels.
     static let sampleStride = 4
+
+    /// The threshold `OffscreenHost.Capture.luminanceVariance()` has to clear to
+    /// count as a picture of something rather than a flat field.
+    ///
+    /// Far below anything a real render produces, far above the zero a flat
+    /// field scores — a view that was never laid out renders as a large,
+    /// perfectly plausible blank image, and this is what tells a snapshot suite
+    /// apart from one.
+    static let minLuminanceVariance = 0.0005
 }
 
 /// A SwiftUI view mounted in a real — but offscreen — AppKit window, for the
@@ -164,8 +173,24 @@ final class OffscreenHost<Root: View> {
     }
 
     /// Take the window back down. Idempotent, and safe to call from a `defer`.
+    ///
+    /// `orderOut` alone leaves the window sitting in `NSApp.windows` for the
+    /// rest of the process — the same trap documented at
+    /// `TabBarHitAreaTests.keyViewProxyMaxWidth`, except `close()` alone does
+    /// not clear it either. **Measured**, not merely reasoned: with
+    /// `isReleasedWhenClosed = false`, `NSWindow.close()` removes the window
+    /// from the screen but leaves it in `NSApp.windows` — AppKit only drops a
+    /// window from that list as part of releasing it, so a window told never
+    /// to release itself never leaves the list, no matter how many times
+    /// `close()` runs. Flipping the flag to `true` immediately before closing
+    /// is what actually removes it; a caller's own strong reference to
+    /// `window` (this type keeps one) is enough to survive the release AppKit
+    /// then performs, so nothing here is unsafe to touch afterwards.
     func tearDown() {
         window.orderOut(nil)
+        window.contentView = nil
+        window.isReleasedWhenClosed = true
+        window.close()
     }
 
     // MARK: - Pumping
