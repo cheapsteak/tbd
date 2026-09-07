@@ -242,10 +242,19 @@ test_restart_sh_routes_the_build_through_the_guard() {
     assert_contains "a non-zero build status exits restart.sh" "$body" '[ "$build_status" -eq 0 ] || exit "$build_status"'
 }
 
-test_restart_sh_never_pipes_the_build_status_away() {
-    local piped
-    piped="$(grep -nE 'swift-safe build.*\|' "$HERE/restart.sh" || true)"
-    assert_eq "no swift-safe build invocation is piped in restart.sh" "" "$piped"
+# The `swift-safe build` invocation lives in restart-build-lib.sh, so that is the
+# file this grep has to read; pointed at restart.sh it can never match and the
+# assertion passes unconditionally. Both files are scanned so the mistake cannot
+# be reintroduced at the call's old home either.
+test_the_build_invocation_never_pipes_the_status_away() {
+    local f piped
+    for f in restart-build-lib.sh restart.sh; do
+        # `||` is not a pipe. Mask it before looking for a real one, or the
+        # `|| status=$?` that KEEPS the build's status reads as the very bug
+        # this guard exists to catch.
+        piped="$(grep -nE 'swift-safe build' "$HERE/$f" | sed 's/||/OR/g' | grep -E '\|' || true)"
+        assert_eq "no swift-safe build invocation is piped in $f" "" "$piped"
+    done
 }
 
 # --skip-build (--quick) must keep shipping the existing binaries: no build was
