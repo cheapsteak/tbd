@@ -7,9 +7,16 @@ import Foundation
         let t = ModelProxyRoute.mintToken()
         #expect(t.count == 32)
         #expect(ModelProxyRoute.isValidToken(t))
-        #expect(!ModelProxyRoute.isValidToken(t.uppercased()))
         #expect(!ModelProxyRoute.isValidToken(String(t.dropLast())))
         #expect(!ModelProxyRoute.isValidToken("../etc/passwd"))
+
+        // Pinned through the generator seam: an unseeded mint can come up all
+        // digits, and `uppercased()` on an all-digit token is still valid hex,
+        // so the case assertion needs a token that actually contains letters.
+        let seeded = ModelProxyRoute.mintToken(random: { 0xdead_beef_cafe_f00d })
+        #expect(seeded == "deadbeefcafef00ddeadbeefcafef00d")
+        #expect(ModelProxyRoute.isValidToken(seeded))
+        #expect(!ModelProxyRoute.isValidToken(seeded.uppercased()))
     }
 
     @Test func roundTripsThroughJSON() throws {
