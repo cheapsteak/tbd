@@ -930,6 +930,13 @@ flag with a soak and a stated graduation plan.
   off → on leaves every running tmux session on tmux and routes only new
   spawns to holders; on → off leaves every running holder session on its
   holder and routes new spawns back to tmux.
+- **No per-leg switches.** Hibernation, orphan GC, the reaper and the
+  reconcile pass each have a holder leg, and each leg derives its gate from
+  the subsystem it belongs to: `auto_hibernate_enabled` for the idle sweep,
+  `gc_enabled` for the two GC arms, nothing for the reaper and reconcile legs,
+  which their tmux counterparts also run without. Holder-ness is a transport
+  property, not a second opt-in; the rule and its consequences are in
+  [`2026-09-06-holder-flag-collapse-design.md`](2026-09-06-holder-flag-collapse-design.md).
 - **Coexistence cost, stated honestly.** Both paths live until graduation:
   two reconciliation ground truths, a doubled test surface, and — counted
   accurately — a **third** attach path in the app, not a second. The app
