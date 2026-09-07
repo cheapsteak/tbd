@@ -7,6 +7,14 @@
 # in the macOS `lint` job while the other script harnesses run on `ubuntu-latest`
 # (.github/workflows/test.yml).
 #
+# AND IT MUST BE VERIFIED WITH `/bin/bash`, WHICH ON MACOS IS 3.2. A developer
+# with Homebrew's bash first on `PATH` is running 5.x, where several constructs
+# 3.2 cannot parse work fine — a `case` with an empty-string pattern nested
+# inside `"$( )"` inside another quoted string is the one that has already got
+# through review here. It fails at RUN time, as a syntax error from inside a
+# command substitution, so `bash -n` on 5.x does not see it either. Check with
+# `/bin/bash scripts/test.test.sh`, not `bash scripts/test.test.sh`.
+#
 # ZERO BUILDS, ZERO CPU LOAD, AND IT NEVER TOUCHES THE REAL ~/tbd, ~/.claude,
 # ~/.codex, ~/Library/Logs/TBD OR THE REAL TMUX SOCKET DIRECTORY. Every case
 # here drives the wrapper against a synthetic home under a throwaway fixture
@@ -449,7 +457,19 @@ kill_pids() {
   return 0
 }
 
-dir_exists() { if [ -d "$1" ]; then echo yes; else echo no; fi; }
+dir_exists()  { if [ -d "$1" ]; then echo yes; else echo no; fi; }
+file_exists() { if [ -f "$1" ]; then echo yes; else echo no; fi; }
+
+# Whether `$1` is a decimal pid. A helper rather than an inline `case` inside a
+# command substitution: macOS ships bash 3.2, whose parser cannot handle a
+# `case` with an empty-string pattern nested inside `"$( )"` inside another
+# quoted string, and the failure is a syntax error at RUN time.
+looks_like_a_pid() {
+  case "${1:-}" in
+    ''|*[!0-9]*) echo no ;;
+    *)           echo yes ;;
+  esac
+}
 
 # A short parent for fixture run roots, and it has to be short for the same
 # reason `scripts/test.sh` mints the real one in `/tmp`: a rendezvous socket
@@ -1420,7 +1440,7 @@ test_an_aged_root_with_no_claim_is_reclaimed() {
   old="$(mk_run_root "$roots" "unclaimed")"
   age_run_root "$old"
   assert_eq "the fixture really has no claim in it" "no" \
-    "$(if [ -f "$old/$RUN_OWNER_FILE" ]; then echo yes; else echo no; fi)"
+    "$(file_exists "$old/$RUN_OWNER_FILE")"
   reclaim_abandoned_run_roots "$roots"
   assert_eq "an unclaimed aged root is reclaimed" "no" "$(dir_exists "$old")"
   rm -rf "$roots"
@@ -1438,11 +1458,11 @@ test_a_real_run_claims_its_root_with_its_own_live_pid() {
   assert_ok "the run is unaffected" "$RUN_RC"
   claim="$fix/observed-claim"
   assert_eq "the claim existed during the run" "yes" \
-    "$(if [ -f "$claim" ]; then echo yes; else echo no; fi)"
+    "$(file_exists "$claim")"
   owner="$(sed -n 1p "$claim" 2>/dev/null)"
   recorded="$(sed -n 2p "$claim" 2>/dev/null)"
   assert_eq "it names a pid" "yes" \
-    "$(case "$owner" in ''|*[!0-9]*) echo no ;; *) echo yes ;; esac)"
+    "$(looks_like_a_pid "$owner")"
   # Both halves come from inside the run, because neither is checkable from out
   # here: the wrapper has exited by now, so its pid names nothing and its start
   # time cannot be re-derived. That is the whole reason the claim is written at
@@ -1463,7 +1483,7 @@ test_the_run_root_claim_is_load_bearing() {
   run_script "$mutant" "$fix"
   RUN_ENV=()
   assert_eq "without the claim the run leaves none" "no" \
-    "$(if [ -f "$fix/observed-claim" ]; then echo yes; else echo no; fi)"
+    "$(file_exists "$fix/observed-claim")"
   rmfix "$fix"
 }
 
