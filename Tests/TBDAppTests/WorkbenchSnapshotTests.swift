@@ -7,8 +7,9 @@ import TBDShared
 /// Renders the Session Workbench transcript UI to PNG at various viewport
 /// sizes and appearance settings for visual review.
 ///
-/// Uses in-process bitmap rendering (`bitmapImageRepForCachingDisplay`) to
-/// avoid screen-capture permission issues.
+/// Hosted offscreen through `OffscreenHost`, which captures in process rather
+/// than through a screen recording — a screenshot API would want a permission
+/// grant no CI machine has.
 @Suite("Workbench snapshot rendering")
 @MainActor
 struct WorkbenchSnapshotTests {
@@ -22,6 +23,20 @@ struct WorkbenchSnapshotTests {
     /// small means we captured an unlaid-out or empty view, which must fail
     /// loudly rather than pass and be mistaken for a rendering defect.
     private static let minPlausiblePNGBytes = 20_000
+
+    /// The other half of that guard, and the sharper one: a PNG can be large and
+    /// still be a picture of nothing — a flat field compresses badly once it
+    /// carries any gradient or vibrancy. Luminance variance is near zero for a
+    /// blank capture and two orders of magnitude above this for a screenful of
+    /// transcript, so the threshold sits far below anything a real render
+    /// produces and far above zero.
+    private static let minLuminanceVariance = 0.0005
+
+    /// Turns of the run loop between building the hierarchy and capturing it,
+    /// and how long each one may block. Synchronous because the whole render
+    /// happens inside a drawing-appearance closure, which cannot await.
+    private static let settlePumps = 5
+    private static let settleSpin: TimeInterval = 0.02
 
     /// Snapshot configurations: (name, width, height, appearance)
     private let configurations: [(String, CGFloat, CGFloat, NSAppearance?)] = [
@@ -110,8 +125,15 @@ struct WorkbenchSnapshotTests {
     }
 
     /// Render the SessionWorkbenchView to a PNG file.
-    /// Appearance must be set BEFORE building views so NSAttributedString colors
-    /// resolve in the correct context (text color does not update dynamically after creation).
+    ///
+    /// **Everything is built inside the appearance**, not merely captured inside
+    /// it: `NSAttributedString` colors resolve in the context that is current
+    /// when they are created and do not update afterwards, so a dark render
+    /// assembled outside `withDrawingAppearance` comes out with light text
+    /// colors. The host's opaque ground is resolved in there too, which is what
+    /// keeps a light backdrop from showing through a dark capture's prose region
+    /// — the defect that made correctly-resolved white prose invisible while
+    /// opaque activity rows and the rail looked fine.
     private func renderWorkbench(
         presentation: TranscriptPresentation,
         appState: AppState,
@@ -119,10 +141,7 @@ struct WorkbenchSnapshotTests {
         appearance: NSAppearance?,
         to path: String
     ) throws {
-        let frame = NSRect(origin: .zero, size: size)
-
-        // Set appearance context before building ANY views so text colors resolve correctly
-        let renderWithAppearance = {
+        try withDrawingAppearance(appearance) {
             // Build the table transcript view
             let context = TranscriptCardContext(
                 terminalID: nil,
@@ -165,7 +184,7 @@ struct WorkbenchSnapshotTests {
             tableCoordinator.tableView = tableView
             tableCoordinator.scrollView = scrollView
 
-            // Set up the workbench view via NSHostingView
+            // Set up the workbench view in an offscreen host
             let workbenchView = SessionWorkbenchView(
                 sections: presentation.indexSections,
                 onOpen: { _ in }
@@ -173,76 +192,29 @@ struct WorkbenchSnapshotTests {
                 scrollView.asSwiftUIView()
             }
 
-            let host = NSHostingView(rootView: AnyView(
-                workbenchView
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .environment(appState)
-            ))
-            host.translatesAutoresizingMaskIntoConstraints = false
-            if let appearance = appearance {
-                host.appearance = appearance
-            }
-
-            let container = NSView(frame: frame)
-            container.wantsLayer = true
-            container.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-            if let appearance = appearance {
-                container.appearance = appearance
-            }
-            container.addSubview(host)
-
-            NSLayoutConstraint.activate([
-                host.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                host.topAnchor.constraint(equalTo: container.topAnchor),
-                host.widthAnchor.constraint(equalToConstant: size.width),
-                host.heightAnchor.constraint(equalToConstant: size.height)
-            ])
+            let host = OffscreenHost(
+                root: AnyView(
+                    workbenchView
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .environment(appState)),
+                size: size,
+                appearance: appearance)
+            defer { host.tearDown() }
 
             // Layout and pump the run loop
-            container.layoutSubtreeIfNeeded()
-            host.layoutSubtreeIfNeeded()
-            self.pump()
+            host.contentView.layoutSubtreeIfNeeded()
+            host.hostingView.layoutSubtreeIfNeeded()
+            host.pumpSynchronously(times: Self.settlePumps, spin: Self.settleSpin)
             tableCoordinator.precomputeBottomWindow()
             tableView.layoutSubtreeIfNeeded()
-            self.pump()
+            host.pumpSynchronously(times: Self.settlePumps, spin: Self.settleSpin)
 
-            // Capture the bitmap DIRECTLY — deliberately no `NSImage.lockFocus()`
-            // round-trip. `lockFocus` pushes a drawing context that does not
-            // inherit `NSAppearance.current`, so a
-            // `NSColor.controlBackgroundColor.setFill()` backdrop resolves LIGHT
-            // even under darkAqua. That was harmless while assistant bubbles
-            // painted their own background, but this design makes them `.clear`
-            // — so the light backdrop showed through the prose region and the
-            // correctly-resolved dark-mode (white) prose became invisible
-            // against it, while opaque activity rows and the rail looked fine.
-            // Writing the cached rep straight out keeps ONE appearance for the
-            // whole capture; `container`'s layer supplies the opaque ground,
-            // resolved inside this closure.
-            guard let rep = container.bitmapImageRepForCachingDisplay(in: frame) else {
-                throw RenderError.couldNotMakePNG
+            let shot = try host.capture()
+            let variance = shot.luminanceVariance()
+            if variance < Self.minLuminanceVariance {
+                throw RenderError.blankRender(path: path, variance: variance)
             }
-            container.cacheDisplay(in: frame, to: rep)
-            guard let png = rep.representation(using: .png, properties: [:]) else {
-                throw RenderError.couldNotMakePNG
-            }
-            try png.write(to: URL(fileURLWithPath: path))
-        }
-
-        // Execute render inside appearance context so text colors resolve correctly
-        if let appearance = appearance {
-            var error: Error?
-            appearance.performAsCurrentDrawingAppearance {
-                do {
-                    try renderWithAppearance()
-                } catch let e {
-                    error = e
-                }
-            }
-            if let error = error {
-                throw error
-            }
-        } else {
-            try renderWithAppearance()
+            try shot.writePNG(to: URL(fileURLWithPath: path))
         }
     }
 
@@ -258,24 +230,18 @@ struct WorkbenchSnapshotTests {
         return coordinator
     }
 
-    /// Pump the run loop to allow deferred work to complete.
-    private func pump() {
-        for _ in 0..<5 {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-        }
-    }
-
     enum RenderError: Error, CustomStringConvertible {
-        case couldNotMakePNG
         case implausiblySmallPNG(name: String, bytes: Int)
+        case blankRender(path: String, variance: Double)
 
         var description: String {
             switch self {
-            case .couldNotMakePNG:
-                return "could not build a PNG representation of the rendered view"
             case let .implausiblySmallPNG(name, bytes):
                 return "\(name).png is only \(bytes) bytes — the view almost certainly "
                     + "rendered blank rather than being captured correctly"
+            case let .blankRender(path, variance):
+                return "the capture for \(path) has luminance variance \(variance) — "
+                    + "it is a flat field, i.e. the view never rendered"
             }
         }
     }

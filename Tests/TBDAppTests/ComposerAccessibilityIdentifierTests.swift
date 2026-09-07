@@ -19,319 +19,146 @@ import TBDShared
 /// declines to make an element at all is a no-op that reads perfectly well in a
 /// diff, and every assertion here fails against the composer as it stood before
 /// the identifiers were added.
+///
+/// **Nested under `AccessibilityBridgeSerialized`, and every body inside
+/// `withAccessibilityBridge`.** SwiftUI builds no accessibility tree until a
+/// client asks for one, the switch that asks is process-wide, and it changes
+/// AppKit's own behavior while it is on — so it is scoped to the body that needs
+/// it, and this suite is ordered against the others that care.
 extension AccessibilityBridgeSerialized {
     @MainActor
     @Suite("composer accessibility identifiers")
     struct ComposerAccessibilityIdentifierTests {
 
-        // MARK: - Fixtures
-
-        private static let inventory = TerminalCompletionsResult(
-            commands: (0..<20).map {
-                CompletionCommand(
-                    name: "compact\($0)", description: "Compact the conversation, take \($0)")
-            },
-            agents: [], freshness: .fresh, source: .probe)
-
-        private func makeWorktree() -> LocalWorktree {
-            LocalWorktree(Worktree(
-                id: UUID(), repoID: UUID(), name: "wt", displayName: "WT", branch: "main",
-                path: "/tmp/wt", status: .active, tmuxServer: "test-server", location: .local))!
-        }
-
-        private func makeTerminal(worktreeID: UUID) -> Terminal {
-            Terminal(
-                id: UUID(), worktreeID: worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
-                kind: .claude)
-        }
-
-        // MARK: - The harness
-
-        /// A mounted composer in an offscreen window, and what has to be torn down
-        /// after it. The shape is `CompletionOverlayPlacementTests`', for the same
-        /// reason: SwiftUI runs `.task` and lays a hierarchy out only for a view in
-        /// a window that has been shown.
-        private struct Mounted {
-            let window: NSWindow
-            let host: NSHostingView<AnyView>
-            let state: AppState
-            let suiteName: String
-
-            func tearDown() {
-                window.orderOut(nil)
-                UserDefaults.standard.removePersistentDomain(forName: suiteName)
-            }
-        }
-
-        private func mount(
-            state composerState: ComposerState = .running,
-            prepare: (ComposerDraft) -> Void = { _ in }
-        ) -> Mounted {
-            _ = NSApplication.shared
-            let suiteName = "ComposerAccessibilityIdentifierTests-\(UUID().uuidString)"
-            let appState = AppState(userDefaults: UserDefaults(suiteName: suiteName)!)
-            appState.composerCompletionsFetcher = { _ in Self.inventory }
-            let worktree = makeWorktree()
-            let terminal = makeTerminal(worktreeID: worktree.id)
-            prepare(appState.composerDraft(for: terminal.id))
-
-            let root = AnyView(
-                VStack(spacing: 0) {
-                    // Stands in for the transcript above the composer, so the
-                    // completion list has the region it opens out over.
-                    Color.clear
-                    MessageComposerView(
-                        terminal: terminal, worktree: worktree, state: composerState)
-                }
-                .environment(appState))
-
-            let host = NSHostingView(rootView: root)
-            let window = NSWindow(
-                contentRect: NSRect(x: -20_000, y: -20_000, width: 720, height: 520),
-                styleMask: [.borderless], backing: .buffered, defer: false)
-            window.isReleasedWhenClosed = false
-            window.contentView = host
-            window.orderFront(nil)
-            return Mounted(window: window, host: host, state: appState, suiteName: suiteName)
-        }
-
-        /// One pump of both pumps SwiftUI needs: the main run loop, which drives
-        /// AppKit's layout and display, and the cooperative pool, which drives
-        /// `.task`.
-        private func pump() async {
-            spinRunLoop()
-            await Task.yield()
-        }
-
-        /// Synchronous on purpose: `RunLoop.run(_:before:)` is unavailable from an
-        /// async context, and one turn of the main run loop is exactly what AppKit
-        /// needs to lay out and display what SwiftUI just published.
-        private func spinRunLoop() {
-            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.004))
-        }
-
-        /// Poll, bounded, for the tree to hold everything named. Returns the last
-        /// set it saw either way, so a failure can print what was actually there.
-        private func settle(
-            _ mounted: Mounted, until wanted: Set<String>, maxPumps: Int = 250
-        ) async -> Set<String> {
-            var seen = axIdentifiers(in: mounted.host)
-            for _ in 0..<maxPumps {
-                if wanted.isSubset(of: seen) { return seen }
-                await pump()
-                seen = axIdentifiers(in: mounted.host)
-            }
-            return seen
-        }
-
-        /// The same poll for a family of identifiers rather than exact names: the
-        /// completion rows are named after the commands the ranker chose, which is
-        /// not something a test should have to predict.
-        private func settle(
-            _ mounted: Mounted, untilAnyHasPrefix prefix: String, maxPumps: Int = 250
-        ) async -> Set<String> {
-            var seen = axIdentifiers(in: mounted.host)
-            for _ in 0..<maxPumps {
-                if seen.contains(where: { $0.hasPrefix(prefix) }) { return seen }
-                await pump()
-                seen = axIdentifiers(in: mounted.host)
-            }
-            return seen
-        }
-
-        private func report(_ mounted: Mounted, _ seen: Set<String>) -> Comment {
-            Comment(rawValue: """
-                the tree held: \(seen.sorted().joined(separator: ", "))
-                \(axTreeDescription(in: mounted.host))
-                """)
-        }
-
         // MARK: - The core controls
 
-        /// The container, the field, and the button: what any driver needs before it
-        /// can do anything at all with the composer.
-        @Test func theComposerExposesItsContainerFieldAndSendButton() async {
-            await withAccessibilityBridge {
-                let mounted = mount()
-                defer { mounted.tearDown() }
+        /// The container, the field, and the button: what any driver needs before
+        /// it can do anything at all with the composer.
+        @Test func theComposerExposesItsContainerFieldAndSendButton() async throws {
+            try await withAccessibilityBridge {
+                let harness = try ComposerHarness(name: "ComposerAccessibilityIdentifierTests")
+                defer { harness.tearDown() }
                 let wanted: Set<String> = [
                     ComposerAccessibility.root,
                     ComposerAccessibility.field,
                     ComposerAccessibility.send,
                 ]
-                let seen = await settle(mounted, until: wanted)
-                #expect(wanted.isSubset(of: seen), report(mounted, seen))
+                let seen = await harness.settle(untilIdentifiers: wanted)
+                #expect(wanted.isSubset(of: seen), Self.report(harness, seen))
             }
         }
 
         // MARK: - The completion list
 
         /// The list and its rows, each row addressable on its own. A list that
-        /// exposed only itself would let a driver see the menu and pick nothing out
-        /// of it.
-        @Test func theOpenMenuExposesItselfAndEachRow() async {
-            await withAccessibilityBridge {
-                let mounted = mount { $0.text = "/comp" }
-                defer { mounted.tearDown() }
+        /// exposed only itself would let a driver see the menu and pick nothing
+        /// out of it.
+        @Test func theOpenMenuExposesItselfAndEachRow() async throws {
+            try await withAccessibilityBridge {
+                let harness = try ComposerHarness(
+                    name: "ComposerAccessibilityIdentifierTests",
+                    prepare: { $0.draft.text = "/comp" })
+                defer { harness.tearDown() }
                 let prefix = ComposerAccessibility.menuRow(command: "")
-                let seen = await settle(mounted, untilAnyHasPrefix: prefix)
+                let seen = await harness.settle(untilAnyIdentifierHasPrefix: prefix)
 
-                #expect(seen.contains(ComposerAccessibility.menu), report(mounted, seen))
+                #expect(seen.contains(ComposerAccessibility.menu), Self.report(harness, seen))
                 let rows = seen.filter { $0.hasPrefix(prefix) }
-                #expect(!rows.isEmpty, report(mounted, seen))
-                // Named by command, so two rows are two identifiers rather than one
-                // repeated — the property that makes a specific row selectable.
-                #expect(rows.count > 1, report(mounted, seen))
+                #expect(!rows.isEmpty, Self.report(harness, seen))
+                // Named by command, so two rows are two identifiers rather than
+                // one repeated — the property that makes a specific row
+                // selectable.
+                #expect(rows.count > 1, Self.report(harness, seen))
                 #expect(
                     rows.contains(ComposerAccessibility.menuRow(command: "compact0")),
-                    report(mounted, seen))
+                    Self.report(harness, seen))
             }
         }
 
         // MARK: - The attachment strip
 
-        /// A staged image, its thumbnail, and its own remove button. The button is
-        /// the one that had to be argued for: an attachment thumbnail was a
+        /// A staged image, its thumbnail, and its own remove button. The button
+        /// is the one that had to be argued for: an attachment thumbnail was a
         /// `.combine`d element, which folds the x into the picture and leaves
         /// nothing to press.
-        @Test func aStagedImageExposesItsThumbnailAndItsRemoveButton() async {
-            await withAccessibilityBridge {
-                let mounted = mount { draft in
-                    draft.stage(path: "/tmp/tbd-composer-a11y-nonexistent.png", id: UUID())
-                }
-                defer { mounted.tearDown() }
+        @Test func aStagedImageExposesItsThumbnailAndItsRemoveButton() async throws {
+            try await withAccessibilityBridge {
+                // Staged with no file behind it: the strip's structure is the
+                // subject, and a thumbnail that never decodes reaches its final
+                // shape a pump sooner.
+                let harness = try ComposerHarness(
+                    name: "ComposerAccessibilityIdentifierTests",
+                    prepare: { try $0.stage(png: nil) })
+                defer { harness.tearDown() }
                 let wanted: Set<String> = [
                     ComposerAccessibility.attachments,
                     ComposerAccessibility.attachmentItem(number: 1),
                     ComposerAccessibility.attachmentRemove(number: 1),
                 ]
-                let seen = await settle(mounted, until: wanted)
-                #expect(wanted.isSubset(of: seen), report(mounted, seen))
+                let seen = await harness.settle(untilIdentifiers: wanted)
+                #expect(wanted.isSubset(of: seen), Self.report(harness, seen))
             }
         }
 
         // MARK: - The two banners
 
-        /// Blocked: the sentence, and the button that gets somebody to the dialog.
-        @Test func theBlockedBannerExposesItsMessageAndRevealButton() async {
-            await withAccessibilityBridge {
-                let mounted = mount(state: .blocked(message: "Claude is asking something"))
-                defer { mounted.tearDown() }
+        /// Blocked: the sentence, and the button that gets somebody to the
+        /// dialog. Built from the terminal's own `awaitingInputReason`, so the
+        /// state under test is the one the daemon's record would produce.
+        @Test func theBlockedBannerExposesItsMessageAndRevealButton() async throws {
+            try await withAccessibilityBridge {
+                let harness = try ComposerHarness(
+                    name: "ComposerAccessibilityIdentifierTests",
+                    terminal: {
+                        ComposerHarness.blockedTerminal(
+                            worktreeID: $0, message: "Claude is asking something")
+                    })
+                defer { harness.tearDown() }
                 let wanted: Set<String> = [
                     ComposerAccessibility.blockedMessage,
                     ComposerAccessibility.blockedReveal,
                 ]
-                let seen = await settle(mounted, until: wanted)
-                #expect(wanted.isSubset(of: seen), report(mounted, seen))
+                let seen = await harness.settle(untilIdentifiers: wanted)
+                #expect(wanted.isSubset(of: seen), Self.report(harness, seen))
             }
         }
 
         /// Not running: the note explaining that a send resumes the session.
-        @Test func theNotRunningNoteIsExposed() async {
-            await withAccessibilityBridge {
-                let mounted = mount(state: .notRunning(exited: true))
-                defer { mounted.tearDown() }
-                let seen = await settle(mounted, until: [ComposerAccessibility.note])
-                #expect(seen.contains(ComposerAccessibility.note), report(mounted, seen))
+        @Test func theNotRunningNoteIsExposed() async throws {
+            try await withAccessibilityBridge {
+                let harness = try ComposerHarness(
+                    name: "ComposerAccessibilityIdentifierTests",
+                    terminal: { ComposerHarness.parkedTerminal(worktreeID: $0, exited: true) })
+                defer { harness.tearDown() }
+                let seen = await harness.settle(
+                    untilIdentifiers: [ComposerAccessibility.note])
+                #expect(seen.contains(ComposerAccessibility.note), Self.report(harness, seen))
             }
         }
 
-        /// And the note is not there when the session is running — so the assertion
-        /// above is about the state and not about a string that is always present.
-        @Test func theNotRunningNoteIsAbsentWhileRunning() async {
-            await withAccessibilityBridge {
-                let mounted = mount()
-                defer { mounted.tearDown() }
-                _ = await settle(mounted, until: [ComposerAccessibility.field])
-                let seen = axIdentifiers(in: mounted.host)
-                #expect(!seen.contains(ComposerAccessibility.note), report(mounted, seen))
-                #expect(!seen.contains(ComposerAccessibility.blockedReveal), report(mounted, seen))
+        /// And the note is not there when the session is running — so the
+        /// assertion above is about the state and not about a string that is
+        /// always present.
+        @Test func theNotRunningNoteIsAbsentWhileRunning() async throws {
+            try await withAccessibilityBridge {
+                let harness = try ComposerHarness(name: "ComposerAccessibilityIdentifierTests")
+                defer { harness.tearDown() }
+                _ = await harness.settle(untilIdentifiers: [ComposerAccessibility.field])
+                let seen = harness.host.accessibilityIdentifiers()
+                #expect(!seen.contains(ComposerAccessibility.note), Self.report(harness, seen))
+                #expect(
+                    !seen.contains(ComposerAccessibility.blockedReveal),
+                    Self.report(harness, seen))
             }
         }
-    }
-}
 
-/// Every accessibility identifier in the tree rooted at `view`.
-///
-/// It walks the **accessibility** tree rather than the view hierarchy, because
-/// the question is what an assistive client — or a GUI driver, which is one —
-/// can actually reach. Two things about that tree are not obvious, and both had
-/// to be found by measurement:
-///
-/// - **SwiftUI does not build one until a client asks for it.** Until then
-///   `NSHostingView.accessibilityChildren()` is empty and a walk reports nothing
-///   at all, whatever the view declares. `withAccessibilityBridge` flips the
-///   switch a driver flips, for the length of one test body.
-/// - **SwiftUI's nodes are not `NSAccessibilityProtocol` in Swift's eyes.** They
-///   are `SwiftUI.AccessibilityNode` objects that implement the accessibility
-///   methods without declaring the Objective-C protocol, so `as?` fails on every
-///   one of them and a typed walk silently sees an empty tree. They are reached
-///   the way Objective-C reaches them instead: by selector.
-///
-/// Children are the union of what a node declares and, for an `NSView`, its
-/// subviews — which is how AppKit itself resolves children for a view that has
-/// not overridden them, and how the `NSTextView` inside the composer's
-/// representable is reached.
-///
-/// **It lives here rather than in `Tests/TestSupport/`.** That target is the
-/// daemon's support library — it depends on `TBDDaemonLib` and links into the
-/// daemon suites — and this would drag AppKit into all of them for one
-/// AppKit-only caller. As a top-level function in the app test target it is
-/// already reusable by every suite in it.
-@MainActor
-func axIdentifiers(in view: NSView) -> Set<String> {
-    var found: Set<String> = []
-    axWalk(view) { node, _ in
-        if let identifier = axAttribute(node, "accessibilityIdentifier") as? String,
-           !identifier.isEmpty {
-            found.insert(identifier)
+        /// What the tree held, and the tree itself — so a failure names the state
+        /// it gave up in rather than only the identifier it wanted.
+        private static func report(_ harness: ComposerHarness, _ seen: Set<String>) -> Comment {
+            Comment(rawValue: """
+                the tree held: \(seen.sorted().joined(separator: ", "))
+                \(harness.host.accessibilityTreeDescription())
+                """)
         }
     }
-    return found
-}
-
-/// The same walk as an indented outline, so a failure names the tree it found
-/// rather than only the identifier it wanted.
-@MainActor
-func axTreeDescription(in view: NSView) -> String {
-    var lines: [String] = []
-    axWalk(view) { node, depth in
-        let role = axAttribute(node, "accessibilityRole") as? String ?? "-"
-        let identifier = (axAttribute(node, "accessibilityIdentifier") as? String)
-            .map { " id=\($0)" } ?? ""
-        let label = (axAttribute(node, "accessibilityLabel") as? String)
-            .map { " label=\($0.prefix(40))" } ?? ""
-        lines.append(
-            String(repeating: "  ", count: depth) + "\(type(of: node))"
-                + " role=\(role)\(identifier)\(label)")
-    }
-    return lines.joined(separator: "\n")
-}
-
-/// One accessibility accessor, by selector — see `axIdentifiers(in:)` for why it
-/// cannot simply be a method call on a typed value.
-@MainActor
-private func axAttribute(_ node: NSObject, _ name: String) -> Any? {
-    guard node.responds(to: Selector((name))) else { return nil }
-    return node.value(forKey: name)
-}
-
-/// Depth-first over the accessibility tree, visiting each node once.
-@MainActor
-private func axWalk(_ root: NSView, visit: (NSObject, Int) -> Void) {
-    var seen = Set<ObjectIdentifier>()
-
-    func children(of node: NSObject) -> [Any] {
-        let declared = axAttribute(node, "accessibilityChildren") as? [Any] ?? []
-        return declared + ((node as? NSView)?.subviews ?? [])
-    }
-
-    func step(_ element: Any, _ depth: Int) {
-        guard let node = element as? NSObject else { return }
-        guard seen.insert(ObjectIdentifier(node)).inserted else { return }
-        visit(node, depth)
-        for child in children(of: node) { step(child, depth + 1) }
-    }
-
-    step(root, 0)
 }
