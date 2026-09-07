@@ -193,6 +193,7 @@ jobs:
           bash scripts/sweep-preflight-refs.test.sh
           bash scripts/nightly-flake-stress.test.sh
           bash scripts/restart-guard-lib.test.sh
+          bash scripts/restart-build-lib.test.sh
           python3 scripts/diag/daemon-footprint-watch.py --self-test
 
   review-scripts-tests:

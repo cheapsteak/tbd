@@ -12,9 +12,11 @@
 # The set of paths that can affect the installed product: swift build compiles
 # Sources/ per Package.swift/Package.resolved; the bundle assembly copies
 # Resources/TBDApp.Info.plist and Resources/AppIcon.icns into the bundle; and
-# restart.sh together with the three libraries it sources determines what lands
-# in /Applications. Nothing else (Tests/, docs/, other scripts, stray root
-# files) can change the installed product.
+# restart.sh together with every library it sources determines what lands in
+# /Applications. Nothing else (Tests/, docs/, other scripts, stray root files)
+# can change the installed product. Adding a library to restart.sh means adding
+# it here too — restart-guard-lib.test.sh derives the expected set from
+# restart.sh's own `source` lines and fails if one is missing.
 INSTALL_PATHSPECS=(
     Sources
     Resources
@@ -22,6 +24,7 @@ INSTALL_PATHSPECS=(
     Package.resolved
     scripts/restart.sh
     scripts/restart-guard-lib.sh
+    scripts/restart-build-lib.sh
     scripts/restart-bundle-lib.sh
     scripts/restart-environment-lib.sh
 )

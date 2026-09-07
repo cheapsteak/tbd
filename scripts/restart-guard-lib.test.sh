@@ -122,6 +122,40 @@ test_no_main_ref_not_install_ready() {
     rm -rf "$d"
 }
 
+# Membership guard for INSTALL_PATHSPECS itself. Every library restart.sh sources
+# helps decide what lands in /Applications, so an uncommitted edit to any of them
+# must make the tree dirty; one missing from the array is a hole the guard cannot
+# see through. The expected set is DERIVED from restart.sh's own `source` lines
+# rather than hard-coded, so a library added later fails here loudly instead of
+# silently widening the hole.
+pathspec_listed() {
+    local needle="$1" p
+    for p in "${INSTALL_PATHSPECS[@]}"; do
+        [ "$p" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+test_install_pathspecs_cover_every_library_restart_sh_sources() {
+    local restart="$HERE/restart.sh"
+    local libs
+    libs="$(grep -E '^[[:space:]]*(source|\.)[[:space:]]' "$restart" \
+        | grep -oE 'restart-[A-Za-z0-9_-]+-lib\.sh' | sort -u)"
+
+    # A derivation that matched nothing would make every assertion below vacuous
+    # and this whole test a no-op, so assert the shape of what was derived first.
+    local derived; derived="$(printf '%s\n' "$libs" | grep -c . || true)"
+    local enough="no (derived $derived)"
+    [ "${derived:-0}" -ge 4 ] && enough="yes"
+    assert_eq "restart.sh sources at least 4 libraries (derivation is not vacuous)" "yes" "$enough"
+
+    assert_ok "INSTALL_PATHSPECS lists scripts/restart.sh itself" pathspec_listed "scripts/restart.sh"
+    while IFS= read -r lib; do
+        [ -n "$lib" ] || continue
+        assert_ok "INSTALL_PATHSPECS lists scripts/$lib" pathspec_listed "scripts/$lib"
+    done <<< "$libs"
+}
+
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done
 if [ "$FAIL" -ne 0 ]; then echo "SOME TESTS FAILED"; exit 1; fi
 echo "ALL GUARD-LIB TESTS PASSED"
