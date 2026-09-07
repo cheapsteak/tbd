@@ -75,12 +75,6 @@ struct EventDrivenTestClockSelfTests {
         var value: String { lock.withLock { text } }
     }
 
-    /// Reports **elapsed** alongside the budget, because the gap between them
-    /// is the whole diagnosis when this fires under the fast parallel pass. A
-    /// message that prints only the budget reads identically whether the wait
-    /// polled steadily for its whole 30 s or got exactly one turn and came back
-    /// 45 s later; the second is a scheduling gap, and saying so is what turns a
-    /// third-attempt investigation into a first-attempt one.
     /// Counts how many times a condition closure was evaluated, so a test can
     /// assert on *effort* rather than on elapsed time — the only way to pin a
     /// busy-spin without a timing assertion of its own.
@@ -92,6 +86,12 @@ struct EventDrivenTestClockSelfTests {
         var count: Int { lock.withLock { n } }
     }
 
+    /// Reports **elapsed** alongside the budget, because the gap between them
+    /// is the whole diagnosis when this fires under the fast parallel pass. A
+    /// message that prints only the budget reads identically whether the wait
+    /// polled steadily for its whole 30 s or got exactly one turn and came back
+    /// 45 s later; the second is a scheduling gap, and saying so is what turns a
+    /// third-attempt investigation into a first-attempt one.
     private struct HandshakeTimeout: Error, CustomStringConvertible {
         let what: String
         let timeout: Swift.Duration

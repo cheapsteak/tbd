@@ -298,6 +298,12 @@ public extension TestClock {
         var advances = 0
         repeat {
             if await condition() { return true }
+            // This loop cannot delegate to `pollUntilTrue` — it *advances* the
+            // clock rather than only reading — so it carries the cancellation
+            // guard itself. Placed before both branches: the armed branch does
+            // not suspend at all, so a cancelled task would spin there just as
+            // readily as on the `try?` sleep below.
+            if Task.isCancelled { break }
             if await isArmed() {
                 await advance(by: interval)
                 advances += 1
@@ -306,6 +312,7 @@ public extension TestClock {
             }
         } while ContinuousClock.now < deadline
         if await condition() { return true }
+        if Task.isCancelled { return false }
         Issue.record(
             ClockAdvanceTimeout(what: what, advances: advances, timeout: timeout),
             sourceLocation: sourceLocation)

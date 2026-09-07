@@ -46,10 +46,9 @@ func waitUntil(
     _ condition: @Sendable () -> Bool,
     timeout: Duration = TestDeadlines.saturatedPass
 ) async -> Bool {
-    let deadline = ContinuousClock.now + timeout
-    while ContinuousClock.now < deadline {
-        if condition() { return true }
-        try? await Task.sleep(for: .milliseconds(10))
-    }
-    return condition()
+    // A cancelled wait reports `false` rather than spinning: this returns a
+    // Bool, so there is nothing to throw and nothing to record.
+    return await pollUntilTrue(
+        timeout: timeout, pollInterval: .milliseconds(10), condition
+    ) == .satisfied
 }

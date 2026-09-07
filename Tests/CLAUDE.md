@@ -578,7 +578,13 @@ Five rules. Each traces to a real flake — provenance kept so the rule sticks.
    diagnostics will not find them in the `#expect` form. (Readers of the full
    tee'd log are unaffected — the `↳` line is present there.)
 
-5. **A bounded wait's verdict must come from a probe taken *after* the
+5. **Do not hand-write a bounded poll — call `pollUntilTrue`
+   (`Tests/TestSupport/BoundedPoll.swift`).** It is the only such loop in the
+   suite, and the reason it is the only one is that nine helpers wrote it
+   independently and between them got two things wrong. The rule below is what
+   it encodes; you need it to review a wait, not to write one.
+
+   **A bounded wait's verdict must come from a probe taken *after* the
    deadline test — never from the loop's exit.** The loop shape everyone writes
    tests the deadline before the condition:
 
@@ -597,9 +603,8 @@ Five rules. Each traces to a real flake — provenance kept so the rule sticks.
    that is the *expected* path, not an exotic one: Swift Testing starts every
    non-serialized test in one process with no concurrency cap, and mined CI
    xUnit puts p50 per-test latency at 56-70 s against a 123-158 s pass, so a
-   5 ms step aside routinely returns its turn tens of seconds later. Add the
-   re-read, as `advanceUntil`, `watchForSleeper` and
-   `SidecarTestSupport.waitUntil` already do:
+   5 ms step aside routinely returns its turn tens of seconds later. The verdict
+   has to be a fresh read:
 
    ```swift
    if condition() { return }
@@ -612,7 +617,17 @@ Five rules. Each traces to a real flake — provenance kept so the rule sticks.
    second is a scheduling gap. And **`try?` around the poll sleep swallows
    cancellation**, which throws instantly: without a `Task.isCancelled` check
    the loop stops suspending and busy-spins its whole budget away on a
-   cooperative thread, then blames the call site for a harness cancellation.
+   cooperative thread (measured: 33.7M condition reads in 30 s), then blames the
+   call site for a harness cancellation.
+
+   `pollUntilTrue` does all three, and returns `PollOutcome` rather than a
+   `Bool` so a caller cannot forget the third case: report a diagnostic on
+   `.timedOut` only. `.cancelled` means the harness ended the test, so a
+   non-throwing waiter returns silently and a throwing one rethrows
+   `CancellationError` — never a fabricated timeout, which would pin the failure
+   on an innocent call site. `advanceUntil` is the one wait that cannot delegate,
+   because it advances the clock rather than only reading it; it carries the
+   guard itself.
 
    (Provenance: PR #716 attempts 1 and 2, where all nine `waitUntil` call sites
    in `EventDrivenTestClockSelfTests` recorded a 30 s timeout while every
