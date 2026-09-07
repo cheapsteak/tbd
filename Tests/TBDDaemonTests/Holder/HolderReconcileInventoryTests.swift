@@ -534,7 +534,7 @@ struct HolderReconcileInventoryTests {
 
         // The pass really did the work the budget bounds, so a recorded sleep
         // is not a sleep from some other pass that judged nothing.
-        #expect(try await db.terminals.get(id: claude.id) == nil)
+        #expect(try await db.terminals.get(id: claude.id)?.isParked == true)
         #expect(try await db.terminals.get(id: shell.id) == nil)
 
         // The budget's timer is its own task, so it can reach the clock a hop
