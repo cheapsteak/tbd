@@ -170,19 +170,19 @@ struct HolderStartupReconcileTests {
         #expect(after.holderPID == 8101)
     }
 
-    /// This arm is deliberately ungated, and the flag-off branch is the one
-    /// worth pinning: turning `holder_hibernation_enabled` off is the soak's
-    /// abort gesture, and the rows most needing reconciliation afterwards are
-    /// exactly the ones the soak parked. Gating the arm would strand them.
+    /// This arm runs on every pass and answers to no switch. Both verdicts are
+    /// asserted in the same run, against a config nobody has touched — the
+    /// singleton exactly as `Database` seeds it — so an arm that grew a gate of
+    /// its own would leave both rows where it found them and fail here.
     ///
-    /// Both verdicts are asserted in the same run, with the flag written
-    /// EXPLICITLY false rather than left NULL, so a future `guard` on the flag
-    /// fails here whichever of the tri-state's two off-values it reads.
-    @Test("both verdicts still move their row with holder hibernation turned off")
-    func bothVerdictsMoveTheirRowWithTheFlagOff() async throws {
+    /// Auto-hibernation is explicitly OFF, which is the one config fact that
+    /// could plausibly be mistaken for this arm's gate: it decides whether a
+    /// row may be newly PARKED, while this arm heals rows that already are.
+    @Test("both verdicts still move their row with auto-hibernation turned off")
+    func bothVerdictsMoveTheirRowWithAutoHibernateOff() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setHolderHibernationEnabled(false)
-        #expect(try await db.config.get().holderHibernationEnabled == false)
+        try await db.config.setAutoHibernate(enabled: false, idleMinutes: 30)
+        #expect(try await db.config.get().autoHibernateEnabled == false)
         let (wt, dir) = try await seedWorktree(db)
         defer { try? FileManager.default.removeItem(at: dir) }
 

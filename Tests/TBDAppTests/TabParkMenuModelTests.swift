@@ -30,14 +30,14 @@ struct TabParkMenuModelTests {
     /// hibernatable → offer Hibernate.
     @Test func manuallyHibernatableTerminalOffersHibernate() {
         let terminal = claudeTerminal()
-        #expect(terminal.isManuallyHibernatable(holderHibernationEnabled: false))
-        #expect(TabParkMenuModel.action(for: terminal, holderHibernationEnabled: false, panelHoldsPTY: false) == .hibernate)
+        #expect(terminal.isManuallyHibernatable())
+        #expect(TabParkMenuModel.action(for: terminal, panelHoldsPTY: false) == .hibernate)
     }
 
     /// Branch 2: a parked session (authoritative `hibernatedAt`) → offer Wake.
     @Test func parkedTerminalOffersWake() {
         let terminal = claudeTerminal(hibernatedAt: Date())
-        #expect(TabParkMenuModel.action(for: terminal, holderHibernationEnabled: false, panelHoldsPTY: false) == .wake)
+        #expect(TabParkMenuModel.action(for: terminal, panelHoldsPTY: false) == .wake)
     }
 
     /// Branch 2 (legacy): a row parked by the pre-merge Suspend feature has
@@ -45,26 +45,26 @@ struct TabParkMenuModelTests {
     @Test func legacySuspendedOnlyTerminalOffersWake() {
         let terminal = claudeTerminal(suspendedAt: Date())
         #expect(terminal.hibernatedAt == nil)
-        #expect(TabParkMenuModel.action(for: terminal, holderHibernationEnabled: false, panelHoldsPTY: false) == .wake)
+        #expect(TabParkMenuModel.action(for: terminal, panelHoldsPTY: false) == .wake)
     }
 
     /// Branch 3: a Claude session mid-turn (`.working`) is neither parked nor
     /// manually hibernatable → no item.
     @Test func workingTerminalOffersNothing() {
         let terminal = claudeTerminal(activityState: .working)
-        #expect(TabParkMenuModel.action(for: terminal, holderHibernationEnabled: false, panelHoldsPTY: false) == nil)
+        #expect(TabParkMenuModel.action(for: terminal, panelHoldsPTY: false) == nil)
     }
 
     /// Branch 3: a Claude session waiting on a permission prompt — hibernating
     /// would eat the raised hand → no item.
     @Test func waitingForUserTerminalOffersNothing() {
         let terminal = claudeTerminal(activityState: .waitingForUser)
-        #expect(TabParkMenuModel.action(for: terminal, holderHibernationEnabled: false, panelHoldsPTY: false) == nil)
+        #expect(TabParkMenuModel.action(for: terminal, panelHoldsPTY: false) == nil)
     }
 
     /// Branch 3: no terminal backing the tab → no item.
     @Test func nilTerminalOffersNothing() {
-        #expect(TabParkMenuModel.action(for: nil, holderHibernationEnabled: false, panelHoldsPTY: false) == nil)
+        #expect(TabParkMenuModel.action(for: nil, panelHoldsPTY: false) == nil)
     }
 
     /// Branch 3: non-Claude terminals (plain shell, Codex) are never
@@ -74,50 +74,34 @@ struct TabParkMenuModelTests {
                              tmuxPaneID: "%1", kind: .shell, activityState: .idle)
         let codex = Terminal(id: UUID(), worktreeID: UUID(), tmuxWindowID: "@2",
                              tmuxPaneID: "%2", kind: .codex, activityState: .idle)
-        #expect(TabParkMenuModel.action(for: shell, holderHibernationEnabled: false, panelHoldsPTY: false) == nil)
-        #expect(TabParkMenuModel.action(for: codex, holderHibernationEnabled: false, panelHoldsPTY: false) == nil)
+        #expect(TabParkMenuModel.action(for: shell, panelHoldsPTY: false) == nil)
+        #expect(TabParkMenuModel.action(for: codex, panelHoldsPTY: false) == nil)
     }
 
-    /// Both branches of the holder soak gate. The menu must agree with the rail
-    /// the daemon will apply: with the gate off a holder tab offers nothing,
-    /// because a Hibernate item there could only ever produce a refusal the
-    /// user cannot act on; with it on the same tab offers Hibernate.
-    @Test func holderTabFollowsTheSoakGate() {
+    /// A live holder tab offers Hibernate exactly as a tmux tab does: manual
+    /// park is unflagged on every transport, so the menu offers what the daemon
+    /// will actually do.
+    @Test func holderTabOffersHibernate() {
         let holder = Terminal(
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
             claudeSessionID: "session-1", kind: .claude, activityState: .idle,
             transport: .holder)
-        #expect(TabParkMenuModel.action(for: holder, holderHibernationEnabled: false, panelHoldsPTY: false) == nil)
+        #expect(TabParkMenuModel.action(for: holder, panelHoldsPTY: false) == .hibernate)
         #expect(
-            TabParkMenuModel.action(for: holder, holderHibernationEnabled: true, panelHoldsPTY: false) == .hibernate)
+            TabParkMenuModel.action(for: claudeTerminal(), panelHoldsPTY: false) == .hibernate)
     }
 
-    /// A PARKED holder tab offers Wake under both values: the gate decides
-    /// whether a park may happen, and a row that is already parked has to be
-    /// wakeable however it got there — an older daemon, or the reconcile rail.
-    @Test func parkedHolderTabAlwaysOffersWake() {
+    /// A PARKED holder tab offers Wake, exactly as a parked tmux tab does.
+    @Test func parkedHolderTabOffersWake() {
         let parked = Terminal(
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
             claudeSessionID: "session-1", kind: .claude, activityState: .idle,
             hibernatedAt: Date(), transport: .holder)
-        #expect(TabParkMenuModel.action(for: parked, holderHibernationEnabled: false, panelHoldsPTY: false) == .wake)
-        #expect(TabParkMenuModel.action(for: parked, holderHibernationEnabled: true, panelHoldsPTY: false) == .wake)
+        #expect(TabParkMenuModel.action(for: parked, panelHoldsPTY: false) == .wake)
     }
 
-    /// A tmux tab is unaffected by either value, which is what makes the two
-    /// tests above about the transport rather than about the flag alone.
-    @Test func tmuxTabIsUnaffectedByTheSoakGate() {
-        let terminal = claudeTerminal()
-        for enabled in [false, true] {
-            #expect(
-                TabParkMenuModel.action(for: terminal, holderHibernationEnabled: enabled, panelHoldsPTY: false)
-                    == .hibernate)
-        }
-    }
-
-    /// Both branches of the viewer suppression, on a holder tab with the soak
-    /// gate ON — so the only thing moving is whether this app's panel owns the
-    /// pty.
+    /// Both branches of the viewer suppression, on a holder tab — so the only
+    /// thing moving is whether this app's panel owns the pty.
     ///
     /// The daemon fail-closes a park while a viewer holds the pty: its
     /// pending-input rail judges its own emulator, which is frozen for the
@@ -130,10 +114,10 @@ struct TabParkMenuModelTests {
             transport: .holder)
         #expect(
             TabParkMenuModel.action(
-                for: holder, holderHibernationEnabled: true, panelHoldsPTY: true) == nil)
+                for: holder, panelHoldsPTY: true) == nil)
         #expect(
             TabParkMenuModel.action(
-                for: holder, holderHibernationEnabled: true, panelHoldsPTY: false)
+                for: holder, panelHoldsPTY: false)
                 == .hibernate)
     }
 
@@ -146,7 +130,7 @@ struct TabParkMenuModelTests {
         for held in [false, true] {
             #expect(
                 TabParkMenuModel.action(
-                    for: terminal, holderHibernationEnabled: true, panelHoldsPTY: held)
+                    for: terminal, panelHoldsPTY: held)
                     == .hibernate)
         }
     }
@@ -160,6 +144,6 @@ struct TabParkMenuModelTests {
             hibernatedAt: Date(), transport: .holder)
         #expect(
             TabParkMenuModel.action(
-                for: parked, holderHibernationEnabled: true, panelHoldsPTY: true) == .wake)
+                for: parked, panelHoldsPTY: true) == .wake)
     }
 }

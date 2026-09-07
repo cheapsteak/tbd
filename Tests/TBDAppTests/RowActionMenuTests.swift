@@ -885,16 +885,15 @@ struct RowActionMenuCallSiteTests {
             let terminal = holderTerminal(worktreeID: worktree.id)
             state.terminals[worktree.id] = [terminal]
             state.daemonCapabilities = DaemonCapabilitiesResult(
-                controlModeEnabled: false, ptyHolderEnabled: true,
-                holderHibernationEnabled: true)
+                controlModeEnabled: false, ptyHolderEnabled: true)
             // The claim a panel takes the instant `attach.ready` is accepted.
             let registration = state.terminalInjections.register(
                 terminalID: terminal.id) { _, _ in true }
 
             #expect(!actions(state, worktree).context().hasHibernatableClaude)
 
-            // The discriminating half: release the claim and the same row, the
-            // same flag and the same terminal offer the park.
+            // The discriminating half: release the claim and the same row and
+            // the same terminal offer the park.
             state.terminalInjections.unregister(registration)
             #expect(actions(state, worktree).context().hasHibernatableClaude)
         }
@@ -912,8 +911,7 @@ struct RowActionMenuCallSiteTests {
                 tmuxPaneID: "%1", claudeSessionID: "session-1", kind: .claude,
                 activityState: .idle)
             state.terminals[worktree.id] = [terminal]
-            state.daemonCapabilities = DaemonCapabilitiesResult(
-                controlModeEnabled: false, holderHibernationEnabled: true)
+            state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: false)
             _ = state.terminalInjections.register(terminalID: terminal.id) { _, _ in true }
 
             #expect(actions(state, worktree).context().hasHibernatableClaude)

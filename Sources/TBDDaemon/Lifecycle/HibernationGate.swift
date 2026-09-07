@@ -7,10 +7,9 @@ import TBDShared
 /// safety rails plus the idle-duration check — is unit-testable without an
 /// actor, a tmux server, or a database. The rails themselves (running turn,
 /// permission prompt, keep-warm, already-hibernated/suspended, resumable
-/// Claude) live on `Terminal.isAutoHibernationEligible(holderHibernationEnabled:)`;
-/// this adds the two inputs that pure method can't see: whether the feature is
-/// enabled and how long the terminal has been idle relative to the configured
-/// timeout.
+/// Claude) live on `Terminal.isAutoHibernationEligible()`; this adds the two
+/// inputs that pure method can't see: whether the feature is enabled and how
+/// long the terminal has been idle relative to the configured timeout.
 public enum HibernationGate {
     /// Why a terminal was or wasn't selected for auto-hibernation. `.eligible`
     /// is the only go; every other case names the rail that blocked it, so the
@@ -19,10 +18,6 @@ public enum HibernationGate {
     public enum Decision: Equatable, Sendable {
         case eligible
         case featureDisabled
-        /// The session runs on the pty-holder transport and
-        /// `holder_hibernation_enabled` is off. The park and wake mechanic for
-        /// that transport exists; this soak gate says it may not run here yet.
-        case holderTransport
         case notClaudeResumable
         case alreadyHibernated
         case suspended
@@ -39,15 +34,6 @@ public enum HibernationGate {
     ///   - terminal: the candidate.
     ///   - autoHibernateEnabled: the global master switch.
     ///   - inputVetoEnabled: soak flag for the input-pipeline pending-input veto.
-    ///   - holderHibernationEnabled: `config.holderHibernationEnabled`, the soak
-    ///     gate for park/wake on the pty-holder transport. Not defaulted, for
-    ///     the reason `Terminal.isManuallyHibernatable(holderHibernationEnabled:)`
-    ///     gives: the flag reaches several call sites across the daemon and the
-    ///     app, and a missing argument should be a compile error rather than a
-    ///     rail that quietly disagrees with the menu the user is looking at.
-    ///     "Forgetting fails toward refusing" would be an argument with a
-    ///     shelf life — it inverts the day the shipped constant flips, which is
-    ///     the whole graduation plan for this flag.
     ///   - idleTimeout: how long a terminal must be idle before it qualifies.
     ///   - idleSince: when the terminal last went idle (its `hibernationIdleSince`
     ///     marker). `nil` means "no idle marker yet" — treated as not-yet-idle,
@@ -60,7 +46,6 @@ public enum HibernationGate {
         terminal: Terminal,
         autoHibernateEnabled: Bool,
         inputVetoEnabled: Bool = false,
-        holderHibernationEnabled: Bool,
         idleTimeout: TimeInterval,
         idleSince: Date?,
         lastInputAt: Date? = nil,
@@ -69,9 +54,7 @@ public enum HibernationGate {
         guard autoHibernateEnabled else { return .featureDisabled }
         // Hard safety rails that don't depend on idle duration (returns the most
         // specific blocker, or nil when all pass).
-        if let blocked = blockingRail(
-            terminal: terminal, holderHibernationEnabled: holderHibernationEnabled
-        ) { return blocked }
+        if let blocked = blockingRail(terminal: terminal) { return blocked }
         // Idle-duration rail: needs a marker and enough elapsed time.
         guard let idleSince, now.timeIntervalSince(idleSince) >= idleTimeout else {
             return .notIdleLongEnough
@@ -93,19 +76,13 @@ public enum HibernationGate {
     /// on this exact precedence (e.g. an already-hibernated running terminal
     /// reports `.alreadyHibernated`, not `.running`). Kept identical to the cascade
     /// that used to be inlined in `decide` so existing behavior is preserved.
-    static func blockingRail(
-        terminal: Terminal, holderHibernationEnabled: Bool
-    ) -> Decision? {
-        // First, and ahead of `isClaudeResumable`: a holder-backed session
-        // whose soak gate is off is refused for a reason that has nothing to do
-        // with the Claude rails, and naming it precisely is what keeps a future
-        // reader from "fixing" the resumable check. Mirrors the same guard on
-        // `Terminal.isManuallyHibernatable(holderHibernationEnabled:)`, which
-        // this cascade deliberately re-implements rather than calls (it needs
-        // per-rail reasons).
-        if terminal.transport == .holder, !holderHibernationEnabled {
-            return .holderTransport
-        }
+    ///
+    /// Transport does not appear here. Park and wake exist on every transport,
+    /// so a holder-backed row passes or fails these rails on exactly the facts
+    /// a tmux-backed one does. Mirrors `Terminal.isManuallyHibernatable`, which
+    /// this cascade deliberately re-implements rather than calls (it needs
+    /// per-rail reasons).
+    static func blockingRail(terminal: Terminal) -> Decision? {
         guard terminal.isClaudeResumable else { return .notClaudeResumable }
         guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
         guard terminal.suspendedAt == nil else { return .suspended }
@@ -148,24 +125,15 @@ public enum HibernationGate {
     ///     veto (`config.hibernateInputVetoEnabled`). Not defaulted: a park
     ///     path that silently forgets to arm this rail is the exact defect this
     ///     parameter exists to prevent.
-    ///   - holderHibernationEnabled: `config.holderHibernationEnabled`, the
-    ///     soak gate for park/wake on the pty-holder transport. Not defaulted,
-    ///     for the same reason it is not on `decide`: a missing argument should be
-    ///     a compile error, not a rail that silently disagrees with the app's
-    ///     menu — and any "forgetting fails safe" reading inverts the day the
-    ///     shipped constant flips.
     ///   - lastInputAt: the timestamp of the last keystroke/paste routed to
     ///     this terminal's pane (from `InputActivityTracker`) — the same fact
     ///     the sweep passes. `nil` means no input was recorded for the pane.
     public static func decideForMerge(
         terminal: Terminal,
         inputVetoEnabled: Bool,
-        holderHibernationEnabled: Bool,
         lastInputAt: Date?
     ) -> Decision {
-        if let blocked = blockingRail(
-            terminal: terminal, holderHibernationEnabled: holderHibernationEnabled
-        ) { return blocked }
+        if let blocked = blockingRail(terminal: terminal) { return blocked }
         guard inputVetoEnabled, let lastInputAt else { return .eligible }
         // The sweep compares `lastInputAt` against its own `idleSince` marker.
         // Merge-park has no such marker to compare against: it does not run the

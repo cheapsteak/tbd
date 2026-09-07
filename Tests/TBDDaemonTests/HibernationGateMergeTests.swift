@@ -37,13 +37,9 @@ struct HibernationGateMergeTests {
         inputVetoEnabled: Bool = false,
         lastInputAt: Date? = nil
     ) -> HibernationGate.Decision {
-        // Every terminal in this suite is a tmux row, so the soak gate is
-        // passed off and named. The production signature has no default for
-        // it, and the tests that are about the gate live beside the holder
-        // fixtures in HolderTmuxAssumptionGateTests.
         HibernationGate.decideForMerge(
             terminal: terminal, inputVetoEnabled: inputVetoEnabled,
-            holderHibernationEnabled: false, lastInputAt: lastInputAt)
+            lastInputAt: lastInputAt)
     }
 
     // MARK: - The go path: no idle window at all
@@ -72,7 +68,6 @@ struct HibernationGateMergeTests {
         let t = claudeTerminal(activityState: .idle)
         let sweepWithSwitchOff = HibernationGate.decide(
             terminal: t, autoHibernateEnabled: false,
-            holderHibernationEnabled: false,
             idleTimeout: 30 * 60,
             idleSince: Date(timeIntervalSince1970: 0), now: Date()
         )
@@ -207,11 +202,11 @@ struct HibernationGateMergeTests {
         #expect(decideForMerge(t, inputVetoEnabled: true, lastInputAt: now) == .alreadyHibernated)
     }
 
-    // MARK: - The holder-transport soak gate, both branches
+    // MARK: - Merge-park rides the same rails on every transport
 
     /// A holder-backed row that passes every other merge rail — including the
     /// input veto's `activityStateObservedAt` requirement, so the only thing
-    /// these two tests vary is the flag.
+    /// the tests below vary is the transport.
     private func holderTerminal() -> Terminal {
         Terminal(
             worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
@@ -221,39 +216,37 @@ struct HibernationGateMergeTests {
             transport: .holder)
     }
 
-    /// The argument cannot be omitted: `decideForMerge` carries no default for
-    /// it, the same as `decide`, so a park path that forgets the flag is a
-    /// compile error rather than a rail that silently disagrees with the app.
-    @Test func mergeParkRefusesAHolderRowWhileTheSoakGateIsOff() {
+    /// Merge-park elects a holder row on the same terms it elects a tmux one —
+    /// the per-worktree tri-state and `auto_hibernate_on_merge_default` decide
+    /// the fan-out, and transport decides nothing.
+    @Test func mergeParkElectsAHolderRow() {
         #expect(HibernationGate.decideForMerge(
             terminal: holderTerminal(), inputVetoEnabled: false,
-            holderHibernationEnabled: false, lastInputAt: nil) == .holderTransport)
+            lastInputAt: nil) == .eligible)
     }
 
-    @Test func mergeParkElectsAHolderRowOnceTheSoakGateIsOn() {
-        #expect(HibernationGate.decideForMerge(
-            terminal: holderTerminal(), inputVetoEnabled: false,
-            holderHibernationEnabled: true, lastInputAt: nil) == .eligible)
-    }
-
-    /// With the gate on, a holder row still answers to every other rail — the
-    /// input veto included. The flag lifts one refusal, not all of them.
-    @Test func theSoakGateDoesNotLiftTheInputVetoOnAHolderRow() {
+    /// A holder row still answers to every other rail — the input veto
+    /// included.
+    @Test func theInputVetoStillAppliesToAHolderRow() {
         #expect(HibernationGate.decideForMerge(
             terminal: holderTerminal(), inputVetoEnabled: true,
-            holderHibernationEnabled: true, lastInputAt: now) == .pendingTypedInput)
+            lastInputAt: now) == .pendingTypedInput)
     }
 
-    /// A tmux row is unaffected by either value, which is what makes the two
-    /// assertions above about the transport rather than about the flag alone.
-    @Test func aTmuxRowIsUnaffectedByTheSoakGate() {
-        for enabled in [false, true] {
-            #expect(HibernationGate.decideForMerge(
-                terminal: claudeTerminal(), inputVetoEnabled: false,
-                holderHibernationEnabled: enabled, lastInputAt: nil) == .eligible)
-            #expect(HibernationGate.decideForMerge(
-                terminal: claudeTerminal(keepWarm: true), inputVetoEnabled: false,
-                holderHibernationEnabled: enabled, lastInputAt: nil) == .keepWarm)
-        }
+    /// The two transports get the same answer from the same facts, which is
+    /// what makes the assertions above about the rails rather than about a
+    /// transport special case.
+    @Test func bothTransportsGetTheSameAnswerFromTheSameFacts() {
+        #expect(HibernationGate.decideForMerge(
+            terminal: claudeTerminal(), inputVetoEnabled: false,
+            lastInputAt: nil) == .eligible)
+        #expect(HibernationGate.decideForMerge(
+            terminal: claudeTerminal(keepWarm: true), inputVetoEnabled: false,
+            lastInputAt: nil) == .keepWarm)
+        var warmHolder = holderTerminal()
+        warmHolder.keepWarm = true
+        #expect(HibernationGate.decideForMerge(
+            terminal: warmHolder, inputVetoEnabled: false,
+            lastInputAt: nil) == .keepWarm)
     }
 }

@@ -93,15 +93,6 @@ struct RowActionMenuActions {
         }?.gone ?? false
     }
 
-    /// The daemon's `holder_hibernation_enabled` soak gate, off until the
-    /// daemon has answered `daemon.capabilities`. The menu must offer only what
-    /// the daemon will actually do: with the gate off a holder-backed session
-    /// is refused a park, so offering one would produce an error and nothing
-    /// else.
-    private var holderHibernationEnabled: Bool {
-        appState.daemonCapabilities?.holderHibernationEnabled ?? false
-    }
-
     /// The sessions this row's "Hibernate now" would actually act on.
     ///
     /// `ManualParkAffordance` adds the app-only half of the question to
@@ -113,8 +104,7 @@ struct RowActionMenuActions {
     private var manuallyParkableTerminals: [Terminal] {
         terminals.filter {
             ManualParkAffordance.isOfferable(
-                $0, holderHibernationEnabled: holderHibernationEnabled,
-                panelHoldsPTY: appState.terminalInjections.holdsPTY(terminalID: $0.id))
+                $0, panelHoldsPTY: appState.terminalInjections.holdsPTY(terminalID: $0.id))
         }
     }
 

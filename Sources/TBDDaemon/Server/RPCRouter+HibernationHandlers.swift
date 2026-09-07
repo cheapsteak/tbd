@@ -86,7 +86,7 @@ extension RPCRouter {
             // and no incarnation, because no spawn happened to name.
             return TerminalWakeResult(woken: false)
         case .sessionGone, .notFound, .noSessionID, .respawnFailed, .worktreeMissing,
-            .profileMissing, .holderTransport, .paneBusy:
+            .profileMissing, .paneBusy:
             // RPC errors, not results — the caller-facing switch in
             // handleTerminalWake maps each to its own RPCResponse(error:).
             // Named explicitly (not `default:`) so a new WakeResult case must
@@ -139,8 +139,6 @@ extension RPCRouter {
             return RPCResponse(
                 error: "This session was pinned to an account profile (\(profileID.uuidString)) that no longer exists. It stays parked and resumable — wake it on your default account, or restore the profile and retry.",
                 code: RPCErrorCode.profileMissing.rawValue)
-        case .holderTransport:
-            return RPCResponse(error: HibernationCoordinator.holderTransportRefusal)
         case .paneBusy(let pid):
             return RPCResponse(error: HibernationCoordinator.paneBusyRefusal(pid: pid))
         case .ok, .notHibernated, .inFlight:

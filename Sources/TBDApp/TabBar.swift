@@ -512,11 +512,6 @@ enum SwapProfileMenu {
 /// `isManuallyHibernatable` requires the terminal NOT be parked — so at most
 /// one item ever shows. Extracted from the view so each branch is
 /// unit-testable without SwiftUI (same pattern as `RowActionMenu`).
-///
-/// `holderHibernationEnabled` is the daemon's `holder_hibernation_enabled`
-/// capability. The menu must agree with the rail the daemon will apply: a
-/// Hibernate item offered on a holder tab while the soak gate is off would
-/// only ever produce a refusal the user cannot act on.
 enum TabParkMenuModel {
     enum ParkAction: Equatable {
         /// Terminal is live and manually hibernatable → offer "Hibernate".
@@ -529,12 +524,11 @@ enum TabParkMenuModel {
     /// session that is mid-turn / waiting on a permission prompt, or a holder
     /// tab whose panel currently owns the pty).
     static func action(
-        for terminal: Terminal?, holderHibernationEnabled: Bool, panelHoldsPTY: Bool
+        for terminal: Terminal?, panelHoldsPTY: Bool
     ) -> ParkAction? {
         guard let terminal else { return nil }
         if ManualParkAffordance.isOfferable(
-            terminal, holderHibernationEnabled: holderHibernationEnabled,
-            panelHoldsPTY: panelHoldsPTY) { return .hibernate }
+            terminal, panelHoldsPTY: panelHoldsPTY) { return .hibernate }
         if terminal.isParked { return .wake }
         return nil
     }
@@ -569,11 +563,8 @@ enum TabParkMenuModel {
 /// each other. What suppression costs the user is that one gesture; the
 /// alternative costs them the session's screen.
 enum ManualParkAffordance {
-    static func isOfferable(
-        _ terminal: Terminal, holderHibernationEnabled: Bool, panelHoldsPTY: Bool
-    ) -> Bool {
-        guard terminal.isManuallyHibernatable(
-            holderHibernationEnabled: holderHibernationEnabled) else { return false }
+    static func isOfferable(_ terminal: Terminal, panelHoldsPTY: Bool) -> Bool {
+        guard terminal.isManuallyHibernatable() else { return false }
         return !(terminal.transport == .holder && panelHoldsPTY)
     }
 }
@@ -1030,8 +1021,6 @@ private struct TabBarItem: View {
             // here too (#341).
             switch TabParkMenuModel.action(
                 for: terminal,
-                holderHibernationEnabled:
-                    appState.daemonCapabilities?.holderHibernationEnabled ?? false,
                 // This tab's own panel is exactly the viewer that would make
                 // the daemon fail the park closed — see `ManualParkAffordance`.
                 panelHoldsPTY: terminal.map {

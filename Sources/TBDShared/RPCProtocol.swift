@@ -298,9 +298,6 @@ public enum RPCMethod {
     public static let configSetGCProfileDirsEnabled = "config.setGCProfileDirsEnabled"
     public static let configSetGCOrphanProcessesEnabled = "config.setGCOrphanProcessesEnabled"
     public static let configSetGCHangStacksEnabled = "config.setGCHangStacksEnabled"
-    public static let configSetGCHolderRendezvousEnabled = "config.setGCHolderRendezvousEnabled"
-    public static let configSetGCRowlessHoldersEnabled = "config.setGCRowlessHoldersEnabled"
-    public static let configSetReapHolderChildrenEnabled = "config.setReapHolderChildrenEnabled"
     /// The retained-transcript GC gate (`gc_retained_transcripts_enabled`) —
     /// the soak switch on the `OrphanGC` leg that unlinks retained transcripts
     /// nobody references and drops receipts whose expiry has passed. Reading
@@ -312,12 +309,6 @@ public enum RPCMethod {
     /// opt-in, and the supported way to turn the soak on. Reading needs no
     /// method of its own: `config.get` already carries the resolved value.
     public static let configSetRemoteDeleteEnabled = "config.setRemoteDeleteEnabled"
-    public static let configSetHolderRowReconcileEnabled = "config.setHolderRowReconcileEnabled"
-    /// The pty-holder auto-hibernation gate (`holder_hibernation_enabled`) —
-    /// the soak switch on parking, waking and limit-resuming holder-backed
-    /// sessions. Reading needs no method of its own: `config.get` already
-    /// carries the resolved value.
-    public static let configSetHolderHibernationEnabled = "config.setHolderHibernationEnabled"
     public static let remoteProviders = "remote.providers"
     public static let remoteSessions = "remote.sessions"
     public static let remoteCreate = "remote.create"
@@ -3440,37 +3431,6 @@ public struct ConfigSetGCProfileDirsEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
-/// Params for `config.setGCHolderRendezvousEnabled` — the gate for the sweep
-/// that unlinks holder rendezvous files (socket, lock, log) whose holder is
-/// gone (default OFF during soak, on top of the GC master switch). Design:
-/// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
-public struct ConfigSetGCHolderRendezvousEnabledParams: Codable, Sendable {
-    public var enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
-/// Params for `config.setGCRowlessHoldersEnabled` — the gate for the sweep that
-/// **kills** a pty holder this installation owns which no session row claims
-/// (default OFF during soak, on top of the GC master switch). A separate opt-in
-/// from the rendezvous-file sweep because it signals processes rather than
-/// unlinking files. Design:
-/// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
-public struct ConfigSetGCRowlessHoldersEnabledParams: Codable, Sendable {
-    public var enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
-/// Params for `config.setReapHolderChildrenEnabled` — the gate on the
-/// `AgentReaper` leg that kills the surviving job of a dead pty holder (default
-/// OFF during soak). This is how the soak is turned on: the leg signals
-/// processes without a user gesture, so leaving it reachable only by editing
-/// the database by hand would make it un-soakable. Design:
-/// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
-public struct ConfigSetReapHolderChildrenEnabledParams: Codable, Sendable {
-    public var enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
 /// Params for `config.setGCRetainedTranscriptsEnabled` — the gate on the
 /// `OrphanGC` leg that reclaims retained-transcript residue: files under
 /// `~/tbd/transcripts/` that no row references, and rows whose `expires_at` has
@@ -3491,28 +3451,6 @@ public struct ConfigSetGCRetainedTranscriptsParams: Codable, Sendable {
 /// `docs/specs/2026-09-02-remote-session-delete-and-transcript-exchange-design.md`.
 public struct ConfigSetRemoteDeleteEnabledParams: Codable, Sendable {
     public var enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
-/// Params for `config.setHolderRowReconcileEnabled` — the gate on the reconcile
-/// arm that judges holder-backed session rows and deletes the ones nothing can
-/// reach any more (default OFF during soak). This is how the soak is turned on:
-/// the arm destroys database rows without a user gesture, so leaving it
-/// reachable only by editing the database by hand would make it un-soakable.
-/// Design: `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
-public struct ConfigSetHolderRowReconcileEnabledParams: Codable, Sendable {
-    public var enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
-/// Params for `config.setHolderHibernationEnabled` — the gate on parking,
-/// waking and limit-resuming Claude sessions on the pty-holder transport
-/// (default OFF during soak). This is how the soak is turned on: without it
-/// the sweep that kills a live holder-owned process would be reachable only by
-/// hand-editing `~/tbd/state.db`. Design:
-/// `docs/specs/2026-08-30-pty-holder-session-transport-design.md`.
-public struct ConfigSetHolderHibernationEnabledParams: Codable, Sendable {
-    public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
@@ -3835,10 +3773,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// tmux — so Settings disables the toggle and says why rather than offering
     /// a switch that would change nothing.
     public let ptyHolderSupported: Bool
-    /// Whether the pty-holder auto-hibernation gate (`holder_hibernation_enabled`)
-    /// is set. Default OFF while it soaks. Read at sweep time, so the Settings
-    /// toggle reads it back from here rather than from a local guess.
-    public let holderHibernationEnabled: Bool
     /// Whether the live transcript's message composer is enabled
     /// (`transcript_composer_enabled`). Default OFF while it soaks. The app gates
     /// the whole composer — the field, the completions request, attachment
@@ -3864,7 +3798,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 updateMode: UpdateMode = Config.updateModeDefault,
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
                 ptyHolderSupported: Bool = false,
-                holderHibernationEnabled: Bool = Config.holderHibernationEnabledDefault,
                 transcriptComposerEnabled: Bool = Config.transcriptComposerEnabledDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
@@ -3883,7 +3816,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.updateMode = updateMode
         self.ptyHolderEnabled = ptyHolderEnabled
         self.ptyHolderSupported = ptyHolderSupported
-        self.holderHibernationEnabled = holderHibernationEnabled
         self.transcriptComposerEnabled = transcriptComposerEnabled
     }
 
@@ -3943,13 +3875,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Bool.self, forKey: .ptyHolderEnabled) ?? Config.ptyHolderDefault
         ptyHolderSupported = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderSupported) ?? false
-        // New field for holder auto-hibernation. A daemon that does not send
-        // it runs no such sweep leg either, so fall through to the shipped
-        // default — one constant with the memberwise init above and with
-        // `ConfigRecord.toModel`, so a graduation moves all three at once —
-        // rather than assuming the gate is live.
-        holderHibernationEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .holderHibernationEnabled) ?? Config.holderHibernationEnabledDefault
         // New field for the composer gate. A daemon that does not send it has no
         // `terminal.completions` either, so fall through to the shipped default
         // rather than showing a composer nothing can serve.

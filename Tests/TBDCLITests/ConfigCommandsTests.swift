@@ -115,20 +115,13 @@ struct ConfigCommandsTests {
         #expect(rendered.contains("auto-archive-on-merge: off"))
     }
 
-    // MARK: - tbd config holder-hibernation
+    // MARK: - No transport-shaped switch
 
-    /// The soak switch for a background sweep that can kill a live holder-owned
-    /// agent process needs a hand-reachable CLI leg, or "enable it for the
-    /// soak" means hand-editing `state.db` — which this project's rules put
-    /// out of bounds.
-    @Test func holderHibernationIsRegisteredOnTheConfigGroup() {
+    /// Hibernation takes one switch — `auto_hibernate_enabled` — for every
+    /// transport. A `tbd config holder-hibernation` leg would advertise a
+    /// second gate that no rail reads.
+    @Test func thereIsNoHolderHibernationSwitch() {
         let names = ConfigCommand.configuration.subcommands.map { $0._commandName }
-        #expect(names.contains("holder-hibernation"))
-    }
-
-    @Test func holderHibernationTakesTheStateWordAsARequiredPositional() throws {
-        #expect(try ConfigHolderHibernation.parse(["on"]).state == "on")
-        #expect(try ConfigHolderHibernation.parse(["off"]).state == "off")
-        #expect(throws: (any Error).self) { try ConfigHolderHibernation.parse([]) }
+        #expect(!names.contains("holder-hibernation"))
     }
 }

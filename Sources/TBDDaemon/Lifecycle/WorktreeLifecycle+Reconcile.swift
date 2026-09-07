@@ -640,26 +640,11 @@ extension WorktreeLifecycle {
     private func reconcileTerminals(
         in worktrees: [LocalWorktree], actuationLog: ActuationLog
     ) async throws {
-        // ONE read for both gates, once per pass rather than per row. They
-        // decide what this whole sweep may do — whether it judges holder rows
-        // at all, and what a finished holder session's row BECOMES — and both
-        // are one judgement for the pass: a flip landing between two rows would
-        // park one and delete its sibling for no reason a reader could
-        // reconstruct. Reading the row twice could also straddle a write and
-        // take the two answers from different configurations, which is the one
-        // way this could disagree with itself inside a single pass.
-        let config = try? await db.config.get()
-        let holderArmEnabled =
-            config?.holderRowReconcileEnabled ?? Config.holderRowReconcileEnabledDefault
-        let holderHibernationEnabled =
-            config?.holderHibernationEnabled ?? Config.holderHibernationEnabledDefault
         // The budget covers the pass, not one server: the arm is serial across
         // every server this call reconciles, so a per-server budget would
         // multiply by the server count exactly the way a per-probe timeout
         // multiplies by the row count.
-        if holderArmEnabled {
-            await holderProbeBudget.begin(Self.holderPhaseBudget, clock: clock)
-        }
+        await holderProbeBudget.begin(Self.holderPhaseBudget, clock: clock)
         // `end()` has to run on every exit, including the throwing one: the
         // budget's timer is what makes `begin` a no-op while a pass is running,
         // so a pass that walked away from its own timer would leave every later
@@ -667,9 +652,7 @@ extension WorktreeLifecycle {
         // caught and rethrown instead.
         do {
             try await reconcileTerminalsWhileLockedPerServer(
-                in: worktrees, actuationLog: actuationLog,
-                holderArmEnabled: holderArmEnabled,
-                holderHibernationEnabled: holderHibernationEnabled)
+                in: worktrees, actuationLog: actuationLog)
         } catch {
             await holderProbeBudget.end()
             throw error
@@ -680,8 +663,7 @@ extension WorktreeLifecycle {
     /// The per-server half of `reconcileTerminals`, split out only so its
     /// caller can bracket it with the pass's probe budget.
     private func reconcileTerminalsWhileLockedPerServer(
-        in worktrees: [LocalWorktree], actuationLog: ActuationLog, holderArmEnabled: Bool,
-        holderHibernationEnabled: Bool
+        in worktrees: [LocalWorktree], actuationLog: ActuationLog
     ) async throws {
         let grouped = Dictionary(grouping: worktrees, by: \.tmuxServer)
         for server in grouped.keys.sorted() {
@@ -694,9 +676,7 @@ extension WorktreeLifecycle {
                     currentWorktrees.append(current)
                 }
                 try await reconcileTerminalsWhileLocked(
-                    in: currentWorktrees, actuationLog: actuationLog,
-                    holderArmEnabled: holderArmEnabled,
-                    holderHibernationEnabled: holderHibernationEnabled)
+                    in: currentWorktrees, actuationLog: actuationLog)
             }
         }
     }
@@ -707,9 +687,7 @@ extension WorktreeLifecycle {
     /// depend on it: a holder row's ground truth is its own rendezvous, and
     /// holding this lock neither protects nor delays it.
     private func reconcileTerminalsWhileLocked(
-        in worktrees: [LocalWorktree], actuationLog: ActuationLog,
-        holderArmEnabled: Bool,
-        holderHibernationEnabled: Bool
+        in worktrees: [LocalWorktree], actuationLog: ActuationLog
     ) async throws {
         // Probe the server each worktree row actually stores, not a canonical
         // name. Promoted scratch worktrees keep their inherited scratch server.
@@ -757,14 +735,6 @@ extension WorktreeLifecycle {
                 let disposal: String
                 switch terminal.transport {
                 case .holder:
-                    // The gate, and the same `continue` the old exemption
-                    // took. Off — the shipped default — this arm establishes
-                    // nothing and moves nothing, so a holder row is exactly as
-                    // untouched as it was before the arm existed.
-                    guard holderArmEnabled else {
-                        logger.debug("reconcile: leaving holder-backed terminal \(terminal.id, privacy: .public) alone — holder_row_reconcile_enabled is off")
-                        continue
-                    }
                     switch await holderRowVerdict(for: terminal) {
                     case .keep(let reason):
                         logger.debug("reconcile: keeping holder-backed terminal \(terminal.id, privacy: .public) — \(reason, privacy: .public)")
@@ -834,26 +804,14 @@ extension WorktreeLifecycle {
                     disposal = "window \(terminal.tmuxWindowID) gone or reassigned"
                 }
 
-                // **What a finished session's row becomes is one rule with one
-                // per-transport condition.** A resumable Claude row is PARKED,
-                // preserving its session id for a later wake; anything else is
-                // deleted, because there is nothing to preserve.
-                //
-                // The holder transport joins that rule only when
-                // `holder_hibernation_enabled` is on, and the reason is that a
-                // parked row is only worth having if something can wake it.
-                // With the gate off `HibernationCoordinator.wake` refuses a
-                // holder row, and this sweep skips parked rows, so a parked
-                // holder row would never be judged again — while the app's
-                // focus-wake selects exactly `isParked && isClaudeResumable &&
-                // hibernateReason != .manual` and would fire a failing wake RPC
-                // on every focus of that worktree, forever. Deleting says the
-                // true thing in that state. With the gate on, the wake path
-                // exists and the park is worth exactly what it is worth on
-                // tmux.
-                let parkable = terminal.isClaudeResumable
-                    && (terminal.transport != .holder || holderHibernationEnabled)
-                if parkable, let sessionID = terminal.claudeSessionID {
+                // **What a finished session's row becomes is one rule, on every
+                // transport.** A resumable Claude row is PARKED, preserving its
+                // session id for a later wake; anything else is deleted,
+                // because there is nothing to preserve. A parked row is only
+                // worth having if something can wake it, and every transport
+                // has a wake path: tmux respawns the window, holder spawns a
+                // fresh holder running `claude --resume`.
+                if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
                     // This park bypasses `HibernationCoordinator`, so the
                     // reconcile rail records its own independent actuation.
                     // Fail closed if that authoritative record cannot be made.
@@ -885,7 +843,7 @@ extension WorktreeLifecycle {
                     logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
                 } else {
                     try? await db.deleteTerminalAndTab(id: terminal.id)
-                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), \(Self.deletionRationale(for: terminal, holderHibernationEnabled: holderHibernationEnabled), privacy: .public)")
+                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), no session to preserve")
                 }
                 await pendingQuestions.clear(terminalID: terminal.id)
                 await subscriptions?.broadcastPendingQuestions(
@@ -937,23 +895,6 @@ extension WorktreeLifecycle {
     /// See `HolderProbeBudget` for why a per-probe timeout is not a bound on a
     /// pass at all.
     static let holderPhaseBudget: Duration = .seconds(5)
-
-    /// Why the sweep deleted a row rather than parking it, for the one log line
-    /// that records the judgement.
-    ///
-    /// Composed by a named function so a test can pin the text: the two
-    /// deletions are not the same event, and a line that told a
-    /// holder-transport Claude row it had "no session to preserve" would be
-    /// false about the one row shape whose park was withheld by a soak gate
-    /// rather than by having nothing worth keeping.
-    static func deletionRationale(
-        for terminal: Terminal, holderHibernationEnabled: Bool
-    ) -> String {
-        guard terminal.transport == .holder, !holderHibernationEnabled,
-            terminal.isClaudeResumable, terminal.claudeSessionID != nil
-        else { return "no session to preserve" }
-        return "holder hibernation is off, so a parked holder row would have nothing to wake it"
-    }
 
     /// How a finished session's job ended, in words, for the one log line that
     /// records the sweep's judgement.
@@ -1124,10 +1065,7 @@ extension WorktreeLifecycle {
     /// signals nothing, ever.
     ///
     /// **Naming that contingency honestly: the loop does not always close.**
-    /// The reaper leg this gate waits for is itself gated on
-    /// `reapHolderChildrenEnabled`, which ships off, so on the shipped defaults
-    /// nothing ever kills the job and the row is kept for as long as the pid is
-    /// alive. Even with both flags on, the reaper keeps rather than signals
+    /// The reaper keeps rather than signals
     /// whenever identity is uncertain — `holder-unrecorded`,
     /// `start-time-mismatch`, `foreign-executable` — and each of those is a
     /// permanent keep here too. A pid the row names that has been reused by a

@@ -445,41 +445,6 @@ extension AppState {
         }
     }
 
-    /// Help text for the pty-holder auto-hibernation toggle.
-    ///
-    /// A stored constant rather than a literal in the view, same reasoning as
-    /// `ptyHolderHelp`: it must describe what changes, and it must be honest
-    /// about the one thing it cannot do — check a session open in a viewer for
-    /// unsent input, the way the tmux rail can.
-    static let holderHibernationHelp = """
-        Off by default. When on, idle holder-backed Claude sessions are parked \
-        by the same sweep and rails as tmux sessions, manual Hibernate acts on \
-        them, and wake starts a fresh holder running claude --resume. Sessions \
-        currently open in a viewer are not parked, because the daemon cannot \
-        check them for unsent input.
-        """
-
-    /// Why the holder-hibernation toggle is inert on this daemon — same
-    /// reasoning and the same caption as `ptyHolderUnsupportedCaption`: with no
-    /// `TBDHolder` helper there is no holder-backed session for this gate to
-    /// ever act on.
-    static let holderHibernationUnsupportedCaption =
-        "Requires the TBDHolder helper beside the daemon binary; this daemon could not find it."
-
-    /// Persist the pty-holder auto-hibernation gate, then re-fetch
-    /// capabilities so the Settings toggle reflects the daemon's persisted
-    /// state. Applies on the next hibernation sweep.
-    func setHolderHibernationEnabled(_ enabled: Bool) async {
-        do {
-            try await holderHibernationFlagSetter(enabled)
-            await refreshDaemonCapabilities()
-        } catch {
-            logger.error("Failed to set holder hibernation: \(error, privacy: .public)")
-            showAlert(
-                "Failed to set holder hibernation: \(error.localizedDescription)", isError: true)
-        }
-    }
-
     /// Help text for the composer toggle. A stored constant rather than a
     /// literal in the view so it is assertable, and so it says exactly what the
     /// switch turns on — the field, its completion menu, and its attachments.

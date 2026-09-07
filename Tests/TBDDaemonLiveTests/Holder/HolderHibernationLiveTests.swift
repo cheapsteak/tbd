@@ -198,39 +198,6 @@ struct HolderHibernationLiveTests {
             id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
     }
 
-    /// The gate's OFF branch, on the same live fixture: the park is refused by
-    /// name and the job is still there afterwards.
-    ///
-    /// Asserting on the surviving pid is what makes this a test of the gate
-    /// rather than of a string — a refusal that had already written `/exit` or
-    /// killed the job would return the same value.
-    @Test func withTheFlagOffTheParkIsRefusedAndTheJobSurvives() async throws {
-        let fixture = try await HibernationFixture.make(holderHibernationEnabled: false)
-        defer { fixture.tearDown() }
-        let terminal = try await fixture.spawnHolderRow()
-        let childPID = try #require(terminal.childPID)
-
-        let result = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
-        #expect(result == .notEligible(reason: HibernationCoordinator.holderTransportRefusal))
-
-        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
-        #expect(!after.isParked, "a refused park still parked the row")
-        #expect(after.childPID == childPID, "a refused park still cleared the row's pids")
-        #expect(holderProcessIsAlive(childPID), "a refused park still ended the job")
-
-        // And the wake half of the same gate, on the same UNPARKED row: the
-        // flag decides whether this install classifies a holder row at all.
-        //
-        // The row is deliberately NOT parked out of band first. A row that is
-        // already parked wakes whatever the flag says — turning the flag off is
-        // the soak's abort gesture, not a way to strand what the soak parked —
-        // so parking it here would spawn a real replacement holder, which is
-        // the opposite of what this test asserts. That half is covered
-        // scripted, in `HolderTmuxAssumptionGateTests`.
-        #expect(await fixture.coordinator.wake(terminalID: terminal.id) == .holderTransport)
-        #expect(holderProcessIsAlive(childPID))
-    }
-
     /// The safety rollback: the park's own invariant, on the one path that
     /// reaches it.
     ///
@@ -665,7 +632,6 @@ private final class HibernationFixture {
     ///     own answers — overridden only where the branch under test is one no
     ///     real process can reach.
     static func make(
-        holderHibernationEnabled: Bool = true,
         holderTerminateAttempts: Int = 25,
         holderEscalationAttempts: Int = 100,
         signaller: any ProcessSignaller = ProductionProcessSignaller()
@@ -680,7 +646,6 @@ private final class HibernationFixture {
 
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPtyHolderEnabled(true)
-        try await db.config.setHolderHibernationEnabled(holderHibernationEnabled)
 
         let executable = try #require(
             HolderProcessFixture.locateExecutable(),

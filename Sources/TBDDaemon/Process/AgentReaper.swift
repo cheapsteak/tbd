@@ -292,9 +292,9 @@ public struct AgentReaper: Sendable {
     /// whether the holder is still alive, and only one of the two answers is a
     /// reconciler:
     ///
-    /// - **Holder alive** — `RowlessHolderCollector` (`OrphanGC`, gated on
-    ///   `gcRowlessHoldersEnabled`) recovers the child pid from the holder's
-    ///   own handshake and kills the job and then the holder.
+    /// - **Holder alive** — `RowlessHolderCollector` (`OrphanGC`, under
+    ///   `gcEnabled`) recovers the child pid from the holder's own handshake
+    ///   and kills the job and then the holder.
     /// - **Holder dead** — nothing reclaims the job. The handshake that would
     ///   name the pid is the thing that is gone: `RowlessHolderCollector` reads
     ///   `.noListener` and keeps, `HolderRendezvousCollector` unlinks the dead
@@ -306,11 +306,11 @@ public struct AgentReaper: Sendable {
     /// `HolderSpawner`'s type comment states the same gap from the creation
     /// side; the two must stay in agreement.
     ///
-    /// Gated: `enabled` is `Config.reapHolderChildrenEnabled`, read by the
-    /// caller once per sweep. Off, this walks nothing and signals nothing —
-    /// deliberately not even enumerating, so a disabled flag costs no `ps`.
-    public func sweepHolderChildren(enabled: Bool) async {
-        guard enabled else { return }
+    /// Unflagged, like the tmux leg: `AgentReaper` carries no switch of its
+    /// own, and holder-ness is a transport property rather than a separate
+    /// opt-in. An installation with no holder sessions has no records to walk,
+    /// so the leg costs nothing where it has nothing to do.
+    public func sweepHolderChildren() async {
         for record in await holderSessions() {
             switch decideHolderChild(record) {
             case .keep(let reason):

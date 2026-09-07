@@ -1409,23 +1409,16 @@ public final class Daemon: Sendable {
                 guard let repos = try? await database.repos.list() else { return [] }
                 return Array(Set(repos.map { TmuxManager.serverName(forRepoPath: $0.path) }))
             }
-            // Read once per sweep rather than captured once at startup, so
-            // flipping the toggle takes effect on the next pass instead of the
-            // next daemon restart. A config read that fails leaves the leg OFF:
-            // the flag's whole job is that nothing kills until somebody says so.
-            let holderLegEnabled: @Sendable () async -> Bool = { [database] in
-                (try? await database.config.get().reapHolderChildrenEnabled) ?? false
-            }
             self.reaperTask = Task {
                 // Sweep once immediately (cold recovery), then every 60s.
                 await reaper.sweep(servers: await ownedServers())
-                await reaper.sweepHolderChildren(enabled: await holderLegEnabled())
+                await reaper.sweepHolderChildren()
                 while !Task.isCancelled {
                     // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                     try? await Task.sleep(for: .seconds(60))
                     guard !Task.isCancelled else { break }
                     await reaper.sweep(servers: await ownedServers())
-                    await reaper.sweepHolderChildren(enabled: await holderLegEnabled())
+                    await reaper.sweepHolderChildren()
                 }
             }
 

@@ -141,26 +141,11 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// The literal typed into the pane, recorded verbatim in the rail's row.
     static let continueMessage = "continue"
 
-    /// The one refusal text this rail returns for a holder-backed row while
-    /// holder hibernation is off, so the notification, the log line and this
-    /// file's tests all name the same reason rather than three near-misses.
-    /// Same fact and the same repair as
-    /// `HibernationCoordinator.holderTransportRefusal`, which is the other half
-    /// of what that flag gates.
-    ///
-    /// Written to complete the daemon's sentence: the notification reads
-    /// "Auto-resume failed — \(reason). Claude may still be parked at the
-    /// limit screen."
-    static let holderTransportRefusal =
-        "this session runs on the pty-holder transport and holder hibernation is off "
-        + "(Settings → Hibernate pty-holder sessions, or `tbd config "
-        + "holder-hibernation on`), so nothing was typed"
-
     /// The refusal for a daemon that has no way to write to a holder's pty at
     /// all — mock mode, or a daemon whose registry (and so whose injection
-    /// courier) was never built. Kept apart from `holderTransportRefusal`
-    /// because the two are different repairs: one is a flag the user can turn
-    /// on, the other is a daemon that cannot serve this transport at all.
+    /// courier) was never built. Written to complete the daemon's sentence: the
+    /// notification reads "Auto-resume failed — \(reason). Claude may still be
+    /// parked at the limit screen."
     static let holderInputPathMissing = "this daemon has no holder input path"
 
     /// The failure for a write the holder input path took and could not
@@ -491,17 +476,11 @@ public struct LimitResumeActuator: LimitResumeActuating {
         // would have sent this rail on to type "continue" at whatever pane the
         // empty coordinate resolved to.
         //
-        // Served rather than refused when holder hibernation is on: the
-        // transport now has an input path (`holderSend`), and this rail is
-        // gated by that same flag because a resume it delivers is the other
-        // half of a park it can undo.
+        // Served rather than refused: the transport has an input path
+        // (`holderSend`), and whatever gates the tmux rail gates this one and
+        // nothing more.
         if terminal.transport == .holder {
-            // Off the same snapshot step 0a read, and already carrying the
-            // shipped default for an install where nobody has chosen
-            // (`ConfigRecord.toModel` applies it).
-            return await holderEligibility(
-                resume, terminal: terminal,
-                hibernationEnabled: config.holderHibernationEnabled)
+            return await holderEligibility(resume, terminal: terminal)
         }
 
         guard !terminal.isParked,
@@ -603,26 +582,14 @@ public struct LimitResumeActuator: LimitResumeActuating {
     ///   scrollback belongs to whichever emulator is reading it, and there is
     ///   no mode for typing to land in.
     ///
-    /// Kept, because none of them was ever about tmux: the flag, the parked
+    /// Kept, because none of them was ever about tmux: the parked
     /// backstop, the row's own cancellation status (1b), and the
     /// user-already-continued check (2) — which also produces the pre-send
     /// growth baseline `verifyResumed` compares against, so skipping it would
     /// leave `preSize == 0` and make any later read look like a resume.
     private func holderEligibility(
-        _ resume: ScheduledResume, terminal: Terminal, hibernationEnabled: Bool
+        _ resume: ScheduledResume, terminal: Terminal
     ) async -> EligibilityCheckResult {
-        // The flag. Off, this rail refuses by name and `.failed` rather than
-        // silently cancelling, because a user who armed auto-resume and will
-        // not get it should be told once, not left watching a limit screen
-        // behind an "auto-resume scheduled" badge that quietly expired.
-        guard hibernationEnabled else {
-            logger.info("""
-                actuate: terminal \(terminal.id.uuidString, privacy: .public) runs on the \
-                pty-holder transport and holder hibernation is off — typing nothing
-                """)
-            return .notEligible(.failed(Self.holderTransportRefusal))
-        }
-
         // Parked: the same fire-time backstop as the tmux path, and the same
         // silent cancel. Parking already cancels the pending row; this catches
         // a park that raced the scheduler.

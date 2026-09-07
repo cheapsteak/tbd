@@ -81,13 +81,6 @@ struct HolderReconcileInventoryTests {
 
     /// Opts the fixture into the arm under test.
     ///
-    /// `holder_row_reconcile_enabled` ships OFF, so every test that expects a
-    /// judgement has to make the gesture a soak participant makes. The one test
-    /// that does not call this is the one asserting the shipped default.
-    private func enableTheHolderArm(_ db: TBDDatabase) async throws {
-        try await db.config.setHolderRowReconcileEnabled(true)
-    }
-
     private func description(
         owner: HolderOwnerToken, status: HolderChildStatus, childPID: Int32 = 4243
     ) -> HolderChildDescription {
@@ -103,66 +96,16 @@ struct HolderReconcileInventoryTests {
 
     // MARK: - The sweep
 
-    @Test("with holder hibernation off, a row whose holder is gone is deleted, never parked")
-    func vanishedHolderRowsAreDeleted() async throws {
+    /// A finished resumable Claude row is PARKED rather than deleted, exactly
+    /// as the tmux arm parks its equivalent — every transport has a wake path,
+    /// so a park is worth having on every transport. The shell row is still
+    /// deleted because there is nothing about it to preserve.
+    @Test("a resumable holder row is parked instead of deleted")
+    func aResumableHolderRowIsParked() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        try await enableTheHolderArm(db)
-        let lifecycle = makeLifecycle(
-            db: db,
-            signaller: deadJobs([4243, 4245]),
-            registry: registry(environment: vanishedHolderEnvironment()))
-        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
-
-        let claude = try await db.terminals.create(
-            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
-            label: TerminalLabel.claudeCode, claudeSessionID: "sess-holder",
-            kind: .claude, transport: .holder, holderPID: 4242, childPID: 4243)
-        let shell = try await db.terminals.create(
-            worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
-            kind: .shell, transport: .holder, holderPID: 4244, childPID: 4245)
-
-        try await lifecycle.reconcile(
-            repoID: repo.id,
-            actuationLog: makeTestActuationLog(),
-            reapSharedScratchTmuxResources: true)
-
-        // **The park is withheld while the soak gate is off, on purpose.**
-        // `HibernationCoordinator.wake` refuses a holder row with the gate off,
-        // and this sweep skips parked rows, so a parked holder row could never
-        // be woken and never be re-judged — while the app's focus-wake selects
-        // exactly `isParked && isClaudeResumable && hibernateReason != .manual`
-        // and would fire a failing wake RPC on every focus of the worktree,
-        // forever.
-        #expect(
-            try await db.config.get().holderHibernationEnabled == false,
-            "this test asserts the gate's off branch; it must not have been touched")
-        #expect(
-            try await db.terminals.get(id: claude.id) == nil,
-            "a holder-backed resumable Claude row was parked instead of deleted; with holder hibernation off a parked holder row is unwakeable and re-fires focus-wake forever")
-        #expect(
-            try await db.terminals.get(id: shell.id) == nil,
-            "a holder-backed shell row whose holder is gone was left in the inventory")
-    }
-
-    /// The same fixture with `holder_hibernation_enabled` ON: the resumable
-    /// Claude row is PARKED rather than deleted, exactly as the tmux arm parks
-    /// its equivalent, and the shell row is still deleted because there is
-    /// nothing about it to preserve.
-    ///
-    /// Deliberately identical input to the test above — only the gesture
-    /// differs — so a gate that stopped being read shows up as two tests
-    /// asserting opposite outcomes on the same rows.
-    @Test("with holder hibernation on, a resumable holder row is parked instead of deleted")
-    func holderHibernationOnParksResumableRows() async throws {
-        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        let db = try TBDDatabase(inMemory: true)
-        try await enableTheHolderArm(db)
-        try await db.config.setHolderHibernationEnabled(true)
         let lifecycle = makeLifecycle(
             db: db,
             signaller: deadJobs([4243, 4245]),
@@ -184,7 +127,7 @@ struct HolderReconcileInventoryTests {
 
         let parked = try #require(
             try await db.terminals.get(id: claude.id),
-            "a resumable holder row was deleted with holder hibernation on")
+            "a resumable holder row was deleted instead of parked")
         #expect(parked.isParked)
         #expect(parked.hibernateReason == .recovery)
         #expect(parked.claudeSessionID == "sess-holder", "the session id must survive the park")
@@ -200,21 +143,16 @@ struct HolderReconcileInventoryTests {
             "a holder-backed shell row has no session to preserve and must still be deleted")
     }
 
-    /// The gate's off branch, which is the shipped default: the arm judges
-    /// nothing and moves nothing, exactly as the old transport exemption did.
-    ///
-    /// Deliberately the same fixture as the test above — the only difference is
-    /// the gesture — so a gate that stopped being read shows up as two tests
-    /// asserting opposite outcomes on identical input.
-    @Test("with its gate off the holder arm leaves every row alone")
-    func theShippedDefaultJudgesNothing() async throws {
+    /// **The arm runs unconditionally.** No gesture is made against the config
+    /// row here — the singleton stands exactly as `Database` seeds it — and the
+    /// arm still judges both rows. An arm that had grown a gate of its own
+    /// would leave them untouched and fail this.
+    @Test("the holder arm judges rows with no config gesture at all")
+    func theHolderArmJudgesWithNoConfigGesture() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        #expect(
-            try await db.config.get().holderRowReconcileEnabled == false,
-            "this test asserts the shipped default; it must not have been touched")
         let lifecycle = makeLifecycle(
             db: db,
             signaller: deadJobs([4243, 4245]),
@@ -234,15 +172,15 @@ struct HolderReconcileInventoryTests {
             actuationLog: makeTestActuationLog(),
             reapSharedScratchTmuxResources: true)
 
-        let survivingClaude = try #require(
+        let parked = try #require(
             try await db.terminals.get(id: claude.id),
-            "the holder arm deleted a row with its gate off")
+            "the holder arm did not judge a resumable row on an untouched config")
         #expect(
-            survivingClaude.hibernatedAt == nil,
-            "the holder arm parked a row with its gate off")
+            parked.isParked,
+            "the holder arm left a finished resumable row awake on an untouched config")
         #expect(
-            try await db.terminals.get(id: shell.id) != nil,
-            "the holder arm deleted a row with its gate off")
+            try await db.terminals.get(id: shell.id) == nil,
+            "the holder arm did not judge a shell row on an untouched config")
     }
 
     @Test("a holder-backed row whose job is still running is left alone")
@@ -256,7 +194,6 @@ struct HolderReconcileInventoryTests {
         let signaller = FakeProcessSignaller()
         signaller.behaviors[4243] = FakeProcessSignaller.Behavior(aliveInitially: true)
         signaller.behaviors[4245] = FakeProcessSignaller.Behavior(aliveInitially: true)
-        try await enableTheHolderArm(db)
         let lifecycle = makeLifecycle(
             db: db, signaller: signaller,
             registry: registry(environment: vanishedHolderEnvironment()))
@@ -576,7 +513,6 @@ struct HolderReconcileInventoryTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        try await enableTheHolderArm(db)
         let clock = SleepRecordingClock()
         let lifecycle = makeLifecycle(
             db: db, signaller: deadJobs([4243, 4245]),
@@ -619,23 +555,21 @@ struct HolderReconcileInventoryTests {
             """)
     }
 
-    /// The gate's off branch: with the arm disabled there is no probing to
-    /// bound, so no budget is armed at all and no timer task is left running.
-    @Test("with its gate off the reconcile pass arms no budget")
-    func theShippedDefaultArmsNoPhaseBudget() async throws {
+    /// The budget is armed on every pass, with no config gesture: the arm it
+    /// bounds runs unconditionally, so a pass that armed nothing would leave
+    /// this serial arm unbounded before the daemon's socket is bound.
+    @Test("the reconcile pass arms the budget with no config gesture at all")
+    func theProductionPassArmsTheBudgetUnconditionally() async throws {
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        #expect(
-            try await db.config.get().holderRowReconcileEnabled == false,
-            "this test asserts the shipped default; it must not have been touched")
         let clock = SleepRecordingClock()
         let lifecycle = makeLifecycle(
             db: db, signaller: deadJobs([4243]),
             registry: registry(environment: vanishedHolderEnvironment()), clock: clock)
         let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
-        _ = try await db.terminals.create(
+        let shell = try await db.terminals.create(
             worktreeID: main.id, tmuxWindowID: "", tmuxPaneID: "",
             kind: .shell, transport: .holder, holderPID: 4242, childPID: 4243)
 
@@ -644,41 +578,10 @@ struct HolderReconcileInventoryTests {
             actuationLog: makeTestActuationLog(),
             reapSharedScratchTmuxResources: true)
 
+        #expect(try await db.terminals.get(id: shell.id) == nil)
         #expect(
-            await clock.settledSleeps().isEmpty,
-            "the holder arm armed its phase budget with its own gate off")
-    }
-
-    // MARK: - What the deletion says about itself
-
-    /// The two deletions are different events and the log must not conflate
-    /// them. A holder-transport Claude row *has* a session to preserve; what it
-    /// does not have, while the soak gate is off, is anything that could wake
-    /// the park.
-    @Test("a withheld park says so rather than claiming there was no session")
-    func theDeletionRationaleNamesTheWithheldPark() {
-        let holderClaude = Terminal(
-            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
-            label: TerminalLabel.claudeCode, claudeSessionID: "sess-holder",
-            kind: .claude, transport: .holder)
-        #expect(
-            WorktreeLifecycle.deletionRationale(
-                for: holderClaude, holderHibernationEnabled: false)
-                == "holder hibernation is off, so a parked holder row would have nothing to wake it")
-
-        let holderShell = Terminal(
-            worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
-            kind: .shell, transport: .holder)
-        #expect(
-            WorktreeLifecycle.deletionRationale(
-                for: holderShell, holderHibernationEnabled: false) == "no session to preserve")
-        // With the gate ON this Claude row is not deleted at all, so the only
-        // rationale it could carry would be a lie. The function says the
-        // generic thing rather than repeating the withheld-park sentence for a
-        // park that was not withheld.
-        #expect(
-            WorktreeLifecycle.deletionRationale(
-                for: holderClaude, holderHibernationEnabled: true) == "no session to preserve")
+            !(await clock.settledSleeps().isEmpty),
+            "the reconcile pass armed no phase budget on an untouched config")
     }
 }
 

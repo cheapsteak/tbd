@@ -54,7 +54,6 @@ struct OrphanGCRowlessHolderLiveTests {
     private func armedDatabase(owner: String) async throws -> TBDDatabase {
         let db = try TBDDatabase(inMemory: true)
         _ = try await db.config.ensureHolderOwnerToken(minting: owner)
-        try await db.config.setGCRowlessHoldersEnabled(true)
         return db
     }
 

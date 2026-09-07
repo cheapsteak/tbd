@@ -12,17 +12,15 @@ public enum HibernateResult: Equatable, Sendable {
 }
 
 /// Which rails a park attempt is judged by, and the config facts those rails
-/// need. Every case carries `holderHibernationEnabled` because the park
-/// mechanic for the pty-holder transport is behind a soak gate whatever
-/// triggered it — the property the soak validates (a row never claims parked
-/// while its child runs) does not depend on who asked.
+/// need. Transport is not among them: the park mechanic exists on every
+/// transport, so what differs between a holder row and a tmux row is how the
+/// park is carried out, never whether it is allowed.
 enum HibernateEligibilityPolicy: Sendable {
-    case manual(holderHibernationEnabled: Bool)
-    case merge(inputVetoEnabled: Bool, holderHibernationEnabled: Bool)
+    case manual
+    case merge(inputVetoEnabled: Bool)
     case automatic(
         enabled: Bool,
         inputVetoEnabled: Bool,
-        holderHibernationEnabled: Bool,
         idleTimeout: TimeInterval,
         idleSince: Date?)
 }
@@ -75,12 +73,6 @@ public enum WakeResult: Equatable, Sendable {
     /// default-profile fallback; the row stays parked and resumable. Carries
     /// the missing profile id for the message.
     case profileMissing(profileID: UUID)
-    /// The row runs on the pty-holder transport and
-    /// `holder_hibernation_enabled` is off. The transport has a wake mechanic —
-    /// spawn a fresh holder running `claude --resume` — and this soak gate says
-    /// it may not run here yet, so wake refuses before touching anything and
-    /// leaves the row exactly as it found it.
-    case holderTransport
     /// The row is exit-stamped (`.exited`) and a process other than the pane's
     /// own shell owns the pane's foreground process group. Wake is
     /// `respawn-window -k`, which would kill it. Nothing was respawned and the
@@ -365,37 +357,15 @@ public actor HibernationCoordinator {
             return .notFound
         }
         guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
-        // One read, carried into the policy so the rail re-checked under the
-        // lock cannot disagree with the one checked here. A config read that
-        // fails takes the shipped default, which refuses a holder row.
-        let holderHibernationEnabled = await resolvedHolderHibernationEnabled()
-        guard terminal.isManuallyHibernatable(
-            holderHibernationEnabled: holderHibernationEnabled) else {
-            return .notEligible(reason: manualBlockReason(
-                terminal, holderHibernationEnabled: holderHibernationEnabled))
+        guard terminal.isManuallyHibernatable() else {
+            return .notEligible(reason: manualBlockReason(terminal))
         }
         return await performHibernate(
-            terminal: terminal,
-            reason: .manual,
-            policy: .manual(holderHibernationEnabled: holderHibernationEnabled))
-    }
-
-    /// `config.holderHibernationEnabled`, resolved through the shipped default
-    /// when the config row cannot be read. Failing toward the default is
-    /// failing toward refusal, which is the safe direction for a mechanic that
-    /// kills a live process.
-    private func resolvedHolderHibernationEnabled() async -> Bool {
-        (try? await db.config.get())?.holderHibernationEnabled
-            ?? Config.holderHibernationEnabledDefault
+            terminal: terminal, reason: .manual, policy: .manual)
     }
 
     /// The reason a manual hibernate was refused, for the RPC error string.
-    private func manualBlockReason(
-        _ terminal: Terminal, holderHibernationEnabled: Bool
-    ) -> String {
-        if terminal.transport == .holder, !holderHibernationEnabled {
-            return Self.holderTransportRefusal
-        }
+    private func manualBlockReason(_ terminal: Terminal) -> String {
         if !terminal.isClaudeResumable { return "Not a resumable Claude session" }
         if terminal.suspendedAt != nil { return "Terminal is suspended" }
         switch terminal.activityState {
@@ -422,17 +392,9 @@ public actor HibernationCoordinator {
     /// rails above, so — like the idle sweep — the row goes after the gate, at
     /// the moment this rail is actually about to act on a session.
     ///
-    /// `holderHibernationEnabled` is not defaulted, for the reason
-    /// `Terminal.isManuallyHibernatable(holderHibernationEnabled:)` gives: the
-    /// flag reaches several call sites across the daemon and the app, and a
-    /// missing argument should be a compile error rather than a rail that
-    /// quietly disagrees with the menu the user is looking at. A default that
-    /// leaned on "forgetting refuses, which is safe" would invert the day the
-    /// shipped constant flips, which is this flag's whole graduation plan.
     public func hibernateForMerge(
         terminalID: UUID,
-        inputVetoEnabled: Bool,
-        holderHibernationEnabled: Bool
+        inputVetoEnabled: Bool
     ) async -> HibernateResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
@@ -441,7 +403,6 @@ public actor HibernationCoordinator {
         let decision = HibernationGate.decideForMerge(
             terminal: terminal,
             inputVetoEnabled: inputVetoEnabled,
-            holderHibernationEnabled: holderHibernationEnabled,
             lastInputAt: inputActivity.lastInput(
                 paneID: InputActivityTracker.key(for: terminal)))
         guard decision == .eligible else {
@@ -465,9 +426,7 @@ public actor HibernationCoordinator {
         let result = await performHibernate(
             terminal: terminal,
             reason: .merged,
-            policy: .merge(
-                inputVetoEnabled: inputVetoEnabled,
-                holderHibernationEnabled: holderHibernationEnabled))
+            policy: .merge(inputVetoEnabled: inputVetoEnabled))
         await actuationLog.appendOutcome(
             confirms: actuationID,
             result: ActuationOutcome.classify(result),
@@ -480,19 +439,10 @@ public actor HibernationCoordinator {
     /// keep-warm, which merge-park honors but manual bypasses — plus the
     /// pending-input veto, whose wording matches the backup TUI scrape's so a
     /// reader cannot tell which of the two rails fired and does not need to.
-    /// The one refusal text every gated path uses for a holder-backed row, so
-    /// the CLI, the app and the actuation record all name the same reason. What
-    /// the flag gates is a new park and the classification of an UNPARKED
-    /// holder row; a row that is already parked wakes without consulting it.
-    static let holderTransportRefusal =
-        "Session runs on the pty-holder transport and holder hibernation is off "
-        + "(Settings → Hibernate pty-holder sessions, or `tbd config "
-        + "holder-hibernation on`)"
-
     /// The one refusal text for an exit-stamped row whose pane is busy, so the
     /// CLI, the app and the actuation record all name the same fact and the
-    /// same two ways out. Named here rather than at each call site for the same
-    /// reason `holderTransportRefusal` is.
+    /// same two ways out. Named here rather than at each call site so every
+    /// surface reports one wording.
     static func paneBusyRefusal(pid: Int32) -> String {
         "This session's agent process exited, but something is still running in its terminal "
         + "(pid \(pid)), and waking would replace that shell and kill it. Finish or stop that "
@@ -501,7 +451,6 @@ public actor HibernationCoordinator {
 
     private static func mergeBlockReason(_ decision: HibernationGate.Decision) -> String {
         switch decision {
-        case .holderTransport: return holderTransportRefusal
         case .notClaudeResumable: return "Not a resumable Claude session"
         case .alreadyHibernated: return "Terminal is already hibernated"
         case .suspended: return "Terminal is suspended"
@@ -804,20 +753,17 @@ public actor HibernationCoordinator {
         policy: HibernateEligibilityPolicy
     ) -> HibernateResult? {
         switch policy {
-        case let .manual(holderHibernationEnabled):
+        case .manual:
             guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
-            guard terminal.isManuallyHibernatable(
-                holderHibernationEnabled: holderHibernationEnabled) else {
-                return .notEligible(reason: manualBlockReason(
-                    terminal, holderHibernationEnabled: holderHibernationEnabled))
+            guard terminal.isManuallyHibernatable() else {
+                return .notEligible(reason: manualBlockReason(terminal))
             }
             return nil
 
-        case let .merge(inputVetoEnabled, holderHibernationEnabled):
+        case let .merge(inputVetoEnabled):
             let decision = HibernationGate.decideForMerge(
                 terminal: terminal,
                 inputVetoEnabled: inputVetoEnabled,
-                holderHibernationEnabled: holderHibernationEnabled,
                 lastInputAt: inputActivity.lastInput(
                     paneID: InputActivityTracker.key(for: terminal)))
             guard decision == .eligible else {
@@ -826,12 +772,11 @@ public actor HibernationCoordinator {
             return nil
 
         case let .automatic(
-            enabled, inputVetoEnabled, holderHibernationEnabled, idleTimeout, idleSince):
+            enabled, inputVetoEnabled, idleTimeout, idleSince):
             let decision = HibernationGate.decide(
                 terminal: terminal,
                 autoHibernateEnabled: enabled,
                 inputVetoEnabled: inputVetoEnabled,
-                holderHibernationEnabled: holderHibernationEnabled,
                 idleTimeout: idleTimeout,
                 idleSince: idleSince,
                 lastInputAt: inputActivity.lastInput(
@@ -1022,12 +967,6 @@ public actor HibernationCoordinator {
             guard terminal.transport == .holder else {
                 return await classifyUnparkedWake(terminal)
             }
-            // The soak gate belongs HERE and not above the parked check: it
-            // decides whether this install classifies an unparked holder row
-            // at all, and an install that has not armed the feature is told so
-            // rather than being handed a process-table verdict it never asked
-            // for. Nothing is mutated on the way out.
-            guard await resolvedHolderHibernationEnabled() else { return .holderTransport }
             return await classifyUnparkedHolderWake(terminal)
         }
         guard let sessionID = terminal.claudeSessionID else { return .noSessionID }
@@ -1588,7 +1527,6 @@ public actor HibernationCoordinator {
                 terminal: terminal,
                 autoHibernateEnabled: config.autoHibernateEnabled,
                 inputVetoEnabled: config.hibernateInputVetoEnabled,
-                holderHibernationEnabled: config.holderHibernationEnabled,
                 idleTimeout: timeout,
                 idleSince: idleSince[terminal.id],
                 lastInputAt: lastInputAt,
@@ -1648,7 +1586,6 @@ public actor HibernationCoordinator {
                             policy: .automatic(
                                 enabled: config.autoHibernateEnabled,
                                 inputVetoEnabled: config.hibernateInputVetoEnabled,
-                                holderHibernationEnabled: config.holderHibernationEnabled,
                                 idleTimeout: timeout,
                                 idleSince: idleSince[terminal.id]))
                         await actuationLog.appendOutcome(
@@ -1676,7 +1613,7 @@ public actor HibernationCoordinator {
                 logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input")
                 pendingKillSince[terminal.id] = nil
 
-            case .featureDisabled, .holderTransport, .notClaudeResumable,
+            case .featureDisabled, .notClaudeResumable,
                  .alreadyHibernated, .suspended, .keepWarm, .running,
                  .waitingForUser:
                 // Not at rest (or ineligible): the idle clock and any armed
