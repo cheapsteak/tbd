@@ -576,7 +576,8 @@ actor HolderRegistry {
                 expecting: owner,
                 // The job has only just been forked, and nothing has read its
                 // pty yet, so whatever it says about its modes on startup lands
-                // in this emulator.
+                // in this emulator — and so does every cell it ever paints,
+                // which is what makes this emulator's screen the child's own.
                 observedChildFromStart: true,
                 onEndOfOutput: endOfOutputNotifier(for: terminalID))
         } catch {
@@ -901,11 +902,14 @@ actor HolderRegistry {
                 // The child has been running without this emulator — since the
                 // last daemon, or since a viewer took the pty — so its mode
                 // setup was consumed by somebody else and the fresh terminal
-                // this builds starts on defaults, permanently. A preamble, when
-                // there is one, restores the modes' values and not their
-                // provenance: the viewer that captured it was itself seeded by
-                // this session's attach preamble, so it can hand back no more
-                // than the daemon gave it.
+                // this builds starts on defaults, permanently. Its grid starts
+                // blank for the same reason, and a TUI above it repaints only
+                // the cells it is changing, so the screen this reader projects
+                // holds the child's text only where the child has since written
+                // it. A preamble, when there is one, restores the values and
+                // not their provenance: the viewer that captured it was itself
+                // seeded by this session's attach preamble, so it can hand back
+                // no more than the daemon gave it.
                 observedChildFromStart: false,
                 onEndOfOutput: notifyEndOfOutput,
                 seedingScreenWith: preamble)
@@ -1280,8 +1284,10 @@ actor HolderRegistry {
     ///   have seen every byte its child ever wrote — `true` for a session this
     ///   daemon just spawned, whose startup `DECSET`s are still queued in the
     ///   pty, and `false` for one adopted while it was already running, whose
-    ///   mode setup was read by somebody else long ago. It rides all the way to
-    ///   `TerminalScreen.modesObserved`, and it is named at every call site
+    ///   mode setup was read by somebody else long ago and whose screen this
+    ///   emulator therefore starts blank underneath. It rides all the way to
+    ///   `TerminalScreen.modesObserved` and `TerminalScreen.contentObserved` —
+    ///   one fact, both consequences — and it is named at every call site
     ///   rather than defaulted, because a default is right on one of these two
     ///   paths and a silent lie on the other.
     private static func take(

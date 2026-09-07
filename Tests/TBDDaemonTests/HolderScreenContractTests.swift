@@ -400,7 +400,7 @@ import Testing
         #expect(screen.modeReading.ageMilliseconds == 7_000)
     }
 
-    // MARK: - Mode provenance
+    // MARK: - Mode and content provenance
 
     /// The ordinary case, and the one that must not report doubt: an emulator
     /// built with its child sees the startup `DECSET`s, because they are still
@@ -454,6 +454,54 @@ import Testing
                 "the preamble did not restore the mode's value")
         #expect(await harness.reader.modeReading().modesObserved == false)
         #expect(try await harness.reader.screen(maxLines: 8).modesObserved == false)
+    }
+
+    /// The content axis of the same fact, on the emulator that has it: an
+    /// emulator born with its child has parsed every cell that child ever
+    /// painted, so its screen is the child's own screen and a consumer may read
+    /// the text at face value.
+    ///
+    /// A handback does not lower it either, for the reason a handback does not
+    /// lower the modes: the emulator that captured the preamble was seeded from
+    /// this one.
+    @Test("a reader born with its child reports its screen content as observed")
+    func aReaderBornWithItsChildReportsObservedContent() async throws {
+        let harness = try Harness(columns: 40, rows: 8)
+        defer { harness.tearDown() }
+
+        #expect(try await harness.reader.screen(maxLines: 8).contentObserved)
+
+        await harness.reader.ingest(preamble: Self.data("hello from the viewer"))
+
+        #expect(try await harness.reader.screen(maxLines: 8).contentObserved)
+    }
+
+    /// The daemon-restart case, and the defect that put this field in the type.
+    /// The emulator starts blank under a child that is already running, and a
+    /// TUI repaints only the cells it is changing — so the grid holds the
+    /// child's text exactly where the child has since written it, and nothing
+    /// anywhere else. A phantom composer line measured in the field stood for
+    /// over a minute while the real composer was empty.
+    ///
+    /// The preamble here **paints visible text**, deliberately, so the two
+    /// halves can be told apart: the values arrive — the text is in `lines` —
+    /// and the provenance does not follow them, because the viewer that
+    /// captured that screen was itself painted by this reader's own attach
+    /// preamble and can hand back no more than it was given.
+    @Test("a reader built over a running child stays content-unobserved across a preamble")
+    func aReaderOverARunningChildStaysContentUnobservedAcrossAPreamble() async throws {
+        let harness = try Harness(columns: 40, rows: 8, observedChildFromStart: false)
+        defer { harness.tearDown() }
+
+        #expect(try await harness.reader.screen(maxLines: 8).contentObserved == false)
+
+        await harness.reader.ingest(preamble: Self.data("restored composer text"))
+
+        let screen = try await harness.reader.screen(maxLines: 8)
+        #expect(screen.lines.contains { $0.contains("restored composer text") },
+                "the preamble did not restore the screen's text: \(screen.lines)")
+        #expect(screen.contentObserved == false)
+        #expect(try await harness.reader.screen(maxLines: 8).contentObserved == false)
     }
 
     // MARK: - Harness

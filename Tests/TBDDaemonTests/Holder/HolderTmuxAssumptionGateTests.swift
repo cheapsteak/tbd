@@ -475,14 +475,16 @@ struct HolderTmuxAssumptionGateTests {
 
     /// A screen the rail can judge, without a holder, a pty or an attach.
     ///
-    /// The two facts these tests vary are the ones the rail turns on: the
-    /// `lines`, which `HibernationSafetyChecks.hasPendingInput` reads, and the
-    /// `source`, which decides whether the daemon may read them at all.
-    /// Everything else is a plausible constant, constructed through
-    /// `TerminalScreen`'s own initializer so a fixture cannot state a screen
-    /// the type would refuse.
+    /// The three facts these tests vary are the ones the rail turns on: the
+    /// `lines`, which `HibernationSafetyChecks.hasPendingInput` reads, the
+    /// `source`, which decides whether the daemon is the live store, and
+    /// `contentObserved`, which decides whether that store's grid was ever
+    /// painted by this child. Everything else is a plausible constant,
+    /// constructed through `TerminalScreen`'s own initializer so a fixture
+    /// cannot state a screen the type would refuse.
     private static func screen(
-        lines: [String], source: TerminalScreen.Source = .daemon
+        lines: [String], source: TerminalScreen.Source = .daemon,
+        contentObserved: Bool = true
     ) throws -> TerminalScreen {
         try TerminalScreen(
             lines: lines,
@@ -492,6 +494,7 @@ struct HolderTmuxAssumptionGateTests {
             modes: TerminalScreen.ChildModes(
                 bracketedPaste: true, applicationCursor: false, alternateScreen: false),
             modesObserved: true,
+            contentObserved: contentObserved,
             source: source,
             ageMilliseconds: 0)
     }
@@ -582,6 +585,59 @@ struct HolderTmuxAssumptionGateTests {
         let viewer = try Self.screen(lines: Self.emptyComposer, source: .viewer)
 
         let result = await parkAgainst({ viewer }, db: db, terminal: terminal)
+        #expect(result == .notEligible(reason: HibernationCoordinator.holderViewerAttachedRefusal))
+    }
+
+    /// The re-adoption case: a screen that is live and still unjudgeable.
+    ///
+    /// After a daemon restart the emulator is built over a child that is
+    /// already running, so it starts blank while the TUI above it repaints only
+    /// the cells it is changing. `source` is honestly `daemon` — every byte
+    /// arriving now is parsed live — and the grid is a mixture of correct
+    /// cells, blanks where the session has text, and text the session has since
+    /// cleared. An EMPTY composer deliberately, for the same reason the stale
+    /// test uses one: the refusal must come from the provenance, not from
+    /// anything the lines say, and a blanked composer over a person's
+    /// half-typed message is precisely the screen this rail exists to refuse.
+    @Test("a park refuses a live screen whose emulator never saw the child start")
+    func parkRefusesAContentUnobservedScreen() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+        let unobserved = try Self.screen(
+            lines: Self.emptyComposer, source: .daemon, contentObserved: false)
+
+        let result = await parkAgainst({ unobserved }, db: db, terminal: terminal)
+        #expect(
+            result == .notEligible(reason: HibernationCoordinator.holderContentUnobservedRefusal),
+            "a content-unobserved screen did not fail the rail closed: \(result)")
+
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before,
+                "a park refused on an unobserved screen still wrote its intent to the row")
+    }
+
+    /// The order of the two axes, which is policy rather than accident. A
+    /// screen can be both frozen and content-unobserved — a viewer attaches to
+    /// a session the daemon re-adopted — and the refusal a person reads should
+    /// be the one naming an action they can take. Closing the tab is that
+    /// action; "wait for the daemon to start this session" is not.
+    @Test("a stale screen that is also content-unobserved refuses on its source")
+    func parkRefusesAStaleUnobservedScreenOnItsSource() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let both = try Self.screen(
+            lines: Self.emptyComposer, source: .staleDaemon, contentObserved: false)
+
+        let result = await parkAgainst({ both }, db: db, terminal: terminal)
         #expect(result == .notEligible(reason: HibernationCoordinator.holderViewerAttachedRefusal))
     }
 
@@ -2713,6 +2769,46 @@ struct HolderTmuxAssumptionGateTests {
             db, logPath: logPath, dates: dates,
             registry: holderRegistry(listing: [terminal]),
             screen: { stale })
+
+        await sweepToTheActMoment(coord, dates: dates)
+        dates.advance(by: 61 + HibernationCoordinator.killDebounce + 1)
+        await coord.sweep()
+
+        let written = try logRows(at: logPath)
+        #expect(written.isEmpty,
+                "the sweep asked for a park it could never have completed: \(written)")
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
+    }
+
+    /// The content axis of the same agreement. A re-adopted session's screen is
+    /// live, so nothing about its `source` stops the sweep — and the park would
+    /// still refuse it, because the emulator inherited a blank grid under a
+    /// child that repaints only what it is changing. A daemon that restarts
+    /// under a fleet re-adopts every session it finds, so arming here would buy
+    /// a request-and-refusal pair per row per sweep until each one is started
+    /// again. The assertion is on the RECORD being empty, because only the
+    /// record can tell "refused" from "never asked".
+    @Test("the sweep neither arms nor fires a holder row whose screen content is unobserved")
+    func sweepSkipsAHolderRowWithUnobservedContent() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setHolderHibernationEnabled(true)
+        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let before = RowFingerprint(terminal)
+        let logPath = try sweepLogPath()
+        let dates = TestDateSource()
+        // A live source and a clear composer, so nothing but the content
+        // provenance can be what stops this.
+        let unobserved = try Self.screen(
+            lines: Self.emptyComposer, source: .daemon, contentObserved: false)
+        let coord = await sweepCoordinator(
+            db, logPath: logPath, dates: dates,
+            registry: holderRegistry(listing: [terminal]),
+            screen: { unobserved })
 
         await sweepToTheActMoment(coord, dates: dates)
         dates.advance(by: 61 + HibernationCoordinator.killDebounce + 1)
