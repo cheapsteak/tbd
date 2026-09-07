@@ -99,12 +99,22 @@ one can be left behind, and each covers exactly one:
   socket with it, which is precisely why the layer above exists.
 - **A wrapper that is SIGKILLed**, where not even the EXIT trap runs, is
   reclaimed by the *next* run: `reclaim_abandoned_run_roots` gives every sibling
-  `/tmp/tbd-test-home.*` older than a day the same two sweeps and then removes
-  it. No run lasts a day — the nightly stress harness mints one root per
-  iteration — so age alone is a safe discriminator, and every run being a sweep
-  means the machine heals as soon as anybody tests again. It is the named
-  reconciler for fixture holders in the sense
+  `/tmp/tbd-test-home.*` that is both older than a day and has no live owner the
+  same two sweeps, then removes it. Every run being a sweep is what makes the
+  machine heal as soon as anybody tests again, with no timer and no daemon. It
+  is the named reconciler for fixture holders in the sense
   `docs/specs/2026-08-15-named-reconciler-doctrine-design.md` means it.
+
+  **Age is not the whole discriminator, and the missing half is the dangerous
+  one.** No run lasts a day, so age says nobody is coming back — but a run that
+  WEDGES stops writing, so its root ages exactly like an abandoned one while its
+  holder, its tmux servers and its `TBD_HOME` are all still in use. So every run
+  claims its own root on the way in, writing its pid and that pid's kernel start
+  time into `<root>/.run-owner`, and the reconciler skips any root whose claim
+  still checks out. Same identity check as everywhere else here: a pid alone
+  would be a number the kernel is free to reissue. A root with no claim in it
+  predates the mechanism and is reclaimed on age — the one arm that is
+  deliberately not keep-biased, because immortal roots are the leak.
 
 The tmux leg is the one with no teardown remedy: **tmux never unlinks its
 socket file when a server exits.** It unlinks a stale socket lazily instead, at

@@ -176,6 +176,25 @@ if [ -n "${FAKE_SWIFT_DEAD_HOLDER_SOCKETS:-}" ]; then
       "$holder_dir/$holder_name.child") 2>/dev/null
   done
 fi
+# Copy the run's owner claim out while the run is still going. Read from inside
+# the fence, so what it captures is the claim as a LIVE run has it — the only
+# vantage point from which "the pid it names is this run's, and it is alive" is
+# a checkable statement.
+if [ -n "${FAKE_SWIFT_COPY_RUN_CLAIM:-}" ]; then
+  run_claim="${TBD_TEST_SCRATCH_ROOT:-/nonexistent}/.run-owner"
+  cp "$run_claim" "$FAKE_SWIFT_COPY_RUN_CLAIM" 2>/dev/null || true
+  # What the claim SAYS is only half of it; the other half is what the kernel
+  # says about the pid it names, asked here because the wrapper is still alive
+  # at this instant and will not be by the time the case reads any of it.
+  claimed_pid="$(sed -n 1p "$run_claim" 2>/dev/null)"
+  {
+    case "$claimed_pid" in
+      ''|*[!0-9]*) echo "not-a-pid" ;;
+      *) if kill -0 "$claimed_pid" 2>/dev/null; then echo alive; else echo dead; fi ;;
+    esac
+    ps -o lstart= -p "$claimed_pid" 2>/dev/null | head -1 | sed 's/^ *//; s/ *$//'
+  } > "$FAKE_SWIFT_COPY_RUN_CLAIM.observed" 2>/dev/null || true
+fi
 # Unquoted on purpose: FAKE_SWIFT_RC is a space-separated list.
 fake_swift_codes=(${FAKE_SWIFT_RC:-0})
 fake_swift_index=$((fake_swift_invocation - 1))
@@ -245,7 +264,7 @@ run_script() {
                  -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_RC \
                  -u FAKE_SWIFT_TMUX_SOCKETS -u FAKE_SWIFT_TEST_COUNT \
                  -u FAKE_SWIFT_HOLDERS -u FAKE_SWIFT_DEAD_HOLDER_SOCKETS \
-                 -u FAKE_HOLDER_START \
+                 -u FAKE_HOLDER_START -u FAKE_SWIFT_COPY_RUN_CLAIM \
                  -u TBD_REMOTE_VERIFY -u TBD_REMOTE_VERIFY_YIELD_SECONDS \
                  -u TBD_SWIFT_QUEUE_YIELD_SECONDS \
                  -u FAKE_REMOTE_VERIFY_RC -u FAKE_REMOTE_VERIFY_LOG \
@@ -451,6 +470,21 @@ mk_run_root() {
 # Ages a directory past `ABANDONED_RUN_ROOT_MINUTES` without waiting a day for
 # it. 25 hours, so the case is not sitting on the boundary.
 age_run_root() { touch -t "$(date -v-25H +%Y%m%d%H%M)" "$1"; }
+
+# A process this file owns, alive until it is killed, standing in for a wrapper
+# whose run has WEDGED rather than died. Echoes its pid.
+start_stub_run() {
+  sleep 600 >/dev/null 2>&1 </dev/null &
+  printf '%s\n' "$!"
+}
+
+# Writes a run root's owner claim by hand: "<pid>" then the kernel's start time
+# for it, which is the two-line shape `claim_run_root` writes.
+write_run_claim() {
+  local root="$1" pid="$2" start="${3:-}"
+  [ -n "$start" ] || start="$(process_start_time "$pid")"
+  printf '%s\n%s\n' "$pid" "$start" > "$root/$RUN_OWNER_FILE"
+}
 
 # ---------------------------------------------------------------------------
 # 1. The symlink refusal — the guard that could chmod 000 a real ~/tbd
@@ -1306,6 +1340,131 @@ test_the_holder_lookup_ands_its_selectors() {
   # rationale.
   assert_missing "no pattern kill is ever executed" \
     "$(printf '%s\n' "$body" | grep -v '^[[:space:]]*#')" "pkill"
+}
+
+# THE SECOND HALF OF THE DISCRIMINATOR. Age says nobody is coming back; the
+# claim file says whether anybody is still there. They are not redundant, and
+# the case that separates them is the expensive one: a run that WEDGES stops
+# writing, so its root ages exactly like an abandoned one while its holder, its
+# tmux servers and its `TBD_HOME` are all still in use. Reclaiming that would
+# `SIGKILL` a live run and delete its state.
+test_an_aged_root_whose_owner_is_alive_is_left_alone() {
+  local roots old owner; roots="$(mk_roots_dir)"
+  old="$(mk_run_root "$roots" "wedged")"
+  owner="$(start_stub_run)"
+  write_run_claim "$old" "$owner"
+  age_run_root "$old"
+  reclaim_abandoned_run_roots "$roots"
+  assert_eq "a wedged run's root survives its own age" "yes" "$(dir_exists "$old")"
+  assert_eq "and its owner is untouched" "$owner" "$(live_pids "$owner")"
+  kill_pids "$owner"
+  rm -rf "$roots"
+}
+
+# MUTATION. Drop the liveness check and age is the only discriminator again —
+# the finding this attestation answers.
+test_the_run_root_liveness_check_is_load_bearing() {
+  local mutant roots old owner; roots="$(mk_roots_dir)"
+  mutant="$(mutant_of "$SCRIPT" '/^    run_root_is_live "\$root" \&\& continue$/d')"
+  old="$(mk_run_root "$roots" "wedged")"
+  owner="$(start_stub_run)"
+  write_run_claim "$old" "$owner"
+  age_run_root "$old"
+  # shellcheck source=/dev/null
+  ( source "$mutant"; reclaim_abandoned_run_roots "$roots" )
+  assert_eq "without the check a live run's root is reclaimed on age alone" "no" \
+    "$(dir_exists "$old")"
+  kill_pids "$owner"
+  rm -rf "$roots"
+}
+
+# THE CLAIM IS ONLY AS GOOD AS ITS IDENTITY CHECK. A pid is free the instant its
+# corpse is collected, so a day-old claim naming a number some unrelated process
+# now holds must not immortalise the root — which is exactly what reading the
+# pid alone would do. The start time is what tells them apart.
+test_an_aged_root_whose_claimed_pid_was_reissued_is_reclaimed() {
+  local roots old owner; roots="$(mk_roots_dir)"
+  old="$(mk_run_root "$roots" "reissued")"
+  owner="$(start_stub_run)"
+  # A live pid, claimed with somebody else's start time: the shape a recycled
+  # pid has, and the one no real process table can be asked to produce.
+  write_run_claim "$old" "$owner" "Thu Jan  1 00:00:00 1970"
+  age_run_root "$old"
+  reclaim_abandoned_run_roots "$roots"
+  assert_eq "a reissued pid does not save the root" "no" "$(dir_exists "$old")"
+  kill_pids "$owner"
+  rm -rf "$roots"
+}
+
+test_an_aged_root_whose_owner_is_dead_is_reclaimed() {
+  local roots old owner; roots="$(mk_roots_dir)"
+  old="$(mk_run_root "$roots" "crashed")"
+  owner="$(start_stub_run)"
+  write_run_claim "$old" "$owner"
+  kill_pids "$owner"
+  # The corpse has to be collected before the pid names nothing; this file's
+  # own shell is its parent, so `wait` is what collects it.
+  wait "$owner" 2>/dev/null
+  age_run_root "$old"
+  reclaim_abandoned_run_roots "$roots"
+  assert_eq "a dead owner's root is reclaimed" "no" "$(dir_exists "$old")"
+  rm -rf "$roots"
+}
+
+# A CLAIM THAT IS NOT THERE IS NOT A KEEP. Roots written by a wrapper that
+# predates this file have none, and treating those as immortal would leak
+# exactly what the reconciler exists to collect. This is the one arm that is
+# deliberately not keep-biased, so it is pinned rather than left to be inferred.
+test_an_aged_root_with_no_claim_is_reclaimed() {
+  local roots old; roots="$(mk_roots_dir)"
+  old="$(mk_run_root "$roots" "unclaimed")"
+  age_run_root "$old"
+  assert_eq "the fixture really has no claim in it" "no" \
+    "$(if [ -f "$old/$RUN_OWNER_FILE" ]; then echo yes; else echo no; fi)"
+  reclaim_abandoned_run_roots "$roots"
+  assert_eq "an unclaimed aged root is reclaimed" "no" "$(dir_exists "$old")"
+  rm -rf "$roots"
+}
+
+# END TO END: a real run claims its own root, with its own live pid, before it
+# does anything slow. Read out of the dump the stub writes, which is taken from
+# inside the run — so the claim is proven to exist while the run is still going,
+# not merely to have been written at some point.
+test_a_real_run_claims_its_root_with_its_own_live_pid() {
+  local fix claim owner recorded; fix="$(mkfix)"
+  RUN_ENV=(FAKE_SWIFT_COPY_RUN_CLAIM="$fix/observed-claim")
+  run_wrapper "$fix"
+  RUN_ENV=()
+  assert_ok "the run is unaffected" "$RUN_RC"
+  claim="$fix/observed-claim"
+  assert_eq "the claim existed during the run" "yes" \
+    "$(if [ -f "$claim" ]; then echo yes; else echo no; fi)"
+  owner="$(sed -n 1p "$claim" 2>/dev/null)"
+  recorded="$(sed -n 2p "$claim" 2>/dev/null)"
+  assert_eq "it names a pid" "yes" \
+    "$(case "$owner" in ''|*[!0-9]*) echo no ;; *) echo yes ;; esac)"
+  # Both halves come from inside the run, because neither is checkable from out
+  # here: the wrapper has exited by now, so its pid names nothing and its start
+  # time cannot be re-derived. That is the whole reason the claim is written at
+  # all — it is the only record that outlives the process it describes.
+  assert_eq "the pid it names was alive while the run was going" "alive" \
+    "$(sed -n 1p "$claim.observed" 2>/dev/null)"
+  assert_eq "and the recorded start time is that pid's real one" \
+    "$(sed -n 2p "$claim.observed" 2>/dev/null)" "$recorded"
+  rmfix "$fix"
+}
+
+# MUTATION. Without the claim the wrapper's own root is indistinguishable from
+# an abandoned one the moment it stops writing.
+test_the_run_root_claim_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"
+  mutant="$(mutant_of "$SCRIPT" '/^claim_run_root "\$scratch_home"$/d')"
+  RUN_ENV=(FAKE_SWIFT_COPY_RUN_CLAIM="$fix/observed-claim")
+  run_script "$mutant" "$fix"
+  RUN_ENV=()
+  assert_eq "without the claim the run leaves none" "no" \
+    "$(if [ -f "$fix/observed-claim" ]; then echo yes; else echo no; fi)"
+  rmfix "$fix"
 }
 
 # ---------------------------------------------------------------------------

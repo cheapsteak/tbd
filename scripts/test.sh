@@ -69,9 +69,12 @@
 # works from `terminal` rows, and a fixture's socket is under a scratch root
 # with no row anywhere. `reclaim_abandoned_run_roots` is the named reconciler
 # for that case (docs/specs/2026-08-15-named-reconciler-doctrine-design.md): at
-# START-UP, every sibling run root older than a day gets the same two sweeps and
-# then `rm -rf`. Every run is a sweep, so the machine heals as soon as anybody
-# tests again.
+# START-UP, every sibling run root that is both older than a day AND has no live
+# owner gets the same two sweeps and then `rm -rf`. Every run is a sweep, so the
+# machine heals as soon as anybody tests again. The liveness half is not
+# redundant with the age half: a WEDGED run stops writing, so it ages exactly
+# like an abandoned one, and only the pid it claimed its root with can tell them
+# apart.
 #
 # READING A PERMISSION-DENIED FAILURE. If a test under this wrapper fails with
 # "You don't have permission to save the file …" or `EACCES`/`NSFileWriteNoPermissionError`
@@ -336,6 +339,14 @@ require_owned_dir_after_mkdir() {
 RUN_ROOT_DIR="/tmp"
 RUN_ROOT_PREFIX="tbd-test-home."
 
+# WHAT A LIVE RUN LEAVES IN ITS ROOT SO NOBODY RECLAIMS IT. Two lines: the
+# wrapper's own pid, and the kernel's start time for that pid as `ps` renders
+# it. The second line is what makes the first safe to read a day later — a pid
+# is free the instant its corpse is collected, and the number is then somebody
+# else's — and it is the same identity check `AgentReaper` applies to a holder
+# row and the fixtures apply to a remembered pid.
+RUN_OWNER_FILE=".run-owner"
+
 # How old a sibling run root has to be before it is certainly abandoned. No run
 # lasts a day — the nightly stress harness mints a fresh root per iteration —
 # so age alone is a safe discriminator, and one that needs no scheduler, no
@@ -454,6 +465,63 @@ sweep_holders() {
   return 0
 }
 
+# The kernel's start time for a pid, as one line with no leading padding.
+#
+# `ps -o lstart=` rather than an elapsed time: an elapsed time is a moving
+# target that has to be compared with a tolerance, while a start INSTANT is a
+# constant that compares by string equality, and equality is what a
+# recycled-pid check needs. Empty for a pid that names nothing.
+#
+# BOTH ENDS ARE TRIMMED because `ps` pads the column on both sides, and the
+# value is written to a file that a later run compares as a string. Trimming
+# only the left would still compare equal — the padding is the same every time —
+# but it would put trailing spaces in the claim file, where the next reader has
+# to know they are there.
+process_start_time() {
+  ps -o lstart= -p "$1" 2>/dev/null | head -1 | sed 's/^ *//; s/ *$//'
+}
+
+# Claims a run root for this process, so no other run reclaims it.
+claim_run_root() {
+  local root="$1"
+  printf '%s\n%s\n' "$$" "$(process_start_time "$$")" > "$root/$RUN_OWNER_FILE" 2>/dev/null || true
+  return 0
+}
+
+# Whether `$1` is a run root whose owner is still alive — the POSITIVE liveness
+# attestation, and the thing that keeps age from being the only discriminator.
+#
+# WHY IT IS NEEDED, GIVEN THAT NO RUN LASTS A DAY. That premise covers every
+# AUTOMATED caller — CI's job timeouts and the nightly harness's per-iteration
+# roots are all far under it — but not a developer who starts a run by hand and
+# walks away from one that WEDGES. `Tests/CLAUDE.md` documents several real hang
+# classes, and a wedged run is exactly the case age cannot see: it stops writing,
+# so its root ages like an abandoned one while its holder, its tmux servers and
+# its `TBD_HOME` are all still in use. Without this check the reclaim would go
+# from "silently leak" to "SIGKILL somebody's live run and delete its state",
+# which is the wrong direction to be wrong in.
+#
+# IT FAILS KEEP-BIASED, LIKE EVERY OTHER IDENTITY CHECK IN THIS FILE: anything
+# short of "this pid is alive AND started when the file says it did" is not
+# proof of life. A missing file is the one case that is NOT keep-biased, and
+# deliberately so — a root with no claim in it was written by a wrapper that
+# predates this attestation, and treating those as immortal would leak exactly
+# the roots this reconciler exists to collect.
+run_root_is_live() {
+  local root="$1" claim="$1/$RUN_OWNER_FILE" pid recorded current
+  [ -f "$claim" ] || return 1
+  pid="$(sed -n 1p "$claim" 2>/dev/null)"
+  recorded="$(sed -n 2p "$claim" 2>/dev/null)"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  current="$(process_start_time "$pid")"
+  [ -n "$current" ] || return 1
+  [ -n "$recorded" ] || return 1
+  [ "$current" = "$recorded" ] || return 1
+  return 0
+}
+
 # THE RECONCILER FOR THE RUN THAT COULD NOT CLEAN UP AFTER ITSELF.
 #
 # `trap cleanup EXIT` covers a normal exit and a TERMed wrapper alike — bash
@@ -467,9 +535,17 @@ sweep_holders() {
 # fixture holders in the doctrine's sense
 # (`docs/specs/2026-08-15-named-reconciler-doctrine-design.md`): a background
 # pass that enumerates ground truth — the run roots actually on disk — compares
-# it against intent (nothing older than a day is anybody's), and reclaims the
-# difference. Every run is a sweep, so the machine self-heals as soon as anyone
-# tests again, and there is no timer, no daemon and no state to keep.
+# it against intent, and reclaims the difference. Every run is a sweep, so the
+# machine self-heals as soon as anyone tests again, and there is no timer, no
+# daemon and no scheduler.
+#
+# THE DISCRIMINATOR IS TWO-PART, AND THE SECOND HALF IS WHY THIS CAN KILL AT
+# ALL. Age says nobody is coming back — no run lasts a day. `run_root_is_live`
+# says whether anybody is still there, from a claim the owning run writes into
+# its own root. Age alone would be a proxy, and the one case it reads wrong is
+# the expensive one: a WEDGED run stops writing, so its root ages exactly like
+# an abandoned one while everything inside it is still in use. Both must agree
+# before anything is signalled.
 #
 # ORDER MATTERS: the processes go first and the files second, for the same
 # reason the tmux sweep runs before its `rm -rf`. Removing a socket out from
@@ -490,6 +566,9 @@ reclaim_abandoned_run_roots() {
   [ -d "$dir" ] || return 0
   while IFS= read -r root; do
     [ -n "$root" ] || continue
+    # Age says nobody is coming back for it; the claim file can still say
+    # somebody is. A wedged run looks exactly like an abandoned one to `find`.
+    run_root_is_live "$root" && continue
     sweep_tmux_servers "$root"
     sweep_holders "$root"
     rm -rf "$root" 2>/dev/null || true
@@ -852,6 +931,12 @@ reclaim_abandoned_run_roots "$RUN_ROOT_DIR"
 # starts failing at once. `scripts/test.test.sh` asserts the budget so a
 # refactor that moves it cannot land quietly.
 scratch_home="$(mktemp -d "$RUN_ROOT_DIR/${RUN_ROOT_PREFIX}XXXXXXXX")"
+# Claimed IMMEDIATELY, before anything slow happens: everything after this line
+# — the build, the suite, a wait in the admission queue — is time during which
+# this run could wedge, and a claim written later would leave a window in which
+# it looks abandoned. The claim is what stops the reconciler above from ever
+# reclaiming a run that is merely stuck rather than gone.
+claim_run_root "$scratch_home"
 tmux_tmpdir="$scratch_home/tmux"
 
 # CLEANUP IS PROCESSES FIRST, FILES SECOND. `rm -rf` unlinks; it does not kill,
