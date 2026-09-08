@@ -519,16 +519,23 @@ private final class ResponseRelay: @unchecked Sendable {
 
         inFlight.decrement()
         let keepAlive = self.keepAlive
+        let cut = error != nil
         boxed.eventLoop.execute {
             let context = self.boxed.context
             guard context.channel.isActive else { return }
+            let channel = context.channel
+            guard !cut else {
+                // A stream cut mid-body is relayed as a cut. Writing `.end`
+                // here would put a terminating chunk on the wire and tell the
+                // client the response completed, which is the one thing that
+                // was not true; dropping the connection is what it would have
+                // seen talking to the upstream directly.
+                channel.close(promise: nil)
+                return
+            }
             let promise = context.eventLoop.makePromise(of: Void.self)
             context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(nil)), promise: promise)
-            // A stream cut mid-body is relayed as a cut: the client's chunked
-            // framing has no terminating chunk, which is exactly what it would
-            // have seen from the upstream directly.
-            if !keepAlive || error != nil {
-                let channel = context.channel
+            if !keepAlive {
                 promise.futureResult.whenComplete { _ in channel.close(promise: nil) }
             }
         }
