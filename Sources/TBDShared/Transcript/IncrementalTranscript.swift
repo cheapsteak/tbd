@@ -61,6 +61,24 @@ public struct IncrementalTranscript: Sendable {
     /// Lines ingested so far, for the `line-N` stable-id fallback. Must count
     /// the same lines the whole-file parser counts, or ids diverge.
     private var lineCursor = 0
+    /// The API `message.id` of every assistant line ingested so far, so a
+    /// streamed message can be confirmed as landed in the JSONL by a set
+    /// lookup rather than a scan of `items`.
+    ///
+    /// Read from the row alone — no cross-row state — so it costs nothing
+    /// beyond the walk `ingest` already performs and does not touch
+    /// `buildItems`' purity.
+    ///
+    /// Sidechain rows are excluded deliberately: a subagent's messages carry
+    /// their own ids and must never confirm a parent session's streamed
+    /// message. `buildItems` drops sidechain rows for a different reason (they
+    /// are not part of the displayed transcript); the exclusion here is its own
+    /// rule and is applied at ingest.
+    ///
+    /// Claude Code writes one assistant line **per content block**, all sharing
+    /// the same `message.id`, so an id is commonly inserted several times. A set
+    /// absorbs that.
+    private var assistantMessageIDs: Set<String> = []
 
     /// One tool-call row held for a possible later patch: the line's original
     /// JSON text plus the stable id `buildItems` was given for it.
@@ -74,7 +92,19 @@ public struct IncrementalTranscript: Sendable {
     /// `@testable` can assert the bound and nothing public can depend on it.
     var retainedToolCallRowCount: Int { toolCallRowByID.count }
 
+    /// How many distinct assistant message ids have been recorded. Internal and
+    /// read-only, so `@testable` can assert that a row carrying no id records
+    /// nothing and nothing public can depend on the count.
+    var assistantMessageIDCount: Int { assistantMessageIDs.count }
+
     public init() {}
+
+    /// Whether a non-sidechain assistant line carrying this API `message.id`
+    /// has been ingested. A streamed message is confirmed — and its provisional
+    /// row retired — when this turns true.
+    public func hasAssistantMessage(id: String) -> Bool {
+        assistantMessageIDs.contains(id)
+    }
 
     @discardableResult
     public mutating func ingest(lines: [String]) -> Change {
@@ -94,6 +124,13 @@ public struct IncrementalTranscript: Sendable {
             rawLines.append(json)
             rawText.append(line)
             stableIDs.append((json["uuid"] as? String) ?? "line-\(lineCursor)")
+
+            if json["type"] as? String == "assistant",
+               json["isSidechain"] as? Bool != true,
+               let message = json["message"] as? [String: Any],
+               let messageID = message["id"] as? String {
+                assistantMessageIDs.insert(messageID)
+            }
 
             if json["type"] as? String == "user",
                let message = json["message"] as? [String: Any],
