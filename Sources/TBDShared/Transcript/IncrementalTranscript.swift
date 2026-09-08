@@ -16,8 +16,14 @@ import Foundation
 ///
 /// Raw line dictionaries are deliberately not retained. Holding every parsed
 /// `[String: Any]` for a large session would cost more memory than this design
-/// saves in transfer; only the built items, the result index, and the rows of
-/// tool calls that might still be patched are kept.
+/// saves in transfer; only the built items, the result index, the rows of tool
+/// calls that might still be patched, and `assistantMessageIDs` are kept.
+///
+/// `assistantMessageIDs` is the one retained set with no upper bound of its
+/// own: it holds one short API `message.id` string per distinct assistant
+/// message and never removes one, so it grows with the length of the session.
+/// Nothing prunes it — the whole struct is dropped when
+/// `TranscriptSource.forget` runs for the session, which is what bounds it.
 public struct IncrementalTranscript: Sendable {
 
     /// What one `ingest` changed, so a caller can publish narrowly instead of
