@@ -1,6 +1,7 @@
 import Foundation
 import NIOHTTP1
 import NIOCore
+import TestSupport
 import Testing
 
 @testable import TBDModelProxy
@@ -114,9 +115,10 @@ extension ModelProxySuites {
             // of whatever turn is still running.
             let retired = ProxyFlagBox()
             // Six events a second apart: the stream has to still be running
-            // when the successor binds, and the successor's bind is allowed to
-            // wait out a squatter (see below), so the script's length is the
-            // budget both of those come out of.
+            // when the retire answers, which is what the in-flight count and
+            // the untouched event stream below read. The successor's wait for
+            // the port is deliberately not paid for out of this script's
+            // length; see the wait itself.
             let ticks = (1...6).map { index in
                 (delayMs: 1000, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
@@ -150,9 +152,23 @@ extension ModelProxySuites {
                 #expect(harness.server.streamsInFlight == 1, "the stream was cut by the retire")
                 #expect(!retired.value, "the process was handed over before the drain finished")
 
+                // The claim the handshake makes, asserted where no race can
+                // turn it: at the instant the answer lands, a connect to the
+                // port must be refused. Only a listening socket answers one, so
+                // a refusal is proof the listener is gone — and a proxy that
+                // wrote its 200 first and closed afterwards is still accepting
+                // here, however its successor's bind goes. The bind below
+                // cannot carry this claim on its own, because a retire frees
+                // the port and cannot reserve it.
+                #expect(
+                    connectRefused(port: harness.port),
+                    "the port still accepted a connection when the retire answered")
+
                 // The successor takes the port while the first proxy is still
-                // delivering. This is what `SO_REUSEADDR` on the listener buys: the
-                // connections carrying the in-flight streams still hold the port.
+                // delivering. This is what `SO_REUSEADDR` on the listener buys:
+                // the connections carrying the in-flight streams still hold the
+                // port, and a bind those refused would fail on the first
+                // attempt and on every one after it.
                 let successor = ProxyServer(
                     port: harness.port, routes: harness.routes, tee: nil,
                     status: {
@@ -163,41 +179,70 @@ extension ModelProxySuites {
                     },
                     onRetire: {})
                 let bindStarted = ContinuousClock().now
-                var boundPort: Int?
-                var lastBindError: (any Error)?
-                // Retried rather than tried once: an ephemeral port the retire
-                // just freed is a port any concurrently starting listener — in
-                // this process or in another test's child — can be handed, and
-                // that is a squatter, not a broken handshake. Four seconds
-                // rather than one because the squatter is real: it took this
-                // port on two of three CI runs once the suite that spawns real
-                // proxy binaries landed ahead of this one.
+                let bindOutcome = ProxyBindOutcomeBox()
+                // Waited out rather than budgeted, because a retire frees the
+                // port and cannot reserve it. macOS hands ephemeral ports out
+                // sequentially from one global counter — `net.inet.tcp
+                // .randomize_ports` is 0 — across the 16,384 numbers in
+                // 49152-65535, so a freed one comes back around after a single
+                // wrap of that range: 16,220 allocations, measured at 0.15 s on
+                // an idle machine. Beside every other socket-opening test in
+                // the pass, the number this retire just freed is one an
+                // unrelated connect or listener can be handed at once, and
+                // `SO_REUSEADDR` buys nothing against that: a socket that does
+                // not set it refuses a `SO_REUSEADDR` bind, EADDRINUSE, for as
+                // long as it lives. A squatter is somebody else holding a port,
+                // not a broken handshake — which is why the handshake is
+                // asserted above, off the socket the retire answered on, and
+                // why this wait only has to outlast the squatter.
                 //
-                // Widening the allowance does NOT weaken the claim, because the
-                // claim is not "within N seconds" — it is "while the old
-                // streams are still running", and `streamsInFlight == 1` below
-                // is what asserts it. A bind that only succeeded because the
-                // last stream ended fails there, whatever the allowance is.
-                while ContinuousClock().now - bindStarted < .seconds(4) {
+                // Thirty seconds rather than the four this waited before, which
+                // a peer test's listener outlived four times on `main` in one
+                // day. It stays well inside `withProxy`'s 60-second "request"
+                // phase deadline. The "no stream was cut" half of the test does
+                // not come out of this wait either: it is the in-flight count
+                // above and the six events below.
+                let poll = await pollUntilTrue(
+                    timeout: .seconds(30), pollInterval: .milliseconds(50)
+                ) {
                     do {
-                        boundPort = try await withPhaseDeadline("successor bind", seconds: 5) {
-                            try await successor.start()
-                        }
-                        break
+                        bindOutcome.bound(
+                            try await withPhaseDeadline("successor bind", seconds: 5) {
+                                try await successor.start()
+                            })
+                        return true
                     } catch {
-                        lastBindError = error
-                        try? await Task.sleep(nanoseconds: 50_000_000)
+                        bindOutcome.failed(error)
+                        return false
                     }
                 }
                 let bindTook = ContinuousClock().now - bindStarted
-                // Built before the macro, not inside it: `#expect`'s message is
-                // a `Comment`, and a nested closure interpolated into one is
-                // the shape that failed to compile in Task A4.
-                let bindFailure = lastBindError.map { "\($0)" } ?? "no error"
-                #expect(
-                    boundPort == harness.port,
-                    "the successor did not take the port in \(bindTook): \(bindFailure)")
-                #expect(harness.server.streamsInFlight == 1, "the first stream ended early")
+                switch poll {
+                case .satisfied:
+                    #expect(bindOutcome.port == harness.port, "the successor bound some other port")
+                case .cancelled:
+                    // Attribution belongs to whatever cancelled this test, not
+                    // to a wait that was about to succeed.
+                    break
+                case .timedOut:
+                    // Both built before the macro, not inside it: `Issue.record`
+                    // takes a `Comment`, and a nested closure interpolated into
+                    // one is the shape that failed to compile in Task A4.
+                    let bindFailure = bindOutcome.lastError ?? "no error"
+                    // Which kind of squatter, asked the one way a test inside
+                    // the process can: a connect that is answered means
+                    // somebody is listening on the port, a refused one means a
+                    // socket that never listens — a client connection's local
+                    // port, say — holds it.
+                    let holder = connectRefused(port: harness.port)
+                        ? "nothing is listening on it"
+                        : "something is listening on it"
+                    Issue.record(
+                        """
+                        the successor did not take the port in \(bindTook): \(bindFailure); \
+                        \(holder)
+                        """)
+                }
                 await successor.stop()
 
                 // No stream was cut: every scripted event still arrives.
@@ -604,6 +649,27 @@ func forwardStatus(_ harness: ProxyHarness, token: String) async throws -> Int {
 }
 
 /// A counter a `@Sendable` callback can bump from anywhere.
+/// The successor's bind result, carried out of the poll closure that produces
+/// it.
+///
+/// A box rather than two `var`s the closure captures: the capture would be a
+/// mutation from inside an `async` closure, and the boxes this suite already
+/// uses are the shape that answers it.
+final class ProxyBindOutcomeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var boundPort: Int?
+    private var failure: String?
+
+    /// The port the successor bound, or nil while no attempt has succeeded.
+    var port: Int? { lock.withLock { boundPort } }
+    /// What the last refused bind said, rendered on the spot: the error is only
+    /// ever wanted for a failure message.
+    var lastError: String? { lock.withLock { failure } }
+
+    func bound(_ port: Int) { lock.withLock { boundPort = port } }
+    func failed(_ error: any Error) { lock.withLock { failure = "\(error)" } }
+}
+
 final class ProxyCountBox: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0

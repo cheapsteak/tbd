@@ -1121,9 +1121,11 @@ func withProxy(
 }
 
 /// A scratch directory under the run root `scripts/test.sh` reclaims, so a
-/// killed test process leaks nothing. Duplicated from `TestSupport`'s
-/// `fencedScratchRoot` rather than imported: that target pulls in
-/// `TBDDaemonLib`, and this one deliberately links only the proxy and NIO.
+/// killed test process leaks nothing. The `URL`-returning sibling of
+/// `TestSupport.fencedScratchRoot` — every caller here composes further path
+/// components onto it — agreeing with it on the fenced root and differing only
+/// in the unfenced fallback, which is `FileManager`'s temporary directory
+/// rather than `/tmp`.
 func proxyScratchRoot(prefix: String) -> URL {
     let fenced = ProcessInfo.processInfo.environment["TBD_TEST_SCRATCH_ROOT"] ?? ""
     let root = fenced.isEmpty ? FileManager.default.temporaryDirectory.path : fenced
