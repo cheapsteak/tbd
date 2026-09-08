@@ -75,3 +75,38 @@ private extension Character {
         return (ascii >= 0x30 && ascii <= 0x39) || (ascii >= 0x61 && ascii <= 0x66)
     }
 }
+
+// MARK: - On-disk coding
+
+extension ModelProxyRoute {
+    /// The one coder pair for a route file.
+    ///
+    /// The daemon writes these files and the proxy reads them, out of two
+    /// binaries that are upgraded independently, so the date strategy cannot
+    /// be left to whichever `JSONEncoder` each side happens to construct: a
+    /// writer on `.deferredToDate` and a reader on `.iso8601` disagree about
+    /// `createdAt` and every route on disk becomes malformed at once. Pinning
+    /// ISO-8601 in one place also makes a route file readable by a human
+    /// looking at `routes/` during an incident.
+    private static func makeEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+
+    private static func makeDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+
+    /// The bytes to write to `routes/<token>.json`.
+    public func encodedForRouteFile() throws -> Data {
+        try Self.makeEncoder().encode(self)
+    }
+
+    /// Decodes the bytes of a `routes/<token>.json`.
+    public static func decodeRouteFile(_ data: Data) throws -> ModelProxyRoute {
+        try makeDecoder().decode(ModelProxyRoute.self, from: data)
+    }
+}

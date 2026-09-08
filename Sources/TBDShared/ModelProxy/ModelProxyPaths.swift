@@ -53,7 +53,18 @@ extension TBDConstants {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> String {
         modelProxyRoutesDir(environment: environment)
-            .appendingPathComponent("\(token).json").path
+            .appendingPathComponent(modelProxyRouteFileName(token: token)).path
+    }
+
+    /// The bare file name a route gets under `routes/`.
+    ///
+    /// Split out from the path helper because the proxy holds its routes
+    /// directory as an injected `URL` rather than deriving it from
+    /// `TBD_HOME` — it must compose the same name against a different parent,
+    /// and a second spelling of `<token>.json` is a route file the daemon
+    /// writes and the proxy never unlinks.
+    public static func modelProxyRouteFileName(token: String) -> String {
+        "\(token).json"
     }
 
     /// One JSONL stream file per terminal: `~/tbd/streams`. Honors TBD_HOME.
@@ -73,6 +84,15 @@ extension TBDConstants {
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> String {
         streamsDir(environment: environment)
-            .appendingPathComponent("\(terminalID.uuidString).jsonl").path
+            .appendingPathComponent(streamFileName(terminalID: terminalID)).path
+    }
+
+    /// The bare file name a terminal's stream file gets under `streams/`.
+    ///
+    /// Same reason as `modelProxyRouteFileName`: the proxy composes it against
+    /// an injected streams directory, and the tee that writes the file and the
+    /// route retirement that unlinks it must agree on one spelling.
+    public static func streamFileName(terminalID: UUID) -> String {
+        "\(terminalID.uuidString).jsonl"
     }
 }

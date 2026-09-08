@@ -152,9 +152,62 @@ enum TBDModelProxyMain {
             lock-fd \(arguments.lockDescriptor.map(String.init) ?? "none", privacy: .public)
             """)
 
-        // ProxyServer is wired in Task A4: it binds `arguments.port`, exits
-        // with `TBDModelProxyExit.bindFailed` when it cannot, and is stopped
-        // from the termination handler below.
+        // Every path this process owns hangs off the home it was given, so the
+        // one `TBD_HOME` override below is all it takes to give a test — or a
+        // second checkout — its own proxy with no injection seam added for the
+        // purpose.
+        let homeEnvironment = ["TBD_HOME": arguments.home]
+        let routes = RouteTable(
+            routesDir: TBDConstants.modelProxyRoutesDir(environment: homeEnvironment),
+            streamsDir: TBDConstants.streamsDir(environment: homeEnvironment))
+
+        // `status` and `onRetire` are the seams `GET /tbd/status` and
+        // `POST /tbd/retire` read, and both endpoints answer 501 until Task A5
+        // lands them; nothing calls either closure yet. The placeholders are
+        // deliberately inert rather than half-right — a status that reported a
+        // plausible-looking route count nobody had counted would be worse than
+        // one that is obviously unwired.
+        let server = ProxyServer(
+            port: arguments.port,
+            routes: routes,
+            tee: nil,
+            status: {
+                ModelProxyStatus(
+                    version: "unwired", pid: getpid(), processStartTime: Date(),
+                    port: arguments.port, streamsInFlight: 0, routeCount: 0)
+            },
+            onRetire: {})
+
+        // `run()` is synchronous and returns `Never`, so the async start is
+        // driven to completion here rather than escaping into a task nobody
+        // waits on: a bind failure has to become an exit status before the
+        // signal wait below begins.
+        let startOutcome = BlockingResultBox<Int>()
+        Task {
+            do {
+                // A directory that cannot be listed is worth a line and not
+                // worth refusing to start over: the daemon rewrites route
+                // files as it spawns, so an empty table recovers by itself.
+                try routes.loadAll()
+            } catch {
+                ProxyLog.main.error(
+                    "route load failed: \(error.localizedDescription, privacy: .public)")
+            }
+            do {
+                startOutcome.finish(.success(try await server.start()))
+            } catch {
+                startOutcome.finish(.failure(error))
+            }
+        }
+
+        switch startOutcome.wait() {
+        case .success(let port):
+            ProxyLog.main.debug("bound port \(port, privacy: .public)")
+        case .failure(let error):
+            FileHandle.standardError.write(
+                Data("TBDModelProxy: bind failed: \(error.localizedDescription)\n".utf8))
+            exit(TBDModelProxyExit.bindFailed)
+        }
 
         // Signals are taken with `DispatchSource` rather than `signal(2)`, so
         // the handler runs on a queue instead of in signal context and may do
@@ -178,6 +231,41 @@ enum TBDModelProxyMain {
         // Keeps the sources alive until the wait returns; a cancelled source
         // stops delivering, and a released one is cancelled.
         for source in sources { source.cancel() }
+
+        let stopOutcome = BlockingResultBox<Void>()
+        Task {
+            await server.stop()
+            stopOutcome.finish(.success(()))
+        }
+        _ = stopOutcome.wait()
         exit(0)
+    }
+}
+
+/// A one-shot result handed from a `Task` back to the synchronous `run()`.
+///
+/// `run()` returns `Never` and owns the process, so it cannot become `async`
+/// without moving the exit-code taxonomy somewhere a test cannot reach. This
+/// box is the narrow bridge: one `finish`, one `wait`, no polling.
+final class BlockingResultBox<Value: Sendable>: @unchecked Sendable {
+    private let ready = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var result: Result<Value, Error>?
+
+    func finish(_ value: Result<Value, Error>) {
+        let first = lock.withLock { () -> Bool in
+            guard result == nil else { return false }
+            result = value
+            return true
+        }
+        guard first else { return }
+        ready.signal()
+    }
+
+    func wait() -> Result<Value, Error> {
+        ready.wait()
+        // Non-nil by construction: the semaphore is signalled only after the
+        // result is stored, and `finish` stores exactly once.
+        return lock.withLock { result } ?? .failure(ProxyServerError.boundAddressUnreadable)
     }
 }
