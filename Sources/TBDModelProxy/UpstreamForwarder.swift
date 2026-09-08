@@ -46,14 +46,29 @@ struct UpstreamForwarder: Sendable {
     private static let log = Logger(subsystem: "com.tbd.modelproxy", category: "upstream")
 
     private let session: URLSession
-    /// Where the session's delegate callbacks are routed. Held explicitly as
-    /// well as being the session's delegate so `forward` has one code path:
-    /// see `UpstreamSinkRegistry`.
+    /// The session's own delegate, which is where every callback for a task
+    /// started on it arrives.
     private let registry: UpstreamSinkRegistry
 
+    /// A session and the sink its callbacks reach are one thing, not two.
+    ///
+    /// A `URLSession` built without a `URLSessionDataDelegate` delivers a
+    /// data task's bytes nowhere, and a forwarder holding such a session would
+    /// wait on an `onEnd` that never comes — a hang with no timeout above it,
+    /// because the *task* completes fine and it is only the notification that
+    /// is lost. So a session that did not come from `makeSession` is not used
+    /// bare: its configuration is reused behind a session that does have the
+    /// sink.
     init(session: URLSession) {
-        self.session = session
-        self.registry = (session.delegate as? UpstreamSinkRegistry) ?? UpstreamSinkRegistry()
+        if let registry = session.delegate as? UpstreamSinkRegistry {
+            self.session = session
+            self.registry = registry
+        } else {
+            let registry = UpstreamSinkRegistry()
+            self.session = URLSession(
+                configuration: session.configuration, delegate: registry, delegateQueue: nil)
+            self.registry = registry
+        }
     }
 
     /// The session every production forward runs on.
@@ -62,7 +77,8 @@ struct UpstreamForwarder: Sendable {
     ///   state of its own between requests, and a cached model response would
     ///   be a correctness bug rather than an optimisation.
     /// - `timeoutIntervalForRequest = 600` and `timeoutIntervalForResource =
-    ///   3600`, both far above the 300 seconds a stream may sit silent between
+    ///   3600` by default — parameters only so a test can ask for a leg that
+    ///   gives up in seconds — both far above the 300 seconds a stream may sit silent between
     ///   SSE pings. `URLSession`'s request timeout measures the gap between
     ///   *bytes*, not the whole call, so a long streamed turn is bounded by
     ///   the resource timeout alone.
@@ -70,7 +86,9 @@ struct UpstreamForwarder: Sendable {
     ///   corporate proxy keeps working. The environment is a parameter so a
     ///   test can prove loopback is never proxied.
     static func makeSession(
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        requestTimeout: TimeInterval = 600,
+        resourceTimeout: TimeInterval = 3600
     ) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieStorage = nil
@@ -78,8 +96,8 @@ struct UpstreamForwarder: Sendable {
         configuration.httpCookieAcceptPolicy = .never
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        configuration.timeoutIntervalForRequest = 600
-        configuration.timeoutIntervalForResource = 3600
+        configuration.timeoutIntervalForRequest = requestTimeout
+        configuration.timeoutIntervalForResource = resourceTimeout
         configuration.httpAdditionalHeaders = nil
         configuration.httpMaximumConnectionsPerHost = 32
         configuration.waitsForConnectivity = false
@@ -176,12 +194,8 @@ struct UpstreamForwarder: Sendable {
 
         let (events, continuation) = AsyncStream.makeStream(of: UpstreamEvent.self)
         let task = session.dataTask(with: request)
-        // Both seats at once, deliberately. `URLSessionTask.delegate` is the
-        // documented per-task seam, and a session built by `makeSession`
-        // already has this same object as its session delegate; pointing both
-        // at one registry means there is one behavior to reason about rather
-        // than a fallback branch no test exercises.
-        task.delegate = registry
+        // Registered before `resume`, because the first callback can arrive on
+        // the delegate queue the moment the task starts.
         registry.register(task: task) { event in
             continuation.yield(event)
             if case .end = event { continuation.finish() }

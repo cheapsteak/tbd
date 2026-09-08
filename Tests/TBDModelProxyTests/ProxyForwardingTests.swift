@@ -21,7 +21,7 @@ import Testing
 /// aborts a stream silent for 300 seconds. A proxy that re-serializes a body
 /// or batches a flush breaks those silently, so the assertions are on bytes
 /// and on arrival times rather than on shapes.
-@Suite("Proxy forwarding")
+@Suite("Proxy forwarding", .serialized)
 struct ProxyForwardingTests {
 
     // MARK: Byte identity
@@ -220,9 +220,23 @@ struct ProxyForwardingTests {
             // URL-based client cannot put the traversal on the wire at all —
             // and it is the wire the proxy has to refuse.
             for path in ["/r/../../v1/messages", "/r/ABC/v1/messages"] {
-                let response = try rawHTTPExchange(
-                    port: harness.port,
-                    request: "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                let port = harness.port
+                let response = try await withPhaseDeadline("raw \(path)", seconds: 25) {
+                    try await withCheckedThrowingContinuation {
+                        (continuation: CheckedContinuation<String, any Error>) in
+                        // A blocking socket on a `DispatchQueue`, never on the
+                        // cooperative pool the rest of the suite runs on.
+                        DispatchQueue.global().async {
+                            continuation.resume(
+                                with: Result {
+                                    try rawHTTPExchange(
+                                        port: port,
+                                        request:
+                                            "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                                })
+                        }
+                    }
+                }
                 #expect(
                     response.hasPrefix("HTTP/1.1 404"),
                     "\(path) answered: \(response.prefix(64))")
@@ -277,7 +291,7 @@ struct ProxyForwardingTests {
 // MARK: - Harness
 
 /// One proxy in front of one fake upstream, with a route between them.
-struct ProxyHarness {
+struct ProxyHarness: Sendable {
     let port: Int
     let token: String
     let terminalID: UUID
@@ -305,22 +319,35 @@ struct ProxyHarness {
 /// upstream is created before anything can throw, for the same reason
 /// `FakeUpstreamTests` registers its `defer` before `start()` — a bind that
 /// throws must not leak an event-loop group into the rest of the test process.
-@discardableResult
-func withProxy<T>(
+///
+/// Every phase runs under a deadline. Two servers, a `URLSession` upstream leg
+/// and a client all have their own ways of waiting forever, and a wedge in any
+/// of them inside a 4,800-test pass is invisible: the runner's stdout is block
+/// buffered, so the log names whichever test flushed last rather than the one
+/// that stopped. A phase that overruns names itself and fails the test instead.
+func withProxy(
     prefix: String,
     script: @escaping FakeUpstream.Handler,
     streamingEnabled: Bool = false,
-    body: (ProxyHarness) async throws -> T
-) async throws -> T {
+    body: @escaping @Sendable (ProxyHarness) async throws -> Void
+) async throws {
     let upstream = FakeUpstream(script: script)
     let root = proxyScratchRoot(prefix: prefix)
-    var startedServer: ProxyServer?
-    var clientSession: URLSession?
+    let serverBox = ProxyServerBox()
+    let sessionBox = ClientSessionBox()
 
     func teardown() async {
-        if let startedServer { await startedServer.stop() }
-        upstream.stop()
-        clientSession?.invalidateAndCancel()
+        // Both of these can block: `ProxyServer.stop()` shuts an event-loop
+        // group down, and `FakeUpstream.stop()` does it synchronously. They run
+        // under their own deadlines so a teardown that wedges reports rather
+        // than eating the job's whole budget.
+        if let server = serverBox.take() {
+            _ = try? await withPhaseDeadline("proxy stop", seconds: 20) { await server.stop() }
+        }
+        _ = try? await withPhaseDeadline("upstream stop", seconds: 20) {
+            await offCooperativePool { upstream.stop() }
+        }
+        sessionBox.take()?.invalidateAndCancel()
         try? FileManager.default.removeItem(at: root)
     }
 
@@ -354,23 +381,29 @@ func withProxy<T>(
             onRetire: {},
             // An explicit environment, so the forwarder's proxy resolution
             // cannot pick up an `HTTPS_PROXY` from the developer's shell and
-            // send a loopback request through a corporate proxy.
-            forwarder: UpstreamForwarder(session: UpstreamForwarder.makeSession(environment: [:])))
-        startedServer = server
-        let port = try await server.start()
+            // send a loopback request through a corporate proxy. The short
+            // timeouts are the test's own: production waits 600 seconds for a
+            // silent stream, and a test that inherited that would hang rather
+            // than fail.
+            forwarder: UpstreamForwarder(
+                session: UpstreamForwarder.makeSession(
+                    environment: [:], requestTimeout: 15, resourceTimeout: 30)))
+        serverBox.put(server)
+        let port = try await withPhaseDeadline("proxy bind", seconds: 20) {
+            try await server.start()
+        }
 
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 60
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
         let session = URLSession(configuration: configuration)
-        clientSession = session
+        sessionBox.put(session)
 
         let harness = ProxyHarness(
             port: port, token: token, terminalID: terminalID, upstream: upstream,
             routesDir: routesDir, streamsDir: streamsDir, session: session)
-        let result = try await body(harness)
+        try await withPhaseDeadline("request", seconds: 60) { try await body(harness) }
         await teardown()
-        return result
     } catch {
         await teardown()
         throw error
@@ -385,6 +418,114 @@ func proxyScratchRoot(prefix: String) -> URL {
     let fenced = ProcessInfo.processInfo.environment["TBD_TEST_SCRATCH_ROOT"] ?? ""
     let root = fenced.isEmpty ? FileManager.default.temporaryDirectory.path : fenced
     return URL(fileURLWithPath: "\(root)/\(prefix)-\(UUID().uuidString.prefix(8).lowercased())")
+}
+
+// MARK: - Deadlines
+
+struct ProxyPhaseTimeout: LocalizedError {
+    let phase: String
+    let seconds: Double
+
+    var errorDescription: String? {
+        "the proxy test's \"\(phase)\" phase did not finish within \(Int(seconds))s"
+    }
+}
+
+/// Returns whichever of `operation` and the deadline finishes first, **without
+/// waiting for the loser**.
+///
+/// Deliberately not `withThrowingTaskGroup`: a group waits for every child
+/// before it returns, so racing a sleeper against a wedged operation there
+/// still hangs. This resumes on the first result and abandons the other task.
+func withPhaseDeadline<Value: Sendable>(
+    _ phase: String,
+    seconds: Double,
+    _ operation: @escaping @Sendable () async throws -> Value
+) async throws -> Value {
+    let outcome = FirstOutcomeBox<Result<Value, any Error>>()
+    let work = Task {
+        do { outcome.finish(.success(try await operation())) } catch { outcome.finish(.failure(error)) }
+    }
+    let timer = Task {
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        outcome.finish(.failure(ProxyPhaseTimeout(phase: phase, seconds: seconds)))
+    }
+    let result = await outcome.value
+    work.cancel()
+    timer.cancel()
+    return try result.get()
+}
+
+/// Runs a blocking call on a `DispatchQueue` rather than on the cooperative
+/// pool, which has one thread per core and is what every other test in the
+/// process is also running on.
+func offCooperativePool(_ work: @escaping @Sendable () -> Void) async {
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        DispatchQueue.global().async {
+            work()
+            continuation.resume()
+        }
+    }
+}
+
+/// A one-shot value: the first `finish` wins and wakes whoever is awaiting.
+final class FirstOutcomeBox<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value?
+    private var waiter: CheckedContinuation<Value, Never>?
+
+    func finish(_ value: Value) {
+        let waiter: CheckedContinuation<Value, Never>? = lock.withLock {
+            guard stored == nil else { return nil }
+            stored = value
+            let pending = self.waiter
+            self.waiter = nil
+            return pending
+        }
+        waiter?.resume(returning: value)
+    }
+
+    var value: Value {
+        get async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Value, Never>) in
+                let ready: Value? = lock.withLock {
+                    if let stored { return stored }
+                    waiter = continuation
+                    return nil
+                }
+                if let ready { continuation.resume(returning: ready) }
+            }
+        }
+    }
+}
+
+/// Holds the server between `withProxy`'s setup and its teardown. A box rather
+/// than a `var`, because the teardown closure has to see it and a captured
+/// `var` cannot cross into a `@Sendable` context.
+final class ProxyServerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: ProxyServer?
+
+    func put(_ server: ProxyServer) { lock.withLock { stored = server } }
+    func take() -> ProxyServer? {
+        lock.withLock {
+            defer { stored = nil }
+            return stored
+        }
+    }
+}
+
+final class ClientSessionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: URLSession?
+
+    func put(_ session: URLSession) { lock.withLock { stored = session } }
+    func take() -> URLSession? {
+        lock.withLock {
+            defer { stored = nil }
+            return stored
+        }
+    }
 }
 
 // MARK: - Raw HTTP
