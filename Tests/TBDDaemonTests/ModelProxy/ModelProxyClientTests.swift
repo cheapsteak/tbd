@@ -209,6 +209,31 @@ struct ModelProxyClientTests {
         #expect(server.requests().isEmpty, "a refused token still reached the proxy")
     }
 
+    // MARK: - Logging
+
+    /// The line `send` logs when a control request cannot reach the proxy is
+    /// the client's own composition, never the logger's — so this pins the
+    /// value handed to `logger.debug` rather than the logger itself. An
+    /// `os.Logger` cannot be swapped for a fake here (there is no injection
+    /// seam, and the framework offers no way to capture what a live logger
+    /// received), so the call in `send`'s `catch` is not directly observable
+    /// from a test; `unreachableLogMessage` is the pure function that call
+    /// site defers to, extracted for exactly this reason. What it can never
+    /// do — because it is built from a fixed `operation` label and the caller's
+    /// `port`, and never from the request `path` — is what matters here: a
+    /// live route token, the 32 lowercase hex characters `removeRoute` wove
+    /// into `/tbd/routes/<token>`, must never appear in it.
+    @Test("the unreachable log message never carries a removeRoute token")
+    func theUnreachableLogMessageNeverCarriesARemoveRouteToken() {
+        let token = String(repeating: "ab", count: 16)
+        let message = ModelProxyClient.unreachableLogMessage(
+            operation: "removeRoute", port: 51234, detail: "The request timed out.")
+
+        #expect(!message.contains(token))
+        #expect(!message.contains("/tbd/routes/"))
+        #expect(message == "model proxy control removeRoute on port 51234 did not answer: The request timed out.")
+    }
+
     // MARK: - The listener these tests are driven through
 
     /// `stop` **joins** the accept thread rather than closing the descriptor

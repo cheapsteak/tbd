@@ -103,7 +103,7 @@ struct ModelProxyClient: Sendable {
     /// against the process table, and a decoder that rounded the fraction away
     /// would make a live proxy look like somebody else's process.
     func status() async throws -> ModelProxyStatus {
-        let data = try await send(method: "GET", path: "/tbd/status", body: nil)
+        let data = try await send(operation: "status", method: "GET", path: "/tbd/status", body: nil)
         do {
             return try ModelProxyStatus.decodeStatusResponse(data)
         } catch {
@@ -114,7 +114,7 @@ struct ModelProxyClient: Sendable {
     /// `POST /tbd/retire`. Returns once the proxy says its listener is closed,
     /// which is the moment a successor may bind.
     func retire() async throws {
-        _ = try await send(method: "POST", path: "/tbd/retire", body: nil)
+        _ = try await send(operation: "retire", method: "POST", path: "/tbd/retire", body: nil)
     }
 
     /// `POST /tbd/routes` — "a route file for this token is on disk now".
@@ -125,7 +125,7 @@ struct ModelProxyClient: Sendable {
     func addRoute(token: String) async throws {
         guard ModelProxyRoute.isValidToken(token) else { throw Error.invalidToken(token) }
         let body = try JSONSerialization.data(withJSONObject: ["token": token])
-        _ = try await send(method: "POST", path: "/tbd/routes", body: body)
+        _ = try await send(operation: "registerRoute", method: "POST", path: "/tbd/routes", body: body)
     }
 
     /// `DELETE /tbd/routes/<token>`. Idempotent by the proxy's contract: a
@@ -133,14 +133,36 @@ struct ModelProxyClient: Sendable {
     /// twice.
     func removeRoute(token: String) async throws {
         guard ModelProxyRoute.isValidToken(token) else { throw Error.invalidToken(token) }
-        _ = try await send(method: "DELETE", path: "/tbd/routes/\(token)", body: nil)
+        _ = try await send(
+            operation: "removeRoute", method: "DELETE", path: "/tbd/routes/\(token)", body: nil)
     }
 
     // MARK: - Transport
 
-    private func send(method: String, path: String, body: Data?) async throws -> Data {
+    /// The message logged when a control request could not reach the proxy at
+    /// all.
+    ///
+    /// Deliberately built from `operation` — one of the fixed labels each verb
+    /// above passes in — and never from the request `path`: `removeRoute`
+    /// composes its path as `/tbd/routes/<token>`, and a live bearer token has
+    /// no business in the system log at any privacy level this daemon does not
+    /// control. Pulled out as a pure function, rather than inlined in the
+    /// `logger.debug` call, so a test can pin that its output can never carry
+    /// a token without needing to observe the logger itself.
+    static func unreachableLogMessage(operation: String, port: Int, detail: String) -> String {
+        "model proxy control \(operation) on port \(port) did not answer: \(detail)"
+    }
+
+    private func send(operation: String, method: String, path: String, body: Data?) async throws -> Data {
         guard let url = URL(string: "http://127.0.0.1:\(port)\(path)") else {
-            throw Error.unreachable(detail: "could not compose a URL for \(path) on port \(port)")
+            // `detail` reaches `Error.errorDescription` and from there a
+            // caller's log line at `.public` (e.g. `ModelProxySupervisor`'s
+            // `makeRoute`/`retireRoute`), so it names the operation rather
+            // than `path` — `removeRoute`'s path is `/tbd/routes/<token>`.
+            // Unreachable in practice: every path above is composed from a
+            // literal or a token already validated as 32 lowercase hex, which
+            // can never fail to parse as a URL path component.
+            throw Error.unreachable(detail: "could not compose a URL for \(operation) on port \(port)")
         }
         var request = URLRequest(
             url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
@@ -159,8 +181,9 @@ struct ModelProxyClient: Sendable {
         } catch {
             Self.logger.debug(
                 """
-                model proxy control \(method, privacy: .public) \(path, privacy: .public) on port \
-                \(port, privacy: .public) did not answer: \(error.localizedDescription, privacy: .public)
+                \(Self.unreachableLogMessage(
+                    operation: operation, port: port, detail: error.localizedDescription), \
+                privacy: .public)
                 """)
             throw Error.unreachable(detail: error.localizedDescription)
         }
