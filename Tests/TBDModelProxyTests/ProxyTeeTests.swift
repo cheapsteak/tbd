@@ -433,9 +433,16 @@ extension ModelProxySuites {
                 await tee.inFlightCount(terminalID: terminalID) == 1
             }
             #expect(counted, "the message never started; the tee wrote nothing")
-            #expect(summarizeStream(streamFile(streamsDir, terminalID)) == [
-                "start:msg_W", "block:msg_W:0",
-            ])
+            // Settled rather than asserted outright: the slot is taken on the
+            // `start` line, so a count of one says nothing about whether the
+            // `block` line that follows it has reached the file yet. Sampling
+            // the count and then reading the file in the same breath is a race
+            // the tee wins most of the time and loses under load.
+            let wroteBothLines = await settles("the start and block lines reached the file") {
+                summarizeStream(streamFile(streamsDir, terminalID)) == ["start:msg_W", "block:msg_W:0"]
+            }
+            let observedLines = summarizeStream(streamFile(streamsDir, terminalID))
+            #expect(wroteBothLines, "the tee wrote \(observedLines)")
 
             session.feed(sseEvent("content_block_delta", textDeltaPayload(index: 0, text: "boom")))
 
