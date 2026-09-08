@@ -263,7 +263,14 @@ deltas into an unlinked inode.
 
 When the daemon retires a route, the proxy drops it, unlinks the route file,
 and unlinks the stream file. When no daemon has adopted the proxy for 24 hours
-and no stream is in flight, the proxy retires itself.
+and no stream is in flight, the proxy retires itself. The window is a policy
+rather than a measurement, chosen from two bounds: it must outlast any daemon
+absence a person sleeps through, since a proxy that retires during an
+overnight outage strands every session spawned against its port, and it must
+be finite, since a proxy nobody adopts is exactly the orphan the reconciler
+doctrine forbids. A day clears the first bound with margin and costs nothing
+against the second, because a proxy with no streams is idle. Any value from a
+few hours upward would do; the constant lives in one place and is not tuned.
 
 ## The daemon
 
@@ -377,7 +384,12 @@ retired when:
 - a newer `start` line replaces it;
 - the stream is aborted;
 - a completed stream stays unconfirmed for 60 seconds, which backstops any
-  side request the tee filter misses.
+  side request the tee filter misses. The value sits above the worst JSONL
+  lag measured on a live session, 25 seconds behind a long tool call, with
+  room for a slower machine, and its only cost is cosmetic: a stale row
+  lingers for the difference. A shorter window would retire genuine messages
+  on a loaded machine; a longer one only delays removing a row nothing
+  confirms.
 
 `TranscriptStreamPlan.updateLast` already renders a last row whose content
 version changed, so a growing row costs one tail re-render per tick. A subtle
