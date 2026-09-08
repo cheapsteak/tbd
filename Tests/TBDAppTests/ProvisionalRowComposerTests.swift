@@ -346,8 +346,25 @@ struct ProvisionalRowPublishTests {
         UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
     }
 
-    private static func publishedIDs(_ state: AppState) async -> [String] {
-        await MainActor.run { (state.sessionTranscripts["s1"] ?? []).map(\.id) }
+    private static func publishedIDs(
+        _ state: AppState, session: String = "s1"
+    ) async -> [String] {
+        await MainActor.run { (state.sessionTranscripts[session] ?? []).map(\.id) }
+    }
+
+    /// A second session with an ordinary transcript and no stream file at all —
+    /// the "plain transcript news" case whose publish composes no provisional
+    /// row and therefore takes `publish`'s disarm branch.
+    private static let userLine = #"{"type":"user","uuid":"b1","timestamp":"2026-08-26T10:00:00.000Z","message":{"role":"user","content":"unrelated"}}"#
+
+    private static func addPlainTranscript(
+        to source: TranscriptSource, sessionID: String
+    ) async throws {
+        let dir = fencedScratchRoot(prefix: "tbdprov")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let path = dir + "/transcript.jsonl"
+        try (Self.userLine + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+        #expect(await source.refresh(sessionID: sessionID, path: path)?.appended.count == 1)
     }
 
     /// Writes one complete-and-unconfirmed message into a real stream file and
@@ -387,7 +404,7 @@ struct ProvisionalRowPublishTests {
             retireTimer: timer, now: { date.now })
         #expect(published.last?.id == "stream:msg_a")
         #expect(await Self.publishedIDs(state) == ["stream:msg_a"])
-        #expect(await timer.armedMessage == "msg_a", "the completed row armed the alarm")
+        #expect(await timer.armedMessage(sessionID: "s1") == "msg_a", "the completed row armed the alarm")
 
         // 59 s of virtual time. The alarm is armed for 60, so nothing fires and
         // the row is still on screen.
@@ -404,7 +421,66 @@ struct ProvisionalRowPublishTests {
             await Self.publishedIDs(state).isEmpty
         }
         #expect(withdrawn == .satisfied, "the alarm's re-publish must withdraw the row")
-        #expect(await timer.armedMessage == nil, "and it does not re-arm itself")
+        #expect(await timer.armedMessage(sessionID: "s1") == nil, "and it does not re-arm itself")
+    }
+
+    /// The scheduler holds **one** on-change closure for the whole app, so every
+    /// registered session's publish runs through whichever pane's timer was
+    /// installed last — and TBD keeps up to eight panes alive at once. Session
+    /// A's completed row arms a 60-second alarm; session B then gets ordinary
+    /// transcript news inside that window, which composes no provisional row
+    /// and so takes `publish`'s disarm branch. With one alarm slot for the
+    /// whole app, B's publish cancelled A's alarm and A's row never retired.
+    @Test("a publish for another session leaves this session's retire alarm alone")
+    func anotherSessionsPublishDoesNotDisarmThisOne() async throws {
+        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
+        defer { Self.removeSuite(suite) }
+        let date = MovableDate(Self.t0)
+        let source = try await Self.sourceWithCompletedMessage(now: Self.t0)
+        try await Self.addPlainTranscript(to: source, sessionID: "s2")
+        let state = await Self.makeState(streaming: true, suite: suite)
+        let clock = TestClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+
+        await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source,
+            retireTimer: timer, now: { date.now })
+        #expect(await timer.armedMessage(sessionID: "s1") == "msg_a")
+
+        // Half-way through A's window, B publishes. Same `publish`, same timer
+        // instance, no provisional of its own.
+        date.advance(by: 30)
+        await clock.advanceWhenSuspended(by: .seconds(30))
+        await TableTranscriptPaneView.publish(
+            sessionID: "s2", state: state, source: source,
+            retireTimer: timer, now: { date.now })
+
+        let bIDs = await Self.publishedIDs(state, session: "s2")
+        #expect(bIDs.isEmpty == false, "B's publish really did run and write B's transcript")
+        #expect(bIDs.allSatisfy { !$0.hasPrefix(ProvisionalRowComposer.idPrefix) },
+                "and it composed no provisional row of its own")
+        #expect(await timer.armedMessage(sessionID: "s1") == "msg_a",
+                "B's publish must not disarm A's alarm")
+        #expect(await timer.armedMessage(sessionID: "s2") == nil,
+                "nor arm one of its own")
+        #expect(await timer.armedSessionCount == 1, "exactly A's alarm, and nothing else")
+        #expect(await Self.publishedIDs(state) == ["stream:msg_a"])
+
+        // A's alarm still fires on A's original schedule, 60 s from when it was
+        // armed: 29 s more is inside the window, 2 s past it is not.
+        date.advance(by: 29)
+        await clock.advanceWhenSuspended(by: .seconds(29))
+        #expect(await Self.publishedIDs(state) == ["stream:msg_a"],
+                "still inside A's window")
+
+        date.advance(by: 2)
+        await clock.advance(by: .seconds(2))
+        let withdrawn = await pollUntilTrue(timeout: .seconds(10)) {
+            await Self.publishedIDs(state).isEmpty
+        }
+        #expect(withdrawn == .satisfied, "A's row must retire on A's own deadline")
+        #expect(await Self.publishedIDs(state, session: "s2").isEmpty == false,
+                "and B's transcript is untouched by it")
     }
 
     /// A still-streaming row arms nothing: it has not stopped, so the file it
@@ -431,7 +507,7 @@ struct ProvisionalRowPublishTests {
             retireTimer: timer, now: { t0 })
 
         #expect(published.last?.id == "stream:msg_a")
-        #expect(await timer.armedMessage == nil)
+        #expect(await timer.armedMessage(sessionID: "s1") == nil)
     }
 
     /// The publish path's own off branch: the same source and the same
@@ -451,7 +527,7 @@ struct ProvisionalRowPublishTests {
 
         #expect(published.isEmpty)
         #expect(await Self.publishedIDs(state).isEmpty)
-        #expect(await timer.armedMessage == nil)
+        #expect(await timer.armedMessage(sessionID: "s1") == nil)
     }
 }
 
@@ -470,8 +546,8 @@ struct ProvisionalRetireTimerTests {
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
 
-        await timer.arm(messageID: "msg_a", after: .seconds(60)) { await log.record() }
-        #expect(await timer.armedMessage == "msg_a")
+        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) { await log.record() }
+        #expect(await timer.armedMessage(sessionID: "s1") == "msg_a")
 
         await clock.advanceWhenSuspended(by: .seconds(59))
         #expect(await log.count == 0, "59 s is inside the window")
@@ -479,7 +555,7 @@ struct ProvisionalRetireTimerTests {
         await clock.advance(by: .seconds(2))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await log.count == 1 }
         #expect(fired == .satisfied, "the alarm must fire once past the deadline")
-        #expect(await timer.armedMessage == nil, "and clear itself so a later arm is not a no-op")
+        #expect(await timer.armedMessage(sessionID: "s1") == nil, "and clear itself so a later arm is not a no-op")
 
         // Nothing re-arms it, so no second fire can arrive.
         await clock.advance(by: .seconds(600))
@@ -494,11 +570,11 @@ struct ProvisionalRetireTimerTests {
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
 
-        await timer.arm(messageID: "msg_a", after: .seconds(60)) { await log.record() }
+        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) { await log.record() }
         await clock.advanceWhenSuspended(by: .seconds(59))
         // A poll one second before the deadline re-arms with the remaining 1 s.
         // If that replaced the alarm, the fire below would be 60 s away.
-        await timer.arm(messageID: "msg_a", after: .seconds(1)) { await log.record() }
+        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(1)) { await log.record() }
 
         await clock.advance(by: .seconds(2))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await log.count >= 1 }
@@ -513,14 +589,63 @@ struct ProvisionalRetireTimerTests {
         let first = FireLog()
         let second = FireLog()
 
-        await timer.arm(messageID: "msg_a", after: .seconds(60)) { await first.record() }
-        await timer.arm(messageID: "msg_b", after: .seconds(60)) { await second.record() }
-        #expect(await timer.armedMessage == "msg_b")
+        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) { await first.record() }
+        await timer.arm(sessionID: "s1", messageID: "msg_b", after: .seconds(60)) { await second.record() }
+        #expect(await timer.armedMessage(sessionID: "s1") == "msg_b")
 
         await clock.advanceWhenSuspended(by: .seconds(61))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await second.count == 1 }
         #expect(fired == .satisfied)
         #expect(await first.count == 0, "the superseded message's alarm was cancelled")
+    }
+
+    /// The keying itself, at the level below the publish test: one session's
+    /// disarm must leave every other session's alarm exactly where it is.
+    @Test("an alarm is scoped to its session and survives another session's disarm")
+    func alarmsAreScopedToTheirSession() async {
+        let clock = TestClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+        let first = FireLog()
+        let second = FireLog()
+
+        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) {
+            await first.record()
+        }
+        await timer.arm(sessionID: "s2", messageID: "msg_b", after: .seconds(60)) {
+            await second.record()
+        }
+        #expect(await timer.armedSessionCount == 2, "two sessions, two alarms")
+
+        await timer.disarm(sessionID: "s2")
+        #expect(await timer.armedMessage(sessionID: "s1") == "msg_a")
+        #expect(await timer.armedMessage(sessionID: "s2") == nil)
+
+        await clock.advanceWhenSuspended(by: .seconds(61))
+        let fired = await pollUntilTrue(timeout: .seconds(10)) { await first.count == 1 }
+        #expect(fired == .satisfied, "s1's alarm was untouched by s2's disarm")
+        #expect(await second.count == 0, "and s2's really was cancelled")
+    }
+
+    @Test("disarmAll cancels every session's alarm")
+    func disarmAllCancelsEverything() async {
+        let clock = TestClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+        let first = FireLog()
+        let second = FireLog()
+
+        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) {
+            await first.record()
+        }
+        await timer.arm(sessionID: "s2", messageID: "msg_b", after: .seconds(60)) {
+            await second.record()
+        }
+        await timer.disarmAll()
+        #expect(await timer.armedSessionCount == 0)
+
+        await clock.advance(by: .seconds(600))
+        for _ in 0..<50 { await Task.yield() }
+        #expect(await first.count == 0)
+        #expect(await second.count == 0)
     }
 
     @Test("disarming cancels a pending alarm")
@@ -529,10 +654,10 @@ struct ProvisionalRetireTimerTests {
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
 
-        await timer.arm(messageID: "msg_a", after: .seconds(60)) { await log.record() }
+        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) { await log.record() }
         await clock.advanceWhenSuspended(by: .seconds(1))
-        await timer.disarm()
-        #expect(await timer.armedMessage == nil)
+        await timer.disarm(sessionID: "s1")
+        #expect(await timer.armedMessage(sessionID: "s1") == nil)
 
         await clock.advance(by: .seconds(600))
         // Give a cancelled task every chance to run before asserting it did not.

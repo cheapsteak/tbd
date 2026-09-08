@@ -259,6 +259,31 @@ actor TranscriptSource {
         entries[sessionID]?.transcript.hasAssistantMessage(id: id) ?? false
     }
 
+    /// Everything one publish needs about `sessionID`, read in a single hop
+    /// onto this actor.
+    ///
+    /// `items`, `provisional` and the provisional's confirmation are three
+    /// facts about one instant, and gathering them with three separate awaits
+    /// let a `refresh` land between them: a publish could then read the
+    /// transcript from *before* the settled assistant message arrived and the
+    /// confirmation from *after* it, and show neither the provisional row nor
+    /// the settled one. Nothing suspends inside this method, so the three
+    /// answers are necessarily consistent with each other.
+    ///
+    /// `confirmed` is `hasAssistantMessage` for the provisional's own id, and
+    /// false when there is no provisional — no other message id is ever a
+    /// candidate for a row, so the caller needs no other lookup.
+    func snapshot(
+        sessionID: String
+    ) -> (items: [TranscriptItem], provisional: ProvisionalMessage?, confirmed: Bool) {
+        let entry = entries[sessionID]
+        let provisional = streamEntries[sessionID]?.provisional
+        let confirmed = provisional.map {
+            entry?.transcript.hasAssistantMessage(id: $0.messageID) ?? false
+        } ?? false
+        return (entry?.transcript.items ?? [], provisional, confirmed)
+    }
+
     /// Bring `sessionID`'s provisional message up to date with the stream file
     /// at `path`. Returns whether the provisional actually changed.
     ///

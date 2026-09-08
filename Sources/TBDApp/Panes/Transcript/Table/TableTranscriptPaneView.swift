@@ -459,9 +459,11 @@ struct TableTranscriptPaneView: View {
         let source = appState.transcriptSource
         let state = appState
 
-        // One alarm per run of this loop, disarmed when the loop ends. It backs
-        // the single retire rule no file change can announce; see
-        // `ProvisionalRetireTimer`.
+        // The retire alarms for this run of the loop, disarmed when it ends.
+        // They back the single retire rule no file change can announce; see
+        // `ProvisionalRetireTimer`. Its state is keyed by session id because
+        // the closure below goes into the scheduler's one app-wide slot and so
+        // sees publishes for every registered session, not just this pane's.
         let retireTimer = ProvisionalRetireTimer(clock: clock)
 
         await scheduler.setOnChange { [weak state] sessionID in
@@ -523,10 +525,11 @@ struct TableTranscriptPaneView: View {
                 tier: tier, token: token)
         }
         await scheduler.deregister(sessionID: sid, token: token)
-        // A pane that goes away leaves no sleeping alarm behind. The publish it
-        // would have run is harmless (it recomposes from the source), but an
-        // unbounded number of them is not.
-        await retireTimer.disarm()
+        // A pane that goes away leaves no sleeping alarm behind, for any of the
+        // sessions this instance served. The publish one would have run is
+        // harmless (it recomposes from the source), but an unbounded number of
+        // them is not.
+        await retireTimer.disarmAll()
     }
 
     /// One publish: read what the source has for `sessionID`, merge the
@@ -561,16 +564,21 @@ struct TableTranscriptPaneView: View {
         retireTimer: ProvisionalRetireTimer,
         now: @escaping @Sendable () -> Date = { Date() }
     ) async -> [TranscriptItem] {
-        let raw = await source.items(sessionID: sessionID)
-        let merged = await mergePendingQuestions(sessionID: sessionID, raw: raw, state: state)
-        let provisional = await source.provisional(sessionID: sessionID)
+        // One hop onto the source for all three facts: the items, the
+        // provisional message and whether the JSONL has caught up with it. Read
+        // separately, a `refresh` landing between two of the awaits could hand
+        // this publish a transcript from before the settled assistant message
+        // and a confirmation from after it — and it would then show neither the
+        // provisional row nor the settled one.
+        let snapshot = await source.snapshot(sessionID: sessionID)
+        let merged = await mergePendingQuestions(
+            sessionID: sessionID, raw: snapshot.items, state: state)
+        let provisional = snapshot.provisional
 
-        // One confirmation lookup per publish, for the one id that can matter:
-        // the row is retired the moment the JSONL catches up with it, and no
-        // other message id is a candidate for a row.
+        // The one id that can matter: the row is retired the moment the JSONL
+        // catches up with it, and no other message id is a candidate for a row.
         var confirmedIDs: Set<String> = []
-        if let provisional,
-           await source.hasAssistantMessage(sessionID: sessionID, id: provisional.messageID) {
+        if let provisional, snapshot.confirmed {
             confirmedIDs = [provisional.messageID]
         }
 
@@ -593,16 +601,24 @@ struct TableTranscriptPaneView: View {
         // rule, so a provisional row that survived it and is `.complete` is
         // exactly the case nothing else will ever announce. Everything else —
         // including a row that was just withdrawn — disarms.
+        //
+        // Both gestures name `sessionID`, and that is load-bearing rather than
+        // decorative: one timer instance serves every session that publishes
+        // through the scheduler's single on-change slot, so an unkeyed disarm
+        // here would let ordinary transcript news for one session cancel
+        // another session's pending retire alarm.
         if let provisional,
            items.last.map({ ProvisionalRowComposer.isProvisional(itemID: $0.id) }) == true,
            let delay = ProvisionalRowComposer.retireDelay(phase: provisional.phase, now: at) {
-            await retireTimer.arm(messageID: provisional.messageID, after: delay) {
+            await retireTimer.arm(
+                sessionID: sessionID, messageID: provisional.messageID, after: delay
+            ) {
                 _ = await publish(
                     sessionID: sessionID, state: state, source: source,
                     retireTimer: retireTimer, now: now)
             }
         } else {
-            await retireTimer.disarm()
+            await retireTimer.disarm(sessionID: sessionID)
         }
         return items
     }
