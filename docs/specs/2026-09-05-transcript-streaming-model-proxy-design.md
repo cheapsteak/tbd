@@ -263,10 +263,33 @@ future release adds. Rules, each of which a test pins:
   leg is shorter than 300 seconds.
 - The upstream leg is TLS from the proxy and honors `HTTPS_PROXY` and
   `NO_PROXY` from the daemon's environment, so a user behind a corporate
-  proxy keeps working.
+  proxy keeps working. Loopback is always in the exception list whatever
+  `NO_PROXY` says, because a route's upstream is a loopback fake in every test
+  the proxy has.
+- **Redirects are relayed, never followed.** A `Location` naming another host
+  would otherwise carry the client's `Authorization` there, since the HTTP
+  client copies a request's headers onto the one it follows with. The 3xx —
+  head, headers and body — reaches Claude as it stands, which is both what it
+  would have seen talking to the upstream directly and where the decision
+  belongs.
 - Non-2xx responses and upstream connection failures are relayed unchanged,
   with the upstream's status and body, so Claude sees exactly what it would
   have seen.
+- **The upstream leg is Foundation's `URLSession`, which is not a byte pipe.**
+  Two of its behaviors are visible from outside and neither takes anything
+  away: it may add `Accept`, `Accept-Language` or `User-Agent` to a request
+  whose client sent none, and it collapses duplicate response header lines
+  into a single comma-joined value. Nothing the client sent is stripped or
+  rewritten by either, and comma-joining is the same field value as repeated
+  lines for the list-valued headers this path carries (RFC 9110 §5.3). The
+  rule the forwarding contract states is "nothing the client sent is lost",
+  not "the bytes on the two legs are identical".
+- **A stream is counted in flight from the moment its route resolves**, not
+  from the upstream head. Time to first byte is a whole model round trip, and
+  a request waiting on it has produced nothing to be seen by; counted from the
+  head, a retire arriving in that window would drain at zero and exit on a
+  turn that had just started. The count is released when the relay ends, on
+  every path — a clean end, a cut, a 502, or a client that hung up.
 
 ### The tee
 
@@ -296,6 +319,14 @@ one line per event, every line tagged with the API message id:
 - A stream that ends without `message_stop`, including an SSE `error` event
   from upstream, writes `{"type":"aborted","message":<id>,"reason":<text>}`.
 
+The abort rule is deliberately **"no `message_stop` was seen"** rather than
+"an error arrived", because the second cannot see the shape that matters most.
+An upstream that truncates a chunked body reaches the HTTP client as a *clean*
+completion: the connection closes without the terminating chunk, and nothing
+in the response framing says a length was promised. A turn the model never
+finished arrives at the tee looking exactly like one it did, and only the
+absence of the stop line tells them apart.
+
 Thinking and tool-input deltas are not written. A tee write failure closes
 that message's tee, logs once, and leaves forwarding untouched.
 
@@ -307,6 +338,17 @@ Between messages the last text lingers, which is text the JSONL already holds.
 The app does not delete the file: it cannot know whether the proxy is
 mid-append on the next message, and an unlink then would send that message's
 deltas into an unlinked inode.
+
+Truncation is decided per proxy, and during a handover there are two. A
+successor spawned while its predecessor is still draining can open a terminal's
+stream file for a new message and truncate it while the predecessor is still
+appending to a message of its own. The cost is bounded and local: that one
+file's display is damaged until the next `message_start` truncates it cleanly,
+and nothing else — no other terminal, no route, no in-flight turn — is
+affected. It is accepted rather than locked against, because a cross-process
+lock on every stream file would put a contended acquisition in front of every
+`message_start` to prevent a cosmetic fault in a window that lasts as long as
+one drain.
 
 When the daemon retires a route, the proxy drops it, unlinks the route file,
 and unlinks the stream file. When no daemon has adopted the proxy for 24 hours
