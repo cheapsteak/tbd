@@ -22,7 +22,7 @@ struct ModelProxyRouteRetirementTests {
             path: "/tmp/tbd-nonexistent-\(UUID().uuidString)", tmuxServer: "tbd-test")
         return try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "claude", kind: .claude, claudeSessionID: "session-one")
+            label: "claude", claudeSessionID: "session-one", kind: .claude)
     }
 
     // MARK: - The row

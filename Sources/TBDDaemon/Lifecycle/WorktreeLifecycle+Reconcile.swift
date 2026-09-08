@@ -804,6 +804,18 @@ extension WorktreeLifecycle {
                     disposal = "window \(terminal.tmuxWindowID) gone or reassigned"
                 }
 
+                // Whichever of the two shapes below the row becomes, its
+                // session is over — that is what `disposal` above established —
+                // so the route that named its process goes now. Ahead of the
+                // branch rather than inside both arms, because the delete arm
+                // removes the only row that could ever name this terminal
+                // again, and a route retired for a row that no longer exists is
+                // a directory listing nobody will make.
+                if terminal.transport == .holder {
+                    await ModelProxyRouteAttachment.retire(
+                        terminalID: terminal.id, supervisor: modelProxySupervisor)
+                }
+
                 // **What a finished session's row becomes is one rule, on every
                 // transport.** A resumable Claude row is PARKED, preserving its
                 // session id for a later wake; anything else is deleted,
@@ -811,16 +823,6 @@ extension WorktreeLifecycle {
                 // worth having if something can wake it, and every transport
                 // has a wake path: tmux respawns the window, holder spawns a
                 // fresh holder running `claude --resume`.
-                // Whichever of the two the row becomes, its session is over —
-                // that is what `disposal` above established — so the route that
-                // named its process goes now. Before the branch rather than in
-                // both arms, because the delete arm removes the only row that
-                // could ever name this terminal again. A row with no route is a
-                // directory listing that finds nothing.
-                if terminal.transport == .holder {
-                    await ModelProxyRouteAttachment.retire(
-                        terminalID: terminal.id, supervisor: modelProxySupervisor)
-                }
                 if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
                     // This park bypasses `HibernationCoordinator`, so the
                     // reconcile rail records its own independent actuation.
