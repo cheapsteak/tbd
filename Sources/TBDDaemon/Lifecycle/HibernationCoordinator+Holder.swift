@@ -1037,16 +1037,6 @@ extension HibernationCoordinator {
                 holderPID: handle.holderPID,
                 childPID: handle.childPID,
                 startedAt: now())
-            // Beside the pids, and before the park marker is cleared: all three
-            // describe the process this call just started, and nothing
-            // snapshots the row between here and `clearHibernated`. A separate
-            // statement rather than a fourth `setHolderProcess` argument
-            // because the other two callers of that method mean different
-            // things by a nil stream path — `restoreHolderPIDsFromRegistry`
-            // must PRESERVE the route of the session it is healing, while a
-            // park clears it.
-            try await db.terminals.setTranscriptStreamPath(
-                terminalID: terminal.id, path: attachment.streamPath)
         } catch {
             // A holder and a job no row names would be reclaimable by nothing,
             // so undo the spawn from the failing call itself.
@@ -1057,6 +1047,27 @@ extension HibernationCoordinator {
             // replacement running on this route and must not touch it.
             return await refuse(
                 "the replacement agent started, but recording its process ids failed: \(error.localizedDescription)")
+        }
+        // Beside the pids, and before the park marker is cleared: both describe
+        // the process this call just started, and nothing snapshots the row
+        // between here and `clearHibernated`. A separate statement rather than a
+        // fourth `setHolderProcess` argument because the other two callers of
+        // that method mean different things by a nil stream path —
+        // `restoreHolderPIDsFromRegistry` must PRESERVE the route of the session
+        // it is healing, while a park clears it.
+        //
+        // **Its own best-effort `do`, exactly like the park's.** Sharing the
+        // block above would let a failed stamp abandon a holder whose pids the
+        // row already records — a live job torn down over a display detail,
+        // and a row that no longer names the processes it just named. A stream
+        // path that did not land costs this session its live transcript view
+        // until the next wake; the route itself still works, and `OrphanGC`
+        // reclaims the file.
+        do {
+            try await db.terminals.setTranscriptStreamPath(
+                terminalID: terminal.id, path: attachment.streamPath)
+        } catch {
+            logger.warning("wake: started a holder for \(terminal.id, privacy: .public) but could not record its model proxy stream path: \(error.localizedDescription, privacy: .public)")
         }
 
         do {

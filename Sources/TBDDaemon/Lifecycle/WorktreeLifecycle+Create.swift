@@ -19,20 +19,6 @@ public enum WorktreeCreateCompletion: Sendable {
     case preSessionPending(phase3: Task<Void, Never>)
 }
 
-/// The facts the model proxy needs about a primary spawn, gathered where the
-/// spawn is composed and read once at the holder branch.
-///
-/// It exists so the routing decision has one nil check rather than three: a
-/// primary that is not Claude produces no context at all, and `attach` is then
-/// never asked. Passing the fields individually would make "no context" and
-/// "a Claude session on the ambient login, no profile, no overlay" the same
-/// three nils, and the first must never be routed while the second must.
-struct PrimaryProxyContext: Sendable {
-    let profileKind: CredentialKind?
-    let profileBaseURL: String?
-    let overlayPath: String?
-}
-
 /// Carries an archived conversation onto a freshly created worktree.
 ///
 /// Deliberately carries no prompt: a carryover spawn opens idle at the
@@ -1448,10 +1434,15 @@ extension WorktreeLifecycle {
         let primarySessionID: String?
         let primaryProfileID: UUID?
         let primaryLabel: String
-        // Non-nil only for a Claude primary, which is the only agent the model
-        // proxy speaks for. A shell has no upstream, and Codex does not talk to
-        // the Messages API, so neither may be handed an `ANTHROPIC_BASE_URL`.
-        var primaryProxyContext: PrimaryProxyContext?
+        // What the model proxy did with this spawn: the stream file to stamp on
+        // the row below, and the route to undo if the row never gets written.
+        //
+        // Filled in by the `.claude` branch alone, which is the only agent the
+        // model proxy speaks for: a shell has no upstream, and Codex does not
+        // talk to the Messages API, so neither may be handed an
+        // `ANTHROPIC_BASE_URL`. The gate is structural rather than a field
+        // check — the other branches never call `attach` at all.
+        var primaryAttachment = ModelProxyRouteAttachment.Outcome.notAttempted
         switch primaryTerminalKind {
         case .shell:
             primaryCommand = defaultShell
@@ -1552,6 +1543,37 @@ extension WorktreeLifecycle {
                 // delegates to the user-scope statusline THIS session reads.
                 profileConfigDir: profileConfigDir
             )
+            // **The routing decision, and it happens BEFORE the command is
+            // composed.** `ClaudeSpawnCommandBuilder.build` re-exports every
+            // profile routing key inline into the command string it returns,
+            // and those exports run *after* the process environment is applied
+            // — so a profile carrying its own `ANTHROPIC_BASE_URL` would
+            // clobber the route's, and the session would talk straight to the
+            // profile endpoint while the row recorded a stream file that never
+            // fills. Deciding here means a routed spawn can be built with
+            // `profileBaseURL: nil`, and the profile's URL survives only as the
+            // route's upstream.
+            //
+            // Only the holder transport is routed (spec: pty-holder only), so
+            // the registry is the gate. A refusal returns this environment
+            // unchanged; nothing below can fail because of it.
+            primaryAttachment = .unproxied(mergedEnvOverrides)
+            if useHolderTransport, let holderRegistry {
+                primaryAttachment = await ModelProxyRouteAttachment.attach(
+                    terminalID: plannedTerminalID1,
+                    config: config,
+                    profileKind: resolvedProfile?.kind,
+                    profileBaseURL: resolvedProfile?.baseURL,
+                    envOverrideBaseURL: mergedEnvOverrides["ANTHROPIC_BASE_URL"],
+                    // The SAME resolved overlay the spawn runs with, read
+                    // above: whether it sets `env.ANTHROPIC_BASE_URL` decides
+                    // whether a route can be honored at all.
+                    overlaySetsBaseURL: ClaudeHookOverlay.overlaySetsEnv(
+                        "ANTHROPIC_BASE_URL", overlayPath: primaryOverlayPath),
+                    sensitiveEnv: mergedEnvOverrides,
+                    baseEnvironment: holderRegistry.environment,
+                    supervisor: modelProxySupervisor)
+            }
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
                 forkSession: carryover != nil,
@@ -1565,7 +1587,12 @@ extension WorktreeLifecycle {
                 initialPrompt: isResume ? nil : effectivePrompt,
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
-                profileBaseURL: resolvedProfile?.baseURL,
+                // Nil on a routed spawn: the profile's endpoint is the route's
+                // upstream now, and passing it here would inline an
+                // `export ANTHROPIC_BASE_URL=…` that runs after — and
+                // therefore over — the route the process environment carries.
+                profileBaseURL: primaryAttachment.builderBaseURL(
+                    profile: resolvedProfile?.baseURL),
                 // Per-spawn model override (picker model buttons) wins over
                 // the profile default for this initial spawn only.
                 profileModel: modelOverride ?? resolvedProfile?.model,
@@ -1586,13 +1613,15 @@ extension WorktreeLifecycle {
             ]
             // Layer the builder's auth/routing env ON TOP of free-form overrides
             // so auth/routing stays final and free-form vars can't clobber it.
-            primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
+            // The attachment's environment is the free-form overrides plus the
+            // route (or exactly the overrides, when nothing was routed), and
+            // the builder cannot clobber the route from there: a routed spawn
+            // was built with no profile base URL, so `ANTHROPIC_BASE_URL` is
+            // not among the keys it returns.
+            primarySensitiveEnv = primaryAttachment.sensitiveEnv
+                .merging(spawn.sensitiveEnv) { _, builder in builder }
             primaryProfileID = resolvedProfile?.profileID
             primaryLabel = TerminalLabel.claudeCode
-            primaryProxyContext = PrimaryProxyContext(
-                profileKind: resolvedProfile?.kind,
-                profileBaseURL: resolvedProfile?.baseURL,
-                overlayPath: primaryOverlayPath)
         }
         // The two transports diverge for exactly this one spawn, and converge
         // again on the row below. Everything that decided WHAT to run —
@@ -1603,35 +1632,12 @@ extension WorktreeLifecycle {
         // wrong.
         let window1: (windowID: String, paneID: String)
         let holderHandle: HolderHandle?
-        // What the model proxy did with this spawn: the stream file to stamp on
-        // the row below, and the route to undo if the row never gets written.
-        // Empty on every unproxied spawn, which is every tmux spawn and every
-        // holder spawn the attachment refused.
-        var primaryAttachment = ModelProxyRouteAttachment.Outcome.unproxied(primarySensitiveEnv)
         if useHolderTransport, let holderRegistry {
-            // The model proxy branch, and the only place a route is minted on
-            // the create path. The route is written and registered BEFORE the
-            // spawn, so the first request the session makes already has one to
-            // resolve; a failure anywhere in here leaves the session unproxied
-            // rather than unstarted.
-            //
-            // A non-Claude primary is never routed, and the gate is the
-            // presence of a context rather than a field inside one: a nil
-            // `profileKind` reads as "not Bedrock", which is exactly what a
-            // shell primary would present.
-            if let proxyContext = primaryProxyContext {
-                primaryAttachment = await ModelProxyRouteAttachment.attach(
-                    terminalID: plannedTerminalID1,
-                    config: config,
-                    profileKind: proxyContext.profileKind,
-                    profileBaseURL: proxyContext.profileBaseURL,
-                    envOverrideBaseURL: mergedEnvOverrides["ANTHROPIC_BASE_URL"],
-                    overlaySetsBaseURL: ClaudeHookOverlay.overlaySetsEnv(
-                        "ANTHROPIC_BASE_URL", overlayPath: proxyContext.overlayPath),
-                    sensitiveEnv: primarySensitiveEnv,
-                    baseEnvironment: holderRegistry.environment,
-                    supervisor: modelProxySupervisor)
-            }
+            // The route, if there is one, was minted above — before the command
+            // was composed, because the command re-exports the profile's own
+            // routing keys and would otherwise run over it. What is left here
+            // is the spawn itself, and the two undo paths for a route nothing
+            // will ever be started against.
             do {
                 holderHandle = try await holderRegistry.spawn(
                     terminalID: plannedTerminalID1,
@@ -1643,7 +1649,9 @@ extension WorktreeLifecycle {
                         // `holderLaunch` inlines as `export K='v';` in front of
                         // the command. The token is a bearer credential for
                         // this session's upstream; argv is world-readable.
-                        sensitiveEnv: primaryAttachment.sensitiveEnv,
+                        // `primarySensitiveEnv` is the routed environment
+                        // itself: the attachment is what it was composed from.
+                        sensitiveEnv: primarySensitiveEnv,
                         workingDirectory: worktreePath,
                         cols: resolvedCols,
                         rows: resolvedRows,

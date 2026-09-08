@@ -1154,6 +1154,41 @@ public actor HibernationCoordinator {
             projectsRoot: claudeProjectsRoot(profileConfigDirPath: profileConfigDir),
             storedTranscriptPath: terminal.transcriptPath
         )
+        // **The routing decision, before the command is composed.** A wake is a
+        // spawn, so it takes the same route branch the create path does — and
+        // for the same reason it takes it *here*:
+        // `ClaudeSpawnCommandBuilder.build` re-exports the profile's routing
+        // keys inline into the command string, and an inline
+        // `export ANTHROPIC_BASE_URL=…` runs after the process environment and
+        // would send the woken session straight past its route.
+        //
+        // It deliberately does NOT retire whatever route the row still holds
+        // first. A row reaches a parked state through `park` or through
+        // reconcile, and both retire on the way in; what is left is a crash
+        // between a spawn and its park, and dropping a route by terminal id
+        // here would sometimes drop the LIVE one instead —
+        // `adoptLiveHolderInsteadOfRespawning` below can find a running session
+        // whose route is the row's. Residue from a crash is the `OrphanGC`
+        // leg's, which is the standing guarantee for exactly this shape of
+        // leftover.
+        var attachment = ModelProxyRouteAttachment.Outcome.unproxied(mergedEnvOverrides)
+        if terminal.transport == .holder, let config, let registry = holderRegistry {
+            attachment = await ModelProxyRouteAttachment.attach(
+                terminalID: terminal.id,
+                config: config,
+                profileKind: resolvedProfile?.kind,
+                profileBaseURL: resolvedProfile?.baseURL,
+                envOverrideBaseURL: mergedEnvOverrides["ANTHROPIC_BASE_URL"],
+                overlaySetsBaseURL: ClaudeHookOverlay.overlaySetsEnv(
+                    "ANTHROPIC_BASE_URL", overlayPath: overlayPath),
+                sensitiveEnv: mergedEnvOverrides,
+                baseEnvironment: registry.environment,
+                supervisor: modelProxySupervisor)
+        }
+        // A tmux wake, a config that could not be read and a daemon with no
+        // registry all fall through with the caller's own environment: none of
+        // them is a state in which a route may be minted, and the first is the
+        // transport the spec excludes outright.
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: sessionID,
             freshSessionID: nil,
@@ -1165,7 +1200,10 @@ public actor HibernationCoordinator {
             initialPrompt: initialPrompt,
             profileSecret: resolvedProfile?.secret,
             profileKind: resolvedProfile?.kind,
-            profileBaseURL: resolvedProfile?.baseURL,
+            // Nil on a routed wake, exactly as on the create path: the
+            // profile's endpoint is the route's upstream now, and inlining it
+            // here would run over the route.
+            profileBaseURL: attachment.builderBaseURL(profile: resolvedProfile?.baseURL),
             profileModel: resolvedProfile?.model,
             profileAwsRegion: resolvedProfile?.awsRegion,
             profileAwsProfile: resolvedProfile?.awsProfile,
@@ -1183,7 +1221,11 @@ public actor HibernationCoordinator {
             "TBD_WORKTREE_ID": worktree.id.uuidString,
             "TBD_TERMINAL_ID": terminal.id.uuidString,
         ]
-        let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
+        // The attachment's environment is the free-form overrides plus the
+        // route; the builder's auth env layers on top and cannot clobber the
+        // route, because a routed spawn was built with no profile base URL.
+        let sensitiveEnv = attachment.sensitiveEnv
+            .merging(spawn.sensitiveEnv) { _, builder in builder }
 
         // The transports diverge again, and for the last time. Everything above
         // — profile, env, overlay, trust seed, transcript sync, the resume
@@ -1191,37 +1233,6 @@ public actor HibernationCoordinator {
         // WHAT to resume and that is transport-independent. Below is the tmux
         // mechanic.
         if terminal.transport == .holder {
-            // A wake is a spawn, so it takes the same route branch the create
-            // path does.
-            //
-            // It deliberately does NOT retire whatever route the row still
-            // holds first. A row reaches a parked state through `park` or
-            // through reconcile, and both retire on the way in; what is left is
-            // a crash between a spawn and its park, and dropping a route by
-            // terminal id here would sometimes drop the LIVE one instead —
-            // `adoptLiveHolderInsteadOfRespawning` below can find a running
-            // session whose route is the row's. Residue from a crash is the
-            // `OrphanGC` leg's, which is the standing guarantee for exactly
-            // this shape of leftover.
-            let attachment: ModelProxyRouteAttachment.Outcome
-            if let config, let registry = holderRegistry {
-                attachment = await ModelProxyRouteAttachment.attach(
-                    terminalID: terminal.id,
-                    config: config,
-                    profileKind: resolvedProfile?.kind,
-                    profileBaseURL: resolvedProfile?.baseURL,
-                    envOverrideBaseURL: mergedEnvOverrides["ANTHROPIC_BASE_URL"],
-                    overlaySetsBaseURL: ClaudeHookOverlay.overlaySetsEnv(
-                        "ANTHROPIC_BASE_URL", overlayPath: overlayPath),
-                    sensitiveEnv: sensitiveEnv,
-                    baseEnvironment: registry.environment,
-                    supervisor: modelProxySupervisor)
-            } else {
-                // No config read and no registry are both states in which this
-                // wake is about to fail or run unproxied anyway; neither is a
-                // reason to route a session whose flags could not be read.
-                attachment = .unproxied(sensitiveEnv)
-            }
             return await wakeHolderSection(
                 terminal: terminal,
                 worktree: worktree,
@@ -1229,7 +1240,10 @@ public actor HibernationCoordinator {
                 expectedReplacementState: expectedReplacementState,
                 spawnCommand: spawn.command,
                 env: env,
-                attachment: attachment,
+                // The routing decision, now carrying the environment this wake
+                // will actually launch with, so the method that can refuse to
+                // spawn holds both the env and the token it would have to undo.
+                attachment: attachment.withEnvironment(sensitiveEnv),
                 cols: cols,
                 rows: rows)
         }

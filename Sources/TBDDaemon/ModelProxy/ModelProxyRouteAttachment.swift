@@ -123,6 +123,48 @@ enum ModelProxyRouteAttachment {
         static func unproxied(_ sensitiveEnv: [String: String]) -> Outcome {
             Outcome(sensitiveEnv: sensitiveEnv, streamPath: nil, token: nil)
         }
+
+        /// This spawn was never a proxy candidate — a tmux transport, or a
+        /// primary that is not Claude. Carries no environment because the
+        /// caller's own is the launch environment on that path.
+        static let notAttempted = Outcome(sensitiveEnv: [:], streamPath: nil, token: nil)
+
+        /// A route was minted and this spawn will run against it.
+        ///
+        /// **Read before `ClaudeSpawnCommandBuilder.build`, not after.** The
+        /// builder re-exports every profile routing key inline into the command
+        /// string, and those exports run *after* the process environment is
+        /// applied — so a routed spawn must be built with `profileBaseURL: nil`
+        /// or the profile's own endpoint wins and the route is minted, stamped
+        /// on the row, and never used.
+        var routed: Bool { token != nil }
+
+        /// The `profileBaseURL` `ClaudeSpawnCommandBuilder.build` must be given
+        /// for this spawn: the profile's own, or **nil once a route is in
+        /// play**.
+        ///
+        /// A named function rather than a ternary at each spawn site, because
+        /// the two sites are the create path and the wake path and a third will
+        /// exist one day: the expression is the whole fix, it is easy to leave
+        /// out, and leaving it out fails silently — the session reaches the
+        /// profile endpoint, the route is minted, the row records a stream file
+        /// that never fills, and nothing errors. As a function it is greppable,
+        /// it is one thing to get right, and it has a test of its own.
+        func builderBaseURL(profile: String?) -> String? {
+            routed ? nil : profile
+        }
+
+        /// The same attachment carrying `environment` instead.
+        ///
+        /// The routing decision is made before the spawn command is composed,
+        /// and the launch environment is only complete after it — the builder's
+        /// auth env merges on top. This is how the two meet: the decision keeps
+        /// its token and stream path, and the caller substitutes the
+        /// environment it will actually launch with, so no spawn site can hold
+        /// an attachment whose environment is not the one it uses.
+        func withEnvironment(_ environment: [String: String]) -> Outcome {
+            Outcome(sensitiveEnv: environment, streamPath: streamPath, token: token)
+        }
     }
 
     static func attach(
@@ -171,10 +213,18 @@ enum ModelProxyRouteAttachment {
                 // proxy off is not a state a route may describe.
                 streamingEnabled: config.transcriptStreamingEffective)
         } catch {
+            // The kind is public and the description is not, because the
+            // description can carry the token: `ModelProxyRouteStore.Failure
+            // .invalidToken` interpolates it verbatim, and a write error from
+            // the route store names a path whose last component is
+            // `<token>.json`. A route token is a bearer credential for this
+            // session's upstream, and the system log is world-readable to
+            // anything running as this user.
             logger.error("""
                 model proxy route unavailable, spawning unproxied: terminal \
                 \(terminalID.uuidString, privacy: .public): \
-                \(error.localizedDescription, privacy: .public)
+                \(Self.errorKind(error), privacy: .public) \
+                (\(error.localizedDescription, privacy: .private))
                 """)
             return .unproxied(sensitiveEnv)
         }
@@ -228,6 +278,26 @@ enum ModelProxyRouteAttachment {
             retired the model proxy route for terminal \
             \(terminalID.uuidString, privacy: .public)
             """)
+    }
+
+    /// A short name for why a route could not be minted, carrying nothing a
+    /// route file's path or a token could hide in.
+    ///
+    /// It is what the operator actually needs — "the store refused the token"
+    /// versus "the rename failed" — and it is the half of the diagnostic that
+    /// can be logged publicly. `errno` is included because it names an OS
+    /// condition and cannot carry a credential.
+    static func errorKind(_ error: any Error) -> String {
+        if let failure = error as? ModelProxyRouteStore.Failure {
+            switch failure {
+            case .invalidToken:
+                return "invalid-token"
+            case .renameFailed(let code):
+                return "rename-failed(errno \(code))"
+            }
+        }
+        if error is ModelProxySupervisor.RouteError { return "no-proxy" }
+        return String(describing: type(of: error))
     }
 
     /// A configured value, or nil for one that is present but says nothing.
