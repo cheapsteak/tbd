@@ -1,4 +1,5 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -102,9 +103,64 @@ struct ModelProxyRouteRetirementTests {
         supervisor.tokenForTerminal = "abcdefabcdefabcdefabcdefabcdefab"
         let terminalID = UUID()
 
-        await ModelProxyRouteAttachment.retire(terminalID: terminalID, supervisor: supervisor)
+        await ModelProxyRouteAttachment.retire(
+            terminalID: terminalID, streamPath: "/tmp/tbd-streams/one.jsonl",
+            proxyEnabled: true, supervisor: supervisor)
 
         #expect(supervisor.retired == ["abcdefabcdefabcdefabcdefabcdefab"])
+    }
+
+    /// **The gate on the lookup itself.** Finding a row's token means listing
+    /// `routes/` and decoding every file in it, and every holder teardown asks
+    /// — a startup reconcile once per row. Two facts together prove the answer
+    /// is nil before the listing: the flag is off, so nothing has been routed
+    /// since, and the row never recorded a stream path, so it was not routed
+    /// before either.
+    @Test("the flag off and an unrouted row skip the lookup entirely")
+    func anUnroutedRowWithTheFlagOffIsNotLookedUp() async throws {
+        let supervisor = FakeModelProxySupervisor()
+        // Deliberately answerable: the assertion is that nobody asks.
+        supervisor.tokenForTerminal = "33333333333333333333333333333333"
+
+        await ModelProxyRouteAttachment.retire(
+            terminalID: UUID(), streamPath: nil, proxyEnabled: false, supervisor: supervisor)
+
+        #expect(supervisor.tokenLookups == 0, "there is provably nothing to find")
+        #expect(supervisor.retired.isEmpty)
+    }
+
+    /// **The discriminating half, and the one that would leak.** A session
+    /// spawned while the flag was on keeps its route for the rest of its life —
+    /// the flag governs new spawns and nothing else — so a row carrying a
+    /// stream path is looked up whatever the column says now. Skipping it would
+    /// leave a live route file behind for every session that outlived the
+    /// toggle.
+    @Test("a routed row is looked up even with the flag off")
+    func aRoutedRowIsLookedUpWithTheFlagOff() async throws {
+        let supervisor = FakeModelProxySupervisor()
+        supervisor.tokenForTerminal = "44444444444444444444444444444444"
+
+        await ModelProxyRouteAttachment.retire(
+            terminalID: UUID(), streamPath: "/tmp/tbd-streams/routed.jsonl",
+            proxyEnabled: false, supervisor: supervisor)
+
+        #expect(supervisor.tokenLookups == 1)
+        #expect(supervisor.retired == ["44444444444444444444444444444444"])
+    }
+
+    /// The other direction of the same conjunction: the flag on is enough on
+    /// its own. A wake can mint a route before the row is stamped, so an
+    /// unrouted-looking row with the flag on still has to be asked about.
+    @Test("the flag on looks up even a row with no stream path")
+    func theFlagOnLooksUpAnUnroutedRow() async throws {
+        let supervisor = FakeModelProxySupervisor()
+        supervisor.tokenForTerminal = nil
+
+        await ModelProxyRouteAttachment.retire(
+            terminalID: UUID(), streamPath: nil, proxyEnabled: true, supervisor: supervisor)
+
+        #expect(supervisor.tokenLookups == 1)
+        #expect(supervisor.retired.isEmpty)
     }
 
     /// **The reason the token form exists.** A wake mints a route and can then
@@ -126,7 +182,8 @@ struct ModelProxyRouteRetirementTests {
         let outcome = await ModelProxyRouteAttachment.attach(
             terminalID: terminalID, config: config, profileKind: .oauth,
             profileBaseURL: nil, envOverrideBaseURL: nil, overlaySetsBaseURL: false,
-            sensitiveEnv: [:], baseEnvironment: ["TBD_HOME": "/tmp/tbd-retire-token"],
+            sensitiveEnv: [:],
+            baseEnvironment: ["TBD_HOME": fencedScratchRoot(prefix: "tbdmprr")],
             supervisor: supervisor)
 
         await ModelProxyRouteAttachment.retire(
@@ -151,9 +208,13 @@ struct ModelProxyRouteRetirementTests {
     func retireIsANoOpWithNothingToRetire() async throws {
         let supervisor = FakeModelProxySupervisor()
         supervisor.tokenForTerminal = nil
-        await ModelProxyRouteAttachment.retire(terminalID: UUID(), supervisor: supervisor)
+        await ModelProxyRouteAttachment.retire(
+            terminalID: UUID(), streamPath: "/tmp/tbd-streams/gone.jsonl",
+            proxyEnabled: true, supervisor: supervisor)
         #expect(supervisor.retired.isEmpty)
 
-        await ModelProxyRouteAttachment.retire(terminalID: UUID(), supervisor: nil)
+        await ModelProxyRouteAttachment.retire(
+            terminalID: UUID(), streamPath: "/tmp/tbd-streams/gone.jsonl",
+            proxyEnabled: true, supervisor: nil)
     }
 }

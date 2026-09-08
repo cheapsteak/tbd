@@ -1154,21 +1154,14 @@ extension RPCRouter {
     /// handshake — so each is reported rather than swallowed.
     ///
     /// Not `private`: `closeScratchTerminals` tears down rows the same way and
-    /// must reclaim the same holders. The teardown itself lives on the registry
-    /// so the lifecycle's own paths (archive, forget) share one implementation
-    /// rather than three near-copies.
+    /// must reclaim the same holders. The steps themselves are
+    /// `WorktreeLifecycle.disposeHolder`, so this router and the lifecycle
+    /// cannot drift apart about what tearing a holder down means — they did,
+    /// as two hand-maintained near-copies, until this call replaced the second.
     func disposeHolder(for terminal: Terminal) async -> String? {
-        // Before the registry check, and unconditionally: the row is about to
-        // be deleted, so this is the last moment anything can name its route,
-        // and a daemon with no registry is exactly the one whose routes nothing
-        // else would ever find.
-        await ModelProxyRouteAttachment.retire(
-            terminalID: terminal.id, supervisor: modelProxySupervisor)
-        guard let holderRegistry else {
-            return "terminal \(terminal.id) runs on the holder transport but this daemon has "
-                + "no holder registry, so its holder and job were left running"
-        }
-        return await holderRegistry.abandon(terminal: terminal)
+        await WorktreeLifecycle.disposeHolder(
+            for: terminal, registry: holderRegistry, config: db.config,
+            supervisor: modelProxySupervisor)
     }
 
     /// Closed-terminal capture metadata for a worktree, newest first. Content

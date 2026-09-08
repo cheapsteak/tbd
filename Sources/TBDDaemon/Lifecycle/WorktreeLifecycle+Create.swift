@@ -1563,24 +1563,20 @@ extension WorktreeLifecycle {
             //
             // Only the holder transport is routed (spec: pty-holder only), so
             // the registry is the gate. A refusal returns this environment
-            // unchanged; nothing below can fail because of it.
-            var attachment = ModelProxyRouteAttachment.Outcome.unproxied(mergedEnvOverrides)
-            if useHolderTransport, let holderRegistry {
-                attachment = await ModelProxyRouteAttachment.attach(
-                    terminalID: plannedTerminalID1,
-                    config: config,
-                    profileKind: resolvedProfile?.kind,
-                    profileBaseURL: resolvedProfile?.baseURL,
-                    envOverrideBaseURL: mergedEnvOverrides["ANTHROPIC_BASE_URL"],
-                    // The SAME resolved overlay the spawn runs with, read
-                    // above: whether it sets `env.ANTHROPIC_BASE_URL` decides
-                    // whether a route can be honored at all.
-                    overlaySetsBaseURL: ClaudeHookOverlay.overlaySetsEnv(
-                        "ANTHROPIC_BASE_URL", overlayPath: primaryOverlayPath),
-                    sensitiveEnv: mergedEnvOverrides,
-                    baseEnvironment: holderRegistry.environment,
-                    supervisor: modelProxySupervisor)
-            }
+            // unchanged; nothing below can fail because of it. The gate and the
+            // call are one function because the wake path makes exactly the
+            // same five-step decision.
+            let attachment = await ModelProxyRouteAttachment.attachIfRoutable(
+                terminalID: plannedTerminalID1,
+                isHolderSpawn: useHolderTransport,
+                config: config,
+                profileKind: resolvedProfile?.kind,
+                profileBaseURL: resolvedProfile?.baseURL,
+                envOverrides: mergedEnvOverrides,
+                // The SAME resolved overlay the spawn runs with, read above.
+                overlayPath: primaryOverlayPath,
+                holderEnvironment: holderRegistry?.environment,
+                supervisor: modelProxySupervisor)
             primaryAttachment = attachment
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
@@ -1621,15 +1617,13 @@ extension WorktreeLifecycle {
                 "TBD_WORKTREE_ID": worktreeID.uuidString,
                 "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
             ]
-            // Layer the builder's auth/routing env ON TOP of free-form overrides
-            // so auth/routing stays final and free-form vars can't clobber it.
-            // The attachment's environment is the free-form overrides plus the
-            // route (or exactly the overrides, when nothing was routed), and
-            // the builder cannot disagree with it about the endpoint: it was
-            // given the very URL the attachment carries, so the two copies of
-            // `ANTHROPIC_BASE_URL` that meet here are one value.
-            primarySensitiveEnv = attachment.sensitiveEnv
-                .merging(spawn.sensitiveEnv) { _, builder in builder }
+            // Layer the builder's auth/routing env ON TOP of free-form
+            // overrides so auth/routing stays final and free-form vars can't
+            // clobber it. Through the attachment's own method, because the wake
+            // path makes the same merge and the order is silent when it is
+            // wrong.
+            primarySensitiveEnv = attachment.launchEnvironment(
+                mergingBuilder: spawn.sensitiveEnv)
             primaryProfileID = resolvedProfile?.profileID
             primaryLabel = TerminalLabel.claudeCode
         }

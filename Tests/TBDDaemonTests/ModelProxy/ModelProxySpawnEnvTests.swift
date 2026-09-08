@@ -52,7 +52,17 @@ final class FakeModelProxySupervisor: ModelProxySupervising, @unchecked Sendable
 
     func retireRoute(token: String, terminalID: UUID) async { retired.append(token) }
 
-    func routeToken(forTerminal terminalID: UUID) async -> String? { tokenForTerminal }
+    /// How many times the terminal-id lookup was made. It is a directory
+    /// listing that decodes every route file in production, so a teardown that
+    /// can prove there is nothing to find must not make it at all — counting is
+    /// the only way to see the difference between "skipped" and "found
+    /// nothing".
+    private(set) var tokenLookups = 0
+
+    func routeToken(forTerminal terminalID: UUID) async -> String? {
+        tokenLookups += 1
+        return tokenForTerminal
+    }
 
     func capabilitySnapshot() async -> ModelProxyCapabilitySnapshot { snapshot }
 
@@ -82,6 +92,16 @@ struct ModelProxySpawnEnvTests {
     /// refusal asserts it survives.
     private static let carriedEnv = ["EXAMPLE_CARRIED_SECRET": "placeholder-not-a-credential"]
 
+    /// The `TBD_HOME` every path in this suite is composed against.
+    ///
+    /// Under the wrapper's scratch root rather than a shared `/tmp` name.
+    /// Nothing writes through these dictionaries today — the supervisor is a
+    /// fake and `streamFilePath` is a pure computation — but the name would be
+    /// shared with every concurrently running worktree, and the first assertion
+    /// that did write would escape the fence. Every other suite here derives
+    /// its root this way.
+    private static let fencedHome = fencedScratchRoot(prefix: "tbdmpse")
+
     private func proxyOnConfig(streaming: Bool = true) -> Config {
         var config = Config()
         config.modelProxyEnabled = true
@@ -96,7 +116,8 @@ struct ModelProxySpawnEnvTests {
         envOverrideBaseURL: String? = nil,
         overlaySetsBaseURL: Bool = false,
         sensitiveEnv: [String: String]? = nil,
-        baseEnvironment: [String: String] = ["TBD_HOME": "/tmp/tbd-spawn-env-tests"],
+        baseEnvironment: [String: String] =
+            ["TBD_HOME": ModelProxySpawnEnvTests.fencedHome],
         supervisor: (any ModelProxyRouting)?
     ) async -> ModelProxyRouteAttachment.Outcome {
         await ModelProxyRouteAttachment.attach(
@@ -116,7 +137,7 @@ struct ModelProxySpawnEnvTests {
     @Test("a proxied spawn gets the route's base URL, a loopback NO_PROXY, and a stream path")
     func routedSpawnCarriesTheRoute() async throws {
         let supervisor = FakeModelProxySupervisor(port: 51_842)
-        let home = "/tmp/tbd-spawn-env-\(UUID().uuidString.prefix(8))"
+        let home = fencedScratchRoot(prefix: "tbdmpse")
         let outcome = await attach(
             config: proxyOnConfig(),
             baseEnvironment: ["TBD_HOME": home],
@@ -255,6 +276,80 @@ struct ModelProxySpawnEnvTests {
         #expect(supervisor.retired == [supervisor.token])
     }
 
+    // MARK: - The gate both spawn sites share
+
+    /// `attachIfRoutable` is the create path's and the wake path's whole
+    /// routing decision, gate included, so each half of that gate needs its own
+    /// case: a third spawn site gets these refusals by calling one function
+    /// instead of copying four steps and losing one.
+    @Test("a tmux spawn is never routed")
+    func routableRefusesATmuxSpawn() async throws {
+        let supervisor = FakeModelProxySupervisor()
+        let outcome = await ModelProxyRouteAttachment.attachIfRoutable(
+            terminalID: Self.terminalID, isHolderSpawn: false, config: proxyOnConfig(),
+            profileKind: .oauth, profileBaseURL: nil, envOverrides: Self.carriedEnv,
+            overlayPath: nil, holderEnvironment: ["TBD_HOME": Self.fencedHome],
+            supervisor: supervisor)
+
+        #expect(outcome.routed == false)
+        #expect(outcome.sensitiveEnv == Self.carriedEnv)
+        #expect(supervisor.made.isEmpty)
+    }
+
+    @Test("a daemon with no holder registry routes nothing")
+    func routableRefusesWithoutARegistry() async throws {
+        let supervisor = FakeModelProxySupervisor()
+        let outcome = await ModelProxyRouteAttachment.attachIfRoutable(
+            terminalID: Self.terminalID, isHolderSpawn: true, config: proxyOnConfig(),
+            profileKind: .oauth, profileBaseURL: nil, envOverrides: Self.carriedEnv,
+            overlayPath: nil, holderEnvironment: nil, supervisor: supervisor)
+
+        #expect(outcome.routed == false)
+        #expect(outcome.sensitiveEnv == Self.carriedEnv)
+        #expect(supervisor.made.isEmpty)
+    }
+
+    /// A config that could not be read is not a state in which a route may be
+    /// minted: the flag is the whole gate and an unreadable one is off.
+    @Test("a config that could not be read routes nothing")
+    func routableRefusesWithoutAConfig() async throws {
+        let supervisor = FakeModelProxySupervisor()
+        let outcome = await ModelProxyRouteAttachment.attachIfRoutable(
+            terminalID: Self.terminalID, isHolderSpawn: true, config: nil,
+            profileKind: .oauth, profileBaseURL: nil, envOverrides: Self.carriedEnv,
+            overlayPath: nil, holderEnvironment: ["TBD_HOME": Self.fencedHome],
+            supervisor: supervisor)
+
+        #expect(outcome.routed == false)
+        #expect(supervisor.made.isEmpty)
+    }
+
+    /// The positive half, with the three inputs above at the values every
+    /// refusal changes exactly one of: a holder spawn, a config with the flag
+    /// on, and a registry environment. The env-override base URL and the
+    /// stream path prove the caller's overrides really did reach `attach`.
+    @Test("a holder spawn with the flag on and a registry is routed")
+    func routableRoutesAHolderSpawn() async throws {
+        let supervisor = FakeModelProxySupervisor(port: 51_842)
+        let home = fencedScratchRoot(prefix: "tbdmpse")
+        let outcome = await ModelProxyRouteAttachment.attachIfRoutable(
+            terminalID: Self.terminalID, isHolderSpawn: true, config: proxyOnConfig(),
+            profileKind: .oauth, profileBaseURL: nil,
+            envOverrides: Self.carriedEnv.merging(
+                ["ANTHROPIC_BASE_URL": "https://override.acme.example"]) { _, new in new },
+            overlayPath: nil, holderEnvironment: ["TBD_HOME": home], supervisor: supervisor)
+
+        #expect(outcome.routed)
+        #expect(outcome.sensitiveEnv["ANTHROPIC_BASE_URL"]
+            == "http://127.0.0.1:51842/r/\(supervisor.token)")
+        #expect(
+            supervisor.made.first?.upstream == "https://override.acme.example",
+            "the caller's overrides are where the env-override upstream comes from")
+        #expect(outcome.streamPath == "\(home)/streams/\(Self.terminalID.uuidString).jsonl")
+        #expect(outcome.sensitiveEnv["EXAMPLE_CARRIED_SECRET"]
+            == Self.carriedEnv["EXAMPLE_CARRIED_SECRET"])
+    }
+
     // MARK: - NO_PROXY
 
     @Test("NO_PROXY extends an existing list without reordering or duplicating it")
@@ -286,7 +381,9 @@ struct ModelProxySpawnEnvTests {
         let outcome = await attach(
             config: proxyOnConfig(),
             sensitiveEnv: ["NO_PROXY": "session.example"],
-            baseEnvironment: ["TBD_HOME": "/tmp/tbd-x", "NO_PROXY": "daemon.example"],
+            baseEnvironment: [
+                "TBD_HOME": Self.fencedHome, "NO_PROXY": "daemon.example",
+            ],
             supervisor: FakeModelProxySupervisor())
         #expect(outcome.sensitiveEnv["NO_PROXY"] == "session.example,127.0.0.1,localhost")
     }
@@ -295,7 +392,9 @@ struct ModelProxySpawnEnvTests {
     func noProxyFallsBackToTheDaemonValue() async throws {
         let outcome = await attach(
             config: proxyOnConfig(),
-            baseEnvironment: ["TBD_HOME": "/tmp/tbd-x", "NO_PROXY": "daemon.example"],
+            baseEnvironment: [
+                "TBD_HOME": Self.fencedHome, "NO_PROXY": "daemon.example",
+            ],
             supervisor: FakeModelProxySupervisor())
         #expect(outcome.sensitiveEnv["NO_PROXY"] == "daemon.example,127.0.0.1,localhost")
     }

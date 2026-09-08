@@ -590,8 +590,15 @@ extension HibernationCoordinator {
         // proxy keeps and the app may still be tailing. The wake mints a fresh
         // one. Best-effort, exactly like the pid clear above — the row is
         // parked either way, and `OrphanGC` is the standing guarantee.
+        //
+        // The row's stream path is read here, before the write below clears it:
+        // it is what says this session was routed, and with the flag off it is
+        // the only thing that does.
         await ModelProxyRouteAttachment.retire(
-            terminalID: terminal.id, supervisor: modelProxySupervisor)
+            terminalID: terminal.id,
+            streamPath: currentTerminal.transcriptStreamPath,
+            proxyEnabled: (try? await db.config.get())?.modelProxyEnabled ?? true,
+            supervisor: modelProxySupervisor)
         do {
             try await db.terminals.setTranscriptStreamPath(
                 terminalID: terminal.id, path: nil)
@@ -852,9 +859,14 @@ extension HibernationCoordinator {
             do {
                 try await db.terminals.setHolderProcess(
                     id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
-                // The job that route named is gone, so the route is too.
+                // The job that route named is gone, so the route is too. The
+                // stream path is read before the clear below, for the same
+                // reason the park reads it there.
                 await ModelProxyRouteAttachment.retire(
-                    terminalID: terminal.id, supervisor: modelProxySupervisor)
+                    terminalID: terminal.id,
+                    streamPath: terminal.transcriptStreamPath,
+                    proxyEnabled: (try? await db.config.get())?.modelProxyEnabled ?? true,
+                    supervisor: modelProxySupervisor)
                 try await db.terminals.setTranscriptStreamPath(
                     terminalID: terminal.id, path: nil)
                 logger.info("startup: cleared the stale holder pids on parked terminal \(terminal.id, privacy: .public) — its recorded child \(childPID, privacy: .public) is gone")

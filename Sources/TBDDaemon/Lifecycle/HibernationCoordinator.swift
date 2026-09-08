@@ -1171,24 +1171,20 @@ public actor HibernationCoordinator {
         // whose route is the row's. Residue from a crash is the `OrphanGC`
         // leg's, which is the standing guarantee for exactly this shape of
         // leftover.
-        var attachment = ModelProxyRouteAttachment.Outcome.unproxied(mergedEnvOverrides)
-        if terminal.transport == .holder, let config, let registry = holderRegistry {
-            attachment = await ModelProxyRouteAttachment.attach(
-                terminalID: terminal.id,
-                config: config,
-                profileKind: resolvedProfile?.kind,
-                profileBaseURL: resolvedProfile?.baseURL,
-                envOverrideBaseURL: mergedEnvOverrides["ANTHROPIC_BASE_URL"],
-                overlaySetsBaseURL: ClaudeHookOverlay.overlaySetsEnv(
-                    "ANTHROPIC_BASE_URL", overlayPath: overlayPath),
-                sensitiveEnv: mergedEnvOverrides,
-                baseEnvironment: registry.environment,
-                supervisor: modelProxySupervisor)
-        }
-        // A tmux wake, a config that could not be read and a daemon with no
-        // registry all fall through with the caller's own environment: none of
-        // them is a state in which a route may be minted, and the first is the
-        // transport the spec excludes outright.
+        //
+        // The same five steps the create path takes, through the same function:
+        // the gate on transport, config and registry, then one `attach` whose
+        // nine arguments must be the nine the create path passes.
+        let attachment = await ModelProxyRouteAttachment.attachIfRoutable(
+            terminalID: terminal.id,
+            isHolderSpawn: terminal.transport == .holder,
+            config: config,
+            profileKind: resolvedProfile?.kind,
+            profileBaseURL: resolvedProfile?.baseURL,
+            envOverrides: mergedEnvOverrides,
+            overlayPath: overlayPath,
+            holderEnvironment: holderRegistry?.environment,
+            supervisor: modelProxySupervisor)
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: sessionID,
             freshSessionID: nil,
@@ -1223,11 +1219,9 @@ public actor HibernationCoordinator {
             "TBD_TERMINAL_ID": terminal.id.uuidString,
         ]
         // The attachment's environment is the free-form overrides plus the
-        // route; the builder's auth env layers on top and cannot disagree with
-        // it about the endpoint, because it was given the very URL the
-        // attachment carries.
-        let sensitiveEnv = attachment.sensitiveEnv
-            .merging(spawn.sensitiveEnv) { _, builder in builder }
+        // route; the builder's auth env layers on top. Through the attachment's
+        // own method, so this merge and the create path's are one expression.
+        let sensitiveEnv = attachment.launchEnvironment(mergingBuilder: spawn.sensitiveEnv)
 
         // The transports diverge again, and for the last time. Everything above
         // — profile, env, overlay, trust seed, transcript sync, the resume

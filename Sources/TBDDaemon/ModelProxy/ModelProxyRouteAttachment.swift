@@ -186,6 +186,22 @@ enum ModelProxyRouteAttachment {
             baseURL ?? profile
         }
 
+        /// The environment this spawn actually launches with: this
+        /// attachment's, with the spawn builder's auth and routing env layered
+        /// **on top**.
+        ///
+        /// A named function because the merge has an order and the order is
+        /// silent when it is wrong. The attachment's dictionary is the
+        /// free-form overrides plus the route; the builder's is the auth env,
+        /// and it has to win — a spawn site that reversed these two would launch
+        /// with the profile's credentials clobbered by whatever a repo-level
+        /// override happened to set, and nothing would say so until the session
+        /// failed to authenticate. The two cannot disagree about the endpoint:
+        /// the builder was given the very URL this attachment carries.
+        func launchEnvironment(mergingBuilder builderEnv: [String: String]) -> [String: String] {
+            sensitiveEnv.merging(builderEnv) { _, builder in builder }
+        }
+
         /// The same attachment carrying `environment` instead.
         ///
         /// The routing decision is made before the spawn command is composed,
@@ -199,6 +215,63 @@ enum ModelProxyRouteAttachment {
                 sensitiveEnv: environment, baseURL: baseURL,
                 streamPath: streamPath, token: token)
         }
+    }
+
+    /// **The whole routing decision for one spawn site, gate included.**
+    ///
+    /// Both spawn sites — `WorktreeLifecycle+Create`'s primary spawn and
+    /// `HibernationCoordinator`'s wake — reach a route the same way: default to
+    /// an unproxied outcome carrying the caller's own overrides, refuse unless
+    /// this spawn is going onto the pty-holder transport with a registry to run
+    /// it and a config to read, and otherwise ask `attach` with nine arguments
+    /// that must be the same nine at both. A third site will exist one day, and
+    /// the five steps are exactly the kind of thing that gets copied with one
+    /// of them missing.
+    ///
+    /// - Parameters:
+    ///   - isHolderSpawn: the transport gate. Only a holder spawn is ever
+    ///     routed (spec, "Scope"); a tmux spawn falls through with the caller's
+    ///     environment untouched.
+    ///   - holderEnvironment: the registry's own environment, which is both the
+    ///     proof that a registry exists and the dictionary every TBD path is
+    ///     derived from.
+    ///   - envOverrides: the resolved free-form overrides. They are the
+    ///     unproxied outcome's environment, the source of an override base URL,
+    ///     and the environment a route is added to — one value, so the three
+    ///     cannot drift apart.
+    static func attachIfRoutable(
+        terminalID: UUID,
+        isHolderSpawn: Bool,
+        config: Config?,
+        profileKind: CredentialKind?,
+        profileBaseURL: String?,
+        envOverrides: [String: String],
+        overlayPath: String?,
+        holderEnvironment: [String: String]?,
+        supervisor: (any ModelProxyRouting)?
+    ) async -> Outcome {
+        // A tmux spawn, a config that could not be read and a daemon with no
+        // registry all fall through with the caller's own environment: none of
+        // them is a state in which a route may be minted, and the first is the
+        // transport the spec excludes outright.
+        guard isHolderSpawn, let config, let holderEnvironment else {
+            return .unproxied(envOverrides)
+        }
+        return await attach(
+            terminalID: terminalID,
+            config: config,
+            profileKind: profileKind,
+            profileBaseURL: profileBaseURL,
+            envOverrideBaseURL: envOverrides["ANTHROPIC_BASE_URL"],
+            // The SAME resolved overlay the spawn runs with: whether it sets
+            // `env.ANTHROPIC_BASE_URL` decides whether a route can be honored
+            // at all, because Claude Code reads that block after the process
+            // environment.
+            overlaySetsBaseURL: ClaudeHookOverlay.overlaySetsEnv(
+                "ANTHROPIC_BASE_URL", overlayPath: overlayPath),
+            sensitiveEnv: envOverrides,
+            baseEnvironment: holderEnvironment,
+            supervisor: supervisor)
     }
 
     static func attach(
@@ -309,7 +382,33 @@ enum ModelProxyRouteAttachment {
     /// Best-effort and never throwing: a route the proxy will not drop is
     /// unlinked by `retireRoute` itself, and one this daemon cannot even find is
     /// the `OrphanGC` leg's.
-    static func retire(terminalID: UUID, supervisor: (any ModelProxyRouting)?) async {
+    ///
+    /// **The lookup is skipped only when nothing can be there.** Finding the
+    /// token means listing `routes/` and decoding every file in it
+    /// (`ModelProxyRouteStore.token(forTerminal:)`), and every holder teardown
+    /// asks — including a startup reconcile that asks once per row. Two facts
+    /// together mean the answer is certainly nil: the flag is off, so no spawn
+    /// since has been routed, **and** this row never recorded a stream path, so
+    /// it was not routed when the flag was on either. Either fact alone is not
+    /// enough, and the row's is the one that matters: a session routed before
+    /// the flag went off still owns a route, and skipping its lookup would
+    /// leave a live route file for the sweep to find long after the session
+    /// ended.
+    ///
+    /// - Parameters:
+    ///   - streamPath: the row's `transcriptStreamPath`, read before any
+    ///     teardown clears it. A routed spawn stamps it; an unrouted one leaves
+    ///     it nil.
+    ///   - proxyEnabled: `model_proxy_enabled`, and `true` whenever the caller
+    ///     could not read it — the flag is used here only to skip work, and
+    ///     skipping wrongly strands a route.
+    static func retire(
+        terminalID: UUID,
+        streamPath: String?,
+        proxyEnabled: Bool,
+        supervisor: (any ModelProxyRouting)?
+    ) async {
+        guard proxyEnabled || streamPath != nil else { return }
         guard let supervisor,
               let token = await supervisor.routeToken(forTerminal: terminalID) else { return }
         await supervisor.retireRoute(token: token, terminalID: terminalID)

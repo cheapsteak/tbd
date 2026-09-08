@@ -700,6 +700,10 @@ extension WorktreeLifecycle {
         // 2026-09-02. `unknown` is ignorance, not evidence: it parks nothing,
         // deletes nothing, and leaves the row for the next sweep.
         var serverPresenceByName: [String: TmuxPresence] = [:]
+        // Read once for the whole pass rather than per row. It only ever makes
+        // a route lookup cheaper (`ModelProxyRouteAttachment.retire`), and an
+        // unreadable config answers "on", which skips nothing.
+        let modelProxyEnabled = (try? await db.config.get())?.modelProxyEnabled ?? true
         for wt in worktrees {
             let serverPresence: TmuxPresence
             if let cached = serverPresenceByName[wt.tmuxServer] {
@@ -813,7 +817,10 @@ extension WorktreeLifecycle {
                 // a directory listing nobody will make.
                 if terminal.transport == .holder {
                     await ModelProxyRouteAttachment.retire(
-                        terminalID: terminal.id, supervisor: modelProxySupervisor)
+                        terminalID: terminal.id,
+                        streamPath: terminal.transcriptStreamPath,
+                        proxyEnabled: modelProxyEnabled,
+                        supervisor: modelProxySupervisor)
                 }
 
                 // **What a finished session's row becomes is one rule, on every
