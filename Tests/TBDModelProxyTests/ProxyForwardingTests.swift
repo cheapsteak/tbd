@@ -452,8 +452,8 @@ struct ProxyForwardingTests {
             // that completed and one that was cut.
             #expect(
                 !response.hasSuffix("0\r\n\r\n"),
-                "the relay wrote a terminating chunk on a cut stream; tail: "
-                    + String(response.suffix(48)).debugDescription)
+                "the relay wrote a terminating chunk on a cut stream; tail: \(String(response.suffix(48)).debugDescription)"
+            )
 
             #expect(harness.upstream.requests.count == 1)
             await waitUntil(
