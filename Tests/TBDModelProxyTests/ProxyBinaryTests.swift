@@ -478,8 +478,7 @@ extension ModelProxySuites {
             let status = await second.awaitExit()
             #expect(
                 status == TBDModelProxyExit.lockHeld,
-                "a second proxy on one home exited \(status.map(String.init) ?? "never"); "
-                    + "log:\n\(second.log())")
+                "a second proxy on one home exited \(String(describing: status)); log:\n\(second.log())")
 
             // The loser must not have disturbed the winner's rendezvous.
             #expect(FileManager.default.fileExists(atPath: home + "/proxy/proxy.pid"))
@@ -529,7 +528,7 @@ extension ModelProxySuites {
             let status = await proxy.awaitExit()
             #expect(
                 status == TBDModelProxyExit.homeUnusable,
-                "an unusable home exited \(status.map(String.init) ?? "never"); log:\n\(proxy.log())")
+                "an unusable home exited \(String(describing: status)); log:\n\(proxy.log())")
         }
     }
 }
@@ -653,7 +652,7 @@ final class ProxyProcess: @unchecked Sendable {
         // hands the binary an unusable home still gets its diagnostics.
         let logPath = home + ".log"
 
-        var arguments = [executable.path, "--home", home, "--port", String(port)]
+        var arguments: [String] = [executable.path, "--home", home, "--port", String(port)]
         if inheritDescriptor != nil { arguments += ["--lock-fd", "9"] }
 
         // O_CLOEXEC on both: they are dup2'd onto the child's stdio, and the
@@ -693,7 +692,8 @@ final class ProxyProcess: @unchecked Sendable {
         // Explicit and rc-free, and in particular carrying no `TBD_HOME`: the
         // proxy is given its home on the command line, and a leaked one would
         // let a passing test be the accident of the developer's real config.
-        var envp = ["PATH=/usr/bin:/bin"].map { strdup($0) }
+        let envpStrings: [String] = ["PATH=/usr/bin:/bin"]
+        var envp = envpStrings.map { strdup($0) }
         envp.append(nil)
         defer {
             for entry in argv { free(entry) }
