@@ -17,13 +17,14 @@ import Foundation
 /// Raw line dictionaries are deliberately not retained. Holding every parsed
 /// `[String: Any]` for a large session would cost more memory than this design
 /// saves in transfer; only the built items, the result index, the rows of tool
-/// calls that might still be patched, and `assistantMessageIDs` are kept.
+/// calls that might still be patched, and the two message-id sets are kept.
 ///
-/// `assistantMessageIDs` is the one retained set with no upper bound of its
-/// own: it holds one short API `message.id` string per distinct assistant
-/// message and never removes one, so it grows with the length of the session.
-/// Nothing prunes it — the whole struct is dropped when
-/// `TranscriptSource.forget` runs for the session, which is what bounds it.
+/// `assistantMessageIDs` and `assistantTextMessageIDs` are the retained sets
+/// with no upper bound of their own: each holds one short API `message.id`
+/// string per distinct assistant message and never removes one, so they grow
+/// with the length of the session. Nothing prunes them — the whole struct is
+/// dropped when `TranscriptSource.forget` runs for the session, which is what
+/// bounds them.
 public struct IncrementalTranscript: Sendable {
 
     /// What one `ingest` changed, so a caller can publish narrowly instead of
@@ -86,6 +87,26 @@ public struct IncrementalTranscript: Sendable {
     /// absorbs that.
     private var assistantMessageIDs: Set<String> = []
 
+    /// The subset of ``assistantMessageIDs`` whose lines have delivered a
+    /// **text** block — that is, the ids for which `buildItems` has produced an
+    /// `.assistantText` item.
+    ///
+    /// Kept apart from "seen at all" because the two answer different
+    /// questions, and only this one can retire a streamed message's row. Claude
+    /// Code writes one line per content block under a shared `message.id`, and
+    /// those lines land at different times: a message that opens with a
+    /// `thinking` block has its id in the JSONL while its text is still
+    /// streaming. Retiring on the id alone would take the row down with nothing
+    /// to replace it — the settled text item does not exist yet — and the user
+    /// would watch live text vanish mid-turn.
+    ///
+    /// "Carries text" follows `buildItems`' own rule rather than the raw block
+    /// type: a `text` block whose string is empty builds no item, so it
+    /// confirms nothing. A message that never emits text at all — a turn that
+    /// only calls tools — is therefore never confirmed here, and its row leaves
+    /// by the composer's 60-second unconfirmed deadline instead.
+    private var assistantTextMessageIDs: Set<String> = []
+
     /// One tool-call row held for a possible later patch: the line's original
     /// JSON text plus the stable id `buildItems` was given for it.
     private struct RetainedRow: Sendable {
@@ -103,13 +124,30 @@ public struct IncrementalTranscript: Sendable {
     /// nothing and nothing public can depend on the count.
     var assistantMessageIDCount: Int { assistantMessageIDs.count }
 
+    /// How many distinct assistant message ids have delivered text. Internal
+    /// and read-only, the counterpart of ``assistantMessageIDCount``, so a test
+    /// can assert the two sets differ rather than only that one lookup does.
+    var assistantTextMessageIDCount: Int { assistantTextMessageIDs.count }
+
     public init() {}
 
     /// Whether a non-sidechain assistant line carrying this API `message.id`
-    /// has been ingested. A streamed message is confirmed — and its provisional
-    /// row retired — when this turns true.
+    /// has been ingested — the id seen at all, on any content block.
+    ///
+    /// Not the confirmation signal: see ``hasAssistantText(id:)``, which is
+    /// what retires a streamed message's provisional row.
     public func hasAssistantMessage(id: String) -> Bool {
         assistantMessageIDs.contains(id)
+    }
+
+    /// Whether the JSONL holds a non-sidechain assistant line for this API
+    /// `message.id` that carries the message's **text**.
+    ///
+    /// This is confirmation. It turns true exactly when the settled
+    /// `.assistantText` item for the message is in ``items``, so a caller can
+    /// retire the streamed row and show the settled one in the same breath.
+    public func hasAssistantText(id: String) -> Bool {
+        assistantTextMessageIDs.contains(id)
     }
 
     @discardableResult
@@ -136,6 +174,9 @@ public struct IncrementalTranscript: Sendable {
                let message = json["message"] as? [String: Any],
                let messageID = message["id"] as? String {
                 assistantMessageIDs.insert(messageID)
+                if Self.carriesAssistantText(message) {
+                    assistantTextMessageIDs.insert(messageID)
+                }
             }
 
             if json["type"] as? String == "user",
@@ -212,5 +253,21 @@ public struct IncrementalTranscript: Sendable {
         return content
             .filter { ($0["type"] as? String) == "tool_use" }
             .compactMap { $0["id"] as? String }
+    }
+
+    /// Whether an assistant `message` object carries what `buildItems` turns
+    /// into an `.assistantText` item.
+    ///
+    /// Deliberately the same two shapes and the same emptiness rule the parser
+    /// applies: a plain-string `content`, or a `text` block, in either case
+    /// non-empty. Anything looser would confirm a message whose settled text
+    /// item does not exist, which is the whole hazard this set was split out to
+    /// avoid.
+    private static func carriesAssistantText(_ message: [String: Any]) -> Bool {
+        if let string = message["content"] as? String { return !string.isEmpty }
+        guard let blocks = message["content"] as? [[String: Any]] else { return false }
+        return blocks.contains { block in
+            (block["type"] as? String) == "text" && !(((block["text"] as? String) ?? "").isEmpty)
+        }
     }
 }

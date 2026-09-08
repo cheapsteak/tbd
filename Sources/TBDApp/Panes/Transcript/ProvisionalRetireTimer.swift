@@ -56,12 +56,29 @@ actor ProvisionalRetireTimer {
     private struct Alarm {
         let messageID: String
         let due: Date
+        /// Which arming this alarm is, never reused. The sleeping task captures
+        /// its own and re-checks it after waking; see ``generation``.
+        let generation: UInt64
         let task: Task<Void, Never>
     }
 
     /// Session id → its pending alarm. At most one alarm per session; sessions
     /// with nothing armed are absent rather than present-and-nil.
     private var alarms: [String: Alarm] = [:]
+
+    /// Stamped onto each alarm and never reused, so a woken task can ask "am I
+    /// still the alarm for this session?" and get an answer that survives
+    /// re-arming with identical parameters.
+    ///
+    /// `Task.cancel()` alone cannot answer it. Cancellation is advisory: a task
+    /// that has already returned from its sleep and is on its way back into the
+    /// actor cannot be stopped, so a `disarm` landing in that window would
+    /// otherwise let the alarm fire for a session that has just been forgotten
+    /// — publishing an empty transcript for a session nothing is watching,
+    /// which is the exact hazard the disarm-before-forget ordering exists to
+    /// prevent. Re-entering under this counter closes it: the fire is committed
+    /// inside the actor or not at all.
+    private var generation: UInt64 = 0
 
     /// Existential `Clock`, last parameter, defaulted — the repo's clock seam.
     init(clock: any Clock<Duration> = ContinuousClock()) {
@@ -93,13 +110,23 @@ actor ProvisionalRetireTimer {
            pending.messageID == messageID, pending.due == deadline { return }
         alarms[sessionID]?.task.cancel()
         let clock = self.clock
+        generation &+= 1
+        let generation = self.generation
         alarms[sessionID] = Alarm(
             messageID: messageID,
             due: deadline,
+            generation: generation,
             task: Task { [weak self] in
                 try? await clock.sleep(for: after)
-                guard !Task.isCancelled else { return }
-                await self?.clear(sessionID: sessionID, messageID: messageID, due: deadline)
+                guard let self else { return }
+                // The one gate, taken inside the actor after the sleep: a
+                // `disarm` or a re-arm that landed while this task was waking
+                // has already moved past this generation, and the fire is
+                // dropped. `Task.isCancelled` cannot stand in for it — see
+                // ``generation``.
+                guard await self.claimFire(sessionID: sessionID, generation: generation) else {
+                    return
+                }
                 await fire()
             })
     }
@@ -111,6 +138,11 @@ actor ProvisionalRetireTimer {
     /// `TranscriptPollScheduler.disarmProvisional`. A publish for one session
     /// must never disturb another's alarm, which is the whole reason this takes
     /// a session id.
+    ///
+    /// Dropping the entry is what actually stops the alarm; the cancel is a
+    /// courtesy that shortens the sleep. A task already past its sleep finds no
+    /// entry under its generation when it re-enters and does not fire, so this
+    /// is a real revocation even in the window where cancellation is too late.
     func disarm(sessionID: String) {
         alarms.removeValue(forKey: sessionID)?.task.cancel()
     }
@@ -140,12 +172,18 @@ actor ProvisionalRetireTimer {
     /// is a claim about the whole table rather than about one lookup.
     var armedSessionCount: Int { alarms.count }
 
-    /// Clears the record of an alarm that has just fired, unless a later `arm`
-    /// already replaced it for that session — a replacement being either a
-    /// different message or the same message with a deadline that has moved.
-    private func clear(sessionID: String, messageID: String, due: Date) {
-        guard let pending = alarms[sessionID],
-              pending.messageID == messageID, pending.due == due else { return }
+    /// Whether a woken alarm is still the one armed for its session, clearing
+    /// the record if it is.
+    ///
+    /// False when a `disarm` removed the entry or a later `arm` replaced it —
+    /// a replacement being a different message, the same message with a
+    /// deadline that has moved, or even the identical pair armed afresh, all of
+    /// which carry a newer generation. The caller fires only on true, so the
+    /// decision to publish is taken here, under the actor, rather than by a
+    /// cancellation check the racing `disarm` cannot win.
+    private func claimFire(sessionID: String, generation: UInt64) -> Bool {
+        guard alarms[sessionID]?.generation == generation else { return false }
         alarms.removeValue(forKey: sessionID)
+        return true
     }
 }

@@ -523,6 +523,20 @@ struct TranscriptSourceStreamTests {
 
     private static let assistantLine = #"{"type":"assistant","uuid":"a1","timestamp":"2026-08-26T10:00:00.000Z","message":{"role":"assistant","id":"msg_a","content":[{"type":"text","text":"hi"}]}}"#
 
+    /// The same message written the way Claude Code actually writes one that
+    /// opens with a thinking block: the thinking line first, on its own, and
+    /// the text line later under the same `message.id`.
+    private static let thinkingLine = #"{"type":"assistant","uuid":"a0","timestamp":"2026-08-26T10:00:00.000Z","message":{"role":"assistant","id":"msg_a","content":[{"type":"thinking","thinking":"weighing it up","signature":"sig"}]}}"#
+
+    /// The settled assistant-text strings among `items` — what confirmation
+    /// promises is on screen where the withdrawn provisional row stood.
+    private static func settledTexts(_ items: [TranscriptItem]) -> [String] {
+        items.compactMap { item in
+            if case .assistantText(_, let text, _, _) = item { return text }
+            return nil
+        }
+    }
+
     /// The confirmation signal C4's retire rule reads. Delegation, but to the
     /// *session's own* transcript: a message another session carries must not
     /// retire this one's row.
@@ -532,14 +546,48 @@ struct TranscriptSourceStreamTests {
         try Self.write(Self.assistantLine + "\n", to: path)
 
         let source = TranscriptSource()
-        #expect(await source.hasAssistantMessage(sessionID: "s1", id: "msg_a") == false,
+        #expect(await source.hasAssistantText(sessionID: "s1", id: "msg_a") == false,
                 "nothing has been read, so nothing confirms anything")
 
         await source.refresh(sessionID: "s1", path: path)
 
-        #expect(await source.hasAssistantMessage(sessionID: "s1", id: "msg_a"))
-        #expect(await source.hasAssistantMessage(sessionID: "s1", id: "msg_absent") == false)
-        #expect(await source.hasAssistantMessage(sessionID: "s2", id: "msg_a") == false)
+        #expect(await source.hasAssistantText(sessionID: "s1", id: "msg_a"))
+        #expect(await source.hasAssistantText(sessionID: "s1", id: "msg_absent") == false)
+        #expect(await source.hasAssistantText(sessionID: "s2", id: "msg_a") == false)
+    }
+
+    /// The snapshot the pane publishes from, over the two-line shape above: the
+    /// thinking line is not confirmation, the text line is, and confirmation
+    /// arrives in the same snapshot as the settled item that replaces the row.
+    @Test("a thinking-only line does not confirm; the text line does, with its item")
+    func onlyTheTextLineConfirmsTheStreamedMessage() async throws {
+        let dir = try Self.scratchDir()
+        let transcriptPath = dir + "/transcript.jsonl"
+        let streamPath = dir + "/stream.jsonl"
+        try Self.write(try Self.lines([
+            .start(message: "msg_a", at: Self.started),
+            .text(message: "msg_a", index: 0, text: "hi"),
+        ]), to: streamPath)
+        try Self.write(Self.thinkingLine + "\n", to: transcriptPath)
+
+        let source = TranscriptSource()
+        #expect(await source.refreshStream(sessionID: "s1", path: streamPath, now: Self.t0))
+        await source.refresh(sessionID: "s1", path: transcriptPath)
+
+        let midStream = await source.snapshot(sessionID: "s1")
+        #expect(midStream.provisional?.messageID == "msg_a")
+        #expect(midStream.confirmed == false,
+                "the id is in the JSONL, but its text is still streaming")
+        #expect(Self.settledTexts(midStream.items).isEmpty,
+                "and there is no settled item to replace the row with")
+
+        try Self.append(Self.assistantLine + "\n", to: transcriptPath)
+        await source.refresh(sessionID: "s1", path: transcriptPath)
+
+        let settled = await source.snapshot(sessionID: "s1")
+        #expect(settled.confirmed, "the text line confirms")
+        #expect(Self.settledTexts(settled.items) == ["hi"],
+                "and the item it built is in the very same snapshot")
     }
 }
 

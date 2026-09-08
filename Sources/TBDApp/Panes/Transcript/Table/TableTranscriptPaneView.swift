@@ -591,7 +591,10 @@ struct TableTranscriptPaneView: View {
         let provisional = snapshot.provisional
 
         // The one id that can matter: the row is retired the moment the JSONL
-        // catches up with it, and no other message id is a candidate for a row.
+        // delivers the line carrying that message's text, and no other message
+        // id is a candidate for a row. Text-bearing rather than id-bearing
+        // because Claude Code writes one line per content block under a shared
+        // id — see `TranscriptSource.hasAssistantText`.
         var confirmedIDs: Set<String> = []
         if let provisional, snapshot.confirmed {
             confirmedIDs = [provisional.messageID]

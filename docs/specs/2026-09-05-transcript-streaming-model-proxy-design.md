@@ -498,8 +498,20 @@ on the first text of a newer message, or on the 60-second rule — never on the
 mere appearance of a successor.
 
 The transcript's incremental ingest also records the API `message.id` of every
-assistant line it consumes. That is a row-local read, so it does not violate
-`buildItems`' purity rule, and it makes confirmation a set lookup.
+assistant line it consumes, and separately the ids of the lines that carry a
+`text` block. Both are row-local reads, so they do not violate `buildItems`'
+purity rule, and they make confirmation a set lookup.
+
+The second set is the one confirmation reads, and the distinction is
+load-bearing. Claude Code writes one JSONL line per content block under a
+shared `message.id`, and those lines land at different times — a text block's
+line was measured arriving 25 seconds after an earlier block's. A message that
+opens with a `thinking` block therefore has its id in the JSONL while its text
+is still streaming, so retiring on the id would take the row down with nothing
+to replace it: the settled text item does not exist yet, and the user watches
+live text vanish mid-turn. "Carries text" follows the parser's own rule rather
+than the raw block type — an empty `text` block builds no item and so confirms
+nothing.
 
 ### Publishing
 
@@ -509,11 +521,14 @@ AskUserQuestion captures, then the provisional row last, as
 the resolved streaming flag is on and its message id is unconfirmed. It is
 retired when:
 
-- the JSONL ingests an assistant line with that message id;
+- the JSONL ingests the assistant line that carries that message's text,
+  which is the line that brings the settled item replacing the row. A line
+  carrying the id alone — a thinking block, a tool call — confirms nothing;
 - a newer message with text supersedes it;
 - the stream is aborted;
 - a completed stream stays unconfirmed for 60 seconds, which backstops any
-  side request the tee filter misses. The value sits above the worst JSONL
+  side request the tee filter misses and any turn whose JSONL never carries
+  text at all — one that only calls tools. The value sits above the worst JSONL
   lag measured on a live session, 25 seconds behind a long tool call, with
   room for a slower machine, and its only cost is cosmetic: a stale row
   lingers for the difference. A shorter window would retire genuine messages
@@ -552,7 +567,9 @@ affordance, and the row is always an assistant bubble.
 - An unreadable stream file is no news, never a blank row.
 - A proxy that dies mid-stream leaves a message the 10-minute silent-stream
   rule retires; one that dies after writing its stop leaves a message the
-  60-second unconfirmed rule retires.
+  60-second unconfirmed rule retires. A turn whose JSONL lines carry the
+  message id but never its text is never confirmed, and leaves by that same
+  60-second rule.
 - A pane whose terminal has no `transcriptStreamPath` registers no stream
   file and behaves exactly as today.
 - The provisional state is dropped on confirmation, retire, and deregistration.
@@ -618,8 +635,9 @@ SSE shape and costs zero tokens.
   writes its coupled pair. A pre-migration row reads NULL, an explicit `0`
   survives a flipped default, and NULL follows it. The GC leg keeps young and
   live files and unlinks the rest.
-- **App.** The provisional row appears, grows, and is replaced by the
-  confirming JSONL line; retires on abort, on a newer message taking the row,
+- **App.** The provisional row appears, grows, and is replaced by the JSONL
+  line that carries the message's text — never by one that carries only its
+  id; retires on abort, on a newer message taking the row,
   on the 60 s unconfirmed rule and on the 10-minute silent-stream rule
   (which a new line restarts); sorts after pending questions; and with streaming off
   is never published while the file still updates. Chunk-split equivalence:

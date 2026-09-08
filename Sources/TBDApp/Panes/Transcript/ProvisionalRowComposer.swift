@@ -7,7 +7,7 @@ import TBDShared
 ///
 /// Pure and total: same inputs, same output, no I/O and no clock of its own.
 /// The pane owns the reads (`TranscriptSource.provisional`,
-/// `TranscriptSource.hasAssistantMessage`), the merge that runs before this
+/// `TranscriptSource.hasAssistantText`), the merge that runs before this
 /// (`AskUserQuestionMerger`), and `now`.
 ///
 /// **Order.** The row is appended last, after the JSONL items and after the
@@ -26,8 +26,14 @@ import TBDShared
 /// **Retirement.** Six rules take the row down, and every one of them is
 /// listed here:
 ///
-/// 1. **Confirmed** — the session's own JSONL has caught up with the message
-///    id, so the settled row replaces the provisional one.
+/// 1. **Confirmed** — the session's own JSONL holds the line carrying this
+///    message's text, so the settled row replaces the provisional one.
+///    Deliberately the text-bearing line and not merely the message id: Claude
+///    Code writes one line per content block under a shared id, and they land
+///    at different times, so a message opening with a `thinking` block would
+///    otherwise retire its row while its text was still streaming and leave
+///    nothing in its place. A turn that never writes text at all — one that
+///    only calls tools — is confirmed by nothing and leaves by rule 5.
 /// 2. **Aborted** — the stream file records an `aborted` line for the message.
 /// 3. **Superseded** — a newer message's lines make it the one the fold
 ///    renders, so the older row is no longer the row on screen.
@@ -52,10 +58,12 @@ enum ProvisionalRowComposer {
     /// How long a *completed* stream message may stay unconfirmed before its
     /// row is withdrawn, measured from when the reader first saw the stop.
     ///
-    /// This is the backstop for a turn the transcript will never mention: a
-    /// side request the tee filter did not recognise, or a proxy that wrote a
-    /// `message_stop` for a request Claude Code never wrote to its JSONL.
-    /// Without it such a row would sit at the bottom of the pane forever.
+    /// This is the backstop for a turn the transcript will never confirm: a
+    /// side request the tee filter did not recognise, a proxy that wrote a
+    /// `message_stop` for a request Claude Code never wrote to its JSONL, or a
+    /// turn that ends without a text block at all — one that only calls tools —
+    /// whose JSONL lines carry the message id but never its text. Without it
+    /// such a row would sit at the bottom of the pane forever.
     static let unconfirmedRetireAfter: Duration = .seconds(60)
 
     /// How long a *streaming* message may go without a new line before its row
@@ -105,9 +113,11 @@ enum ProvisionalRowComposer {
     ///     `AskUserQuestion` captures already merged in.
     ///   - provisional: what the stream file currently folds to, or nil when
     ///     nothing has been tailed for this session.
-    ///   - confirmed: whether the session's own transcript has caught up with a
-    ///     message id. A closure rather than a set so the caller decides how
-    ///     many ids it is worth asking about; today it asks about exactly one.
+    ///   - confirmed: whether the session's own transcript holds the
+    ///     text-bearing line for a message id, not merely "a line with this id
+    ///     landed" — `TranscriptSource.hasAssistantText`. A closure rather than
+    ///     a set so the caller decides how many ids it is worth asking about;
+    ///     today it asks about exactly one.
     ///   - now: the instant the retire deadline is measured against. The
     ///     caller's to keep stable across one publish.
     ///   - streamingEnabled: the resolved streaming flag. Off means no row,

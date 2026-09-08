@@ -258,15 +258,21 @@ actor TranscriptSource {
         streamEntries[sessionID]?.provisional
     }
 
-    /// Whether the session's own transcript has caught up with the assistant
-    /// message `id` — the signal that retires a provisional row in favour of
-    /// the real transcript item.
+    /// Whether the session's own transcript holds the assistant line that
+    /// carries message `id`'s **text** — the signal that retires a provisional
+    /// row in favour of the real transcript item.
+    ///
+    /// The message id alone is not that signal. Claude Code writes one JSONL
+    /// line per content block under a shared `message.id`, and they land at
+    /// different times, so a message opening with a `thinking` block puts its
+    /// id in the JSONL while its text is still streaming. Retiring then would
+    /// take the row down with no settled item to replace it.
     ///
     /// False for a session with no transcript entry at all, which is the
     /// conservative reading: nothing has been read, so nothing confirms
     /// anything.
-    func hasAssistantMessage(sessionID: String, id: String) -> Bool {
-        entries[sessionID]?.transcript.hasAssistantMessage(id: id) ?? false
+    func hasAssistantText(sessionID: String, id: String) -> Bool {
+        entries[sessionID]?.transcript.hasAssistantText(id: id) ?? false
     }
 
     /// Everything one publish needs about `sessionID`, read in a single hop
@@ -280,7 +286,7 @@ actor TranscriptSource {
     /// the settled one. Nothing suspends inside this method, so the three
     /// answers are necessarily consistent with each other.
     ///
-    /// `confirmed` is `hasAssistantMessage` for the provisional's own id, and
+    /// `confirmed` is `hasAssistantText` for the provisional's own id, and
     /// false when there is no provisional — no other message id is ever a
     /// candidate for a row, so the caller needs no other lookup.
     func snapshot(
@@ -289,7 +295,7 @@ actor TranscriptSource {
         let entry = entries[sessionID]
         let provisional = streamEntries[sessionID]?.provisional
         let confirmed = provisional.map {
-            entry?.transcript.hasAssistantMessage(id: $0.messageID) ?? false
+            entry?.transcript.hasAssistantText(id: $0.messageID) ?? false
         } ?? false
         return (entry?.transcript.items ?? [], provisional, confirmed)
     }

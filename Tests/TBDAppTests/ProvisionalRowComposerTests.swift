@@ -879,6 +879,166 @@ struct ProvisionalRowPublishTests {
         return path
     }
 
+    // MARK: - Confirmation comes with the text, not with the id
+
+    /// One assistant line of the captured session: the line itself, the
+    /// `message.id` it carries, and whether it delivers a non-empty `text`
+    /// block. Claude Code writes one line per content block under a shared id,
+    /// so these three facts are what every case below is stated in.
+    private struct CaptureLine {
+        let text: String
+        let messageID: String
+        let carriesText: Bool
+    }
+
+    /// The assistant lines of `incremental-transcript-sample.jsonl`, a real
+    /// captured session. Real lines rather than hand-built ones because the
+    /// whole hazard is the shape Claude Code actually writes: this capture
+    /// holds a message written as a thinking line and then, separately, a text
+    /// line, and another that only ever calls tools.
+    ///
+    /// `subdirectory:` is required here: this target registers its fixtures
+    /// with `.copy`, which preserves the `Fixtures/` directory.
+    private static func assistantCaptureLines() throws -> [CaptureLine] {
+        let url = try #require(Bundle.module.url(
+            forResource: "incremental-transcript-sample", withExtension: "jsonl",
+            subdirectory: "Fixtures"))
+        let content = try String(contentsOf: url, encoding: .utf8)
+        return try content.components(separatedBy: "\n").filter { !$0.isEmpty }
+            .compactMap { line -> CaptureLine? in
+                guard let data = line.data(using: .utf8),
+                      let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      json["type"] as? String == "assistant",
+                      let message = json["message"] as? [String: Any],
+                      let id = message["id"] as? String else { return nil }
+                let blocks = (message["content"] as? [[String: Any]]) ?? []
+                let carriesText = blocks.contains {
+                    ($0["type"] as? String) == "text"
+                        && !((($0["text"] as? String) ?? "").isEmpty)
+                }
+                return CaptureLine(text: line, messageID: id, carriesText: carriesText)
+            }
+    }
+
+    /// A directory holding a stream file for `messageID` that has started and
+    /// is streaming text, with no terminal line — a turn still in flight, which
+    /// is exactly when the JSONL's first line for it can land.
+    private static func streamingTurn(messageID: String) throws -> (dir: String, stream: String) {
+        let dir = fencedScratchRoot(prefix: "tbdprov")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let path = dir + "/stream.jsonl"
+        let lines = try [
+            ModelProxyStreamLine.start(message: messageID, at: Self.t0),
+            .text(message: messageID, index: 0, text: "I've read it and"),
+        ].map { try $0.encodedLine() + "\n" }.joined()
+        try lines.write(toFile: path, atomically: true, encoding: .utf8)
+        return (dir, path)
+    }
+
+    private static func append(_ text: String, to path: String) throws {
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(text.utf8))
+    }
+
+    /// The settled assistant-text strings in a published transcript — what the
+    /// withdrawn provisional row is supposed to be replaced by.
+    private static func settledTexts(_ items: [TranscriptItem]) -> [String] {
+        items.compactMap { item in
+            if case .assistantText(let id, let text, _, _) = item,
+               !ProvisionalRowComposer.isProvisional(itemID: id) { return text }
+            return nil
+        }
+    }
+
+    /// The row must not be withdrawn by a line that carries the message id but
+    /// none of its text.
+    ///
+    /// Claude Code writes one JSONL line per content block under a shared
+    /// `message.id`, and they land at different times — a text block's line was
+    /// measured arriving up to 25 s after an earlier block's. So a message that
+    /// opens with a `thinking` block puts its id in the JSONL while its text is
+    /// still streaming. Retiring on the id would take the row down with nothing
+    /// to replace it: the user watches live text vanish mid-turn, which is
+    /// worse than the lag this feature exists to close.
+    @Test("a thinking-only line leaves the row up; the text line retires it and replaces it")
+    func onlyTheTextLineRetiresTheRow() async throws {
+        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
+        defer { Self.removeSuite(suite) }
+        let capture = try Self.assistantCaptureLines()
+        let split = try #require(capture.first { candidate in
+            capture.filter { $0.messageID == candidate.messageID }.count >= 2
+        }, "capture must hold a message written across two lines")
+        let lines = capture.filter { $0.messageID == split.messageID }
+        let thinking = try #require(lines.first)
+        let text = try #require(lines.last)
+        #expect(thinking.carriesText == false, "its first line must be the thinking one")
+        #expect(text.carriesText, "and its last the text one, or this proves nothing")
+
+        let files = try Self.streamingTurn(messageID: split.messageID)
+        let transcriptPath = files.dir + "/transcript.jsonl"
+        try (thinking.text + "\n").write(toFile: transcriptPath, atomically: true, encoding: .utf8)
+
+        let source = TranscriptSource()
+        #expect(await source.refreshStream(sessionID: "s1", path: files.stream, now: Self.t0))
+        await source.refresh(sessionID: "s1", path: transcriptPath)
+        let state = await Self.makeState(streaming: true, suite: suite)
+        let timer = ProvisionalRetireTimer(clock: TestClock())
+        let t0 = Self.t0
+
+        let midStream = await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source, retireTimer: timer, now: { t0 })
+        #expect(midStream.last?.id == "stream:" + split.messageID,
+                "the thinking line carries the id, and must not take the row down")
+        #expect(Self.settledTexts(midStream).isEmpty,
+                "there is no settled text item that could have replaced it")
+
+        try Self.append(text.text + "\n", to: transcriptPath)
+        await source.refresh(sessionID: "s1", path: transcriptPath)
+
+        let settled = await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source, retireTimer: timer, now: { t0 })
+        #expect(settled.contains { ProvisionalRowComposer.isProvisional(itemID: $0.id) } == false,
+                "the text line confirms, so the row is withdrawn")
+        #expect(Self.settledTexts(settled).isEmpty == false,
+                "and the JSONL's own item is in the very same publish")
+        #expect(await timer.armedMessage(sessionID: "s1") == nil,
+                "a withdrawn row leaves no alarm behind")
+    }
+
+    /// The same rule from the other side. A turn that only calls tools writes
+    /// its id on every line and never a text block, so nothing confirms it and
+    /// its row leaves by the 60-second unconfirmed deadline instead — never by
+    /// a `tool_use` line arriving while the answer is still streaming.
+    @Test("a tool_use line does not retire the row either")
+    func aToolUseLineDoesNotRetireTheRow() async throws {
+        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
+        defer { Self.removeSuite(suite) }
+        let capture = try Self.assistantCaptureLines()
+        let textless = try #require(capture.first { candidate in
+            capture.filter { $0.messageID == candidate.messageID }.allSatisfy { !$0.carriesText }
+        }, "capture must hold a message that only ever calls tools")
+
+        let files = try Self.streamingTurn(messageID: textless.messageID)
+        let transcriptPath = files.dir + "/transcript.jsonl"
+        try (textless.text + "\n").write(toFile: transcriptPath, atomically: true, encoding: .utf8)
+
+        let source = TranscriptSource()
+        #expect(await source.refreshStream(sessionID: "s1", path: files.stream, now: Self.t0))
+        await source.refresh(sessionID: "s1", path: transcriptPath)
+        let state = await Self.makeState(streaming: true, suite: suite)
+        let timer = ProvisionalRetireTimer(clock: TestClock())
+        let t0 = Self.t0
+
+        let published = await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source, retireTimer: timer, now: { t0 })
+        #expect(published.last?.id == "stream:" + textless.messageID,
+                "a line with the id but no text confirms nothing")
+        #expect(await timer.armedMessage(sessionID: "s1") == textless.messageID,
+                "and the row keeps its own deadline, which is what will retire it")
+    }
+
     /// The publish path's own off branch: the same source and the same
     /// completed message, with capabilities reporting streaming off.
     @Test("publishing with streaming off writes no provisional row and arms nothing")
@@ -1109,5 +1269,136 @@ struct ProvisionalRetireTimerTests {
         // Give a cancelled task every chance to run before asserting it did not.
         for _ in 0..<50 { await Task.yield() }
         #expect(await log.count == 0)
+    }
+
+    // MARK: - The window cancellation cannot close
+
+    /// `Task.cancel()` is advisory: an alarm whose sleep has already returned
+    /// is on its way back into the actor and cannot be stopped there. So the
+    /// decision to fire is taken *inside* the actor, against the generation the
+    /// alarm was armed with — and this test removes cancellation from the
+    /// picture entirely to prove that check is what does the work.
+    ///
+    /// `GatedClock`'s sleeps ignore cancellation and end only when the test
+    /// releases them, so the alarm below genuinely wakes after its session was
+    /// forgotten. Without the re-entry check it would publish an empty
+    /// transcript for a session nothing is watching.
+    @Test("an alarm disarmed while it sleeps does not fire when its sleep returns anyway")
+    func aDisarmedAlarmDoesNotFireWhenItsSleepReturns() async {
+        let clock = GatedClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+        let log = FireLog()
+
+        await timer.arm(
+            sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)
+        ) { await log.record() }
+        await clock.waitForSleepers(1)
+
+        await timer.disarm(sessionID: "s1")
+        await clock.release()
+
+        let woke = await pollUntilTrue(timeout: .seconds(10)) { await clock.wakeCount == 1 }
+        #expect(woke == .satisfied, "the alarm really did wake, or this proves nothing")
+        for _ in 0..<50 { await Task.yield() }
+        #expect(await log.count == 0, "a forgotten session must not be published for")
+        #expect(await timer.armedSessionCount == 0)
+    }
+
+    /// Why the check is a generation and not the pair the alarm records. A pane
+    /// that disarms and then re-arms the identical message at the identical
+    /// deadline — a row withdrawn and composed again on the next poll — leaves
+    /// two alarms that `messageID` and `due` cannot tell apart. Only the one
+    /// armed last may fire.
+    @Test("an alarm re-armed identically fires once, for the arming that is current")
+    func aReArmedIdenticalAlarmFiresOnlyForTheCurrentArming() async {
+        let clock = GatedClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+        let stale = FireLog()
+        let current = FireLog()
+
+        await timer.arm(
+            sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)
+        ) { await stale.record() }
+        await clock.waitForSleepers(1)
+        await timer.disarm(sessionID: "s1")
+        await timer.arm(
+            sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)
+        ) { await current.record() }
+        await clock.waitForSleepers(2)
+
+        await clock.release()
+
+        let fired = await pollUntilTrue(timeout: .seconds(10)) { await current.count == 1 }
+        #expect(fired == .satisfied, "the arming that is current fires")
+        for _ in 0..<50 { await Task.yield() }
+        #expect(await stale.count == 0,
+                "and the forgotten one does not, though its message and deadline match")
+        #expect(await current.count == 1, "once, not twice")
+    }
+}
+
+/// A clock whose sleeps end only when the test releases them, and which ignores
+/// cancellation entirely.
+///
+/// `TestClock` cannot express the ordering the two cases above need. They must
+/// hold an alarm mid-sleep while the test reaches into the actor, and then have
+/// that sleep return *normally*: a cancelled sleep would let the alarm bail out
+/// for a reason that has nothing to do with the check under test, and it is
+/// precisely because cancellation is advisory that the check exists.
+private final class GatedClock: Clock, @unchecked Sendable {
+    typealias Instant = ContinuousClock.Instant
+
+    private let gate = SleepGate()
+
+    var now: Instant { ContinuousClock().now }
+    var minimumResolution: Duration { .zero }
+
+    func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+        await gate.wait()
+    }
+
+    /// Returns once at least `count` sleeps have begun.
+    func waitForSleepers(_ count: Int) async { await gate.waitForArrivals(count) }
+
+    /// Ends every sleep in progress, and every sleep that starts afterwards.
+    func release() async { await gate.release() }
+
+    /// How many sleeps have *returned*, so a test can prove the alarm woke
+    /// rather than assert on a fire that never had the chance to happen.
+    var wakeCount: Int { get async { await gate.wakeCount } }
+
+    private actor SleepGate {
+        private var isOpen = false
+        private var sleepers: [CheckedContinuation<Void, Never>] = []
+        private var arrivals = 0
+        private var watchers: [(needed: Int, continuation: CheckedContinuation<Void, Never>)] = []
+        private(set) var wakeCount = 0
+
+        func wait() async {
+            arrivals += 1
+            let ready = watchers.filter { arrivals >= $0.needed }
+            watchers.removeAll { arrivals >= $0.needed }
+            for watcher in ready { watcher.continuation.resume() }
+            if !isOpen {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    sleepers.append(continuation)
+                }
+            }
+            wakeCount += 1
+        }
+
+        func release() {
+            isOpen = true
+            let waiting = sleepers
+            sleepers.removeAll()
+            for continuation in waiting { continuation.resume() }
+        }
+
+        func waitForArrivals(_ count: Int) async {
+            guard arrivals < count else { return }
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                watchers.append((count, continuation))
+            }
+        }
     }
 }
