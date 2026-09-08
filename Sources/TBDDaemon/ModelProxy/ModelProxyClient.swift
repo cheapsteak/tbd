@@ -179,12 +179,9 @@ struct ModelProxyClient: Sendable {
         do {
             (data, response) = try await session.data(for: request)
         } catch {
-            Self.logger.debug(
-                """
-                \(Self.unreachableLogMessage(
-                    operation: operation, port: port, detail: error.localizedDescription), \
-                privacy: .public)
-                """)
+            let message = Self.unreachableLogMessage(
+                operation: operation, port: port, detail: error.localizedDescription)
+            Self.logger.debug("\(message, privacy: .public)")
             throw Error.unreachable(detail: error.localizedDescription)
         }
 
