@@ -967,9 +967,10 @@ struct ProvisionalRowPublishTests {
         let suite = "tbd-provisional-publish-\(UUID().uuidString)"
         defer { Self.removeSuite(suite) }
         let capture = try Self.assistantCaptureLines()
-        let split = try #require(capture.first { candidate in
+        let firstSplit = capture.first { candidate in
             capture.filter { $0.messageID == candidate.messageID }.count >= 2
-        }, "capture must hold a message written across two lines")
+        }
+        let split = try #require(firstSplit, "capture must hold a message written across two lines")
         let lines = capture.filter { $0.messageID == split.messageID }
         let thinking = try #require(lines.first)
         let text = try #require(lines.last)
@@ -999,8 +1000,10 @@ struct ProvisionalRowPublishTests {
 
         let settled = await TableTranscriptPaneView.publish(
             sessionID: "s1", state: state, source: source, retireTimer: timer, now: { t0 })
-        #expect(settled.contains { ProvisionalRowComposer.isProvisional(itemID: $0.id) } == false,
-                "the text line confirms, so the row is withdrawn")
+        let stillProvisional = settled.contains(where: {
+            ProvisionalRowComposer.isProvisional(itemID: $0.id)
+        })
+        #expect(stillProvisional == false, "the text line confirms, so the row is withdrawn")
         #expect(Self.settledTexts(settled).isEmpty == false,
                 "and the JSONL's own item is in the very same publish")
         #expect(await timer.armedMessage(sessionID: "s1") == nil,
@@ -1016,9 +1019,11 @@ struct ProvisionalRowPublishTests {
         let suite = "tbd-provisional-publish-\(UUID().uuidString)"
         defer { Self.removeSuite(suite) }
         let capture = try Self.assistantCaptureLines()
-        let textless = try #require(capture.first { candidate in
+        let firstTextless = capture.first { candidate in
             capture.filter { $0.messageID == candidate.messageID }.allSatisfy { !$0.carriesText }
-        }, "capture must hold a message that only ever calls tools")
+        }
+        let textless = try #require(
+            firstTextless, "capture must hold a message that only ever calls tools")
 
         let files = try Self.streamingTurn(messageID: textless.messageID)
         let transcriptPath = files.dir + "/transcript.jsonl"
@@ -1397,7 +1402,7 @@ private final class GatedClock: Clock, @unchecked Sendable {
         func waitForArrivals(_ count: Int) async {
             guard arrivals < count else { return }
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                watchers.append((count, continuation))
+                watchers.append((needed: count, continuation: continuation))
             }
         }
     }

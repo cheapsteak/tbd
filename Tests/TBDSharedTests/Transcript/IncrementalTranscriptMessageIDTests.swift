@@ -87,9 +87,10 @@ struct IncrementalTranscriptMessageIDTests {
 
         // The capture writes one assistant line per content block, so one
         // message id appears on two consecutive lines. Split between them.
-        let repeated = try #require(assistants.first { candidate in
+        let firstRepeated = assistants.first { candidate in
             assistants.filter { $0.id == candidate.id }.count >= 2
-        })
+        }
+        let repeated = try #require(firstRepeated)
         let occurrences = assistants.filter { $0.id == repeated.id }
         #expect(occurrences.first?.carriesText == false,
                 "the capture's first line for this message must be the thinking one")
@@ -125,9 +126,11 @@ struct IncrementalTranscriptMessageIDTests {
     func toolOnlyTurnIsSeenButNotConfirmed() throws {
         let lines = try fixtureLines()
         let assistants = try assistantIDsByIndex(lines)
-        let textless = try #require(assistants.first { candidate in
+        let firstTextless = assistants.first { candidate in
             assistants.filter { $0.id == candidate.id }.allSatisfy { !$0.carriesText }
-        }, "capture must hold a message that never delivers text")
+        }
+        let textless = try #require(
+            firstTextless, "capture must hold a message that never delivers text")
 
         var transcript = IncrementalTranscript()
         transcript.ingest(lines: lines)
@@ -144,7 +147,10 @@ struct IncrementalTranscriptMessageIDTests {
     func emptyTextBlockDoesNotConfirm() throws {
         let lines = try fixtureLines()
         let assistants = try assistantIDsByIndex(lines)
-        let withText = try #require(assistants.first(where: \.carriesText))
+        // Hoisted out of `#require`: the macro decomposes a call written inside
+        // it and then cannot prove the argument is non-throwing.
+        let firstWithText = assistants.first(where: \.carriesText)
+        let withText = try #require(firstWithText)
         // Take the real text line and blank the one field that matters.
         var row = try json(of: lines[withText.index])
         var message = try #require(row["message"] as? [String: Any])
