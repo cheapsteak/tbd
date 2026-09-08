@@ -162,7 +162,15 @@ struct ModelProxySpawner: Sendable {
             .deletingLastPathComponent()
             .appendingPathComponent("TBDModelProxy")
         guard FileManager.default.isExecutableFile(atPath: candidate.path) else {
-            Self.logger.error(
+            // `.debug`, not `.error`, because the supervisor is constructed on
+            // every boot regardless of the flag: an install with the proxy off
+            // — the shipped default — would otherwise log a per-boot error
+            // about a feature nobody asked for. The fact is not lost where it
+            // matters. `daemon.capabilities` answers unsupported and Settings
+            // greys the streaming toggle out with a caption, and a gated start
+            // that finds no spawner says so at `.info` in `attemptSpawn`, which
+            // is the one moment a missing binary changes what a user gets.
+            Self.logger.debug(
                 """
                 no TBDModelProxy binary beside the running daemon at \
                 \(candidate.path, privacy: .public); no session can be proxied

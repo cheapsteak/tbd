@@ -60,10 +60,10 @@ final class FakeModelProxySupervisor: ModelProxySupervising, @unchecked Sendable
     /// config RPC's whole job is to make exactly one of these calls, and
     /// counting them is how that is checked without a proxy process.
     private(set) var startCalls = 0
-    private(set) var retireCalls = 0
+    private(set) var drainCalls = 0
 
     func startIfEnabled() async { startCalls += 1 }
-    func retireProxy() async { retireCalls += 1 }
+    func beginDraining() async { drainCalls += 1 }
 }
 
 /// **What a holder spawn's environment becomes when the model proxy is on, and
@@ -406,6 +406,26 @@ struct ModelProxySpawnEnvTests {
         #expect(
             command.contains(proxyURL),
             "the inline export names something other than the route: \(command)")
+
+        // **Positional, and this is the half that says the export *wins*.**
+        // The builder prefixes its inline exports to the `claude` invocation,
+        // and the shell evaluates the whole command string only after its
+        // startup files — so an export that sits before the invocation runs
+        // after every rc file and before the agent starts, which is the one
+        // ordering an rc file cannot get in front of. Simulating a competing rc
+        // file for real would mean running an interactive shell and reading
+        // what it resolved, which is a live test rather than this one; what is
+        // assertable here is the position that makes the outcome inevitable.
+        let exportRange = try #require(
+            command.range(of: "export ANTHROPIC_BASE_URL="),
+            "the routed spawn exports no base URL at all: \(command)")
+        let invocationRange = try #require(
+            command.range(of: "claude --session-id"),
+            "the composed command does not invoke claude: \(command)")
+        #expect(
+            exportRange.upperBound <= invocationRange.lowerBound,
+            "the route export must precede the agent it is exported for: \(command)")
+
         #expect(launch.environment["ANTHROPIC_BASE_URL"] == proxyURL)
         // `NO_PROXY` is not one of the builder's routing keys and must stay out
         // of the command line: it rides the process environment alone.

@@ -1278,6 +1278,14 @@ public final class Daemon: Sendable {
         // environment at spawn. It never throws: a proxy that could not be
         // started is a streaming nicety that is unavailable, not a daemon that
         // failed to boot.
+        //
+        // Awaited, and this step precedes the RPC socket bind (step 9), so its
+        // cost is startup latency the CLI and the app can see. Bounded, and
+        // milliseconds in the normal case: the worst case is the control
+        // client's 2-second status probe plus the spawner's 10-second bind
+        // budget, on a machine where the proxy binds pathologically slowly. It
+        // is also flag-gated, so nobody running the shipped default pays any of
+        // it.
 
         await modelProxySupervisor?.startIfEnabled()
 

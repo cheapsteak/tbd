@@ -235,6 +235,14 @@ enum ClaudeSpawnCommandBuilder {
     /// are assigned by `build` itself and never returned here, so nothing this
     /// function produces can leak a secret into `ps`.
     ///
+    /// The one qualification is `ANTHROPIC_BASE_URL` on a proxied session,
+    /// where the value carries a model-proxy route token. That is not a
+    /// credential either — it authorizes nothing but a forward to an upstream
+    /// the daemon itself wrote — and it is deliberately inlined anyway: see
+    /// `ModelProxyRouteAttachment.Outcome.builderBaseURL`, which explains why
+    /// the rc-file defence is worth more than keeping the token out of `ps`
+    /// when the route file backing it is already readable by the same user.
+    ///
     /// Extracted from `build` because the spawn path is no longer the only
     /// caller that has to run a session's `claude` binary the way the session
     /// runs it: `terminal.completions` probes it for the command list, and a
