@@ -167,6 +167,12 @@ struct UpstreamForwarder: Sendable {
     /// upstream leg failed with, including a failure *after* the head; the
     /// caller knows whether it has already relayed a head and is the only one
     /// that can decide between a 502 and a truncated body.
+    ///
+    /// `onEnd` fires exactly once on **every** exit, cancellation included —
+    /// with a `CancellationError` when this task was cancelled before the
+    /// upstream reported, which is what a client hanging up mid-turn looks
+    /// like. The caller's in-flight accounting and its tee both close on that
+    /// call and on nothing else.
     func forward(
         method: String,
         url: URL,
@@ -181,8 +187,13 @@ struct UpstreamForwarder: Sendable {
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.httpShouldHandleCookies = false
         // `addValue`, not `setValue`: a client may send the same header twice
-        // (`anthropic-beta` is the one that does), and setValue would keep
-        // only the last.
+        // (`anthropic-beta` is the one that does), and `setValue` would keep
+        // only the last. `addValue` does not put a second header *line* on the
+        // wire — `URLRequest` joins repeats of one field name with a comma —
+        // but for the list-valued headers Claude repeats, `a, b` and two `a` /
+        // `b` lines are the same field value (RFC 9110 §5.3), so no value is
+        // lost. A header whose repeats are *not* list-valued would be
+        // corrupted by this, and no such header exists on this path.
         for (name, value) in headers
         where !Self.droppedRequestHeaders.contains(name.lowercased()) {
             request.addValue(value, forHTTPHeaderField: name)
@@ -204,6 +215,7 @@ struct UpstreamForwarder: Sendable {
         task.resume()
 
         await withTaskCancellationHandler {
+            var sawEnd = false
             for await event in events {
                 switch event {
                 case .head(let status, let responseHeaders):
@@ -211,9 +223,19 @@ struct UpstreamForwarder: Sendable {
                 case .chunk(let bytes):
                     onChunk(bytes)
                 case .end(let error):
+                    sawEnd = true
                     onEnd(error)
                 }
             }
+            // A cancelled `AsyncStream` iterator finishes *immediately*: the
+            // `.end` the delegate is about to yield lands in a stream nobody
+            // reads. So the loop exiting is not proof the upstream leg
+            // reported, and `onEnd` is this call's only promise — the caller
+            // hangs its in-flight count, its tee's `end(error:)` and its
+            // channel teardown on it. The ordinary way to get here is the
+            // user pressing Esc: the client hangs up, the handler cancels this
+            // task, and the turn is an aborted one.
+            if !sawEnd { onEnd(CancellationError()) }
         } onCancel: {
             // The client hung up. Nothing downstream will read the rest of
             // this response, and an abandoned upstream connection would hold a

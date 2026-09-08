@@ -44,6 +44,25 @@ actor RouteTable {
                 return "route file for \(token) has no usable http(s) upstream"
             }
         }
+
+        /// The same reason with the token left out, for the log line that
+        /// interpolates the token separately at `.private`.
+        var reason: String {
+            switch self {
+            case .invalidToken:
+                return "token is not 32 lowercase hex characters"
+            case .unreadable:
+                return "route file could not be read"
+            case .malformed(_, let detail):
+                return "route file is malformed: \(detail)"
+            case .unsupportedVersion(_, let version):
+                return "route file has unsupported schema version \(version)"
+            case .tokenMismatch:
+                return "route file names a different token than its file name"
+            case .invalidUpstream:
+                return "route file has no usable http(s) upstream"
+            }
+        }
     }
 
     private static let log = Logger(subsystem: "com.tbd.modelproxy", category: "routes")
@@ -130,7 +149,15 @@ actor RouteTable {
         guard route.token == token else {
             throw RouteError.tokenMismatch(token, route.token)
         }
-        guard let upstream = URL(string: route.upstream),
+        // Every forwarded URL is `upstream + suffix`, and the suffix always
+        // starts with `/`. A writer that spelled the base with a trailing
+        // slash would compose `https://api.anthropic.com//v1/messages`, which
+        // is a different path to the API and a 404 from it. The route file's
+        // documented shape has no trailing slash; normalising here means a
+        // writer that gets it wrong costs nothing rather than breaking every
+        // request on that route.
+        let base = Self.trimmingTrailingSlashes(route.upstream)
+        guard let upstream = URL(string: base),
             let scheme = upstream.scheme?.lowercased(),
             scheme == "http" || scheme == "https",
             upstream.host != nil
@@ -138,9 +165,23 @@ actor RouteTable {
             throw RouteError.invalidUpstream(token)
         }
 
-        routes[token] = route
+        let normalized =
+            base == route.upstream
+            ? route
+            : ModelProxyRoute(
+                token: route.token, terminalID: route.terminalID, upstream: base,
+                streamingEnabled: route.streamingEnabled, createdAt: route.createdAt)
+        routes[token] = normalized
         reportedBad.remove(token)
-        return route
+        return normalized
+    }
+
+    /// `https://host/` → `https://host`. Repeated slashes go too, because
+    /// `//v1/messages` and `///v1/messages` are equally wrong.
+    private static func trimmingTrailingSlashes(_ upstream: String) -> String {
+        var trimmed = Substring(upstream)
+        while trimmed.hasSuffix("/") { trimmed = trimmed.dropLast() }
+        return String(trimmed)
     }
 
     /// Drops a route and reclaims the two files it owns.
@@ -168,9 +209,17 @@ actor RouteTable {
         routes[token]
     }
 
+    /// Logs a refused route once.
+    ///
+    /// The token is a bearer credential for one session's upstream leg, so it
+    /// is interpolated at `.private` and the reason — which is the part a
+    /// reader of the log needs — is what stays public. `RouteError.reason`
+    /// exists so the two can be separated; an `errorDescription` would carry
+    /// the token back into the public half of the line.
     private func report(token: String, error: Error) {
         guard reportedBad.insert(token).inserted else { return }
+        let reason = (error as? RouteError)?.reason ?? "\(error)"
         Self.log.error(
-            "skipping route: \(error.localizedDescription, privacy: .public)")
+            "skipping route \(token, privacy: .private): \(reason, privacy: .public)")
     }
 }
