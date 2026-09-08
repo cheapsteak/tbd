@@ -446,6 +446,15 @@ struct TableTranscriptPaneView: View {
                 state.touchSessionTranscript(sessionID)
             }
         }
+        // The model-proxy stream file this session's terminal was spawned
+        // with, when the daemon reports streaming as effective. Read once: the
+        // path is stamped at spawn and never changes, so a terminal either has
+        // one for its whole life or never gets one, and re-reading it each tier
+        // change would only risk minting a generation for no reason.
+        let streamPath = appState.transcriptStreamingEnabled
+            ? terminal?.transcriptStreamPath
+            : nil
+
         // One token per run of this task, so the hold belongs to *this* pane.
         // The deregistration at the bottom happens whenever this task notices
         // its own cancellation, which can be well after a replacement pane for
@@ -454,7 +463,7 @@ struct TableTranscriptPaneView: View {
         let token = TranscriptPaneToken()
         var tier = currentPollTier()
         await TranscriptPaneRegistration.apply(
-            sessionID: sid, path: path,
+            sessionID: sid, path: path, streamPath: streamPath,
             tier: tier, token: token, scheduler: scheduler)
 
         // Publish once immediately so the pane is not blank until the first tick.
@@ -489,7 +498,9 @@ struct TableTranscriptPaneView: View {
             let latest = currentPollTier()
             guard latest != tier else { continue }
             tier = latest
-            await scheduler.register(sessionID: sid, path: path, tier: tier, token: token)
+            await scheduler.register(
+                sessionID: sid, path: path, streamPath: streamPath,
+                tier: tier, token: token)
         }
         await scheduler.deregister(sessionID: sid, token: token)
     }

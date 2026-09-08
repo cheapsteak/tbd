@@ -1403,6 +1403,18 @@ final class AppState {
     /// Published so the Settings control-mode toggle re-renders after
     /// `setControlModeEnabled` refreshes it.
     var daemonCapabilities: DaemonCapabilitiesResult?
+    /// Whether the daemon reports transcript streaming as effective — the
+    /// conjunction of `transcript_streaming_enabled` and `model_proxy_enabled`,
+    /// already resolved daemon-side, so the app never re-derives the pair.
+    ///
+    /// False until capabilities have been fetched, which is the conservative
+    /// reading and the same one `transcriptComposerEnabled` takes: a pane that
+    /// registers no stream file renders exactly what it renders today, while a
+    /// provisional row that appeared and then vanished on the first capability
+    /// fetch would be worse than one that appeared a moment late.
+    var transcriptStreamingEnabled: Bool {
+        daemonCapabilities?.transcriptStreamingEnabled ?? false
+    }
     /// How `loadModelProfiles()` fetches its config-bearing response.
     /// Injectable because `DaemonClient` is concrete, matching the other
     /// settings seams below.

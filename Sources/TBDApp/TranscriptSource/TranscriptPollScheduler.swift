@@ -65,15 +65,20 @@ actor TranscriptPollScheduler {
 
     private struct Registration {
         var path: String
+        /// The terminal's model-proxy stream file, when the pane declared one.
+        /// Nil is the ordinary case — transcript streaming off, a session that
+        /// was never routed through the proxy, or a pre-streaming daemon — and
+        /// means this registration never touches a second file.
+        var streamPath: String?
         /// Every pane holding this session open right now, and the tier each
         /// one declared. Held inside the entry, so it is dropped whole when the
         /// last holder leaves — nothing accumulates per retired pane.
         var holders: [TranscriptPaneToken: TranscriptPollTier]
         /// Which incarnation of this session id this registration is. Minted
-        /// when the entry is created and again when its path changes — the two
-        /// cases where work already in flight was computed against something
-        /// this entry no longer is — so such a tick can recognise itself as
-        /// stale. See `finishTick`. Holders coming and going do not mint one:
+        /// when the entry is created and again when either of its paths changes
+        /// — the cases where work already in flight was computed against
+        /// something this entry no longer is — so such a tick can recognise
+        /// itself as stale. See `finishTick`. Holders coming and going do not mint one:
         /// the entry is still the same entry, and a tick that outlives one of
         /// several holders is still owed to the rest.
         var generation: UInt64
@@ -146,24 +151,34 @@ actor TranscriptPollScheduler {
     /// Idempotent per token: a pane re-declaring its tier updates its own hold
     /// rather than taking a second one, which is what makes the holder set
     /// bounded by "panes currently open", not by "tier changes ever made".
+    ///
+    /// `streamPath` is the model-proxy stream file this pane wants tailed
+    /// alongside the transcript, or nil for none. It defaults to nil so a
+    /// caller with no interest in streaming — every caller before this feature
+    /// — reads the same as it always did.
     func register(
-        sessionID: String, path: String, tier: TranscriptPollTier, token: TranscriptPaneToken
+        sessionID: String, path: String, streamPath: String? = nil,
+        tier: TranscriptPollTier, token: TranscriptPaneToken
     ) {
         var registration: Registration
         if let existing = registrations[sessionID] {
             registration = existing
-            if registration.path != path {
+            if registration.path != path || registration.streamPath != streamPath {
                 // The same session id under a different file. Whatever a tick
                 // in flight built, it built against the old path; mint a new
-                // incarnation so it can tell.
+                // incarnation so it can tell. A changed stream path counts for
+                // the same reason: the offsets and lines the source holds
+                // describe a file this registration no longer names.
                 lastGeneration += 1
                 registration.generation = lastGeneration
                 registration.path = path
+                registration.streamPath = streamPath
             }
         } else {
             lastGeneration += 1
             registration = Registration(
-                path: path, holders: [:], generation: lastGeneration, task: nil)
+                path: path, streamPath: streamPath, holders: [:],
+                generation: lastGeneration, task: nil)
         }
         registration.holders[token] = tier
         registrations[sessionID] = registration
@@ -239,6 +254,7 @@ actor TranscriptPollScheduler {
         guard var registration = registrations[sessionID] else { return }
         registration.task?.cancel()
         let path = registration.path
+        let streamPath = registration.streamPath
         // Carried by the task, not re-read from `registrations` inside it: the
         // whole point is to compare against what the registry says *later*.
         // Restarting a task (`setAppActive`, a re-declared tier, a holder
@@ -257,7 +273,9 @@ actor TranscriptPollScheduler {
             while !Task.isCancelled {
                 try? await clock.sleep(for: interval)
                 if Task.isCancelled { return }
-                await self?.tick(sessionID: sessionID, path: path, generation: generation)
+                await self?.tick(
+                    sessionID: sessionID, path: path, streamPath: streamPath,
+                    generation: generation)
             }
         }
         registrations[sessionID] = registration
@@ -270,12 +288,29 @@ actor TranscriptPollScheduler {
     /// cancellation check of its own. So the generation is re-checked on both
     /// sides of it — before, to skip work a cancelled task no longer owes, and
     /// again in `finishTick`, which is where the interesting case lives.
-    private func tick(sessionID: String, path: String, generation: UInt64) async {
+    ///
+    /// A registration that names a stream file refreshes it in the same tick,
+    /// at the same cadence: the provisional message is the same pane's content
+    /// as the transcript rows, and giving it a timer of its own would be a
+    /// second cadence policy to keep in step with this one. Either file
+    /// changing is news — the two are folded into one `hasNews` so a stream
+    /// delta with no transcript change still reaches the pane, which is the
+    /// whole point of streaming.
+    private func tick(
+        sessionID: String, path: String, streamPath: String?, generation: UInt64
+    ) async {
         guard registrations[sessionID]?.generation == generation else { return }
         let change = await source.refresh(sessionID: sessionID, path: path)
-        await finishTick(
-            sessionID: sessionID, generation: generation,
-            hasNews: !(change?.isEmpty ?? true))
+        var hasNews = !(change?.isEmpty ?? true)
+        if let streamPath {
+            // Not folded into the expression above: `||` short-circuits, and a
+            // transcript change must not skip the stream refresh — the tail
+            // would fall behind exactly when the session is busiest.
+            let streamChanged = await source.refreshStream(
+                sessionID: sessionID, path: streamPath, now: Date())
+            hasNews = hasNews || streamChanged
+        }
+        await finishTick(sessionID: sessionID, generation: generation, hasNews: hasNews)
     }
 
     /// The far side of one tick: decide whether what the refresh just did still
