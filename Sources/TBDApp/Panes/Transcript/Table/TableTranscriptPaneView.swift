@@ -459,7 +459,8 @@ struct TableTranscriptPaneView: View {
         let source = appState.transcriptSource
         let state = appState
 
-        // The retire alarms for this run of the loop, disarmed when it ends.
+        // The retire alarms for this run of the loop; this pane's own session
+        // is disarmed when it ends, and no other's.
         // They back the single retire rule no file change can announce; see
         // `ProvisionalRetireTimer`. Its state is keyed by session id because
         // the closure below goes into the scheduler's one app-wide slot and so
@@ -525,11 +526,16 @@ struct TableTranscriptPaneView: View {
                 tier: tier, token: token)
         }
         await scheduler.deregister(sessionID: sid, token: token)
-        // A pane that goes away leaves no sleeping alarm behind, for any of the
-        // sessions this instance served. The publish one would have run is
-        // harmless (it recomposes from the source), but an unbounded number of
-        // them is not.
-        await retireTimer.disarmAll()
+        // A pane that goes away disarms **its own** session's alarm and no
+        // other. This instance is reachable from the scheduler's one app-wide
+        // `onChange` slot, so it may hold alarms for sessions other panes are
+        // showing, and the 60-second rule is the one retire rule nothing
+        // re-announces: cancelling another session's alarm here would strand
+        // its provisional row on screen forever. The alarms left armed are
+        // safe — the sleeping task is retained by its own `fire` closure,
+        // clears itself when it fires, and its callback (`publish`) captures
+        // only `AppState`, the source and this timer, never a view.
+        await retireTimer.disarm(sessionID: sid)
     }
 
     /// One publish: read what the source has for `sessionID`, merge the

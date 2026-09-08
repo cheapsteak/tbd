@@ -140,6 +140,18 @@ struct ProvisionalRowComposerTests {
             provisional: completed, now: Self.t0.addingTimeInterval(61))
         #expect(atSixtyOne == Self.settled,
                 "61 s after the stop nothing is ever going to confirm it")
+
+        // The boundary belongs to the retired side. A row kept at exactly the
+        // deadline would come with a zero-length alarm that fires the instant
+        // it is armed, re-publishes, composes the same row and arms zero
+        // again — a spin whenever `now` is frozen or steps backwards.
+        let atExactlySixty = Self.compose(
+            provisional: completed, now: Self.t0.addingTimeInterval(60))
+        #expect(atExactlySixty == Self.settled,
+                "the boundary tick retires the row rather than composing a zero-delay one")
+        #expect(ProvisionalRowComposer.retireDelay(
+            phase: completed.phase, now: Self.t0.addingTimeInterval(60)) == nil,
+                "and asks for no alarm, so the two rules agree at the boundary")
     }
 
     /// The deadline measures from the completion instant, so a row that
@@ -234,8 +246,8 @@ struct ProvisionalRowComposerTests {
         #expect(ProvisionalRowComposer.retireDelay(
             phase: .complete(at: Self.t0), now: Self.t0.addingTimeInterval(45)) == .seconds(15))
         #expect(ProvisionalRowComposer.retireDelay(
-            phase: .complete(at: Self.t0), now: Self.t0.addingTimeInterval(600)) == .seconds(0),
-                "a deadline already past is clamped at zero, never negative")
+            phase: .complete(at: Self.t0), now: Self.t0.addingTimeInterval(600)) == nil,
+                "a deadline already past asks for no alarm at all, never a zero-length one")
     }
 }
 
@@ -624,6 +636,40 @@ struct ProvisionalRetireTimerTests {
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await first.count == 1 }
         #expect(fired == .satisfied, "s1's alarm was untouched by s2's disarm")
         #expect(await second.count == 0, "and s2's really was cancelled")
+    }
+
+    /// The teardown gesture itself. A pane whose loop ends disarms its own
+    /// session and nothing else, because this instance is reachable from the
+    /// scheduler's single app-wide slot and may hold alarms for sessions other
+    /// panes are showing. The 60-second rule is announced by nothing, so an
+    /// alarm cancelled here would never be re-armed and its row would stay on
+    /// screen for good.
+    @Test("a teardown disarm leaves another session's alarm to fire exactly once")
+    func teardownDisarmLeavesOtherSessionsArmed() async {
+        let clock = TestClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+        let leaving = FireLog()
+        let staying = FireLog()
+
+        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) {
+            await leaving.record()
+        }
+        await timer.arm(sessionID: "s2", messageID: "msg_b", after: .seconds(60)) {
+            await staying.record()
+        }
+
+        // What `appSideLoop` now does when its pane goes away.
+        await timer.disarm(sessionID: "s1")
+        #expect(await timer.armedSessionCount == 1, "only the leaving pane's session was disarmed")
+        #expect(await timer.armedMessage(sessionID: "s2") == "msg_b")
+
+        await clock.advanceWhenSuspended(by: .seconds(61))
+        let fired = await pollUntilTrue(timeout: .seconds(10)) { await staying.count == 1 }
+        #expect(fired == .satisfied, "s2's backstop survived the other pane's teardown")
+        #expect(await leaving.count == 0, "and the torn-down session's own alarm was cancelled")
+
+        await clock.advance(by: .seconds(600))
+        #expect(await staying.count == 1, "exactly once — nothing re-arms a fired backstop")
     }
 
     @Test("disarmAll cancels every session's alarm")

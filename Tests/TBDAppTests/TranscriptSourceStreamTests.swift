@@ -5,6 +5,19 @@ import Testing
 @testable import TBDShared
 import TestSupport
 
+/// A deterministic generator, so a failing chunk split is reproducible from
+/// the seed rather than being a coin flip in CI.
+private struct SplitMix64: RandomNumberGenerator {
+    var state: UInt64
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+}
+
 /// `TranscriptSource`'s second file: the model-proxy stream file it tails
 /// beside the transcript JSONL, and the provisional message it folds out of it.
 ///
@@ -314,6 +327,81 @@ struct TranscriptSourceStreamTests {
                 "the stop arrived in the same tick that crossed the ceiling")
         #expect(provisional?.text.count == 10_001,
                 "no part of the only message on screen may be dropped")
+    }
+
+    // MARK: - Chunk-split equivalence
+
+    /// Three messages: two that finished and one that has only started, with
+    /// deltas carrying multi-byte characters and a marker the split chooser
+    /// aims at. The fold's answer is `msg_b` — the most recent message that has
+    /// *text*, since `msg_c` has produced none — completed at the reader's
+    /// `now`.
+    private static let chunkSplitFixture: [ModelProxyStreamLine] = [
+        .start(message: "msg_a", at: started),
+        .block(message: "msg_a", index: 0),
+        .text(message: "msg_a", index: 0, text: "Hello, "),
+        .text(message: "msg_a", index: 0, text: "wörld 🌍 — and a newline\nin the delta"),
+        .stop(message: "msg_a"),
+        .start(message: "msg_b", at: started.addingTimeInterval(1)),
+        .text(message: "msg_b", index: 0, text: "the second answer, SPLITME here, ✓"),
+        .text(message: "msg_b", index: 1, text: " and a second block"),
+        .stop(message: "msg_b"),
+        .start(message: "msg_c", at: started.addingTimeInterval(2)),
+    ]
+
+    /// The property the whole tailing layer exists to hold: **how** the bytes
+    /// arrive cannot change what a pane renders. The proxy's tee writes into
+    /// this file from another process, so a poll can land at any byte offset —
+    /// between two lines, inside a line's JSON, or inside a single multi-byte
+    /// character — and the same file delivered in any chunking must fold to the
+    /// same provisional message as the file read whole.
+    ///
+    /// Two of the splits are chosen rather than drawn, because they are the two
+    /// a naive tailer gets wrong: one lands inside a `text` line's JSON string
+    /// value, one inside the four bytes of an emoji. The rest are drawn from a
+    /// seeded generator, so a failure names the exact byte offsets that produced
+    /// it and can be replayed.
+    @Test(
+        "a file delivered in arbitrary chunks folds to what the whole file folds to",
+        arguments: [UInt64(0x5EED), 0x7A11, 0xC0FF_EE00, 0xD15E_A5E0])
+    func arbitraryChunkSplitsFoldToTheWholeFile(seed: UInt64) async throws {
+        let path = try Self.scratchDir() + "/stream.jsonl"
+        let lines = Self.chunkSplitFixture
+        let data = Data(try Self.lines(lines).utf8)
+
+        // Inside a `text` line's JSON string value, and inside the four bytes
+        // of "🌍". `#require`, not `if let`: a fixture that stopped containing
+        // either would leave this test drawing only ordinary offsets and still
+        // passing.
+        let insideJSONString = try #require(data.range(of: Data("SPLITME".utf8))).lowerBound + 3
+        let insideMultiByte = try #require(data.range(of: Data("🌍".utf8))).lowerBound + 2
+
+        var generator = SplitMix64(state: seed)
+        var offsets: Set<Int> = [insideJSONString, insideMultiByte]
+        for _ in 0..<12 {
+            offsets.insert(Int(generator.next() % UInt64(data.count - 1)) + 1)
+        }
+        let splits = offsets.filter { $0 > 0 && $0 < data.count }.sorted()
+        let replay = "seed=0x\(String(seed, radix: 16)) splits=\(splits) of \(data.count) bytes"
+
+        try Self.write("", to: path)
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        let source = TranscriptSource()
+        var start = 0
+        for end in splits + [data.count] {
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data.subdata(in: start..<end))
+            start = end
+            _ = await source.refreshStream(sessionID: "s1", path: path, now: Self.t0)
+        }
+
+        let whole = StreamFileReader.fold(lines: lines, now: Self.t0)
+        #expect(whole?.messageID == "msg_b",
+                "the fixture must fold to a completed message, or this proves nothing")
+        #expect(whole?.phase == .complete(at: Self.t0))
+        #expect(await source.provisional(sessionID: "s1") == whole,
+                "chunked delivery must land on the whole-file fold — \(replay)")
     }
 
     // MARK: - Transcript confirmation

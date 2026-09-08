@@ -91,9 +91,15 @@ actor ProvisionalRetireTimer {
         alarms.removeValue(forKey: sessionID)?.task.cancel()
     }
 
-    /// Cancels every alarm this timer holds. Called once when the pane's loop
-    /// ends, so a torn-down pane leaves no sleeping task behind for any of the
-    /// sessions its instance happened to serve.
+    /// Cancels every alarm this timer holds.
+    ///
+    /// For tests, and for a caller that really is tearing down *everything*
+    /// this timer serves. **Not** for a pane's own teardown: because the
+    /// closure carrying this instance sits in the scheduler's single app-wide
+    /// slot, the table can hold alarms for sessions other panes are showing,
+    /// and cancelling one of those strands its provisional row on screen —
+    /// the 60-second rule is announced by nothing, so nothing re-arms it. A
+    /// pane leaving calls ``disarm(sessionID:)`` for its own session instead.
     func disarmAll() {
         for alarm in alarms.values { alarm.task.cancel() }
         alarms.removeAll()

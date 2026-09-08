@@ -88,7 +88,15 @@ enum ProvisionalRowComposer {
         case .aborted:
             return items
         case .complete(let at):
-            guard now.timeIntervalSince(at) <= retireAfterSeconds else { return items }
+            // Strictly less than, so the boundary tick retires rather than
+            // composing a row whose remaining delay is zero. A zero-delay
+            // alarm fires the moment it is armed, and the re-publish it runs
+            // would compose the same row and arm the same zero again — a spin
+            // under a `now` that is frozen or has stepped backwards. Keeping
+            // the row only while the deadline is genuinely in the future makes
+            // "compose keeps it" and "``retireDelay`` has a deadline" the same
+            // condition.
+            guard now.timeIntervalSince(at) < retireAfterSeconds else { return items }
         case .streaming:
             break
         }
@@ -104,12 +112,16 @@ enum ProvisionalRowComposer {
     /// unconfirmed-completion rule, or nil when no such deadline applies.
     ///
     /// Only `.complete` has one. `.streaming` has not stopped yet, and
-    /// `.aborted` was already withdrawn by ``compose``. Clamped at zero rather
-    /// than going negative, so a caller that arms on it fires immediately for a
-    /// deadline that has already passed instead of sleeping backwards.
+    /// `.aborted` was already withdrawn by ``compose``. A deadline that has
+    /// arrived or passed is nil rather than zero: ``compose`` has already
+    /// retired that row, so there is nothing left to wake up for, and arming a
+    /// zero-length sleep would fire instantly into a re-publish that composed
+    /// the same row and armed the same zero again.
     static func retireDelay(phase: ProvisionalMessage.Phase, now: Date) -> Duration? {
         guard case .complete(let at) = phase else { return nil }
-        return .seconds(max(0, retireAfterSeconds - now.timeIntervalSince(at)))
+        let remaining = retireAfterSeconds - now.timeIntervalSince(at)
+        guard remaining > 0 else { return nil }
+        return .seconds(remaining)
     }
 
     /// ``unconfirmedRetireAfter`` as a `TimeInterval`, so the rule is stated
