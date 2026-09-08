@@ -105,10 +105,22 @@ actor TranscriptPollScheduler {
     /// would keep a torn-down pane's closure alive.
     private var onChange: (@Sendable (String) async -> Void)?
     private let source: TranscriptSource
+    /// The instant a stream refresh stamps its lines with.
+    ///
+    /// A date seam rather than the clock seam beside it, because what this
+    /// produces is *data*: `TranscriptSource` stores it and the provisional
+    /// row's retire deadlines are later measured against it. `Duration` is
+    /// behavior, `Date` is data — see the repo's clock-and-date-seam rule.
+    private let now: @Sendable () -> Date
     private let clock: any Clock<Duration>
 
-    init(source: TranscriptSource, clock: any Clock<Duration> = ContinuousClock()) {
+    init(
+        source: TranscriptSource,
+        now: @escaping @Sendable () -> Date = { Date() },
+        clock: any Clock<Duration> = ContinuousClock()
+    ) {
         self.source = source
+        self.now = now
         self.clock = clock
     }
 
@@ -317,7 +329,7 @@ actor TranscriptPollScheduler {
             // transcript change must not skip the stream refresh — the tail
             // would fall behind exactly when the session is busiest.
             let streamChanged = await source.refreshStream(
-                sessionID: sessionID, path: streamPath, now: Date())
+                sessionID: sessionID, path: streamPath, now: now())
             hasNews = hasNews || streamChanged
         }
         await finishTick(sessionID: sessionID, generation: generation, hasNews: hasNews)

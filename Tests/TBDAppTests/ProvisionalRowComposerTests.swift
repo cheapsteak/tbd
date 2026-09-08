@@ -23,8 +23,10 @@ struct ProvisionalRowComposerTests {
         .assistantText(id: "msg_old", text: "an older answer", timestamp: t0),
     ]
 
-    private static func streaming(_ text: String, id: String = "msg_a") -> ProvisionalMessage {
-        ProvisionalMessage(messageID: id, text: text, phase: .streaming)
+    private static func streaming(
+        _ text: String, id: String = "msg_a", lastLineAt: Date = t0
+    ) -> ProvisionalMessage {
+        ProvisionalMessage(messageID: id, text: text, phase: .streaming, lastLineAt: lastLineAt)
     }
 
     /// Nothing is confirmed. The default for tests that are about some other
@@ -121,7 +123,7 @@ struct ProvisionalRowComposerTests {
     func abortedMessageIsRetired() {
         let items = Self.compose(provisional: ProvisionalMessage(
             messageID: "msg_a", text: "half an ans",
-            phase: .aborted(reason: "upstream closed")))
+            phase: .aborted(reason: "upstream closed"), lastLineAt: Self.t0))
 
         #expect(items == Self.settled)
     }
@@ -129,7 +131,8 @@ struct ProvisionalRowComposerTests {
     @Test("a completed but unconfirmed message is retired after the deadline")
     func completedMessageRetiresAfterTheDeadline() {
         let completed = ProvisionalMessage(
-            messageID: "msg_a", text: "Hello, world", phase: .complete(at: Self.t0))
+            messageID: "msg_a", text: "Hello, world", phase: .complete(at: Self.t0),
+            lastLineAt: Self.t0)
 
         let atFiftyNine = Self.compose(
             provisional: completed, now: Self.t0.addingTimeInterval(59))
@@ -150,7 +153,7 @@ struct ProvisionalRowComposerTests {
         #expect(atExactlySixty == Self.settled,
                 "the boundary tick retires the row rather than composing a zero-delay one")
         #expect(ProvisionalRowComposer.retireDelay(
-            phase: completed.phase, now: Self.t0.addingTimeInterval(60)) == nil,
+            for: completed, now: Self.t0.addingTimeInterval(60)) == nil,
                 "and asks for no alarm, so the two rules agree at the boundary")
     }
 
@@ -160,7 +163,8 @@ struct ProvisionalRowComposerTests {
     func deadlineIsMeasuredFromCompletion() {
         let longDone = ProvisionalMessage(
             messageID: "msg_a", text: "Hello",
-            phase: .complete(at: Self.t0.addingTimeInterval(-3600)))
+            phase: .complete(at: Self.t0.addingTimeInterval(-3600)),
+            lastLineAt: Self.t0.addingTimeInterval(-3600))
 
         #expect(Self.compose(provisional: longDone) == Self.settled)
     }
@@ -229,6 +233,8 @@ struct ProvisionalRowComposerTests {
     @Test("the retire window is 60 seconds and the prefix is stream:")
     func constantsAreWhatTheDesignDeclares() {
         #expect(ProvisionalRowComposer.unconfirmedRetireAfter == .seconds(60))
+        #expect(ProvisionalRowComposer.silentStreamRetireAfter == .seconds(600),
+                "the silent-stream window is the proxy's own drain cap")
         #expect(ProvisionalRowComposer.idPrefix == "stream:")
         #expect(ProvisionalRowComposer.isProvisional(itemID: "stream:msg_a"))
         #expect(!ProvisionalRowComposer.isProvisional(itemID: "msg_a"))
@@ -236,18 +242,86 @@ struct ProvisionalRowComposerTests {
 
     // MARK: - The alarm's delay
 
-    @Test("only a completed message asks for a retire alarm")
-    func onlyCompletionSchedulesAnAlarm() {
-        #expect(ProvisionalRowComposer.retireDelay(phase: .streaming, now: Self.t0) == nil)
+    @Test("every phase but aborted asks for a retire alarm, each on its own rule")
+    func eachPhaseSchedulesItsOwnAlarm() {
+        let completed = ProvisionalMessage(
+            messageID: "msg_a", text: "done", phase: .complete(at: Self.t0),
+            lastLineAt: Self.t0)
+
         #expect(ProvisionalRowComposer.retireDelay(
-            phase: .aborted(reason: "x"), now: Self.t0) == nil)
+            for: ProvisionalMessage(
+                messageID: "msg_a", text: "half",
+                phase: .aborted(reason: "x"), lastLineAt: Self.t0),
+            now: Self.t0) == nil,
+                "an aborted row was never composed, so there is nothing to wake up for")
+
+        #expect(ProvisionalRowComposer.retireDelay(for: completed, now: Self.t0) == .seconds(60))
         #expect(ProvisionalRowComposer.retireDelay(
-            phase: .complete(at: Self.t0), now: Self.t0) == .seconds(60))
+            for: completed, now: Self.t0.addingTimeInterval(45)) == .seconds(15))
         #expect(ProvisionalRowComposer.retireDelay(
-            phase: .complete(at: Self.t0), now: Self.t0.addingTimeInterval(45)) == .seconds(15))
-        #expect(ProvisionalRowComposer.retireDelay(
-            phase: .complete(at: Self.t0), now: Self.t0.addingTimeInterval(600)) == nil,
+            for: completed, now: Self.t0.addingTimeInterval(600)) == nil,
                 "a deadline already past asks for no alarm at all, never a zero-length one")
+
+        // The silent-stream rule. Measured from the last line, ten minutes
+        // wide, and restarted by a line rather than by the poll that noticed
+        // it: the second reading below is the same message a minute later
+        // whose line arrived a minute later too.
+        #expect(ProvisionalRowComposer.retireDelay(
+            for: Self.streaming("Hel"), now: Self.t0) == .seconds(600))
+        #expect(ProvisionalRowComposer.retireDelay(
+            for: Self.streaming("Hel"), now: Self.t0.addingTimeInterval(540)) == .seconds(60))
+        #expect(ProvisionalRowComposer.retireDelay(
+            for: Self.streaming("Hello", lastLineAt: Self.t0.addingTimeInterval(60)),
+            now: Self.t0.addingTimeInterval(60)) == .seconds(600),
+                "a new line restarts the window rather than shortening it")
+        #expect(ProvisionalRowComposer.retireDelay(
+            for: Self.streaming("Hel"), now: Self.t0.addingTimeInterval(600)) == nil)
+    }
+
+    // MARK: - The silent-stream rule
+
+    /// The case the 60-second rule cannot reach: a proxy killed mid-turn writes
+    /// neither `stop` nor `aborted`, so the fold reports `.streaming` forever
+    /// and the JSONL — which never saw that request finish either — will not
+    /// confirm it. Without a deadline of its own the row is on screen for good.
+    ///
+    /// What discriminates: with a deadline only for `.complete`, every
+    /// assertion below that expects the row *gone* fails, because a streaming
+    /// row was composed unconditionally.
+    @Test("a streaming message with no terminal line is retired at the drain cap")
+    func silentStreamingMessageRetiresAtTheDrainCap() {
+        let quiet = Self.streaming("half an answer")
+
+        #expect(Self.compose(provisional: quiet, now: Self.t0.addingTimeInterval(599)).last?.id
+                == "stream:msg_a",
+                "a stream can be quiet for minutes while a tool-input block streams")
+        #expect(Self.compose(provisional: quiet, now: Self.t0.addingTimeInterval(600))
+                == Self.settled,
+                "the boundary tick retires, the same way the completion rule does")
+        #expect(Self.compose(provisional: quiet, now: Self.t0.addingTimeInterval(601))
+                == Self.settled)
+        #expect(ProvisionalRowComposer.retireDelay(
+            for: quiet, now: Self.t0.addingTimeInterval(600)) == nil,
+                "and asks for no alarm, so the two rules agree at the boundary")
+    }
+
+    /// The window is restarted by each line, not by the message: the same
+    /// message nine minutes in, having just produced a delta, is owed a fresh
+    /// ten minutes rather than the minute that was left.
+    @Test("a new line restarts the silent-stream window")
+    func aNewLineRestartsTheSilentStreamWindow() {
+        let nineMinutesIn = Self.t0.addingTimeInterval(540)
+        let stale = Self.streaming("half an answer")
+        let refreshed = Self.streaming("half an answer, and more", lastLineAt: nineMinutesIn)
+
+        #expect(Self.compose(provisional: stale, now: nineMinutesIn.addingTimeInterval(61))
+                == Self.settled,
+                "without a new line the original window runs out")
+        #expect(Self.compose(provisional: refreshed, now: nineMinutesIn.addingTimeInterval(61))
+                .last?.id == "stream:msg_a",
+                "with one, the row is still the best thing to show")
+        #expect(ProvisionalRowComposer.retireDeadline(for: refreshed)
+                == nineMinutesIn.addingTimeInterval(600))
     }
 }
 
@@ -495,31 +569,180 @@ struct ProvisionalRowPublishTests {
                 "and B's transcript is untouched by it")
     }
 
-    /// A still-streaming row arms nothing: it has not stopped, so the file it
-    /// came from is still moving and the poll scheduler is still reporting it.
-    @Test("a streaming row arms no alarm")
-    func aStreamingRowArmsNoAlarm() async throws {
+    /// A stream file with one text line and no terminal line — a turn in
+    /// flight, or a proxy that died before writing its `stop`. The two look
+    /// identical from here, which is the whole reason the silent-stream rule
+    /// exists.
+    ///
+    /// What discriminates: before the rule, a streaming row armed nothing, so
+    /// the alarm assertion below read nil and the row stayed on screen for
+    /// good.
+    @Test("a streaming row arms the silent-stream alarm and is withdrawn by it")
+    func aStreamingRowIsWithdrawnByTheSilentStreamAlarm() async throws {
         let suite = "tbd-provisional-publish-\(UUID().uuidString)"
         defer { Self.removeSuite(suite) }
+        let path = try Self.streamFileWithOneTextLine()
+        let source = TranscriptSource()
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: Self.t0))
+
+        let state = await Self.makeState(streaming: true, suite: suite)
+        let clock = TestClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+        let date = MovableDate(Self.t0)
+
+        let published = await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source,
+            retireTimer: timer, now: { date.now })
+        #expect(published.last?.id == "stream:msg_a")
+        #expect(await timer.armedMessage(sessionID: "s1") == "msg_a",
+                "a stream that may never end must still be on a deadline")
+
+        // Nine minutes of silence is not enough: a healthy turn streaming a
+        // large tool-input block emits no text deltas for exactly this long.
+        date.advance(by: 540)
+        await clock.advanceWhenSuspended(by: .seconds(540))
+        #expect(await Self.publishedIDs(state) == ["stream:msg_a"],
+                "the row must survive right up to the drain cap")
+
+        date.advance(by: 61)
+        await clock.advance(by: .seconds(61))
+        let withdrawn = await pollUntilTrue(timeout: .seconds(10)) {
+            await Self.publishedIDs(state).isEmpty
+        }
+        #expect(withdrawn == .satisfied, "the alarm's re-publish must withdraw the row")
+        #expect(await timer.armedMessage(sessionID: "s1") == nil, "and it does not re-arm itself")
+    }
+
+    /// The window belongs to the last line, so a delta arriving inside it buys
+    /// the row another full ten minutes — and the pending alarm has to be
+    /// replaced, not left alone, even though the message id has not changed.
+    ///
+    /// What discriminates: with the alarm keyed by message id alone, the
+    /// re-publish after the append is a no-op, the original alarm fires at its
+    /// original deadline, and the row is withdrawn while its stream is still
+    /// producing.
+    @Test("a line arriving inside the window re-arms the silent-stream alarm")
+    func aNewLineReArmsTheSilentStreamAlarm() async throws {
+        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
+        defer { Self.removeSuite(suite) }
+        let path = try Self.streamFileWithOneTextLine()
+        let source = TranscriptSource()
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: Self.t0))
+
+        let state = await Self.makeState(streaming: true, suite: suite)
+        let clock = TestClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+        let date = MovableDate(Self.t0)
+
+        await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source,
+            retireTimer: timer, now: { date.now })
+        #expect(await timer.armedMessage(sessionID: "s1") == "msg_a")
+
+        // Nine minutes in, one more delta lands and the source re-reads it.
+        date.advance(by: 540)
+        await clock.advanceWhenSuspended(by: .seconds(540))
+        let more = try ModelProxyStreamLine
+            .text(message: "msg_a", index: 0, text: "lo").encodedLine()
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((more + "\n").utf8))
+        try handle.close()
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: date.now))
+        await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source,
+            retireTimer: timer, now: { date.now })
+
+        // Past the *original* deadline. The row is still there, because the
+        // append moved it.
+        date.advance(by: 61)
+        await clock.advanceWhenSuspended(by: .seconds(61))
+        #expect(await Self.publishedIDs(state) == ["stream:msg_a"],
+                "the original window expired, but the line that arrived replaced it")
+        #expect(await timer.armedMessage(sessionID: "s1") == "msg_a",
+                "and the replacement alarm is still pending")
+    }
+
+    /// The handoff production actually performs, which the single-instance
+    /// two-session test does not reach: `appSideLoop` builds a **new**
+    /// `ProvisionalRetireTimer` on every pane mount and drops it into the
+    /// scheduler's single `onChange` slot, so a remount leaves the previous
+    /// instance's alarm pending with nothing left holding it.
+    ///
+    /// The property being pinned is that this is safe: a fired alarm only ever
+    /// runs an ordinary publish, which recomputes from the source and the
+    /// state, so it retires the row it should retire regardless of which
+    /// instance woke up — and it touches no other session on the way.
+    @Test("a retire alarm survives a remount onto a second timer and lands on its own session")
+    func aRemountedPaneStillRetiresTheRightSession() async throws {
+        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
+        defer { Self.removeSuite(suite) }
+        let date = MovableDate(Self.t0)
+        let source = try await Self.sourceWithCompletedMessage(now: Self.t0)
+        try await Self.addPlainTranscript(to: source, sessionID: "s2")
+        let state = await Self.makeState(streaming: true, suite: suite)
+        let clock = TestClock()
+
+        // Mount one: the pane's own timer arms A's 60-second backstop.
+        let firstTimer = ProvisionalRetireTimer(clock: clock)
+        await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source,
+            retireTimer: firstTimer, now: { date.now })
+        #expect(await firstTimer.armedMessage(sessionID: "s1") == "msg_a")
+
+        // The remount. A second instance takes the scheduler's on-change slot;
+        // the first is unreachable from the app but its alarm is still asleep.
+        date.advance(by: 30)
+        await clock.advanceWhenSuspended(by: .seconds(30))
+        let secondTimer = ProvisionalRetireTimer(clock: clock)
+        await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source,
+            retireTimer: secondTimer, now: { date.now })
+        #expect(await secondTimer.armedMessage(sessionID: "s1") == "msg_a",
+                "the new instance arms the same row for the remainder of its window")
+        #expect(await Self.publishedIDs(state) == ["stream:msg_a"])
+
+        // A publish for another session through the new instance, the case the
+        // keying exists for.
+        await TableTranscriptPaneView.publish(
+            sessionID: "s2", state: state, source: source,
+            retireTimer: secondTimer, now: { date.now })
+        #expect(await secondTimer.armedMessage(sessionID: "s1") == "msg_a",
+                "B's publish through the new timer must not disarm A")
+
+        date.advance(by: 31)
+        await clock.advance(by: .seconds(31))
+        let withdrawn = await pollUntilTrue(timeout: .seconds(10)) {
+            await Self.publishedIDs(state).isEmpty
+        }
+        #expect(withdrawn == .satisfied,
+                "whichever instance woke up, the re-publish retires A's row")
+        #expect(await Self.publishedIDs(state, session: "s2").isEmpty == false,
+                "and B's transcript is untouched by either instance")
+        // Both alarms were due at the same virtual instant and clear themselves
+        // as they fire, so this is polled rather than read once: which of the
+        // two finishes first is not something the test gets to decide.
+        let cleared = await pollUntilTrue(timeout: .seconds(10)) {
+            // Read both, then compare: `&&` takes its right side as a
+            // nonisolated autoclosure, which cannot await an actor's property.
+            let abandoned = await firstTimer.armedSessionCount
+            let live = await secondTimer.armedSessionCount
+            return abandoned == 0 && live == 0
+        }
+        #expect(cleared == .satisfied,
+                "neither the abandoned instance nor the live one re-arms after firing")
+    }
+
+    /// One text line, no terminal line: what a stream in flight and a proxy
+    /// killed mid-turn both leave on disk.
+    private static func streamFileWithOneTextLine() throws -> String {
         let dir = fencedScratchRoot(prefix: "tbdprov")
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let path = dir + "/stream.jsonl"
         let line = try ModelProxyStreamLine
             .text(message: "msg_a", index: 0, text: "Hel").encodedLine()
         try (line + "\n").write(toFile: path, atomically: true, encoding: .utf8)
-        let source = TranscriptSource()
-        #expect(await source.refreshStream(sessionID: "s1", path: path, now: Self.t0))
-
-        let state = await Self.makeState(streaming: true, suite: suite)
-        let timer = ProvisionalRetireTimer(clock: TestClock())
-        let t0 = Self.t0
-
-        let published = await TableTranscriptPaneView.publish(
-            sessionID: "s1", state: state, source: source,
-            retireTimer: timer, now: { t0 })
-
-        #expect(published.last?.id == "stream:msg_a")
-        #expect(await timer.armedMessage(sessionID: "s1") == nil)
+        return path
     }
 
     /// The publish path's own off branch: the same source and the same
@@ -543,9 +766,15 @@ struct ProvisionalRowPublishTests {
     }
 }
 
-/// `ProvisionalRetireTimer` on its own: the one-shot behind the 60-second rule.
+/// `ProvisionalRetireTimer` on its own: the one-shot behind both deadline rules.
 @Suite("ProvisionalRetireTimer", .clockDriven, .serialized)
 struct ProvisionalRetireTimerTests {
+
+    private static let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+    /// The instant every alarm below is nominally due. It is the alarm's
+    /// identity, never a clock the timer reads — the sleeping is all done on
+    /// the injected `TestClock`, which is why these two never have to agree.
+    private static let due = t0.addingTimeInterval(60)
 
     private actor FireLog {
         private(set) var count = 0
@@ -558,7 +787,7 @@ struct ProvisionalRetireTimerTests {
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
 
-        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) { await log.record() }
+        await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) { await log.record() }
         #expect(await timer.armedMessage(sessionID: "s1") == "msg_a")
 
         await clock.advanceWhenSuspended(by: .seconds(59))
@@ -582,15 +811,52 @@ struct ProvisionalRetireTimerTests {
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
 
-        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) { await log.record() }
+        await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) { await log.record() }
         await clock.advanceWhenSuspended(by: .seconds(59))
-        // A poll one second before the deadline re-arms with the remaining 1 s.
-        // If that replaced the alarm, the fire below would be 60 s away.
-        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(1)) { await log.record() }
+        // A poll one second before the deadline re-arms with the *same* due
+        // instant and the remaining 1 s. The due instant is the identity, so
+        // this is a no-op; if the shrinking delay replaced the alarm instead,
+        // the fire below would be 60 s away.
+        await timer.arm(
+            sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(1)
+        ) { await log.record() }
 
         await clock.advance(by: .seconds(2))
         let fired = await pollUntilTrue(timeout: .seconds(10)) { await log.count >= 1 }
         #expect(fired == .satisfied)
+        #expect(await log.count == 1, "one alarm, not two")
+    }
+
+    /// The other half of that rule, and what the silent-stream window needs: a
+    /// line arriving for the message already armed genuinely moves its due
+    /// instant, and the pending alarm must give way to the later one.
+    ///
+    /// What discriminates: keyed by message id alone, the second arm below is
+    /// a no-op, the first alarm fires at 60 s, and a row whose stream is still
+    /// producing is withdrawn underneath it.
+    @Test("re-arming the same message at a later deadline replaces the alarm")
+    func reArmingAtALaterDeadlineReplacesTheAlarm() async {
+        let clock = TestClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+        let log = FireLog()
+
+        await timer.arm(
+            sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)
+        ) { await log.record() }
+        await clock.advanceWhenSuspended(by: .seconds(30))
+        await timer.arm(
+            sessionID: "s1", messageID: "msg_a",
+            deadline: Self.due.addingTimeInterval(60), after: .seconds(60)
+        ) { await log.record() }
+
+        await clock.advanceWhenSuspended(by: .seconds(31))
+        for _ in 0..<50 { await Task.yield() }
+        #expect(await log.count == 0, "the original deadline no longer belongs to anything")
+        #expect(await timer.armedMessage(sessionID: "s1") == "msg_a")
+
+        await clock.advance(by: .seconds(30))
+        let fired = await pollUntilTrue(timeout: .seconds(10)) { await log.count == 1 }
+        #expect(fired == .satisfied, "the replacement fires on the later deadline")
         #expect(await log.count == 1, "one alarm, not two")
     }
 
@@ -601,8 +867,8 @@ struct ProvisionalRetireTimerTests {
         let first = FireLog()
         let second = FireLog()
 
-        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) { await first.record() }
-        await timer.arm(sessionID: "s1", messageID: "msg_b", after: .seconds(60)) { await second.record() }
+        await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) { await first.record() }
+        await timer.arm(sessionID: "s1", messageID: "msg_b", deadline: Self.due, after: .seconds(60)) { await second.record() }
         #expect(await timer.armedMessage(sessionID: "s1") == "msg_b")
 
         await clock.advanceWhenSuspended(by: .seconds(61))
@@ -620,10 +886,10 @@ struct ProvisionalRetireTimerTests {
         let first = FireLog()
         let second = FireLog()
 
-        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) {
+        await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) {
             await first.record()
         }
-        await timer.arm(sessionID: "s2", messageID: "msg_b", after: .seconds(60)) {
+        await timer.arm(sessionID: "s2", messageID: "msg_b", deadline: Self.due, after: .seconds(60)) {
             await second.record()
         }
         #expect(await timer.armedSessionCount == 2, "two sessions, two alarms")
@@ -651,10 +917,10 @@ struct ProvisionalRetireTimerTests {
         let leaving = FireLog()
         let staying = FireLog()
 
-        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) {
+        await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) {
             await leaving.record()
         }
-        await timer.arm(sessionID: "s2", messageID: "msg_b", after: .seconds(60)) {
+        await timer.arm(sessionID: "s2", messageID: "msg_b", deadline: Self.due, after: .seconds(60)) {
             await staying.record()
         }
 
@@ -679,10 +945,10 @@ struct ProvisionalRetireTimerTests {
         let first = FireLog()
         let second = FireLog()
 
-        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) {
+        await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) {
             await first.record()
         }
-        await timer.arm(sessionID: "s2", messageID: "msg_b", after: .seconds(60)) {
+        await timer.arm(sessionID: "s2", messageID: "msg_b", deadline: Self.due, after: .seconds(60)) {
             await second.record()
         }
         await timer.disarmAll()
@@ -700,7 +966,7 @@ struct ProvisionalRetireTimerTests {
         let timer = ProvisionalRetireTimer(clock: clock)
         let log = FireLog()
 
-        await timer.arm(sessionID: "s1", messageID: "msg_a", after: .seconds(60)) { await log.record() }
+        await timer.arm(sessionID: "s1", messageID: "msg_a", deadline: Self.due, after: .seconds(60)) { await log.record() }
         await clock.advanceWhenSuspended(by: .seconds(1))
         await timer.disarm(sessionID: "s1")
         #expect(await timer.armedMessage(sessionID: "s1") == nil)

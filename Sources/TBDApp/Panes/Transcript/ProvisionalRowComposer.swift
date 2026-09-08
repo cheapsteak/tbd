@@ -23,22 +23,41 @@ import TBDShared
 /// what marks the row provisional downstream — `transcriptRenderNodes(from:)`
 /// reads the prefix, nothing else has to be threaded through.
 ///
-/// **Retirement.** Four of the five rules are announced by something the pane
+/// **Retirement.** Four of the six rules are announced by something the pane
 /// already watches. Confirmation arrives with a transcript read, an abort and a
 /// newer `start` (which `StreamFileReader.fold` resolves inside the fold, not
 /// here) arrive with a stream-file change, and the flag going off restarts the
-/// pane's loop. The fifth — a completed message nobody ever confirms — is
-/// announced by nothing at all, which is why ``ProvisionalRetireTimer`` exists.
+/// pane's loop. The other two — a completed message nobody ever confirms, and a
+/// stream that simply stops arriving — are announced by nothing at all, which
+/// is why ``ProvisionalRetireTimer`` exists. Both are deadlines, they differ
+/// only in what they measure from and how long they allow.
 enum ProvisionalRowComposer {
 
     /// How long a *completed* stream message may stay unconfirmed before its
-    /// row is withdrawn.
+    /// row is withdrawn, measured from when the reader first saw the stop.
     ///
     /// This is the backstop for a turn the transcript will never mention: a
     /// side request the tee filter did not recognise, or a proxy that wrote a
     /// `message_stop` for a request Claude Code never wrote to its JSONL.
     /// Without it such a row would sit at the bottom of the pane forever.
     static let unconfirmedRetireAfter: Duration = .seconds(60)
+
+    /// How long a *streaming* message may go without a new line before its row
+    /// is withdrawn, measured from the last line the reader saw.
+    ///
+    /// A message reaches a terminal phase only when a `stop` or `aborted` line
+    /// is written and decoded. A proxy killed mid-turn writes neither, so the
+    /// fold reports `.streaming` forever and the transcript — which never saw
+    /// that request finish either — will not confirm it. Without a deadline of
+    /// its own that row stays on screen until the pane closes.
+    ///
+    /// Ten minutes, not sixty seconds, because silence is normal here in a way
+    /// it is not after a stop: the tee records text deltas, and a turn
+    /// streaming a large tool-input block emits none of them for minutes while
+    /// the request is perfectly healthy. The proxy's own drain cap is the
+    /// longest a legitimate stream can still be in flight, so a stream quiet
+    /// for longer than that is one nothing is coming back for.
+    static let silentStreamRetireAfter: Duration = .seconds(600)
 
     /// Prefix on the provisional row's item id. Deliberately a prefix of the
     /// real message id rather than an opaque token, so the row's identity is
@@ -83,22 +102,17 @@ enum ProvisionalRowComposer {
     ) -> [TranscriptItem] {
         guard streamingEnabled, let provisional else { return items }
         guard !confirmed(provisional.messageID) else { return items }
-
-        switch provisional.phase {
-        case .aborted:
+        // Nil is `.aborted`, which is withdrawn outright. Otherwise the row
+        // survives strictly *before* its deadline, so the boundary tick
+        // retires rather than composing a row whose remaining delay is zero. A
+        // zero-delay alarm fires the moment it is armed, and the re-publish it
+        // runs would compose the same row and arm the same zero again — a spin
+        // under a `now` that is frozen or has stepped backwards. Keeping the
+        // row only while the deadline is genuinely in the future makes
+        // "compose keeps it" and "``retireDelay`` has a deadline" the same
+        // condition.
+        guard let deadline = retireDeadline(for: provisional), now < deadline else {
             return items
-        case .complete(let at):
-            // Strictly less than, so the boundary tick retires rather than
-            // composing a row whose remaining delay is zero. A zero-delay
-            // alarm fires the moment it is armed, and the re-publish it runs
-            // would compose the same row and arm the same zero again — a spin
-            // under a `now` that is frozen or has stepped backwards. Keeping
-            // the row only while the deadline is genuinely in the future makes
-            // "compose keeps it" and "``retireDelay`` has a deadline" the same
-            // condition.
-            guard now.timeIntervalSince(at) < retireAfterSeconds else { return items }
-        case .streaming:
-            break
         }
 
         return items + [.assistantText(
@@ -108,27 +122,49 @@ enum ProvisionalRowComposer {
             usage: nil)]
     }
 
-    /// How long from `now` until a row composed for `phase` would retire on the
-    /// unconfirmed-completion rule, or nil when no such deadline applies.
+    /// The instant a composed row for `provisional` retires on its own, or nil
+    /// when it is already withdrawn.
     ///
-    /// Only `.complete` has one. `.streaming` has not stopped yet, and
-    /// `.aborted` was already withdrawn by ``compose``. A deadline that has
-    /// arrived or passed is nil rather than zero: ``compose`` has already
-    /// retired that row, so there is nothing left to wake up for, and arming a
-    /// zero-length sleep would fire instantly into a re-publish that composed
-    /// the same row and armed the same zero again.
-    static func retireDelay(phase: ProvisionalMessage.Phase, now: Date) -> Duration? {
-        guard case .complete(let at) = phase else { return nil }
-        let remaining = retireAfterSeconds - now.timeIntervalSince(at)
+    /// `.complete` retires ``unconfirmedRetireAfter`` from the stop the reader
+    /// saw; `.streaming` retires ``silentStreamRetireAfter`` from the last line
+    /// it saw; `.aborted` has no deadline because ``compose`` never gives it a
+    /// row. Both live deadlines move only when their basis does, which is what
+    /// makes this safe to call on every poll: `ProvisionalMessage` carries
+    /// instants `TranscriptSource` holds still, never a fresh `Date()`.
+    ///
+    /// Also the alarm's identity — see ``ProvisionalRetireTimer/arm``. A line
+    /// arriving for a streaming message moves the deadline, and that is exactly
+    /// when the pending alarm must be replaced rather than left alone.
+    static func retireDeadline(for provisional: ProvisionalMessage) -> Date? {
+        switch provisional.phase {
+        case .aborted:
+            return nil
+        case .complete(let at):
+            return at.addingTimeInterval(seconds(unconfirmedRetireAfter))
+        case .streaming:
+            return provisional.lastLineAt.addingTimeInterval(seconds(silentStreamRetireAfter))
+        }
+    }
+
+    /// How long from `now` until ``retireDeadline(for:)`` arrives, or nil when
+    /// there is no deadline or it has already passed.
+    ///
+    /// A deadline that has arrived or passed is nil rather than zero:
+    /// ``compose`` has already retired that row, so there is nothing left to
+    /// wake up for, and arming a zero-length sleep would fire instantly into a
+    /// re-publish that composed the same row and armed the same zero again.
+    static func retireDelay(for provisional: ProvisionalMessage, now: Date) -> Duration? {
+        guard let deadline = retireDeadline(for: provisional) else { return nil }
+        let remaining = deadline.timeIntervalSince(now)
         guard remaining > 0 else { return nil }
         return .seconds(remaining)
     }
 
-    /// ``unconfirmedRetireAfter`` as a `TimeInterval`, so the rule is stated
-    /// once as a `Duration` (which is what the timer sleeps on) and compared
-    /// against `Date` arithmetic here without a second literal.
-    private static var retireAfterSeconds: TimeInterval {
-        let components = unconfirmedRetireAfter.components
+    /// A `Duration` as a `TimeInterval`, so each rule is stated once as the
+    /// `Duration` the timer sleeps on and compared against `Date` arithmetic
+    /// here without a second literal.
+    private static func seconds(_ duration: Duration) -> TimeInterval {
+        let components = duration.components
         return TimeInterval(components.seconds)
             + TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000
     }

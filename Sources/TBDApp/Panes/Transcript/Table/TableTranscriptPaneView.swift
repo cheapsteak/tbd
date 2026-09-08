@@ -529,7 +529,7 @@ struct TableTranscriptPaneView: View {
         // A pane that goes away disarms **its own** session's alarm and no
         // other. This instance is reachable from the scheduler's one app-wide
         // `onChange` slot, so it may hold alarms for sessions other panes are
-        // showing, and the 60-second rule is the one retire rule nothing
+        // showing, and the deadline rules are the retire rules nothing
         // re-announces: cancelling another session's alarm here would strand
         // its provisional row on screen forever. The alarms left armed are
         // safe — the sleeping task is retained by its own `fire` closure,
@@ -603,10 +603,11 @@ struct TableTranscriptPaneView: View {
         }
 
         // Arm the deadline only for a row that actually got published and has
-        // actually completed. `compose` has already applied every other retire
-        // rule, so a provisional row that survived it and is `.complete` is
-        // exactly the case nothing else will ever announce. Everything else —
-        // including a row that was just withdrawn — disarms.
+        // one. `compose` has already applied every other retire rule, so a
+        // provisional row that survived it is either a completed message
+        // nobody has confirmed or a stream that has gone quiet — the two cases
+        // nothing else will ever announce. Everything else — including a row
+        // that was just withdrawn — disarms.
         //
         // Both gestures name `sessionID`, and that is load-bearing rather than
         // decorative: one timer instance serves every session that publishes
@@ -615,9 +616,11 @@ struct TableTranscriptPaneView: View {
         // another session's pending retire alarm.
         if let provisional,
            items.last.map({ ProvisionalRowComposer.isProvisional(itemID: $0.id) }) == true,
-           let delay = ProvisionalRowComposer.retireDelay(phase: provisional.phase, now: at) {
+           let deadline = ProvisionalRowComposer.retireDeadline(for: provisional),
+           let delay = ProvisionalRowComposer.retireDelay(for: provisional, now: at) {
             await retireTimer.arm(
-                sessionID: sessionID, messageID: provisional.messageID, after: delay
+                sessionID: sessionID, messageID: provisional.messageID,
+                deadline: deadline, after: delay
             ) {
                 _ = await publish(
                     sessionID: sessionID, state: state, source: source,

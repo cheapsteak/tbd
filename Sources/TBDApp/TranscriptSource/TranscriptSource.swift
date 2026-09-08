@@ -83,6 +83,16 @@ actor TranscriptSource {
         /// first saw the stop — would never come due. Reset when the message
         /// id changes, because the new message has not completed yet.
         var completedAt: Date?
+        /// The `now` at which this reader last saw a line arrive for the
+        /// message `provisional` names.
+        ///
+        /// The ten-minute silent-stream rule measures from here, so it must
+        /// move when a line lands and stay put when a poll finds nothing —
+        /// stamping it with a fresh `Date()` every tick would push that
+        /// deadline forward forever, exactly as re-stamping `completedAt`
+        /// would push the 60-second one. Reset when the message id changes,
+        /// because the deadline belongs to the message, not to the session.
+        var lastLineAt: Date?
     }
 
     private var streamEntries: [String: StreamEntry] = [:]
@@ -358,7 +368,8 @@ actor TranscriptSource {
         // A line that will not decode is skipped, not fatal: the tailer can
         // catch a partial append, and a newer proxy can write a `type` this
         // build does not know.
-        working.lines.append(contentsOf: read.lines.compactMap(ModelProxyStreamLine.decode(line:)))
+        let decoded = read.lines.compactMap(ModelProxyStreamLine.decode(line:))
+        working.lines.append(contentsOf: decoded)
         working.lines = Self.capped(working.lines)
 
         let previous = working.provisional
@@ -368,20 +379,30 @@ actor TranscriptSource {
         }
 
         if previous?.messageID != folded.messageID {
-            // A different message now holds the row, and it has not been seen
-            // to complete before this fold.
+            // A different message now holds the row, and it has neither been
+            // seen to complete nor been timed from before this fold.
             working.completedAt = nil
+            working.lastLineAt = nil
         }
-        var stabilized = folded
+        // Only a line that actually arrived for *this* message restarts its
+        // silence. Lines that belong to another in-flight message do not, and
+        // a tick that decoded nothing at all leaves the deadline where it was.
+        if working.lastLineAt == nil
+            || decoded.contains(where: { $0.message == folded.messageID }) {
+            working.lastLineAt = now
+        }
+
+        var phase = folded.phase
         if case .complete = folded.phase {
             if let firstSeen = working.completedAt {
-                stabilized = ProvisionalMessage(
-                    messageID: folded.messageID, text: folded.text,
-                    phase: .complete(at: firstSeen))
+                phase = .complete(at: firstSeen)
             } else {
                 working.completedAt = now
             }
         }
+        let stabilized = ProvisionalMessage(
+            messageID: folded.messageID, text: folded.text, phase: phase,
+            lastLineAt: working.lastLineAt ?? now)
 
         working.provisional = stabilized
         streamEntries[sessionID] = working

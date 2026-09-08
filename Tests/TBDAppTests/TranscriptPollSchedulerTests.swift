@@ -1,6 +1,9 @@
+import Clocks
 import Foundation
 import Testing
 @testable import TBDApp
+@testable import TBDShared
+import TestSupport
 
 @Suite("TranscriptPollPolicy")
 struct TranscriptPollPolicyTests {
@@ -374,5 +377,64 @@ struct TranscriptPollSchedulerTests {
 
         await scheduler.deregister(sessionID: "s1", token: warm)
         #expect(await scheduler.registeredSessionIDs.isEmpty)
+    }
+}
+
+/// The scheduler's stream leg: the one tick that reads a second file and
+/// stamps what it reads with an instant the provisional row's retire deadlines
+/// are later measured against.
+///
+/// Its own suite because it drives a real poll task on a `TestClock`, which
+/// wants the clock-driven traits the registration tests above have no use for.
+@Suite("TranscriptPollSchedulerStream", .clockDriven, .serialized)
+struct TranscriptPollSchedulerStreamTests {
+
+    private static let transcriptLine = #"{"type":"user","uuid":"a","timestamp":"2026-08-26T10:00:00.000Z","message":{"role":"user","content":"hello"}}"#
+
+    /// A transcript and a stream file in one fenced directory. The stream file
+    /// carries a single text line and no terminal line, so what the tick reads
+    /// is a `.streaming` message whose deadline is measured from this stamp.
+    private static func files() throws -> (transcript: String, stream: String) {
+        let dir = fencedScratchRoot(prefix: "tbdsched")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let transcript = dir + "/transcript.jsonl"
+        try (transcriptLine + "\n").write(toFile: transcript, atomically: true, encoding: .utf8)
+        let stream = dir + "/stream.jsonl"
+        let line = try ModelProxyStreamLine
+            .text(message: "msg_a", index: 0, text: "Hel").encodedLine()
+        try (line + "\n").write(toFile: stream, atomically: true, encoding: .utf8)
+        return (transcript, stream)
+    }
+
+    /// What discriminates: the injected date is deliberately years away from
+    /// any wall clock a test machine can be set to, so a bare `Date()` at the
+    /// refresh site cannot produce it. The value is not decoration — it is what
+    /// the silent-stream deadline is measured from, so a scheduler that stamps
+    /// its own `Date()` puts that deadline somewhere no test clock can reach.
+    @Test("a stream tick stamps its lines with the injected date, not the wall clock")
+    func streamTickUsesTheInjectedDate() async throws {
+        let files = try Self.files()
+        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+        let source = TranscriptSource()
+        let clock = TestClock()
+        let scheduler = TranscriptPollScheduler(
+            source: source, now: { stamp }, clock: clock)
+
+        let pane = TranscriptPaneToken()
+        await scheduler.register(
+            sessionID: "s1", path: files.transcript, streamPath: files.stream,
+            tier: .foreground, token: pane)
+        await clock.advanceWhenSuspended(by: .milliseconds(100))
+
+        let tailed = await pollUntilTrue(timeout: .seconds(10)) {
+            await source.provisional(sessionID: "s1") != nil
+        }
+        #expect(tailed == .satisfied, "the tick must have read the stream file")
+        let provisional = await source.provisional(sessionID: "s1")
+        #expect(provisional?.messageID == "msg_a")
+        #expect(provisional?.lastLineAt == stamp,
+                "the instant the retire deadline is measured from came from the seam")
+
+        await scheduler.deregister(sessionID: "s1", token: pane)
     }
 }

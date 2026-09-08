@@ -1,21 +1,23 @@
 import Foundation
 
-/// The one-shot alarms behind ``ProvisionalRowComposer/unconfirmedRetireAfter``,
-/// one per session.
+/// The one-shot alarms behind ``ProvisionalRowComposer/unconfirmedRetireAfter``
+/// and ``ProvisionalRowComposer/silentStreamRetireAfter``, one per session.
 ///
 /// Every other way a provisional row retires is announced by something the pane
 /// already watches: confirmation rides in on a transcript read, an abort and a
 /// newer `start` ride in on a stream-file change, and the flag going off
-/// restarts the pane's loop. The 60-second rule is announced by nothing —
-/// the message has *stopped*, so the stream file has gone quiet by definition
-/// and the poll scheduler will report "no news" forever. Without an alarm the
-/// row would stay on screen until some unrelated edit to the session happened
-/// to trigger a publish.
+/// restarts the pane's loop. The two deadline rules are announced by nothing —
+/// a message that has *stopped* leaves a stream file quiet by definition, and a
+/// message whose proxy died mid-turn leaves one quiet in exactly the same way,
+/// so the poll scheduler reports "no news" forever either way. Without an alarm
+/// the row would stay on screen until some unrelated edit to the session
+/// happened to trigger a publish.
 ///
-/// So the pane arms exactly one sleep when it publishes a `.complete` row, and
-/// re-publishes once when it fires. The re-publish is an ordinary publish: it
-/// re-reads the source and re-composes, so it retires the row by simply not
-/// composing it any more, and it is correct even if the row was already gone.
+/// So the pane arms exactly one sleep whenever it publishes a row that has a
+/// deadline, and re-publishes once when it fires. The re-publish is an ordinary
+/// publish: it re-reads the source and re-composes, so it retires the row by
+/// simply not composing it any more, and it is correct even if the row was
+/// already gone.
 ///
 /// **Why the state is keyed by session id.** One instance of this actor is
 /// created per run of `appSideLoop`, but the closure that carries it is
@@ -35,14 +37,18 @@ actor ProvisionalRetireTimer {
 
     private let clock: any Clock<Duration>
 
-    /// One pending alarm: the message id it belongs to, and the sleeping task.
+    /// One pending alarm: the row it belongs to, and the sleeping task.
     ///
-    /// Recorded by message id, not by deadline, so a poll every 100 ms
-    /// re-arming for the same message is a no-op rather than a deadline that
-    /// keeps sliding forward — the same reason `TranscriptSource` records the
-    /// completion instant once.
+    /// The row is identified by its message id *and* the instant it is due,
+    /// never by "how long is left". A poll every 100 ms hands back the same
+    /// pair and is a no-op, so the deadline cannot slide forward under
+    /// repetition — `ProvisionalMessage` carries instants `TranscriptSource`
+    /// holds still for exactly this reason. When a line arrives for a streaming
+    /// message its due instant genuinely moves, and that is the one thing that
+    /// must replace the pending alarm rather than leave it alone.
     private struct Alarm {
         let messageID: String
+        let due: Date
         let task: Task<Void, Never>
     }
 
@@ -55,35 +61,44 @@ actor ProvisionalRetireTimer {
         self.clock = clock
     }
 
-    /// Arms a single alarm for `sessionID`'s `messageID`, firing `after` from
-    /// now.
+    /// Arms a single alarm for `sessionID`'s `messageID`, due at `deadline` and
+    /// firing `after` from now.
     ///
-    /// Idempotent per session and message id: re-arming for the id already
-    /// armed on that session leaves the existing alarm exactly where it is.
-    /// Arming a *different* id for the same session cancels that session's old
-    /// alarm first, because the row it belonged to is no longer the row on
-    /// screen. Other sessions' alarms are untouched either way.
+    /// Idempotent per session, message id and deadline: re-arming the pair
+    /// already armed on that session leaves the existing alarm exactly where it
+    /// is. A *different* id, or the same id whose deadline has moved, cancels
+    /// that session's old alarm first — the first because the row it belonged
+    /// to is no longer the row on screen, the second because a streaming row
+    /// that has just received a line is owed a later wake-up than the one
+    /// pending. Other sessions' alarms are untouched in every case.
+    ///
+    /// `deadline` is the alarm's identity, not a clock this actor reads: the
+    /// sleep is `after` on the injected clock, so a test clock never has to
+    /// agree with `Date`.
     func arm(
         sessionID: String,
         messageID: String,
+        deadline: Date,
         after: Duration,
         fire: @escaping @Sendable () async -> Void
     ) {
-        guard alarms[sessionID]?.messageID != messageID else { return }
+        if let pending = alarms[sessionID],
+           pending.messageID == messageID, pending.due == deadline { return }
         alarms[sessionID]?.task.cancel()
         let clock = self.clock
         alarms[sessionID] = Alarm(
             messageID: messageID,
+            due: deadline,
             task: Task { [weak self] in
                 try? await clock.sleep(for: after)
                 guard !Task.isCancelled else { return }
-                await self?.clear(sessionID: sessionID, messageID: messageID)
+                await self?.clear(sessionID: sessionID, messageID: messageID, due: deadline)
                 await fire()
             })
     }
 
     /// Cancels whatever is armed **for this session only**. Called on every
-    /// publish that does not produce a completed row for it — the row was
+    /// publish that does not produce a row with a deadline for it — the row was
     /// confirmed, aborted, superseded or switched off. A publish for one
     /// session must never disturb another's alarm, which is the whole reason
     /// this takes a session id.
@@ -98,8 +113,8 @@ actor ProvisionalRetireTimer {
     /// closure carrying this instance sits in the scheduler's single app-wide
     /// slot, the table can hold alarms for sessions other panes are showing,
     /// and cancelling one of those strands its provisional row on screen —
-    /// the 60-second rule is announced by nothing, so nothing re-arms it. A
-    /// pane leaving calls ``disarm(sessionID:)`` for its own session instead.
+    /// a deadline rule is announced by nothing, so nothing re-arms it. A pane
+    /// leaving calls ``disarm(sessionID:)`` for its own session instead.
     func disarmAll() {
         for alarm in alarms.values { alarm.task.cancel() }
         alarms.removeAll()
@@ -115,9 +130,11 @@ actor ProvisionalRetireTimer {
     var armedSessionCount: Int { alarms.count }
 
     /// Clears the record of an alarm that has just fired, unless a later `arm`
-    /// already replaced it for that session.
-    private func clear(sessionID: String, messageID: String) {
-        guard alarms[sessionID]?.messageID == messageID else { return }
+    /// already replaced it for that session — a replacement being either a
+    /// different message or the same message with a deadline that has moved.
+    private func clear(sessionID: String, messageID: String, due: Date) {
+        guard let pending = alarms[sessionID],
+              pending.messageID == messageID, pending.due == due else { return }
         alarms.removeValue(forKey: sessionID)
     }
 }

@@ -23,6 +23,14 @@ struct ProvisionalMessage: Equatable, Sendable {
     /// The message's text blocks concatenated in ascending block index.
     let text: String
     let phase: Phase
+    /// When the reader last saw a line for this message.
+    ///
+    /// The reader's clock, not the proxy's, and the same caller-stability rule
+    /// as `.complete(at:)`: it moves only when a line actually arrives, so the
+    /// deadline a silent `.streaming` row retires on does not slide forward on
+    /// every poll. `StreamFileReader.fold` stamps it with the `now` it is
+    /// handed and `TranscriptSource` is what holds it still.
+    let lastLineAt: Date
 }
 
 /// Folds the tagged lines of one terminal's stream file into the single
@@ -55,11 +63,14 @@ struct StreamFileReader: Sendable {
     /// from when the reader *first saw* the stop. So a caller that has already
     /// observed a stop must pass back the instant it recorded then, not a fresh
     /// `Date()` — folding the same lines with a moving `now` would push the
-    /// deadline forward on every poll and the row would never retire.
+    /// deadline forward on every poll and the row would never retire. The same
+    /// applies to `lastLineAt`, which this call stamps with `now` and which the
+    /// ten-minute silent-stream rule measures from.
     static func fold(lines: [ModelProxyStreamLine], now: Date) -> ProvisionalMessage? {
         guard let chosen = select(from: accumulate(lines)) else { return nil }
         return ProvisionalMessage(
-            messageID: chosen.messageID, text: chosen.text, phase: chosen.phase(now: now))
+            messageID: chosen.messageID, text: chosen.text, phase: chosen.phase(now: now),
+            lastLineAt: now)
     }
 
     /// The id of the most recent message in these lines by the same ranking

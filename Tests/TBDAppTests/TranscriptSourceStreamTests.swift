@@ -267,6 +267,46 @@ struct TranscriptSourceStreamTests {
                 "a deregistered session must leave no stream tail resident")
     }
 
+    /// The same stability rule as the completion instant, for the deadline a
+    /// row that never stops retires on: it must move when a line for that
+    /// message lands and stay put otherwise, or the ten-minute silent-stream
+    /// window would be pushed forward by the polling itself and never come due.
+    @Test("the last-line instant moves only when a line for that message arrives")
+    func lastLineInstantMovesOnlyWithItsOwnMessage() async throws {
+        let path = try Self.scratchDir() + "/stream.jsonl"
+        try Self.write(try Self.lines([
+            .start(message: "msg_a", at: Self.started),
+            .text(message: "msg_a", index: 0, text: "Hel"),
+        ]), to: path)
+
+        let source = TranscriptSource()
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: Self.t0))
+        #expect(await source.provisional(sessionID: "s1")?.lastLineAt == Self.t0)
+
+        // A poll that finds the file unchanged reads nothing and moves nothing.
+        let later = Self.t0.addingTimeInterval(120)
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: later) == false)
+        #expect(await source.provisional(sessionID: "s1")?.lastLineAt == Self.t0)
+
+        // Nor does traffic for a *different* message: `msg_b` starting says
+        // nothing about whether `msg_a` is still alive, and `msg_a` still holds
+        // the row because `msg_b` has produced no text.
+        try Self.append(try Self.lines([
+            .start(message: "msg_b", at: Self.started.addingTimeInterval(1)),
+        ]), to: path)
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: later) == false)
+        #expect(await source.provisional(sessionID: "s1")?.messageID == "msg_a")
+        #expect(await source.provisional(sessionID: "s1")?.lastLineAt == Self.t0)
+
+        // A delta of its own does move it.
+        try Self.append(try Self.lines([
+            .text(message: "msg_a", index: 0, text: "lo"),
+        ]), to: path)
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: later))
+        #expect(await source.provisional(sessionID: "s1")?.text == "Hello")
+        #expect(await source.provisional(sessionID: "s1")?.lastLineAt == later)
+    }
+
     // MARK: - The defensive cap
 
     /// The ceiling exists for the case the proxy's own truncation does not

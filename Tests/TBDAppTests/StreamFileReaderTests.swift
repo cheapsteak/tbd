@@ -26,7 +26,8 @@ struct StreamFileReaderTests {
             now: Self.now
         )
 
-        #expect(folded == ProvisionalMessage(messageID: "msg_a", text: "Hello, world", phase: .streaming))
+        #expect(folded == ProvisionalMessage(
+            messageID: "msg_a", text: "Hello, world", phase: .streaming, lastLineAt: Self.now))
     }
 
     /// The blocks arrive interleaved and out of order on purpose: the reader
@@ -64,7 +65,8 @@ struct StreamFileReaderTests {
             now: Self.now
         )
 
-        #expect(folded == ProvisionalMessage(messageID: "msg_new", text: "fresh", phase: .streaming))
+        #expect(folded == ProvisionalMessage(
+            messageID: "msg_new", text: "fresh", phase: .streaming, lastLineAt: Self.now))
     }
 
     /// Two parents in flight against one route interleave their lines. The
@@ -83,7 +85,8 @@ struct StreamFileReaderTests {
             now: Self.now
         )
 
-        #expect(folded == ProvisionalMessage(messageID: "msg_b", text: "bbb", phase: .streaming))
+        #expect(folded == ProvisionalMessage(
+            messageID: "msg_b", text: "bbb", phase: .streaming, lastLineAt: Self.now))
     }
 
     @Test("A started message with no text yet wins only when nothing else has text")
@@ -92,7 +95,8 @@ struct StreamFileReaderTests {
             lines: [.start(message: "msg_a", at: Self.started), .block(message: "msg_a", index: 0)],
             now: Self.now
         )
-        #expect(onlyStarted == ProvisionalMessage(messageID: "msg_a", text: "", phase: .streaming))
+        #expect(onlyStarted == ProvisionalMessage(
+            messageID: "msg_a", text: "", phase: .streaming, lastLineAt: Self.now))
 
         let alongsideText = StreamFileReader.fold(
             lines: [
@@ -103,7 +107,8 @@ struct StreamFileReaderTests {
             ],
             now: Self.now
         )
-        #expect(alongsideText == ProvisionalMessage(messageID: "msg_a", text: "has text", phase: .streaming))
+        #expect(alongsideText == ProvisionalMessage(
+            messageID: "msg_a", text: "has text", phase: .streaming, lastLineAt: Self.now))
     }
 
     /// Truncation happens only when nothing is in flight, but a reader that
@@ -122,7 +127,8 @@ struct StreamFileReaderTests {
         #expect(folded == ProvisionalMessage(
             messageID: "msg_torn",
             text: "orphan text",
-            phase: .complete(at: Self.now)
+            phase: .complete(at: Self.now),
+            lastLineAt: Self.now
         ))
     }
 
@@ -156,7 +162,8 @@ struct StreamFileReaderTests {
         #expect(folded == ProvisionalMessage(
             messageID: "msg_a",
             text: "partial",
-            phase: .aborted(reason: "upstream connection dropped")
+            phase: .aborted(reason: "upstream connection dropped"),
+            lastLineAt: Self.now
         ))
     }
 
@@ -212,7 +219,8 @@ struct StreamFileReaderTests {
         #expect(folded == ProvisionalMessage(
             messageID: "msg_a",
             text: "the answer",
-            phase: .complete(at: Self.now)
+            phase: .complete(at: Self.now),
+            lastLineAt: Self.now
         ))
     }
 
@@ -246,7 +254,8 @@ struct StreamFileReaderTests {
         #expect(StreamFileReader.fold(lines: decoded, now: Self.now) == ProvisionalMessage(
             messageID: "msg_a",
             text: "before-after",
-            phase: .complete(at: Self.now)
+            phase: .complete(at: Self.now),
+            lastLineAt: Self.now
         ))
     }
 }

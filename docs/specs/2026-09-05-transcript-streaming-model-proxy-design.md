@@ -519,6 +519,15 @@ retired when:
   lingers for the difference. A shorter window would retire genuine messages
   on a loaded machine; a longer one only delays removing a row nothing
   confirms.
+- a stream that has not stopped goes 10 minutes without a new line, measured
+  from the last line the reader saw and restarted by each one. A message
+  leaves the streaming phase only when a `stop` or `aborted` line is written
+  and read, so a proxy killed mid-turn — which writes neither, and whose
+  request the JSONL will not confirm either — has no other way off the screen.
+  The window is the proxy's own drain cap, the longest a legitimate stream can
+  still be in flight. Sixty seconds would be wrong here: the tee records text
+  deltas, and a healthy turn streaming a large tool-input block emits none for
+  minutes.
 
 `TranscriptStreamPlan.updateLast` already renders a last row whose content
 version changed, so a growing row costs one tail re-render per tick. A subtle
@@ -539,7 +548,9 @@ affordance, and the row is always an assistant bubble.
 ### Failure handling
 
 - An unreadable stream file is no news, never a blank row.
-- A proxy that dies mid-stream leaves a message the 60-second rule retires.
+- A proxy that dies mid-stream leaves a message the 10-minute silent-stream
+  rule retires; one that dies after writing its stop leaves a message the
+  60-second unconfirmed rule retires.
 - A pane whose terminal has no `transcriptStreamPath` registers no stream
   file and behaves exactly as today.
 - The provisional state is dropped on confirmation, retire, and deregistration.
@@ -607,7 +618,8 @@ SSE shape and costs zero tokens.
   live files and unlinks the rest.
 - **App.** The provisional row appears, grows, and is replaced by the
   confirming JSONL line; retires on abort, on a newer message taking the row,
-  and on the 60 s rule; sorts after pending questions; and with streaming off
+  on the 60 s unconfirmed rule and on the 10-minute silent-stream rule
+  (which a new line restarts); sorts after pending questions; and with streaming off
   is never published while the file still updates. Chunk-split equivalence:
   *"a file delivered in arbitrary chunks folds to what the whole file folds
   to"* writes one encoded stream file to disk in seeded-random chunk splits —
