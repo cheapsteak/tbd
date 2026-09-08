@@ -115,9 +115,13 @@ final class ProxyServer: Sendable {
             clock: clock)
     }
 
-    /// Number of forwarded responses whose head has been relayed and whose end
-    /// has not. `POST /tbd/retire` drains on this; the status endpoint reports
-    /// it.
+    /// Number of accepted requests whose relay has not ended.
+    ///
+    /// Counted from the moment the route resolves, not from the upstream head:
+    /// a request waiting on time to first byte has produced nothing to be seen
+    /// by, and a retire that drained through that window would `exit(0)` on a
+    /// turn that had just started. `POST /tbd/retire` drains on this; the
+    /// status endpoint reports it.
     var streamsInFlight: Int { inFlight.value }
 
     /// When a daemon last drove a `/tbd/…` verb. The retention watch samples
@@ -448,6 +452,17 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
                 }
             }
 
+            // Counted from acceptance, not from the upstream head. Between the
+            // route resolving and time to first byte a request has produced no
+            // bytes to be seen by, and that window is a whole model round trip
+            // — seconds on a cold connection, longer on a queued one. A retire
+            // that drained through it would sample zero streams in flight and
+            // `exit(0)` on a turn that had just started. `relayEnd` releases
+            // the count on every exit path — head or no head, cut, 502 or a
+            // cancelled client — and `forward` promises `onEnd` exactly once,
+            // which is what keeps this exactly-once.
+            inFlight.increment()
+
             let relay = ResponseRelay(
                 boxed: boxed, isHeadRequest: method == .HEAD, keepAlive: keepAlive,
                 inFlight: inFlight, tee: teeContinuation)
@@ -562,7 +577,6 @@ private final class ResponseRelay: @unchecked Sendable {
             return true
         }
         guard firstHead else { return }
-        inFlight.increment()
 
         let responseHead = makeResponseHead(status: status, headers: headers)
         boxed.eventLoop.execute {
@@ -601,6 +615,12 @@ private final class ResponseRelay: @unchecked Sendable {
         tee?.yield(.end(error))
         tee?.finish()
 
+        // Unconditional, and before the branch below: the count was taken when
+        // the request was accepted, so it is owed back whether the upstream
+        // ever produced a head or not. `hadHead` decides only what the client
+        // is told — a 502 it has seen nothing of yet, or a cut body it has.
+        inFlight.decrement()
+
         guard state.hadHead else {
             // Nothing has been written to the client yet, so the whole failure
             // is still expressible as a status. This is the only place the
@@ -612,7 +632,6 @@ private final class ResponseRelay: @unchecked Sendable {
             return
         }
 
-        inFlight.decrement()
         let keepAlive = self.keepAlive
         let cut = error != nil
         boxed.eventLoop.execute {

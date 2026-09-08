@@ -37,6 +37,15 @@ final class FakeUpstream: @unchecked Sendable {
         /// response, which is how a truncated stream reaches a client: the
         /// chunked body never gets its terminating chunk.
         var closeWithoutStop: Bool = false
+        /// The gap before the response *head*, which no other field can
+        /// express: `delayMs` on the first event delays a byte of the body,
+        /// and by then the head is already on the wire. A real turn spends
+        /// this window queued at the model, and it is the window in which a
+        /// request exists but has produced no evidence of itself.
+        ///
+        /// Last in the memberwise initializer on purpose, so every existing
+        /// `Script(...)` call site keeps compiling unchanged.
+        var headDelayMs: Int = 0
     }
 
     typealias Handler = @Sendable (HTTPRequestHead, [UInt8]) -> Script
@@ -153,6 +162,19 @@ private final class ScriptedUpstreamHandler: ChannelInboundHandler, @unchecked S
     }
 
     private func respond(context: ChannelHandlerContext, script: FakeUpstream.Script) {
+        guard script.headDelayMs > 0 else {
+            writeHead(context: context, script: script)
+            return
+        }
+        let boxed = SendableUpstreamContext(context: context)
+        context.eventLoop.scheduleTask(in: .milliseconds(Int64(script.headDelayMs))) { [self] in
+            let context = boxed.context
+            guard context.channel.isActive else { return }
+            writeHead(context: context, script: script)
+        }
+    }
+
+    private func writeHead(context: ChannelHandlerContext, script: FakeUpstream.Script) {
         var headers = HTTPHeaders()
         for (name, value) in script.headers {
             headers.add(name: name, value: value)

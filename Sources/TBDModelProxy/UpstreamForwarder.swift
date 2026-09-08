@@ -311,6 +311,25 @@ final class UpstreamSinkRegistry: NSObject, URLSessionDataDelegate, @unchecked S
         sink(for: dataTask)?(.chunk([UInt8](data)))
     }
 
+    /// A 3xx is relayed, never followed.
+    ///
+    /// `URLSession` follows redirects by default and copies the request's
+    /// headers onto the new one, so a `Location` pointing at another host
+    /// would carry the client's `Authorization` — the bearer token for this
+    /// session's upstream — to whatever answered. Refusing the redirect keeps
+    /// the credential on the one host the route named and hands the client the
+    /// 3xx verbatim, which is what it would have seen talking to the upstream
+    /// directly and what leaves the decision where it belongs.
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         let sink = lock.withLock { sinks.removeValue(forKey: ObjectIdentifier(task)) }
         sink?(.end(error))

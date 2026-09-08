@@ -544,10 +544,157 @@ extension ModelProxySuites {
                 #expect(text.hasPrefix(expected), "502 body was: \(text)")
                 #expect(text.hasSuffix(#""}}"#), "502 body was: \(text)")
 
-                // Nothing was forwarded, and a failure before the head must not
-                // touch the counter it never incremented.
+                // Nothing was forwarded, and the count taken when the request
+                // was accepted was handed back by the same `relayEnd` that
+                // wrote the 502.
                 #expect(harness.upstream.requests.isEmpty)
                 #expect(harness.server.streamsInFlight == 0)
+            }
+        }
+
+        @Test("a stream is counted from acceptance, so a retire in the head's window waits")
+        func streamsInFlightCountsFromAcceptance() async throws {
+            // Time to first byte is a whole model round trip, and for its
+            // entire length the request has produced no byte anyone can see.
+            // Counted from the upstream *head* instead, a retire arriving in
+            // that window samples zero streams in flight and hands the process
+            // over — `exit(0)` in production — on a turn that had just started.
+            let retired = ProxyFlagBox()
+            let headArrived = ProxyFlagBox()
+
+            try await withProxy(
+                prefix: "pxacc",
+                script: { _, _ in
+                    var script = sseTextAnswer(messageID: "msg_TTFB", deltas: ["late"])
+                    // The head itself is delayed. No `delayMs` can express
+                    // this: the first event's gap is a gap before a body byte,
+                    // and by then the head is already on the wire.
+                    script.headDelayMs = 2000
+                    return script
+                },
+                onRetire: { retired.set() }
+            ) { harness in
+                #expect(harness.server.streamsInFlight == 0)
+
+                let turn = Task { () -> Int in
+                    var request = URLRequest(url: harness.url("/v1/messages"))
+                    request.httpMethod = "POST"
+                    request.httpBody = Data(#"{"stream":true}"#.utf8)
+                    let (bytes, response) = try await harness.session.bytes(for: request)
+                    headArrived.set()
+                    #expect((response as? HTTPURLResponse)?.statusCode == 200)
+                    var events = 0
+                    for try await line in bytes.lines where line.hasPrefix("event: ") {
+                        events += 1
+                    }
+                    return events
+                }
+
+                // One second against the head's two. Counted from the head,
+                // this wait runs out at zero and names itself.
+                await waitUntil(
+                    "the accepted request was counted before its head arrived", seconds: 1,
+                    sample: { harness.server.streamsInFlight }, isSatisfied: { $0 == 1 })
+                #expect(
+                    !headArrived.value,
+                    "the upstream answered early; the window under test was never entered")
+
+                // A retire issued inside that window. The 200 is immediate
+                // either way — what is under test is the drain, whose first
+                // sample is taken before it sleeps at all.
+                let (body, response) = try await harness.session.data(
+                    for: controlRequest(port: harness.port, method: "POST", path: "/tbd/retire"))
+                #expect((response as? HTTPURLResponse)?.statusCode == 200)
+                #expect(String(decoding: body, as: UTF8.self) == ControlEndpoints.retiringBody)
+                #expect(
+                    !headArrived.value,
+                    "the retire outlasted the head's delay; the window was missed")
+                #expect(
+                    !retired.value,
+                    "the drain handed the process over while a turn was still waiting on its head")
+
+                // `sseTextAnswer` is message_start, content_block_start, one
+                // delta, content_block_stop, message_delta, message_stop.
+                let events = try await turn.value
+                #expect(events == 6, "the retire cut a stream it was supposed to drain")
+                await waitUntil(
+                    "the relay released its stream once the response ended",
+                    sample: { harness.server.streamsInFlight }, isSatisfied: { $0 == 0 })
+                await waitUntil(
+                    "the drain handed over once the stream ended", sample: { retired.value },
+                    isSatisfied: { $0 })
+            }
+        }
+
+        // MARK: Redirects
+
+        @Test("a redirect is relayed to the client, never followed")
+        func redirectIsRelayedNotFollowed() async throws {
+            // `URLSession` follows a 3xx by default and copies the original
+            // request's headers onto the new one, so a `Location` naming
+            // another host would carry the client's `Authorization` — this
+            // session's bearer token — to whatever answered it. The redirect
+            // is the client's to act on, and relaying it is also what the
+            // byte-transparency rule says about every other response.
+            let redirectBody = Array(#"{"moved":true}"#.utf8)
+
+            try await withProxy(
+                prefix: "pxrdr",
+                script: { head, _ in
+                    // A relative `Location`, which resolves back to this same
+                    // fake. A followed redirect therefore shows up as a second
+                    // request here and as a 200 at the client, so the test
+                    // fails loudly rather than by omission.
+                    if head.uri.hasSuffix("/moved") {
+                        return FakeUpstream.Script(
+                            status: 200, headers: [("content-type", "application/json")],
+                            events: [(delayMs: 0, bytes: Array(#"{"followed":true}"#.utf8))])
+                    }
+                    return FakeUpstream.Script(
+                        status: 302,
+                        headers: [("content-type", "application/json"), ("location", "/moved")],
+                        events: [(delayMs: 0, bytes: redirectBody)])
+                }
+            ) { harness in
+                // A raw socket, because `URLSession` follows a 302 itself: a
+                // client that chased the `Location` would report on where it
+                // landed rather than on what the proxy put on the wire.
+                let requestBody = #"{"stream":true}"#
+                let request = """
+                    POST /r/\(harness.token)/v1/messages HTTP/1.1\r
+                    Host: 127.0.0.1\r
+                    Authorization: Bearer test-token-not-real\r
+                    Content-Type: application/json\r
+                    Content-Length: \(requestBody.utf8.count)\r
+                    Connection: close\r
+                    \r
+                    \(requestBody)
+                    """
+                let port = harness.port
+                let response = try await withPhaseDeadline("redirect read", seconds: 25) {
+                    try await withCheckedThrowingContinuation {
+                        (continuation: CheckedContinuation<String, any Error>) in
+                        DispatchQueue.global().async {
+                            continuation.resume(
+                                with: Result { try rawHTTPExchange(port: port, request: request) })
+                        }
+                    }
+                }
+
+                #expect(
+                    response.hasPrefix("HTTP/1.1 302"),
+                    "the redirect was not relayed; got: \(response.prefix(64))")
+                #expect(response.lowercased().contains("location: /moved"))
+                #expect(response.contains(#"{"moved":true}"#))
+                #expect(
+                    !response.contains(#"{"followed":true}"#),
+                    "the proxy followed the redirect and relayed what it found")
+
+                // Exactly one, on the one host the route named. A followed
+                // redirect would be two — and to another host, the bearer
+                // token would have gone with it.
+                #expect(harness.upstream.requests.count == 1)
+                #expect(harness.upstream.requests.first?.head.uri == "/v1/messages")
             }
         }
     }
