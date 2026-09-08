@@ -1173,37 +1173,46 @@ struct ModelProxySupervisorTests {
     /// is one short of `hangSignalThreshold`, and a poll that then succeeds
     /// must reset the count rather than let it carry into a later hang
     /// episode.
+    ///
+    /// On `EventDrivenTestClock` for the reason the ladder below spells out:
+    /// this is a re-arming poller chain, and every advance after the first has
+    /// to wait for the sleep the previous tick armed on its way out.
     @Test("three misses then a successful poll sends no signal")
     func threeMissesThenASuccessSendsNoSignal() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
 
         let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6300, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 6300, startTime: proxy.processStartTime)
 
-        let supervisor = fixture.supervisor()
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.start()
         #expect(await supervisor.current?.pid == 6300)
 
-        // Three misses only, driven by a fixed count of `advanceWhenSuspended`
-        // rather than `advanceUntil`: there is no positive outcome to converge
-        // on here, and the absence this asserts holds regardless of exactly
-        // when it is checked — three is below the threshold on any reading.
+        // Three misses, and no more: three is below the threshold on any
+        // reading, so there is no positive outcome to converge on here — the
+        // count is fixed and each step waits for the arming that makes it
+        // sound.
         proxy.failNextStatusResponses(3)
         for _ in 1...3 {
-            await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
+            try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
         }
+        // The re-arm after the third tick is the proof that tick finished, so
+        // the absence below is an observation rather than a guess about
+        // whether the tick had run yet.
+        try await clock.requireSleeperArmed()
         #expect(
             fixture.signaller.terminated().isEmpty,
             "three misses is one short of the four-poll threshold")
 
         // The fourth poll succeeds (the fake's fail count is exhausted). A
         // signal now would be the count carrying across the reset rather than
-        // restarting from it — again timing-invariant, so one plain advance
-        // is enough.
-        await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
+        // restarting from it.
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        try await clock.requireSleeperArmed()
         #expect(fixture.signaller.terminated().isEmpty)
         #expect(fixture.signaller.killed().isEmpty)
         #expect(await supervisor.current?.pid == 6300)
@@ -1221,17 +1230,59 @@ struct ModelProxySupervisorTests {
     /// "alive but unresponsive" to a signal at all: `tick`'s poll-failure
     /// branch only ever consulted the process table, so a merely-hung proxy
     /// (as opposed to one truly gone) was kept forever.
+    ///
+    /// **Why this runs on `EventDrivenTestClock`, and what the mechanism was.**
+    /// The watch is a fire-then-re-arm loop — `tick` runs, returns, and only
+    /// then does `watch` arm the next `clock.sleep(for: watchInterval)` — so
+    /// every advance in this ladder past the first is a re-arm, the shape
+    /// `Tests/CLAUDE.md` ("Re-arming") names as the sharp edge of every clock
+    /// handshake. On `TestClock` the only way to observe a re-arm is
+    /// `checkSuspension()`, whose `megaYield` is 20 serially-awaited
+    /// background-QoS tasks; the `advanceUntil` loop this test used ran that
+    /// probe every 25 ms, so under the saturated fast pass it flooded the
+    /// cooperative pool with exactly the low-priority work the watch task
+    /// needed a turn from, and starved the thing it was waiting for. Field
+    /// signature: this test reddened on a rerun of an unrelated PR (run
+    /// 34279779589 attempt 3) having observed **one** clock advance in 45 s —
+    /// the first tick landed and the second re-arm was never seen. Nothing
+    /// about the ladder was slow: the fake answers a miss with a prompt 500,
+    /// and `ModelProxyClient`'s two-second budget is a `URLSession` deadline
+    /// that no test clock touches.
+    ///
+    /// So each step here advances only once the sleep it is meant to fire is
+    /// provably in the ledger, and `EventDrivenTestClock` signals that arming
+    /// from inside the critical section that registers the sleeper rather than
+    /// racing a probe loop. Strict (`require`) rather than soft, because the
+    /// chain is sound only step by step: a missed arming throws before virtual
+    /// time moves, instead of desyncing the ledger and hanging later with no
+    /// attribution — and one throw ends the chain, so a failing run pays one
+    /// hang guard rather than one per wait.
+    ///
+    /// **Advancing on this clock does not run the resumed task's post-sleep
+    /// code**, so every assertion below is preceded by the wait that proves the
+    /// tick it is about has finished: the re-arm. `requireSleeperArmed` after
+    /// the last advance of a group is that proof, and the verdict is always
+    /// what the signaller recorded and what the spawner was asked for — never
+    /// elapsed real time.
+    ///
+    /// **What the chain relies on, for whoever changes `tick` next**: exactly
+    /// one sleeper can be in the ledger at each step. `watch` does not re-arm
+    /// until `tick` returns, and no path this test walks reaches a second
+    /// `clock.sleep` — the respawn at the end succeeds on its immediate
+    /// attempt, so `respawn`'s backoff never arms. Add another sleep reachable
+    /// from `tick` and these waits could land on the wrong sleeper.
     @Test("a hung proxy is SIGTERMed at four misses, SIGKILLed two ticks later, and respawned once gone")
     func hungProxyEscalatesToSignalsThenRespawns() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
 
         let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6302, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 6302, startTime: proxy.processStartTime)
 
-        let supervisor = fixture.supervisor()
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.start()
         #expect(await supervisor.current?.pid == 6302)
 
@@ -1239,12 +1290,12 @@ struct ModelProxySupervisorTests {
         // proxy never recovers in this test.
         proxy.failNextStatusResponses(20)
 
-        let sentTerm = await fixture.clock.advanceUntil(
-            "SIGTERM to reach the hung proxy", by: fixture.watchInterval
-        ) {
-            !fixture.signaller.terminated().isEmpty
+        // Four ticks, four consecutive misses: the fourth crosses
+        // `hangSignalThreshold` and sends SIGTERM from inside `tick`.
+        for _ in 1...4 {
+            try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
         }
-        #expect(sentTerm)
+        try await clock.requireSleeperArmed()
         #expect(
             fixture.signaller.terminated() == [6302],
             "the fourth consecutive miss crosses hangSignalThreshold")
@@ -1253,12 +1304,11 @@ struct ModelProxySupervisorTests {
             await supervisor.current?.pid == 6302,
             "still the same live proxy — sending a signal does not itself drop it")
 
-        let sentKill = await fixture.clock.advanceUntil(
-            "SIGKILL to reach the hung proxy", by: fixture.watchInterval
-        ) {
-            !fixture.signaller.killed().isEmpty
+        // `hangSignalKillDelay` more misses, and the second of them escalates.
+        for _ in 1...2 {
+            try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
         }
-        #expect(sentKill)
+        try await clock.requireSleeperArmed()
         #expect(fixture.signaller.killed() == [6302])
         #expect(fixture.signaller.terminated() == [6302], "still exactly one SIGTERM, never repeated")
         #expect(
@@ -1269,12 +1319,11 @@ struct ModelProxySupervisorTests {
         // the same fact that drives the ordinary death path.
         fixture.identity.forget(pid: 6302)
         await fixture.spawner.answer(.success(pid: 6303, port: proxy.port))
-        let respawned = await fixture.clock.advanceUntil(
-            "the hung proxy to be respawned on the same port", by: fixture.watchInterval
-        ) {
-            await supervisor.current?.pid == 6303
-        }
-        #expect(respawned)
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        try await clock.requireSleeperArmed()
+        #expect(
+            await supervisor.current?.pid == 6303,
+            "the hung proxy is respawned once the process table stops confirming it")
         #expect(
             await fixture.spawner.calls() == [proxy.port],
             "the respawn targets the port the hung proxy held")
@@ -1289,17 +1338,23 @@ struct ModelProxySupervisorTests {
     /// the ordinary "gone" path (`processIdentity.matches` failing against
     /// the poll-failure branch's anchor) that respawns it, immediately, with
     /// no signal in between.
+    ///
+    /// One tick, but on `EventDrivenTestClock` with the ladder above: the
+    /// replacement happens *inside* that tick, so the re-arm after it is what
+    /// makes the assertions below readable off the observables rather than off
+    /// a real-time poll.
     @Test("a recycled pid takes the immediate respawn path, never a signal")
     func recycledPidRespawnsWithoutSignalling() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
 
         let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6304, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 6304, startTime: proxy.processStartTime)
 
-        let supervisor = fixture.supervisor()
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.start()
         #expect(await supervisor.current?.pid == 6304)
 
@@ -1310,12 +1365,11 @@ struct ModelProxySupervisorTests {
         fixture.identity.admit(pid: 6304, startTime: proxy.processStartTime.addingTimeInterval(500))
         await fixture.spawner.answer(.success(pid: 6305, port: proxy.port))
 
-        let replaced = await fixture.clock.advanceUntil(
-            "the recycled pid to be replaced", by: fixture.watchInterval
-        ) {
-            await supervisor.current?.pid == 6305
-        }
-        #expect(replaced)
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        try await clock.requireSleeperArmed()
+        #expect(
+            await supervisor.current?.pid == 6305,
+            "the recycled pid is replaced on the tick that noticed it")
         #expect(fixture.signaller.terminated().isEmpty, "a recycled pid must never be signalled")
         #expect(fixture.signaller.killed().isEmpty)
         #expect(
