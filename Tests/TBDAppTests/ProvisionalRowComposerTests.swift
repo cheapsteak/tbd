@@ -1,0 +1,526 @@
+import Clocks
+import Foundation
+import Testing
+@testable import TBDApp
+@testable import TBDShared
+import TestSupport
+
+/// `ProvisionalRowComposer` — the step that decides whether the model-proxy
+/// stream's in-flight message is on screen, and where in the list it sits.
+///
+/// Pure, so every test here is a plain value assertion: the composer has no
+/// files, no clock and no `AppState`. The wiring that feeds it is exercised
+/// separately in `ProvisionalRowPublishTests` below.
+@Suite("ProvisionalRowComposer")
+struct ProvisionalRowComposerTests {
+
+    private static let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+    /// Two settled JSONL rows, so "appended last" is a real claim about order
+    /// rather than a statement about a one-element array.
+    private static let settled: [TranscriptItem] = [
+        .userPrompt(id: "u1", text: "explain the fold", timestamp: t0),
+        .assistantText(id: "msg_old", text: "an older answer", timestamp: t0),
+    ]
+
+    private static func streaming(_ text: String, id: String = "msg_a") -> ProvisionalMessage {
+        ProvisionalMessage(messageID: id, text: text, phase: .streaming)
+    }
+
+    /// Nothing is confirmed. The default for tests that are about some other
+    /// retire rule, so a stray confirmation cannot make them pass vacuously.
+    private static let nothingConfirmed: @Sendable (String) -> Bool = { _ in false }
+
+    /// The text of an `.assistantText` row, read straight off the case so this
+    /// suite stays free of the `@MainActor` rendering helpers.
+    private static func assistantText(_ item: TranscriptItem?) -> String? {
+        guard let item, case .assistantText(_, let text, _, _) = item else { return nil }
+        return text
+    }
+
+    private static func compose(
+        items: [TranscriptItem] = settled,
+        provisional: ProvisionalMessage?,
+        confirmed: @escaping (String) -> Bool = nothingConfirmed,
+        now: Date = t0,
+        streamingEnabled: Bool = true
+    ) -> [TranscriptItem] {
+        ProvisionalRowComposer.compose(
+            items: items, provisional: provisional, confirmed: confirmed,
+            now: now, streamingEnabled: streamingEnabled)
+    }
+
+    // MARK: - Appearing and growing
+
+    @Test("a streaming message appears as the last row, with the stream id prefix")
+    func streamingMessageAppears() {
+        let items = Self.compose(provisional: Self.streaming("Hello"))
+
+        #expect(items.count == Self.settled.count + 1)
+        #expect(Array(items.dropLast()) == Self.settled,
+                "the settled transcript must be passed through untouched")
+        guard let last = items.last,
+              case .assistantText(let id, let text, let timestamp, let usage) = last else {
+            Issue.record("expected a trailing assistantText row, got \(String(describing: items.last))")
+            return
+        }
+        #expect(id == "stream:msg_a")
+        #expect(id.hasPrefix(ProvisionalRowComposer.idPrefix))
+        #expect(text == "Hello")
+        #expect(timestamp == nil, "the row carries no timestamp — the JSONL has not stamped it yet")
+        #expect(usage == nil)
+    }
+
+    /// The identity has to hold still while the text grows, or the table
+    /// rebuilds instead of re-rendering its last row.
+    @Test("a growing message keeps one row identity and updates its text")
+    func growingMessageKeepsItsIdentity() {
+        let first = Self.compose(provisional: Self.streaming("Hel"))
+        let second = Self.compose(provisional: Self.streaming("Hello, world"))
+
+        #expect(first.count == second.count)
+        #expect(first.last?.id == second.last?.id)
+        #expect(Self.assistantText(second.last) == "Hello, world")
+    }
+
+    /// The empty-text case is deliberate, not an oversight: `StreamFileReader`
+    /// reports a message that has started and said nothing so a reader can see
+    /// that a turn has begun. The row is a bare cursor until the first delta.
+    @Test("a started message with no text yet still gets a row")
+    func startedButSilentStillGetsARow() {
+        let items = Self.compose(provisional: Self.streaming(""))
+
+        #expect(items.last?.id == "stream:msg_a")
+        #expect(Self.assistantText(items.last) == "")
+    }
+
+    // MARK: - Retiring
+
+    /// The ordinary end of a turn: the JSONL catches up, the real row lands,
+    /// and the provisional one must be gone in the same publish — not one row
+    /// later, or the answer renders twice.
+    @Test("a confirmed message is replaced by its JSONL row, not shown twice")
+    func confirmedMessageIsReplaced() {
+        let landed = Self.settled + [
+            .assistantText(id: "msg_a", text: "Hello, world", timestamp: Self.t0),
+        ]
+
+        let items = Self.compose(
+            items: landed,
+            provisional: Self.streaming("Hello, world"),
+            confirmed: { $0 == "msg_a" })
+
+        #expect(items == landed, "the composer must add nothing once the id is confirmed")
+        #expect(!items.contains { ProvisionalRowComposer.isProvisional(itemID: $0.id) },
+                "no provisional row survives confirmation")
+        #expect(items.contains { $0.id == "msg_a" },
+                "and the settled row it was standing in for is present")
+    }
+
+    @Test("an aborted message is retired")
+    func abortedMessageIsRetired() {
+        let items = Self.compose(provisional: ProvisionalMessage(
+            messageID: "msg_a", text: "half an ans",
+            phase: .aborted(reason: "upstream closed")))
+
+        #expect(items == Self.settled)
+    }
+
+    @Test("a completed but unconfirmed message is retired after the deadline")
+    func completedMessageRetiresAfterTheDeadline() {
+        let completed = ProvisionalMessage(
+            messageID: "msg_a", text: "Hello, world", phase: .complete(at: Self.t0))
+
+        let atFiftyNine = Self.compose(
+            provisional: completed, now: Self.t0.addingTimeInterval(59))
+        #expect(atFiftyNine.last?.id == "stream:msg_a",
+                "59 s after the stop the row is still the best thing to show")
+
+        let atSixtyOne = Self.compose(
+            provisional: completed, now: Self.t0.addingTimeInterval(61))
+        #expect(atSixtyOne == Self.settled,
+                "61 s after the stop nothing is ever going to confirm it")
+    }
+
+    /// The deadline measures from the completion instant, so a row that
+    /// completed long before this publish is already gone on its first render.
+    @Test("the deadline is measured from the completion instant, not from first sight")
+    func deadlineIsMeasuredFromCompletion() {
+        let longDone = ProvisionalMessage(
+            messageID: "msg_a", text: "Hello",
+            phase: .complete(at: Self.t0.addingTimeInterval(-3600)))
+
+        #expect(Self.compose(provisional: longDone) == Self.settled)
+    }
+
+    @Test("nothing tailed yet means nothing appended")
+    func noProvisionalMeansNoRow() {
+        #expect(Self.compose(provisional: nil) == Self.settled)
+    }
+
+    // MARK: - The flag
+
+    /// The off branch of the feature's gate. Everything else about the input is
+    /// exactly the appearing case, so this can only pass because the flag was
+    /// read.
+    @Test("streaming off never produces a row")
+    func streamingOffProducesNoRow() {
+        #expect(Self.compose(provisional: Self.streaming("Hello"), streamingEnabled: false)
+                == Self.settled)
+        #expect(Self.compose(provisional: Self.streaming("Hello"), streamingEnabled: true).count
+                == Self.settled.count + 1,
+                "and the same input with the flag on does produce one")
+    }
+
+    // MARK: - Order
+
+    /// The pane composes in three layers — JSONL, then the daemon's pending
+    /// `AskUserQuestion` captures, then this. A question captured by the
+    /// `PreToolUse` hook was captured *before* the answer now streaming, so the
+    /// provisional row belongs after it.
+    @Test("the row sorts after a pending AskUserQuestion synthetic item")
+    func rowSortsAfterAPendingQuestion() {
+        let merged = AskUserQuestionMerger.merge(
+            jsonlItems: Self.settled,
+            pending: [PendingAskUserQuestion(
+                toolUseID: "toolu_1",
+                inputJSON: #"{"questions":[]}"#,
+                timestamp: Self.t0)])
+        #expect(merged.items.last?.id == "toolu_1", "fixture check: the merger appends the capture")
+
+        let items = Self.compose(items: merged.items, provisional: Self.streaming("Hello"))
+
+        #expect(items.count == merged.items.count + 1)
+        #expect(items.last?.id == "stream:msg_a")
+        #expect(items[items.count - 2].id == "toolu_1",
+                "the synthetic question keeps its place directly above the provisional row")
+    }
+
+    // MARK: - The declared constants
+
+    @Test("the retire window is 60 seconds and the prefix is stream:")
+    func constantsAreWhatTheDesignDeclares() {
+        #expect(ProvisionalRowComposer.unconfirmedRetireAfter == .seconds(60))
+        #expect(ProvisionalRowComposer.idPrefix == "stream:")
+        #expect(ProvisionalRowComposer.isProvisional(itemID: "stream:msg_a"))
+        #expect(!ProvisionalRowComposer.isProvisional(itemID: "msg_a"))
+    }
+
+    // MARK: - The alarm's delay
+
+    @Test("only a completed message asks for a retire alarm")
+    func onlyCompletionSchedulesAnAlarm() {
+        #expect(ProvisionalRowComposer.retireDelay(phase: .streaming, now: Self.t0) == nil)
+        #expect(ProvisionalRowComposer.retireDelay(
+            phase: .aborted(reason: "x"), now: Self.t0) == nil)
+        #expect(ProvisionalRowComposer.retireDelay(
+            phase: .complete(at: Self.t0), now: Self.t0) == .seconds(60))
+        #expect(ProvisionalRowComposer.retireDelay(
+            phase: .complete(at: Self.t0), now: Self.t0.addingTimeInterval(45)) == .seconds(15))
+        #expect(ProvisionalRowComposer.retireDelay(
+            phase: .complete(at: Self.t0), now: Self.t0.addingTimeInterval(600)) == .seconds(0),
+                "a deadline already past is clamped at zero, never negative")
+    }
+}
+
+/// The trailing cursor: how a reader tells the provisional row from a settled
+/// one. Two hops — the presentation marks the node, the bubble draws the mark —
+/// and both are asserted, because either alone renders nothing.
+@MainActor
+@Suite("ProvisionalRowPresentation")
+struct ProvisionalRowPresentationTests {
+
+    @Test("a stream: item builds a node marked provisional and a plain one does not")
+    func streamPrefixMarksTheNode() {
+        let presentation = TranscriptPresentation.build(
+            items: [
+                .assistantText(id: "msg_old", text: "settled", timestamp: nil),
+                .assistantText(id: "stream:msg_a", text: "arriving", timestamp: nil),
+            ],
+            memo: TranscriptPresentationMemo())
+
+        #expect(presentation.nodes.count == 2)
+        #expect(presentation.nodes[0].isProvisional == false)
+        #expect(presentation.nodes[1].isProvisional)
+    }
+
+    /// Two rows with identical text but different provisional-ness must not
+    /// collide in the composed-blocks cache, which is keyed on
+    /// `(id, contentVersion)`.
+    @Test("the provisional mark is part of a node's content version")
+    func provisionalMarkIsPartOfTheContentVersion() {
+        let kind = TranscriptRenderNode.Kind.chatBubble(
+            .assistantText(id: "x", text: "same text", timestamp: nil))
+        let plain = TranscriptRenderNode(id: "x", kind: kind, badgeUsage: nil)
+        let marked = TranscriptRenderNode(id: "x", kind: kind, badgeUsage: nil, isProvisional: true)
+
+        #expect(plain.contentVersion != marked.contentVersion)
+        #expect(plain != marked)
+    }
+
+    @Test("the bubble draws a trailing cursor only for a provisional node")
+    func bubbleDrawsTheCursorOnlyWhenProvisional() {
+        let item = TranscriptItem.assistantText(id: "stream:msg_a", text: "Hello", timestamp: nil)
+
+        let plain = TranscriptBubbleGeometry.composedBlocks(
+            for: item, badgeUsage: nil, linkResolver: nil)
+        let marked = TranscriptBubbleGeometry.composedBlocks(
+            for: item, badgeUsage: nil, linkResolver: nil, isProvisional: true)
+
+        #expect(Self.prose(plain) == "Hello")
+        #expect(Self.prose(marked) == "Hello" + TranscriptBubbleGeometry.provisionalCursor)
+    }
+
+    private static func prose(_ blocks: [MessageBlock]) -> String {
+        blocks.compactMap { block -> String? in
+            guard case .prose(let string) = block else { return nil }
+            return string.string
+        }.joined()
+    }
+}
+
+/// A `Date` a test can move, for the `now` seam `TableTranscriptPaneView.publish`
+/// takes. `TestClock` moves virtual *durations*; this moves the wall clock the
+/// retire comparison is made against, and the two have to be moved together —
+/// the alarm decides *when* to re-publish, the composer decides what the
+/// re-publish shows.
+///
+/// File scope, and `@unchecked Sendable` over a lock, because the `now` closure
+/// crosses into the alarm's detached task.
+private final class MovableDate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+    init(_ value: Date) { self.value = value }
+    var now: Date {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+    func advance(by seconds: TimeInterval) {
+        lock.lock(); defer { lock.unlock() }
+        value = value.addingTimeInterval(seconds)
+    }
+}
+
+/// The publish step in `TableTranscriptPaneView` — the seam where the composer,
+/// the source and the retire alarm meet.
+///
+/// Driven directly rather than through a SwiftUI view tree, the same shape as
+/// `TaskKey.resolve`: `publish` is where the four inputs are actually gathered,
+/// and a view host would add nothing but flakiness.
+///
+/// The suite is deliberately NOT `@MainActor`. `publish` is `nonisolated` — the
+/// isolation it actually runs under in the app, since the scheduler's on-change
+/// closure is `@Sendable` — and every read of `AppState` here goes through an
+/// explicit `MainActor.run` helper, which is also what keeps the bounded-poll
+/// conditions free of main-actor captures.
+@Suite("ProvisionalRowPublish", .clockDriven, .serialized)
+struct ProvisionalRowPublishTests {
+
+    private static let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+    @MainActor
+    private static func makeState(streaming: Bool, suite: String) -> AppState {
+        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
+        state.daemonCapabilities = DaemonCapabilitiesResult(
+            controlModeEnabled: false, transcriptStreamingEnabled: streaming)
+        return state
+    }
+
+    private static func removeSuite(_ suite: String) {
+        UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
+    }
+
+    private static func publishedIDs(_ state: AppState) async -> [String] {
+        await MainActor.run { (state.sessionTranscripts["s1"] ?? []).map(\.id) }
+    }
+
+    /// Writes one complete-and-unconfirmed message into a real stream file and
+    /// has the source tail it. No transcript file at all, so
+    /// `hasAssistantMessage` is false — which is exactly the unconfirmed case.
+    private static func sourceWithCompletedMessage(now: Date) async throws -> TranscriptSource {
+        let dir = fencedScratchRoot(prefix: "tbdprov")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let path = dir + "/stream.jsonl"
+        let lines = try [
+            ModelProxyStreamLine.start(message: "msg_a", at: now),
+            .text(message: "msg_a", index: 0, text: "Hello, world"),
+            .stop(message: "msg_a"),
+        ].map { try $0.encodedLine() + "\n" }.joined()
+        try lines.write(toFile: path, atomically: true, encoding: .utf8)
+
+        let source = TranscriptSource()
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: now))
+        return source
+    }
+
+    /// The finding the alarm exists for: once a message stops, the stream file
+    /// goes quiet, so no poll will ever report news for it again and nothing
+    /// else would ever take the row down.
+    @Test("a completed row is withdrawn by the alarm, 60 s later and not before")
+    func theAlarmWithdrawsACompletedRow() async throws {
+        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
+        defer { Self.removeSuite(suite) }
+        let date = MovableDate(Self.t0)
+        let source = try await Self.sourceWithCompletedMessage(now: Self.t0)
+        let state = await Self.makeState(streaming: true, suite: suite)
+        let clock = TestClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+
+        let published = await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source,
+            retireTimer: timer, now: { date.now })
+        #expect(published.last?.id == "stream:msg_a")
+        #expect(await Self.publishedIDs(state) == ["stream:msg_a"])
+        #expect(await timer.armedMessage == "msg_a", "the completed row armed the alarm")
+
+        // 59 s of virtual time. The alarm is armed for 60, so nothing fires and
+        // the row is still on screen.
+        date.advance(by: 59)
+        await clock.advanceWhenSuspended(by: .seconds(59))
+        #expect(await Self.publishedIDs(state) == ["stream:msg_a"],
+                "the row must survive right up to the deadline")
+
+        // Past it. The alarm's re-publish re-composes, and the composer's own
+        // 60-second rule is what drops the row.
+        date.advance(by: 2)
+        await clock.advance(by: .seconds(2))
+        let withdrawn = await pollUntilTrue(timeout: .seconds(10)) {
+            await Self.publishedIDs(state).isEmpty
+        }
+        #expect(withdrawn == .satisfied, "the alarm's re-publish must withdraw the row")
+        #expect(await timer.armedMessage == nil, "and it does not re-arm itself")
+    }
+
+    /// A still-streaming row arms nothing: it has not stopped, so the file it
+    /// came from is still moving and the poll scheduler is still reporting it.
+    @Test("a streaming row arms no alarm")
+    func aStreamingRowArmsNoAlarm() async throws {
+        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
+        defer { Self.removeSuite(suite) }
+        let dir = fencedScratchRoot(prefix: "tbdprov")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let path = dir + "/stream.jsonl"
+        let line = try ModelProxyStreamLine
+            .text(message: "msg_a", index: 0, text: "Hel").encodedLine()
+        try (line + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+        let source = TranscriptSource()
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: Self.t0))
+
+        let state = await Self.makeState(streaming: true, suite: suite)
+        let timer = ProvisionalRetireTimer(clock: TestClock())
+        let t0 = Self.t0
+
+        let published = await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source,
+            retireTimer: timer, now: { t0 })
+
+        #expect(published.last?.id == "stream:msg_a")
+        #expect(await timer.armedMessage == nil)
+    }
+
+    /// The publish path's own off branch: the same source and the same
+    /// completed message, with capabilities reporting streaming off.
+    @Test("publishing with streaming off writes no provisional row and arms nothing")
+    func publishingWithStreamingOffWritesNoRow() async throws {
+        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
+        defer { Self.removeSuite(suite) }
+        let source = try await Self.sourceWithCompletedMessage(now: Self.t0)
+        let state = await Self.makeState(streaming: false, suite: suite)
+        let timer = ProvisionalRetireTimer(clock: TestClock())
+        let t0 = Self.t0
+
+        let published = await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source,
+            retireTimer: timer, now: { t0 })
+
+        #expect(published.isEmpty)
+        #expect(await Self.publishedIDs(state).isEmpty)
+        #expect(await timer.armedMessage == nil)
+    }
+}
+
+/// `ProvisionalRetireTimer` on its own: the one-shot behind the 60-second rule.
+@Suite("ProvisionalRetireTimer", .clockDriven, .serialized)
+struct ProvisionalRetireTimerTests {
+
+    private actor FireLog {
+        private(set) var count = 0
+        func record() { count += 1 }
+    }
+
+    @Test("the alarm fires once, after the delay and not before")
+    func alarmFiresOnceAfterTheDelay() async {
+        let clock = TestClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+        let log = FireLog()
+
+        await timer.arm(messageID: "msg_a", after: .seconds(60)) { await log.record() }
+        #expect(await timer.armedMessage == "msg_a")
+
+        await clock.advanceWhenSuspended(by: .seconds(59))
+        #expect(await log.count == 0, "59 s is inside the window")
+
+        await clock.advance(by: .seconds(2))
+        let fired = await pollUntilTrue(timeout: .seconds(10)) { await log.count == 1 }
+        #expect(fired == .satisfied, "the alarm must fire once past the deadline")
+        #expect(await timer.armedMessage == nil, "and clear itself so a later arm is not a no-op")
+
+        // Nothing re-arms it, so no second fire can arrive.
+        await clock.advance(by: .seconds(600))
+        #expect(await log.count == 1)
+    }
+
+    /// The idempotence that keeps a 100 ms poll from pushing the deadline
+    /// forever: a re-arm for the id already armed must leave the alarm alone.
+    @Test("re-arming the same message does not push the deadline out")
+    func reArmingTheSameMessageIsANoOp() async {
+        let clock = TestClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+        let log = FireLog()
+
+        await timer.arm(messageID: "msg_a", after: .seconds(60)) { await log.record() }
+        await clock.advanceWhenSuspended(by: .seconds(59))
+        // A poll one second before the deadline re-arms with the remaining 1 s.
+        // If that replaced the alarm, the fire below would be 60 s away.
+        await timer.arm(messageID: "msg_a", after: .seconds(1)) { await log.record() }
+
+        await clock.advance(by: .seconds(2))
+        let fired = await pollUntilTrue(timeout: .seconds(10)) { await log.count >= 1 }
+        #expect(fired == .satisfied)
+        #expect(await log.count == 1, "one alarm, not two")
+    }
+
+    @Test("arming a different message replaces the alarm")
+    func armingADifferentMessageReplacesTheAlarm() async {
+        let clock = TestClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+        let first = FireLog()
+        let second = FireLog()
+
+        await timer.arm(messageID: "msg_a", after: .seconds(60)) { await first.record() }
+        await timer.arm(messageID: "msg_b", after: .seconds(60)) { await second.record() }
+        #expect(await timer.armedMessage == "msg_b")
+
+        await clock.advanceWhenSuspended(by: .seconds(61))
+        let fired = await pollUntilTrue(timeout: .seconds(10)) { await second.count == 1 }
+        #expect(fired == .satisfied)
+        #expect(await first.count == 0, "the superseded message's alarm was cancelled")
+    }
+
+    @Test("disarming cancels a pending alarm")
+    func disarmingCancelsThePendingAlarm() async {
+        let clock = TestClock()
+        let timer = ProvisionalRetireTimer(clock: clock)
+        let log = FireLog()
+
+        await timer.arm(messageID: "msg_a", after: .seconds(60)) { await log.record() }
+        await clock.advanceWhenSuspended(by: .seconds(1))
+        await timer.disarm()
+        #expect(await timer.armedMessage == nil)
+
+        await clock.advance(by: .seconds(600))
+        // Give a cancelled task every chance to run before asserting it did not.
+        for _ in 0..<50 { await Task.yield() }
+        #expect(await log.count == 0)
+    }
+}

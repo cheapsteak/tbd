@@ -410,10 +410,10 @@ struct TableTranscriptPaneView: View {
 
     // MARK: - Polling
 
-    private func pollLoop() async {
+    private func pollLoop(clock: any Clock<Duration> = ContinuousClock()) async {
         let transport = TranscriptPaneTransport.resolve(path: terminal?.transcriptPath)
         if case .appSide(let path) = transport {
-            await appSideLoop(path: path)
+            await appSideLoop(path: path, clock: clock)
             return
         }
         var consecutiveFailures = 0
@@ -433,6 +433,10 @@ struct TableTranscriptPaneView: View {
     /// three view consumers — this pane, the history pane and the overlay —
     /// read that store already, so nothing downstream changes.
     ///
+    /// What each publish writes is composed by `publish` below: JSONL items,
+    /// then the daemon's pending `AskUserQuestion` captures, then the
+    /// model-proxy stream's provisional assistant row last.
+    ///
     /// `path` is the already-resolved, non-empty transcript path chosen by
     /// `TranscriptPaneTransport.resolve` — passed in rather than re-read here so
     /// the "no path" case cannot recur inside this loop and strand the pane.
@@ -440,31 +444,40 @@ struct TableTranscriptPaneView: View {
     /// The pane also *declares* its cadence tier (`currentPollTier`) and
     /// re-declares it whenever its visibility changes; the scheduler never
     /// derives one.
-    private func appSideLoop(path: String) async {
+    ///
+    /// `clock` drives both the tier re-declaration wait and the provisional
+    /// row's retire alarm; the repo's clock seam, last parameter, defaulted.
+    private func appSideLoop(path: String, clock: any Clock<Duration> = ContinuousClock()) async {
+        // Every input this run reads *once* is read here, before the first
+        // `await`: `taskKey` is a computed property over `AppState`, so
+        // re-reading it after an actor hop could answer differently from the
+        // value `.task(id:)` keyed this run on, and the loop would then be
+        // running against a resolution nothing restarts it for.
+        let key = taskKey
         guard let sid = currentSessionID else { return }
         let scheduler = appState.transcriptPollScheduler
         let source = appState.transcriptSource
         let state = appState
 
+        // One alarm per run of this loop, disarmed when the loop ends. It backs
+        // the single retire rule no file change can announce; see
+        // `ProvisionalRetireTimer`.
+        let retireTimer = ProvisionalRetireTimer(clock: clock)
+
         await scheduler.setOnChange { [weak state] sessionID in
             guard let state else { return }
-            let raw = await source.items(sessionID: sessionID)
-            let items = await Self.mergePendingQuestions(
-                sessionID: sessionID, raw: raw, state: state)
-            await MainActor.run {
-                state.sessionTranscripts[sessionID] = items
-                state.touchSessionTranscript(sessionID)
-            }
+            await Self.publish(
+                sessionID: sessionID, state: state, source: source, retireTimer: retireTimer)
         }
         // The model-proxy stream file this session's terminal was spawned with,
-        // when the daemon reports streaming as effective. Read once, and taken
-        // from `taskKey` so that the value this loop runs on is by construction
-        // the value its `.task(id:)` was keyed on: the path itself is stamped at
+        // when the daemon reports streaming as effective. Taken from the
+        // `TaskKey` captured above, so the value this loop registers is the same
+        // value its `.task(id:)` was keyed on: the path itself is stamped at
         // spawn and never changes, but the *flag* in front of it can be flipped
         // in Settings at any moment, and a flip restarts this loop rather than
         // being noticed mid-run. Re-reading it on every tier change would only
         // risk minting a generation for no reason.
-        let streamPath = taskKey.streamPath
+        let streamPath = key.streamPath
 
         // One token per run of this task, so the hold belongs to *this* pane.
         // The deregistration at the bottom happens whenever this task notices
@@ -479,11 +492,8 @@ struct TableTranscriptPaneView: View {
 
         // Publish once immediately so the pane is not blank until the first tick.
         await source.refresh(sessionID: sid, path: path)
-        let raw = await source.items(sessionID: sid)
-        let items = await Self.mergePendingQuestions(
-            sessionID: sid, raw: raw, state: appState)
-        appState.sessionTranscripts[sid] = items
-        appState.touchSessionTranscript(sid)
+        let items = await Self.publish(
+            sessionID: sid, state: state, source: source, retireTimer: retireTimer)
         if !items.isEmpty { hasShownInitialMessages = true }
 
         // Hold the task open so `.task(id:)` teardown deregisters on disappear,
@@ -502,7 +512,6 @@ struct TableTranscriptPaneView: View {
         // costs at most a handful of extra `stat`s.
         //
         // `clock.sleep`, never `Task.sleep`: the latter is a lint error here.
-        let clock = ContinuousClock()
         while !Task.isCancelled {
             try? await clock.sleep(for: .seconds(1))
             if Task.isCancelled { break }
@@ -514,6 +523,88 @@ struct TableTranscriptPaneView: View {
                 tier: tier, token: token)
         }
         await scheduler.deregister(sessionID: sid, token: token)
+        // A pane that goes away leaves no sleeping alarm behind. The publish it
+        // would have run is harmless (it recomposes from the source), but an
+        // unbounded number of them is not.
+        await retireTimer.disarm()
+    }
+
+    /// One publish: read what the source has for `sessionID`, merge the
+    /// daemon's pending `AskUserQuestion` captures, append the model-proxy
+    /// stream's provisional row, write the result into `AppState`, and arm or
+    /// disarm the one-shot that retires a completed-but-unconfirmed row.
+    ///
+    /// Returns what it published, for the one caller that needs it — the
+    /// initial publish, which latches `hasShownInitialMessages`.
+    ///
+    /// `nonisolated static` for the same reason `mergePendingQuestions` is:
+    /// it runs from the scheduler's `@Sendable` on-change closure, and `View`'s
+    /// `@MainActor` would otherwise drag the merge's index build onto main.
+    /// Only the store write needs main, and it says so.
+    ///
+    /// **Why the streaming flag is read here rather than captured from the
+    /// pane's `TaskKey`.** The scheduler holds exactly one on-change closure
+    /// for the whole app, whichever pane registered last, and it is passed the
+    /// session that changed — the closures have to stay interchangeable between
+    /// panes (see `TranscriptPollScheduler.onChange`). A closure carrying one
+    /// pane's resolved flag would decide for sessions belonging to other panes,
+    /// and a pane with no stream file of its own never restarts on a flag flip,
+    /// so the value it captured could be arbitrarily stale. The flag is
+    /// app-wide (`DaemonCapabilities`), so reading it fresh on the main actor
+    /// is both correct and race-free; what is per-pane is the *stream path*,
+    /// and that stays in the `TaskKey`.
+    @discardableResult
+    nonisolated static func publish(
+        sessionID: String,
+        state: AppState,
+        source: TranscriptSource,
+        retireTimer: ProvisionalRetireTimer,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) async -> [TranscriptItem] {
+        let raw = await source.items(sessionID: sessionID)
+        let merged = await mergePendingQuestions(sessionID: sessionID, raw: raw, state: state)
+        let provisional = await source.provisional(sessionID: sessionID)
+
+        // One confirmation lookup per publish, for the one id that can matter:
+        // the row is retired the moment the JSONL catches up with it, and no
+        // other message id is a candidate for a row.
+        var confirmedIDs: Set<String> = []
+        if let provisional,
+           await source.hasAssistantMessage(sessionID: sessionID, id: provisional.messageID) {
+            confirmedIDs = [provisional.messageID]
+        }
+
+        let streamingEnabled = await MainActor.run { state.transcriptStreamingEnabled }
+        let at = now()
+        let items = ProvisionalRowComposer.compose(
+            items: merged,
+            provisional: provisional,
+            confirmed: { confirmedIDs.contains($0) },
+            now: at,
+            streamingEnabled: streamingEnabled)
+
+        await MainActor.run {
+            state.sessionTranscripts[sessionID] = items
+            state.touchSessionTranscript(sessionID)
+        }
+
+        // Arm the deadline only for a row that actually got published and has
+        // actually completed. `compose` has already applied every other retire
+        // rule, so a provisional row that survived it and is `.complete` is
+        // exactly the case nothing else will ever announce. Everything else —
+        // including a row that was just withdrawn — disarms.
+        if let provisional,
+           items.last.map({ ProvisionalRowComposer.isProvisional(itemID: $0.id) }) == true,
+           let delay = ProvisionalRowComposer.retireDelay(phase: provisional.phase, now: at) {
+            await retireTimer.arm(messageID: provisional.messageID, after: delay) {
+                _ = await publish(
+                    sessionID: sessionID, state: state, source: source,
+                    retireTimer: retireTimer, now: now)
+            }
+        } else {
+            await retireTimer.disarm()
+        }
+        return items
     }
 
     /// This pane's cadence tier right now: foreground while its worktree is on

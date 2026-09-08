@@ -56,13 +56,26 @@ struct TranscriptRenderNode: Identifiable, Equatable {
     /// corrects it.
     let contentVersion: UInt64
 
-    init(id: String, kind: Kind, badgeUsage: TokenUsage?) {
+    /// True for the model-proxy stream's provisional assistant row — the one
+    /// row in the list whose text is still arriving and which the transcript
+    /// JSONL has not confirmed. The bubble draws a trailing cursor for it and
+    /// nothing else changes.
+    ///
+    /// Derived from the item id's `stream:` prefix by
+    /// `transcriptRenderNodes(from:)`, so no extra state has to be threaded
+    /// through the projection, and defaulted so every other construction site
+    /// — including the tests that build nodes by hand — is unchanged.
+    let isProvisional: Bool
+
+    init(id: String, kind: Kind, badgeUsage: TokenUsage?, isProvisional: Bool = false) {
         self.id = id
         self.kind = kind
         self.badgeUsage = badgeUsage
+        self.isProvisional = isProvisional
         var hasher = Hasher()
         hasher.combine(kind)
         hasher.combine(badgeUsage)
+        hasher.combine(isProvisional)
         self.contentVersion = UInt64(bitPattern: Int64(hasher.finalize()))
     }
 
@@ -145,7 +158,14 @@ nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [Transcr
 
         switch item {
         case .userPrompt, .assistantText, .peerMessage:
-            out.append(TranscriptRenderNode(id: item.id, kind: .chatBubble(item), badgeUsage: badge))
+            // The `stream:` prefix is what marks a row provisional; see
+            // `ProvisionalRowComposer.idPrefix`. Only a chat bubble can carry
+            // it — the composer only ever appends `.assistantText`.
+            out.append(TranscriptRenderNode(
+                id: item.id,
+                kind: .chatBubble(item),
+                badgeUsage: badge,
+                isProvisional: ProvisionalRowComposer.isProvisional(itemID: item.id)))
 
         case .systemReminder(let id, let kind, let text, let ts, let source, let truncatedTo):
             if kind == .skillBody {
