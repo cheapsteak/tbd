@@ -719,7 +719,19 @@ struct ModelProxySupervisorTests {
         try await fixture.db.config.setModelProxyEnabled(true)
         fixture.identity.admit(pid: 6250, startTime: proxy.processStartTime)
 
-        let supervisor = fixture.supervisor()
+        // A held registration's connection is never answered, so left at the
+        // client's default two-second budget it is `addRoute`'s own timeout —
+        // not the drain — that eventually clears the in-flight count, and on
+        // a saturated runner that budget itself can balloon far past its
+        // nominal length (`ModelProxyClientTests`' own silent-proxy case
+        // measured 32s against a 0.4s budget) but is still bounded. A long
+        // client timeout here is what keeps the registration in flight for
+        // the whole of this test's real-time budget regardless.
+        let supervisor = fixture.supervisor(clientFactory: { port in
+            ModelProxyClient(
+                port: port, session: ModelProxyClient.makeSession(requestTimeout: 120),
+                requestTimeout: 120)
+        })
         await supervisor.startIfEnabled()
         #expect(await supervisor.current?.pid == 6250)
 
