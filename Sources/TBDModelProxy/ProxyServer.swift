@@ -355,7 +355,10 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
                 let response = await control.handle(
                     method: method, path: path, body: body, remoteAddress: remoteAddress)
                 ProxyRequestHandler.respondJSON(
-                    on: boxed, status: response.status, body: response.body, keepAlive: keepAlive)
+                    on: boxed, status: response.status, body: response.body, keepAlive: keepAlive,
+                    // Retire's drain ends in `exit(0)`, so it may not begin
+                    // until its 200 is on the wire.
+                    onWritten: response.afterAnswer)
             }
             return
         }
@@ -448,7 +451,8 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
     }
 
     private static func respondJSON(
-        context: ChannelHandlerContext, status: HTTPResponseStatus, body: String, keepAlive: Bool
+        context: ChannelHandlerContext, status: HTTPResponseStatus, body: String, keepAlive: Bool,
+        onWritten: (@Sendable () -> Void)? = nil
     ) {
         var headers = HTTPHeaders()
         headers.add(name: "content-type", value: "application/json")
@@ -460,6 +464,13 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
         context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
         let promise = context.eventLoop.makePromise(of: Void.self)
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: promise)
+        // Registered before the close below, so a retire's drain starts from a
+        // written answer rather than from a closing channel. `whenComplete`
+        // fires on a failed write too, which is the wanted behaviour: a retire
+        // whose answer could not be delivered still has to retire.
+        if let onWritten {
+            promise.futureResult.whenComplete { _ in onWritten() }
+        }
         if !keepAlive {
             // The channel, not the context: `whenComplete` takes a `@Sendable`
             // closure, `ChannelHandlerContext` is not `Sendable`, and `Channel`
@@ -470,12 +481,22 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
     }
 
     private static func respondJSON(
-        on boxed: SendableChannelContext, status: HTTPResponseStatus, body: String, keepAlive: Bool
+        on boxed: SendableChannelContext, status: HTTPResponseStatus, body: String, keepAlive: Bool,
+        onWritten: (@Sendable () -> Void)? = nil
     ) {
         boxed.eventLoop.execute {
             let context = boxed.context
-            guard context.channel.isActive else { return }
-            respondJSON(context: context, status: status, body: body, keepAlive: keepAlive)
+            guard context.channel.isActive else {
+                // The client hung up before its answer could be written. There
+                // is nothing to deliver, but a retire that was asked for still
+                // has to happen — a proxy that kept its listener closed and
+                // never exited would be the worst of both.
+                onWritten?()
+                return
+            }
+            respondJSON(
+                context: context, status: status, body: body, keepAlive: keepAlive,
+                onWritten: onWritten)
         }
     }
 }

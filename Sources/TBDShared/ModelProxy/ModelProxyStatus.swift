@@ -36,25 +36,32 @@ public struct ModelProxyStatus: Codable, Sendable, Equatable {
 // MARK: - Wire coding
 
 extension ModelProxyStatus {
-    /// The one coder pair for `GET /tbd/status`.
+    /// The one coder pair for `GET /tbd/status`, pinned on both sides.
     ///
-    /// Pinned to ISO-8601 for the same reason a route file is
-    /// (`ModelProxyRoute.encodedForRouteFile`): the proxy writes this and the
-    /// daemon reads it, out of two binaries that are upgraded independently,
-    /// and a writer on `.deferredToDate` against a reader on `.iso8601` would
-    /// turn `processStartTime` into a value the adoption check can only refuse.
-    /// Adoption is exactly the decision that hangs on this field, so the
-    /// disagreement would not fail loudly — it would quietly mint a new port
-    /// and orphan the running proxy.
+    /// The proxy writes this and the daemon reads it, out of two binaries that
+    /// are upgraded independently, so the date strategy cannot be left to
+    /// whichever `JSONEncoder` each side happens to construct: adoption is
+    /// decided by comparing `processStartTime` against the process table, and a
+    /// disagreement would not fail loudly — it would quietly mint a fresh port
+    /// and orphan a live proxy.
+    ///
+    /// **Seconds since the epoch, not ISO-8601**, and that is the whole reason
+    /// this differs from a route file. `ProcessStartTime.startTime` reads a
+    /// `struct timeval` and returns microseconds; `.iso8601` renders whole
+    /// seconds and would throw the fraction away, so a proxy started at
+    /// `…:07.123456` would report `…:07` and never compare equal to what the
+    /// daemon reads from the kernel. A `Double` of seconds round-trips the
+    /// value the kernel gave, bit for bit. A route file's `createdAt` is
+    /// nobody's equality test and stays human-readable.
     private static func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        encoder.dateEncodingStrategy = .secondsSince1970
         return encoder
     }
 
     private static func makeDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = .secondsSince1970
         return decoder
     }
 

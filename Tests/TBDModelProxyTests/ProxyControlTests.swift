@@ -194,9 +194,147 @@ extension ModelProxySuites {
                 method: "POST", path: "/tbd/retire", body: [], remoteAddress: loopbackV4)
             #expect(response.status == .ok)
             #expect(closed.value, "the listener was still open when retire answered")
+            // What the server does once the answer is on the wire.
+            response.afterAnswer?()
 
             await waitUntil(
                 "the drain gave up at its cap", sample: { retired.value }, isSatisfied: { $0 })
+        }
+
+        @Test("the drain cannot begin until the answer has been written")
+        func retireDoesNotDrainBeforeItsAnswerIsWritten() async throws {
+            // On an idle proxy the drain finishes on its *first* sample and
+            // calls `onRetire`, which in production is `exit(0)`. Started
+            // inside the endpoint, that races the process's own exit against
+            // its 200, and a supervisor that gets a connection reset cannot
+            // tell a retiring proxy from a crashed one.
+            let root = proxyScratchRoot(prefix: "pxorder")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let routes = RouteTable(
+                routesDir: root.appendingPathComponent("proxy/routes"),
+                streamsDir: root.appendingPathComponent("streams"))
+
+            let retires = ProxyCountBox()
+            let control = ControlEndpoints(
+                routes: routes,
+                status: { ModelProxyStatus(
+                    version: "test", pid: getpid(), processStartTime: Date(), port: 0,
+                    streamsInFlight: 0, routeCount: 0) },
+                onRetire: { retires.increment() },
+                closeListener: {},
+                // Idle: the drain's first sample is already zero, so nothing
+                // but the ordering keeps `onRetire` from firing at once.
+                streamsInFlight: { 0 },
+                pollInterval: .milliseconds(1),
+                drainCap: .milliseconds(50))
+
+            let response = await control.handle(
+                method: "POST", path: "/tbd/retire", body: [], remoteAddress: loopbackV4)
+            #expect(response.status == .ok)
+            #expect(response.body == ControlEndpoints.retiringBody)
+
+            // Generously longer than the 1 ms poll: a drain that had started
+            // inside `handle` would have finished many times over by now.
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            #expect(
+                retires.value == 0,
+                "the drain ran before the answer was written")
+
+            let answer = try #require(response.afterAnswer)
+            answer()
+            await waitUntil(
+                "the drain ran once the answer was written", sample: { retires.value },
+                isSatisfied: { $0 == 1 })
+        }
+
+        @Test("two retires start one drain and hand over once")
+        func twoRetiresHandOverOnce() async throws {
+            // A supervisor that retried its retire — or two of them — must not
+            // get two drains: each one ends in `onRetire`, and `exit(0)` is not
+            // a thing to call twice.
+            let root = proxyScratchRoot(prefix: "pxtwice")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let routes = RouteTable(
+                routesDir: root.appendingPathComponent("proxy/routes"),
+                streamsDir: root.appendingPathComponent("streams"))
+
+            let retires = ProxyCountBox()
+            let closes = ProxyCountBox()
+            let control = ControlEndpoints(
+                routes: routes,
+                status: { ModelProxyStatus(
+                    version: "test", pid: getpid(), processStartTime: Date(), port: 0,
+                    streamsInFlight: 0, routeCount: 0) },
+                onRetire: { retires.increment() },
+                closeListener: { closes.increment() },
+                streamsInFlight: { 0 },
+                pollInterval: .milliseconds(1),
+                drainCap: .milliseconds(50))
+
+            let first = await control.handle(
+                method: "POST", path: "/tbd/retire", body: [], remoteAddress: loopbackV4)
+            let second = await control.handle(
+                method: "POST", path: "/tbd/retire", body: [], remoteAddress: loopbackV4)
+            // Both are answered — a second retire is not an error, and closing
+            // an already-closed listener is a no-op by contract.
+            #expect(first.status == .ok)
+            #expect(second.status == .ok)
+            #expect(closes.value == 2)
+
+            first.afterAnswer?()
+            second.afterAnswer?()
+            await waitUntil(
+                "the drain handed over", sample: { retires.value }, isSatisfied: { $0 >= 1 })
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            #expect(retires.value == 1, "two retires started two drains")
+        }
+
+        @Test("a status round-trips the microseconds the kernel reported")
+        func statusRoundTripsSubSecondPrecision() async throws {
+            // `ProcessStartTime.startTime` reads a `struct timeval`, so the
+            // value carries microseconds, and the daemon adopts a proxy by
+            // comparing this field against what it reads from the process
+            // table. A coder that rendered whole seconds would make every
+            // comparison fail and quietly orphan a live proxy.
+            let started = Date(timeIntervalSince1970: 1_789_234_567.123456)
+            let status = ModelProxyStatus(
+                version: "dev", pid: 4321, processStartTime: started, port: 51234,
+                streamsInFlight: 2, routeCount: 3)
+
+            let decoded = try ModelProxyStatus.decodeStatusResponse(
+                try status.encodedForStatusResponse())
+            #expect(decoded == status)
+            // The assertion that discriminates: an `.iso8601` coder decodes to
+            // the whole second, so this is the line that fails if the fraction
+            // is ever thrown away again.
+            #expect(decoded.processStartTime == started)
+            #expect(decoded.processStartTime != Date(timeIntervalSince1970: 1_789_234_567))
+        }
+
+        @Test("retire answers on the wire before it hands the process over")
+        func retireAnswersOverASocketBeforeHandingOver() async throws {
+            // The wiring half of the ordering rule: the endpoint hands the
+            // drain back, and the *server* must run it from the response
+            // write's completion. A server that dropped it would answer
+            // correctly and never retire at all.
+            let retired = ProxyFlagBox()
+            try await withProxy(
+                prefix: "pxidle",
+                script: { _, _ in FakeUpstream.Script(events: []) },
+                onRetire: { retired.set() }
+            ) { harness in
+                #expect(harness.server.streamsInFlight == 0)
+                let (body, response) = try await harness.session.data(
+                    for: controlRequest(port: harness.port, method: "POST", path: "/tbd/retire"))
+                #expect((response as? HTTPURLResponse)?.statusCode == 200)
+                // The whole body, not a prefix: what a client of a proxy that
+                // exited mid-write would have is a truncated read or a reset.
+                #expect(String(decoding: body, as: UTF8.self) == ControlEndpoints.retiringBody)
+
+                await waitUntil(
+                    "the drain handed the process over", sample: { retired.value },
+                    isSatisfied: { $0 })
+            }
         }
 
         @Test("the drain samples the count for as long as its cap allows")
@@ -415,4 +553,13 @@ func forwardStatus(_ harness: ProxyHarness, token: String) async throws -> Int {
     request.httpBody = Data(#"{"stream":true}"#.utf8)
     let (_, response) = try await harness.session.data(for: request)
     return (response as? HTTPURLResponse)?.statusCode ?? 0
+}
+
+/// A counter a `@Sendable` callback can bump from anywhere.
+final class ProxyCountBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
 }

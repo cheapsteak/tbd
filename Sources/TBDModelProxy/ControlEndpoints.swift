@@ -24,13 +24,28 @@ final class ControlEndpoints: Sendable {
 
     /// One answer. Always JSON, always with a status: a supervisor reading
     /// these is a program, not a person.
-    struct Response: Sendable, Equatable {
+    struct Response: Sendable {
         let status: HTTPResponseStatus
         let body: String
+        /// Work that may only begin once this answer is on the wire.
+        ///
+        /// Retire is the reason it exists, and the reason it is a callback
+        /// rather than something the endpoint just does before returning: the
+        /// drain ends in `onRetire`, which in production is `exit(0)`. An idle
+        /// proxy drains on its first sample, so starting the drain before the
+        /// 200 has been written races the process's own exit against its
+        /// answer — and a supervisor that gets a connection reset instead of
+        /// the handshake has no way to tell a retiring proxy from a crashed
+        /// one. The caller invokes this from the write's completion.
+        let afterAnswer: (@Sendable () -> Void)?
 
-        init(_ status: HTTPResponseStatus, _ body: String) {
+        init(
+            _ status: HTTPResponseStatus, _ body: String,
+            afterAnswer: (@Sendable () -> Void)? = nil
+        ) {
             self.status = status
             self.body = body
+            self.afterAnswer = afterAnswer
         }
     }
 
@@ -52,6 +67,10 @@ final class ControlEndpoints: Sendable {
     private let pollInterval: Duration
     private let drainCap: Duration
     private let clock: any Clock<Duration>
+    /// Whether a drain has already been started. Two retires — a supervisor
+    /// that retried, or two of them — must not run two drains, because each
+    /// one ends in `onRetire` and `exit(0)` is not a thing to call twice.
+    private let drainStarted = DrainLatch()
 
     init(
         routes: RouteTable,
@@ -169,10 +188,14 @@ final class ControlEndpoints: Sendable {
     /// successor's bind time rather than the length of whatever turn is still
     /// running. The streams already open keep flowing on the connections they
     /// are already on — closing a listening socket does not touch them.
+    ///
+    /// The drain is handed back rather than started here. On an idle proxy the
+    /// drain finishes on its first sample and calls `onRetire`, which is
+    /// `exit(0)`; started before the answer was written, it would race the
+    /// process's own exit against its 200.
     private func retire() async -> Response {
         await closeListener()
-        startDrain()
-        return Response(.ok, Self.retiringBody)
+        return Response(.ok, Self.retiringBody, afterAnswer: { [self] in startDrain() })
     }
 
     /// Waits for the last in-flight stream and then hands over to `onRetire`.
@@ -184,6 +207,10 @@ final class ControlEndpoints: Sendable {
     /// leave a retired proxy running forever; 10 minutes is far past Claude's
     /// own 183-second retry budget.
     private func startDrain() {
+        guard drainStarted.claim() else {
+            Self.log.debug("retire drain already running; not starting a second")
+            return
+        }
         let onRetire = self.onRetire
         let streamsInFlight = self.streamsInFlight
         let clock = self.clock
@@ -304,4 +331,18 @@ final class ControlEndpoints: Sendable {
     }
 
     private static let loopbackV6: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+}
+
+/// A one-shot claim. The first caller wins and every later one is told so.
+private final class DrainLatch: Sendable {
+    private let lock = NSLock()
+    private nonisolated(unsafe) var claimed = false
+
+    func claim() -> Bool {
+        lock.withLock {
+            guard !claimed else { return false }
+            claimed = true
+            return true
+        }
+    }
 }
