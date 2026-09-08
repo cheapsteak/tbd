@@ -124,10 +124,23 @@ A directory under the TBD home, `TBDConstants.modelProxyDir`, honoring
 subdirectory. The daemon spawns the proxy with `posix_spawn`, the `flock`
 descriptor riding a `dup2` file action exactly as `HolderSpawner` does
 (`Sources/TBDDaemon/Holder/HolderSpawner.swift`), so a spawner that cannot take
-the lock has learned a live proxy exists without connecting to it. The proxy
-calls `setsid` first, ignores `SIGHUP` and `SIGPIPE`, and orphans to launchd
-when the daemon exits. Its binary is a sibling of the daemon's, never copied
-out of the build tree; a running image survives rebuilds as the holder's does.
+the lock has learned a live proxy exists without connecting to it. The spawner
+releases its own copy right after `posix_spawn`, leaving the child the sole
+owner of the open file description the lock lives on.
+
+The lock says **a live proxy owns this rendezvous**, so the proxy holds it from
+spawn until its listener closes — a retire — or until the process exits,
+whichever comes first. A proxy whose listener is closed owns no port and
+answers no route; it is draining, not serving, and holding the lock through the
+drain would keep a successor from being spawned at all. Nothing else in the
+rendezvous needs that rule: the pid file is unlinked on the way out only while
+it still names the exiting process, so a successor's file is never deleted by
+its predecessor.
+
+The proxy calls `setsid` first, ignores `SIGHUP` and `SIGPIPE`, and orphans to
+launchd when the daemon exits. Its binary is a sibling of the daemon's, never
+copied out of the build tree; a running image survives rebuilds as the holder's
+does.
 
 ### Why one per TBD home
 
@@ -177,9 +190,14 @@ daemon restart.
   colliding port; every adoption checks it.
 - `POST /tbd/retire` closes the listener and **answers as soon as it is
   closed**, then finishes its in-flight streams without a port and exits. The
-  successor binds the moment the answer arrives. No stream is cut, and the
-  no-listener gap is the successor's bind time, far inside Claude's 183-second
-  retry budget.
+  retiring proxy releases its rendezvous lock the moment the listener is
+  closed, before the answer goes out, so the successor's spawner can take both
+  the lock and the port while the drain is still running — a drain may last
+  minutes, and a lock held across it would mean no successor and nothing
+  listening. The drained process owns no port and answers no route, and its pid
+  file is unlinked only if it is still its own. The successor binds the moment
+  the answer arrives. No stream is cut, and the no-listener gap is the
+  successor's bind time, far inside Claude's 183-second retry budget.
 - `POST /tbd/routes` and `DELETE /tbd/routes/<token>` tell the proxy a route
   file was written or should be dropped, so it need not watch the directory.
 
