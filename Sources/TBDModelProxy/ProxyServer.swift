@@ -190,6 +190,21 @@ final class ProxyServer: Sendable {
         onListenerClosed()
     }
 
+    /// Retires this proxy without an HTTP request behind it — the signal path.
+    ///
+    /// The same close, the same lock release and the same drain as `POST
+    /// /tbd/retire`, so there is one drain, one release and one way out of the
+    /// process however the retire was asked for. The only difference is that
+    /// nothing has to reach a socket first, so the drain may start as soon as
+    /// the listener is gone rather than waiting on a 200.
+    ///
+    /// Idempotent: a second call closes an already-closed listener and loses
+    /// the drain latch, so it joins the drain already running instead of
+    /// starting another.
+    func retireNow() async {
+        await control.retireNow()
+    }
+
     /// The same close, reachable without a `ProxyServer`, so the retire verb
     /// can hold the box instead of the server.
     private static func closeListener(_ box: ChannelBox) async {

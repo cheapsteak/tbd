@@ -193,14 +193,29 @@ enum TBDModelProxyMain {
         //    `signal(2)`: the handler then runs on a queue instead of in
         //    signal context and may do real work. The disposition must be
         //    ignored first, or the default action wins the race.
+        //
+        //    What a signal *means* is decided by `ProxySignalDisposition`:
+        //    once the listener is up, the first one retires this proxy exactly
+        //    as `POST /tbd/retire` does, and only the second exits without
+        //    waiting for the drain. Until then — and this is the window this
+        //    early arming exists for — there is nothing to drain, so a signal
+        //    ends the process at once.
         let stopped = ProxyStopSignal()
+        let signals = ProxySignalDisposition()
         signal(SIGTERM, SIG_IGN)
         signal(SIGINT, SIG_IGN)
         let sources = [SIGTERM, SIGINT].map { number -> DispatchSourceSignal in
             let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
             source.setEventHandler {
-                ProxyLog.main.debug("received signal \(number, privacy: .public), stopping")
-                stopped.stop(reason: "signal \(number)")
+                switch signals.received() {
+                case .retire(let retire):
+                    ProxyLog.main.debug(
+                        "received signal \(number, privacy: .public), retiring")
+                    retire()
+                case .exitNow:
+                    ProxyLog.main.debug("received signal \(number, privacy: .public), stopping")
+                    stopped.stop(reason: "signal \(number)")
+                }
             }
             source.resume()
             return source
@@ -297,11 +312,11 @@ enum TBDModelProxyMain {
                     processStartTime: processStart, port: boundPort.value,
                     streamsInFlight: 0, routeCount: 0, home: servedHome)
             },
-            // Reached only after `POST /tbd/retire` has closed the listener and
-            // drained the streams that were still running on it. It joins the
-            // one shutdown path rather than calling `exit` itself, so the pid
-            // file is reclaimed the same way on every route out of this
-            // process.
+            // Reached only after a retire — a `POST /tbd/retire` or a signal —
+            // has closed the listener and drained the streams that were still
+            // running on it. It joins the one shutdown path rather than calling
+            // `exit` itself, so the pid file is reclaimed the same way on every
+            // route out of this process.
             onRetire: { stopped.stop(reason: "retire") },
             // Fired the moment the listener is gone and before the retire's
             // 200 is written, so the successor's spawner can take the lock as
@@ -359,7 +374,23 @@ enum TBDModelProxyMain {
                 """)
         }
 
-        // 5. The retention watch. It samples on the clock and joins the same
+        // 5. The signal path joins the retire path, now that there is a
+        //    listener to close and a drain to run.
+        //
+        //    A SIGTERM is how a supervisor, a process manager, or a person at
+        //    a shell stops a proxy, and a proxy that answered it by tearing
+        //    down its event loops would cut every turn it was carrying — the
+        //    transcript corruption this whole feature exists to avoid, arriving
+        //    by the most ordinary gesture there is. So the first signal runs
+        //    the same retire the control endpoint runs: close the listener,
+        //    release the rendezvous lock, drain under the same cap, exit the
+        //    same way. `retireNow` is idempotent, so a signal landing during an
+        //    HTTP retire's drain joins that drain rather than disturbing it.
+        signals.armRetire {
+            Task { await server.retireNow() }
+        }
+
+        // 6. The retention watch. It samples on the clock and joins the same
         //    shutdown path as a signal, so a self-retiring proxy reclaims its
         //    pid file exactly as a TERMed one does.
         let retireWatch = ProxyRetireWatch(
@@ -401,15 +432,16 @@ enum TBDModelProxyMain {
     }
 }
 
-/// The one way out of `run()`: whichever of a signal, a `POST /tbd/retire`
-/// drain, or the retention watch gets there first wakes the main thread and
-/// says why.
+/// The one way out of `run()`: whichever of a finished drain — a `POST
+/// /tbd/retire`'s, a signal's, or the retention watch's — a signal arriving
+/// before there is a listener to close, or a second signal during a drain gets
+/// there first wakes the main thread and says why.
 ///
 /// A semaphore plus a one-shot reason rather than a bare `DispatchSemaphore`,
-/// because three unrelated paths reach it and the log line that follows is the
-/// only place a reader learns which one did. Extra `stop` calls are counted by
-/// the semaphore and ignored by the reason, which is what makes it safe for a
-/// SIGTERM to land while a retire drain is already finishing.
+/// because several unrelated paths reach it and the log line that follows is
+/// the only place a reader learns which one did. Extra `stop` calls are counted
+/// by the semaphore and ignored by the reason, which is what makes it safe for
+/// a drain to finish just as a second signal lands.
 final class ProxyStopSignal: Sendable {
     private let ready = DispatchSemaphore(value: 0)
     private let lock = NSLock()
@@ -428,6 +460,56 @@ final class ProxyStopSignal: Sendable {
         ready.wait()
         return lock.withLock { reason } ?? "unknown"
     }
+}
+
+/// What a SIGTERM or SIGINT means, which depends on what has already arrived.
+///
+/// **The first signal a serving proxy gets means what `POST /tbd/retire`
+/// means**: close the listener, release the rendezvous lock, let the turns
+/// already in flight finish under the drain cap, and exit when the drain ends.
+/// A signal is how a process manager, a supervisor, or a person at a shell
+/// stops a proxy, and answering it by tearing the event loops down would
+/// truncate every stream the proxy was carrying — the transcript corruption
+/// this feature exists to avoid, reached by the most ordinary gesture there is.
+///
+/// **The second one exits immediately**, cutting whatever is still open. It is
+/// the operator saying they meant now, and it exists so that "stop this proxy
+/// this instant" is a second signal away rather than a `SIGKILL` away.
+///
+/// **Before the listener is up there is nothing to drain**, so a signal
+/// arriving during start-up exits at once. `armRetire` is what turns the first
+/// signal into a retire, and it is called only after the bind — which is also
+/// why the count alone cannot decide: a proxy that had not bound yet would
+/// otherwise sit in a retire that has nothing to close.
+final class ProxySignalDisposition: @unchecked Sendable {
+    /// What the handler should do about the signal it just took.
+    enum Disposition {
+        /// Run the retire the control endpoint would have run.
+        case retire(@Sendable () -> Void)
+        /// Wake the main thread and end the process.
+        case exitNow
+    }
+
+    private let lock = NSLock()
+    private var retire: (@Sendable () -> Void)?
+    private var count = 0
+
+    /// Arms the retire path. Called once, after the listener is bound.
+    func armRetire(_ retire: @escaping @Sendable () -> Void) {
+        lock.withLock { self.retire = retire }
+    }
+
+    /// Counts one signal and says what to do about it.
+    func received() -> Disposition {
+        lock.withLock { () -> Disposition in
+            count += 1
+            guard count == 1, let armed = self.retire else { return .exitNow }
+            return .retire(armed)
+        }
+    }
+
+    /// How many signals have been taken, for a test and for a log line.
+    var signalCount: Int { lock.withLock { count } }
 }
 
 /// The `flock` that says a live proxy owns this home's rendezvous.

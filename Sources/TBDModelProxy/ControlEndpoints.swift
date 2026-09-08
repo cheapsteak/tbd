@@ -226,6 +226,25 @@ final class ControlEndpoints: Sendable {
         return Response(.ok, Self.retiringBody, afterAnswer: { [self] in startDrain() })
     }
 
+    /// The same retire, asked for by a signal rather than by a request.
+    ///
+    /// A SIGTERM or SIGINT means what `POST /tbd/retire` means (spec,
+    /// "Signals"), and it routes through this rather than through a shutdown of
+    /// its own so that there is exactly one drain, one lock release and one way
+    /// out of the process. The ordering the HTTP verb needs — answer, then
+    /// drain — has no counterpart here: there is no answer to race, so the
+    /// drain may start the moment the listener is closed.
+    ///
+    /// Idempotent in both directions. A signal during an HTTP retire's drain
+    /// closes a listener that is already closed and loses `drainStarted`, so it
+    /// joins that drain; an HTTP retire after a signal's does the same. What
+    /// gets an impatient operator out of a drain is a *second* signal, which
+    /// never reaches here — see `ProxySignalDisposition`.
+    func retireNow() async {
+        await closeListener()
+        startDrain()
+    }
+
     /// Waits for the last in-flight stream and then hands over to `onRetire`.
     ///
     /// A poll rather than a completion, because a stream ends on an event loop

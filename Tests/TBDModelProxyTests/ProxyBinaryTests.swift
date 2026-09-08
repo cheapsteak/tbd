@@ -86,6 +86,43 @@ struct ProxyBinaryTests {
         #expect(codes.allSatisfy { $0 > 1 })
     }
 
+    /// What a SIGTERM means, decided without a process to send one to.
+    ///
+    /// The three branches are the whole rule (spec, "Signals"), and each one is
+    /// a different failure if it is wrong: a signal before the bind that asked
+    /// for a retire would sit waiting on a listener that does not exist; a
+    /// first signal that exited would truncate every stream the proxy was
+    /// carrying; a second signal that joined the drain would leave an operator
+    /// with no way short of `SIGKILL` to stop a proxy now.
+    @Test("the first signal retires, a second exits, and one before the bind exits")
+    func signalDispositionArmsAndCounts() {
+        // Nothing has bound yet, so there is nothing to close and nothing to
+        // drain: the process ends.
+        let unarmed = ProxySignalDisposition()
+        guard case .exitNow = unarmed.received() else {
+            Issue.record("a signal arriving before the bind asked for a retire")
+            return
+        }
+
+        let armed = ProxySignalDisposition()
+        let retires = TestCounter()
+        armed.armRetire { retires.increment() }
+        guard case .retire(let retire) = armed.received() else {
+            Issue.record("the first signal to a serving proxy did not retire it")
+            return
+        }
+        retire()
+        #expect(retires.value == 1)
+
+        // The operator saying they meant now.
+        guard case .exitNow = armed.received() else {
+            Issue.record("a second signal joined the drain instead of ending it")
+            return
+        }
+        #expect(armed.signalCount == 2)
+        #expect(retires.value == 1, "a second signal started a second retire")
+    }
+
     /// The pid file's shape, asserted on the composer, so the two lines and
     /// their order stay pinned independently of how hard the file is to observe
     /// from outside.
@@ -440,6 +477,259 @@ extension ModelProxySuites {
                 "the pid file outlived the proxy")
         }
 
+        /// A signal is a retire, and a retire cuts nothing (spec, "Signals").
+        ///
+        /// The failure this pins is the one an operator meets by accident: a
+        /// `kill` on a proxy carrying turns for every session on the machine.
+        /// A proxy that answered a signal by tearing its event loops down would
+        /// truncate each of those mid-message, which is precisely the
+        /// transcript corruption the feature exists to avoid.
+        ///
+        /// Discriminating three ways over, and each one fails a different
+        /// mistake. The listener has to close — otherwise the signal did
+        /// nothing and the stream would survive anyway. The process has to be
+        /// alive at that moment — otherwise it exited and the bytes below are
+        /// whatever the client had already buffered. And the bytes have to be
+        /// the upstream's own, in order, to the end.
+        ///
+        /// The final frame is allowed to go missing, for the reason
+        /// `retireReleasesTheLockBeforeTheDrainEnds` states: the drain samples
+        /// the in-flight count *before* the terminating chunk is flushed, so
+        /// the process may exit between the two. Everything before it may not.
+        @Test("a signal retires the proxy and lets the stream it carries finish")
+        func aSignalRetiresRatherThanCuttingTheStream() async throws {
+            // Eight events 400 ms apart: over three seconds of stream left to
+            // lose after the signal lands, each frame flushed on its own.
+            let ticks = (1...8).map { index in
+                (delayMs: 400, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
+            }
+            let upstream = FakeUpstream { _, _ in FakeUpstream.Script(events: ticks) }
+            let upstreamPort = try upstream.start()
+            defer { upstream.stop() }
+
+            let home = proxyScratchRoot(prefix: "pxsigd").path
+            let token = ModelProxyRoute.mintToken()
+            let route = ModelProxyRoute(
+                token: token, terminalID: UUID(),
+                upstream: "http://127.0.0.1:\(upstreamPort)", streamingEnabled: false)
+            try FileManager.default.createDirectory(
+                atPath: home + "/proxy/routes", withIntermediateDirectories: true)
+            try route.encodedForRouteFile().write(
+                to: URL(fileURLWithPath: home + "/proxy/routes/" + token + ".json"))
+
+            let proxy = try ProxyProcess.start(home: home)
+            defer { proxy.terminate() }
+            let pidFile = try await proxy.awaitPIDFile()
+
+            let routeURL = try ProxyProcess.url(port: pidFile.port, path: "/r/\(token)/v1/messages")
+            var request = URLRequest(url: routeURL)
+            request.httpMethod = "POST"
+            request.httpBody = Data(#"{"stream":true}"#.utf8)
+            let (bytes, response) = try await ProxyProcess.session.bytes(for: request)
+            #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+            // The head is on the wire, so the relay is counted in flight and
+            // the drain has something to wait for.
+            kill(proxy.pid, SIGTERM)
+
+            // A retire closes the listener first, which is how a successor's
+            // spawner learns the port is free. Nothing here waits on the
+            // process: it must still be running when this holds.
+            let closed = await waitUntil(
+                "the signalled proxy to close its listener", seconds: 10,
+                sample: { connectRefused(port: pidFile.port) }, isSatisfied: { $0 })
+            #expect(closed, "the signal never closed the listener; log:\n\(proxy.log())")
+            // The pid is still in the process table. A weak check on its own —
+            // an exited child stays there as a zombie until it is reaped, and
+            // nothing has reaped this one yet — so what actually proves the
+            // proxy kept serving is the byte comparison below, which a process
+            // that had exited here could not satisfy.
+            #expect(kill(proxy.pid, 0) == 0, "the signalled proxy's pid is gone")
+
+            var received: [UInt8] = []
+            var readError: (any Error)?
+            do {
+                for try await byte in bytes { received.append(byte) }
+            } catch {
+                readError = error
+            }
+
+            // Built before the macro, not inside it: `#expect`'s message is a
+            // `Comment`, and a `+`-built String is not one.
+            let whole = ticks.flatMap { $0.bytes }
+            let allButLast = ticks.dropLast().flatMap { $0.bytes }
+            let ending = readError.map { "then \($0)" } ?? "then a clean end"
+            #expect(
+                whole.starts(with: received),
+                "the relay delivered bytes the upstream never wrote, \(ending); log:\n\(proxy.log())")
+            #expect(
+                received.count >= allButLast.count,
+                "the signal cut the stream at \(received.count) of \(whole.count) bytes, \(ending); log:\n\(proxy.log())"
+            )
+
+            // And it exits by itself once the drain is done, the way a
+            // POST /tbd/retire does.
+            let status = await proxy.awaitExit()
+            #expect(status == 0, "a signalled proxy must exit cleanly; log:\n\(proxy.log())")
+            #expect(
+                !FileManager.default.fileExists(atPath: home + "/proxy/proxy.pid"),
+                "the pid file outlived the proxy")
+        }
+
+        /// The way out of a drain that is short of `SIGKILL` (spec, "Signals").
+        ///
+        /// The first signal starts a drain that would run for the length of the
+        /// stream — ten seconds here, and up to ten minutes in production. An
+        /// operator who wants the process gone now must not have to reach for a
+        /// signal that cannot be handled at all, so the second one exits
+        /// without waiting.
+        ///
+        /// Discriminating on the clock: the exit has to land inside a budget
+        /// far shorter than the stream still owed, which a proxy that ignored
+        /// the second signal could not do.
+        @Test("a second signal during the drain exits without waiting for it")
+        func aSecondSignalEndsTheDrain() async throws {
+            // Twenty events half a second apart. Ten seconds of stream is far
+            // outside the budget asserted below, so an exit inside it is an
+            // exit that did not wait for the drain.
+            let ticks = (1...20).map { index in
+                (delayMs: 500, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
+            }
+            let upstream = FakeUpstream { _, _ in FakeUpstream.Script(events: ticks) }
+            let upstreamPort = try upstream.start()
+            defer { upstream.stop() }
+
+            let home = proxyScratchRoot(prefix: "pxsig2").path
+            let token = ModelProxyRoute.mintToken()
+            let route = ModelProxyRoute(
+                token: token, terminalID: UUID(),
+                upstream: "http://127.0.0.1:\(upstreamPort)", streamingEnabled: false)
+            try FileManager.default.createDirectory(
+                atPath: home + "/proxy/routes", withIntermediateDirectories: true)
+            try route.encodedForRouteFile().write(
+                to: URL(fileURLWithPath: home + "/proxy/routes/" + token + ".json"))
+
+            let proxy = try ProxyProcess.start(home: home)
+            defer { proxy.terminate() }
+            let pidFile = try await proxy.awaitPIDFile()
+
+            let routeURL = try ProxyProcess.url(port: pidFile.port, path: "/r/\(token)/v1/messages")
+            var request = URLRequest(url: routeURL)
+            request.httpMethod = "POST"
+            request.httpBody = Data(#"{"stream":true}"#.utf8)
+            let (bytes, response) = try await ProxyProcess.session.bytes(for: request)
+            #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+            kill(proxy.pid, SIGTERM)
+            let closed = await waitUntil(
+                "the signalled proxy to close its listener", seconds: 10,
+                sample: { connectRefused(port: pidFile.port) }, isSatisfied: { $0 })
+            #expect(closed, "the first signal never closed the listener; log:\n\(proxy.log())")
+            // As above, a weak check by itself; what proves the first signal
+            // started a drain rather than an exit is that the second signal's
+            // budget below is measured against a stream still owing seconds.
+            #expect(kill(proxy.pid, 0) == 0, "the signalled proxy's pid is gone")
+
+            let secondSignalAt = ContinuousClock().now
+            kill(proxy.pid, SIGTERM)
+            let status = await proxy.awaitExit(seconds: 15)
+            let waited = ContinuousClock().now - secondSignalAt
+            #expect(status == 0, "the second signal exited \(String(describing: status)); log:\n\(proxy.log())")
+            #expect(
+                waited < .seconds(5),
+                "the second signal waited \(waited) on a drain with seconds of stream left; log:\n\(proxy.log())"
+            )
+
+            // The stream really was cut, which is the cost the second signal
+            // buys and the thing only a `SIGKILL` could otherwise do.
+            var received: [UInt8] = []
+            do {
+                for try await byte in bytes { received.append(byte) }
+            } catch {
+                // A reset connection is the expected ending here.
+            }
+            let whole = ticks.flatMap { $0.bytes }
+            #expect(
+                received.count < whole.count,
+                "the second signal delivered the whole stream anyway; log:\n\(proxy.log())")
+        }
+
+        /// A signal on an idle proxy costs nothing (spec, "Signals").
+        ///
+        /// The drain samples the in-flight count before its first sleep, so a
+        /// proxy carrying no turn retires on that sample. The budget is what
+        /// separates "a signal is a retire" from "a signal is now a wait": a
+        /// process manager stopping an idle proxy must not sit through a poll
+        /// interval, let alone the ten-minute cap.
+        @Test("a signal with nothing in flight exits promptly")
+        func aSignalWithNothingInFlightExitsPromptly() async throws {
+            let home = proxyScratchRoot(prefix: "pxsigi").path
+            let proxy = try ProxyProcess.start(home: home)
+            defer { proxy.terminate() }
+            let pidFile = try await proxy.awaitPIDFile()
+
+            // Discriminating: the proxy is serving, and carrying nothing, when
+            // the signal arrives — so the promptness below is a drain that
+            // found nothing rather than a process that never bound at all.
+            let before = try await ProxyProcess.status(port: pidFile.port)
+            #expect(before.streamsInFlight == 0)
+
+            let signalledAt = ContinuousClock().now
+            kill(proxy.pid, SIGTERM)
+            let status = await proxy.awaitExit(seconds: 20)
+            let waited = ContinuousClock().now - signalledAt
+            #expect(status == 0, "an idle proxy exited \(String(describing: status)); log:\n\(proxy.log())")
+            #expect(
+                waited < .seconds(5),
+                "an idle proxy took \(waited) to exit after a signal; log:\n\(proxy.log())")
+            #expect(
+                !FileManager.default.fileExists(atPath: home + "/proxy/proxy.pid"),
+                "the pid file outlived the proxy")
+
+            // And the rendezvous is free for a successor, which is the other
+            // half of what a retire owes.
+            let successor = try? HolderLock.acquire(path: home + "/proxy/proxy.lock")
+            #expect(successor != nil, "the exited proxy left its rendezvous lock held")
+            successor?.release()
+        }
+
+        /// Exit 3, produced rather than asserted (`exitStatusesAreDistinct`
+        /// pins only that no two codes collide).
+        ///
+        /// It is the one exit status the supervisor acts on rather than merely
+        /// reports: on a bind failure it probes `GET /tbd/status` on that port,
+        /// adopts a TBD proxy that answers, and mints a fresh port for anything
+        /// else. A proxy that exited some other way when its port was taken
+        /// would send the supervisor down the wrong branch.
+        @Test("a port another listener holds exits bindFailed and writes no pid file")
+        func aTakenPortExitsBindFailed() async throws {
+            // A listener on a kernel-assigned port, still holding it when the
+            // proxy is asked for exactly that number. `SO_REUSEADDR` — which
+            // the proxy sets so a successor can bind while a predecessor's
+            // connections linger — does not let two *listeners* share a port on
+            // BSD, which is what makes this reachable at all.
+            let squatter = FakeUpstream { _, _ in FakeUpstream.Script(events: []) }
+            let takenPort = try squatter.start()
+            defer { squatter.stop() }
+
+            let home = proxyScratchRoot(prefix: "pxbind").path
+            let proxy = try ProxyProcess.start(home: home, port: takenPort)
+            defer { proxy.terminate() }
+            let status = await proxy.awaitExit()
+            #expect(
+                status == TBDModelProxyExit.bindFailed,
+                "a proxy asked for a taken port exited \(String(describing: status)); log:\n\(proxy.log())"
+            )
+            #expect(
+                proxy.log().contains("bind failed"),
+                "the diagnostic did not name the bind; log:\n\(proxy.log())")
+            // Deliberately no pid file on this path: a reader who finds one is
+            // entitled to assume the port in it is bound.
+            #expect(
+                !FileManager.default.fileExists(atPath: home + "/proxy/proxy.pid"),
+                "a proxy that never bound left a pid file naming a port it does not hold")
+        }
+
         @Test("a route written before the spawn is servable without a control call")
         func startsWithExistingRoutes() async throws {
             let upstream = FakeUpstream { _, _ in
@@ -723,6 +1013,31 @@ final class MovableWallClock: @unchecked Sendable {
     func advance(_ interval: TimeInterval) {
         lock.withLock { now = now.addingTimeInterval(interval) }
     }
+}
+
+/// True when nothing is listening on a loopback port.
+///
+/// A raw `connect` rather than a request through `URLSession`: what a retire
+/// closes is the *listening* socket, and the connections already open on that
+/// port keep streaming — so the question is whether a new connect is refused,
+/// and a session that reused a live connection would answer a different one. A
+/// refused connect on loopback comes back at once with `ECONNREFUSED` rather
+/// than waiting out a timeout, so this is safe to poll.
+func connectRefused(port: Int) -> Bool {
+    let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+    guard descriptor >= 0 else { return false }
+    defer { close(descriptor) }
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = UInt16(port).bigEndian
+    address.sin_addr.s_addr = inet_addr("127.0.0.1")
+    let outcome = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+            connect(descriptor, socketAddress, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    return outcome != 0
 }
 
 /// A counter shared between a test and the closures it hands to a subject.
