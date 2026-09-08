@@ -200,14 +200,17 @@ struct ModelProxyConfigRPCTests {
             params: ConfigSetModelProxyEnabledParams(enabled: true)))
 
         #expect(supervisor.startCalls == 1)
-        #expect(supervisor.retireCalls == 0)
+        #expect(supervisor.drainCalls == 0)
     }
 
-    /// And off retires rather than merely stopping. A proxy left listening
-    /// holds `proxy.lock` and self-retires only after its own 24-hour idle
-    /// window, so a toggle that only stopped the watch would leave the feature
-    /// running for a day after the user switched it off.
-    @Test func turningTheProxyOffRetiresIt() async throws {
+    /// And off drains rather than either retiring or merely stopping. A proxy
+    /// left listening holds `proxy.lock` and self-retires only after its own
+    /// 24-hour idle window, so a toggle that only stopped the watch would leave
+    /// the feature running for a day; a toggle that retired it on the spot
+    /// would break every session already routed through the port. Draining is
+    /// the third thing, and the supervisor is the only party that knows when it
+    /// is finished.
+    @Test func turningTheProxyOffDrainsIt() async throws {
         let supervisor = FakeModelProxySupervisor()
         router.modelProxySupervisor = supervisor
         _ = await router.handle(try RPCRequest(
@@ -218,7 +221,7 @@ struct ModelProxyConfigRPCTests {
             method: RPCMethod.configSetModelProxyEnabled,
             params: ConfigSetModelProxyEnabledParams(enabled: false)))
 
-        #expect(supervisor.retireCalls == 1)
+        #expect(supervisor.drainCalls == 1)
         #expect(supervisor.startCalls == 1, "the off flip must not also start one")
     }
 
@@ -235,12 +238,12 @@ struct ModelProxyConfigRPCTests {
             params: ConfigSetTranscriptStreamingParams(enabled: true)))
 
         #expect(supervisor.startCalls == 1)
-        #expect(supervisor.retireCalls == 0)
+        #expect(supervisor.drainCalls == 0)
     }
 
     /// Turning streaming off leaves the proxy column alone, so it must leave
     /// the supervisor alone as well: routes still route.
-    @Test func turningStreamingOffRetiresNothing() async throws {
+    @Test func turningStreamingOffDrainsNothing() async throws {
         let supervisor = FakeModelProxySupervisor()
         router.modelProxySupervisor = supervisor
 
@@ -249,7 +252,7 @@ struct ModelProxyConfigRPCTests {
             params: ConfigSetTranscriptStreamingParams(enabled: false)))
 
         #expect(supervisor.startCalls == 0)
-        #expect(supervisor.retireCalls == 0)
+        #expect(supervisor.drainCalls == 0)
     }
 
     /// The port and version are carried, not dropped, once a supervisor fills

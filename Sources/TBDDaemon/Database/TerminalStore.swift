@@ -754,6 +754,37 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Whether any session that was spawned through the model proxy is still
+    /// alive.
+    ///
+    /// The one question the supervisor's drain asks the database, and it asks
+    /// it once, at daemon start with `model_proxy_enabled` off: a proxy is kept
+    /// alive for sessions that are already routed through it, and an install
+    /// that has none must run nothing at all (spec, "Supervisor" → Gate).
+    ///
+    /// "Routed" is `transcriptStreamPath`, which is stamped at spawn and
+    /// cleared when the process it named is replaced, so a row still carrying
+    /// one names a job whose `ANTHROPIC_BASE_URL` points at the proxy. "Alive"
+    /// is the negation of `Terminal.isExitStamped` rather than a second
+    /// spelling of it in SQL: a parked session is woken by a gesture and its
+    /// next turn goes through the proxy, so only a row whose agent process has
+    /// actually left is finished with the port.
+    ///
+    /// Filtered in SQL and judged in Swift on purpose. The filter is the cheap,
+    /// unambiguous half — one indexed-in-practice column, and every install
+    /// that never enabled the proxy answers it with an empty set — while the
+    /// judgment is the model's own property, so it cannot drift from the one
+    /// every other reader uses.
+    public func hasLiveRoutedSession() async throws -> Bool {
+        try await writer.read { db in
+            try TerminalRecord
+                .filter(Column("transcript_stream_path") != nil)
+                .fetchAll(db)
+                .compactMap { $0.toModel() }
+                .contains { !$0.isExitStamped }
+        }
+    }
+
     /// Get a terminal by ID.
     public func get(id: UUID) async throws -> Terminal? {
         try await writer.read { db in

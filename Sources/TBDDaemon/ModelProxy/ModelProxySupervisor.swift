@@ -141,6 +141,14 @@ actor ModelProxySupervisor {
     private let ownVersion: String?
     private let processIdentity: any ProcessIdentityChecking
     private let pidFile: any ModelProxyPIDFileReading
+    /// Whether any session spawned through the proxy is still alive — one
+    /// database question, asked once, at a boot that finds the flag off.
+    ///
+    /// A closure rather than a store, because it is the only thing this actor
+    /// wants from the terminal table and taking the table would make the
+    /// supervisor's tests need one. Its default answers "none", which is the
+    /// answer that makes a supervisor with nothing injected run nothing.
+    private let routedSessionsAlive: @Sendable () async -> Bool
     /// This daemon's home in the one form both sides compare, computed once.
     ///
     /// `ModelProxyStatus.canonicalHome` resolves symlinks against the
@@ -174,6 +182,11 @@ actor ModelProxySupervisor {
     /// rendezvous, or a command line this daemon composed wrong. The watch
     /// stops reconciling; only a daemon restart clears it.
     private var permanentlyDown = false
+    /// **The flag is off and sessions are still routed.** The supervisor keeps
+    /// doing everything it does — watching, adopting, respawning — for as long
+    /// as the proxy still serves a route, and retires it when the last one
+    /// goes. Cleared by the flag coming back on.
+    private var draining = false
     /// Guards `replaceIfVersionDiffers` against re-entering itself through the
     /// spawn it performs.
     private var replacing = false
@@ -225,6 +238,7 @@ actor ModelProxySupervisor {
         ownVersion: String?,
         processIdentity: any ProcessIdentityChecking = ProcessTableIdentityCheck(),
         pidFile: any ModelProxyPIDFileReading = ModelProxyPIDFile(),
+        routedSessionsAlive: @escaping @Sendable () async -> Bool = { false },
         clientFactory: @escaping @Sendable (Int) -> ModelProxyClient = { ModelProxyClient(port: $0) },
         watchInterval: Duration = .seconds(15),
         respawnBackoff: [Duration] = [.seconds(1), .seconds(5), .seconds(30)],
@@ -236,6 +250,7 @@ actor ModelProxySupervisor {
         self.ownVersion = ownVersion
         self.processIdentity = processIdentity
         self.pidFile = pidFile
+        self.routedSessionsAlive = routedSessionsAlive
         self.canonicalHome = ModelProxyStatus.canonicalHome(home.path)
         self.pidFilePath = ProxyHomePaths(home: home).pidPath
         self.clientFactory = clientFactory
@@ -255,6 +270,7 @@ actor ModelProxySupervisor {
     static func production(
         config: ConfigStore,
         home: URL,
+        routedSessionsAlive: @escaping @Sendable () async -> Bool,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         clock: any Clock<Duration> = ContinuousClock()
     ) -> ModelProxySupervisor {
@@ -267,6 +283,7 @@ actor ModelProxySupervisor {
             home: home,
             spawner: spawner,
             ownVersion: executable.flatMap { ModelProxyVersion.identity(of: $0) },
+            routedSessionsAlive: routedSessionsAlive,
             clock: clock)
     }
 
@@ -392,15 +409,52 @@ actor ModelProxySupervisor {
     /// A config the daemon cannot read is treated as off. That is the shipped
     /// default for this flag, and starting a proxy on a failed read would be a
     /// background process nobody asked for.
+    ///
+    /// **Off is not always nothing.** A daemon that boots with the flag off
+    /// while a session spawned under the flag is still alive starts in draining
+    /// mode instead: that session's `ANTHROPIC_BASE_URL` names the proxy for
+    /// the rest of its life, so somebody has to keep the port answering until
+    /// it is done. An install with no such session — every install that never
+    /// turned the flag on — starts nothing, which is what the success criteria
+    /// mean by "no code path introduced here runs".
     func startIfEnabled() async {
         guard (try? await config.get())?.modelProxyEnabled == true else {
+            await startDrainingIfSessionsAreRouted()
+            return
+        }
+        // An on-flip while draining is a return to normal service and nothing
+        // more: the watch is already running and the proxy is already this
+        // supervisor's, so all that has to change is that the next tick stops
+        // looking for an excuse to retire it.
+        if draining {
+            draining = false
+            Self.logger.info(
+                """
+                the model proxy was switched back on for \(self.home.path, privacy: .public) \
+                while it was draining; keeping the proxy and resuming normal service
+                """)
+        }
+        await start()
+    }
+
+    /// The boot path's off branch: run only for the sessions that are already
+    /// routed, and only until they are done.
+    private func startDrainingIfSessionsAreRouted() async {
+        guard !started else { return }
+        guard await routedSessionsAlive() else {
             Self.logger.debug(
                 """
-                the model proxy is disabled for \(self.home.path, privacy: .public); \
-                not starting a supervisor
+                the model proxy is disabled for \(self.home.path, privacy: .public) and no session \
+                is routed through it; not starting a supervisor
                 """)
             return
         }
+        draining = true
+        Self.logger.info(
+            """
+            the model proxy is disabled for \(self.home.path, privacy: .public) but sessions \
+            spawned against it are still alive; supervising it until its last route retires
+            """)
         await start()
     }
 
@@ -442,30 +496,126 @@ actor ModelProxySupervisor {
         await drainPendingReap()
     }
 
-    /// Stops the watch **and asks the proxy to go away**, which is what turning
-    /// the flag off means.
+    /// Turning the flag off: **stop routing new sessions, and keep the proxy
+    /// alive for the ones already routed through it.**
     ///
-    /// The difference from `stop()` is the whole point of having two. `stop()`
-    /// is shutdown: the proxy is meant to outlive this daemon, and the next one
-    /// adopts it back through the port in the config row. This is a user saying
-    /// they do not want the feature — leaving a proxy listening, holding a
-    /// lock, and self-retiring only after 24 hours would make the toggle a
-    /// promise the daemon does not keep.
+    /// The toggle's help text promises the flag "applies to sessions started
+    /// after you change it", and the off direction has to keep that promise as
+    /// literally as the on direction does. A session's `ANTHROPIC_BASE_URL` is
+    /// fixed in its environment at spawn, so retiring the proxy here would not
+    /// un-route those sessions — it would break them, mid-task, with a
+    /// connection error to a closed loopback port and no way back short of
+    /// respawning each one.
+    ///
+    /// So nothing is retired now. `ModelProxyRouteAttachment` already refuses
+    /// to route a new spawn the moment the column reads off, which is the whole
+    /// of what the user asked for; this enters **draining mode**, where the
+    /// watch keeps running and the proxy keeps being adopted and respawned,
+    /// and the proxy is retired only once it reports no routes left — every
+    /// routed terminal having retired its own route as it exited.
+    ///
+    /// The immediate check is not impatience: the common case is a user with no
+    /// proxied session running, and it retires the proxy in that case at the
+    /// speed of the gesture rather than at the speed of the watch.
+    func beginDraining() async {
+        guard started || live != nil else {
+            // Nothing is running, so there is nothing to drain and nothing to
+            // retire. Recording draining here would arm a mode no watch would
+            // ever leave.
+            return
+        }
+        draining = true
+        Self.logger.info(
+            """
+            the model proxy was switched off for \(self.home.path, privacy: .public); routing no \
+            new session and retiring the proxy once its last route is gone
+            """)
+        await finishDrainingIfNoRoutesRemain(routeCount: nil)
+    }
+
+    /// One drain check. The proxy's own `routeCount` is the authority on
+    /// whether any session is still routed through it — it is the party that
+    /// serves them, and it rebuilds its table from `routes/` across every
+    /// respawn, so it stays right through a proxy this supervisor replaced.
+    ///
+    /// - Parameter routeCount: the count from a status answer the caller
+    ///   already holds. The watch polls `/tbd/status` every tick anyway, and a
+    ///   second poll for a number that cannot have changed in between would
+    ///   double the control traffic of a draining daemon. Nil asks for one.
+    private func finishDrainingIfNoRoutesRemain(routeCount known: Int?) async {
+        guard draining, let live else {
+            // Draining with no proxy current is a tick with no answer, not the
+            // end of the drain: a proxy that died under a routed session is
+            // respawned by the watch and rebuilds its routes from disk. The one
+            // cost is an install that flips the flag off while a spawn is
+            // failing, which spawns a proxy once and retires it on the next
+            // tick.
+            return
+        }
+        let count: Int
+        if let known {
+            count = known
+        } else {
+            do {
+                count = try await client(port: live.state.port).status().routeCount
+            } catch {
+                Self.logger.debug(
+                    """
+                    the draining model proxy on port \(live.state.port, privacy: .public) did not \
+                    answer /tbd/status: \(error.localizedDescription, privacy: .public); keeping it
+                    """)
+                return
+            }
+        }
+        guard count == 0 else {
+            Self.logger.debug(
+                """
+                the model proxy on port \(live.state.port, privacy: .public) still serves \
+                \(count, privacy: .public) route(s); draining
+                """)
+            return
+        }
+        await finishDraining()
+    }
+
+    /// The drain is over: ask the proxy to go away, then stop the watch.
+    ///
+    /// Retiring here and not on the flip is the difference between this and
+    /// `stop()`. `stop()` is shutdown, and the proxy is meant to outlive the
+    /// daemon; this is a user who does not want the feature and no longer has a
+    /// session that needs it, so leaving a proxy listening, holding a lock, and
+    /// self-retiring only after 24 hours would make the toggle a promise the
+    /// daemon does not keep.
     ///
     /// `retire()` returns once the listener is closed and the lock released;
     /// the proxy is still draining whatever is in flight, for up to ten
-    /// minutes, and nothing here waits for it. A session already spawned keeps
-    /// its `ANTHROPIC_BASE_URL` for its life either way — that is fixed in its
-    /// environment at spawn — so draining is what keeps the flip from cutting a
-    /// turn in half.
-    func retireProxy() async {
-        let target = live
-        await stop()
-        guard let target else { return }
+    /// minutes, and nothing here waits for it.
+    private func finishDraining() async {
+        // **The retire goes first, and the watch is stopped only after it
+        // answers.** Two reasons, and both are load-bearing.
+        //
+        // `stop()` cancels the watch task, and on the tick path this runs
+        // *inside* that task. Every `await` after the cancellation is a
+        // cancelled await, and `ModelProxyClient` is a `URLSession` call: it
+        // would throw rather than reach the proxy, and the proxy would be
+        // dropped having never been asked to retire. Retiring first is what
+        // makes the request happen at all.
+        //
+        // It is also what closes the race a snapshot across `stop()` would
+        // lose. While `started` is still true a concurrent `startIfEnabled` —
+        // the user flipping the flag back on — cannot reconcile or spawn
+        // anything, because `start()` returns early on a supervisor that is
+        // already started. So nothing can put a *different* proxy on
+        // `target`'s port while this call is in flight.
+        guard let target = live else {
+            draining = false
+            await stop()
+            return
+        }
         Self.logger.info(
             """
-            the model proxy is being switched off for \(self.home.path, privacy: .public); \
-            retiring pid \(target.state.pid, privacy: .public) on port \
+            the model proxy for \(self.home.path, privacy: .public) has no routes left; retiring \
+            pid \(target.state.pid, privacy: .public) on port \
             \(target.state.port, privacy: .public)
             """)
         do {
@@ -473,8 +623,8 @@ actor ModelProxySupervisor {
         } catch {
             // Nothing to fall back to, and nothing to escalate to: the proxy
             // is not this daemon's to signal on the adopted path, and on the
-            // spawned path killing it would cut the very turns the drain
-            // exists to protect. It self-retires after its own idle window.
+            // spawned path killing it would cut whatever is still in flight.
+            // It self-retires after its own idle window.
             Self.logger.error(
                 """
                 the model proxy on port \(target.state.port, privacy: .public) would not retire: \
@@ -482,10 +632,26 @@ actor ModelProxySupervisor {
                 will be routed while the flag is off
                 """)
         }
-        // Through the one door, so a child of ours is queued for collection
-        // rather than left a zombie the next `start()` would refuse to adopt.
-        dropLive()
-        await drainPendingReap()
+        // Asked to go away, so it stops being this supervisor's however the
+        // request went. Through the one door, so a child of ours is queued for
+        // collection rather than left a zombie the next `start()` would refuse
+        // to adopt — and guarded on the pid, because that `retire()` is a
+        // suspension of its own.
+        if live?.state.pid == target.state.pid { dropLive() }
+        guard draining else {
+            // The flag came back on while the retire was in flight. The watch
+            // stays: it finds no proxy on its next tick and reconciles a fresh
+            // one, which is exactly what the on-flip asked for.
+            Self.logger.info(
+                """
+                the model proxy for \(self.home.path, privacy: .public) was switched back on while \
+                its predecessor was retiring; the watch will start a replacement
+                """)
+            await drainPendingReap()
+            return
+        }
+        draining = false
+        await stop()
     }
 
     private func watch() async {
@@ -917,6 +1083,15 @@ actor ModelProxySupervisor {
                     pid: live.state.pid, port: live.state.port, version: status.version,
                     adopted: live.state.adopted),
                 identityAnchor: status.processStartTime)
+            if draining {
+                // The drain reads the count off the poll that just answered
+                // rather than making a second call. A draining proxy is not
+                // version-replaced either: replacing it would retire and
+                // respawn a process whose only remaining job is to finish the
+                // sessions it already serves.
+                await finishDrainingIfNoRoutesRemain(routeCount: status.routeCount)
+                return
+            }
             await replaceIfVersionDiffers()
         } catch {
             // A missed poll is not a death. Only the process table can tell a

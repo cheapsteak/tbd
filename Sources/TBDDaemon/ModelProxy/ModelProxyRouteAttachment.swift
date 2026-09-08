@@ -81,10 +81,14 @@ protocol ModelProxyRouting: Sendable {
 protocol ModelProxySupervising: ModelProxyRouting {
     func capabilitySnapshot() async -> ModelProxyCapabilitySnapshot
     /// Start supervising, if `config.model_proxy_enabled` is on. Idempotent.
+    /// Also leaves draining mode, which is how the flag coming back on takes
+    /// hold on a supervisor that was winding down.
     func startIfEnabled() async
-    /// Stop supervising and ask the running proxy to retire — what turning the
-    /// flag off means, as distinct from the `stop()` a shutdown performs.
-    func retireProxy() async
+    /// Enter draining mode — what turning the flag off means. The proxy is
+    /// kept alive for the sessions already routed through it and retired once
+    /// the last of them is gone, which is neither the `stop()` a shutdown
+    /// performs nor an immediate retirement. Idempotent.
+    func beginDraining() async
 }
 
 extension ModelProxySupervisor: ModelProxySupervising {}

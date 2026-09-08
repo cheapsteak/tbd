@@ -919,7 +919,17 @@ public final class Daemon: Sendable {
         // cannot route.
         let modelProxySupervisor: ModelProxySupervisor? = mockMode == nil
             ? ModelProxySupervisor.production(
-                config: database.config, home: TBDConstants.configDir)
+                config: database.config,
+                home: TBDConstants.configDir,
+                // The one question a boot with the flag off asks: is anything
+                // still routed? A session spawned while the flag was on keeps
+                // the proxy's port in its environment for life, so a daemon
+                // that restarts after the flag went off still has to keep that
+                // port answering — and an install that never turned the flag on
+                // must run nothing at all.
+                routedSessionsAlive: { [database] in
+                    (try? await database.terminals.hasLiveRoutedSession()) ?? false
+                })
             : nil
         self.modelProxySupervisor = modelProxySupervisor
 
@@ -1257,15 +1267,18 @@ public final class Daemon: Sendable {
 
         // 8c-proxy. Adopt or spawn this home's model proxy, gated on
         // `model_proxy_enabled` — the supervisor re-reads the column itself, so
-        // the gate has one spelling rather than one per caller.
+        // the gate has one spelling rather than one per caller. With the flag
+        // off it starts only to drain, and only when a session spawned against
+        // the proxy is still alive.
         //
         // Here, and not later: a terminal reconciled or woken below can be
         // spawned, and a spawn asks the supervisor for a route. With no proxy
         // yet current those sessions would start unproxied and keep that for
         // their life, because `ANTHROPIC_BASE_URL` is fixed in a session's
-        // environment at spawn. Bounded by the spawner's own bind budget, and
-        // it never throws: a proxy that could not be started is a streaming
-        // nicety that is unavailable, not a daemon that failed to boot.
+        // environment at spawn. It never throws: a proxy that could not be
+        // started is a streaming nicety that is unavailable, not a daemon that
+        // failed to boot.
+
         await modelProxySupervisor?.startIfEnabled()
 
         // 8d. Reconcile parked state and durable tmux ownership before any
@@ -2027,7 +2040,7 @@ public final class Daemon: Sendable {
         // outliving its daemon is the point of a separate process, sessions
         // already spawned still have its port in their environment, and the
         // next daemon adopts it back through the port in the config row.
-        // `retireProxy` is what the flag's off-flip calls; shutdown must not.
+        // `beginDraining` is what the flag's off-flip calls; shutdown must not.
         await modelProxySupervisor?.stop()
 
         if let questionSweep = pendingQuestionExpirySweep {

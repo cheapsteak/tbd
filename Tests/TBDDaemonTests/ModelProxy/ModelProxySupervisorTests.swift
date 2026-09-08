@@ -249,11 +249,16 @@ struct ModelProxySupervisorTests {
         #expect(await fixture.spawner.calls().isEmpty)
     }
 
-    // MARK: - The flag gate
+    // MARK: - The flag gate and the drain
 
     /// The gate (spec, "The daemon" → "Supervisor" → Gate). `model_proxy_enabled`
     /// is default-off and shipped that way, so a daemon that booted without it
-    /// must not start a proxy — not spawn one, not adopt one, not even probe.
+    /// — on a fresh install, where nothing has ever been routed — must not
+    /// start a proxy: not spawn one, not adopt one, not even probe.
+    ///
+    /// The flag-off boot that *does* start something is the drain, and it needs
+    /// a routed session alive to reach it; see
+    /// `aFlagOffBootDrainsForRoutedSessions` and its discriminating half.
     @Test("with the flag off the supervisor starts nothing")
     func theFlagOffStartsNothing() async throws {
         let fixture = try SupervisorFixture.make()
@@ -293,11 +298,12 @@ struct ModelProxySupervisorTests {
         #expect(await supervisor.current?.pid == 6110)
     }
 
-    /// Turning the flag off is not the gesture a shutdown makes. The proxy is
-    /// asked to retire — it is holding a lock and would otherwise self-retire
-    /// only after 24 hours — and it stops being this supervisor's.
-    @Test("retireProxy asks the running proxy to go away and drops it")
-    func retireProxyRetiresAndDrops() async throws {
+    /// The flag going off ends routing for **new** sessions and nothing else.
+    /// With nothing routed there is nothing to protect, so the proxy is retired
+    /// on the spot: it holds `proxy.lock` and would otherwise self-retire only
+    /// after 24 hours.
+    @Test("the flag going off retires a proxy that serves no routes")
+    func drainingRetiresAProxyWithNoRoutes() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
@@ -311,12 +317,251 @@ struct ModelProxySupervisorTests {
         await supervisor.startIfEnabled()
         #expect(await supervisor.current?.pid == 6120)
 
-        await supervisor.retireProxy()
+        // The column first and the supervisor second, exactly as the RPC does
+        // it: the write is what stops new spawns being routed, and this call is
+        // what decides the fate of the proxy already running.
+        try await fixture.db.config.setModelProxyEnabled(false)
+        await supervisor.beginDraining()
 
         #expect(
             proxy.requests().contains { $0.method == "POST" && $0.path == "/tbd/retire" },
-            "the flag going off must ask the proxy to retire")
+            "a proxy nobody is routed through has nothing to drain")
         #expect(await supervisor.current == nil, "a retired proxy is no longer this daemon's")
+    }
+
+    /// **The finding this behaviour exists for.** A session spawned while the
+    /// flag was on carries `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/r/<token>`
+    /// in its environment for the rest of its life, so retiring the proxy when
+    /// the toggle goes off would not un-route it — it would break it mid-task,
+    /// on its next turn, with a connection error to a closed loopback port. The
+    /// toggle's help text promises the flag applies to sessions started after
+    /// the change, and this is that promise in the off direction.
+    @Test("the flag going off keeps a proxy that still serves routes")
+    func drainingKeepsAProxyThatStillServesRoutes() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(
+            version: fixture.ownVersion, pid: 6140, home: fixture.home, routeCount: 1)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.admit(pid: 6140, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        #expect(await supervisor.current?.pid == 6140)
+
+        try await fixture.db.config.setModelProxyEnabled(false)
+        await supervisor.beginDraining()
+        await supervisor.stop()
+
+        #expect(
+            proxy.requests().allSatisfy { $0.path != "/tbd/retire" },
+            "a route still in flight must keep its proxy listening")
+        #expect(await supervisor.current?.pid == 6140)
+    }
+
+    /// A draining supervisor is not a stopped one: it keeps every duty it had,
+    /// because the sessions it is draining for still need a proxy on that port.
+    /// A proxy that dies mid-drain is respawned exactly as it would have been
+    /// with the flag on — the successor rebuilds its table from `routes/`, so
+    /// the routes survive it.
+    ///
+    /// The spawned proxy has no listener, so every status poll fails and the
+    /// drain never reads a route count: what is observed here is only the
+    /// respawn, which the old retire-on-off behaviour could not have produced —
+    /// it stopped the watch and dropped the proxy before any of this.
+    @Test("a proxy that dies while draining is still respawned")
+    func drainingStillRespawnsAProxyThatDies() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        try await fixture.db.config.setModelProxyEnabled(true)
+        await fixture.spawner.answer(.success(pid: 6150, port: SupervisorFixture.deadPort))
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        #expect(await supervisor.current?.pid == 6150)
+
+        try await fixture.db.config.setModelProxyEnabled(false)
+        await supervisor.beginDraining()
+        #expect(await supervisor.current?.pid == 6150, "an unanswered drain check keeps the proxy")
+
+        await fixture.spawner.reap(pid: 6150, status: 0)
+        await fixture.spawner.answer(.success(pid: 6151, port: SupervisorFixture.deadPort))
+        let respawned = await fixture.clock.advanceUntil(
+            "the draining proxy to be respawned", by: fixture.watchInterval,
+            { await supervisor.current?.pid == 6151 })
+        await supervisor.stop()
+
+        #expect(respawned)
+        #expect(
+            await fixture.spawner.calls()
+                == [0, SupervisorFixture.deadPort],
+            "the successor takes the port the dead one held")
+    }
+
+    /// The end of the drain, and the only thing that ends it: the proxy itself
+    /// reporting that no route is left. Every routed terminal retires its own
+    /// route as it exits, so the count reaching zero is the last of them
+    /// finishing — at which point the proxy is retired and the supervisor
+    /// stops.
+    @Test("the last route retiring retires the proxy and stops the watch")
+    func drainingEndsWhenTheLastRouteGoes() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(
+            version: fixture.ownVersion, pid: 6160, home: fixture.home, routeCount: 2)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.admit(pid: 6160, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        try await fixture.db.config.setModelProxyEnabled(false)
+        await supervisor.beginDraining()
+        #expect(await supervisor.current?.pid == 6160, "two routes in flight keep it")
+
+        proxy.setRouteCount(0)
+        let retired = await fixture.clock.advanceUntil(
+            "the drained proxy to be retired", by: fixture.watchInterval,
+            { await supervisor.current == nil })
+        await supervisor.stop()
+
+        #expect(retired)
+        #expect(proxy.requests().contains { $0.method == "POST" && $0.path == "/tbd/retire" })
+    }
+
+    /// Turning the flag back on while a drain is under way is simply a return
+    /// to normal service. Nothing is respawned and nothing is re-adopted — the
+    /// watch never stopped and the proxy was never dropped — and the route
+    /// count falling to zero afterwards no longer means anything, because the
+    /// supervisor is not draining any more.
+    ///
+    /// The zero route count is the discriminating half: it is exactly the input
+    /// that retires the proxy in `drainingEndsWhenTheLastRouteGoes`, and here it
+    /// must not.
+    @Test("turning the flag back on while draining keeps the proxy")
+    func drainingIsClearedByTheFlagComingBackOn() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(
+            version: fixture.ownVersion, pid: 6170, home: fixture.home, routeCount: 1)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.admit(pid: 6170, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        try await fixture.db.config.setModelProxyEnabled(false)
+        await supervisor.beginDraining()
+
+        // The user changes their mind, and then the last route retires anyway.
+        try await fixture.db.config.setModelProxyEnabled(true)
+        await supervisor.startIfEnabled()
+        proxy.setRouteCount(0)
+
+        let pollsBefore = proxy.requests().filter { $0.path == "/tbd/status" }.count
+        let polled = await fixture.clock.advanceUntil(
+            "a watch poll after the flag came back on", by: fixture.watchInterval,
+            { proxy.requests().filter { $0.path == "/tbd/status" }.count > pollsBefore })
+        await supervisor.stop()
+
+        #expect(polled)
+        #expect(
+            proxy.requests().allSatisfy { $0.path != "/tbd/retire" },
+            "a supervisor that is no longer draining must not retire on an empty route table")
+        #expect(await supervisor.current?.pid == 6170)
+    }
+
+    /// The `catch` around `/tbd/retire` (Minor 2 of the B2.5 review). A proxy
+    /// that refuses to retire is still dropped: there is nothing to escalate to
+    /// — an adopted proxy is not this daemon's to signal, and killing a spawned
+    /// one would cut whatever is still in flight — and it self-retires after
+    /// its own idle window. What must not happen is the supervisor going on
+    /// believing it holds a proxy it has told itself it retired, which is what
+    /// a future refactor moving `dropLive()` inside the `do` would produce.
+    @Test("a proxy that refuses to retire is dropped anyway")
+    func aFailedRetireStillDropsTheProxy() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(
+            version: fixture.ownVersion, pid: 6180, home: fixture.home, retireStatus: 500)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.admit(pid: 6180, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        #expect(await supervisor.current?.pid == 6180)
+
+        try await fixture.db.config.setModelProxyEnabled(false)
+        await supervisor.beginDraining()
+
+        #expect(
+            proxy.requests().contains { $0.method == "POST" && $0.path == "/tbd/retire" },
+            "the refusal has to come from a retire that was actually attempted")
+        #expect(
+            await supervisor.current == nil,
+            "a proxy the supervisor believes it retired must not stay current")
+    }
+
+    /// The boot half of the drain. A daemon that restarts after the flag went
+    /// off — or that was never running when it went off — still has to keep the
+    /// port answering for sessions spawned while it was on, because their base
+    /// URL is fixed in their environment. So a flag-off boot with a routed
+    /// session alive starts, adopts, and drains.
+    @Test("a flag-off boot with a routed session still alive starts draining")
+    func aFlagOffBootDrainsForRoutedSessions() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(
+            version: fixture.ownVersion, pid: 6190, home: fixture.home, routeCount: 1)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        #expect(try await fixture.db.config.get().modelProxyEnabled == false)
+        fixture.identity.admit(pid: 6190, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor(routedSessionsAlive: { true })
+        await supervisor.startIfEnabled()
+        await supervisor.stop()
+
+        #expect(
+            await supervisor.current?.pid == 6190,
+            "a routed session's proxy is adopted even with the flag off")
+        #expect(proxy.requests().allSatisfy { $0.path != "/tbd/retire" })
+    }
+
+    /// **The discriminating half of the boot drain**, and the one that keeps
+    /// the success criterion honest: with the flag off and no session routed
+    /// through the proxy, the supervisor starts nothing — not even against a
+    /// proxy that is sitting there, adoptable, on the persisted port. This is
+    /// `aFlagOffBootDrainsForRoutedSessions` with exactly one input changed.
+    @Test("a flag-off boot with nothing routed adopts nothing")
+    func aFlagOffBootWithNothingRoutedStartsNothing() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(
+            version: fixture.ownVersion, pid: 6200, home: fixture.home, routeCount: 1)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 6200, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor(routedSessionsAlive: { false })
+        await supervisor.startIfEnabled()
+        await supervisor.stop()
+
+        #expect(await supervisor.current == nil)
+        #expect(proxy.requests().isEmpty, "nothing was even probed")
+        #expect(await fixture.spawner.calls().isEmpty)
     }
 
     /// **The discriminating half.** `stop()` is shutdown, and a proxy outliving
@@ -1168,7 +1413,11 @@ private struct SupervisorFixture {
     /// with the watch is more than one hop passes an `EventDrivenTestClock`
     /// instead — see `respawnsAfterDeath` for why that is not a blanket
     /// migration.
+    /// `routedSessionsAlive` answers "no session is routed" unless a case says
+    /// otherwise, which is the answer that makes a flag-off boot run nothing —
+    /// the shipped install.
     func supervisor(
+        routedSessionsAlive: @escaping @Sendable () async -> Bool = { false },
         clientFactory: @escaping @Sendable (Int) -> ModelProxyClient = {
             ModelProxyClient(port: $0)
         },
@@ -1180,6 +1429,7 @@ private struct SupervisorFixture {
             spawner: spawner,
             ownVersion: ownVersion,
             processIdentity: identity,
+            routedSessionsAlive: routedSessionsAlive,
             clientFactory: clientFactory,
             watchInterval: watchInterval,
             respawnBackoff: [firstBackoff, .seconds(5)],
@@ -1310,10 +1560,18 @@ private final class FakeProxyProcess: @unchecked Sendable {
 
     private let server: LoopbackHTTPTestServer
     private let pidBox: PidBox
+    private let routeCountBox: IntBox
     private let paths: ProxyHomePaths
     let processStartTime = FakeProxyProcess.startedAt
 
     var port: Int { server.port }
+
+    /// How many routes this proxy says it is serving.
+    ///
+    /// Mutable because the drain turns on exactly this number falling to zero
+    /// while the supervisor watches, and the number belongs to the proxy: the
+    /// daemon never counts routes itself, it asks.
+    func setRouteCount(_ count: Int) { routeCountBox.value = count }
 
     /// Makes the listener answer for another process from now on — one port
     /// changing hands, which is what another daemon's replacement looks like
@@ -1338,13 +1596,19 @@ private final class FakeProxyProcess: @unchecked Sendable {
         try? FileManager.default.removeItem(atPath: paths.pidPath)
     }
 
-    init(version: String, pid: Int32, home: URL, routeStatus: Int = 200) throws {
+    init(
+        version: String, pid: Int32, home: URL, routeStatus: Int = 200,
+        routeCount: Int = 0, retireStatus: Int = 200
+    ) throws {
         // The listener's port is not known until it is bound, so the status
         // document is composed per request out of a box the initializer fills
         // afterwards rather than baked into the handler.
-        let portBox = PortBox()
+        let portBox = IntBox()
         let pidBox = PidBox(pid)
+        let routeCountBox = IntBox()
+        routeCountBox.value = routeCount
         self.pidBox = pidBox
+        self.routeCountBox = routeCountBox
         self.paths = ProxyHomePaths(home: home)
         // Canonical, exactly as the real proxy reports it: the daemon compares
         // canonical forms, and a fake that echoed a raw path would make the
@@ -1360,14 +1624,15 @@ private final class FakeProxyProcess: @unchecked Sendable {
             case ("GET", "/tbd/status"):
                 let document = ModelProxyStatus(
                     version: version, pid: pidBox.value, processStartTime: started,
-                    port: portBox.value, streamsInFlight: 0, routeCount: 0,
+                    port: portBox.value, streamsInFlight: 0,
+                    routeCount: routeCountBox.value,
                     home: servedHome)
                 guard let data = try? document.encodedForStatusResponse() else {
                     return LoopbackHTTPTestServer.Reply(status: 500, body: "{}")
                 }
                 return .ok(String(decoding: data, as: UTF8.self))
             case ("POST", "/tbd/retire"):
-                return .ok("{}")
+                return LoopbackHTTPTestServer.Reply(status: retireStatus, body: "{}")
             case ("POST", "/tbd/routes"):
                 return LoopbackHTTPTestServer.Reply(status: routeStatus, body: "{}")
             default:
@@ -1395,7 +1660,7 @@ private final class ForeignHomeProxyProcess: @unchecked Sendable {
     var port: Int { server.port }
 
     init(version: String, pid: Int32, home: String) throws {
-        let portBox = PortBox()
+        let portBox = IntBox()
         let started = processStartTime
         // The empty string passes through uncanonicalized on purpose: it is
         // what an image older than the `home` field decodes to, and running it
@@ -1446,9 +1711,11 @@ private final class PidBox: @unchecked Sendable {
     }
 }
 
-/// A box for the port, because the handler closure is built before the
-/// listener has one.
-private final class PortBox: @unchecked Sendable {
+/// A box for a number the request handler reads but the test writes: the
+/// listener's own port, which is not known until after the closure is built,
+/// and the route count, which a draining test moves while the supervisor
+/// watches.
+private final class IntBox: @unchecked Sendable {
     private let lock = NSLock()
     private var stored = 0
     var value: Int {

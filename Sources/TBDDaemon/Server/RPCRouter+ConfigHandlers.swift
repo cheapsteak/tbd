@@ -440,13 +440,16 @@ extension RPCRouter {
     /// is the half a column write cannot do: the boot path starts a supervisor
     /// only when the flag was already on, so without this a user who turned the
     /// proxy on would get routes minted against nothing until the next restart.
-    /// On the way off the running proxy is retired rather than merely
-    /// abandoned — see `retireProxy`.
+    /// On the way off the supervisor starts **draining** rather than retiring
+    /// the proxy where it stands — see `beginDraining`. The sessions already
+    /// routed through it carry its port in their environment for the rest of
+    /// their lives, so cutting the proxy would break them mid-task rather than
+    /// merely un-routing them, and the help text above promises otherwise.
     ///
     /// Acted on the *written* value rather than on a flip computed from a
     /// preceding read: both calls are idempotent (`startIfEnabled` returns
-    /// early on a supervisor already started, `retireProxy` on one holding no
-    /// proxy), so a second call in the same direction changes nothing, and no
+    /// early on a supervisor already started, `beginDraining` on one that never
+    /// started), so a second call in the same direction changes nothing, and no
     /// window opens between reading the old value and writing the new one.
     func handleConfigSetModelProxyEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(
@@ -455,7 +458,7 @@ extension RPCRouter {
         if params.enabled {
             await modelProxySupervisor?.startIfEnabled()
         } else {
-            await modelProxySupervisor?.retireProxy()
+            await modelProxySupervisor?.beginDraining()
         }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
