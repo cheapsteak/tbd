@@ -201,6 +201,29 @@ daemon restart.
 - `POST /tbd/routes` and `DELETE /tbd/routes/<token>` tell the proxy a route
   file was written or should be dropped, so it need not watch the directory.
 
+### Signals
+
+`SIGTERM` and `SIGINT` mean to a serving proxy exactly what `POST /tbd/retire`
+means: the listener closes, the rendezvous lock is released with it, the
+streams already in flight finish under the same drain cap, and the process
+exits when the drain ends. A signal is how a process manager, a supervisor, or
+a person at a shell stops a proxy, and one that answered by tearing down its
+connections would truncate every turn it was carrying — the transcript
+corruption this feature exists to avoid, arriving by the most ordinary gesture
+there is.
+
+A **second** signal during that drain exits immediately, cutting whatever is
+still open. It is the operator saying they meant now, and it is what keeps
+"stop this proxy this instant" one signal away rather than a `SIGKILL` away. A
+signal that finds nothing in flight exits promptly, because the drain it starts
+has nothing to wait for, and one that arrives before the listener is bound ends
+the process at once, because there is no listener to close. A signal landing
+during a drain a retire has already started joins that drain rather than
+beginning a second.
+
+`SIGKILL` is therefore the only way to end a proxy that cuts a stream
+mid-message.
+
 ### Adoption identity
 
 A status document is a network response, and a local process that wins the
@@ -549,7 +572,9 @@ SSE shape and costs zero tokens.
   stub. The `HEAD` probe and count-tokens are forwarded. A failing tee leaves
   the client's bytes intact. Adopt, spawn, retire, and respawn on an injected
   clock. Address-in-use against a non-TBD listener mints a new port; against a
-  TBD proxy adopts it. Retire answers before the drain finishes.
+  TBD proxy adopts it. Retire answers before the drain finishes. A signal
+  retires a proxy carrying a stream rather than cutting it, a second signal
+  ends the drain, and a signal with nothing in flight exits promptly.
 - **Tee.** A request with `x-claude-code-agent-id`, or with an empty `tools`
   array, writes nothing. Concurrent streams on one route interleave with
   their message ids and truncation waits for both.
