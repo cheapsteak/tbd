@@ -73,7 +73,19 @@ struct ModelProxyClientTests {
         defer { server.stop() }
 
         let client = ModelProxyClient(port: server.port)
-        await #expect(throws: ModelProxyClient.Error.self) { try await client.status() }
+        do {
+            _ = try await client.status()
+            Issue.record("an HTML page was accepted as a status document")
+        } catch let error as ModelProxyClient.Error {
+            // The *case*, not merely the type: `unexpectedStatus` and
+            // `unreachable` are also `ModelProxyClient.Error`, and a 200 whose
+            // body is not a status document has to be told apart from both —
+            // it is what a stranger on the port looks like.
+            guard case .malformedResponse = error else {
+                Issue.record("a non-status answer was reported as \(error)")
+                return
+            }
+        }
     }
 
     @Test("a non-200 carries the status and an excerpt of the body")
@@ -194,5 +206,32 @@ struct ModelProxyClientTests {
             }
         }
         #expect(server.requests().isEmpty, "a refused token still reached the proxy")
+    }
+
+    // MARK: - The listener these tests are driven through
+
+    /// `stop` **joins** the accept thread rather than closing the descriptor
+    /// out from under it.
+    ///
+    /// A claim about the harness rather than about the client, asserted here
+    /// because the failure it prevents has no fingerprint of its own: a thread
+    /// left blocked in `accept()` on a closed fd number wakes up on whichever
+    /// listening socket the kernel hands that number to next — another suite's,
+    /// in this same test process — sees that *its* server was stopped, and
+    /// drops that suite's connection. What anyone would see is a stranger's
+    /// test failing intermittently.
+    @Test("stop wakes the accept thread instead of leaving it on a closed descriptor")
+    func stopJoinsTheAcceptThread() async throws {
+        let server = try LoopbackHTTPTestServer { _ in .ok("{}") }
+
+        // One real request first, so what is joined below is a thread proven
+        // to have reached the accept loop rather than one that never started.
+        _ = try? await ModelProxyClient(port: server.port).status()
+        #expect(server.requests().count == 1, "the listener never served a request")
+
+        server.stop()
+        #expect(
+            server.waitForAcceptThread(timeout: 1),
+            "the accept thread was still blocked a second after stop() returned")
     }
 }

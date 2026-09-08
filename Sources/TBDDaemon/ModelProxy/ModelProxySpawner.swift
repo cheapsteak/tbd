@@ -78,7 +78,17 @@ struct ModelProxySpawner: Sendable {
         case launchFailed(errno: Int32)
         /// The child neither published a port nor exited inside the budget. It
         /// was killed and reaped — see `killAndReap`.
-        case bindTimeout
+        ///
+        /// `polls` and `elapsed` are what that budget cost in real time, and
+        /// they are carried rather than logged alone for `HolderSpawner`'s
+        /// reason: the wait spends credit at the *nominal* poll interval
+        /// rather than reading a clock, so a 10-second budget is really 500
+        /// attempts, and on a runner where each `sleep(for: 20ms)` resumes
+        /// late those attempts can span minutes. Without both numbers a CI log
+        /// cannot tell a proxy that never bound from one that bound slowly,
+        /// and the tempting fix is to raise a number that was never the unit
+        /// of the wait.
+        case bindTimeout(polls: Int, elapsed: TimeInterval)
         /// The child exited early with a status that is none of the above:
         /// a bad command line (2), a signal, or a crash. Carried rather than
         /// folded into `bindFailed` because respawning is the wrong answer to
@@ -96,9 +106,11 @@ struct ModelProxySpawner: Sendable {
             case .launchFailed(let code):
                 return "could not spawn the model proxy: "
                     + "\(String(cString: strerror(code))) (errno \(code))"
-            case .bindTimeout:
-                return "the model proxy never published a port within the budget "
-                    + "and was killed"
+            case .bindTimeout(let polls, let elapsed):
+                return String(
+                    format: "the model proxy never published a port after %d polls over "
+                        + "%.1fs of real time, and was killed",
+                    polls, elapsed)
             case .childExited(let status):
                 return "the model proxy exited with status \(status) before it published a port"
             }
@@ -234,7 +246,31 @@ struct ModelProxySpawner: Sendable {
         pid: pid_t, requestedPort: Int, paths: ProxyHomePaths
     ) async throws -> (pid: pid_t, port: Int) {
         var waited: Duration = .zero
+        // Diagnostic only — nothing branches on either. `waited` is credit
+        // spent at the nominal poll interval; these two say what that credit
+        // bought in real time, which is the one thing a CI failure here cannot
+        // be reasoned about without.
+        var polls = 0
+        let startedAt = Date()
         while true {
+            // A cancelled spawn stops here rather than spinning through the
+            // rest of its budget: `try? await clock.sleep` returns *instantly*
+            // once the task is cancelled, so a loop that did not look would
+            // burn every remaining iteration at full speed. The child is
+            // killed on the way out for `bindTimeout`'s reason — nobody was
+            // ever told its port, and it is holding `proxy.lock` — which keeps
+            // this type's promise that a spawn it cannot finish leaves no
+            // process and no lock behind.
+            if Task.isCancelled {
+                Self.killAndReap(pid: pid)
+                Self.logger.error(
+                    """
+                    model proxy spawn for \(paths.home.path, privacy: .public) was cancelled; \
+                    pid \(pid, privacy: .public) killed
+                    """)
+                throw CancellationError()
+            }
+
             if let published = Self.publishedPort(path: paths.pidPath, pid: pid) {
                 Self.logger.info(
                     """
@@ -253,6 +289,7 @@ struct ModelProxySpawner: Sendable {
             }
 
             guard waited < bindTimeout else { break }
+            polls += 1
             try? await clock.sleep(for: bindPollInterval)
             waited += bindPollInterval
         }
@@ -266,13 +303,16 @@ struct ModelProxySpawner: Sendable {
         // proxy has no children and no stream can exist on a port nobody was
         // ever told.
         Self.killAndReap(pid: pid)
+        let elapsed = Date().timeIntervalSince(startedAt)
         Self.logger.error(
             """
-            model proxy pid \(pid, privacy: .public) never published a port in \
-            \("\(bindTimeout)", privacy: .public); killed. See \
+            model proxy pid \(pid, privacy: .public) never published a port after \
+            \(polls, privacy: .public) polls over \
+            \(String(format: "%.1f", elapsed), privacy: .public)s of real time \
+            (budget \("\(bindTimeout)", privacy: .public)); killed. See \
             \(paths.logPath, privacy: .public)
             """)
-        throw Error.bindTimeout
+        throw Error.bindTimeout(polls: polls, elapsed: elapsed)
     }
 
     /// The port in a pid file that names `pid`, or nil for a missing file, an

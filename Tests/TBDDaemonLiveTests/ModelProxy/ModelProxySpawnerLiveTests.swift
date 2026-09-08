@@ -68,8 +68,24 @@ struct ModelProxySpawnerLiveTests {
 
         // A second spawn against a live proxy's home is refused by the lock,
         // without touching the running proxy's rendezvous.
-        await #expect(throws: ModelProxySpawner.Error.lockHeld) {
-            _ = try await spawner.spawn(port: spawned.port, home: home)
+        //
+        // do/catch rather than `#expect(throws:)` because the branch that must
+        // not happen leaves a **real proxy** behind: bound to a port, holding
+        // a lock, and self-retiring only after 24 hours. `#expect` discards
+        // what the closure returned, so the pid would be unrecoverable; here
+        // it is killed and reaped before the failure is recorded.
+        do {
+            let unexpected = try await spawner.spawn(port: spawned.port, home: home)
+            kill(unexpected.pid, SIGKILL)
+            var ignored: Int32 = 0
+            _ = waitpid(unexpected.pid, &ignored, 0)
+            Issue.record(
+                """
+                a second spawn on a live proxy's home succeeded as pid \(unexpected.pid) \
+                on port \(unexpected.port); it was killed
+                """)
+        } catch ModelProxySpawner.Error.lockHeld {
+            // Expected: the running proxy holds `proxy.lock`.
         }
 
         try await client.retire()

@@ -40,6 +40,22 @@ final class LoopbackHTTPTestServer: @unchecked Sendable {
     private var received: [Request] = []
     private var held: [Int32] = []
     private var stopped = false
+    private var listenerClosed = false
+
+    /// Raised once `serve` has returned, so `stop` can **join** the accept
+    /// thread rather than leave one behind.
+    ///
+    /// A detached thread sitting in `accept()` on a descriptor somebody else
+    /// closed is not merely untidy. The number is free the instant it is
+    /// closed, the next listening socket opened in this process — another
+    /// suite's, running in parallel — can be handed exactly that number, and
+    /// the zombie then wins *its* `accept()`, sees `stopped`, and closes that
+    /// suite's connection out from under whoever was waiting for it. The
+    /// symptom is a stranger's test failing, with nothing in it to point back
+    /// here. So the listener is closed only by the thread that uses it, and
+    /// `stop` waits for that to happen.
+    private let acceptThreadDone = NSCondition()
+    private var acceptThreadFinished = false
 
     init(handler: @escaping @Sendable (Request) -> Reply?) throws {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
@@ -92,24 +108,93 @@ final class LoopbackHTTPTestServer: @unchecked Sendable {
         lock.withLock { received }
     }
 
-    /// Closes the listener and every connection still being held open by a
-    /// `nil` reply. Idempotent, so a `defer` and an explicit call can both run.
+    /// Stops the listener, closes every connection still being held open by a
+    /// `nil` reply, and waits for the accept thread to finish. Idempotent, so
+    /// a `defer` and an explicit call can both run.
     func stop() {
         let toClose: [Int32] = lock.withLock {
-            guard !stopped else { return [] }
             stopped = true
             let open = held
             held = []
             return open
         }
-        Darwin.close(listenerFD)
         for fd in toClose { Darwin.close(fd) }
+
+        // Wake the sleeper, then join it. `shutdown` before anything is closed
+        // is the documented way to get a thread out of `accept`; the
+        // descriptor itself is closed by the accept thread on its way out and
+        // never here, so it cannot be handed to another socket while that
+        // thread is still inside `poll`.
+        shutdownListenerIfOpen()
+        _ = waitForAcceptThread(timeout: 1)
+    }
+
+    /// True once the accept thread has returned; false if it had not within
+    /// `timeout`. Bounded rather than indefinite so a caller can *assert* the
+    /// join happened instead of hanging when it did not.
+    @discardableResult
+    func waitForAcceptThread(timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        acceptThreadDone.lock()
+        defer { acceptThreadDone.unlock() }
+        while !acceptThreadFinished {
+            guard acceptThreadDone.wait(until: deadline) else { return acceptThreadFinished }
+        }
+        return true
+    }
+
+    private func markAcceptThreadFinished() {
+        acceptThreadDone.lock()
+        acceptThreadFinished = true
+        acceptThreadDone.broadcast()
+        acceptThreadDone.unlock()
+    }
+
+    /// `shutdown` while the descriptor is still ours, under the same flag the
+    /// close is: a listener the accept thread has already closed must never be
+    /// shut down *by number* after the kernel has given that number to
+    /// somebody else.
+    private func shutdownListenerIfOpen() {
+        lock.withLock {
+            guard !listenerClosed else { return }
+            _ = shutdown(listenerFD, SHUT_RDWR)
+        }
+    }
+
+    private func closeListenerIfOpen() {
+        lock.withLock {
+            guard !listenerClosed else { return }
+            listenerClosed = true
+            Darwin.close(listenerFD)
+        }
     }
 
     // MARK: - The loop
 
     private func serve(handler: @escaping @Sendable (Request) -> Reply?) {
+        defer {
+            // The accept thread owns the listener: this is the only place the
+            // descriptor is closed, so no other thread can close it while this
+            // one is inside `poll` or `accept`.
+            closeListenerIfOpen()
+            markAcceptThreadFinished()
+        }
         while true {
+            if lock.withLock({ stopped }) { return }
+
+            // A bounded poll rather than a blocking `accept`. `stop` shuts the
+            // listener down first, which is the documented wake, but on Darwin
+            // `shutdown` on a *listening* socket can answer `ENOTCONN` and
+            // leave the sleeper exactly where it was; a 50 ms poll makes the
+            // exit unconditional and prompt either way.
+            var watched = pollfd(fd: listenerFD, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&watched, 1, 50)
+            if ready < 0 {
+                if errno == EINTR { continue }
+                return
+            }
+            guard ready > 0 else { continue }
+
             let connection = accept(listenerFD, nil, nil)
             guard connection >= 0 else { return }
             let isStopped = lock.withLock { stopped }

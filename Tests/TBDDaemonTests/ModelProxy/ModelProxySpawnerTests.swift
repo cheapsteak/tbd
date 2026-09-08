@@ -239,11 +239,21 @@ struct ModelProxySpawnerTests {
         let fixture = try SpawnerFixture.make(body: "exec sleep 600")
         defer { fixture.tearDown() }
 
-        await #expect(throws: ModelProxySpawner.Error.bindTimeout) {
+        let thrown = await #expect(throws: ModelProxySpawner.Error.self) {
             _ = try await fixture.spawner(
                 bindTimeout: .seconds(2), bindPollInterval: .milliseconds(100)
             ).spawn(port: 51234, home: fixture.home)
         }
+        // The case, plus the two numbers it carries: they are what tells a CI
+        // log a budget that was spent from one that expired in a fraction of
+        // the real time it nominally allows, and asserting them keeps them
+        // from quietly becoming zero.
+        guard case .some(.bindTimeout(let polls, let elapsed)) = thrown else {
+            Issue.record("a silent proxy was reported as \(String(describing: thrown))")
+            return
+        }
+        #expect(polls == 20, "a 2-second budget of 100 ms polls should be 20 attempts")
+        #expect(elapsed > 0, "the timeout reported no elapsed time at all")
 
         // Non-vacuity: the fake really ran, so what was killed was a live
         // child rather than a spawn that never happened.
