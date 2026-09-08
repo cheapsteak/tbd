@@ -66,6 +66,9 @@ final class ControlEndpoints: Sendable {
     /// test passes a recorder, which is the only reason the process's own exit
     /// is injectable at all.
     private let onRetire: @Sendable () -> Void
+    /// Closes the listening socket. In production it also releases the
+    /// process's rendezvous lock, which is why retire waits for it before
+    /// answering rather than starting it alongside the drain.
     private let closeListener: @Sendable () async -> Void
     private let streamsInFlight: @Sendable () -> Int
     private let pollInterval: Duration
@@ -211,6 +214,12 @@ final class ControlEndpoints: Sendable {
     /// drain finishes on its first sample and calls `onRetire`, which is
     /// `exit(0)`; started before the answer was written, it would race the
     /// process's own exit against its 200.
+    ///
+    /// `closeListener` is also where the process drops its rendezvous lock, so
+    /// by the time this answers, the successor's spawner can take the lock as
+    /// well as the port. Holding it through the drain would block that spawn
+    /// for as long as the drain runs — up to the cap — with nothing listening
+    /// on the port meanwhile.
     private func retire() async -> Response {
         await closeListener()
         return Response(.ok, Self.retiringBody, afterAnswer: { [self] in startDrain() })

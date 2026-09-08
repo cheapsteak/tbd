@@ -67,6 +67,13 @@ final class ProxyServer: Sendable {
     /// counter and the channel box rather than over `self` so the server does
     /// not retain a closure that retains the server.
     private let control: ControlEndpoints
+    /// Run once the listening socket is gone, on every path that closes it.
+    ///
+    /// The proxy passes its rendezvous-lock release here: a retiring proxy owns
+    /// no port and answers no route the moment this fires, so the successor's
+    /// spawner may take the lock while the drain is still running. Defaulted to
+    /// nothing, so a test that only wants a server need not care.
+    private let onListenerClosed: @Sendable () -> Void
 
     init(
         port: Int,
@@ -74,6 +81,7 @@ final class ProxyServer: Sendable {
         tee: (any StreamTeeing)?,
         status: @escaping @Sendable () -> ModelProxyStatus,
         onRetire: @escaping @Sendable () -> Void,
+        onListenerClosed: @escaping @Sendable () -> Void = {},
         forwarder: UpstreamForwarder = UpstreamForwarder(session: UpstreamForwarder.makeSession()),
         clock: any Clock<Duration> = ContinuousClock()
     ) {
@@ -91,11 +99,18 @@ final class ProxyServer: Sendable {
         let inFlight = StreamCounter()
         self.channelBox = channelBox
         self.inFlight = inFlight
+        self.onListenerClosed = onListenerClosed
         self.control = ControlEndpoints(
             routes: routes,
             status: status,
             onRetire: onRetire,
-            closeListener: { await ProxyServer.closeListener(channelBox) },
+            // Composed here rather than inside the retire verb: the release
+            // must land after the close and before the answer, and this is the
+            // only place both are in one expression.
+            closeListener: {
+                await ProxyServer.closeListener(channelBox)
+                onListenerClosed()
+            },
             streamsInFlight: { inFlight.value },
             clock: clock)
     }
@@ -161,8 +176,14 @@ final class ProxyServer: Sendable {
     /// Stops accepting new connections. In-flight responses keep streaming on
     /// the connections they are already on — `POST /tbd/retire` answers as soon
     /// as this returns and drains afterwards.
+    ///
+    /// `onListenerClosed` fires here too, so the stop path and the retire path
+    /// agree about when this process stops owning the rendezvous. It is
+    /// contracted to be idempotent, and the box's `take()` makes the close
+    /// itself so.
     func closeListener() async {
         await Self.closeListener(channelBox)
+        onListenerClosed()
     }
 
     /// The same close, reachable without a `ProxyServer`, so the retire verb

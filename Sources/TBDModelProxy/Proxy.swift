@@ -68,9 +68,11 @@ struct ProxyArguments: Equatable {
     var port: Int
     /// The TBD home whose `proxy/`, `streams/` and route files this proxy owns.
     var home: String
-    /// An inherited `flock` descriptor, already held by the spawner. The proxy
-    /// keeps it open for its whole life and never closes it; that a descriptor
-    /// cannot be inherited by accident is what makes it proof of ownership.
+    /// An inherited `flock` descriptor, already held by the spawner. That a
+    /// descriptor cannot be inherited by accident is what makes it proof of
+    /// ownership. The proxy holds it from start-up until its listener closes —
+    /// a `POST /tbd/retire` — or until the process exits, whichever comes
+    /// first; see `ProxyRendezvousLock`.
     var lockDescriptor: Int32?
 
     static let usage = "usage: TBDModelProxy [--port <n>] [--home <path>] [--lock-fd <n>]"
@@ -225,17 +227,23 @@ enum TBDModelProxyMain {
         //    Two ways to hold it, one meaning. A `--lock-fd` was taken by the
         //    spawner and rode in on a `dup2` file action, which is proof of
         //    ownership precisely because a descriptor cannot be inherited by
-        //    accident; it is kept open, untouched, for this process's whole
-        //    life, and closing it would drop the lock. Without one — a test, a
-        //    proxy started by hand — this process takes the lock itself. A
-        //    second proxy on one home fails here either way.
-        var ownLock: HolderLock? = nil
+        //    accident. Without one — a test, a proxy started by hand — this
+        //    process takes the lock itself. A second proxy on one home fails
+        //    here either way.
+        //
+        //    Held from here until the listener closes, and not until exit:
+        //    what the lock means is "a live proxy owns this rendezvous", and a
+        //    retired proxy with a closed listener owns no port and answers no
+        //    route. See `ProxyRendezvousLock`.
+        let rendezvous: ProxyRendezvousLock
         if let inherited = arguments.lockDescriptor {
             ProxyLog.main.debug(
                 "holding the inherited lock descriptor \(inherited, privacy: .public)")
+            rendezvous = ProxyRendezvousLock(inherited: inherited)
         } else {
             do {
-                ownLock = try HolderLock.acquire(path: paths.lockPath)
+                let own = try HolderLock.acquire(path: paths.lockPath)
+                rendezvous = ProxyRendezvousLock(acquired: own)
             } catch HolderLock.Error.alreadyHeld(let path) {
                 FileHandle.standardError.write(
                     Data("TBDModelProxy: another proxy already holds \(path)\n".utf8))
@@ -247,9 +255,10 @@ enum TBDModelProxyMain {
             }
         }
         // Read once, and named, so the lock is visibly still owned past the
-        // branch that took it: the descriptor stays open until `exit`, because
-        // closing it is what would release the lock.
-        let heldDescriptor: Int32 = ownLock?.fileDescriptor ?? arguments.lockDescriptor ?? -1
+        // branch that took it. `HolderLock` is a `deinit`-free struct, so
+        // nothing here is keeping the descriptor alive: it stays open — and
+        // the lock with it — until `releaseRendezvousLock()` closes it.
+        let heldDescriptor: Int32 = rendezvous.fileDescriptor
         ProxyLog.main.debug("lock held on descriptor \(heldDescriptor, privacy: .public)")
 
         let routes = RouteTable(routesDir: paths.routesDir, streamsDir: paths.streamsDir)
@@ -286,7 +295,13 @@ enum TBDModelProxyMain {
             // one shutdown path rather than calling `exit` itself, so the pid
             // file is reclaimed the same way on every route out of this
             // process.
-            onRetire: { stopped.stop(reason: "retire") })
+            onRetire: { stopped.stop(reason: "retire") },
+            // Fired the moment the listener is gone and before the retire's
+            // 200 is written, so the successor's spawner can take the lock as
+            // soon as it has its answer rather than waiting out this process's
+            // drain. Also fired by `stop()`, where it is a no-op ahead of an
+            // exit that would have closed the descriptor anyway.
+            onListenerClosed: { rendezvous.releaseRendezvousLock() })
 
         // `run()` is synchronous and returns `Never`, so the async start is
         // driven to completion here rather than escaping into a task nobody
@@ -359,6 +374,12 @@ enum TBDModelProxyMain {
         }
         _ = stopOutcome.wait()
 
+        // Idempotent, and belt-and-braces: `stop()` closes the listener, which
+        // fires the same release. Stated here as well because the invariant
+        // this process owes its successor — the lock is never held past the
+        // listener — must not depend on the shape of `stop()`.
+        rendezvous.releaseRendezvousLock()
+
         // Only while it is still ours. A retiring proxy exits *after* its
         // successor has bound the port and written its own pid file, and an
         // unconditional unlink here would leave that live successor with no
@@ -399,6 +420,75 @@ final class ProxyStopSignal: Sendable {
     func wait() -> String {
         ready.wait()
         return lock.withLock { reason } ?? "unknown"
+    }
+}
+
+/// The `flock` that says a live proxy owns this home's rendezvous.
+///
+/// Two ways in, one way out. A `--lock-fd` inherited through a `dup2` file
+/// action is the spawner's own descriptor, and the daemon drops its copy right
+/// after `posix_spawn` (`HolderSpawner`); a proxy started with no descriptor
+/// takes the lock itself. Either way the lock lives on an open file
+/// description, so closing the descriptor is what releases it.
+///
+/// **Held from start-up until the listener closes, or until the process exits,
+/// whichever comes first.** Not until exit, which is the tempting rule and the
+/// wrong one: `POST /tbd/retire` closes the listener, answers immediately, and
+/// only then drains streams that may run for minutes. What the lock means is
+/// "a live proxy owns this rendezvous", and a proxy whose listener is closed
+/// owns no port and answers no route — so holding it through the drain would
+/// block the successor's spawner for the length of the drain, leaving nothing
+/// listening on the port. The pid file needs no such rule: it is reclaimed
+/// only while it still names this process.
+///
+/// `@unchecked Sendable` with an `NSLock`: the release is reachable from the
+/// event loop that answers a retire and from the main thread on the way out,
+/// and it must happen exactly once.
+final class ProxyRendezvousLock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var acquired: HolderLock?
+    private var inherited: Int32?
+
+    /// A lock this process took for itself.
+    init(acquired: HolderLock) { self.acquired = acquired }
+
+    /// A lock the spawner took and handed down on a descriptor.
+    init(inherited: Int32) { self.inherited = inherited }
+
+    /// The descriptor the lock lives on, or -1 once it has been released.
+    var fileDescriptor: Int32 {
+        lock.withLock { acquired?.fileDescriptor ?? inherited ?? -1 }
+    }
+
+    /// Drops the lock, so a successor's spawner can take it.
+    ///
+    /// Idempotent, and it must be: the retire path releases at listener close
+    /// and the exit path releases again, and closing a descriptor twice is not
+    /// a harmless mistake — the number can have been handed to something else
+    /// in between.
+    func releaseRendezvousLock() {
+        enum Held {
+            case own(HolderLock)
+            case handedDown(Int32)
+        }
+        let held = lock.withLock { () -> Held? in
+            defer {
+                self.acquired = nil
+                self.inherited = nil
+            }
+            if let own = self.acquired { return .own(own) }
+            if let handedDown = self.inherited { return .handedDown(handedDown) }
+            return nil
+        }
+        switch held {
+        case .own(let own):
+            own.release()
+        case .handedDown(let descriptor):
+            close(descriptor)
+        case .none:
+            return
+        }
+        ProxyLog.main.debug("released the rendezvous lock")
     }
 }
 

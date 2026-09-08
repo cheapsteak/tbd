@@ -512,6 +512,148 @@ extension ModelProxySuites {
             #expect(pidFile.port > 0)
         }
 
+        /// The lock is a live proxy's claim on the rendezvous, and a retiring
+        /// proxy stops being one the moment its listener closes.
+        ///
+        /// The successor's spawner takes `proxy.lock` before it spawns
+        /// anything, the way `HolderSpawner` does. If the predecessor held its
+        /// lock until exit, that spawn would fail with `lockHeld` for the whole
+        /// drain — up to the ten-minute cap — with nothing listening on the
+        /// port and every proxied session losing a turn once Claude's
+        /// 183-second retry budget ran out.
+        ///
+        /// Discriminating twice over: the lock has to come free inside a second
+        /// of the answer, and the six-second stream has to keep delivering
+        /// afterwards. A proxy that released only at exit could satisfy the
+        /// first only by cutting the stream, which the event count then
+        /// catches.
+        @Test("retire frees the rendezvous lock while the drain is still running")
+        func retireReleasesTheLockBeforeTheDrainEnds() async throws {
+            // Six events a second apart: long enough that a lock which only
+            // came free at exit could not come free inside the budget below.
+            let ticks = (1...6).map { index in
+                (delayMs: 1000, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
+            }
+            let upstream = FakeUpstream { _, _ in FakeUpstream.Script(events: ticks) }
+            let upstreamPort = try upstream.start()
+            defer { upstream.stop() }
+
+            let home = proxyScratchRoot(prefix: "pxrelk").path
+            let token = ModelProxyRoute.mintToken()
+            let route = ModelProxyRoute(
+                token: token, terminalID: UUID(),
+                upstream: "http://127.0.0.1:\(upstreamPort)", streamingEnabled: false)
+            try FileManager.default.createDirectory(
+                atPath: home + "/proxy/routes", withIntermediateDirectories: true)
+            try route.encodedForRouteFile().write(
+                to: URL(fileURLWithPath: home + "/proxy/routes/" + token + ".json"))
+
+            // No `--lock-fd`, so this proxy takes `proxy.lock` for itself and
+            // the release under test is `HolderLock.release()`.
+            let proxy = try ProxyProcess.start(home: home)
+            defer { proxy.terminate() }
+            let pidFile = try await proxy.awaitPIDFile()
+
+            let routeURL = try ProxyProcess.url(
+                port: pidFile.port, path: "/r/\(token)/v1/messages")
+            var request = URLRequest(url: routeURL)
+            request.httpMethod = "POST"
+            request.httpBody = Data(#"{"stream":true}"#.utf8)
+            let (bytes, response) = try await ProxyProcess.session.bytes(for: request)
+            #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+            let (retireBody, retireResponse) = try await ProxyProcess.session.data(
+                for: controlRequest(port: pidFile.port, method: "POST", path: "/tbd/retire"))
+            let answeredAt = ContinuousClock().now
+            #expect((retireResponse as? HTTPURLResponse)?.statusCode == 200)
+            #expect(String(decoding: retireBody, as: UTF8.self) == ControlEndpoints.retiringBody)
+
+            // The successor's spawner, in one line: take the lock, then spawn.
+            var taken: HolderLock?
+            while ContinuousClock().now - answeredAt < .seconds(1) {
+                if let lock = try? HolderLock.acquire(path: home + "/proxy/proxy.lock") {
+                    taken = lock
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            let successorLock = try #require(
+                taken,
+                "the retiring proxy still held its lock a second after answering; log:\n\(proxy.log())"
+            )
+            defer { successorLock.release() }
+
+            // …and the predecessor is still carrying the turn it answered
+            // over: the events keep arriving for seconds after the lock came
+            // free, so nothing was cut to free it.
+            //
+            // The last frame is allowed to go missing, and the read is allowed
+            // to end in an error, because the drain samples the in-flight count
+            // *before* the terminating chunk is flushed and the process can
+            // exit between the two. What is under test is that the stream kept
+            // delivering across the release, which five of six frames after a
+            // one-second budget already says.
+            var arrived = 0
+            var readError: (any Error)?
+            do {
+                for try await line in bytes.lines where line.hasPrefix("event: ") { arrived += 1 }
+            } catch {
+                readError = error
+            }
+            // Built before the macro, not inside it: `#expect`'s message is a
+            // `Comment`, and a nested closure interpolated into one is the
+            // shape that failed to compile in Task A4.
+            let ending = readError.map { "then \($0)" } ?? "then a clean end"
+            #expect(
+                arrived >= ticks.count - 1,
+                "the drain delivered \(arrived) of \(ticks.count) events, \(ending); log:\n\(proxy.log())")
+
+            // And it still exits by itself once the drain is done.
+            let status = await proxy.awaitExit()
+            #expect(status == 0, "a drained proxy must exit cleanly; log:\n\(proxy.log())")
+        }
+
+        /// The inherited descriptor really carries the lock, rather than merely
+        /// not being re-acquired.
+        ///
+        /// `anInheritedLockDescriptorSkipsTheAcquire` above shows the proxy does
+        /// not acquire for itself; it cannot show the handed-down descriptor is
+        /// open in the child, because the proxy never reads it. This one hands
+        /// down the spawner's OWN locked descriptor — the production shape,
+        /// where `dup2` gives the child a copy of the same open file
+        /// description — and then does what the spawner does next: releases its
+        /// copy right after the spawn (`HolderSpawner.swift`). The lock must
+        /// survive on the child's copy alone.
+        @Test("the inherited descriptor holds the lock after its spawner lets go")
+        func anInheritedLockDescriptorIsHeldNotMerelyUnclaimed() async throws {
+            let home = proxyScratchRoot(prefix: "pxinhh").path
+            try FileManager.default.createDirectory(
+                atPath: home + "/proxy", withIntermediateDirectories: true)
+            let lockPath = home + "/proxy/proxy.lock"
+
+            let held = try HolderLock.acquire(path: lockPath)
+            var spawnerStillHolds = true
+            defer { if spawnerStillHolds { held.release() } }
+
+            let proxy = try ProxyProcess.start(
+                home: home, inheritDescriptor: held.fileDescriptor)
+            defer { proxy.terminate() }
+            let pidFile = try await proxy.awaitPIDFile()
+            #expect(pidFile.pid == proxy.pid)
+
+            held.release()
+            spawnerStillHolds = false
+
+            // The listener is still open, so this proxy still owns the
+            // rendezvous. A child that had lost the descriptor at exec, or
+            // closed it, would leave the file unlocked and this would succeed.
+            let stolen = try? HolderLock.acquire(path: lockPath)
+            if let stolen { stolen.release() }
+            #expect(
+                stolen == nil,
+                "the lock was free once the spawner let go; log:\n\(proxy.log())")
+        }
+
         @Test("a home that cannot be created exits homeUnusable without binding")
         func anUnusableHomeExitsWithoutBinding() async throws {
             // A home whose path is a regular file: `mkdir -p` cannot make it,
