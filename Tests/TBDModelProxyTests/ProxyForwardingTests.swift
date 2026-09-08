@@ -6,553 +6,572 @@ import Testing
 @testable import TBDModelProxy
 @testable import TBDShared
 
-/// What the proxy promises a forwarded request and its response.
+/// Every proxy suite lives inside this one, and `.serialized` here is
+/// recursive: the forwarding, tee, control and route-table suites run one at a
+/// time rather than against each other.
 ///
-/// Every test here spins a real `ProxyServer` on a kernel-assigned loopback
-/// port in front of a `FakeUpstream` on another, and asserts on both halves at
-/// once: what the upstream *received*, verbatim, and what the client got back.
-/// Nothing is inferred from the proxy's own logs or counters.
-///
-/// The rules pinned here each have a measured reason in the design
-/// (`docs/specs/2026-09-05-transcript-streaming-model-proxy-design.md`,
-/// "Forwarding"): Claude's retry and capability-disable logic matches on the
-/// upstream's error *wording*, prompt caching depends on the `system` array
-/// arriving in the order it was written, and Claude counts SSE pings and
-/// aborts a stream silent for 300 seconds. A proxy that re-serializes a body
-/// or batches a flush breaks those silently, so the assertions are on bytes
-/// and on arrival times rather than on shapes.
-@Suite("Proxy forwarding", .serialized)
-struct ProxyForwardingTests {
+/// Each of them binds real loopback listeners and asserts on *arrival times* —
+/// that an event reaches the client as it arrives, that a text line lands
+/// before the stream ends, that a retire answers inside 500 ms. Three such
+/// suites racing on a 3-core CI runner measure the runner's load rather than
+/// the proxy: the cut-stream test lost its body chunk that way the first time
+/// the tee and control suites ran beside it. They also mint and free ephemeral
+/// ports, and a port freed by one suite's retire is a port another suite's
+/// `bind(0)` can be handed a moment later.
+@Suite("Model proxy", .serialized)
+struct ModelProxySuites {}
 
-    // MARK: Byte identity
+extension ModelProxySuites {
+    /// What the proxy promises a forwarded request and its response.
+    ///
+    /// Every test here spins a real `ProxyServer` on a kernel-assigned loopback
+    /// port in front of a `FakeUpstream` on another, and asserts on both halves at
+    /// once: what the upstream *received*, verbatim, and what the client got back.
+    /// Nothing is inferred from the proxy's own logs or counters.
+    ///
+    /// The rules pinned here each have a measured reason in the design
+    /// (`docs/specs/2026-09-05-transcript-streaming-model-proxy-design.md`,
+    /// "Forwarding"): Claude's retry and capability-disable logic matches on the
+    /// upstream's error *wording*, prompt caching depends on the `system` array
+    /// arriving in the order it was written, and Claude counts SSE pings and
+    /// aborts a stream silent for 300 seconds. A proxy that re-serializes a body
+    /// or batches a flush breaks those silently, so the assertions are on bytes
+    /// and on arrival times rather than on shapes.
+    @Suite("Proxy forwarding", .serialized)
+    struct ProxyForwardingTests {
 
-    @Test("a request's body and headers reach the upstream byte-identical")
-    func forwardsBodyAndHeadersByteIdentical() async throws {
-        // 300 KB, which is the size a real Claude Code request runs to once a
-        // few files are in context — big enough that any accumulate-then-parse
-        // step in the request leg would show up.
-        let filler = String(repeating: "context ", count: 37_500)
-        let requestBody = Data(
-            #"{"model":"claude-stub","stream":true,"system":["\#(filler)"]}"#.utf8)
-        #expect(requestBody.count > 300_000)
+        // MARK: Byte identity
 
-        try await withProxy(
-            prefix: "pxid",
-            script: { _, _ in
-                FakeUpstream.Script(
-                    status: 200, headers: [("content-type", "application/json")],
-                    events: [(delayMs: 0, bytes: Array(#"{"ok":true}"#.utf8))])
+        @Test("a request's body and headers reach the upstream byte-identical")
+        func forwardsBodyAndHeadersByteIdentical() async throws {
+            // 300 KB, which is the size a real Claude Code request runs to once a
+            // few files are in context — big enough that any accumulate-then-parse
+            // step in the request leg would show up.
+            let filler = String(repeating: "context ", count: 37_500)
+            let requestBody = Data(
+                #"{"model":"claude-stub","stream":true,"system":["\#(filler)"]}"#.utf8)
+            #expect(requestBody.count > 300_000)
+
+            try await withProxy(
+                prefix: "pxid",
+                script: { _, _ in
+                    FakeUpstream.Script(
+                        status: 200, headers: [("content-type", "application/json")],
+                        events: [(delayMs: 0, bytes: Array(#"{"ok":true}"#.utf8))])
+                }
+            ) { harness in
+                var request = URLRequest(url: harness.url("/v1/messages"))
+                request.httpMethod = "POST"
+                request.httpBody = requestBody
+                request.setValue("application/json", forHTTPHeaderField: "content-type")
+                request.setValue("a,b", forHTTPHeaderField: "anthropic-beta")
+                request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                request.setValue("s", forHTTPHeaderField: "x-claude-code-session-id")
+                request.setValue("js", forHTTPHeaderField: "x-stainless-lang")
+                request.setValue("gzip", forHTTPHeaderField: "accept-encoding")
+
+                let (_, response) = try await harness.session.data(for: request)
+                #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+                let received = try #require(harness.upstream.requests.first)
+                // The whole body, compared as bytes. A re-serializing proxy would
+                // still produce valid JSON here and still break prompt caching.
+                #expect(Data(received.body) == requestBody)
+
+                // Open lists, not an allowlist: Anthropic has refused new beta
+                // headers behind a custom base URL before, and the OAuth
+                // capability rides in `anthropic-beta`.
+                #expect(received.head.headers.first(name: "anthropic-beta") == "a,b")
+                #expect(received.head.headers.first(name: "anthropic-version") == "2023-06-01")
+                #expect(received.head.headers.first(name: "x-claude-code-session-id") == "s")
+                #expect(received.head.headers.first(name: "x-stainless-lang") == "js")
+
+                // `accept-encoding` is the one request header that never passes
+                // through. It is replaced rather than merely dropped because
+                // `URLSession` adds `gzip, deflate, br` to a request that sets
+                // none and then transparently decompresses the answer, which would
+                // leave the relay handing the client bytes that disagree with the
+                // `Content-Encoding` header beside them.
+                let forwardedEncoding = received.head.headers.first(name: "accept-encoding")
+                #expect(forwardedEncoding == UpstreamForwarder.requestedEncoding)
+                #expect(forwardedEncoding != "gzip")
             }
-        ) { harness in
-            var request = URLRequest(url: harness.url("/v1/messages"))
-            request.httpMethod = "POST"
-            request.httpBody = requestBody
-            request.setValue("application/json", forHTTPHeaderField: "content-type")
-            request.setValue("a,b", forHTTPHeaderField: "anthropic-beta")
-            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-            request.setValue("s", forHTTPHeaderField: "x-claude-code-session-id")
-            request.setValue("js", forHTTPHeaderField: "x-stainless-lang")
-            request.setValue("gzip", forHTTPHeaderField: "accept-encoding")
-
-            let (_, response) = try await harness.session.data(for: request)
-            #expect((response as? HTTPURLResponse)?.statusCode == 200)
-
-            let received = try #require(harness.upstream.requests.first)
-            // The whole body, compared as bytes. A re-serializing proxy would
-            // still produce valid JSON here and still break prompt caching.
-            #expect(Data(received.body) == requestBody)
-
-            // Open lists, not an allowlist: Anthropic has refused new beta
-            // headers behind a custom base URL before, and the OAuth
-            // capability rides in `anthropic-beta`.
-            #expect(received.head.headers.first(name: "anthropic-beta") == "a,b")
-            #expect(received.head.headers.first(name: "anthropic-version") == "2023-06-01")
-            #expect(received.head.headers.first(name: "x-claude-code-session-id") == "s")
-            #expect(received.head.headers.first(name: "x-stainless-lang") == "js")
-
-            // `accept-encoding` is the one request header that never passes
-            // through. It is replaced rather than merely dropped because
-            // `URLSession` adds `gzip, deflate, br` to a request that sets
-            // none and then transparently decompresses the answer, which would
-            // leave the relay handing the client bytes that disagree with the
-            // `Content-Encoding` header beside them.
-            let forwardedEncoding = received.head.headers.first(name: "accept-encoding")
-            #expect(forwardedEncoding == UpstreamForwarder.requestedEncoding)
-            #expect(forwardedEncoding != "gzip")
-        }
-    }
-
-    // MARK: Streaming
-
-    @Test("each event reaches the client as it arrives, not batched at the end")
-    func relaysStreamChunkByChunk() async throws {
-        let spacingMs = 300
-        let events = (1...3).map { index in
-            (delayMs: spacingMs, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
         }
 
-        try await withProxy(
-            prefix: "pxst",
-            script: { _, _ in FakeUpstream.Script(events: events) }
-        ) { harness in
-            var request = URLRequest(url: harness.url("/v1/messages"))
-            request.httpMethod = "POST"
-            request.httpBody = Data(#"{"stream":true}"#.utf8)
+        // MARK: Streaming
 
-            let clock = ContinuousClock()
-            let (bytes, response) = try await harness.session.bytes(for: request)
-            #expect((response as? HTTPURLResponse)?.statusCode == 200)
-
-            var arrivals: [ContinuousClock.Instant] = []
-            for try await line in bytes.lines where line.hasPrefix("event: ") {
-                arrivals.append(clock.now)
+        @Test("each event reaches the client as it arrives, not batched at the end")
+        func relaysStreamChunkByChunk() async throws {
+            let spacingMs = 300
+            let events = (1...3).map { index in
+                (delayMs: spacingMs, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
 
-            #expect(arrivals.count == 3)
-            guard arrivals.count >= 2 else { return }
-            // The scripted spacing is 300 ms; asserting 200 leaves room for a
-            // loaded CI machine to be late without letting a proxy that
-            // buffered the whole stream — which would deliver all three within
-            // a millisecond of each other — pass.
-            let gap = arrivals[1] - arrivals[0]
-            #expect(
-                gap >= .milliseconds(200),
-                "second event arrived \(gap) after the first; a buffered relay collapses this to ~0")
-        }
-    }
+            try await withProxy(
+                prefix: "pxst",
+                script: { _, _ in FakeUpstream.Script(events: events) }
+            ) { harness in
+                var request = URLRequest(url: harness.url("/v1/messages"))
+                request.httpMethod = "POST"
+                request.httpBody = Data(#"{"stream":true}"#.utf8)
 
-    @Test("comment lines and pings reach the client byte for byte")
-    func relaysCommentPingsUnchanged() async throws {
-        // A comment line carries no event and no data. Claude counts these to
-        // decide a stream is alive, so a relay that coalesced or dropped them
-        // would look correct on the deltas and still time a turn out.
-        let frames = [
-            Array("event: content_block_delta\ndata: {\"i\":0}\n\n".utf8),
-            Array(": ping\n\n".utf8),
-            Array("event: content_block_delta\ndata: {\"i\":1}\n\n".utf8),
-            Array(": ping\n\n".utf8),
-            Array("event: message_stop\ndata: {}\n\n".utf8),
-        ]
-        let expected = Data(frames.flatMap { $0 })
+                let clock = ContinuousClock()
+                let (bytes, response) = try await harness.session.bytes(for: request)
+                #expect((response as? HTTPURLResponse)?.statusCode == 200)
 
-        try await withProxy(
-            prefix: "pxpi",
-            script: { _, _ in
-                FakeUpstream.Script(events: frames.map { (delayMs: 0, bytes: $0) })
+                var arrivals: [ContinuousClock.Instant] = []
+                for try await line in bytes.lines where line.hasPrefix("event: ") {
+                    arrivals.append(clock.now)
+                }
+
+                #expect(arrivals.count == 3)
+                guard arrivals.count >= 2 else { return }
+                // The scripted spacing is 300 ms; asserting 200 leaves room for a
+                // loaded CI machine to be late without letting a proxy that
+                // buffered the whole stream — which would deliver all three within
+                // a millisecond of each other — pass.
+                let gap = arrivals[1] - arrivals[0]
+                #expect(
+                    gap >= .milliseconds(200),
+                    "second event arrived \(gap) after the first; a buffered relay collapses this to ~0")
             }
-        ) { harness in
-            var request = URLRequest(url: harness.url("/v1/messages"))
-            request.httpMethod = "POST"
-            request.httpBody = Data(#"{"stream":true}"#.utf8)
-
-            let (data, response) = try await harness.session.data(for: request)
-            #expect((response as? HTTPURLResponse)?.statusCode == 200)
-            #expect(data == expected)
         }
-    }
 
-    @Test("an upstream error status and body are relayed verbatim")
-    func relaysUpstreamErrorBodyVerbatim() async throws {
-        // The exact wording matters: Claude's retry and capability-disable
-        // logic matches on it, so a proxy that rewrote this into its own error
-        // shape would change what Claude does next.
-        let errorBody = Array(
-            #"{"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}"#
-                .utf8)
+        @Test("comment lines and pings reach the client byte for byte")
+        func relaysCommentPingsUnchanged() async throws {
+            // A comment line carries no event and no data. Claude counts these to
+            // decide a stream is alive, so a relay that coalesced or dropped them
+            // would look correct on the deltas and still time a turn out.
+            let frames = [
+                Array("event: content_block_delta\ndata: {\"i\":0}\n\n".utf8),
+                Array(": ping\n\n".utf8),
+                Array("event: content_block_delta\ndata: {\"i\":1}\n\n".utf8),
+                Array(": ping\n\n".utf8),
+                Array("event: message_stop\ndata: {}\n\n".utf8),
+            ]
+            let expected = Data(frames.flatMap { $0 })
 
-        try await withProxy(
-            prefix: "pxer",
-            script: { _, _ in
-                FakeUpstream.Script(
-                    status: 429,
-                    headers: [("content-type", "application/json"), ("retry-after", "17")],
-                    events: [(delayMs: 0, bytes: errorBody)])
+            try await withProxy(
+                prefix: "pxpi",
+                script: { _, _ in
+                    FakeUpstream.Script(events: frames.map { (delayMs: 0, bytes: $0) })
+                }
+            ) { harness in
+                var request = URLRequest(url: harness.url("/v1/messages"))
+                request.httpMethod = "POST"
+                request.httpBody = Data(#"{"stream":true}"#.utf8)
+
+                let (data, response) = try await harness.session.data(for: request)
+                #expect((response as? HTTPURLResponse)?.statusCode == 200)
+                #expect(data == expected)
             }
-        ) { harness in
-            var request = URLRequest(url: harness.url("/v1/messages"))
-            request.httpMethod = "POST"
-            request.httpBody = Data(#"{"stream":true}"#.utf8)
-
-            let (data, response) = try await harness.session.data(for: request)
-            let http = try #require(response as? HTTPURLResponse)
-            #expect(http.statusCode == 429)
-            #expect(Array(data) == errorBody)
-            // A non-hop-by-hop response header passes untouched, which is how
-            // Claude learns how long to wait.
-            #expect(http.value(forHTTPHeaderField: "retry-after") == "17")
         }
-    }
 
-    // MARK: Refusals
+        @Test("an upstream error status and body are relayed verbatim")
+        func relaysUpstreamErrorBodyVerbatim() async throws {
+            // The exact wording matters: Claude's retry and capability-disable
+            // logic matches on it, so a proxy that rewrote this into its own error
+            // shape would change what Claude does next.
+            let errorBody = Array(
+                #"{"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}"#
+                    .utf8)
 
-    @Test("an unknown token is 404 and reaches no upstream")
-    func unknownTokenIs404AndForwardsNothing() async throws {
-        try await withProxy(
-            prefix: "pxun",
-            script: { _, _ in FakeUpstream.Script(events: []) }
-        ) { harness in
-            let unknown = String(repeating: "0", count: 32)
-            #expect(ModelProxyRoute.isValidToken(unknown), "the token must be well-formed to be a fair test")
+            try await withProxy(
+                prefix: "pxer",
+                script: { _, _ in
+                    FakeUpstream.Script(
+                        status: 429,
+                        headers: [("content-type", "application/json"), ("retry-after", "17")],
+                        events: [(delayMs: 0, bytes: errorBody)])
+                }
+            ) { harness in
+                var request = URLRequest(url: harness.url("/v1/messages"))
+                request.httpMethod = "POST"
+                request.httpBody = Data(#"{"stream":true}"#.utf8)
 
-            let unknownURL = try #require(
-                URL(string: "http://127.0.0.1:\(harness.port)/r/\(unknown)/v1/messages"))
-            var request = URLRequest(url: unknownURL)
-            request.httpMethod = "POST"
-            request.httpBody = Data(#"{"stream":true}"#.utf8)
-
-            let (data, response) = try await harness.session.data(for: request)
-            #expect((response as? HTTPURLResponse)?.statusCode == 404)
-            #expect(String(decoding: data, as: UTF8.self) == ProxyServer.unknownRouteBody)
-            // The refusal is the point: a proxy on loopback that forwarded an
-            // unknown token would be an open forwarder for every local process.
-            #expect(harness.upstream.requests.isEmpty)
+                let (data, response) = try await harness.session.data(for: request)
+                let http = try #require(response as? HTTPURLResponse)
+                #expect(http.statusCode == 429)
+                #expect(Array(data) == errorBody)
+                // A non-hop-by-hop response header passes untouched, which is how
+                // Claude learns how long to wait.
+                #expect(http.value(forHTTPHeaderField: "retry-after") == "17")
+            }
         }
-    }
 
-    @Test("a malformed token is 404 before it can compose a path")
-    func malformedTokenIs404() async throws {
-        try await withProxy(
-            prefix: "pxmt",
-            script: { _, _ in FakeUpstream.Script(events: []) }
-        ) { harness in
-            // Sent over a raw socket on purpose. `URL` and `URLSession`
-            // normalize `..` out of a path before it leaves the process, so a
-            // URL-based client cannot put the traversal on the wire at all —
-            // and it is the wire the proxy has to refuse.
-            for path in ["/r/../../v1/messages", "/r/ABC/v1/messages"] {
+        // MARK: Refusals
+
+        @Test("an unknown token is 404 and reaches no upstream")
+        func unknownTokenIs404AndForwardsNothing() async throws {
+            try await withProxy(
+                prefix: "pxun",
+                script: { _, _ in FakeUpstream.Script(events: []) }
+            ) { harness in
+                let unknown = String(repeating: "0", count: 32)
+                #expect(ModelProxyRoute.isValidToken(unknown), "the token must be well-formed to be a fair test")
+
+                let unknownURL = try #require(
+                    URL(string: "http://127.0.0.1:\(harness.port)/r/\(unknown)/v1/messages"))
+                var request = URLRequest(url: unknownURL)
+                request.httpMethod = "POST"
+                request.httpBody = Data(#"{"stream":true}"#.utf8)
+
+                let (data, response) = try await harness.session.data(for: request)
+                #expect((response as? HTTPURLResponse)?.statusCode == 404)
+                #expect(String(decoding: data, as: UTF8.self) == ProxyServer.unknownRouteBody)
+                // The refusal is the point: a proxy on loopback that forwarded an
+                // unknown token would be an open forwarder for every local process.
+                #expect(harness.upstream.requests.isEmpty)
+            }
+        }
+
+        @Test("a malformed token is 404 before it can compose a path")
+        func malformedTokenIs404() async throws {
+            try await withProxy(
+                prefix: "pxmt",
+                script: { _, _ in FakeUpstream.Script(events: []) }
+            ) { harness in
+                // Sent over a raw socket on purpose. `URL` and `URLSession`
+                // normalize `..` out of a path before it leaves the process, so a
+                // URL-based client cannot put the traversal on the wire at all —
+                // and it is the wire the proxy has to refuse.
+                for path in ["/r/../../v1/messages", "/r/ABC/v1/messages"] {
+                    let port = harness.port
+                    let response = try await withPhaseDeadline("raw \(path)", seconds: 25) {
+                        try await withCheckedThrowingContinuation {
+                            (continuation: CheckedContinuation<String, any Error>) in
+                            // A blocking socket on a `DispatchQueue`, never on the
+                            // cooperative pool the rest of the suite runs on.
+                            DispatchQueue.global().async {
+                                continuation.resume(
+                                    with: Result {
+                                        try rawHTTPExchange(
+                                            port: port,
+                                            request:
+                                                "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                                    })
+                            }
+                        }
+                    }
+                    #expect(
+                        response.hasPrefix("HTTP/1.1 404"),
+                        "\(path) answered: \(response.prefix(64))")
+                    #expect(response.contains("unknown route"))
+                }
+                #expect(harness.upstream.requests.isEmpty)
+            }
+        }
+
+        // MARK: Everything under the base URL
+
+        @Test("the HEAD probe and count_tokens reach the upstream with their paths intact")
+        func forwardsHeadAndCountTokens() async throws {
+            // The base URL governs whatever Claude Code calls on it, not only
+            // `/v1/messages`: the warm-up probe and count-tokens are both real
+            // traffic, and a proxy that only knew one endpoint would fail a
+            // session before its first turn.
+            try await withProxy(
+                prefix: "pxhd",
+                script: { head, _ in
+                    if head.method == .HEAD {
+                        return FakeUpstream.Script(
+                            status: 200, headers: [("content-length", "0")], events: [])
+                    }
+                    return FakeUpstream.Script(
+                        status: 200, headers: [("content-type", "application/json")],
+                        events: [(delayMs: 0, bytes: Array(#"{"input_tokens":7}"#.utf8))])
+                }
+            ) { harness in
+                var probe = URLRequest(url: harness.url("/api/hello"))
+                probe.httpMethod = "HEAD"
+                let (_, probeResponse) = try await harness.session.data(for: probe)
+                #expect((probeResponse as? HTTPURLResponse)?.statusCode == 200)
+
+                var count = URLRequest(url: harness.url("/v1/messages/count_tokens"))
+                count.httpMethod = "POST"
+                count.httpBody = Data(#"{"model":"claude-stub"}"#.utf8)
+                let (countData, countResponse) = try await harness.session.data(for: count)
+                #expect((countResponse as? HTTPURLResponse)?.statusCode == 200)
+                #expect(String(decoding: countData, as: UTF8.self) == #"{"input_tokens":7}"#)
+
+                let received = harness.upstream.requests
+                #expect(received.count == 2)
+                #expect(received.first?.head.method == .HEAD)
+                #expect(received.first?.head.uri == "/api/hello")
+                #expect(received.last?.head.method == .POST)
+                #expect(received.last?.head.uri == "/v1/messages/count_tokens")
+            }
+        }
+
+        // MARK: Endings
+
+        @Test("a client that hangs up mid-stream still ends the relay and the tee")
+        func clientDisconnectEndsRelayAndTee() async throws {
+            // The ordinary aborted turn: the user presses Esc, Claude Code drops
+            // the connection, and the response the proxy is relaying has no reader
+            // left. Nothing about that is exceptional, so every accounting the
+            // relay owns has to close on it — the in-flight count Task A5's retire
+            // drains on, and the tee's `end(error:)`, which is the only signal an
+            // `aborted` stream line can come from.
+            let recorder = RecordingTee()
+            // Deliberately far longer than the cut it is cut by. NIO's
+            // `HTTPServerPipelineHandler` swallows `read()` while a response is
+            // outstanding, so a client's FIN is not seen when it arrives — the
+            // proxy learns the connection is gone when a later write to it fails.
+            // A script that ended near that moment would let a relay which
+            // reported nothing on cancellation still be rescued by the stream
+            // finishing on its own, and the test would pass for the wrong reason.
+            // 40 events at 250 ms is 10 seconds of stream against a 5-second wait.
+            let events = (1...40).map { index in
+                (delayMs: 250, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
+            }
+
+            try await withProxy(
+                prefix: "pxcd",
+                script: { _, _ in FakeUpstream.Script(events: events) },
+                tee: recorder
+            ) { harness in
+                let requestBody = #"{"stream":true}"#
+                let request = """
+                    POST /r/\(harness.token)/v1/messages HTTP/1.1\r
+                    Host: 127.0.0.1\r
+                    Content-Type: application/json\r
+                    Content-Length: \(requestBody.utf8.count)\r
+                    \r
+                    \(requestBody)
+                    """
                 let port = harness.port
-                let response = try await withPhaseDeadline("raw \(path)", seconds: 25) {
+                // A raw socket rather than a cancelled `URLSession` task: the
+                // moment the client's FIN goes out has to be the test's to choose,
+                // because every assertion below is about what the proxy does after
+                // it.
+                let seen = try await withPhaseDeadline("cut after first event", seconds: 30) {
                     try await withCheckedThrowingContinuation {
                         (continuation: CheckedContinuation<String, any Error>) in
-                        // A blocking socket on a `DispatchQueue`, never on the
-                        // cooperative pool the rest of the suite runs on.
                         DispatchQueue.global().async {
                             continuation.resume(
                                 with: Result {
-                                    try rawHTTPExchange(
-                                        port: port,
-                                        request:
-                                            "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                                    try rawHTTPCutAfterMarker(
+                                        port: port, request: request, marker: "event: tick")
                                 })
                         }
                     }
                 }
+                #expect(seen.contains("event: tick"), "the client never saw a first event")
+                // The stream is still running upstream — two more events at 400 ms
+                // are scripted — so nothing below can be explained by the response
+                // having finished on its own.
+                #expect(harness.upstream.requests.count == 1)
+
+                // Bounded well below the script's own 10 seconds, so a relay that
+                // only ends because the upstream ran out of events cannot pass.
+                await waitUntil(
+                    "the relay released its in-flight stream", seconds: 5,
+                    sample: { harness.server.streamsInFlight }, isSatisfied: { $0 == 0 })
+                await waitUntil(
+                    "the tee was told the stream ended", seconds: 5,
+                    sample: { recorder.endCount }, isSatisfied: { $0 == 1 })
+                #expect(recorder.beginCount == 1)
+                // Exactly once: `relayEnd` deduplicates, and a second end would
+                // reach a tee that has already written its terminal line.
+                #expect(recorder.endCount == 1)
                 #expect(
-                    response.hasPrefix("HTTP/1.1 404"),
-                    "\(path) answered: \(response.prefix(64))")
-                #expect(response.contains("unknown route"))
+                    recorder.lastEndError != nil,
+                    "a hung-up turn is an aborted one, so the tee's end carries an error")
             }
-            #expect(harness.upstream.requests.isEmpty)
         }
-    }
 
-    // MARK: Everything under the base URL
+        @Test("a stream in flight is counted while it runs and released when it ends")
+        func streamsInFlightTracksAnOpenStream() async throws {
+            // The counter is what `POST /tbd/retire` drains on in Task A5, so a
+            // leak here is a proxy that never agrees to retire.
+            let events = (1...3).map { index in
+                (delayMs: 400, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
+            }
 
-    @Test("the HEAD probe and count_tokens reach the upstream with their paths intact")
-    func forwardsHeadAndCountTokens() async throws {
-        // The base URL governs whatever Claude Code calls on it, not only
-        // `/v1/messages`: the warm-up probe and count-tokens are both real
-        // traffic, and a proxy that only knew one endpoint would fail a
-        // session before its first turn.
-        try await withProxy(
-            prefix: "pxhd",
-            script: { head, _ in
-                if head.method == .HEAD {
-                    return FakeUpstream.Script(
-                        status: 200, headers: [("content-length", "0")], events: [])
+            try await withProxy(
+                prefix: "pxif",
+                script: { _, _ in FakeUpstream.Script(events: events) }
+            ) { harness in
+                #expect(harness.server.streamsInFlight == 0)
+
+                var request = URLRequest(url: harness.url("/v1/messages"))
+                request.httpMethod = "POST"
+                request.httpBody = Data(#"{"stream":true}"#.utf8)
+
+                let (bytes, response) = try await harness.session.bytes(for: request)
+                #expect((response as? HTTPURLResponse)?.statusCode == 200)
+                // The head has been relayed and the end has not, which is the
+                // whole definition of the count.
+                #expect(harness.server.streamsInFlight == 1)
+
+                var arrived = 0
+                for try await line in bytes.lines where line.hasPrefix("event: ") { arrived += 1 }
+                #expect(arrived == 3)
+
+                await waitUntil(
+                    "the relay released its in-flight stream",
+                    sample: { harness.server.streamsInFlight }, isSatisfied: { $0 == 0 })
+            }
+        }
+
+        @Test("an upstream that drops mid-body reaches the client as a cut, not a short body")
+        func upstreamCutMidBodyIsRelayedAsACut() async throws {
+            // A truncated turn must not look like a finished one. If the relay
+            // wrote `.end` here, the client would read a complete response that
+            // happened to stop early — and Claude would treat a half-written
+            // message as the whole answer instead of retrying.
+            //
+            // The event is delayed so the head is a message of its own: the
+            // assertion is about a body that stops mid-flight, not about what a
+            // client makes of a response whose head and death arrive together.
+            let event = Array("event: content_block_delta\ndata: {\"i\":0}\n\n".utf8)
+
+            try await withProxy(
+                prefix: "pxcut",
+                script: { _, _ in
+                    FakeUpstream.Script(
+                        status: 200,
+                        headers: [
+                            ("content-type", "text/event-stream; charset=utf-8"),
+                            // Declares more than it will send, and that shape is
+                            // deliberate. Measured on CI: an upstream *chunked*
+                            // body that stops without its terminating chunk
+                            // reaches `URLSession` as a clean completion — the
+                            // upstream leg is told nothing failed, so the relay
+                            // cannot tell that shape from a finished response. A
+                            // body short of a declared length is the truncation
+                            // `didCompleteWithError` does report, and so it is the
+                            // one that can exercise the relay's cut path at all.
+                            ("content-length", "\(event.count + 64)"),
+                        ],
+                        events: [(delayMs: 200, bytes: event)],
+                        closeWithoutStop: true)
                 }
-                return FakeUpstream.Script(
-                    status: 200, headers: [("content-type", "application/json")],
-                    events: [(delayMs: 0, bytes: Array(#"{"input_tokens":7}"#.utf8))])
-            }
-        ) { harness in
-            var probe = URLRequest(url: harness.url("/api/hello"))
-            probe.httpMethod = "HEAD"
-            let (_, probeResponse) = try await harness.session.data(for: probe)
-            #expect((probeResponse as? HTTPURLResponse)?.statusCode == 200)
-
-            var count = URLRequest(url: harness.url("/v1/messages/count_tokens"))
-            count.httpMethod = "POST"
-            count.httpBody = Data(#"{"model":"claude-stub"}"#.utf8)
-            let (countData, countResponse) = try await harness.session.data(for: count)
-            #expect((countResponse as? HTTPURLResponse)?.statusCode == 200)
-            #expect(String(decoding: countData, as: UTF8.self) == #"{"input_tokens":7}"#)
-
-            let received = harness.upstream.requests
-            #expect(received.count == 2)
-            #expect(received.first?.head.method == .HEAD)
-            #expect(received.first?.head.uri == "/api/hello")
-            #expect(received.last?.head.method == .POST)
-            #expect(received.last?.head.uri == "/v1/messages/count_tokens")
-        }
-    }
-
-    // MARK: Endings
-
-    @Test("a client that hangs up mid-stream still ends the relay and the tee")
-    func clientDisconnectEndsRelayAndTee() async throws {
-        // The ordinary aborted turn: the user presses Esc, Claude Code drops
-        // the connection, and the response the proxy is relaying has no reader
-        // left. Nothing about that is exceptional, so every accounting the
-        // relay owns has to close on it — the in-flight count Task A5's retire
-        // drains on, and the tee's `end(error:)`, which is the only signal an
-        // `aborted` stream line can come from.
-        let recorder = RecordingTee()
-        // Deliberately far longer than the cut it is cut by. NIO's
-        // `HTTPServerPipelineHandler` swallows `read()` while a response is
-        // outstanding, so a client's FIN is not seen when it arrives — the
-        // proxy learns the connection is gone when a later write to it fails.
-        // A script that ended near that moment would let a relay which
-        // reported nothing on cancellation still be rescued by the stream
-        // finishing on its own, and the test would pass for the wrong reason.
-        // 40 events at 250 ms is 10 seconds of stream against a 5-second wait.
-        let events = (1...40).map { index in
-            (delayMs: 250, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
-        }
-
-        try await withProxy(
-            prefix: "pxcd",
-            script: { _, _ in FakeUpstream.Script(events: events) },
-            tee: recorder
-        ) { harness in
-            let requestBody = #"{"stream":true}"#
-            let request = """
-                POST /r/\(harness.token)/v1/messages HTTP/1.1\r
-                Host: 127.0.0.1\r
-                Content-Type: application/json\r
-                Content-Length: \(requestBody.utf8.count)\r
-                \r
-                \(requestBody)
-                """
-            let port = harness.port
-            // A raw socket rather than a cancelled `URLSession` task: the
-            // moment the client's FIN goes out has to be the test's to choose,
-            // because every assertion below is about what the proxy does after
-            // it.
-            let seen = try await withPhaseDeadline("cut after first event", seconds: 30) {
-                try await withCheckedThrowingContinuation {
-                    (continuation: CheckedContinuation<String, any Error>) in
-                    DispatchQueue.global().async {
-                        continuation.resume(
-                            with: Result {
-                                try rawHTTPCutAfterMarker(
-                                    port: port, request: request, marker: "event: tick")
-                            })
+            ) { harness in
+                // Read on a raw socket rather than through `URLSession`: the
+                // contract is about the bytes on the wire — a chunked body that
+                // stops without its terminating chunk — and how a particular
+                // client maps that to an error is its own business.
+                let requestBody = #"{"stream":true}"#
+                let request = """
+                    POST /r/\(harness.token)/v1/messages HTTP/1.1\r
+                    Host: 127.0.0.1\r
+                    Content-Type: application/json\r
+                    Content-Length: \(requestBody.utf8.count)\r
+                    Connection: close\r
+                    \r
+                    \(requestBody)
+                    """
+                let port = harness.port
+                let response = try await withPhaseDeadline("cut read", seconds: 30) {
+                    try await withCheckedThrowingContinuation {
+                        (continuation: CheckedContinuation<String, any Error>) in
+                        DispatchQueue.global().async {
+                            continuation.resume(
+                                with: Result { try rawHTTPExchange(port: port, request: request) })
+                        }
                     }
                 }
+
+                #expect(
+                    response.hasPrefix("HTTP/1.1 200"),
+                    "the head was relayed before the cut; got: \(response.prefix(64))")
+                #expect(response.lowercased().contains("transfer-encoding: chunked"))
+                #expect(response.contains("content_block_delta"))
+                // The terminating chunk is the whole difference between a response
+                // that completed and one that was cut.
+                #expect(
+                    !response.hasSuffix("0\r\n\r\n"),
+                    "the relay wrote a terminating chunk on a cut stream; tail: \(String(response.suffix(48)).debugDescription)"
+                )
+
+                #expect(harness.upstream.requests.count == 1)
+                await waitUntil(
+                    "the relay released its in-flight stream",
+                    sample: { harness.server.streamsInFlight }, isSatisfied: { $0 == 0 })
             }
-            #expect(seen.contains("event: tick"), "the client never saw a first event")
-            // The stream is still running upstream — two more events at 400 ms
-            // are scripted — so nothing below can be explained by the response
-            // having finished on its own.
-            #expect(harness.upstream.requests.count == 1)
-
-            // Bounded well below the script's own 10 seconds, so a relay that
-            // only ends because the upstream ran out of events cannot pass.
-            await waitUntil(
-                "the relay released its in-flight stream", seconds: 5,
-                sample: { harness.server.streamsInFlight }, isSatisfied: { $0 == 0 })
-            await waitUntil(
-                "the tee was told the stream ended", seconds: 5,
-                sample: { recorder.endCount }, isSatisfied: { $0 == 1 })
-            #expect(recorder.beginCount == 1)
-            // Exactly once: `relayEnd` deduplicates, and a second end would
-            // reach a tee that has already written its terminal line.
-            #expect(recorder.endCount == 1)
-            #expect(
-                recorder.lastEndError != nil,
-                "a hung-up turn is an aborted one, so the tee's end carries an error")
-        }
-    }
-
-    @Test("a stream in flight is counted while it runs and released when it ends")
-    func streamsInFlightTracksAnOpenStream() async throws {
-        // The counter is what `POST /tbd/retire` drains on in Task A5, so a
-        // leak here is a proxy that never agrees to retire.
-        let events = (1...3).map { index in
-            (delayMs: 400, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
         }
 
-        try await withProxy(
-            prefix: "pxif",
-            script: { _, _ in FakeUpstream.Script(events: events) }
-        ) { harness in
-            #expect(harness.server.streamsInFlight == 0)
+        @Test("an unreachable upstream is 502 in the API's own error shape")
+        func unreachableUpstreamIs502() async throws {
+            // Claude's retry and capability-disable logic reads these bodies, so a
+            // proxy that answered with its own error shape — or with a bare status
+            // — would change what the client does next.
+            try await withProxy(
+                prefix: "px502",
+                script: { _, _ in FakeUpstream.Script(events: []) }
+            ) { harness in
+                let deadPort = try unusedLoopbackPort()
+                let deadToken = ModelProxyRoute.mintToken()
+                let dead = ModelProxyRoute(
+                    token: deadToken, terminalID: UUID(),
+                    upstream: "http://127.0.0.1:\(deadPort)", streamingEnabled: false)
+                try dead.encodedForRouteFile().write(
+                    to: harness.routesDir.appendingPathComponent(
+                        TBDConstants.modelProxyRouteFileName(token: deadToken)))
+                try await harness.routes.add(token: deadToken)
 
-            var request = URLRequest(url: harness.url("/v1/messages"))
-            request.httpMethod = "POST"
-            request.httpBody = Data(#"{"stream":true}"#.utf8)
+                let url = try #require(
+                    URL(string: "http://127.0.0.1:\(harness.port)/r/\(deadToken)/v1/messages"))
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.httpBody = Data(#"{"stream":true}"#.utf8)
 
-            let (bytes, response) = try await harness.session.bytes(for: request)
-            #expect((response as? HTTPURLResponse)?.statusCode == 200)
-            // The head has been relayed and the end has not, which is the
-            // whole definition of the count.
-            #expect(harness.server.streamsInFlight == 1)
+                let (data, response) = try await harness.session.data(for: request)
+                #expect((response as? HTTPURLResponse)?.statusCode == 502)
 
-            var arrived = 0
-            for try await line in bytes.lines where line.hasPrefix("event: ") { arrived += 1 }
-            #expect(arrived == 3)
+                // Asserted as a prefix through `message`: what follows is the
+                // platform's own wording for a refused connection, which is not
+                // ours to pin.
+                let text = String(decoding: data, as: UTF8.self)
+                let expected =
+                    #"{"type":"error","error":{"type":"api_error","message":"upstream unreachable: "#
+                #expect(text.hasPrefix(expected), "502 body was: \(text)")
+                #expect(text.hasSuffix(#""}}"#), "502 body was: \(text)")
 
-            await waitUntil(
-                "the relay released its in-flight stream",
-                sample: { harness.server.streamsInFlight }, isSatisfied: { $0 == 0 })
-        }
-    }
-
-    @Test("an upstream that drops mid-body reaches the client as a cut, not a short body")
-    func upstreamCutMidBodyIsRelayedAsACut() async throws {
-        // A truncated turn must not look like a finished one. If the relay
-        // wrote `.end` here, the client would read a complete response that
-        // happened to stop early — and Claude would treat a half-written
-        // message as the whole answer instead of retrying.
-        //
-        // The event is delayed so the head is a message of its own: the
-        // assertion is about a body that stops mid-flight, not about what a
-        // client makes of a response whose head and death arrive together.
-        let event = Array("event: content_block_delta\ndata: {\"i\":0}\n\n".utf8)
-
-        try await withProxy(
-            prefix: "pxcut",
-            script: { _, _ in
-                FakeUpstream.Script(
-                    status: 200,
-                    headers: [
-                        ("content-type", "text/event-stream; charset=utf-8"),
-                        // Declares more than it will send, and that shape is
-                        // deliberate. Measured on CI: an upstream *chunked*
-                        // body that stops without its terminating chunk
-                        // reaches `URLSession` as a clean completion — the
-                        // upstream leg is told nothing failed, so the relay
-                        // cannot tell that shape from a finished response. A
-                        // body short of a declared length is the truncation
-                        // `didCompleteWithError` does report, and so it is the
-                        // one that can exercise the relay's cut path at all.
-                        ("content-length", "\(event.count + 64)"),
-                    ],
-                    events: [(delayMs: 200, bytes: event)],
-                    closeWithoutStop: true)
+                // Nothing was forwarded, and a failure before the head must not
+                // touch the counter it never incremented.
+                #expect(harness.upstream.requests.isEmpty)
+                #expect(harness.server.streamsInFlight == 0)
             }
-        ) { harness in
-            // Read on a raw socket rather than through `URLSession`: the
-            // contract is about the bytes on the wire — a chunked body that
-            // stops without its terminating chunk — and how a particular
-            // client maps that to an error is its own business.
-            let requestBody = #"{"stream":true}"#
-            let request = """
-                POST /r/\(harness.token)/v1/messages HTTP/1.1\r
-                Host: 127.0.0.1\r
-                Content-Type: application/json\r
-                Content-Length: \(requestBody.utf8.count)\r
-                Connection: close\r
-                \r
-                \(requestBody)
-                """
-            let port = harness.port
-            let response = try await withPhaseDeadline("cut read", seconds: 30) {
-                try await withCheckedThrowingContinuation {
-                    (continuation: CheckedContinuation<String, any Error>) in
-                    DispatchQueue.global().async {
-                        continuation.resume(
-                            with: Result { try rawHTTPExchange(port: port, request: request) })
-                    }
-                }
-            }
-
-            #expect(
-                response.hasPrefix("HTTP/1.1 200"),
-                "the head was relayed before the cut; got: \(response.prefix(64))")
-            #expect(response.lowercased().contains("transfer-encoding: chunked"))
-            #expect(response.contains("content_block_delta"))
-            // The terminating chunk is the whole difference between a response
-            // that completed and one that was cut.
-            #expect(
-                !response.hasSuffix("0\r\n\r\n"),
-                "the relay wrote a terminating chunk on a cut stream; tail: \(String(response.suffix(48)).debugDescription)"
-            )
-
-            #expect(harness.upstream.requests.count == 1)
-            await waitUntil(
-                "the relay released its in-flight stream",
-                sample: { harness.server.streamsInFlight }, isSatisfied: { $0 == 0 })
-        }
-    }
-
-    @Test("an unreachable upstream is 502 in the API's own error shape")
-    func unreachableUpstreamIs502() async throws {
-        // Claude's retry and capability-disable logic reads these bodies, so a
-        // proxy that answered with its own error shape — or with a bare status
-        // — would change what the client does next.
-        try await withProxy(
-            prefix: "px502",
-            script: { _, _ in FakeUpstream.Script(events: []) }
-        ) { harness in
-            let deadPort = try unusedLoopbackPort()
-            let deadToken = ModelProxyRoute.mintToken()
-            let dead = ModelProxyRoute(
-                token: deadToken, terminalID: UUID(),
-                upstream: "http://127.0.0.1:\(deadPort)", streamingEnabled: false)
-            try dead.encodedForRouteFile().write(
-                to: harness.routesDir.appendingPathComponent(
-                    TBDConstants.modelProxyRouteFileName(token: deadToken)))
-            try await harness.routes.add(token: deadToken)
-
-            let url = try #require(
-                URL(string: "http://127.0.0.1:\(harness.port)/r/\(deadToken)/v1/messages"))
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.httpBody = Data(#"{"stream":true}"#.utf8)
-
-            let (data, response) = try await harness.session.data(for: request)
-            #expect((response as? HTTPURLResponse)?.statusCode == 502)
-
-            // Asserted as a prefix through `message`: what follows is the
-            // platform's own wording for a refused connection, which is not
-            // ours to pin.
-            let text = String(decoding: data, as: UTF8.self)
-            let expected =
-                #"{"type":"error","error":{"type":"api_error","message":"upstream unreachable: "#
-            #expect(text.hasPrefix(expected), "502 body was: \(text)")
-            #expect(text.hasSuffix(#""}}"#), "502 body was: \(text)")
-
-            // Nothing was forwarded, and a failure before the head must not
-            // touch the counter it never incremented.
-            #expect(harness.upstream.requests.isEmpty)
-            #expect(harness.server.streamsInFlight == 0)
         }
     }
 }
 
 // MARK: - Route table
 
-@Suite("Proxy route table")
-struct ProxyRouteTableTests {
-    @Test("a trailing slash on the upstream is trimmed before it can double a separator")
-    func trimsTrailingSlashFromUpstream() async throws {
-        let root = proxyScratchRoot(prefix: "pxrt")
-        let routesDir = root.appendingPathComponent("proxy/routes")
-        let streamsDir = root.appendingPathComponent("streams")
-        try FileManager.default.createDirectory(at: routesDir, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: streamsDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+extension ModelProxySuites {
+    @Suite("Proxy route table")
+    struct ProxyRouteTableTests {
+        @Test("a trailing slash on the upstream is trimmed before it can double a separator")
+        func trimsTrailingSlashFromUpstream() async throws {
+            let root = proxyScratchRoot(prefix: "pxrt")
+            let routesDir = root.appendingPathComponent("proxy/routes")
+            let streamsDir = root.appendingPathComponent("streams")
+            try FileManager.default.createDirectory(at: routesDir, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: streamsDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
 
-        let token = ModelProxyRoute.mintToken()
-        let route = ModelProxyRoute(
-            token: token, terminalID: UUID(), upstream: "https://api.anthropic.com/",
-            streamingEnabled: false)
-        try route.encodedForRouteFile().write(
-            to: routesDir.appendingPathComponent(
-                TBDConstants.modelProxyRouteFileName(token: token)))
+            let token = ModelProxyRoute.mintToken()
+            let route = ModelProxyRoute(
+                token: token, terminalID: UUID(), upstream: "https://api.anthropic.com/",
+                streamingEnabled: false)
+            try route.encodedForRouteFile().write(
+                to: routesDir.appendingPathComponent(
+                    TBDConstants.modelProxyRouteFileName(token: token)))
 
-        let table = RouteTable(routesDir: routesDir, streamsDir: streamsDir)
-        let added = try await table.add(token: token)
-        #expect(added.upstream == "https://api.anthropic.com")
+            let table = RouteTable(routesDir: routesDir, streamsDir: streamsDir)
+            let added = try await table.add(token: token)
+            #expect(added.upstream == "https://api.anthropic.com")
 
-        let stored = try #require(await table.route(for: token))
-        // The rule this exists for: every forwarded URL is `upstream + suffix`
-        // and every suffix starts with `/`, so an untrimmed base composes
-        // `https://api.anthropic.com//v1/messages` — a different path, and a
-        // 404 from the API.
-        #expect(stored.upstream + "/v1/messages" == "https://api.anthropic.com/v1/messages")
+            let stored = try #require(await table.route(for: token))
+            // The rule this exists for: every forwarded URL is `upstream + suffix`
+            // and every suffix starts with `/`, so an untrimmed base composes
+            // `https://api.anthropic.com//v1/messages` — a different path, and a
+            // 404 from the API.
+            #expect(stored.upstream + "/v1/messages" == "https://api.anthropic.com/v1/messages")
+        }
     }
 }
 

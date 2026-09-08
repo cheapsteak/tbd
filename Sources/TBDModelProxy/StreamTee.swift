@@ -343,10 +343,16 @@ actor StreamTee: StreamTeeing {
         let path = streamsDir.appendingPathComponent(
             TBDConstants.streamFileName(terminalID: state.terminalID)
         ).path
-        // Truncate when this is the only message on the terminal, append when
-        // another is already running: two concurrent parent turns interleave
-        // by message id rather than clobbering each other.
-        let flags = O_WRONLY | O_CREAT | O_CLOEXEC | (truncating ? O_TRUNC : O_APPEND)
+        // Every descriptor is `O_APPEND`, and the one that starts a message
+        // with nothing else in flight additionally truncates. Both halves are
+        // load-bearing and the second is the one that is easy to get wrong:
+        // two concurrent turns hold two descriptors on one file, and a
+        // descriptor opened *without* `O_APPEND` writes at its own offset, so
+        // its later lines land on top of whatever the appending session wrote
+        // in between. Measured on CI before the fix: the second turn's `start`,
+        // `block` and text lines were overwritten by the first turn's, and only
+        // its `stop` — written after the first turn had finished — survived.
+        let flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_APPEND | (truncating ? O_TRUNC : 0)
         let descriptor = Darwin.open(path, flags, mode_t(0o600))
         guard descriptor >= 0 else {
             let code = errno
