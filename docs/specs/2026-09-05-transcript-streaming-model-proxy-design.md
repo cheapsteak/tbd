@@ -397,9 +397,23 @@ than Bedrock, the daemon asks `ModelProxySupervisor` for a route carrying the
 resolved upstream: the profile's base URL, else an env-override base URL, else
 the public API. The spawn's process environment gains
 `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/r/<token>` and a `NO_PROXY`
-extended with `127.0.0.1,localhost`, both through `sensitiveEnv` rather than
-the inline exports, so the token never appears in the pane's argv. The
-terminal row records `transcriptStreamPath`, the absolute stream file path,
+extended with `127.0.0.1,localhost`. `NO_PROXY` travels in `sensitiveEnv`
+alone. The route URL travels **both** in `sensitiveEnv` and as an inline export
+in the command string, from one field so the two cannot disagree, because the
+inline export runs after the shell's rc files: a user whose `.zshrc` sets
+`ANTHROPIC_BASE_URL` would otherwise have it clobber whatever the process
+environment carried, and the session would talk straight to that endpoint while
+its row recorded a stream file that never fills. The profile's base URL has
+always been defended that way, and a route that replaces it as the endpoint the
+session must reach needs the same defence.
+
+That puts the route token in the job's argv, where any process running as this
+user can read it with `ps -ww`. It is not a widening of the trust boundary: the
+route files under `~/tbd/proxy/routes/` are mode-0700 in a directory the same
+user owns, so every token is already readable by exactly that set of processes.
+Losing the rc-file defence would be a real failure; this is not one.
+
+The terminal row records `transcriptStreamPath`, the absolute stream file path,
 handed to the app the way `transcriptPath` is. Resume and wake spawns take the
 same branch.
 
@@ -416,21 +430,79 @@ without a route rather than fighting the user's setting.
 `ModelProxySupervisor`, a new actor under `Sources/TBDDaemon/ModelProxy/`,
 owns the proxy's life on an injected clock:
 
-- **Gate.** Nothing below runs unless `model_proxy_enabled` is on. The
-  daemon starts the supervisor only when the flag is on at startup or when the
-  flag is turned on; turning the flag off stops the watch and asks the running
-  proxy to retire, so it drains what is in flight and exits. A daemon shutdown
-  stops the watch and leaves the proxy alive, since outliving the daemon is
-  the point of a separate process.
+- **Gate.** `model_proxy_enabled` decides whether a *new* spawn is routed, and
+  the supervisor runs for as long as any routed session is still alive. The
+  daemon starts it when the flag is on at startup or when the flag is turned
+  on.
+
+  Turning the flag off does not retire the proxy where it stands. A session
+  spawned while the flag was on carries the proxy's port in its environment for
+  the rest of its life, so cutting the listener would not un-route it — it would
+  break it mid-task, on its next turn, against a closed loopback port. The
+  toggle promises that the flag applies to sessions started after the change,
+  and the off direction keeps that promise as literally as the on direction
+  does. So the supervisor enters **draining mode**: no new spawn is routed
+  (`ModelProxyRouteAttachment` refuses on the column), while the watch keeps
+  running and the proxy keeps being adopted and respawned. Each tick reads
+  `routeCount` off the `/tbd/status` poll it already makes; when it reaches
+  zero — every routed terminal having retired its route as it exited — the
+  supervisor retires the proxy, drops it, and stops. Turning the flag back on
+  while draining simply leaves the mode: nothing was retired, so there is
+  nothing to restart.
+
+  At startup with the flag off the supervisor starts in draining mode only when
+  a routed terminal is still alive — one query, for a terminal row carrying a
+  `transcript_stream_path` that is not exit-stamped. An install that has never
+  turned the flag on has none, and runs nothing at all.
+
+  A daemon shutdown is a third gesture and stops the watch alone, leaving the
+  proxy alive: outliving the daemon is the point of a separate process, and the
+  next daemon adopts it back through the port in the config row.
 - **Startup.** Read the persisted port. Probe `/tbd/status`. Adopt on the
   identity check above. Otherwise take the lock and spawn, then persist what
   the proxy reports.
-- **Watch.** Poll `status` on a bounded interval. On death, respawn with
-  bounded backoff. On a version different from the daemon's own binary, ask
-  the old proxy to retire and spawn the new one; different rather than older,
-  because `tbd update` keeps the previous app bundle as a rollback route.
+- **Watch.** Poll `status` on a bounded interval — 15 seconds, chosen against
+  the cost of a loopback status call nobody but this daemon ever sees, wide
+  enough not to be noisy and narrow enough that a dead or wedged proxy is
+  noticed and respawned well inside the timeouts a session's own retries
+  tolerate. On death, respawn with bounded backoff — 1s, then 5s, then 30s,
+  the first retry nearly immediate because every session spawned against the
+  dead port is itself retrying it, lengthening so a proxy that keeps dying on
+  start is not respawned in a tight loop, and bounded overall (one exhausted
+  burst plus the watch interval before the next) well inside Claude's
+  183-second retry budget for a refused base URL. Giving up after the last
+  backoff step is not permanent — the next watch tick sees no proxy and
+  starts a fresh burst. On a version different from the daemon's own binary,
+  ask the old proxy to retire and spawn the new one; different rather than
+  older, because `tbd update` keeps the previous app bundle as a rollback
+  route.
+- **Liveness beyond the process table.** A proxy the process table still
+  confirms — same pid, same start time — can still be wedged: a deadlock, a
+  stuck syscall, a starved thread, none of which exits the process. Missed
+  status polls alone are not evidence of that, since an ordinary one is a
+  proxy that is merely slow; the watch instead counts *consecutive* misses
+  against the one live proxy, reset by any successful poll. Four in a row —
+  one minute at the 15-second watch interval — is treated as a hang: this
+  daemon sends SIGTERM, which the proxy handles as the same
+  close-the-listener-and-drain shutdown `POST /tbd/retire` triggers, and keeps
+  polling. Two ticks later, still unanswered, it escalates to SIGKILL. Once
+  the process is actually gone the ordinary death path takes over and
+  respawns it on the same port — the same path a pid the process table can no
+  longer confirm always took. Every signal re-verifies identity — pid and
+  start time — against the process table immediately beforehand, so a pid the
+  kernel has since recycled to an unrelated process is never signalled — that
+  case takes the ordinary death path immediately, on its first miss, with no
+  signal in between. The whole ladder — four misses, two more, one
+  tick to notice the kill landed, a respawn — finishes with comfortable room
+  under Claude's 183-second retry budget for a refused base URL, which is
+  what a route whose registration failed during the hang was otherwise
+  waiting on with no live proxy ever left to load it.
 - **Routes.** Write and register a route before a spawn; retire it when the
-  terminal exits, hibernates by exiting, is archived, or is removed.
+  terminal exits, hibernates by exiting, is archived, or is removed. A route
+  registration in flight — the file is written but the running proxy has not
+  yet been told about it — counts against a drain the same way a route it has
+  already been told about does, so a flag flip landing in that window cannot
+  retire the proxy out from under a spawn that has just been handed its port.
 - **Capabilities.** Answer `daemon.capabilities` with supported, enabled, port,
   and version, so Settings can explain a disabled toggle.
 
@@ -545,8 +617,20 @@ This design introduces three new resources, and names who reclaims each.
   `gcGraceSeconds`, or whose age cannot be read, is kept; a file whose
   terminal row still exists and is not exited is kept; the rest are unlinked.
 - **Rendezvous residue** in the proxy directory: `proxy.lock`, `proxy.pid`,
-  `proxy.log`. Swept by the same collector shape as the holder's, anchored to
-  a lock nobody holds.
+  `proxy.log`. Outside the route and stream leg's reach by construction — that
+  collector is pointed at `routes/` and `streams/`, one level below the
+  directory these three sit in, so it cannot enumerate them. **An unheld lock
+  is the wrong anchor for them**, and that is why: a retiring proxy releases
+  its lock the moment it closes its listener and then drains in-flight streams
+  for up to ten minutes, so "nobody holds the lock" routinely describes a
+  process that is very much alive, and unlinking its pid file or its log would
+  take the record away from the thing still writing it. The residue belongs to
+  a later leg anchored on **pid liveness** — read `proxy.pid`, confirm the
+  process it names through the same identity check adoption uses, and only then
+  sweep the triple — which asks a different question from the file leg and
+  wants a soak of its own. Until it exists, the three files are bounded rather
+  than unbounded: there is one of each per home, and every new proxy overwrites
+  them.
 - **The port** is one integer in the config row; nothing accumulates.
 
 ## Security
@@ -580,7 +664,10 @@ SSE shape and costs zero tokens.
   array, writes nothing. Concurrent streams on one route interleave with
   their message ids and truncation waits for both.
 - **Daemon.** The spawn env is set only for holder, flag on, non-Bedrock; the
-  token is in `sensitiveEnv` and absent from the command string. Each RPC
+  route URL reaches both the process environment and the inline export, so it
+  survives an rc file that sets `ANTHROPIC_BASE_URL`
+  (`routedSpawnDefendsItsRouteAgainstRCFiles`), while `NO_PROXY` stays out of
+  the command string. Each RPC
   writes its coupled pair. A pre-migration row reads NULL, an explicit `0`
   survives a flipped default, and NULL follows it. The GC leg keeps young and
   live files and unlinks the rest.
@@ -602,8 +689,9 @@ SSE shape and costs zero tokens.
   foreground poll interval of its generation, rather than at message end.
 - A session behind the proxy is byte-for-byte as correct as one without it:
   same responses, same retries, same prompt-cache hits.
-- With both flags off, no code path introduced here runs: the supervisor is
-  not started, no proxy is spawned or probed, and no spawn is routed.
+- With both flags off, on an install with no routed session alive, no code path
+  introduced here runs: the supervisor is not started, no proxy is spawned or
+  probed, and no spawn is routed.
 
 ## Non-goals
 

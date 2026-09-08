@@ -2,14 +2,17 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TestSupport
 
 /// Tier 2: a real rendezvous directory with real unix sockets plus an in-memory
 /// database. The holders base, the profiles base, the scratchpad base and the
 /// clock are all injected; nothing here resolves a production path and no
 /// process is spawned.
 ///
-/// Rooted directly under `/tmp` so the socket paths fit darwin's 104-byte
-/// `sun_path`; removed in `deinit`.
+/// Rooted under `TBD_TEST_SCRATCH_ROOT` — itself a short path directly under
+/// `/tmp`, so the socket paths fit darwin's 104-byte `sun_path` — which is what
+/// the wrapper's EXIT trap reclaims when a run is killed part-way. `deinit`
+/// removes it on every ordinary path.
 @Suite("OrphanGC sweeps holder rendezvous files")
 struct OrphanGCHolderRendezvousTests: ~Copyable {
     let fm = FileManager.default
@@ -18,8 +21,7 @@ struct OrphanGCHolderRendezvousTests: ~Copyable {
     let clock = Date(timeIntervalSince1970: 1_800_000_000)
 
     init() {
-        sandbox = URL(
-            fileURLWithPath: "/tmp/tbd-gchr-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        sandbox = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbd-gchr"), isDirectory: true)
         holdersBase = sandbox.appendingPathComponent("h", isDirectory: true)
         try? fm.createDirectory(at: holdersBase, withIntermediateDirectories: true)
     }

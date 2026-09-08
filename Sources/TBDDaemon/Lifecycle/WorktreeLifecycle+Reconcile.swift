@@ -700,6 +700,10 @@ extension WorktreeLifecycle {
         // 2026-09-02. `unknown` is ignorance, not evidence: it parks nothing,
         // deletes nothing, and leaves the row for the next sweep.
         var serverPresenceByName: [String: TmuxPresence] = [:]
+        // Read once for the whole pass rather than per row. It only ever makes
+        // a route lookup cheaper (`ModelProxyRouteAttachment.retire`), and an
+        // unreadable config answers "on", which skips nothing.
+        let modelProxyEnabled = (try? await db.config.get())?.modelProxyEnabled ?? true
         for wt in worktrees {
             let serverPresence: TmuxPresence
             if let cached = serverPresenceByName[wt.tmuxServer] {
@@ -804,6 +808,21 @@ extension WorktreeLifecycle {
                     disposal = "window \(terminal.tmuxWindowID) gone or reassigned"
                 }
 
+                // Whichever of the two shapes below the row becomes, its
+                // session is over — that is what `disposal` above established —
+                // so the route that named its process goes now. Ahead of the
+                // branch rather than inside both arms, because the delete arm
+                // removes the only row that could ever name this terminal
+                // again, and a route retired for a row that no longer exists is
+                // a directory listing nobody will make.
+                if terminal.transport == .holder {
+                    await ModelProxyRouteAttachment.retire(
+                        terminalID: terminal.id,
+                        streamPath: terminal.transcriptStreamPath,
+                        proxyEnabled: modelProxyEnabled,
+                        supervisor: modelProxySupervisor)
+                }
+
                 // **What a finished session's row becomes is one rule, on every
                 // transport.** A resumable Claude row is PARKED, preserving its
                 // session id for a later wake; anything else is deleted,
@@ -833,6 +852,10 @@ extension WorktreeLifecycle {
                         if terminal.transport == .holder {
                             try await db.terminals.setHolderProcess(
                                 id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
+                            // Same reason, same write: the column names a
+                            // stream file the retirement above just dropped.
+                            try await db.terminals.setTranscriptStreamPath(
+                                terminalID: terminal.id, path: nil)
                         }
                         await actuationLog.appendOutcome(
                             confirms: actuationID, result: .dispatched)

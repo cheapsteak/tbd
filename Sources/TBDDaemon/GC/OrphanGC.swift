@@ -63,6 +63,7 @@ public actor OrphanGC {
     private let deletionQueueCollector: DeletionQueueCollector
     private let profileDirCollector: ProfileDirCollector
     private let holderRendezvousCollector: HolderRendezvousCollector
+    private let modelProxyFileCollector: ModelProxyFileCollector
     private let attachmentsCollector: AttachmentsCollector
     /// The attachments root both halves of the reconciler pair read — the hourly
     /// sweep through `attachmentsCollector`, and `removedWorktreeCleanup`
@@ -121,7 +122,9 @@ public actor OrphanGC {
         hangStackBase: URL? = nil,
         credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
-        holdersBase: URL? = nil
+        holdersBase: URL? = nil,
+        modelProxyBase: URL? = nil,
+        streamsBase: URL? = nil
     ) {
         var wrapped: (@Sendable () async -> [String]?)?
         if let lsofProvider {
@@ -132,7 +135,8 @@ public actor OrphanGC {
             scratchpadBase: scratchpadBase, now: now,
             profileDirBase: profileDirBase, hangStackBase: hangStackBase,
             credentialsKeychain: credentialsKeychain,
-            signaller: signaller, holdersBase: holdersBase
+            signaller: signaller, holdersBase: holdersBase,
+            modelProxyBase: modelProxyBase, streamsBase: streamsBase
         )
     }
 
@@ -160,6 +164,8 @@ public actor OrphanGC {
         orphanProcessPollInterval: Duration = .milliseconds(100),
         clock: any Clock<Duration> = ContinuousClock(),
         holdersBase: URL? = nil,
+        modelProxyBase: URL? = nil,
+        streamsBase: URL? = nil,
         attachmentsBase: URL? = nil,
         holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
         rowlessHolderHandshake: (@Sendable (String) async -> RowlessHolderHandshake)? = nil,
@@ -198,6 +204,19 @@ public actor OrphanGC {
             base: resolvedHoldersBase,
             now: resolvedNow,
             isListening: holderListenerProbe ?? HolderRendezvousCollector.probeForListener)
+        // Both directories come from the injected seams or from
+        // `TBDConstants`, never from a literal join: the fence moves `TBD_HOME`
+        // and a hand-built path would sweep the developer's real one.
+        //
+        // Pointed at `routes/` rather than at the proxy directory, which is what
+        // keeps `proxy.lock`, `proxy.pid` and `proxy.log` structurally out of
+        // this leg's reach — see `ModelProxyFileCollector` for why an unheld
+        // lock is the wrong anchor for them.
+        self.modelProxyFileCollector = ModelProxyFileCollector(
+            routesDir: modelProxyBase.map { $0.appendingPathComponent("routes") }
+                ?? TBDConstants.modelProxyRoutesDir(),
+            streamsDir: streamsBase ?? TBDConstants.streamsDir(),
+            now: resolvedNow)
         self.rowlessHolderCollector = RowlessHolderCollector(
             base: resolvedHoldersBase,
             now: resolvedNow,
@@ -316,6 +335,10 @@ public actor OrphanGC {
         )
 
         await reclaimHolderRendezvous(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
+        await reclaimModelProxyFiles(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
@@ -838,6 +861,76 @@ public actor OrphanGC {
                 // as things reclaimed. No `ReapRecord` is written — these files
                 // are unlinked, not quarantined, and there is nothing a
                 // `tbd gc restore` could put back.
+                reaped += 1
+            }
+        }
+    }
+
+    /// Reclaims model proxy route files and stream files whose sessions are
+    /// gone (spec, "Durable resources and their reconcilers").
+    ///
+    /// Under `gcEnabled` alone, with no flag of its own: the files are the
+    /// proxy's own output, nothing else can reclaim them, and unlike the holder
+    /// legs this one signals no process and reads no rendezvous — it unlinks a
+    /// route file whose terminal no longer exists and a stream file nothing will
+    /// ever tail again.
+    ///
+    /// The keep bias in `ModelProxyFileCollector` is what makes that safe, and
+    /// the cost it is sized against is the **route** file's, not the stream
+    /// file's: a stream reaped early loses one turn's provisional transcript
+    /// view, while a route reaped from under a live session 404s that session
+    /// from the proxy's next restart onward. See the collector's own note.
+    ///
+    /// Rows are read once, before any gate. A row that commits during the sweep
+    /// is therefore not in the set — which is exactly what the grace window
+    /// covers, since a file written by a spawn that recent is younger than
+    /// `gcGraceSeconds` and kept on age alone.
+    private func reclaimModelProxyFiles(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        let candidates = modelProxyFileCollector.candidates()
+        guard !candidates.isEmpty else { return }
+
+        guard let terminals = try? await db.terminals.list() else {
+            logger.error("gc: session rows unreadable this sweep — skipping the model proxy file phase")
+            planned.append("KEEP rows-unreadable model-proxy-file phase")
+            return
+        }
+        // Holder rows only, because only a holder spawn is ever routed (spec:
+        // pty-holder transport only), and only rows Claude's process has not
+        // left: an exit-stamped row is a session whose stream nothing will
+        // resume, and keeping its files for it would keep them forever.
+        let live = Set(
+            terminals
+                .filter { $0.transport == .holder && $0.hibernateReason != .exited }
+                .map(\.id))
+
+        for candidate in candidates {
+            switch modelProxyFileCollector.decide(
+                candidate, graceSeconds: config.gcGraceSeconds, liveTerminalIDs: live
+            ) {
+            case .keep(let reason):
+                // `planned` is a return value, printed for the operator who
+                // asked for the sweep, and it names the file in full. The log
+                // line is a different audience — see `ModelProxyFileCandidate
+                // .loggablePath` — and this one is the sharpest case for it: a
+                // `live-terminal` or `grace` keep names, by construction, the
+                // route file of a session that is running right now.
+                planned.append("KEEP \(reason) \(candidate.path)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) \(candidate.loggablePath, privacy: .public)
+                """)
+            case .reap:
+                planned.append("REAP model-proxy-file \(candidate.path)")
+                // The outer `gcEnabled || dryRun` guard means every line below
+                // runs only with gcEnabled == true.
+                guard !dryRun else { continue }
+                guard modelProxyFileCollector.reap(candidate) else {
+                    planned.append("KEEP unlink-failed \(candidate.path)")
+                    continue
+                }
+                // No `ReapRecord`: these files are unlinked, not quarantined,
+                // and there is nothing a `tbd gc restore` could put back.
                 reaped += 1
             }
         }

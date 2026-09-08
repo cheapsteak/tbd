@@ -204,6 +204,18 @@ public final class Daemon: Sendable {
     /// Internal rather than public because the holder types are: nothing
     /// outside `TBDDaemonLib` has any business holding a pty master.
     nonisolated(unsafe) var holderRegistry: HolderRegistry?
+    /// The one `ModelProxySupervisor` for this TBD home. Owned here so
+    /// shutdown can take the watch away, and so the config RPC that flips
+    /// `model_proxy_enabled` can reach the same instance the lifecycle, the
+    /// hibernation coordinator and the router route sessions through — a
+    /// second supervisor on one home would be a second daemon as far as
+    /// `proxy.lock` is concerned.
+    ///
+    /// Constructed at every boot outside mock mode, whatever the flag says, and
+    /// **started** only when the flag is on: construction opens nothing and
+    /// spawns nothing, while the runtime flip needs something to call.
+    /// `nil` in mock mode, like every other rail.
+    nonisolated(unsafe) var modelProxySupervisor: ModelProxySupervisor?
     /// The registry a live `ShadowPeerManager` registers itself with, so
     /// `ShadowPeerReconciler` can tell a live shadow from an orphan. Owned here
     /// because the two have opposite lifetimes: the reconciler runs for the
@@ -894,6 +906,33 @@ public final class Daemon: Sendable {
             : nil
         self.holderRegistry = holderRegistry
 
+        // The model proxy's supervisor, built beside the registry it routes
+        // for. Construction locates the sibling `TBDModelProxy` and computes
+        // its build identity, and does nothing else — no directory, no lock, no
+        // process — so it is safe on every boot regardless of the flag. It is
+        // started later (step 8c-proxy), after the database is migrated and
+        // before terminals are reconciled, and only when the flag is on.
+        //
+        // `nil` in mock mode, like every other rail: with no supervisor a spawn
+        // is never routed and `daemon.capabilities` answers "unsupported, no
+        // port, no version", which is the honest reading of a daemon that
+        // cannot route.
+        let modelProxySupervisor: ModelProxySupervisor? = mockMode == nil
+            ? ModelProxySupervisor.production(
+                config: database.config,
+                home: TBDConstants.configDir,
+                // The one question a boot with the flag off asks: is anything
+                // still routed? A session spawned while the flag was on keeps
+                // the proxy's port in its environment for life, so a daemon
+                // that restarts after the flag went off still has to keep that
+                // port answering — and an install that never turned the flag on
+                // must run nothing at all.
+                routedSessionsAlive: { [database] in
+                    (try? await database.terminals.hasLiveRoutedSession()) ?? false
+                })
+            : nil
+        self.modelProxySupervisor = modelProxySupervisor
+
         // Input for a holder-backed session, routed by who is reading its pty.
         // Built from the registry (which knows who owns each pty and holds the
         // daemon's own reader) and the fd sidecar (the one channel to the app),
@@ -942,6 +981,7 @@ public final class Daemon: Sendable {
         )
         lifecycle.controlMode = controlModeBridge
         lifecycle.holderRegistry = holderRegistry
+        lifecycle.modelProxySupervisor = modelProxySupervisor
 
         // Queued prompt on worktree creation (design 2026-08-10). Constructed
         // here — before `lifecycle` is copied by value into the RPC router
@@ -964,7 +1004,17 @@ public final class Daemon: Sendable {
         // periodic sweep task itself is started later, alongside the reaper,
         // inside the main `if mockMode == nil` block.
         if mockMode == nil {
-            let gc = OrphanGC(db: database, git: git, broadcast: { [subs] delta in subs.broadcast(delta: delta) })
+            // The proxy's rendezvous and the stream files are named
+            // explicitly, out of the same `TBDConstants` the supervisor and the
+            // proxy compose their paths from, rather than left to the
+            // collector's own defaults: the two must sweep the home this daemon
+            // actually serves, and naming them here is what makes that
+            // agreement visible at the wiring site.
+            let gc = OrphanGC(
+                db: database, git: git,
+                broadcast: { [subs] delta in subs.broadcast(delta: delta) },
+                modelProxyBase: TBDConstants.modelProxyDir(),
+                streamsBase: TBDConstants.streamsDir())
             self.orphanGC = gc
             lifecycle.onWorktreeRemoved = { [gc] worktreeID, path, repoPath in
                 await gc.removedWorktreeCleanup(
@@ -1085,6 +1135,12 @@ public final class Daemon: Sendable {
         // pty master and quietly steal bytes from each other.
         rpcRouter.holderRegistry = holderRegistry
         rpcRouter.holderInjectionCourier = holderInjectionCourier
+        // One supervisor across the router, the lifecycle and the coordinator,
+        // for the registry's reason: two would each try to own one home's
+        // `proxy.lock`, and `daemon.capabilities` would report a proxy no
+        // spawn was routed through.
+        rpcRouter.modelProxySupervisor = modelProxySupervisor
+        await rpcRouter.hibernationCoordinator.setModelProxySupervisor(modelProxySupervisor)
         // The wake path recreates a terminal's tmux server/window when the
         // window is gone (e.g. post-reboot); give the recreated server the
         // same gated control-mode connection as every other ensureServer
@@ -1208,6 +1264,30 @@ public final class Daemon: Sendable {
         // file wins once it exists. Idempotent (file-exists guard), so no
         // migration or marker is needed. Best-effort, never blocks startup.
         await database.notes.exportContentColumnToFiles()
+
+        // 8c-proxy. Adopt or spawn this home's model proxy, gated on
+        // `model_proxy_enabled` — the supervisor re-reads the column itself, so
+        // the gate has one spelling rather than one per caller. With the flag
+        // off it starts only to drain, and only when a session spawned against
+        // the proxy is still alive.
+        //
+        // Here, and not later: a terminal reconciled or woken below can be
+        // spawned, and a spawn asks the supervisor for a route. With no proxy
+        // yet current those sessions would start unproxied and keep that for
+        // their life, because `ANTHROPIC_BASE_URL` is fixed in a session's
+        // environment at spawn. It never throws: a proxy that could not be
+        // started is a streaming nicety that is unavailable, not a daemon that
+        // failed to boot.
+        //
+        // Awaited, and this step precedes the RPC socket bind (step 9), so its
+        // cost is startup latency the CLI and the app can see. Bounded, and
+        // milliseconds in the normal case: the worst case is the control
+        // client's 2-second status probe plus the spawner's 10-second bind
+        // budget, on a machine where the proxy binds pathologically slowly. It
+        // is also flag-gated, so nobody running the shipped default pays any of
+        // it.
+
+        await modelProxySupervisor?.startIfEnabled()
 
         // 8d. Reconcile parked state and durable tmux ownership before any
         // listener accepts an RPC. Full startup recovery may destructively
@@ -1962,6 +2042,14 @@ public final class Daemon: Sendable {
         // thread and the pty descriptor it owns, because after end of file that
         // thread parks on its wake pipe rather than exiting.
         await holderRegistry?.releaseAll()
+
+        // Take the watch away, and leave the proxy running. That is deliberate
+        // and it is not the same gesture as turning the feature off: a proxy
+        // outliving its daemon is the point of a separate process, sessions
+        // already spawned still have its port in their environment, and the
+        // next daemon adopts it back through the port in the config row.
+        // `beginDraining` is what the flag's off-flip calls; shutdown must not.
+        await modelProxySupervisor?.stop()
 
         if let questionSweep = pendingQuestionExpirySweep {
             await questionSweep.stop()

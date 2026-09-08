@@ -238,6 +238,16 @@ public final class RPCRouter: Sendable {
     /// reader rather than crashing.
     nonisolated(unsafe) var holderRegistry: HolderRegistry?
 
+    /// The daemon's `ModelProxySupervisor`, set by `Daemon` after construction
+    /// from the same value the lifecycle and the hibernation coordinator hold.
+    /// Two things read it: `daemon.capabilities`, which reports whether this
+    /// daemon can route at all, and the terminal teardown path, which retires
+    /// the route of a row it is about to delete. `nil` in mock mode and in tests
+    /// that never exercise the proxy — capabilities then answer "unsupported,
+    /// no port, no version", which is the honest reading of a daemon that
+    /// cannot route.
+    nonisolated(unsafe) var modelProxySupervisor: (any ModelProxySupervising)?
+
     /// Delivers `terminal.send` to a holder-backed session, routed by who is
     /// reading its pty. Set by `Daemon` after construction, beside the registry
     /// and the sidecar it is built from. `nil` in mock mode and in tests that
@@ -933,11 +943,16 @@ public final class RPCRouter: Sendable {
         // streaming on with the proxy off streams nothing, and the app should
         // not have to re-derive that.
         result.transcriptStreamingEnabled = config.transcriptStreamingEffective
-        // `modelProxySupported`, `modelProxyPort` and `modelProxyVersion` keep
-        // their initializer defaults — false, nil, nil — because there is no
-        // supervisor yet. Until it arrives no daemon can route a session, so
-        // "not supported, no port, no version" is the honest answer rather than
-        // a placeholder, and Settings greys the toggle out on it.
+        // One actor hop for all three, so a port and a version cannot come
+        // from either side of a proxy replacement. With no supervisor wired
+        // they keep their initializer defaults — false, nil, nil — which is the
+        // honest answer for a daemon that cannot route a session, and what
+        // Settings greys the toggle out on.
+        let proxy = await modelProxySupervisor?.capabilitySnapshot()
+            ?? ModelProxyCapabilitySnapshot.none
+        result.modelProxySupported = proxy.supported
+        result.modelProxyPort = proxy.port
+        result.modelProxyVersion = proxy.version
         return try RPCResponse(result: result)
     }
 

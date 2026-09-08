@@ -1434,6 +1434,22 @@ extension WorktreeLifecycle {
         let primarySessionID: String?
         let primaryProfileID: UUID?
         let primaryLabel: String
+        // What the model proxy did with this spawn: the stream file to stamp on
+        // the row below, and the route to undo if the row never gets written.
+        //
+        // Filled in by the `.claude` branch alone, which is the only agent the
+        // model proxy speaks for: a shell has no upstream, and Codex does not
+        // talk to the Messages API, so neither may be handed an
+        // `ANTHROPIC_BASE_URL`. The gate is structural rather than a field
+        // check — the other branches never call `attach` at all.
+        //
+        // **Optional, and there is no empty `Outcome` to use instead.** An
+        // attachment that stood for "never attempted" would have to carry an
+        // empty environment, and `attachment.sensitiveEnv` would then compile at
+        // a shell or Codex spawn site and launch it with no env overrides, no
+        // `DISABLE_AUTO_UPDATE`, and no auth env at all — silently. `nil` makes
+        // that read a compile error instead.
+        var primaryAttachment: ModelProxyRouteAttachment.Outcome? = nil
         switch primaryTerminalKind {
         case .shell:
             primaryCommand = defaultShell
@@ -1511,6 +1527,57 @@ extension WorktreeLifecycle {
                     storedTranscriptPath: nil
                 )
             }
+            // Hoisted out of the `build` call because the model proxy must read
+            // the SAME resolved file the spawn runs with: whether it sets
+            // `env.ANTHROPIC_BASE_URL` decides whether a route can be honored at
+            // all. Resolving it a second time would rewrite the per-session
+            // overlay and could answer about a different file.
+            let primaryOverlayPath = ClaudeHookOverlay.resolveOverlayPath(
+                fallbackModels: resolvedProfile?.fallbackModels,
+                sessionKey: plannedTerminalID1.uuidString,
+                // Repo fragment is file-backed config, read fresh at
+                // spawn time — applies on every spawn path, resume included.
+                repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                // Per-spawn fragment applies to FRESH primary spawns only;
+                // an archived-session resume must not reapply it. Hooks
+                // overlay still resolves for resumes — only
+                // extraSettingsJSON goes nil.
+                extraSettingsJSON: isResume ? nil : claudeSettingsOverlay,
+                // Desk sessions only — see the parameter's doc comment.
+                watchDeskRole: watchDeskRole,
+                worktreePath: worktreePath,
+                // The same config dir this spawn runs with, so the tee
+                // delegates to the user-scope statusline THIS session reads.
+                profileConfigDir: profileConfigDir
+            )
+            // **The routing decision, and it happens BEFORE the command is
+            // composed.** `ClaudeSpawnCommandBuilder.build` re-exports every
+            // profile routing key inline into the command string it returns,
+            // and those exports run *after* the process environment is applied
+            // — so a profile carrying its own `ANTHROPIC_BASE_URL` would
+            // clobber the route's, and the session would talk straight to the
+            // profile endpoint while the row recorded a stream file that never
+            // fills. Deciding here means a routed spawn can be built with
+            // `profileBaseURL: nil`, and the profile's URL survives only as the
+            // route's upstream.
+            //
+            // Only the holder transport is routed (spec: pty-holder only), so
+            // the registry is the gate. A refusal returns this environment
+            // unchanged; nothing below can fail because of it. The gate and the
+            // call are one function because the wake path makes exactly the
+            // same five-step decision.
+            let attachment = await ModelProxyRouteAttachment.attachIfRoutable(
+                terminalID: plannedTerminalID1,
+                isHolderSpawn: useHolderTransport,
+                config: config,
+                profileKind: resolvedProfile?.kind,
+                profileBaseURL: resolvedProfile?.baseURL,
+                envOverrides: mergedEnvOverrides,
+                // The SAME resolved overlay the spawn runs with, read above.
+                overlayPath: primaryOverlayPath,
+                holderEnvironment: holderRegistry?.environment,
+                supervisor: modelProxySupervisor)
+            primaryAttachment = attachment
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
                 forkSession: carryover != nil,
@@ -1524,7 +1591,14 @@ extension WorktreeLifecycle {
                 initialPrompt: isResume ? nil : effectivePrompt,
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
-                profileBaseURL: resolvedProfile?.baseURL,
+                // The route's own URL on a routed spawn, the profile's
+                // otherwise. The builder inlines an
+                // `export ANTHROPIC_BASE_URL=…` that runs after the shell's rc
+                // files, which is how this endpoint survives a `.zshrc` that
+                // sets one of its own — a defence the profile's URL has always
+                // had and the route needs just as much.
+                profileBaseURL: attachment.builderBaseURL(
+                    profile: resolvedProfile?.baseURL),
                 // Per-spawn model override (picker model buttons) wins over
                 // the profile default for this initial spawn only.
                 profileModel: modelOverride ?? resolvedProfile?.model,
@@ -1533,24 +1607,7 @@ extension WorktreeLifecycle {
                 profileConfigDir: profileConfigDir,
                 cmd: nil,
                 shellFallback: defaultShell,
-                settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
-                    fallbackModels: resolvedProfile?.fallbackModels,
-                    sessionKey: plannedTerminalID1.uuidString,
-                    // Repo fragment is file-backed config, read fresh at
-                    // spawn time — applies on every spawn path, resume included.
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                    // Per-spawn fragment applies to FRESH primary spawns only;
-                    // an archived-session resume must not reapply it. Hooks
-                    // overlay still resolves for resumes — only
-                    // extraSettingsJSON goes nil.
-                    extraSettingsJSON: isResume ? nil : claudeSettingsOverlay,
-                    // Desk sessions only — see the parameter's doc comment.
-                    watchDeskRole: watchDeskRole,
-                    worktreePath: worktreePath,
-                    // The same config dir this spawn runs with, so the tee
-                    // delegates to the user-scope statusline THIS session reads.
-                    profileConfigDir: profileConfigDir
-                ),
+                settingsOverlayPath: primaryOverlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: worktree.displayName
@@ -1560,9 +1617,13 @@ extension WorktreeLifecycle {
                 "TBD_WORKTREE_ID": worktreeID.uuidString,
                 "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
             ]
-            // Layer the builder's auth/routing env ON TOP of free-form overrides
-            // so auth/routing stays final and free-form vars can't clobber it.
-            primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
+            // Layer the builder's auth/routing env ON TOP of free-form
+            // overrides so auth/routing stays final and free-form vars can't
+            // clobber it. Through the attachment's own method, because the wake
+            // path makes the same merge and the order is silent when it is
+            // wrong.
+            primarySensitiveEnv = attachment.launchEnvironment(
+                mergingBuilder: spawn.sensitiveEnv)
             primaryProfileID = resolvedProfile?.profileID
             primaryLabel = TerminalLabel.claudeCode
         }
@@ -1576,16 +1637,49 @@ extension WorktreeLifecycle {
         let window1: (windowID: String, paneID: String)
         let holderHandle: HolderHandle?
         if useHolderTransport, let holderRegistry {
-            holderHandle = try await holderRegistry.spawn(
-                terminalID: plannedTerminalID1,
-                launch: Self.holderLaunch(
-                    shellCommand: primaryCommand,
-                    env: primaryEnv,
-                    sensitiveEnv: primarySensitiveEnv,
-                    workingDirectory: worktreePath,
-                    cols: resolvedCols,
-                    rows: resolvedRows,
-                    environment: holderRegistry.environment))
+            // The route, if there is one, was minted above — before the command
+            // was composed, because the command re-exports the profile's own
+            // routing keys and would otherwise run over it. What is left here
+            // is the spawn itself, and the two undo paths for a route nothing
+            // will ever be started against.
+            do {
+                holderHandle = try await holderRegistry.spawn(
+                    terminalID: plannedTerminalID1,
+                    launch: Self.holderLaunch(
+                        shellCommand: primaryCommand,
+                        env: primaryEnv,
+                        // The route's base URL rides `sensitiveEnv` — the job's
+                        // process environment — and never `env`, which
+                        // `holderLaunch` inlines as `export K='v';` in front of
+                        // the command. `primarySensitiveEnv` is the routed
+                        // environment itself: the attachment is what it was
+                        // composed from.
+                        //
+                        // That is a statement about `holderLaunch`'s two
+                        // dictionaries and nothing more. The token IS in this
+                        // job's argv, because `primaryCommand` carries an
+                        // inline `export ANTHROPIC_BASE_URL=…` of its own, from
+                        // `attachment.builderBaseURL` — the export has to run
+                        // after the shell's rc files or a `.zshrc` takes the
+                        // session off its route. See that method for why `ps`
+                        // visibility is not a widening of the trust boundary.
+                        sensitiveEnv: primarySensitiveEnv,
+                        workingDirectory: worktreePath,
+                        cols: resolvedCols,
+                        rows: resolvedRows,
+                        environment: holderRegistry.environment))
+            } catch {
+                // Nothing was spawned against this route and nothing ever will
+                // be, so retire it from the failing call itself rather than
+                // leaving a file for the sweep. By the token this attachment
+                // minted, never by terminal id: this row has no other route
+                // today, and a lookup would still be the wrong instruction to
+                // leave behind.
+                await ModelProxyRouteAttachment.retire(
+                    primaryAttachment, terminalID: plannedTerminalID1,
+                    supervisor: modelProxySupervisor)
+                throw error
+            }
             // A holder session has no tmux coordinate. The columns are NOT NULL
             // from the v1 schema, so they take the empty string — and nothing
             // may read them back: a holder row is discriminated by `transport`
@@ -1631,7 +1725,13 @@ extension WorktreeLifecycle {
                 // persisted and later compared against a process start time by
                 // `ProcessIdentityCheck`, which is exactly the kind of fact a
                 // test has to be able to pin end to end.
-                holderChildStartedAt: holderHandle == nil ? nil : now()
+                holderChildStartedAt: holderHandle == nil ? nil : now(),
+                // Stamped IN the insert, not by a follow-up `UPDATE`:
+                // `TerminalReplacementSnapshot` compares this column, so a row
+                // that exists without it for even one suspension can be
+                // snapshotted by a concurrent caller, and a late stamp would
+                // make every replacement that snapshot authorized reject.
+                transcriptStreamPath: primaryAttachment?.streamPath
             )
         } catch {
             // Best-effort creation-time cleanup on both transports: a resource
@@ -1642,6 +1742,9 @@ extension WorktreeLifecycle {
             if let holderHandle {
                 await holderRegistry?.abandon(
                     terminalID: plannedTerminalID1, handle: holderHandle)
+                await ModelProxyRouteAttachment.retire(
+                    primaryAttachment, terminalID: plannedTerminalID1,
+                    supervisor: modelProxySupervisor)
             } else {
                 try? await tmux.killWindow(server: tmuxServer, windowID: window1.windowID)
             }

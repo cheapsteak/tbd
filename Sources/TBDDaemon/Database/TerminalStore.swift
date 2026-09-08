@@ -419,6 +419,13 @@ private func resetAgentProcessLifecycle(
     let incarnationID = UUID()
     record.claudeSessionID = sessionID
     record.transcriptPath = transcriptPath
+    // The proxy route is stamped per PROCESS, not per session: it names the
+    // stream file the job about to be replaced was launched against, and the
+    // replacement gets a route of its own or none at all. Leaving it would
+    // point the app's tail at a file the retired route's proxy has unlinked,
+    // and would make every `TerminalReplacementSnapshot` taken afterwards
+    // compare against a path no live process is writing.
+    record.transcript_stream_path = nil
     record.sessionOrderObservedAt = nil
     record.codexTranscriptBoundaryOffset = nil
     record.sessionIncarnationID = incarnationID.uuidString
@@ -695,9 +702,17 @@ public struct TerminalStore: Sendable {
         transport: TerminalTransport = .tmux,
         holderPID: Int32? = nil,
         childPID: Int32? = nil,
-        holderChildStartedAt: Date? = nil
+        holderChildStartedAt: Date? = nil,
+        // The model proxy stream file this row's session was launched
+        // against, or nil for an unproxied spawn. Taken at creation rather than
+        // written by a follow-up `UPDATE` because
+        // `TerminalReplacementSnapshot` compares this column: a row that exists
+        // for even one `await` without it can be snapshotted by a concurrent
+        // caller, and the stamp that arrives afterwards then makes every
+        // replacement that snapshot authorized reject.
+        transcriptStreamPath: String? = nil
     ) async throws -> Terminal {
-        let terminal = Terminal(
+        var terminal = Terminal(
             id: id,
             worktreeID: worktreeID,
             tmuxWindowID: tmuxWindowID,
@@ -712,6 +727,9 @@ public struct TerminalStore: Sendable {
             childPID: childPID,
             holderChildStartedAt: holderChildStartedAt
         )
+        // Assigned rather than passed: `Terminal`'s memberwise initializer is
+        // already at the Swift type-checker's expression budget here.
+        terminal.transcriptStreamPath = transcriptStreamPath
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
             if let worktree = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString),
@@ -733,6 +751,37 @@ public struct TerminalStore: Sendable {
             }
             request = request.order(Column("createdAt").asc, Column("id").asc)
             return try request.fetchAll(db).compactMap { $0.toModel() }
+        }
+    }
+
+    /// Whether any session that was spawned through the model proxy is still
+    /// alive.
+    ///
+    /// The one question the supervisor's drain asks the database, and it asks
+    /// it once, at daemon start with `model_proxy_enabled` off: a proxy is kept
+    /// alive for sessions that are already routed through it, and an install
+    /// that has none must run nothing at all (spec, "Supervisor" → Gate).
+    ///
+    /// "Routed" is `transcriptStreamPath`, which is stamped at spawn and
+    /// cleared when the process it named is replaced, so a row still carrying
+    /// one names a job whose `ANTHROPIC_BASE_URL` points at the proxy. "Alive"
+    /// is the negation of `Terminal.isExitStamped` rather than a second
+    /// spelling of it in SQL: a parked session is woken by a gesture and its
+    /// next turn goes through the proxy, so only a row whose agent process has
+    /// actually left is finished with the port.
+    ///
+    /// Filtered in SQL and judged in Swift on purpose. The filter is the cheap,
+    /// unambiguous half — one indexed-in-practice column, and every install
+    /// that never enabled the proxy answers it with an empty set — while the
+    /// judgment is the model's own property, so it cannot drift from the one
+    /// every other reader uses.
+    public func hasLiveRoutedSession() async throws -> Bool {
+        try await writer.read { db in
+            try TerminalRecord
+                .filter(Column("transcript_stream_path") != nil)
+                .fetchAll(db)
+                .compactMap { $0.toModel() }
+                .contains { !$0.isExitStamped }
         }
     }
 

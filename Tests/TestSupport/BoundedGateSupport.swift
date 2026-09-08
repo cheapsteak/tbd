@@ -101,10 +101,20 @@ public final class GateExecutor: TaskExecutor, @unchecked Sendable {
 /// Starts a task that is expected to block on a `waitForGate`, on threads that
 /// are not Swift's cooperative pool.
 ///
-/// Use this for the ONE side that gets held. The other side — the work the
-/// test runs while the gate is closed, and the `signal()` that releases it —
-/// stays on the pool, which is the point: it needs a thread, and this call is
-/// what guarantees one is left.
+/// Ordinarily use this for the ONE side that gets held. The other side — the
+/// work the test runs while the gate is closed, and the `signal()` that
+/// releases it — stays on the pool, which is the point: it needs a thread,
+/// and this call is what guarantees one is left.
+///
+/// **That assumes the pool can be reached.** When a suite shares the test
+/// process with one that deliberately saturates the pool —
+/// `BoundedGateWaitTests`'s whole subject, which parks every cooperative
+/// thread for 120 s — a releasing side left on the pool may not run at all,
+/// and the hand-off that releases the gate needs `gateHoldingTask` too, not
+/// just the held side. `ModelProxySupervisorTests.swift`'s `runBlocking` is
+/// the sanctioned pattern for that case: both the held side and the
+/// `signal()`-equivalent hand-off run through `gateHoldingTask`, and its own
+/// doc comment explains why.
 ///
 /// **The preference stops at an unstructured task.** SE-0417 carries a task
 /// executor preference into child tasks (`async let`, task groups) and into

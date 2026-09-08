@@ -435,10 +435,39 @@ extension RPCRouter {
     /// The coupling — turning the proxy off also writes streaming off, in one
     /// transaction — lives in `ConfigStore.setModelProxyEnabled`, not here, so
     /// every caller of the store gets it, not only this RPC.
+    ///
+    /// **The supervisor follows the flag on the daemon already running**, which
+    /// is the half a column write cannot do: the boot path starts a supervisor
+    /// only when the flag was already on, so without this a user who turned the
+    /// proxy on would get routes minted against nothing until the next restart.
+    /// On the way off the supervisor starts **draining** rather than retiring
+    /// the proxy where it stands — see `beginDraining`. The sessions already
+    /// routed through it carry its port in their environment for the rest of
+    /// their lives, so cutting the proxy would break them mid-task rather than
+    /// merely un-routing them, and the help text above promises otherwise.
+    ///
+    /// Acted on the *written* value rather than on a flip computed from a
+    /// preceding read: both calls are idempotent (`startIfEnabled` returns
+    /// early on a supervisor already started, `beginDraining` on one that never
+    /// started), so a second call in the same direction changes nothing, and no
+    /// window opens between reading the old value and writing the new one.
+    ///
+    /// Both are awaited before this RPC answers, which is what makes the
+    /// Settings checkbox's response wait on them. Milliseconds normally, and
+    /// bounded in the worst case by the control client's 2-second probe plus
+    /// the spawner's 10-second bind budget. Answering early would be worse than
+    /// the wait: the reply is what the app reloads its capabilities on, and a
+    /// reply that landed before the supervisor had a port would render the
+    /// toggle's own state wrong.
     func handleConfigSetModelProxyEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(
             ConfigSetModelProxyEnabledParams.self, from: paramsData)
         try await db.config.setModelProxyEnabled(params.enabled)
+        if params.enabled {
+            await modelProxySupervisor?.startIfEnabled()
+        } else {
+            await modelProxySupervisor?.beginDraining()
+        }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
@@ -457,12 +486,22 @@ extension RPCRouter {
     /// readers act on is `Config.transcriptStreamingEffective`, the conjunction
     /// of the two columns, because a hand-edited row can hold a combination no
     /// gesture here can produce.
+    ///
+    /// Because turning streaming on turns the proxy on, this is also a way to
+    /// arm the supervisor, and it starts one for the same reason
+    /// `setModelProxyEnabled` does: a user who asked for the provisional row
+    /// and got no proxy would see a stream file that never appears. Turning
+    /// streaming **off** retires nothing — the proxy column is untouched by
+    /// that direction, and a route still routes.
     func handleConfigSetTranscriptStreamingEnabled(
         _ paramsData: Data
     ) async throws -> RPCResponse {
         let params = try decoder.decode(
             ConfigSetTranscriptStreamingParams.self, from: paramsData)
         try await db.config.setTranscriptStreamingEnabled(params.enabled)
+        if params.enabled {
+            await modelProxySupervisor?.startIfEnabled()
+        }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

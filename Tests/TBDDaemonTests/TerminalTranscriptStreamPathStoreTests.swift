@@ -152,6 +152,56 @@ struct TerminalTranscriptStreamPathStoreTests {
         }
     }
 
+    // MARK: - The drain's one question
+
+    /// The question a flag-off boot asks the database, and the whole reason the
+    /// supervisor can run with the flag off: a session spawned through the
+    /// proxy keeps its port in its environment for life, so the daemon has to
+    /// keep that port answering even after the toggle went off (spec,
+    /// "Supervisor" → Gate).
+    @Test func aRoutedSessionCountsAsLive() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let terminal = try await makeTerminal(db)
+        #expect(
+            try await db.terminals.hasLiveRoutedSession() == false,
+            "a row that was never routed is not something to drain for")
+
+        try await db.terminals.setTranscriptStreamPath(
+            terminalID: terminal.id, path: "/tmp/tbd-streams/live.jsonl")
+
+        #expect(try await db.terminals.hasLiveRoutedSession())
+    }
+
+    /// A session whose agent process has left is finished with the port. It is
+    /// the exit stamp that says so — `hibernatedAt` plus `.exited` — and not a
+    /// park, because a parked session is woken by a gesture and its next turn
+    /// goes through the proxy again.
+    @Test func anExitedRoutedSessionDoesNotCountAsLive() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let terminal = try await makeTerminal(db)
+        try await db.terminals.setTranscriptStreamPath(
+            terminalID: terminal.id, path: "/tmp/tbd-streams/gone.jsonl")
+
+        try await db.terminals.setHibernated(
+            id: terminal.id, sessionID: "sess-1", reason: .exited)
+
+        #expect(try await db.terminals.hasLiveRoutedSession() == false)
+    }
+
+    /// The discriminating half of the one above: the same park with any other
+    /// reason is a session that is coming back.
+    @Test func aParkedRoutedSessionStillCountsAsLive() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let terminal = try await makeTerminal(db)
+        try await db.terminals.setTranscriptStreamPath(
+            terminalID: terminal.id, path: "/tmp/tbd-streams/parked.jsonl")
+
+        try await db.terminals.setHibernated(
+            id: terminal.id, sessionID: "sess-1", reason: .manual)
+
+        #expect(try await db.terminals.hasLiveRoutedSession())
+    }
+
     // MARK: - The wire
 
     @Test func terminalJSONWithoutTheKeyDecodesToNil() throws {

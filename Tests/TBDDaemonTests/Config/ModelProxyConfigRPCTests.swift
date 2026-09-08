@@ -120,7 +120,7 @@ struct ModelProxyConfigRPCTests {
 
         #expect(caps.modelProxyEnabled == Config.modelProxyDefault)
         #expect(caps.transcriptStreamingEnabled == Config.transcriptStreamingDefault)
-        // No supervisor until Part B2 — so no daemon can route a session yet,
+        // No supervisor wired into this router, so it cannot route a session,
         // and Settings has what it needs to say so.
         #expect(caps.modelProxySupported == false)
         #expect(caps.modelProxyPort == nil)
@@ -183,6 +183,76 @@ struct ModelProxyConfigRPCTests {
         #expect(decoded.modelProxySupported == false)
         #expect(decoded.modelProxyPort == nil)
         #expect(decoded.modelProxyVersion == nil)
+    }
+
+    // MARK: - The supervisor follows the flag
+
+    /// **The flag reaches the daemon already running**, which is the half a
+    /// column write cannot do on its own: the boot path starts a supervisor
+    /// only when the flag was already on, so a user who turned the proxy on
+    /// would otherwise get nothing until the next restart.
+    @Test func turningTheProxyOnStartsTheSupervisor() async throws {
+        let supervisor = FakeModelProxySupervisor()
+        router.modelProxySupervisor = supervisor
+
+        _ = await router.handle(try RPCRequest(
+            method: RPCMethod.configSetModelProxyEnabled,
+            params: ConfigSetModelProxyEnabledParams(enabled: true)))
+
+        #expect(supervisor.startCalls == 1)
+        #expect(supervisor.drainCalls == 0)
+    }
+
+    /// And off drains rather than either retiring or merely stopping. A proxy
+    /// left listening holds `proxy.lock` and self-retires only after its own
+    /// 24-hour idle window, so a toggle that only stopped the watch would leave
+    /// the feature running for a day; a toggle that retired it on the spot
+    /// would break every session already routed through the port. Draining is
+    /// the third thing, and the supervisor is the only party that knows when it
+    /// is finished.
+    @Test func turningTheProxyOffDrainsIt() async throws {
+        let supervisor = FakeModelProxySupervisor()
+        router.modelProxySupervisor = supervisor
+        _ = await router.handle(try RPCRequest(
+            method: RPCMethod.configSetModelProxyEnabled,
+            params: ConfigSetModelProxyEnabledParams(enabled: true)))
+
+        _ = await router.handle(try RPCRequest(
+            method: RPCMethod.configSetModelProxyEnabled,
+            params: ConfigSetModelProxyEnabledParams(enabled: false)))
+
+        #expect(supervisor.drainCalls == 1)
+        #expect(supervisor.startCalls == 1, "the off flip must not also start one")
+    }
+
+    /// Streaming on writes the proxy column on, in the same transaction, so it
+    /// is a second way to arm the supervisor and has to start one too — a user
+    /// who asked for the provisional row and got no proxy would watch for a
+    /// stream file that never appears.
+    @Test func turningStreamingOnStartsTheSupervisor() async throws {
+        let supervisor = FakeModelProxySupervisor()
+        router.modelProxySupervisor = supervisor
+
+        _ = await router.handle(try RPCRequest(
+            method: RPCMethod.configSetTranscriptStreamingEnabled,
+            params: ConfigSetTranscriptStreamingParams(enabled: true)))
+
+        #expect(supervisor.startCalls == 1)
+        #expect(supervisor.drainCalls == 0)
+    }
+
+    /// Turning streaming off leaves the proxy column alone, so it must leave
+    /// the supervisor alone as well: routes still route.
+    @Test func turningStreamingOffDrainsNothing() async throws {
+        let supervisor = FakeModelProxySupervisor()
+        router.modelProxySupervisor = supervisor
+
+        _ = await router.handle(try RPCRequest(
+            method: RPCMethod.configSetTranscriptStreamingEnabled,
+            params: ConfigSetTranscriptStreamingParams(enabled: false)))
+
+        #expect(supervisor.startCalls == 0)
+        #expect(supervisor.drainCalls == 0)
     }
 
     /// The port and version are carried, not dropped, once a supervisor fills
