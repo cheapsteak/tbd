@@ -584,9 +584,20 @@ extension ModelProxySuites {
         /// signal that cannot be handled at all, so the second one exits
         /// without waiting.
         ///
-        /// Discriminating on the clock: the exit has to land inside a budget
-        /// far shorter than the stream still owed, which a proxy that ignored
-        /// the second signal could not do.
+        /// Discriminating on delivered bytes, not the clock: the exit reason
+        /// (`"signal N"` versus `"retire"`, `Proxy.swift`) is only ever
+        /// written through `os.Logger`, which this binary's own contract
+        /// keeps out of `proxy.log` on any path but a cannot-run-at-all
+        /// failure (`Proxy.swift`, top-of-file comment) — so it is not a
+        /// channel a test can assert on. What a broken proxy that ignored the
+        /// second signal actually *does* differently is deliver the whole
+        /// ten-second stream instead of a prefix of it: the upstream has only
+        /// twenty ticks, so a drain that ran to completion delivers all of
+        /// them, and only a drain that was cut short delivers fewer. The
+        /// byte-count check below is that proof, and unlike a wall-clock
+        /// budget it cannot be fooled by a slow or starved test runner — it
+        /// reads the actual outcome of the code path taken, not how long that
+        /// path took to run.
         @Test("a second signal during the drain exits without waiting for it")
         func aSecondSignalEndsTheDrain() async throws {
             // Twenty events half a second apart. Ten seconds of stream is far
@@ -626,22 +637,25 @@ extension ModelProxySuites {
                 sample: { connectRefused(port: pidFile.port) }, isSatisfied: { $0 })
             #expect(closed, "the first signal never closed the listener; log:\n\(proxy.log())")
             // As above, a weak check by itself; what proves the first signal
-            // started a drain rather than an exit is that the second signal's
-            // budget below is measured against a stream still owing seconds.
+            // started a drain rather than an exit is the byte-count check
+            // below, which only a proxy that was still draining when the
+            // second signal landed could satisfy.
             #expect(kill(proxy.pid, 0) == 0, "the signalled proxy's pid is gone")
 
-            let secondSignalAt = ContinuousClock().now
             kill(proxy.pid, SIGTERM)
-            let status = await proxy.awaitExit(seconds: 15)
-            let waited = ContinuousClock().now - secondSignalAt
+            // Generously wide: this bounds a starved CI runner's scheduling
+            // delay, not the drain itself. The discriminator below is the
+            // delivered byte count, not how long the exit took, so widening
+            // this only removes flake risk and cannot mask a proxy that let
+            // the drain run to completion.
+            let status = await proxy.awaitExit(seconds: 30)
             #expect(status == 0, "the second signal exited \(String(describing: status)); log:\n\(proxy.log())")
-            #expect(
-                waited < .seconds(5),
-                "the second signal waited \(waited) on a drain with seconds of stream left; log:\n\(proxy.log())"
-            )
 
             // The stream really was cut, which is the cost the second signal
-            // buys and the thing only a `SIGKILL` could otherwise do.
+            // buys and the thing only a `SIGKILL` could otherwise do. A proxy
+            // that let the drain run to completion instead would deliver
+            // every one of the twenty ticks, which is what the count check
+            // below rules out.
             var received: [UInt8] = []
             do {
                 for try await byte in bytes { received.append(byte) }

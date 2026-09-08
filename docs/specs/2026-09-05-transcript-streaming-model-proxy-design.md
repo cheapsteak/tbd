@@ -216,8 +216,9 @@ A **second** signal during that drain exits immediately, cutting whatever is
 still open. It is the operator saying they meant now, and it is what keeps
 "stop this proxy this instant" one signal away rather than a `SIGKILL` away. A
 signal that finds nothing in flight exits promptly, because the drain it starts
-has nothing to wait for, and one that arrives before the listener is bound ends
-the process at once, because there is no listener to close. A signal landing
+has nothing to wait for, and one that arrives before the retire disposition is
+armed — a window that spans the bind and the pid-file write — ends the process at
+once, because there is not yet a retire to run. A signal landing
 during a drain a retire has already started joins that drain rather than
 beginning a second.
 

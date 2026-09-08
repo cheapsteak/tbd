@@ -476,11 +476,13 @@ final class ProxyStopSignal: Sendable {
 /// the operator saying they meant now, and it exists so that "stop this proxy
 /// this instant" is a second signal away rather than a `SIGKILL` away.
 ///
-/// **Before the listener is up there is nothing to drain**, so a signal
-/// arriving during start-up exits at once. `armRetire` is what turns the first
-/// signal into a retire, and it is called only after the bind — which is also
-/// why the count alone cannot decide: a proxy that had not bound yet would
-/// otherwise sit in a retire that has nothing to close.
+/// **Before the retire disposition is armed there is nothing to drain**, so a
+/// signal exits at once. `armRetire` is what turns the first signal into a
+/// retire, and it is called only after the bind succeeds and the pid file is
+/// written — so the unarmed window spans that startup sequence, not merely the
+/// time before the listener is bound — which is also why the count alone
+/// cannot decide: a proxy caught in that window would otherwise sit in a
+/// retire that was never armed.
 final class ProxySignalDisposition: @unchecked Sendable {
     /// What the handler should do about the signal it just took.
     enum Disposition {
@@ -494,9 +496,15 @@ final class ProxySignalDisposition: @unchecked Sendable {
     private var retire: (@Sendable () -> Void)?
     private var count = 0
 
-    /// Arms the retire path. Called once, after the listener is bound.
+    /// Arms the retire path. Called exactly once, after the bind succeeds and
+    /// the pid file is written — a second call is a bug (asserted in debug)
+    /// and is ignored rather than replacing the already-armed closure.
     func armRetire(_ retire: @escaping @Sendable () -> Void) {
-        lock.withLock { self.retire = retire }
+        lock.withLock {
+            assert(self.retire == nil, "armRetire called more than once")
+            guard self.retire == nil else { return }
+            self.retire = retire
+        }
     }
 
     /// Counts one signal and says what to do about it.
