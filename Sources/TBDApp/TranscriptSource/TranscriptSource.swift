@@ -57,6 +57,55 @@ actor TranscriptSource {
 
     private var entries: [String: Entry] = [:]
 
+    /// What an entry knows about one terminal's model-proxy stream file.
+    ///
+    /// Deliberately separate from `Entry`: the two files are different files
+    /// with different lifetimes — the transcript JSONL belongs to the Claude
+    /// session and the stream file to the terminal — and a session can have
+    /// one, both or neither. Nothing here resets the other.
+    private struct StreamEntry {
+        var path: String
+        var offset: UInt64
+        var lastSize: UInt64
+        /// Every line decoded so far, in file order. Bounded by the proxy's
+        /// own per-message truncation, and defensively by `maxStreamLines`.
+        var lines: [ModelProxyStreamLine]
+        var provisional: ProvisionalMessage?
+        /// The `now` this reader recorded the FIRST time a fold reported
+        /// `.complete` for the message `provisional` names, reused on every
+        /// later fold of the same message.
+        ///
+        /// `StreamFileReader.fold` stamps `.complete(at:)` with whatever `now`
+        /// it is handed and says the stability of that value is the caller's
+        /// to keep. This is where it is kept: without it every poll would
+        /// re-stamp the completion instant with a fresh `Date()`, and the
+        /// 60-second unconfirmed rule — which measures from when the reader
+        /// first saw the stop — would never come due. Reset when the message
+        /// id changes, because the new message has not completed yet.
+        var completedAt: Date?
+        /// The `now` at which this reader last saw a line arrive for the
+        /// message `provisional` names.
+        ///
+        /// The ten-minute silent-stream rule measures from here, so it must
+        /// move when a line lands and stay put when a poll finds nothing —
+        /// stamping it with a fresh `Date()` every tick would push that
+        /// deadline forward forever, exactly as re-stamping `completedAt`
+        /// would push the 60-second one. Reset when the message id changes,
+        /// because the deadline belongs to the message, not to the session.
+        var lastLineAt: Date?
+    }
+
+    private var streamEntries: [String: StreamEntry] = [:]
+
+    /// Defensive ceiling on one session's retained stream lines.
+    ///
+    /// The proxy truncates the file when nothing is in flight, so in practice
+    /// the retained set is one turn's deltas. This bounds the pathological case
+    /// — a proxy that never truncates, or a reader that never sees it happen —
+    /// by dropping the oldest message that has already ended, which is the only
+    /// content nothing can still be appended to.
+    private static let maxStreamLines = 10_000
+
     /// Reads the verification window back off disk. Injected so a test can make
     /// the capture fail without racing the filesystem: in production the window
     /// is lost only when the file is replaced or removed in the instant between
@@ -84,8 +133,15 @@ actor TranscriptSource {
     /// app reads it.
     var trackedSessionCount: Int { entries.count }
 
-    /// Drops everything built for `sessionID`. The next `refresh` for that id
-    /// starts over from byte zero.
+    /// How many sessions have a stream-file tail resident right now. Read-only,
+    /// and here for the same reason as `trackedSessionCount`: so a test can
+    /// assert the bound rather than trust a comment. Nothing in the app reads
+    /// it.
+    var trackedStreamSessionCount: Int { streamEntries.count }
+
+    /// Drops everything built for `sessionID` — the transcript AND the
+    /// provisional message tailed from the stream file. The next `refresh` or
+    /// `refreshStream` for that id starts over from byte zero.
     ///
     /// `TranscriptPollScheduler` is the only production caller, from two
     /// places: `deregister`, and `finishTick` for a poll whose refresh landed
@@ -94,6 +150,7 @@ actor TranscriptSource {
     /// it.
     func forget(sessionID: String) {
         entries.removeValue(forKey: sessionID)
+        streamEntries.removeValue(forKey: sessionID)
     }
 
     /// Bring `sessionID` up to date with `path`.
@@ -191,6 +248,227 @@ actor TranscriptSource {
         }
         entries[sessionID] = working
         return change
+    }
+
+    // MARK: - Model proxy stream file
+
+    /// The message currently worth rendering from `sessionID`'s stream file, or
+    /// nil when nothing has been tailed for it.
+    func provisional(sessionID: String) -> ProvisionalMessage? {
+        streamEntries[sessionID]?.provisional
+    }
+
+    /// Whether the session's own transcript holds the assistant line that
+    /// carries message `id`'s **text** — the signal that retires a provisional
+    /// row in favour of the real transcript item.
+    ///
+    /// The message id alone is not that signal. Claude Code writes one JSONL
+    /// line per content block under a shared `message.id`, and they land at
+    /// different times, so a message opening with a `thinking` block puts its
+    /// id in the JSONL while its text is still streaming. Retiring then would
+    /// take the row down with no settled item to replace it.
+    ///
+    /// False for a session with no transcript entry at all, which is the
+    /// conservative reading: nothing has been read, so nothing confirms
+    /// anything.
+    func hasAssistantText(sessionID: String, id: String) -> Bool {
+        entries[sessionID]?.transcript.hasAssistantText(id: id) ?? false
+    }
+
+    /// Everything one publish needs about `sessionID`, read in a single hop
+    /// onto this actor.
+    ///
+    /// `items`, `provisional` and the provisional's confirmation are three
+    /// facts about one instant, and gathering them with three separate awaits
+    /// let a `refresh` land between them: a publish could then read the
+    /// transcript from *before* the settled assistant message arrived and the
+    /// confirmation from *after* it, and show neither the provisional row nor
+    /// the settled one. Nothing suspends inside this method, so the three
+    /// answers are necessarily consistent with each other.
+    ///
+    /// `confirmed` is `hasAssistantText` for the provisional's own id, and
+    /// false when there is no provisional — no other message id is ever a
+    /// candidate for a row, so the caller needs no other lookup.
+    func snapshot(
+        sessionID: String
+    ) -> (items: [TranscriptItem], provisional: ProvisionalMessage?, confirmed: Bool) {
+        let entry = entries[sessionID]
+        let provisional = streamEntries[sessionID]?.provisional
+        let confirmed = provisional.map {
+            entry?.transcript.hasAssistantText(id: $0.messageID) ?? false
+        } ?? false
+        return (entry?.transcript.items ?? [], provisional, confirmed)
+    }
+
+    /// Bring `sessionID`'s provisional message up to date with the stream file
+    /// at `path`. Returns whether the provisional actually changed.
+    ///
+    /// **An unreadable file is no news, never a blank row.** A failed stat or a
+    /// failed read returns false and leaves the prior provisional exactly as it
+    /// was — the file is written by a separate process that can be replacing,
+    /// truncating or not-yet-creating it, and none of that is evidence the
+    /// message on screen is gone.
+    ///
+    /// **A fold that finds nothing is no news either.** The proxy truncates the
+    /// file when nothing is in flight, so an empty file means "no turn running"
+    /// — not "the answer you are showing was withdrawn". The provisional row is
+    /// retired by confirmation from the transcript or by the unconfirmed
+    /// deadline, never by the stream file going quiet.
+    ///
+    /// `now` is the instant this poll happened. It is handed to
+    /// `StreamFileReader.fold` only for a message that has just completed;
+    /// a message already recorded as complete keeps the instant it was first
+    /// seen to complete (`StreamEntry.completedAt`).
+    @discardableResult
+    func refreshStream(sessionID: String, path: String, now: Date) -> Bool {
+        var entry = streamEntries[sessionID]
+        if let existing = entry, existing.path != path {
+            // A different file under the same session id, so the *working* copy
+            // starts empty: nothing read from the old one describes the new one.
+            //
+            // The stored entry is deliberately not cleared here. If the new file
+            // cannot be stat'd or read below, this returns without writing
+            // anything back and the old path's provisional keeps the row — an
+            // unreadable file is no news, never "the answer was withdrawn". The
+            // switch takes effect on the first tick the new file can be read.
+            entry = nil
+        }
+        var working = entry ?? StreamEntry(
+            path: path, offset: 0, lastSize: 0, lines: [], provisional: nil, completedAt: nil)
+
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = (attrs[.size] as? NSNumber)?.uint64Value else {
+            Self.log.debug(
+                "stream stat failed, retaining prior provisional session=\(sessionID, privacy: .public)")
+            return false
+        }
+
+        // The shrink rule: the proxy truncates this file in place, so a file
+        // shorter than what we have consumed — or shorter than we last saw it —
+        // is a new file's worth of content at the same path. Resume from zero
+        // and drop the lines the old content produced, or the fold would splice
+        // a retired turn onto the new one.
+        if size < working.offset || size < working.lastSize {
+            Self.log.debug(
+                "stream file shrank, restarting session=\(sessionID, privacy: .public)")
+            working.offset = 0
+            working.lines = []
+        }
+
+        // A file that is exactly the size we last saw has had nothing appended,
+        // and the fold is a pure function of the lines — so there is nothing to
+        // read and nothing that could have changed. Skips one open-and-read per
+        // tick per visible pane, which at the 100 ms foreground cadence is the
+        // difference worth having.
+        if entry != nil, size == working.lastSize { return false }
+
+        guard let read = TranscriptFileWindow.read(path: path, from: working.offset) else {
+            Self.log.debug(
+                "stream read failed, retaining prior provisional session=\(sessionID, privacy: .public)")
+            return false
+        }
+
+        working.offset = read.newOffset
+        working.lastSize = size
+        working.path = path
+        // A line that will not decode is skipped, not fatal: the tailer can
+        // catch a partial append, and a newer proxy can write a `type` this
+        // build does not know.
+        let decoded = read.lines.compactMap(ModelProxyStreamLine.decode(line:))
+        working.lines.append(contentsOf: decoded)
+        working.lines = Self.capped(working.lines)
+
+        let previous = working.provisional
+        guard let folded = StreamFileReader.fold(lines: working.lines, now: now) else {
+            streamEntries[sessionID] = working
+            return false
+        }
+
+        if previous?.messageID != folded.messageID {
+            // A different message now holds the row, and it has neither been
+            // seen to complete nor been timed from before this fold.
+            working.completedAt = nil
+            working.lastLineAt = nil
+        }
+        // Only a line that actually arrived for *this* message restarts its
+        // silence. Lines that belong to another in-flight message do not, and
+        // a tick that decoded nothing at all leaves the deadline where it was.
+        if working.lastLineAt == nil
+            || decoded.contains(where: { $0.message == folded.messageID }) {
+            working.lastLineAt = now
+        }
+
+        var phase = folded.phase
+        if case .complete = folded.phase {
+            if let firstSeen = working.completedAt {
+                phase = .complete(at: firstSeen)
+            } else {
+                working.completedAt = now
+            }
+        }
+        let stabilized = ProvisionalMessage(
+            messageID: folded.messageID, text: folded.text, phase: phase,
+            lastLineAt: working.lastLineAt ?? now)
+
+        working.provisional = stabilized
+        streamEntries[sessionID] = working
+        return previous != working.provisional
+    }
+
+    /// Drops whole messages from the head until the retained lines are back
+    /// under `maxStreamLines`, oldest ended message first.
+    ///
+    /// Only a message that has already ended is dropped: an in-flight one is
+    /// still being appended to, and removing its head would leave the fold
+    /// rendering a torn suffix of the very turn on screen.
+    ///
+    /// The **most recent** message is never dropped either, ended or not — which
+    /// is also what keeps the cap inert while a single message is the only one
+    /// resident. A long turn crosses the ceiling and then ends on the same tick
+    /// its `stop` lands; dropping it there would fold to nothing, and the stored
+    /// provisional would be stranded at `.streaming` holding a partial answer
+    /// that nothing can ever complete. So a single pathologically long turn is
+    /// allowed past the ceiling rather than be mangled or lost — the ceiling is
+    /// a defence against accumulation *across* turns, which is the shape that
+    /// actually grows without bound.
+    ///
+    /// "Most recent" is `StreamFileReader.mostRecentMessageID` — the message
+    /// whose first line appears latest, the same ranking the fold picks with —
+    /// and not the owner of the last retained line. Those diverge exactly when
+    /// two parent requests interleave: an older message that keeps appending
+    /// after a newer one has started and stopped owns the last line, so ranking
+    /// by it protects the *older* turn and evicts every line of the newer one,
+    /// which is the message the fold is rendering. Ranking by first-line
+    /// position instead means eviction can only ever move the row forward to a
+    /// later turn, never rewind it to an earlier one.
+    private static func capped(_ lines: [ModelProxyStreamLine]) -> [ModelProxyStreamLine] {
+        guard lines.count > maxStreamLines else { return lines }
+        var kept = lines
+        while kept.count > maxStreamLines,
+              let newest = StreamFileReader.mostRecentMessageID(in: kept),
+              let oldest = oldestEndedMessage(in: kept, excluding: newest) {
+            kept.removeAll { $0.message == oldest }
+        }
+        return kept
+    }
+
+    /// The id of the earliest-appearing message that has a terminal line,
+    /// ignoring `newest` — the most recent message by first-line position,
+    /// which the caller must keep whether or not it has ended.
+    private static func oldestEndedMessage(
+        in lines: [ModelProxyStreamLine], excluding newest: String
+    ) -> String? {
+        var ended: Set<String> = []
+        for line in lines {
+            switch line {
+            case let .stop(message): ended.insert(message)
+            case let .aborted(message, _): ended.insert(message)
+            case .start, .block, .text: break
+            }
+        }
+        ended.remove(newest)
+        guard !ended.isEmpty else { return nil }
+        return lines.first { ended.contains($0.message) }?.message
     }
 
     /// Whether the bytes `entry` has already consumed still read the same.

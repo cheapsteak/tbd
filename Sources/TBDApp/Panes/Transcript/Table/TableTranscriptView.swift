@@ -318,7 +318,8 @@ struct TableTranscriptView: NSViewRepresentable {
             let key = ComposedKey(id: node.id, version: node.contentVersion)
             if let cached = composedCache[key] { return cached }
             let composed = TranscriptBubbleGeometry.composedBlocks(
-                for: item, badgeUsage: node.badgeUsage, linkResolver: context.linkResolver)
+                for: item, badgeUsage: node.badgeUsage, linkResolver: context.linkResolver,
+                isProvisional: node.isProvisional)
             composedCache[key] = composed
             return composed
         }

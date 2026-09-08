@@ -65,15 +65,20 @@ actor TranscriptPollScheduler {
 
     private struct Registration {
         var path: String
+        /// The terminal's model-proxy stream file, when the pane declared one.
+        /// Nil is the ordinary case — transcript streaming off, a session that
+        /// was never routed through the proxy, or a pre-streaming daemon — and
+        /// means this registration never touches a second file.
+        var streamPath: String?
         /// Every pane holding this session open right now, and the tier each
         /// one declared. Held inside the entry, so it is dropped whole when the
         /// last holder leaves — nothing accumulates per retired pane.
         var holders: [TranscriptPaneToken: TranscriptPollTier]
         /// Which incarnation of this session id this registration is. Minted
-        /// when the entry is created and again when its path changes — the two
-        /// cases where work already in flight was computed against something
-        /// this entry no longer is — so such a tick can recognise itself as
-        /// stale. See `finishTick`. Holders coming and going do not mint one:
+        /// when the entry is created and again when either of its paths changes
+        /// — the cases where work already in flight was computed against
+        /// something this entry no longer is — so such a tick can recognise
+        /// itself as stale. See `finishTick`. Holders coming and going do not mint one:
         /// the entry is still the same entry, and a tick that outlives one of
         /// several holders is still owed to the rest.
         var generation: UInt64
@@ -93,18 +98,47 @@ actor TranscriptPollScheduler {
     /// registrations hold a copy, so nothing accumulates per retired session.
     private var lastGeneration: UInt64 = 0
     private var appActive = true
-    /// One handler for every registration, not one per session. Each pane sets
-    /// the same closure and it is passed the session id that changed, so a
-    /// later pane overwriting an earlier one's handler is harmless — they are
-    /// interchangeable. Do not "fix" this into a per-session dictionary; that
-    /// would keep a torn-down pane's closure alive.
+    /// One handler for every registration, not one per session. It is passed
+    /// the session id that changed, and it carries nothing belonging to the
+    /// pane that installed it — so the first pane to mount installs it and
+    /// every later one finds it already there (see ``setOnChangeIfUnset``). Do
+    /// not "fix" this into a per-session dictionary; that would keep a
+    /// torn-down pane's closure alive.
     private var onChange: (@Sendable (String) async -> Void)?
     private let source: TranscriptSource
+    /// The instant a stream refresh stamps its lines with.
+    ///
+    /// A date seam rather than the clock seam beside it, because what this
+    /// produces is *data*: `TranscriptSource` stores it and the provisional
+    /// row's retire deadlines are later measured against it. `Duration` is
+    /// behavior, `Date` is data — see the repo's clock-and-date-seam rule.
+    private let now: @Sendable () -> Date
     private let clock: any Clock<Duration>
 
-    init(source: TranscriptSource, clock: any Clock<Duration> = ContinuousClock()) {
+    /// The app's one provisional-row retire timer, created with this scheduler
+    /// and on its clock.
+    ///
+    /// It lives here because its lifetime is the *registration's*, not any
+    /// pane's. An alarm is armed by a publish, and every publish in the app
+    /// runs through the single ``onChange`` slot above; a pane that mounts,
+    /// remounts, or is restarted by a Settings flip must therefore find the
+    /// same instance the previous one armed into, or a session's live alarm
+    /// ends up in one instance while the pane that would cancel it holds
+    /// another — and the orphan then fires after ``deregister`` has already
+    /// forgotten the session, publishing an empty transcript for it.
+    /// `nonisolated` because it is an immutable `Sendable` actor reference:
+    /// `publish` can take it without a hop through this actor.
+    nonisolated let provisionalRetire: ProvisionalRetireTimer
+
+    init(
+        source: TranscriptSource,
+        now: @escaping @Sendable () -> Date = { Date() },
+        clock: any Clock<Duration> = ContinuousClock()
+    ) {
         self.source = source
+        self.now = now
         self.clock = clock
+        self.provisionalRetire = ProvisionalRetireTimer(clock: clock)
     }
 
     var registeredSessionIDs: Set<String> { Set(registrations.keys) }
@@ -127,6 +161,16 @@ actor TranscriptPollScheduler {
         registrations[sessionID]?.holders.count ?? 0
     }
 
+    /// The model-proxy stream file `sessionID` is registered to tail, or nil
+    /// when it has none (or is not registered at all).
+    ///
+    /// Read-only, and here so a test can pin what a registration actually
+    /// carries rather than infer it from a tick's side effects. Nothing in the
+    /// app reads it.
+    func registeredStreamPath(sessionID: String) -> String? {
+        registrations[sessionID]?.streamPath
+    }
+
     /// The generation of the live registration for `sessionID`, or nil when it
     /// is not registered.
     ///
@@ -137,8 +181,40 @@ actor TranscriptPollScheduler {
         registrations[sessionID]?.generation
     }
 
-    func setOnChange(_ handler: @escaping @Sendable (String) async -> Void) {
+    /// Installs the change handler, unless one is already installed.
+    ///
+    /// Deliberately not a plain setter. Panes call this on every mount and the
+    /// closures are interchangeable — none of them carries anything belonging
+    /// to the pane that built it — so re-seating one buys nothing, and the
+    /// habit of re-seating it is what let a per-pane object ride into this slot
+    /// and split one session's alarms across two instances. Keeping the first
+    /// closure is safe: it holds `AppState` weakly, plus the same source and
+    /// retire timer this scheduler already owns, and no view.
+    func setOnChangeIfUnset(_ handler: @escaping @Sendable (String) async -> Void) {
+        guard onChange == nil else { return }
         onChange = handler
+    }
+
+    /// Cancels the provisional retire alarm for `sessionID` — unless a pane is
+    /// still holding that session registered.
+    ///
+    /// The guard is the whole point. The viewer-slot LRU permits two panes onto
+    /// one session, and a deadline rule is announced by nothing: cancelling an
+    /// alarm a surviving pane's row still depends on strands that row on screen
+    /// until the pane closes. So the gesture belongs to the *last* holder
+    /// leaving, and a departing pane that is not the last one asks for it in
+    /// vain.
+    ///
+    /// ``deregister`` makes this call itself, after dropping the registration
+    /// and **before** `TranscriptSource.forget` — the ordering is load-bearing.
+    /// An alarm that survives into the forget wakes up, publishes what the
+    /// source no longer has, and writes an empty transcript into
+    /// `AppState.sessionTranscripts`, where `AppState+History.selectSession`
+    /// reads `[]` as a cached answer and never refetches from disk. Session
+    /// History for that session would then read empty for good.
+    func disarmProvisional(sessionID: String) async {
+        guard registrations[sessionID] == nil else { return }
+        await provisionalRetire.disarm(sessionID: sessionID)
     }
 
     /// Adds `token`'s hold on `sessionID`, at the tier that pane declares.
@@ -146,24 +222,34 @@ actor TranscriptPollScheduler {
     /// Idempotent per token: a pane re-declaring its tier updates its own hold
     /// rather than taking a second one, which is what makes the holder set
     /// bounded by "panes currently open", not by "tier changes ever made".
+    ///
+    /// `streamPath` is the model-proxy stream file this pane wants tailed
+    /// alongside the transcript, or nil for none. It defaults to nil so a
+    /// caller with no interest in streaming — every caller before this feature
+    /// — reads the same as it always did.
     func register(
-        sessionID: String, path: String, tier: TranscriptPollTier, token: TranscriptPaneToken
+        sessionID: String, path: String, streamPath: String? = nil,
+        tier: TranscriptPollTier, token: TranscriptPaneToken
     ) {
         var registration: Registration
         if let existing = registrations[sessionID] {
             registration = existing
-            if registration.path != path {
+            if registration.path != path || registration.streamPath != streamPath {
                 // The same session id under a different file. Whatever a tick
                 // in flight built, it built against the old path; mint a new
-                // incarnation so it can tell.
+                // incarnation so it can tell. A changed stream path counts for
+                // the same reason: the offsets and lines the source holds
+                // describe a file this registration no longer names.
                 lastGeneration += 1
                 registration.generation = lastGeneration
                 registration.path = path
+                registration.streamPath = streamPath
             }
         } else {
             lastGeneration += 1
             registration = Registration(
-                path: path, holders: [:], generation: lastGeneration, task: nil)
+                path: path, streamPath: streamPath, holders: [:],
+                generation: lastGeneration, task: nil)
         }
         registration.holders[token] = tier
         registrations[sessionID] = registration
@@ -213,6 +299,11 @@ actor TranscriptPollScheduler {
     /// Making the teardown conditional on the holder set emptying settles the
     /// two-panes-on-one-session case by the same stroke: either may leave, and
     /// the session keeps polling for whoever is left.
+    ///
+    /// The provisional retire alarm is cancelled here too, on the same
+    /// last-holder branch and ahead of the forget — the only place that knows
+    /// both that nobody is watching any more and that the source is about to
+    /// drop what the alarm would republish. See ``disarmProvisional``.
     func deregister(sessionID: String, token: TranscriptPaneToken) async {
         guard var registration = registrations[sessionID] else { return }
         guard registration.holders.removeValue(forKey: token) != nil else { return }
@@ -226,6 +317,8 @@ actor TranscriptPollScheduler {
         }
         registration.task?.cancel()
         registrations.removeValue(forKey: sessionID)
+        // Before the forget, never after it: see `disarmProvisional`.
+        await disarmProvisional(sessionID: sessionID)
         await source.forget(sessionID: sessionID)
     }
 
@@ -239,6 +332,7 @@ actor TranscriptPollScheduler {
         guard var registration = registrations[sessionID] else { return }
         registration.task?.cancel()
         let path = registration.path
+        let streamPath = registration.streamPath
         // Carried by the task, not re-read from `registrations` inside it: the
         // whole point is to compare against what the registry says *later*.
         // Restarting a task (`setAppActive`, a re-declared tier, a holder
@@ -257,7 +351,9 @@ actor TranscriptPollScheduler {
             while !Task.isCancelled {
                 try? await clock.sleep(for: interval)
                 if Task.isCancelled { return }
-                await self?.tick(sessionID: sessionID, path: path, generation: generation)
+                await self?.tick(
+                    sessionID: sessionID, path: path, streamPath: streamPath,
+                    generation: generation)
             }
         }
         registrations[sessionID] = registration
@@ -270,12 +366,29 @@ actor TranscriptPollScheduler {
     /// cancellation check of its own. So the generation is re-checked on both
     /// sides of it — before, to skip work a cancelled task no longer owes, and
     /// again in `finishTick`, which is where the interesting case lives.
-    private func tick(sessionID: String, path: String, generation: UInt64) async {
+    ///
+    /// A registration that names a stream file refreshes it in the same tick,
+    /// at the same cadence: the provisional message is the same pane's content
+    /// as the transcript rows, and giving it a timer of its own would be a
+    /// second cadence policy to keep in step with this one. Either file
+    /// changing is news — the two are folded into one `hasNews` so a stream
+    /// delta with no transcript change still reaches the pane, which is the
+    /// whole point of streaming.
+    private func tick(
+        sessionID: String, path: String, streamPath: String?, generation: UInt64
+    ) async {
         guard registrations[sessionID]?.generation == generation else { return }
         let change = await source.refresh(sessionID: sessionID, path: path)
-        await finishTick(
-            sessionID: sessionID, generation: generation,
-            hasNews: !(change?.isEmpty ?? true))
+        var hasNews = !(change?.isEmpty ?? true)
+        if let streamPath {
+            // Not folded into the expression above: `||` short-circuits, and a
+            // transcript change must not skip the stream refresh — the tail
+            // would fall behind exactly when the session is busiest.
+            let streamChanged = await source.refreshStream(
+                sessionID: sessionID, path: streamPath, now: now())
+            hasNews = hasNews || streamChanged
+        }
+        await finishTick(sessionID: sessionID, generation: generation, hasNews: hasNews)
     }
 
     /// The far side of one tick: decide whether what the refresh just did still
