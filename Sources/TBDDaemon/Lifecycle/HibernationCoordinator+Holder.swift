@@ -1012,10 +1012,22 @@ extension HibernationCoordinator {
                 launch: WorktreeLifecycle.holderLaunch(
                     shellCommand: spawnCommand,
                     env: replacementEnv,
-                    // The route's base URL rides the job's process
-                    // environment, never the inline exports, so the token
-                    // stays out of argv on the wake path exactly as it does on
-                    // the create path.
+                    // `sensitiveEnv` is the job's process environment, and
+                    // it is what carries the route: `holderLaunch` inlines
+                    // `env` as `export K='v';` in front of the command and
+                    // never this dictionary.
+                    //
+                    // The token is in the job's argv all the same, and
+                    // deliberately: `spawnCommand` was composed by
+                    // `ClaudeSpawnCommandBuilder` from
+                    // `attachment.builderBaseURL(profile:)`, which re-exports
+                    // `ANTHROPIC_BASE_URL` inline so the export runs *after*
+                    // the shell's rc files — the one thing that keeps a
+                    // `.zshrc` setting one of its own from taking this woken
+                    // session off its route. `Outcome.builderBaseURL` carries
+                    // the trade: `ps -ww` is readable by exactly the processes
+                    // that can already read `routes/`, and losing the rc-file
+                    // defence would be a real failure where this is not one.
                     sensitiveEnv: attachment.sensitiveEnv,
                     workingDirectory: worktree.path,
                     cols: cols ?? TmuxManager.defaultCols,

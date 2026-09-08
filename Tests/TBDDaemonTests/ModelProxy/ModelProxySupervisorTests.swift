@@ -1,5 +1,6 @@
 import Clocks
 import Darwin
+import Dispatch
 import Foundation
 import TestSupport
 import Testing
@@ -510,6 +511,171 @@ struct ModelProxySupervisorTests {
         #expect(
             await supervisor.current == nil,
             "a proxy the supervisor believes it retired must not stay current")
+    }
+
+    // MARK: - The drain's own races
+
+    /// **The window Important 1 of the final review found.** The immediate
+    /// drain check the toggle makes suspends on its own `/tbd/status` poll, and
+    /// everything it decided before that poll can be false when it resumes.
+    ///
+    /// Here the user re-ticks the toggle while the poll is in flight. The count
+    /// that comes back is zero — the same input that retires the proxy in
+    /// `drainingRetiresAProxyWithNoRoutes` — and it must decide nothing,
+    /// because the supervisor is no longer draining by the time it arrives.
+    /// Retiring on it would leave the flag on with no proxy for a whole watch
+    /// interval, and every session spawned in that gap unproxied.
+    @Test("the flag coming back on during the drain's poll keeps the proxy")
+    func theFlagComingBackOnDuringTheDrainPollKeepsTheProxy() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6210, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.admit(pid: 6210, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        try await fixture.db.config.setModelProxyEnabled(false)
+
+        let config = fixture.db.config
+        proxy.onNextStatus {
+            runBlocking("the flag coming back on mid-poll") {
+                try? await config.setModelProxyEnabled(true)
+                await supervisor.startIfEnabled()
+            }
+        }
+        await supervisor.beginDraining()
+        await supervisor.stop()
+
+        #expect(
+            proxy.requests().allSatisfy { $0.path != "/tbd/retire" },
+            "a route count read before the flag came back on must not retire the proxy")
+        #expect(await supervisor.current?.pid == 6210)
+    }
+
+    /// The other half of the same window, and the one that costs a session: a
+    /// spawn racing the toggle. The RPC writes the column and asks for the
+    /// drain; the spawn was already past its own read of that column, and its
+    /// `POST /tbd/routes` lands while the drain's poll is in flight. The poll
+    /// answered zero and the answer was already stale.
+    ///
+    /// A retire here would not un-route that session — its
+    /// `ANTHROPIC_BASE_URL` names this port for the rest of its life — it would
+    /// break it on its first turn against a closed loopback port.
+    @Test("a route minted during the drain's poll keeps the proxy")
+    func aRouteMintedDuringTheDrainPollKeepsTheProxy() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6220, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.admit(pid: 6220, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        try await fixture.db.config.setModelProxyEnabled(false)
+
+        // The document already composed says zero; the route lands immediately
+        // behind it, so every later read says one.
+        proxy.onNextStatus { proxy.setRouteCount(1) }
+        await supervisor.beginDraining()
+        await supervisor.stop()
+
+        #expect(
+            proxy.requests().allSatisfy { $0.path != "/tbd/retire" },
+            "the count is re-read immediately before the retire, and it is no longer zero")
+        #expect(await supervisor.current?.pid == 6220)
+    }
+
+    /// The proxy the drain decided about is not necessarily the proxy it would
+    /// retire. While the poll is in flight the supervisor is free to service
+    /// anything else — here a restart that adopts a *different* proxy onto
+    /// `live` — and a retire that read `live` at the point of use would send
+    /// `POST /tbd/retire` to the successor, which has drained nothing and may be
+    /// serving routes of its own.
+    @Test("a proxy replaced during the drain's poll is not the one retired")
+    func aProxyReplacedDuringTheDrainPollIsNotRetired() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let first = try FakeProxyProcess(version: fixture.ownVersion, pid: 6230, home: fixture.home)
+        defer { first.stop() }
+        try await fixture.db.config.setModelProxyPort(first.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.admit(pid: 6230, startTime: first.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        #expect(await supervisor.current?.pid == 6230)
+        try await fixture.db.config.setModelProxyEnabled(false)
+
+        // A second proxy, on its own port, publishing its own pid file — the
+        // rendezvous a successor writes after binding.
+        let second = try FakeProxyProcess(version: fixture.ownVersion, pid: 6231, home: fixture.home)
+        defer { second.stop() }
+        fixture.identity.admit(pid: 6231, startTime: second.processStartTime)
+
+        let config = fixture.db.config
+        first.onNextStatus {
+            runBlocking("the successor being adopted mid-poll") {
+                await supervisor.stop()
+                try? await config.setModelProxyPort(second.port)
+                await supervisor.start()
+            }
+        }
+        await supervisor.beginDraining()
+        await supervisor.stop()
+
+        #expect(await supervisor.current?.pid == 6231, "the successor was adopted mid-poll")
+        #expect(
+            second.requests().allSatisfy { $0.path != "/tbd/retire" },
+            "the successor must not be retired on its predecessor's route count")
+        #expect(first.requests().allSatisfy { $0.path != "/tbd/retire" })
+    }
+
+    /// **The one status read whose verdict is a `POST /tbd/retire`**, and until
+    /// this fix the only one acted on with no identity check at all. A proxy
+    /// that died and left its port to a stranger — another home's proxy, or a
+    /// pid the table no longer confirms — answers with a route count of its
+    /// own, and a daemon that believed it would retire on a stranger's word.
+    ///
+    /// Nothing is retired, and nothing is adopted either: an answer that fails
+    /// the check decides nothing at all.
+    @Test("a drain check from a process the daemon cannot confirm is ignored")
+    func aDrainCheckFromAnUnconfirmedProcessIsIgnored() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6240, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.admit(pid: 6240, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        #expect(await supervisor.current?.pid == 6240)
+
+        // The proxy this daemon adopted is gone from the process table; what
+        // answers on that port now is not something it can confirm. Everything
+        // else — the route count of zero, the flag going off — is exactly
+        // `drainingRetiresAProxyWithNoRoutes`, which retires.
+        fixture.identity.forget(pid: 6240)
+        try await fixture.db.config.setModelProxyEnabled(false)
+        await supervisor.beginDraining()
+        await supervisor.stop()
+
+        #expect(
+            proxy.requests().allSatisfy { $0.path != "/tbd/retire" },
+            "a route count from an unconfirmed responder must not retire anything")
+        #expect(
+            await supervisor.current?.pid == 6240,
+            "and it must not drop or re-adopt anything either")
     }
 
     /// The boot half of the drain. A daemon that restarts after the flag went
@@ -1561,6 +1727,7 @@ private final class FakeProxyProcess: @unchecked Sendable {
     private let server: LoopbackHTTPTestServer
     private let pidBox: PidBox
     private let routeCountBox: IntBox
+    private let statusHook: StatusHookBox
     private let paths: ProxyHomePaths
     let processStartTime = FakeProxyProcess.startedAt
 
@@ -1572,6 +1739,18 @@ private final class FakeProxyProcess: @unchecked Sendable {
     /// while the supervisor watches, and the number belongs to the proxy: the
     /// daemon never counts routes itself, it asks.
     func setRouteCount(_ count: Int) { routeCountBox.value = count }
+
+    /// Fires **once**, on the server thread, after the next `/tbd/status`
+    /// document has been composed and before it is written back.
+    ///
+    /// It is how a test opens the window every drain race lives in. The
+    /// supervisor is suspended awaiting exactly this response, so the actor is
+    /// free to service anything else, and whatever this closure does — the flag
+    /// coming back on, a route being minted, the proxy being replaced — lands
+    /// strictly between the poll and the decision the answer feeds. A blocking
+    /// hand-off rather than a detached `Task`, because a race arranged by
+    /// scheduling luck is not a test.
+    func onNextStatus(_ body: @escaping @Sendable () -> Void) { statusHook.arm(body) }
 
     /// Makes the listener answer for another process from now on — one port
     /// changing hands, which is what another daemon's replacement looks like
@@ -1607,8 +1786,10 @@ private final class FakeProxyProcess: @unchecked Sendable {
         let pidBox = PidBox(pid)
         let routeCountBox = IntBox()
         routeCountBox.value = routeCount
+        let statusHook = StatusHookBox()
         self.pidBox = pidBox
         self.routeCountBox = routeCountBox
+        self.statusHook = statusHook
         self.paths = ProxyHomePaths(home: home)
         // Canonical, exactly as the real proxy reports it: the daemon compares
         // canonical forms, and a fake that echoed a raw path would make the
@@ -1630,6 +1811,10 @@ private final class FakeProxyProcess: @unchecked Sendable {
                 guard let data = try? document.encodedForStatusResponse() else {
                     return LoopbackHTTPTestServer.Reply(status: 500, body: "{}")
                 }
+                // After the document is composed and before it is answered:
+                // the world the supervisor is about to decide against moves
+                // here, and only here.
+                statusHook.fire()
                 return .ok(String(decoding: data, as: UTF8.self))
             case ("POST", "/tbd/retire"):
                 return LoopbackHTTPTestServer.Reply(status: retireStatus, body: "{}")
@@ -1709,6 +1894,48 @@ private final class PidBox: @unchecked Sendable {
         get { lock.withLock { stored } }
         set { lock.withLock { stored = newValue } }
     }
+}
+
+/// A one-shot closure the fake proxy runs from inside its status handler.
+private final class StatusHookBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var body: (@Sendable () -> Void)?
+
+    func arm(_ body: @escaping @Sendable () -> Void) {
+        lock.withLock { self.body = body }
+    }
+
+    /// Runs the armed closure and disarms it, so a hook set for one poll cannot
+    /// fire on the watch tick behind it.
+    func fire() {
+        let armed: (@Sendable () -> Void)? = lock.withLock {
+            let armed = body
+            body = nil
+            return armed
+        }
+        armed?()
+    }
+}
+
+/// Runs `body` and blocks the calling thread until it finishes.
+///
+/// Only ever called from a `FakeProxyProcess` status hook, and the thread it
+/// blocks is the fake server's own accept thread — never a cooperative one, so
+/// this cannot starve the pool the released side runs on (`Tests/CLAUDE.md`,
+/// "Thread-blocking gates run off the cooperative pool"). The actor `body`
+/// talks to is suspended awaiting the very response this hook precedes, which
+/// is what makes the hand-off deterministic rather than lucky.
+///
+/// `waitForGate` bounds it regardless: a future change that broke that
+/// arrangement reports a named gate and lets the test's own assertions fail,
+/// instead of hanging the suite.
+private func runBlocking(_ gate: String, _ body: @escaping @Sendable () async -> Void) {
+    let finished = DispatchSemaphore(value: 0)
+    Task {
+        await body()
+        finished.signal()
+    }
+    finished.waitForGate(gate)
 }
 
 /// A box for a number the request handler reads but the test writes: the

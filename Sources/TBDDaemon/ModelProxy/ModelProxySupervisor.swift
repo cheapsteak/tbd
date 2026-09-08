@@ -542,6 +542,8 @@ actor ModelProxySupervisor {
     ///   already holds. The watch polls `/tbd/status` every tick anyway, and a
     ///   second poll for a number that cannot have changed in between would
     ///   double the control traffic of a draining daemon. Nil asks for one.
+    ///   Either way the *finish* reads it once more, because that read is the
+    ///   one the retire is sent on — see `finishDraining(target:)`.
     private func finishDrainingIfNoRoutesRemain(routeCount known: Int?) async {
         guard draining, let live else {
             // Draining with no proxy current is a tick with no answer, not the
@@ -552,30 +554,90 @@ actor ModelProxySupervisor {
             // tick.
             return
         }
+        // The proxy this decision is about, named once. Everything after the
+        // first suspension is compared against it rather than against whatever
+        // `live` has become.
+        let target = live
         let count: Int
         if let known {
             count = known
         } else {
-            do {
-                count = try await client(port: live.state.port).status().routeCount
-            } catch {
-                Self.logger.debug(
-                    """
-                    the draining model proxy on port \(live.state.port, privacy: .public) did not \
-                    answer /tbd/status: \(error.localizedDescription, privacy: .public); keeping it
-                    """)
-                return
-            }
+            guard let polled = await routeCountFromOurProxy(target) else { return }
+            count = polled
         }
         guard count == 0 else {
             Self.logger.debug(
                 """
-                the model proxy on port \(live.state.port, privacy: .public) still serves \
+                the model proxy on port \(target.state.port, privacy: .public) still serves \
                 \(count, privacy: .public) route(s); draining
                 """)
             return
         }
-        await finishDraining()
+        await finishDraining(target: target)
+    }
+
+    /// `target`'s own route count, and **nil for every answer this supervisor
+    /// must not act on**.
+    ///
+    /// A status poll is a suspension, and a drain that acts on what it learned
+    /// before one has decided against a world that has since moved: the flag
+    /// can come back on, a spawn can mint a route, the port can change hands.
+    /// So everything the caller decided before the poll is re-read after it,
+    /// and the answer itself is put through the identity checks adoption makes
+    /// — this is the one status read whose verdict is a `POST /tbd/retire`, and
+    /// a stranger that won the port must not be able to ask for one.
+    ///
+    /// Returns nil for a proxy that did not answer, too: an unanswered poll is
+    /// not a route count of zero, and the drain simply tries again next tick.
+    private func routeCountFromOurProxy(_ target: Live) async -> Int? {
+        let status: ModelProxyStatus
+        do {
+            status = try await client(port: target.state.port).status()
+        } catch {
+            Self.logger.debug(
+                """
+                the draining model proxy on port \(target.state.port, privacy: .public) did not \
+                answer /tbd/status: \(error.localizedDescription, privacy: .public); keeping it
+                """)
+            return nil
+        }
+        guard draining else {
+            Self.logger.info(
+                """
+                the model proxy for \(self.home.path, privacy: .public) was switched back on while \
+                its route count was being read; keeping it
+                """)
+            return nil
+        }
+        guard let current = live, current.state.pid == target.state.pid,
+            current.state.port == target.state.port
+        else {
+            Self.logger.info(
+                """
+                the model proxy this drain was reading (pid \(target.state.pid, privacy: .public) \
+                on port \(target.state.port, privacy: .public)) is no longer the current one; \
+                leaving the decision to the next tick
+                """)
+            return nil
+        }
+        guard status.pid == target.state.pid else {
+            Self.logger.error(
+                """
+                port \(target.state.port, privacy: .public) answered a drain check for pid \
+                \(status.pid, privacy: .public) and not \(target.state.pid, privacy: .public); \
+                not retiring on a stranger's route count
+                """)
+            return nil
+        }
+        if let refusal = identityRefusal(for: status, on: target.state.port) {
+            Self.logger.error(
+                """
+                not acting on a drain check from the process answering /tbd/status on port \
+                \(target.state.port, privacy: .public): \(refusal.reason, privacy: .public)
+                """)
+            return nil
+        }
+        return status.routeCount
     }
 
     /// The drain is over: ask the proxy to go away, then stop the watch.
@@ -590,7 +652,25 @@ actor ModelProxySupervisor {
     /// `retire()` returns once the listener is closed and the lock released;
     /// the proxy is still draining whatever is in flight, for up to ten
     /// minutes, and nothing here waits for it.
-    private func finishDraining() async {
+    private func finishDraining(target: Live) async {
+        // **The count is read again here, immediately before the retire, and
+        // from the same identity-checked poll every other drain decision uses.**
+        // The count the caller holds was true when it was read and the reads on
+        // both paths are a suspension away from this line: a session spawned in
+        // that window holds this proxy's port in its environment for the rest of
+        // its life, and retiring the listener would break it mid-task rather
+        // than un-route it — which is the whole thing draining mode exists to
+        // prevent. Nothing between this call returning and the request below
+        // suspends, so what it confirms is still true when the retire is sent.
+        guard let remaining = await routeCountFromOurProxy(target) else { return }
+        guard remaining == 0 else {
+            Self.logger.info(
+                """
+                the model proxy on port \(target.state.port, privacy: .public) took \
+                \(remaining, privacy: .public) route(s) while its drain was finishing; keeping it
+                """)
+            return
+        }
         // **The retire goes first, and the watch is stopped only after it
         // answers.** Two reasons, and both are load-bearing.
         //
@@ -607,11 +687,6 @@ actor ModelProxySupervisor {
         // anything, because `start()` returns early on a supervisor that is
         // already started. So nothing can put a *different* proxy on
         // `target`'s port while this call is in flight.
-        guard let target = live else {
-            draining = false
-            await stop()
-            return
-        }
         Self.logger.info(
             """
             the model proxy for \(self.home.path, privacy: .public) has no routes left; retiring \
@@ -695,6 +770,74 @@ actor ModelProxySupervisor {
         return stored
     }
 
+    /// Why a `/tbd/status` answer is **not** this home's proxy, or nil when it
+    /// is (spec, "Adoption identity").
+    ///
+    /// One judgment in one place, because two callers make it and they must
+    /// make the same one. Adoption asks it before taking a responder over. The
+    /// drain asks it before believing a `routeCount` it is about to send a
+    /// `POST /tbd/retire` on — the only other place a status document decides
+    /// something irreversible. A check added to one and forgotten in the other
+    /// is a stranger that won the port deciding the fate of a proxy live
+    /// sessions are routed through.
+    ///
+    /// The pid the *document* claims is not checked here: adoption has no
+    /// prior pid to compare it against, and the drain has one and compares it
+    /// itself. Everything else — the home, the process table, the pid file and
+    /// the port in it — is asked of every caller.
+    private enum IdentityRefusal {
+        case noHome(pid: pid_t)
+        case anotherHome(pid: pid_t, home: String)
+        case processTable(pid: pid_t)
+        case noPidFile(pid: pid_t)
+        case pidFileNamesAnotherProcess(published: pid_t, claimed: pid_t)
+        case pidFileNamesAnotherPort(published: Int, probed: Int)
+
+        /// The clause a log line puts after naming the port that answered.
+        var reason: String {
+            switch self {
+            case .noHome(let pid):
+                return "pid \(pid) reports no home, so it is an image older than the field and "
+                    + "cannot be placed"
+            case .anotherHome(let pid, let home):
+                return "pid \(pid) serves \(home), which is another TBD home"
+            case .processTable(let pid):
+                return "it claims pid \(pid), which the process table does not confirm"
+            case .noPidFile(let pid):
+                return "it claims pid \(pid), but this home's pid file is missing or unreadable"
+            case .pidFileNamesAnotherProcess(let published, let claimed):
+                return "this home's pid file names pid \(published) and it claims pid \(claimed)"
+            case .pidFileNamesAnotherPort(let published, let probed):
+                return "this home's pid file names port \(published), and it was reached on port "
+                    + "\(probed)"
+            }
+        }
+    }
+
+    /// The checks above, in the order that reads best in a log line: what the
+    /// document says about itself first, then the two facts on this machine
+    /// that it cannot write.
+    private func identityRefusal(for status: ModelProxyStatus, on port: Int) -> IdentityRefusal? {
+        guard status.home.isEmpty == false else { return .noHome(pid: status.pid) }
+        let answeredHome = ModelProxyStatus.canonicalHome(status.home)
+        guard answeredHome == canonicalHome else {
+            return .anotherHome(pid: status.pid, home: answeredHome)
+        }
+        guard processIdentity.matches(pid: status.pid, startTime: status.processStartTime) else {
+            return .processTable(pid: status.pid)
+        }
+        guard let published = pidFile.read(path: pidFilePath) else {
+            return .noPidFile(pid: status.pid)
+        }
+        guard published.pid == status.pid else {
+            return .pidFileNamesAnotherProcess(published: published.pid, claimed: status.pid)
+        }
+        guard published.port == port else {
+            return .pidFileNamesAnotherPort(published: published.port, probed: port)
+        }
+        return nil
+    }
+
     /// Probes `/tbd/status` on `port` and adopts what answers, but only when
     /// four independent facts agree that the responder is this home's proxy
     /// (spec, "Adoption identity").
@@ -743,58 +886,11 @@ actor ModelProxySupervisor {
                 """)
             return false
         }
-        guard status.home.isEmpty == false else {
+        if let refusal = identityRefusal(for: status, on: port) {
             Self.logger.error(
                 """
-                the proxy answering on port \(port, privacy: .public) (pid \
-                \(status.pid, privacy: .public)) reports no home, so it is an image older than \
-                the field and cannot be placed; not adopting it
-                """)
-            return false
-        }
-        let answeredHome = ModelProxyStatus.canonicalHome(status.home)
-        guard answeredHome == canonicalHome else {
-            Self.logger.error(
-                """
-                the proxy answering on port \(port, privacy: .public) (pid \
-                \(status.pid, privacy: .public)) serves \(answeredHome, privacy: .public), not \
-                \(self.canonicalHome, privacy: .public); not adopting another home's proxy
-                """)
-            return false
-        }
-        guard processIdentity.matches(pid: status.pid, startTime: status.processStartTime) else {
-            Self.logger.error(
-                """
-                a process answering /tbd/status on port \(port, privacy: .public) claims pid \
-                \(status.pid, privacy: .public), which the process table does not confirm; \
-                not adopting it
-                """)
-            return false
-        }
-        guard let published = pidFile.read(path: pidFilePath) else {
-            Self.logger.error(
-                """
-                a process answering /tbd/status on port \(port, privacy: .public) claims pid \
-                \(status.pid, privacy: .public), but this home's pid file is missing or \
-                unreadable; not adopting it
-                """)
-            return false
-        }
-        guard published.pid == status.pid else {
-            Self.logger.error(
-                """
-                this home's pid file names pid \(published.pid, privacy: .public) and the \
-                process answering on port \(port, privacy: .public) claims pid \
-                \(status.pid, privacy: .public); not adopting it
-                """)
-            return false
-        }
-        guard published.port == port else {
-            Self.logger.error(
-                """
-                this home's pid file names port \(published.port, privacy: .public) for pid \
-                \(published.pid, privacy: .public), and the proxy was probed on port \
-                \(port, privacy: .public); not adopting it
+                not adopting the process answering /tbd/status on port \(port, privacy: .public): \
+                \(refusal.reason, privacy: .public)
                 """)
             return false
         }

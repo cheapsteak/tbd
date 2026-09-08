@@ -26,6 +26,38 @@ public struct ModelProxyFileCandidate: Sendable, Equatable {
         self.terminalID = terminalID
         self.modifiedAt = modifiedAt
     }
+
+    /// `path` in the form the **system log** may carry.
+    ///
+    /// A route file's name *is* its route token, and a route token is a bearer
+    /// credential for that session's upstream: anything holding one can drive
+    /// this proxy at the route's endpoint. The log is not the same audience as
+    /// the filesystem — `routes/` is 0700 under a directory this user owns,
+    /// while `log show` is readable by anything running as this user and a
+    /// sysdiagnose routinely leaves the machine — so the token's tail is
+    /// elided here, leaving the directory, enough of a prefix to correlate two
+    /// lines about one file, and the extension.
+    ///
+    /// A stream file's name is a terminal UUID, which names a row this daemon
+    /// logs by the thousand, so it passes through whole.
+    ///
+    /// Decided by extension rather than by directory because a candidate is a
+    /// public value type anyone can construct, and the safe reading of an
+    /// unanchored `.json` is "this might be a token".
+    public var loggablePath: String {
+        let url = URL(fileURLWithPath: path)
+        guard url.pathExtension == ModelProxyFileCollector.routeExtension else { return path }
+        let token = url.deletingPathExtension().lastPathComponent
+        let shown = String(token.prefix(Self.loggableTokenPrefix))
+        guard shown.count < token.count else { return path }
+        return url.deletingLastPathComponent()
+            .appendingPathComponent("\(shown)….\(url.pathExtension)").path
+    }
+
+    /// How much of a route token a log line may name. Eight of the token's 32
+    /// hex characters is 32 bits — enough that two lines about one file read as
+    /// one file, and 96 bits short of anything a reader could use.
+    static let loggableTokenPrefix = 8
 }
 
 /// Outcome of gating one candidate. `reason` is one of `"unknown-age"`,
@@ -211,7 +243,7 @@ public struct ModelProxyFileCollector: Sendable {
     public func reap(_ candidate: ModelProxyFileCandidate) -> Bool {
         guard isAnchored(candidate) else {
             modelProxyLogger.warning("""
-            gc: refusing to unlink \(candidate.path, privacy: .public) — not a route or stream file \
+            gc: refusing to unlink \(candidate.loggablePath, privacy: .public) — not a route or stream file \
             under \(self.routesDir.path, privacy: .public) or \(self.streamsDir.path, privacy: .public)
             """)
             return false
@@ -220,13 +252,13 @@ public struct ModelProxyFileCollector: Sendable {
         guard unlink(candidate.path) == 0 else {
             let code = errno
             modelProxyLogger.warning("""
-            gc: could not unlink \(candidate.path, privacy: .public): \
+            gc: could not unlink \(candidate.loggablePath, privacy: .public): \
             \(String(cString: strerror(code)), privacy: .public) (errno \(code, privacy: .public))
             """)
             return false
         }
         modelProxyLogger.info(
-            "gc: unlinked model proxy file \(candidate.path, privacy: .public)")
+            "gc: unlinked model proxy file \(candidate.loggablePath, privacy: .public)")
         return true
     }
 

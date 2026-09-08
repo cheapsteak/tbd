@@ -1657,10 +1657,18 @@ extension WorktreeLifecycle {
                         // The route's base URL rides `sensitiveEnv` — the job's
                         // process environment — and never `env`, which
                         // `holderLaunch` inlines as `export K='v';` in front of
-                        // the command. The token is a bearer credential for
-                        // this session's upstream; argv is world-readable.
-                        // `primarySensitiveEnv` is the routed environment
-                        // itself: the attachment is what it was composed from.
+                        // the command. `primarySensitiveEnv` is the routed
+                        // environment itself: the attachment is what it was
+                        // composed from.
+                        //
+                        // That is a statement about `holderLaunch`'s two
+                        // dictionaries and nothing more. The token IS in this
+                        // job's argv, because `primaryCommand` carries an
+                        // inline `export ANTHROPIC_BASE_URL=…` of its own, from
+                        // `attachment.builderBaseURL` — the export has to run
+                        // after the shell's rc files or a `.zshrc` takes the
+                        // session off its route. See that method for why `ps`
+                        // visibility is not a widening of the trust boundary.
                         sensitiveEnv: primarySensitiveEnv,
                         workingDirectory: worktreePath,
                         cols: resolvedCols,

@@ -910,9 +910,15 @@ public actor OrphanGC {
                 candidate, graceSeconds: config.gcGraceSeconds, liveTerminalIDs: live
             ) {
             case .keep(let reason):
+                // `planned` is a return value, printed for the operator who
+                // asked for the sweep, and it names the file in full. The log
+                // line is a different audience — see `ModelProxyFileCandidate
+                // .loggablePath` — and this one is the sharpest case for it: a
+                // `live-terminal` or `grace` keep names, by construction, the
+                // route file of a session that is running right now.
                 planned.append("KEEP \(reason) \(candidate.path)")
                 logger.debug("""
-                gc: keep \(reason, privacy: .public) \(candidate.path, privacy: .public)
+                gc: keep \(reason, privacy: .public) \(candidate.loggablePath, privacy: .public)
                 """)
             case .reap:
                 planned.append("REAP model-proxy-file \(candidate.path)")

@@ -313,6 +313,42 @@ struct ModelProxyFileCollectorTests: ~Copyable {
         }
     }
 
+    // MARK: - What may reach the system log
+
+    /// **A route file's name IS its route token**, and a token is a bearer
+    /// credential for that session's upstream (spec, "Security"): anything
+    /// holding one can drive the proxy at the route's endpoint. The system log
+    /// is a different audience from `routes/` — 0700 under a directory this
+    /// user owns, against an archive readable by anything running as this user
+    /// and routinely carried off the machine inside a sysdiagnose — so the log
+    /// form of a route path elides the token's tail.
+    ///
+    /// A stream file's name is a terminal UUID, which this daemon logs by the
+    /// thousand, so it passes through whole. And `planned` is a return value
+    /// the operator asked for, not a log line: it still names both files
+    /// exactly.
+    @Test func aRoutePathIsRedactedForTheLogAndWholeForTheOperator() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let route = makeRoute(terminalID: UUID())
+        let stream = makeStream(terminalID: UUID())
+        let collector = makeCollector()
+        let routeCandidate = try #require(collector.candidates().first { $0.path == route })
+        let streamCandidate = try #require(collector.candidates().first { $0.path == stream })
+
+        #expect(
+            routeCandidate.loggablePath
+                == routesDir.appendingPathComponent("01234567….json").path)
+        #expect(
+            !routeCandidate.loggablePath.contains(Self.token),
+            "no log line may carry a whole route token")
+        #expect(streamCandidate.loggablePath == stream, "a terminal UUID is not a credential")
+
+        let result = await makeGC(db: db).sweep(dryRun: true)
+        #expect(
+            result.planned.contains("REAP model-proxy-file \(route)"),
+            "the sweep's own answer to the operator still names the file in full")
+    }
+
     /// The master switch off leaves the same fixture completely alone, and the
     /// sweep does not even plan it.
     @Test func gcDisabledPlansAndReapsNothing() async throws {
