@@ -415,7 +415,22 @@ struct ProxyForwardingTests {
             prefix: "pxcut",
             script: { _, _ in
                 FakeUpstream.Script(
-                    events: [(delayMs: 200, bytes: event)], closeWithoutStop: true)
+                    status: 200,
+                    headers: [
+                        ("content-type", "text/event-stream; charset=utf-8"),
+                        // Declares more than it will send, and that shape is
+                        // deliberate. Measured on CI: an upstream *chunked*
+                        // body that stops without its terminating chunk
+                        // reaches `URLSession` as a clean completion — the
+                        // upstream leg is told nothing failed, so the relay
+                        // cannot tell that shape from a finished response. A
+                        // body short of a declared length is the truncation
+                        // `didCompleteWithError` does report, and so it is the
+                        // one that can exercise the relay's cut path at all.
+                        ("content-length", "\(event.count + 64)"),
+                    ],
+                    events: [(delayMs: 200, bytes: event)],
+                    closeWithoutStop: true)
             }
         ) { harness in
             // Read on a raw socket rather than through `URLSession`: the
