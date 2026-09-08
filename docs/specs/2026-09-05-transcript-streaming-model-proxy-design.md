@@ -461,12 +461,27 @@ owns the proxy's life on an injected clock:
 - **Startup.** Read the persisted port. Probe `/tbd/status`. Adopt on the
   identity check above. Otherwise take the lock and spawn, then persist what
   the proxy reports.
-- **Watch.** Poll `status` on a bounded interval. On death, respawn with
-  bounded backoff. On a version different from the daemon's own binary, ask
-  the old proxy to retire and spawn the new one; different rather than older,
-  because `tbd update` keeps the previous app bundle as a rollback route.
+- **Watch.** Poll `status` on a bounded interval — 15 seconds, chosen against
+  the cost of a loopback status call nobody but this daemon ever sees, wide
+  enough not to be noisy and narrow enough that a dead or wedged proxy is
+  noticed and respawned well inside the timeouts a session's own retries
+  tolerate. On death, respawn with bounded backoff — 1s, then 5s, then 30s,
+  the first retry nearly immediate because every session spawned against the
+  dead port is itself retrying it, lengthening so a proxy that keeps dying on
+  start is not respawned in a tight loop, and bounded overall (one exhausted
+  burst plus the watch interval before the next) well inside Claude's
+  183-second retry budget for a refused base URL. Giving up after the last
+  backoff step is not permanent — the next watch tick sees no proxy and
+  starts a fresh burst. On a version different from the daemon's own binary,
+  ask the old proxy to retire and spawn the new one; different rather than
+  older, because `tbd update` keeps the previous app bundle as a rollback
+  route.
 - **Routes.** Write and register a route before a spawn; retire it when the
-  terminal exits, hibernates by exiting, is archived, or is removed.
+  terminal exits, hibernates by exiting, is archived, or is removed. A route
+  registration in flight — the file is written but the running proxy has not
+  yet been told about it — counts against a drain the same way a route it has
+  already been told about does, so a flag flip landing in that window cannot
+  retire the proxy out from under a spawn that has just been handed its port.
 - **Capabilities.** Answer `daemon.capabilities` with supported, enabled, port,
   and version, so Settings can explain a disabled toggle.
 

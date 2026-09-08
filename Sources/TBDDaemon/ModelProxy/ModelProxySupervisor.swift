@@ -159,7 +159,27 @@ actor ModelProxySupervisor {
     /// `<home>/proxy/proxy.pid` — the file the proxy writes after its bind.
     private let pidFilePath: String
     private let clientFactory: @Sendable (Int) -> ModelProxyClient
+    /// How often the watch polls `/tbd/status` on the live proxy.
+    ///
+    /// Fifteen seconds bounds how long a dead or wedged proxy goes unnoticed
+    /// against the cost of a loopback status call nobody but this daemon ever
+    /// sees: fast enough that a crash is respawned well inside the timeouts a
+    /// session's own retries tolerate, and slow enough that a proxy serving
+    /// every session on this machine is not woken by its supervisor more
+    /// often than an operator would want in `log stream`.
     private let watchInterval: Duration
+    /// How long the watch waits before each respawn attempt after the proxy
+    /// exits, oldest attempt first.
+    ///
+    /// One second, then five, then thirty: the first retry is nearly
+    /// immediate because every session spawned against the dead port is
+    /// itself retrying it, and Claude's own retry budget for a refused base
+    /// URL is 183 seconds (spec, "Failure semantics") — comfortably wider
+    /// than one exhausted burst of this ladder (1 + 5 + 30 = 36s) plus the
+    /// `watchInterval` before the next one starts. The ladder then lengthens
+    /// so a proxy that keeps dying on start is not respawned in a tight loop.
+    /// Giving up after the last step is not permanent: `respawn` says so, and
+    /// the next watch tick sees no proxy and starts a fresh burst.
     private let respawnBackoff: [Duration]
     private let clock: any Clock<Duration>
     private let routes: ModelProxyRouteStore
@@ -187,6 +207,20 @@ actor ModelProxySupervisor {
     /// as the proxy still serves a route, and retires it when the last one
     /// goes. Cleared by the flag coming back on.
     private var draining = false
+    /// Route registrations that have written their file but have not yet been
+    /// told to the live proxy — or, told to it and not yet answered.
+    ///
+    /// `makeRoute` suspends on a network call (`addRoute`) between writing the
+    /// route file and the proxy knowing about it. Because this type is an
+    /// actor, a `beginDraining()` triggered by a concurrent flag flip can run
+    /// in that window, and the `/tbd/status` poll a drain check makes does not
+    /// yet reflect a registration still in flight — both would read
+    /// `routeCount == 0` and retire the proxy out from under a session that
+    /// was just handed its port. Every drain check ANDs this against the
+    /// polled count, so a registration in flight is treated the same as a
+    /// route the proxy has already confirmed: the drain waits and the next
+    /// tick tries again.
+    private var routeRegistrationsInFlight = 0
     /// Guards `replaceIfVersionDiffers` against re-entering itself through the
     /// spawn it performs.
     private var replacing = false
@@ -565,11 +599,12 @@ actor ModelProxySupervisor {
             guard let polled = await routeCountFromOurProxy(target) else { return }
             count = polled
         }
-        guard count == 0 else {
+        guard count == 0, routeRegistrationsInFlight == 0 else {
             Self.logger.debug(
                 """
                 the model proxy on port \(target.state.port, privacy: .public) still serves \
-                \(count, privacy: .public) route(s); draining
+                \(count, privacy: .public) route(s) (\
+                \(self.routeRegistrationsInFlight, privacy: .public) registering); draining
                 """)
             return
         }
@@ -663,11 +698,17 @@ actor ModelProxySupervisor {
         // prevent. Nothing between this call returning and the request below
         // suspends, so what it confirms is still true when the retire is sent.
         guard let remaining = await routeCountFromOurProxy(target) else { return }
-        guard remaining == 0 else {
+        // Re-read after the suspension above, same as `remaining` itself: a
+        // `makeRoute` that started before this poll and is still suspended on
+        // `addRoute` counts against the retire below exactly as a confirmed
+        // route would.
+        guard remaining == 0, routeRegistrationsInFlight == 0 else {
             Self.logger.info(
                 """
                 the model proxy on port \(target.state.port, privacy: .public) took \
-                \(remaining, privacy: .public) route(s) while its drain was finishing; keeping it
+                \(remaining, privacy: .public) route(s) (\
+                \(self.routeRegistrationsInFlight, privacy: .public) registering) while its drain \
+                was finishing; keeping it
                 """)
             return
         }
@@ -1302,6 +1343,13 @@ actor ModelProxySupervisor {
             streamingEnabled: streamingEnabled)
         try routes.write(route)
 
+        // Counted from here — the file exists but the running proxy has not
+        // been told about it yet — through the `addRoute` call below,
+        // regardless of how it finishes. A drain that reads `/tbd/status`
+        // while this suspends must not see this route as absent; see
+        // `routeRegistrationsInFlight`'s doc comment.
+        routeRegistrationsInFlight += 1
+        defer { routeRegistrationsInFlight -= 1 }
         do {
             try await client(port: live.state.port).addRoute(token: route.token)
         } catch {

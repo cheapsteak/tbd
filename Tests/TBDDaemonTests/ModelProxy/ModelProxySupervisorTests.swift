@@ -681,6 +681,77 @@ struct ModelProxySupervisorTests {
             "and it must not drop or re-adopt anything either")
     }
 
+    /// A fifth window the count-based drain must survive, alongside the four
+    /// above: `makeRoute` writes the route file, then suspends on `addRoute`
+    /// to tell the running proxy about it. Because the supervisor is an
+    /// actor, a `beginDraining()` triggered by a concurrent flag flip can run
+    /// in exactly that suspension, and the `/tbd/status` poll it makes does
+    /// not yet reflect a registration the proxy has not been told about —
+    /// both read `routeCount == 0`. Retiring here would not un-route the
+    /// session `makeRoute` was just called for; it would break it, mid-task,
+    /// against a port that has just gone away.
+    ///
+    /// `holdNextRouteRegistration` is what opens the window without wedging
+    /// the fake server: it answers nothing for the registration (the
+    /// `aSilentProxyTimesOut` mechanism), which frees the accept loop rather
+    /// than blocking it, so the drain's own `/tbd/status` poll lands and
+    /// answers for real — a route count of zero the drain must not act on
+    /// alone.
+    ///
+    /// Discriminates against the pre-fix code: without
+    /// `routeRegistrationsInFlight`, the drain's poll answering zero is the
+    /// whole of what the pre-fix `finishDrainingIfNoRoutesRemain` needed to
+    /// retire. `beginDraining` and the watch's `tick` both funnel through
+    /// that one function and its one guard, so driving it through the
+    /// immediate path exercises the same check `tick`'s "known" count takes
+    /// and the re-read `finishDraining` makes right before the retire. What
+    /// happens once a registration is confirmed, and once the route it named
+    /// is later removed, is exactly `aRouteMintedDuringTheDrainPollKeepsTheProxy`
+    /// and `drainingRetiresAProxyWithNoRoutes` — not re-proven here.
+    @Test("a drain that begins while a route registration is in flight keeps the proxy")
+    func aDrainDuringAnInFlightRegistrationKeepsTheProxy() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6250, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.admit(pid: 6250, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        #expect(await supervisor.current?.pid == 6250)
+
+        proxy.holdNextRouteRegistration()
+        let makeRouteTask = Task {
+            try await supervisor.makeRoute(
+                terminalID: UUID(), upstream: "https://api.anthropic.com", streamingEnabled: false)
+        }
+
+        // Confirms `addRoute` has been sent — and so, since `makeRoute`
+        // increments the in-flight count synchronously before that call,
+        // that the count is already 1 — without needing to reach into the
+        // actor.
+        try await waitFor(
+            "the route registration to reach the proxy",
+            observed: { "requests \(proxy.requests().map(\.path))" }
+        ) {
+            proxy.requests().contains { $0.method == "POST" && $0.path == "/tbd/routes" }
+        }
+
+        try await fixture.db.config.setModelProxyEnabled(false)
+        await supervisor.beginDraining()
+        #expect(
+            proxy.requests().allSatisfy { $0.path != "/tbd/retire" },
+            "a registration still in flight must not be read as a route count of zero")
+        #expect(await supervisor.current?.pid == 6250)
+
+        await supervisor.stop()
+        makeRouteTask.cancel()
+        _ = try? await makeRouteTask.value
+    }
+
     /// The boot half of the drain. A daemon that restarts after the flag went
     /// off — or that was never running when it went off — still has to keep the
     /// port answering for sessions spawned while it was on, because their base
@@ -1731,6 +1802,7 @@ private final class FakeProxyProcess: @unchecked Sendable {
     private let pidBox: PidBox
     private let routeCountBox: IntBox
     private let statusHook: StatusHookBox
+    private let holdRouteRegistration: IntBox
     private let paths: ProxyHomePaths
     let processStartTime = FakeProxyProcess.startedAt
 
@@ -1754,6 +1826,17 @@ private final class FakeProxyProcess: @unchecked Sendable {
     /// hand-off rather than a detached `Task`, because a race arranged by
     /// scheduling luck is not a test.
     func onNextStatus(_ body: @escaping @Sendable () -> Void) { statusHook.arm(body) }
+
+    /// Holds the next `POST /tbd/routes` open and unanswered, **without**
+    /// blocking the accept loop — the handler returns `nil` for it, which
+    /// `LoopbackHTTPTestServer` treats as "keep this connection, answer
+    /// nothing", the same mechanism `aSilentProxyTimesOut` uses for a wedged
+    /// proxy. That is what makes it useful here and not merely another hold:
+    /// the server is free to accept and answer a concurrent `/tbd/status`
+    /// poll while this connection sits open, which is exactly the window a
+    /// `makeRoute` suspended on `addRoute` leaves for a concurrent drain
+    /// check to run in. One-shot, like `onNextStatus`.
+    func holdNextRouteRegistration() { holdRouteRegistration.value = 1 }
 
     /// Makes the listener answer for another process from now on — one port
     /// changing hands, which is what another daemon's replacement looks like
@@ -1790,9 +1873,11 @@ private final class FakeProxyProcess: @unchecked Sendable {
         let routeCountBox = IntBox()
         routeCountBox.value = routeCount
         let statusHook = StatusHookBox()
+        let holdRouteRegistration = IntBox()
         self.pidBox = pidBox
         self.routeCountBox = routeCountBox
         self.statusHook = statusHook
+        self.holdRouteRegistration = holdRouteRegistration
         self.paths = ProxyHomePaths(home: home)
         // Canonical, exactly as the real proxy reports it: the daemon compares
         // canonical forms, and a fake that echoed a raw path would make the
@@ -1822,6 +1907,10 @@ private final class FakeProxyProcess: @unchecked Sendable {
             case ("POST", "/tbd/retire"):
                 return LoopbackHTTPTestServer.Reply(status: retireStatus, body: "{}")
             case ("POST", "/tbd/routes"):
+                if holdRouteRegistration.value == 1 {
+                    holdRouteRegistration.value = 0
+                    return nil
+                }
                 return LoopbackHTTPTestServer.Reply(status: routeStatus, body: "{}")
             default:
                 return LoopbackHTTPTestServer.Reply(status: 404, body: "{}")
