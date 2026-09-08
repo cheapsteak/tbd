@@ -51,6 +51,14 @@ enum ProvisionalRowComposer {
         itemID.hasPrefix(idPrefix)
     }
 
+    /// `items` with any provisional row removed.
+    ///
+    /// The inverse of ``compose``, for the one reader that shares the store
+    /// with the live pane but must never show the row: Session History.
+    static func settledOnly(_ items: [TranscriptItem]) -> [TranscriptItem] {
+        items.filter { !isProvisional(itemID: $0.id) }
+    }
+
     /// Returns `items` with the provisional row appended, or `items` unchanged
     /// when the row is retired.
     ///

@@ -196,6 +196,22 @@ struct ProvisionalRowComposerTests {
                 "the synthetic question keeps its place directly above the provisional row")
     }
 
+    // MARK: - Session History
+
+    /// Session History reads the same `AppState.sessionTranscripts` store the
+    /// live pane publishes into, and the session it is showing can be the one a
+    /// live pane is streaming. `settledOnly` is what keeps the unconfirmed row
+    /// out of a record of what the session was.
+    @Test("settledOnly drops the provisional row and keeps everything else in order")
+    func settledOnlyDropsTheProvisionalRow() {
+        let withRow = Self.compose(provisional: Self.streaming("Hello"))
+        #expect(withRow.count == Self.settled.count + 1, "fixture check: a row is present")
+
+        #expect(ProvisionalRowComposer.settledOnly(withRow) == Self.settled)
+        #expect(ProvisionalRowComposer.settledOnly(Self.settled) == Self.settled,
+                "a transcript with no provisional row passes through unchanged")
+    }
+
     // MARK: - The declared constants
 
     @Test("the retire window is 60 seconds and the prefix is stream:")
