@@ -302,8 +302,10 @@ actor StreamTee: StreamTeeing {
         }
 
         let truncating = inFlightCount(terminalID: state.terminalID) == 0
-        guard state.descriptor >= 0 || openFile(truncating: truncating, state: state) else {
-            return
+        // Two statements rather than `||`: the operator's autoclosure captures
+        // `state`, which Swift 6.2 reports as a `sending` data race.
+        if state.descriptor < 0 {
+            guard openFile(truncating: truncating, state: state) else { return }
         }
         state.openMessage = message
         inFlight[state.terminalID, default: 0] += 1
