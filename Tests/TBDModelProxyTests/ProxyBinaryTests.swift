@@ -600,9 +600,9 @@ extension ModelProxySuites {
         /// path took to run.
         @Test("a second signal during the drain exits without waiting for it")
         func aSecondSignalEndsTheDrain() async throws {
-            // Twenty events half a second apart. Ten seconds of stream is far
-            // outside the budget asserted below, so an exit inside it is an
-            // exit that did not wait for the drain.
+            // Twenty events half a second apart: ten seconds of stream. No
+            // wall-clock bound is asserted; a process that exits having
+            // delivered fewer than twenty events did not wait for the drain.
             let ticks = (1...20).map { index in
                 (delayMs: 500, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
