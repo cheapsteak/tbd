@@ -1158,6 +1158,12 @@ extension RPCRouter {
     /// so the lifecycle's own paths (archive, forget) share one implementation
     /// rather than three near-copies.
     func disposeHolder(for terminal: Terminal) async -> String? {
+        // Before the registry check, and unconditionally: the row is about to
+        // be deleted, so this is the last moment anything can name its route,
+        // and a daemon with no registry is exactly the one whose routes nothing
+        // else would ever find.
+        await ModelProxyRouteAttachment.retire(
+            terminalID: terminal.id, supervisor: modelProxySupervisor)
         guard let holderRegistry else {
             return "terminal \(terminal.id) runs on the holder transport but this daemon has "
                 + "no holder registry, so its holder and job were left running"

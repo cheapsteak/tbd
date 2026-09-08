@@ -216,6 +216,13 @@ public actor HibernationCoordinator {
     /// a screen.
     var holderRegistry: HolderRegistry?
 
+    /// The daemon's `ModelProxySupervisor`, wired post-construction by
+    /// `Daemon.swift` beside `holderRegistry`. A wake is a spawn, so it takes
+    /// the same route branch the create path does; a park is the end of a
+    /// process, so it retires the route that process was launched on. `nil`
+    /// leaves both a no-op.
+    var modelProxySupervisor: (any ModelProxyRouting)?
+
     /// Answers a holder-backed session's screen, for the park's pending-input
     /// rail to judge. A **test seam only** — production leaves it nil and
     /// `holderScreenReading` falls through to the registry's own reader, which
@@ -318,6 +325,14 @@ public actor HibernationCoordinator {
     /// must share the one actor that holds the daemon's readers.
     func setHolderRegistry(_ registry: HolderRegistry?) {
         holderRegistry = registry
+    }
+
+    /// Wire the model proxy supervisor. Set once by `Daemon.swift` after
+    /// construction, beside the registry and from the same value the lifecycle
+    /// and the RPC router hold — one supervisor per daemon, because two would
+    /// each mint routes the other's proxy has never heard of.
+    func setModelProxySupervisor(_ supervisor: (any ModelProxyRouting)?) {
+        modelProxySupervisor = supervisor
     }
 
     /// Wire the park rail's screen seam. Tests only — see `holderScreenOracle`.
@@ -1176,6 +1191,37 @@ public actor HibernationCoordinator {
         // WHAT to resume and that is transport-independent. Below is the tmux
         // mechanic.
         if terminal.transport == .holder {
+            // A wake is a spawn, so it takes the same route branch the create
+            // path does.
+            //
+            // It deliberately does NOT retire whatever route the row still
+            // holds first. A row reaches a parked state through `park` or
+            // through reconcile, and both retire on the way in; what is left is
+            // a crash between a spawn and its park, and dropping a route by
+            // terminal id here would sometimes drop the LIVE one instead —
+            // `adoptLiveHolderInsteadOfRespawning` below can find a running
+            // session whose route is the row's. Residue from a crash is the
+            // `OrphanGC` leg's, which is the standing guarantee for exactly
+            // this shape of leftover.
+            let attachment: ModelProxyRouteAttachment.Outcome
+            if let config, let registry = holderRegistry {
+                attachment = await ModelProxyRouteAttachment.attach(
+                    terminalID: terminal.id,
+                    config: config,
+                    profileKind: resolvedProfile?.kind,
+                    profileBaseURL: resolvedProfile?.baseURL,
+                    envOverrideBaseURL: mergedEnvOverrides["ANTHROPIC_BASE_URL"],
+                    overlaySetsBaseURL: ClaudeHookOverlay.overlaySetsEnv(
+                        "ANTHROPIC_BASE_URL", overlayPath: overlayPath),
+                    sensitiveEnv: sensitiveEnv,
+                    baseEnvironment: registry.environment,
+                    supervisor: modelProxySupervisor)
+            } else {
+                // No config read and no registry are both states in which this
+                // wake is about to fail or run unproxied anyway; neither is a
+                // reason to route a session whose flags could not be read.
+                attachment = .unproxied(sensitiveEnv)
+            }
             return await wakeHolderSection(
                 terminal: terminal,
                 worktree: worktree,
@@ -1183,7 +1229,7 @@ public actor HibernationCoordinator {
                 expectedReplacementState: expectedReplacementState,
                 spawnCommand: spawn.command,
                 env: env,
-                sensitiveEnv: sensitiveEnv,
+                attachment: attachment,
                 cols: cols,
                 rows: rows)
         }

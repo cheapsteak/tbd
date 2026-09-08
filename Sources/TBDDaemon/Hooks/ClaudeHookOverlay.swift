@@ -641,4 +641,30 @@ public enum ClaudeHookOverlay {
     public static func overlayExists() -> Bool {
         FileManager.default.fileExists(atPath: overlayPath)
     }
+
+    /// Whether the settings file this spawn will run with sets `key` in its
+    /// top-level `env` object.
+    ///
+    /// Asked of the **resolved** overlay — the exact path handed to
+    /// `--settings`, fragments already deep-merged — rather than of the repo
+    /// fragment or the per-spawn fragment separately, because a key may come
+    /// from either and what decides the session is the merged file.
+    ///
+    /// It exists for one caller: the model proxy has to know whether the user's
+    /// own settings will override the `ANTHROPIC_BASE_URL` it is about to put
+    /// in the process environment (Claude Code applies `settings.json`'s `env`
+    /// after the environment it inherits), and route a session it cannot
+    /// actually route.
+    ///
+    /// A pure read. A nil path, a file that is not there, bytes that are not
+    /// JSON, and a document with no `env` object all answer false — the same
+    /// answer, because none of them is a setting that would win, and none of
+    /// them is a reason to refuse a spawn.
+    static func overlaySetsEnv(_ key: String, overlayPath: String?) -> Bool {
+        guard let overlayPath,
+              let data = FileManager.default.contents(atPath: overlayPath),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let env = root["env"] as? [String: Any] else { return false }
+        return env[key] != nil
+    }
 }

@@ -163,6 +163,16 @@ public struct WorktreeLifecycle: Sendable {
     /// dup of a session's pty master and steal bytes from each other.
     var holderRegistry: HolderRegistry?
 
+    /// The daemon's `ModelProxySupervisor`, wired post-construction by
+    /// `Daemon.swift` the way `holderRegistry` is. `nil` in mock mode and in
+    /// every test that does not exercise the proxy, where a holder spawn simply
+    /// gets no route and runs against the model API directly.
+    ///
+    /// Held as `any ModelProxyRouting` rather than as the actor so the spawn
+    /// decision can be pinned without a proxy process; the concrete supervisor
+    /// conforms, so `Daemon.swift` assigns it unchanged.
+    var modelProxySupervisor: (any ModelProxyRouting)?
+
     /// How the create path builds the scheduler that recaptures a resumed
     /// session's ID. `nil` in production, which builds the ordinary
     /// `SessionRecaptureScheduler(db:tmux:)`.
@@ -322,6 +332,12 @@ public struct WorktreeLifecycle: Sendable {
     /// either: a holder's screen lives in the daemon's own emulator, not in a
     /// tmux pane, so there was never a capture to preserve.
     func disposeHolder(for terminal: Terminal) async -> String? {
+        // Before the registry check, and unconditionally: the row is about to
+        // be deleted, so this is the last moment anything can name its route,
+        // and a daemon with no registry is exactly the one whose routes nothing
+        // else would ever find.
+        await ModelProxyRouteAttachment.retire(
+            terminalID: terminal.id, supervisor: modelProxySupervisor)
         guard let holderRegistry else {
             return "terminal \(terminal.id) runs on the holder transport but this daemon has "
                 + "no holder registry, so its holder and job were left running"

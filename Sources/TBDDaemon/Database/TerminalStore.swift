@@ -419,6 +419,13 @@ private func resetAgentProcessLifecycle(
     let incarnationID = UUID()
     record.claudeSessionID = sessionID
     record.transcriptPath = transcriptPath
+    // The proxy route is stamped per PROCESS, not per session: it names the
+    // stream file the job about to be replaced was launched against, and the
+    // replacement gets a route of its own or none at all. Leaving it would
+    // point the app's tail at a file the retired route's proxy has unlinked,
+    // and would make every `TerminalReplacementSnapshot` taken afterwards
+    // compare against a path no live process is writing.
+    record.transcript_stream_path = nil
     record.sessionOrderObservedAt = nil
     record.codexTranscriptBoundaryOffset = nil
     record.sessionIncarnationID = incarnationID.uuidString
@@ -695,9 +702,17 @@ public struct TerminalStore: Sendable {
         transport: TerminalTransport = .tmux,
         holderPID: Int32? = nil,
         childPID: Int32? = nil,
-        holderChildStartedAt: Date? = nil
+        holderChildStartedAt: Date? = nil,
+        // The model proxy stream file this row's session was launched
+        // against, or nil for an unproxied spawn. Taken at creation rather than
+        // written by a follow-up `UPDATE` because
+        // `TerminalReplacementSnapshot` compares this column: a row that exists
+        // for even one `await` without it can be snapshotted by a concurrent
+        // caller, and the stamp that arrives afterwards then makes every
+        // replacement that snapshot authorized reject.
+        transcriptStreamPath: String? = nil
     ) async throws -> Terminal {
-        let terminal = Terminal(
+        var terminal = Terminal(
             id: id,
             worktreeID: worktreeID,
             tmuxWindowID: tmuxWindowID,
@@ -712,6 +727,9 @@ public struct TerminalStore: Sendable {
             childPID: childPID,
             holderChildStartedAt: holderChildStartedAt
         )
+        // Assigned rather than passed: `Terminal`'s memberwise initializer is
+        // already at the Swift type-checker's expression budget here.
+        terminal.transcriptStreamPath = transcriptStreamPath
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
             if let worktree = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString),

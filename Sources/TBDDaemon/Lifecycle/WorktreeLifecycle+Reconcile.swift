@@ -811,6 +811,16 @@ extension WorktreeLifecycle {
                 // worth having if something can wake it, and every transport
                 // has a wake path: tmux respawns the window, holder spawns a
                 // fresh holder running `claude --resume`.
+                // Whichever of the two the row becomes, its session is over —
+                // that is what `disposal` above established — so the route that
+                // named its process goes now. Before the branch rather than in
+                // both arms, because the delete arm removes the only row that
+                // could ever name this terminal again. A row with no route is a
+                // directory listing that finds nothing.
+                if terminal.transport == .holder {
+                    await ModelProxyRouteAttachment.retire(
+                        terminalID: terminal.id, supervisor: modelProxySupervisor)
+                }
                 if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
                     // This park bypasses `HibernationCoordinator`, so the
                     // reconcile rail records its own independent actuation.
@@ -833,6 +843,10 @@ extension WorktreeLifecycle {
                         if terminal.transport == .holder {
                             try await db.terminals.setHolderProcess(
                                 id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
+                            // Same reason, same write: the column names a
+                            // stream file the retirement above just dropped.
+                            try await db.terminals.setTranscriptStreamPath(
+                                terminalID: terminal.id, path: nil)
                         }
                         await actuationLog.appendOutcome(
                             confirms: actuationID, result: .dispatched)

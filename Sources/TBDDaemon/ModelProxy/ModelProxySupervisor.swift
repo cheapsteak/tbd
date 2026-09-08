@@ -262,6 +262,21 @@ actor ModelProxySupervisor {
 
     var current: State? { live?.state }
 
+    /// Everything `daemon.capabilities` reports about the proxy, in one hop.
+    ///
+    /// `supported` is the conjunction rather than `canSpawn` alone: after a
+    /// `homeUnusable` or a command line this daemon composed wrong, the binary
+    /// is still there and `canSpawn` still answers true, while nothing will
+    /// ever be routed again until the daemon restarts. Settings greys the
+    /// toggle out on this fact, and it would be greyed out for the wrong reason
+    /// — or not at all — if it read only half of it.
+    func capabilitySnapshot() -> ModelProxyCapabilitySnapshot {
+        ModelProxyCapabilitySnapshot(
+            supported: canSpawn && !permanentlyDown,
+            port: live?.state.port,
+            version: live?.state.version)
+    }
+
     /// The base URL a session is spawned against, or nil when no proxy is
     /// current — in which case the session is spawned unproxied.
     func baseURL(for route: ModelProxyRoute) -> String? {

@@ -19,6 +19,20 @@ public enum WorktreeCreateCompletion: Sendable {
     case preSessionPending(phase3: Task<Void, Never>)
 }
 
+/// The facts the model proxy needs about a primary spawn, gathered where the
+/// spawn is composed and read once at the holder branch.
+///
+/// It exists so the routing decision has one nil check rather than three: a
+/// primary that is not Claude produces no context at all, and `attach` is then
+/// never asked. Passing the fields individually would make "no context" and
+/// "a Claude session on the ambient login, no profile, no overlay" the same
+/// three nils, and the first must never be routed while the second must.
+struct PrimaryProxyContext: Sendable {
+    let profileKind: CredentialKind?
+    let profileBaseURL: String?
+    let overlayPath: String?
+}
+
 /// Carries an archived conversation onto a freshly created worktree.
 ///
 /// Deliberately carries no prompt: a carryover spawn opens idle at the
@@ -1434,6 +1448,10 @@ extension WorktreeLifecycle {
         let primarySessionID: String?
         let primaryProfileID: UUID?
         let primaryLabel: String
+        // Non-nil only for a Claude primary, which is the only agent the model
+        // proxy speaks for. A shell has no upstream, and Codex does not talk to
+        // the Messages API, so neither may be handed an `ANTHROPIC_BASE_URL`.
+        var primaryProxyContext: PrimaryProxyContext?
         switch primaryTerminalKind {
         case .shell:
             primaryCommand = defaultShell
@@ -1511,6 +1529,29 @@ extension WorktreeLifecycle {
                     storedTranscriptPath: nil
                 )
             }
+            // Hoisted out of the `build` call because the model proxy must read
+            // the SAME resolved file the spawn runs with: whether it sets
+            // `env.ANTHROPIC_BASE_URL` decides whether a route can be honored at
+            // all. Resolving it a second time would rewrite the per-session
+            // overlay and could answer about a different file.
+            let primaryOverlayPath = ClaudeHookOverlay.resolveOverlayPath(
+                fallbackModels: resolvedProfile?.fallbackModels,
+                sessionKey: plannedTerminalID1.uuidString,
+                // Repo fragment is file-backed config, read fresh at
+                // spawn time — applies on every spawn path, resume included.
+                repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                // Per-spawn fragment applies to FRESH primary spawns only;
+                // an archived-session resume must not reapply it. Hooks
+                // overlay still resolves for resumes — only
+                // extraSettingsJSON goes nil.
+                extraSettingsJSON: isResume ? nil : claudeSettingsOverlay,
+                // Desk sessions only — see the parameter's doc comment.
+                watchDeskRole: watchDeskRole,
+                worktreePath: worktreePath,
+                // The same config dir this spawn runs with, so the tee
+                // delegates to the user-scope statusline THIS session reads.
+                profileConfigDir: profileConfigDir
+            )
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
                 forkSession: carryover != nil,
@@ -1533,24 +1574,7 @@ extension WorktreeLifecycle {
                 profileConfigDir: profileConfigDir,
                 cmd: nil,
                 shellFallback: defaultShell,
-                settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
-                    fallbackModels: resolvedProfile?.fallbackModels,
-                    sessionKey: plannedTerminalID1.uuidString,
-                    // Repo fragment is file-backed config, read fresh at
-                    // spawn time — applies on every spawn path, resume included.
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                    // Per-spawn fragment applies to FRESH primary spawns only;
-                    // an archived-session resume must not reapply it. Hooks
-                    // overlay still resolves for resumes — only
-                    // extraSettingsJSON goes nil.
-                    extraSettingsJSON: isResume ? nil : claudeSettingsOverlay,
-                    // Desk sessions only — see the parameter's doc comment.
-                    watchDeskRole: watchDeskRole,
-                    worktreePath: worktreePath,
-                    // The same config dir this spawn runs with, so the tee
-                    // delegates to the user-scope statusline THIS session reads.
-                    profileConfigDir: profileConfigDir
-                ),
+                settingsOverlayPath: primaryOverlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: worktree.displayName
@@ -1565,6 +1589,10 @@ extension WorktreeLifecycle {
             primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
             primaryProfileID = resolvedProfile?.profileID
             primaryLabel = TerminalLabel.claudeCode
+            primaryProxyContext = PrimaryProxyContext(
+                profileKind: resolvedProfile?.kind,
+                profileBaseURL: resolvedProfile?.baseURL,
+                overlayPath: primaryOverlayPath)
         }
         // The two transports diverge for exactly this one spawn, and converge
         // again on the row below. Everything that decided WHAT to run —
@@ -1575,17 +1603,63 @@ extension WorktreeLifecycle {
         // wrong.
         let window1: (windowID: String, paneID: String)
         let holderHandle: HolderHandle?
+        // What the model proxy did with this spawn: the stream file to stamp on
+        // the row below, and the route to undo if the row never gets written.
+        // Empty on every unproxied spawn, which is every tmux spawn and every
+        // holder spawn the attachment refused.
+        var primaryAttachment = ModelProxyRouteAttachment.Outcome.unproxied(primarySensitiveEnv)
         if useHolderTransport, let holderRegistry {
-            holderHandle = try await holderRegistry.spawn(
-                terminalID: plannedTerminalID1,
-                launch: Self.holderLaunch(
-                    shellCommand: primaryCommand,
-                    env: primaryEnv,
+            // The model proxy branch, and the only place a route is minted on
+            // the create path. The route is written and registered BEFORE the
+            // spawn, so the first request the session makes already has one to
+            // resolve; a failure anywhere in here leaves the session unproxied
+            // rather than unstarted.
+            //
+            // A non-Claude primary is never routed, and the gate is the
+            // presence of a context rather than a field inside one: a nil
+            // `profileKind` reads as "not Bedrock", which is exactly what a
+            // shell primary would present.
+            if let proxyContext = primaryProxyContext {
+                primaryAttachment = await ModelProxyRouteAttachment.attach(
+                    terminalID: plannedTerminalID1,
+                    config: config,
+                    profileKind: proxyContext.profileKind,
+                    profileBaseURL: proxyContext.profileBaseURL,
+                    envOverrideBaseURL: mergedEnvOverrides["ANTHROPIC_BASE_URL"],
+                    overlaySetsBaseURL: ClaudeHookOverlay.overlaySetsEnv(
+                        "ANTHROPIC_BASE_URL", overlayPath: proxyContext.overlayPath),
                     sensitiveEnv: primarySensitiveEnv,
-                    workingDirectory: worktreePath,
-                    cols: resolvedCols,
-                    rows: resolvedRows,
-                    environment: holderRegistry.environment))
+                    baseEnvironment: holderRegistry.environment,
+                    supervisor: modelProxySupervisor)
+            }
+            do {
+                holderHandle = try await holderRegistry.spawn(
+                    terminalID: plannedTerminalID1,
+                    launch: Self.holderLaunch(
+                        shellCommand: primaryCommand,
+                        env: primaryEnv,
+                        // The route's base URL rides `sensitiveEnv` — the job's
+                        // process environment — and never `env`, which
+                        // `holderLaunch` inlines as `export K='v';` in front of
+                        // the command. The token is a bearer credential for
+                        // this session's upstream; argv is world-readable.
+                        sensitiveEnv: primaryAttachment.sensitiveEnv,
+                        workingDirectory: worktreePath,
+                        cols: resolvedCols,
+                        rows: resolvedRows,
+                        environment: holderRegistry.environment))
+            } catch {
+                // Nothing was spawned against this route and nothing ever will
+                // be, so retire it from the failing call itself rather than
+                // leaving a file for the sweep. By the token this attachment
+                // minted, never by terminal id: this row has no other route
+                // today, and a lookup would still be the wrong instruction to
+                // leave behind.
+                await ModelProxyRouteAttachment.retire(
+                    primaryAttachment, terminalID: plannedTerminalID1,
+                    supervisor: modelProxySupervisor)
+                throw error
+            }
             // A holder session has no tmux coordinate. The columns are NOT NULL
             // from the v1 schema, so they take the empty string — and nothing
             // may read them back: a holder row is discriminated by `transport`
@@ -1631,7 +1705,13 @@ extension WorktreeLifecycle {
                 // persisted and later compared against a process start time by
                 // `ProcessIdentityCheck`, which is exactly the kind of fact a
                 // test has to be able to pin end to end.
-                holderChildStartedAt: holderHandle == nil ? nil : now()
+                holderChildStartedAt: holderHandle == nil ? nil : now(),
+                // Stamped IN the insert, not by a follow-up `UPDATE`:
+                // `TerminalReplacementSnapshot` compares this column, so a row
+                // that exists without it for even one suspension can be
+                // snapshotted by a concurrent caller, and a late stamp would
+                // make every replacement that snapshot authorized reject.
+                transcriptStreamPath: primaryAttachment.streamPath
             )
         } catch {
             // Best-effort creation-time cleanup on both transports: a resource
@@ -1642,6 +1722,9 @@ extension WorktreeLifecycle {
             if let holderHandle {
                 await holderRegistry?.abandon(
                     terminalID: plannedTerminalID1, handle: holderHandle)
+                await ModelProxyRouteAttachment.retire(
+                    primaryAttachment, terminalID: plannedTerminalID1,
+                    supervisor: modelProxySupervisor)
             } else {
                 try? await tmux.killWindow(server: tmuxServer, windowID: window1.windowID)
             }

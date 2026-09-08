@@ -584,6 +584,20 @@ extension HibernationCoordinator {
         } catch {
             logger.warning("hibernate: parked \(terminal.id, privacy: .public) but failed to clear its holder pids: \(error.localizedDescription, privacy: .public)")
         }
+        // A park is the end of a process, and the route named that process.
+        // Retire it here rather than at the wake: a row can stay parked for
+        // days, and a live route with no session behind it is a stream file the
+        // proxy keeps and the app may still be tailing. The wake mints a fresh
+        // one. Best-effort, exactly like the pid clear above — the row is
+        // parked either way, and `OrphanGC` is the standing guarantee.
+        await ModelProxyRouteAttachment.retire(
+            terminalID: terminal.id, supervisor: modelProxySupervisor)
+        do {
+            try await db.terminals.setTranscriptStreamPath(
+                terminalID: terminal.id, path: nil)
+        } catch {
+            logger.warning("hibernate: parked \(terminal.id, privacy: .public) but failed to clear its model proxy stream path: \(error.localizedDescription, privacy: .public)")
+        }
         inputActivity.forget(paneID: InputActivityTracker.key(for: currentTerminal))
 
         guard let persisted = try? await db.terminals.get(id: terminal.id),
@@ -838,6 +852,11 @@ extension HibernationCoordinator {
             do {
                 try await db.terminals.setHolderProcess(
                     id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
+                // The job that route named is gone, so the route is too.
+                await ModelProxyRouteAttachment.retire(
+                    terminalID: terminal.id, supervisor: modelProxySupervisor)
+                try await db.terminals.setTranscriptStreamPath(
+                    terminalID: terminal.id, path: nil)
                 logger.info("startup: cleared the stale holder pids on parked terminal \(terminal.id, privacy: .public) — its recorded child \(childPID, privacy: .public) is gone")
             } catch {
                 logger.warning("startup: failed to clear the stale holder pids on \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -908,18 +927,36 @@ extension HibernationCoordinator {
         expectedReplacementState: TerminalReplacementSnapshot,
         spawnCommand: String,
         env: [String: String],
-        sensitiveEnv: [String: String],
+        // What the model proxy did with this wake: the process environment to
+        // launch with, the stream file to stamp on the row beside the pids, and
+        // the route to undo if this call ends up not spawning at all. Carried
+        // as one value because the three are one decision, and a caller that
+        // could pass the environment without the token would be able to spawn a
+        // routed session it could no longer un-route.
+        attachment: ModelProxyRouteAttachment.Outcome,
         cols: Int?,
         rows: Int?
     ) async -> WakeResult {
+        // Every refusal below goes through this rather than returning
+        // `.respawnFailed` directly, because each one is a spawn that did not
+        // happen and the route was minted before this method was entered. A
+        // refusal that forgot to undo it would leave a route file, and later a
+        // stream file, for a session nothing ever started — the shape the
+        // `OrphanGC` leg exists to catch and should not have to.
+        func refuse(_ reason: String) async -> WakeResult {
+            await ModelProxyRouteAttachment.retire(
+                attachment, terminalID: terminal.id, supervisor: modelProxySupervisor)
+            return .respawnFailed(reason: reason)
+        }
+
         guard let registry = holderRegistry else {
-            return .respawnFailed(
-                reason: "this daemon has no holder registry, so the session cannot be resumed on the pty-holder transport")
+            return await refuse(
+                "this daemon has no holder registry, so the session cannot be resumed on the pty-holder transport")
         }
 
         guard let currentTerminal = try? await db.terminals.get(id: terminal.id),
               expectedReplacementState.matches(currentTerminal) else {
-            return .respawnFailed(reason: "terminal changed while wake was preparing; retry")
+            return await refuse("terminal changed while wake was preparing; retry")
         }
 
         // The row said parked, but its holder may already be running — an
@@ -927,6 +964,12 @@ extension HibernationCoordinator {
         // rather than starting a second one.
         if let adopted = await adoptLiveHolderInsteadOfRespawning(
             currentTerminal, registry: registry) {
+            // No spawn happened, so the route this wake minted names a session
+            // that will never be started against it — and the live session it
+            // healed is still running on whatever route it already had. By
+            // token, so the one that is dropped is provably the unused one.
+            await ModelProxyRouteAttachment.retire(
+                attachment, terminalID: terminal.id, supervisor: modelProxySupervisor)
             return adopted
         }
 
@@ -941,8 +984,8 @@ extension HibernationCoordinator {
         // healthy. Everything between here and the guard is read-only, so
         // moving the question down costs the refusal nothing.
         guard registry.canSpawn else {
-            return .respawnFailed(
-                reason: "the TBDHolder helper is missing beside the daemon, so no holder can be started for this session; the row stays parked")
+            return await refuse(
+                "the TBDHolder helper is missing beside the daemon, so no holder can be started for this session; the row stays parked")
         }
 
         let incarnationID: UUID
@@ -951,13 +994,13 @@ extension HibernationCoordinator {
                 id: terminal.id,
                 expectedState: expectedReplacementState,
                 at: now()) else {
-                return .respawnFailed(reason: "terminal changed before wake could launch; retry")
+                return await refuse("terminal changed before wake could launch; retry")
             }
             incarnationID = prepared
         } catch {
             logger.warning("wake: failed to prepare the replacement agent for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return .respawnFailed(
-                reason: "preparing the replacement agent failed: \(error.localizedDescription)")
+            return await refuse(
+                "preparing the replacement agent failed: \(error.localizedDescription)")
         }
         let replacementEnv = AgentProcessEnvironment.replacement(
             base: env, incarnationID: incarnationID)
@@ -969,16 +1012,23 @@ extension HibernationCoordinator {
                 launch: WorktreeLifecycle.holderLaunch(
                     shellCommand: spawnCommand,
                     env: replacementEnv,
-                    sensitiveEnv: sensitiveEnv,
+                    // The route's base URL rides the job's process
+                    // environment, never the inline exports, so the token
+                    // stays out of argv on the wake path exactly as it does on
+                    // the create path.
+                    sensitiveEnv: attachment.sensitiveEnv,
                     workingDirectory: worktree.path,
                     cols: cols ?? TmuxManager.defaultCols,
                     rows: rows ?? TmuxManager.defaultRows,
                     environment: registry.environment))
         } catch {
             // The row stays parked, so the next focus or menu retry can wake it.
+            // Its route goes with the spawn that never happened: the retry
+            // mints a fresh one, and leaving this file behind would make the
+            // row's route ambiguous for as long as it stayed parked.
             logger.warning("wake: could not start a holder for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return .respawnFailed(
-                reason: "starting a holder for this session failed: \(error.localizedDescription)")
+            return await refuse(
+                "starting a holder for this session failed: \(error.localizedDescription)")
         }
 
         do {
@@ -987,13 +1037,26 @@ extension HibernationCoordinator {
                 holderPID: handle.holderPID,
                 childPID: handle.childPID,
                 startedAt: now())
+            // Beside the pids, and before the park marker is cleared: all three
+            // describe the process this call just started, and nothing
+            // snapshots the row between here and `clearHibernated`. A separate
+            // statement rather than a fourth `setHolderProcess` argument
+            // because the other two callers of that method mean different
+            // things by a nil stream path — `restoreHolderPIDsFromRegistry`
+            // must PRESERVE the route of the session it is healing, while a
+            // park clears it.
+            try await db.terminals.setTranscriptStreamPath(
+                terminalID: terminal.id, path: attachment.streamPath)
         } catch {
             // A holder and a job no row names would be reclaimable by nothing,
             // so undo the spawn from the failing call itself.
             await registry.abandon(terminalID: terminal.id, handle: handle)
             logger.warning("wake: started a holder for \(terminal.id, privacy: .public) but could not record its pids, so it was abandoned: \(error.localizedDescription, privacy: .public)")
-            return .respawnFailed(
-                reason: "the replacement agent started, but recording its process ids failed: \(error.localizedDescription)")
+            // The job is gone with the holder, so its route goes too. Unlike
+            // the `clearHibernated` failure below, which leaves a LIVE
+            // replacement running on this route and must not touch it.
+            return await refuse(
+                "the replacement agent started, but recording its process ids failed: \(error.localizedDescription)")
         }
 
         do {
