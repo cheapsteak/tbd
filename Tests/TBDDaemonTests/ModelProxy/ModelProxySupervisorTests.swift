@@ -376,6 +376,9 @@ struct ModelProxySupervisorTests {
         defer { fixture.tearDown() }
 
         let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 9090)
+        // Stopped again below, on purpose; the defer is for the paths where an
+        // expectation fails before that and the listener would otherwise leak.
+        defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 9090, startTime: proxy.processStartTime)
 
@@ -395,6 +398,153 @@ struct ModelProxySupervisorTests {
 
         #expect(landed)
         #expect(await fixture.spawner.calls() == [adoptedPort])
+    }
+
+    /// A **spawned** proxy that dies in the one way `waitpid` cannot report.
+    ///
+    /// `reapIfExited` answers nil for two different facts — "still running"
+    /// and "not this process's to collect", which is what `waitpid` returns
+    /// `ECHILD` for once an exit has gone somewhere else. A supervisor that
+    /// consulted only `waitpid` for its own children would read the second as
+    /// the first and keep a dead proxy forever, with `current` naming a port
+    /// nothing is listening on. The process table is what tells them apart,
+    /// for a child exactly as for an adopted proxy.
+    @Test("a spawned proxy that leaves the process table is replaced, waitpid or not")
+    func replacesASpawnedProxyWaitpidCannotCollect() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 8080)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        // Denied once so the startup probe does not adopt: this case is about
+        // a proxy this daemon *spawned*.
+        fixture.identity.denyOnce()
+        fixture.identity.admit(pid: 8080, startTime: proxy.processStartTime)
+        await fixture.spawner.answer(.success(pid: 8080, port: proxy.port))
+
+        let supervisor = fixture.supervisor()
+        await supervisor.start()
+        #expect(await supervisor.current?.adopted == false)
+
+        // One quiet poll, which is where a spawned proxy gets the identity
+        // anchor the death check reads: the start time it answered with.
+        await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
+        #expect(await supervisor.current?.pid == 8080)
+
+        let heldPort = proxy.port
+        proxy.stop()
+        fixture.identity.forget(pid: 8080)
+        // Deliberately no `spawner.reap(pid: 8080, …)`: the exit is one this
+        // process cannot collect, so `reapIfExited` keeps answering nothing.
+        await fixture.spawner.answer(.success(pid: 8081, port: heldPort))
+
+        let landed = await fixture.clock.advanceUntil(
+            "the lost child to be replaced", by: fixture.watchInterval,
+            { await supervisor.current?.pid == 8081 })
+        await supervisor.stop()
+
+        #expect(landed, "a child waitpid cannot collect must not collapse into keep-forever")
+        #expect(await fixture.spawner.calls() == [heldPort, heldPort])
+    }
+
+    /// The zombie rule, and the adoption rule that falls out of it.
+    ///
+    /// A proxy this process spawned and then dropped — here by replacing it
+    /// for its version — is still its child until somebody calls `waitpid`.
+    /// Two things must happen. It has to be *collected*, and `stop()` has to
+    /// be one of the places that tries, because `stop()` takes the watch away
+    /// and B2.3's runtime toggle is a `stop()`/`start()` pair. And it must
+    /// never be adopted back: `kill(pid, 0)` succeeds on a zombie and `ps`
+    /// still prints its command line, so the identity check confirms it and
+    /// `current` would end up naming a dead port that no later branch revises.
+    @Test("a proxy this daemon replaced is collected, and a restart never adopts it back")
+    func replacedProxyIsReapedAndNeverAdoptedBack() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        // The fake answers for pid 7075 throughout — a listener that outlives
+        // the process it claims to be is exactly what a corpse looks like from
+        // the supervisor's side, and it is what makes the wrong adoption
+        // possible at all.
+        let proxy = try FakeProxyProcess(version: "9999-1", pid: 7075)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.denyOnce()
+        fixture.identity.admit(pid: 7075, startTime: proxy.processStartTime)
+        await fixture.spawner.answer(.success(pid: 7075, port: proxy.port))
+        await fixture.spawner.answer(.success(pid: 7076, port: proxy.port))
+
+        let supervisor = fixture.supervisor()
+        await supervisor.start()
+        #expect(await supervisor.current?.pid == 7075)
+        #expect(await supervisor.current?.adopted == false, "a child of ours is never adopted")
+
+        // The first poll reads the version the proxy actually reports, which
+        // differs, so this daemon retires and replaces its own child.
+        let replaced = await fixture.clock.advanceUntil(
+            "the mismatched child to be replaced", by: fixture.watchInterval,
+            { await supervisor.current?.pid == 7076 })
+        #expect(replaced)
+
+        // What the runtime toggle does. Nothing is advanced across it: the
+        // whole question is what `start()` decides, not what a watch tick
+        // later corrects.
+        await supervisor.stop()
+        await fixture.spawner.answer(.success(pid: 7077, port: proxy.port))
+        await supervisor.start()
+
+        let current = await supervisor.current
+        #expect(current?.pid == 7077, "the dropped child must not be adopted back")
+        #expect(current?.adopted == false)
+        #expect(
+            await fixture.spawner.calls() == [proxy.port, proxy.port, proxy.port],
+            "each replacement takes the port the last one held")
+
+        // And it is collected rather than left a zombie. The exit lands after
+        // the watch is gone, so `stop()` is the only thing left that can reap.
+        await fixture.spawner.reap(pid: 7075, status: 0)
+        await supervisor.stop()
+        #expect(
+            await fixture.spawner.collected() == [7075],
+            "a child this daemon dropped is waited for, not leaked")
+    }
+
+    /// One control client per port, for the life of the supervisor.
+    ///
+    /// The default factory builds a `ModelProxyClient` around a fresh
+    /// ephemeral `URLSession`, and nothing invalidates one. A factory called
+    /// per watch tick is a session per watch tick, for as long as the daemon
+    /// runs — so the count is the assertion, not the behaviour around it.
+    @Test("the control client is built once per port, not once per watch tick")
+    func buildsOneClientPerPort() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 4040)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 4040, startTime: proxy.processStartTime)
+
+        let built = ClientBuildCounter()
+        let supervisor = fixture.supervisor(clientFactory: { port in
+            built.record(port: port)
+            return ModelProxyClient(port: port)
+        })
+        await supervisor.start()
+
+        for _ in 0..<10 {
+            await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
+        }
+        await supervisor.stop()
+
+        #expect(await supervisor.current?.pid == 4040, "ten quiet polls change nothing")
+        #expect(
+            proxy.requests().filter { $0.path == "/tbd/status" }.count >= 10,
+            "the polls have to have happened for the count below to mean anything")
+        #expect(
+            built.counts() == [proxy.port: 1],
+            "a client per tick is a URLSession per tick, and nothing invalidates them")
     }
 
     // MARK: - Routes
@@ -507,6 +657,9 @@ struct ModelProxySupervisorTests {
         defer { fixture.tearDown() }
 
         let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 3032)
+        // As above: stopped mid-test, and stopped again here if an expectation
+        // fails first.
+        defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 3032, startTime: proxy.processStartTime)
 
@@ -636,14 +789,18 @@ private struct SupervisorFixture {
     /// asks for: a fake proxy binds a real loopback port and the config row
     /// names it, so nothing has to be redirected for the client to reach it —
     /// and a probe of a port with no listener fails for the real reason.
-    func supervisor() -> ModelProxySupervisor {
+    func supervisor(
+        clientFactory: @escaping @Sendable (Int) -> ModelProxyClient = {
+            ModelProxyClient(port: $0)
+        }
+    ) -> ModelProxySupervisor {
         ModelProxySupervisor(
             config: db.config,
             home: home,
             spawner: spawner,
             ownVersion: ownVersion,
             processIdentity: identity,
-            clientFactory: { ModelProxyClient(port: $0) },
+            clientFactory: clientFactory,
             watchInterval: watchInterval,
             respawnBackoff: [.seconds(1), .seconds(5)],
             clock: clock)
@@ -681,11 +838,15 @@ private actor StubSpawner: ModelProxySpawning {
     private var answers: [Answer] = []
     private var requested: [Int] = []
     private var exits: [pid_t: Int32] = [:]
+    private var collectedPids: [pid_t] = []
 
     func answer(_ answer: Answer) { answers.append(answer) }
     func calls() -> [Int] { requested }
     /// Makes `reapIfExited` report `pid` as having exited, once.
     func reap(pid: pid_t, status: Int32) { exits[pid] = status }
+    /// The pids actually collected, in order — a zombie is a pid that exited
+    /// and never appears here.
+    func collected() -> [pid_t] { collectedPids }
 
     func spawn(port: Int, home: URL) async throws -> (pid: pid_t, port: Int) {
         requested.append(port)
@@ -699,7 +860,9 @@ private actor StubSpawner: ModelProxySpawning {
     }
 
     func reapIfExited(pid: pid_t) async -> Int32? {
-        exits.removeValue(forKey: pid)
+        guard let status = exits.removeValue(forKey: pid) else { return nil }
+        collectedPids.append(pid)
+        return status
     }
 }
 
@@ -781,6 +944,18 @@ private final class FakeProxyProcess: @unchecked Sendable {
 
     func requests() -> [LoopbackHTTPTestServer.Request] { server.requests() }
     func stop() { server.stop() }
+}
+
+/// Counts how many clients a supervisor asks its factory for, per port.
+private final class ClientBuildCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var built: [Int: Int] = [:]
+
+    func record(port: Int) {
+        lock.withLock { built[port, default: 0] += 1 }
+    }
+
+    func counts() -> [Int: Int] { lock.withLock { built } }
 }
 
 /// A box for the port, because the handler closure is built before the

@@ -168,6 +168,46 @@ actor ModelProxySupervisor {
     /// spawn it performs.
     private var replacing = false
 
+    /// The pids this process has spawned, oldest first.
+    ///
+    /// `waitpid` can collect these and only these, which makes the list two
+    /// things at once. A proxy answering `/tbd/status` with a pid on it is
+    /// never recorded as `adopted`: that would hand its death to the process
+    /// table, where nothing would ever collect it. And a pid on it that this
+    /// supervisor has *dropped* must not be adopted back — `kill(pid, 0)`
+    /// succeeds on a zombie and `ps` still prints its command line, so no
+    /// identity check can tell an uncollected corpse of ours from a live
+    /// proxy.
+    ///
+    /// Capped because a daemon that lives for months replaces its proxy on
+    /// every `tbd update`. The cap only has to outlast the pids that are still
+    /// interesting; anything evicted is older than every proxy this supervisor
+    /// could still be talking to.
+    private var spawnedPids: [pid_t] = []
+    private static let spawnMemory = 64
+
+    /// Spawned pids dropped without being collected, each with the reap
+    /// attempts left before this supervisor stops trying.
+    ///
+    /// The budget is not impatience: a retired proxy drains for up to ten
+    /// minutes and is legitimately still running for all of it, so at one
+    /// attempt per watch tick the budget spans that. Past it, an answer of
+    /// nothing forever means `ECHILD` — the child is not this process's to
+    /// collect — and holding the number would only refuse a later proxy the
+    /// kernel handed the same pid.
+    private var pendingReap: [pid_t: Int] = [:]
+    private static let reapAttemptBudget = 40
+
+    /// One control client per port, for the life of this supervisor.
+    ///
+    /// The default `clientFactory` builds a `ModelProxyClient` around a fresh
+    /// ephemeral `URLSession`, and the watch would otherwise call it every
+    /// `watchInterval` for as long as the daemon runs — a session per tick,
+    /// none of them invalidated. The cache is never evicted because its key
+    /// space is the ports one home has held: one, in every install whose port
+    /// is never squatted.
+    private var clients: [Int: ModelProxyClient] = [:]
+
     init(
         config: ConfigStore,
         home: URL,
@@ -229,6 +269,77 @@ actor ModelProxySupervisor {
         return "http://127.0.0.1:\(port)/r/\(route.token)"
     }
 
+    // MARK: - Collaborators and bookkeeping
+
+    /// The control client for `port`, built once and kept.
+    private func client(port: Int) -> ModelProxyClient {
+        if let existing = clients[port] { return existing }
+        let made = clientFactory(port)
+        clients[port] = made
+        return made
+    }
+
+    /// Records a pid this process spawned.
+    private func rememberSpawned(pid: pid_t) {
+        spawnedPids.removeAll { $0 == pid }
+        spawnedPids.append(pid)
+        if spawnedPids.count > Self.spawnMemory { spawnedPids.removeFirst() }
+    }
+
+    /// Whether this process spawned `pid`: it is ours to `waitpid`, and never
+    /// something to record as adopted.
+    private func weSpawned(pid: pid_t) -> Bool { spawnedPids.contains(pid) }
+
+    /// A pid that has been collected, or given up on. It is not ours any more,
+    /// and a later proxy the kernel hands the same number is adoptable again.
+    private func forgetSpawned(pid: pid_t) {
+        spawnedPids.removeAll { $0 == pid }
+        pendingReap[pid] = nil
+    }
+
+    /// Queues one of our own children for collection.
+    private func queueForReap(pid: pid_t) {
+        guard weSpawned(pid: pid) else { return }
+        pendingReap[pid] = Self.reapAttemptBudget
+    }
+
+    /// Drops the current proxy, queueing it for collection when it is a child
+    /// of this process.
+    ///
+    /// **Every path that abandons a proxy goes through here.** One that did
+    /// not would leave a zombie — and a zombie is adoptable, which is how a
+    /// `stop()`/`start()` pair ends up holding a dead port with no branch left
+    /// that would revise it.
+    private func dropLive() {
+        guard let live else { return }
+        queueForReap(pid: live.state.pid)
+        self.live = nil
+    }
+
+    /// One non-blocking `waitpid` per pid we are still waiting to collect.
+    private func drainPendingReap() async {
+        guard let spawner, !pendingReap.isEmpty else { return }
+        for (pid, attemptsLeft) in pendingReap {
+            if let status = await spawner.reapIfExited(pid: pid) {
+                forgetSpawned(pid: pid)
+                Self.logger.info(
+                    """
+                    collected the model proxy this daemon dropped (pid \(pid, privacy: .public), \
+                    exit status \(status, privacy: .public))
+                    """)
+            } else if attemptsLeft <= 1 {
+                forgetSpawned(pid: pid)
+                Self.logger.error(
+                    """
+                    gave up collecting the model proxy this daemon dropped (pid \
+                    \(pid, privacy: .public)): it is not this process's to reap
+                    """)
+            } else {
+                pendingReap[pid] = attemptsLeft - 1
+            }
+        }
+    }
+
     // MARK: - Lifecycle
 
     /// Adopt or spawn, then start the watch. Never throws: a proxy that could
@@ -237,6 +348,7 @@ actor ModelProxySupervisor {
     func start() async {
         guard !started else { return }
         started = true
+        await drainPendingReap()
         await reconcile()
         watchTask = Task { [weak self] in
             await self?.watch()
@@ -255,6 +367,17 @@ actor ModelProxySupervisor {
         watchTask?.cancel()
         watchTask = nil
         started = false
+        // The watch is what makes the next `waitpid` call, so a stop with
+        // children still uncollected has to make one itself: `stop()` is not
+        // only a shutdown, it is half of what flipping the runtime flag does.
+        //
+        // Bounded by construction — one `waitpid(WNOHANG)` per pending pid,
+        // and no waiting. There is nothing to wait *for*: a retired proxy
+        // drains for up to ten minutes, so a sleep long enough to matter would
+        // stall every stop, and one short enough not to would change nothing.
+        // What a pass does not collect stays pending for the next `start()`,
+        // and is refused adoption until it is collected either way.
+        await drainPendingReap()
     }
 
     private func watch() async {
@@ -308,12 +431,20 @@ actor ModelProxySupervisor {
     private func adoptIfMatching(port: Int) async -> Bool {
         let status: ModelProxyStatus
         do {
-            status = try await clientFactory(port).status()
+            status = try await client(port: port).status()
         } catch {
             Self.logger.debug(
                 """
                 nothing adoptable answered /tbd/status on port \(port, privacy: .public): \
                 \(error.localizedDescription, privacy: .public)
+                """)
+            return false
+        }
+        if pendingReap[status.pid] != nil {
+            Self.logger.error(
+                """
+                port \(port, privacy: .public) is answering for pid \(status.pid, privacy: .public), \
+                a proxy this daemon dropped and has not collected yet; not adopting our own corpse
                 """)
             return false
         }
@@ -326,15 +457,30 @@ actor ModelProxySupervisor {
                 """)
             return false
         }
+        // A proxy this process spawned stays ours no matter which path found
+        // it again: `adopted` is what decides whether its death is read off
+        // `waitpid` or off the process table, and reading a child's off the
+        // process table is how it becomes a zombie.
+        let isOurChild = weSpawned(pid: status.pid)
+        // Annotated rather than inferred: an unannotated ternary of two string
+        // literals is ambiguous between the logger's `String` and
+        // `StaticString` interpolations.
+        let verb: String = isOurChild ? "took back" : "adopted"
+        if live?.state.pid != status.pid { dropLive() }
         live = Live(
             state: State(
-                pid: status.pid, port: status.port > 0 ? status.port : port,
-                version: status.version, adopted: true),
+                // The port we reached it on, not the one it reported. Every
+                // control call this supervisor makes goes to `port`, so a
+                // status document naming a different one must not be allowed
+                // to send them somewhere else.
+                pid: status.pid, port: port,
+                version: status.version, adopted: !isOurChild),
             identityAnchor: status.processStartTime)
         Self.logger.info(
             """
-            adopted the model proxy on port \(port, privacy: .public) (pid \
-            \(status.pid, privacy: .public), version \(status.version, privacy: .public))
+            \(verb, privacy: .public) the model proxy on port \
+            \(port, privacy: .public) (pid \(status.pid, privacy: .public), version \
+            \(status.version, privacy: .public))
             """)
         return true
     }
@@ -438,6 +584,8 @@ actor ModelProxySupervisor {
     private func recordSpawn(
         pid: pid_t, port: Int, requested: Int, decision: PortDecision
     ) async {
+        rememberSpawned(pid: pid)
+
         switch decision {
         case .mint:
             // SQLite decides, not this daemon: two daemons starting at once on
@@ -448,12 +596,24 @@ actor ModelProxySupervisor {
                     Self.logger.error(
                         """
                         another daemon minted port \(stored, privacy: .public) for this home while \
-                        we were spawning on \(port, privacy: .public); retiring ours and adopting \
-                        theirs
+                        we were spawning on \(port, privacy: .public); adopting theirs and \
+                        retiring ours
                         """)
-                    try? await clientFactory(port).retire()
-                    _ = await adoptIfMatching(port: stored)
-                    return
+                    // The winner first, and ours retired only once there is
+                    // one: retiring first and failing to adopt would leave
+                    // this home with no proxy at all, having just had a
+                    // working one.
+                    if await adoptIfMatching(port: stored) {
+                        try? await client(port: port).retire()
+                        queueForReap(pid: pid)
+                        return
+                    }
+                    Self.logger.error(
+                        """
+                        nothing adoptable answers on port \(stored, privacy: .public); keeping the \
+                        proxy spawned on \(port, privacy: .public), which a later daemon will not \
+                        find
+                        """)
                 }
             } catch {
                 Self.logger.error(
@@ -464,10 +624,10 @@ actor ModelProxySupervisor {
                     """)
             }
         case .overwrite:
-            try? await config.setModelProxyPort(port)
+            await persistPort(port)
         case .keep:
             if port != requested {
-                try? await config.setModelProxyPort(port)
+                await persistPort(port)
             }
         }
 
@@ -483,9 +643,30 @@ actor ModelProxySupervisor {
             """)
     }
 
+    /// Stores the port a proxy actually bound, and says so when it cannot.
+    ///
+    /// Not a `try?`: a failure here does not stop *this* daemon, which holds
+    /// the port in memory, but it is exactly how a later one fails to find the
+    /// proxy, spawns a second, and meets a held lock.
+    private func persistPort(_ port: Int) async {
+        do {
+            try await config.setModelProxyPort(port)
+        } catch {
+            Self.logger.error(
+                """
+                could not persist model proxy port \(port, privacy: .public): \
+                \(error.localizedDescription, privacy: .public); the proxy is running but a later \
+                daemon will not find it
+                """)
+        }
+    }
+
     // MARK: - Watch
 
     private func tick() async {
+        // Before anything else, and even when the supervisor is permanently
+        // down: a child we dropped is a zombie until somebody collects it.
+        await drainPendingReap()
         guard !permanentlyDown else { return }
         guard let live else {
             await reconcile()
@@ -503,13 +684,14 @@ actor ModelProxySupervisor {
                 the model proxy (pid \(live.state.pid, privacy: .public)) exited with status \
                 \(status, privacy: .public); respawning on port \(live.state.port, privacy: .public)
                 """)
+            forgetSpawned(pid: live.state.pid)
             self.live = nil
             await respawn(port: live.state.port)
             return
         }
 
         do {
-            let status = try await clientFactory(live.state.port).status()
+            let status = try await client(port: live.state.port).status()
             guard processIdentity.matches(pid: status.pid, startTime: status.processStartTime)
             else {
                 Self.logger.error(
@@ -517,7 +699,7 @@ actor ModelProxySupervisor {
                     port \(live.state.port, privacy: .public) is answering for a process this \
                     daemon does not recognise; dropping it and reconciling from scratch
                     """)
-                self.live = nil
+                dropLive()
                 return
             }
             // The proxy is the authority on its own version: a spawned one was
@@ -533,15 +715,24 @@ actor ModelProxySupervisor {
             // A missed poll is not a death. Only the process table can tell a
             // proxy that is gone from one that is merely slow, and it is the
             // only thing consulted here.
-            if live.state.adopted, let anchor = live.identityAnchor,
+            //
+            // For a child of ours as much as for an adopted proxy.
+            // `reapIfExited` answers nothing both for a child that is still
+            // running and for one this process cannot collect — `waitpid`'s
+            // `ECHILD` is indistinguishable from "not exited" — so a spawned
+            // proxy that consulted only `waitpid` would collapse into keep
+            // forever the moment its exit went somewhere else. The anchor is
+            // the start time the last answered poll recorded; with none yet,
+            // there is nothing to compare and the proxy is kept.
+            if let anchor = live.identityAnchor,
                 !processIdentity.matches(pid: live.state.pid, startTime: anchor)
             {
                 Self.logger.error(
                     """
-                    the adopted model proxy (pid \(live.state.pid, privacy: .public)) is gone; \
-                    respawning on port \(live.state.port, privacy: .public)
+                    the model proxy (pid \(live.state.pid, privacy: .public)) is gone from the \
+                    process table; respawning on port \(live.state.port, privacy: .public)
                     """)
-                self.live = nil
+                dropLive()
                 await respawn(port: live.state.port)
             } else {
                 Self.logger.debug(
@@ -594,7 +785,7 @@ actor ModelProxySupervisor {
             \(ownVersion, privacy: .public); retiring and replacing it
             """)
         do {
-            try await clientFactory(port).retire()
+            try await client(port: port).retire()
         } catch {
             Self.logger.error(
                 """
@@ -604,7 +795,7 @@ actor ModelProxySupervisor {
                 """)
             return
         }
-        self.live = nil
+        dropLive()
         await respawn(port: port)
     }
 
@@ -634,7 +825,7 @@ actor ModelProxySupervisor {
         try routes.write(route)
 
         do {
-            try await clientFactory(live.state.port).addRoute(token: route.token)
+            try await client(port: live.state.port).addRoute(token: route.token)
         } catch {
             Self.logger.error(
                 """
@@ -657,7 +848,7 @@ actor ModelProxySupervisor {
     func retireRoute(token: String, terminalID: UUID) async {
         if let live {
             do {
-                try await clientFactory(live.state.port).removeRoute(token: token)
+                try await client(port: live.state.port).removeRoute(token: token)
                 return
             } catch {
                 Self.logger.error(
