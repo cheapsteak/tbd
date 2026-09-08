@@ -1167,6 +1167,164 @@ struct ModelProxySupervisorTests {
         #expect(await fixture.spawner.calls() == [0], "an unanswered poll is not a death")
     }
 
+    // MARK: - Hang detection
+
+    /// The discriminating half of the ladder below: three consecutive misses
+    /// is one short of `hangSignalThreshold`, and a poll that then succeeds
+    /// must reset the count rather than let it carry into a later hang
+    /// episode.
+    @Test("three misses then a successful poll sends no signal")
+    func threeMissesThenASuccessSendsNoSignal() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6300, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 6300, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.start()
+        #expect(await supervisor.current?.pid == 6300)
+
+        // Three misses only, driven by a fixed count of `advanceWhenSuspended`
+        // rather than `advanceUntil`: there is no positive outcome to converge
+        // on here, and the absence this asserts holds regardless of exactly
+        // when it is checked — three is below the threshold on any reading.
+        proxy.failNextStatusResponses(3)
+        for _ in 1...3 {
+            await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
+        }
+        #expect(
+            fixture.signaller.terminated().isEmpty,
+            "three misses is one short of the four-poll threshold")
+
+        // The fourth poll succeeds (the fake's fail count is exhausted). A
+        // signal now would be the count carrying across the reset rather than
+        // restarting from it — again timing-invariant, so one plain advance
+        // is enough.
+        await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
+        #expect(fixture.signaller.terminated().isEmpty)
+        #expect(fixture.signaller.killed().isEmpty)
+        #expect(await supervisor.current?.pid == 6300)
+
+        await supervisor.stop()
+    }
+
+    /// The full ladder the fix adds: a proxy the process table still
+    /// confirms but that stops answering is SIGTERMed once four consecutive
+    /// polls miss, SIGKILLed if it is still alive two ticks after that, and
+    /// respawned on the same port once it is actually gone — the same
+    /// "gone" path a pid the process table no longer confirms always took.
+    ///
+    /// Discriminates against the pre-fix code, which had no path from
+    /// "alive but unresponsive" to a signal at all: `tick`'s poll-failure
+    /// branch only ever consulted the process table, so a merely-hung proxy
+    /// (as opposed to one truly gone) was kept forever.
+    @Test("a hung proxy is SIGTERMed at four misses, SIGKILLed two ticks later, and respawned once gone")
+    func hungProxyEscalatesToSignalsThenRespawns() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6302, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 6302, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.start()
+        #expect(await supervisor.current?.pid == 6302)
+
+        // Wide enough to cover every tick below without exhausting — this
+        // proxy never recovers in this test.
+        proxy.failNextStatusResponses(20)
+
+        let sentTerm = await fixture.clock.advanceUntil(
+            "SIGTERM to reach the hung proxy", by: fixture.watchInterval
+        ) {
+            !fixture.signaller.terminated().isEmpty
+        }
+        #expect(sentTerm)
+        #expect(
+            fixture.signaller.terminated() == [6302],
+            "the fourth consecutive miss crosses hangSignalThreshold")
+        #expect(fixture.signaller.killed().isEmpty, "SIGKILL waits for hangSignalKillDelay more ticks")
+        #expect(
+            await supervisor.current?.pid == 6302,
+            "still the same live proxy — sending a signal does not itself drop it")
+
+        let sentKill = await fixture.clock.advanceUntil(
+            "SIGKILL to reach the hung proxy", by: fixture.watchInterval
+        ) {
+            !fixture.signaller.killed().isEmpty
+        }
+        #expect(sentKill)
+        #expect(fixture.signaller.killed() == [6302])
+        #expect(fixture.signaller.terminated() == [6302], "still exactly one SIGTERM, never repeated")
+        #expect(
+            await supervisor.current?.pid == 6302,
+            "the process table still confirms it; nothing respawns until it is actually gone")
+
+        // The kill lands: the process is now gone from the table, which is
+        // the same fact that drives the ordinary death path.
+        fixture.identity.forget(pid: 6302)
+        await fixture.spawner.answer(.success(pid: 6303, port: proxy.port))
+        let respawned = await fixture.clock.advanceUntil(
+            "the hung proxy to be respawned on the same port", by: fixture.watchInterval
+        ) {
+            await supervisor.current?.pid == 6303
+        }
+        #expect(respawned)
+        #expect(
+            await fixture.spawner.calls() == [proxy.port],
+            "the respawn targets the port the hung proxy held")
+
+        await supervisor.stop()
+    }
+
+    /// The identity re-check right before every signal is what this pins: a
+    /// pid the kernel has recycled to an unrelated process — a different
+    /// start time answering where the daemon's anchor expects the old one —
+    /// must never be signalled, whatever `consecutiveHungPolls` says. It is
+    /// the ordinary "gone" path (`processIdentity.matches` failing against
+    /// the poll-failure branch's anchor) that respawns it, immediately, with
+    /// no signal in between.
+    @Test("a recycled pid takes the immediate respawn path, never a signal")
+    func recycledPidRespawnsWithoutSignalling() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6304, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 6304, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.start()
+        #expect(await supervisor.current?.pid == 6304)
+
+        // The poll fails, and by the time the process table is consulted for
+        // the pid this daemon remembers, the kernel has recycled it to an
+        // unrelated process with a different start time.
+        proxy.failNextStatusResponses(1)
+        fixture.identity.admit(pid: 6304, startTime: proxy.processStartTime.addingTimeInterval(500))
+        await fixture.spawner.answer(.success(pid: 6305, port: proxy.port))
+
+        let replaced = await fixture.clock.advanceUntil(
+            "the recycled pid to be replaced", by: fixture.watchInterval
+        ) {
+            await supervisor.current?.pid == 6305
+        }
+        #expect(replaced)
+        #expect(fixture.signaller.terminated().isEmpty, "a recycled pid must never be signalled")
+        #expect(fixture.signaller.killed().isEmpty)
+        #expect(
+            await fixture.spawner.calls() == [proxy.port],
+            "the mismatch takes the immediate respawn path, not the hang ladder")
+
+        await supervisor.stop()
+    }
+
     /// An **adopted** proxy is not this daemon's child, so `waitpid` can never
     /// collect it: its death is read off the process table instead. The
     /// supervisor spawns a replacement on the port it held.
@@ -1632,6 +1790,7 @@ private struct SupervisorFixture {
     let db: TBDDatabase
     let spawner: StubSpawner
     let identity: StubIdentity
+    let signaller: StubSignaller
     let clock: TestClock<Duration>
     let ownVersion = "12345-1700000000"
     let watchInterval: Duration = .seconds(15)
@@ -1653,6 +1812,7 @@ private struct SupervisorFixture {
             db: try TBDDatabase(inMemory: true),
             spawner: StubSpawner(),
             identity: StubIdentity(),
+            signaller: StubSignaller(),
             clock: TestClock())
     }
 
@@ -1681,6 +1841,7 @@ private struct SupervisorFixture {
             spawner: spawner,
             ownVersion: ownVersion,
             processIdentity: identity,
+            signaller: signaller,
             routedSessionsAlive: routedSessionsAlive,
             clientFactory: clientFactory,
             watchInterval: watchInterval,
@@ -1796,6 +1957,35 @@ private final class StubIdentity: ProcessIdentityChecking, @unchecked Sendable {
     }
 }
 
+/// A `ProcessSignaller` that records what it was asked to signal instead of
+/// touching a real process — the hang-detection tests' way of observing
+/// `considerSignallingHungProxy` without sending a real `kill(2)`.
+///
+/// Only `terminateProcessOnly`/`forceKillProcessOnly` are implemented for
+/// real: `ModelProxySupervisor` calls exactly those two, never the
+/// process-group forms, so recording under the other names would observe a
+/// call the supervisor never makes. Everything else this protocol requires
+/// but the supervisor never calls (`isAlive`, `children`, `commandLine`,
+/// `stat`, `startTime`) is a harmless stub.
+private final class StubSignaller: ProcessSignaller, @unchecked Sendable {
+    private let lock = NSLock()
+    private var terminatedPids: [Int32] = []
+    private var killedPids: [Int32] = []
+
+    func terminated() -> [Int32] { lock.withLock { terminatedPids } }
+    func killed() -> [Int32] { lock.withLock { killedPids } }
+
+    func isAlive(_ pid: Int32) -> Bool { true }
+    func terminate(_ pid: Int32) {}
+    func forceKill(_ pid: Int32) {}
+    func terminateProcessOnly(_ pid: Int32) { lock.withLock { terminatedPids.append(pid) } }
+    func forceKillProcessOnly(_ pid: Int32) { lock.withLock { killedPids.append(pid) } }
+    func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
+    func commandLine(_ pid: Int32) -> String? { nil }
+    func stat(_ pid: Int32) -> String? { nil }
+    func startTime(_ pid: Int32) -> Date? { nil }
+}
+
 /// A `TBDModelProxy`'s control endpoint and nothing else: it answers
 /// `/tbd/status` with a document the daemon's decoder accepts, takes a retire
 /// and both route verbs, and records everything that arrived.
@@ -1815,6 +2005,7 @@ private final class FakeProxyProcess: @unchecked Sendable {
     private let routeCountBox: IntBox
     private let statusHook: StatusHookBox
     private let holdRouteRegistration: IntBox
+    private let failStatusResponses: IntBox
     private let paths: ProxyHomePaths
     let processStartTime = FakeProxyProcess.startedAt
 
@@ -1849,6 +2040,15 @@ private final class FakeProxyProcess: @unchecked Sendable {
     /// `makeRoute` suspended on `addRoute` leaves for a concurrent drain
     /// check to run in. One-shot, like `onNextStatus`.
     func holdNextRouteRegistration() { holdRouteRegistration.value = 1 }
+
+    /// Makes the next `count` `/tbd/status` requests answer with a 500
+    /// instead of a status document — a fast, deterministic stand-in for a
+    /// proxy that is alive but not answering usefully (a hang), without the
+    /// real-time uncertainty of a connection that genuinely times out. A
+    /// count rather than a one-shot hook: the hang-detection ladder is driven
+    /// by *consecutive* failures, so a test walking it sets a count wide
+    /// enough to cover every tick it advances through.
+    func failNextStatusResponses(_ count: Int) { failStatusResponses.value = count }
 
     /// Makes the listener answer for another process from now on — one port
     /// changing hands, which is what another daemon's replacement looks like
@@ -1886,10 +2086,12 @@ private final class FakeProxyProcess: @unchecked Sendable {
         routeCountBox.value = routeCount
         let statusHook = StatusHookBox()
         let holdRouteRegistration = IntBox()
+        let failStatusResponses = IntBox()
         self.pidBox = pidBox
         self.routeCountBox = routeCountBox
         self.statusHook = statusHook
         self.holdRouteRegistration = holdRouteRegistration
+        self.failStatusResponses = failStatusResponses
         self.paths = ProxyHomePaths(home: home)
         // Canonical, exactly as the real proxy reports it: the daemon compares
         // canonical forms, and a fake that echoed a raw path would make the
@@ -1903,6 +2105,10 @@ private final class FakeProxyProcess: @unchecked Sendable {
             }
             switch (request.method, request.path) {
             case ("GET", "/tbd/status"):
+                if failStatusResponses.value > 0 {
+                    failStatusResponses.value -= 1
+                    return LoopbackHTTPTestServer.Reply(status: 500, body: "{}")
+                }
                 let document = ModelProxyStatus(
                     version: version, pid: pidBox.value, processStartTime: started,
                     port: portBox.value, streamsInFlight: 0,

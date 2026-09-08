@@ -140,6 +140,13 @@ actor ModelProxySupervisor {
     /// replaced for its version, because "differs from nothing" is not a fact.
     private let ownVersion: String?
     private let processIdentity: any ProcessIdentityChecking
+    /// How this daemon signals a proxy it believes is hung — SIGTERM, then
+    /// SIGKILL. Not used for anything `processIdentity` already answers; this
+    /// is only ever `terminateProcessOnly`/`forceKillProcessOnly`, deliberately
+    /// never the process-group form: a proxy is never `setsid`'d as a group
+    /// leader the way a tmux pane is, and even if it were, only the proxy
+    /// itself is this daemon's to signal.
+    private let signaller: any ProcessSignaller
     private let pidFile: any ModelProxyPIDFileReading
     /// Whether any session spawned through the proxy is still alive — one
     /// database question, asked once, at a boot that finds the flag off.
@@ -181,6 +188,26 @@ actor ModelProxySupervisor {
     /// Giving up after the last step is not permanent: `respawn` says so, and
     /// the next watch tick sees no proxy and starts a fresh burst.
     private let respawnBackoff: [Duration]
+    /// Consecutive missed `/tbd/status` polls, all while the process table
+    /// still confirms the proxy, before this daemon treats it as hung rather
+    /// than merely slow.
+    ///
+    /// Four ticks at the 15s `watchInterval` is one minute — long enough that
+    /// a burst of load or a GC pause on the proxy side is not mistaken for a
+    /// hang, short enough that the rest of the ladder this threshold starts
+    /// (SIGTERM, `hangSignalKillDelay` ticks, SIGKILL, one more tick to notice
+    /// the process is gone, then a respawn inside `respawnBackoff`'s first
+    /// step) finishes with comfortable room under the 183s Claude retries a
+    /// refused port for.
+    private static let hangSignalThreshold = 4
+    /// Ticks after SIGTERM, still unresponsive, before this daemon escalates
+    /// to SIGKILL.
+    ///
+    /// Two ticks (30s) is a real chance for a proxy that can still act on
+    /// signals to exit cleanly — SIGTERM asks it to do the same
+    /// close-the-listener-and-drain shutdown `POST /tbd/retire` triggers —
+    /// before this daemon forces it.
+    private static let hangSignalKillDelay = 2
     private let clock: any Clock<Duration>
     private let routes: ModelProxyRouteStore
 
@@ -221,6 +248,30 @@ actor ModelProxySupervisor {
     /// route the proxy has already confirmed: the drain waits and the next
     /// tick tries again.
     private var routeRegistrationsInFlight = 0
+    /// Consecutive `/tbd/status` failures for the live proxy, counted only
+    /// while the process table still confirms its pid and start time — a
+    /// failure that means "gone" instead resets this through `dropLive()`,
+    /// same as any successful poll does.
+    ///
+    /// This is what turns a proxy that is alive but wedged — deadlocked,
+    /// thread-starved, stuck in a syscall — into something the watch
+    /// eventually acts on. Without it, `tick`'s poll-failure branch consults
+    /// only the process table, which cannot tell "gone" from "hung", and a
+    /// route whose registration failed during the hang is written to disk
+    /// with no live proxy ever left to load it (see `makeRoute`'s comment
+    /// on a registration failure surviving as a file for "the next start" —
+    /// a wedged proxy has no next start short of this).
+    private var consecutiveHungPolls = 0
+    /// The value `consecutiveHungPolls` held when SIGTERM went out — nil
+    /// until this hang episode's first signal. `consecutiveHungPolls` minus
+    /// this is how many ticks have passed since, which is what
+    /// `considerSignallingHungProxy` compares against `hangSignalKillDelay`.
+    private var hangTermSentAtFailureCount: Int?
+    /// Set once SIGKILL has gone out for this hang episode, so a proxy that
+    /// lingers in the process table for a tick or two after being killed —
+    /// an adopted proxy whose parent has not yet reaped it — is not
+    /// signalled again on every subsequent tick.
+    private var hangKillSent = false
     /// Guards `replaceIfVersionDiffers` against re-entering itself through the
     /// spawn it performs.
     private var replacing = false
@@ -271,6 +322,7 @@ actor ModelProxySupervisor {
         spawner: (any ModelProxySpawning)?,
         ownVersion: String?,
         processIdentity: any ProcessIdentityChecking = ProcessTableIdentityCheck(),
+        signaller: any ProcessSignaller = ProductionProcessSignaller(),
         pidFile: any ModelProxyPIDFileReading = ModelProxyPIDFile(),
         routedSessionsAlive: @escaping @Sendable () async -> Bool = { false },
         clientFactory: @escaping @Sendable (Int) -> ModelProxyClient = { ModelProxyClient(port: $0) },
@@ -283,6 +335,7 @@ actor ModelProxySupervisor {
         self.spawner = spawner
         self.ownVersion = ownVersion
         self.processIdentity = processIdentity
+        self.signaller = signaller
         self.pidFile = pidFile
         self.routedSessionsAlive = routedSessionsAlive
         self.canonicalHome = ModelProxyStatus.canonicalHome(home.path)
@@ -394,6 +447,19 @@ actor ModelProxySupervisor {
         guard let live else { return }
         queueForReap(pid: live.state.pid)
         self.live = nil
+        resetHangTracking()
+    }
+
+    /// Clears the hang-detection state — the counter and both signal
+    /// markers — for whatever proxy was `live` a moment ago. Called wherever
+    /// `live` stops naming that proxy (`dropLive`, the spawned-and-reaped
+    /// branch of `tick`) and wherever a fresh answer proves the current one
+    /// is not hung (a successful poll, a new adoption, a new spawn) — always
+    /// idempotent, so calling it defensively costs nothing.
+    private func resetHangTracking() {
+        consecutiveHungPolls = 0
+        hangTermSentAtFailureCount = nil
+        hangKillSent = false
     }
 
     /// One non-blocking `waitpid` per pid we are still waiting to collect.
@@ -954,6 +1020,10 @@ actor ModelProxySupervisor {
                 pid: status.pid, port: port,
                 version: status.version, adopted: !isOurChild),
             identityAnchor: status.processStartTime)
+        // A status answer just arrived from this exact pid, so whatever hang
+        // tracking a same-pid re-adoption (the `dropLive()` above was skipped)
+        // carried over is stale.
+        resetHangTracking()
         Self.logger.info(
             """
             \(verb, privacy: .public) the model proxy on port \
@@ -1123,6 +1193,7 @@ actor ModelProxySupervisor {
                 pid: pid, port: port, version: ownVersion ?? ModelProxyVersion.unknown,
                 adopted: false),
             identityAnchor: nil)
+        resetHangTracking()
         Self.logger.info(
             """
             spawned a model proxy for \(self.home.path, privacy: .public): pid \
@@ -1173,6 +1244,7 @@ actor ModelProxySupervisor {
                 """)
             forgetSpawned(pid: live.state.pid)
             self.live = nil
+            resetHangTracking()
             await respawn(port: live.state.port)
             return
         }
@@ -1220,6 +1292,10 @@ actor ModelProxySupervisor {
                     pid: live.state.pid, port: live.state.port, version: status.version,
                     adopted: live.state.adopted),
                 identityAnchor: status.processStartTime)
+            // A real answer just arrived, so whatever this proxy's hang
+            // tracking held is stale — including a SIGTERM already sent this
+            // episode, since it answered after all.
+            resetHangTracking()
             if draining {
                 // The drain reads the count off the poll that just answered
                 // rather than making a second call. A draining proxy is not
@@ -1259,7 +1335,60 @@ actor ModelProxySupervisor {
                     the model proxy on port \(live.state.port, privacy: .public) did not answer \
                     /tbd/status: \(error.localizedDescription, privacy: .public); keeping it
                     """)
+                // Alive by the process table and unresponsive is not a fact
+                // that check can ever produce on its own — it is what
+                // `consecutiveHungPolls` is counted for. Only when there is
+                // an anchor to protect against a recycled pid: with none yet
+                // (a just-spawned proxy's first few ticks) this daemon has
+                // nothing safe to compare a signal's target against, so
+                // nothing is counted or signalled until one exists.
+                if let anchor = live.identityAnchor {
+                    consecutiveHungPolls += 1
+                    await considerSignallingHungProxy(target: live, anchor: anchor)
+                }
             }
+        }
+    }
+
+    /// Escalates a proxy this daemon believes is hung — alive by the process
+    /// table, but has missed `hangSignalThreshold` consecutive `/tbd/status`
+    /// polls in a row — from SIGTERM to SIGKILL.
+    ///
+    /// **Identity is re-checked immediately before every signal.** `anchor` is
+    /// the start time the *last successful* poll recorded, which can be many
+    /// ticks stale by the time this threshold is crossed; re-verifying against
+    /// it here, right before `kill(2)`, is what keeps this from ever signalling
+    /// a pid the kernel has since recycled to an unrelated process — the same
+    /// discipline `AgentReaper`'s process-identity leg uses.
+    private func considerSignallingHungProxy(target: Live, anchor: Date) async {
+        guard consecutiveHungPolls >= Self.hangSignalThreshold else { return }
+        guard processIdentity.matches(pid: target.state.pid, startTime: anchor) else {
+            // Recycled or gone between the poll above and here. The death
+            // path this function's caller runs alongside (or the next tick's)
+            // is what handles that; there is nothing safe left to signal.
+            return
+        }
+        if let sentAt = hangTermSentAtFailureCount {
+            guard !hangKillSent else { return }
+            guard consecutiveHungPolls - sentAt >= Self.hangSignalKillDelay else { return }
+            Self.logger.error(
+                """
+                the model proxy (pid \(target.state.pid, privacy: .public)) on port \
+                \(target.state.port, privacy: .public) is still unresponsive \
+                \(Self.hangSignalKillDelay, privacy: .public) ticks after SIGTERM; sending SIGKILL
+                """)
+            signaller.forceKillProcessOnly(target.state.pid)
+            hangKillSent = true
+        } else {
+            Self.logger.error(
+                """
+                the model proxy (pid \(target.state.pid, privacy: .public)) on port \
+                \(target.state.port, privacy: .public) has missed \
+                \(consecutiveHungPolls, privacy: .public) consecutive status polls; treating it \
+                as hung and sending SIGTERM
+                """)
+            signaller.terminateProcessOnly(target.state.pid)
+            hangTermSentAtFailureCount = consecutiveHungPolls
         }
     }
 

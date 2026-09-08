@@ -476,6 +476,27 @@ owns the proxy's life on an injected clock:
   ask the old proxy to retire and spawn the new one; different rather than
   older, because `tbd update` keeps the previous app bundle as a rollback
   route.
+- **Liveness beyond the process table.** A proxy the process table still
+  confirms — same pid, same start time — can still be wedged: a deadlock, a
+  stuck syscall, a starved thread, none of which exits the process. Missed
+  status polls alone are not evidence of that, since an ordinary one is a
+  proxy that is merely slow; the watch instead counts *consecutive* misses
+  against the one live proxy, reset by any successful poll. Four in a row —
+  one minute at the 15-second watch interval — is treated as a hang: this
+  daemon sends SIGTERM, which the proxy handles as the same
+  close-the-listener-and-drain shutdown `POST /tbd/retire` triggers, and keeps
+  polling. Two ticks later, still unanswered, it escalates to SIGKILL. Once
+  the process is actually gone the ordinary death path takes over and
+  respawns it on the same port — the same path a pid the process table can no
+  longer confirm always took. Every signal re-verifies identity — pid and
+  start time — against the process table immediately beforehand, so a pid the
+  kernel has since recycled to an unrelated process is never signalled — that
+  case takes the ordinary death path immediately, on its first miss, with no
+  signal in between. The whole ladder — four misses, two more, one
+  tick to notice the kill landed, a respawn — finishes with comfortable room
+  under Claude's 183-second retry budget for a refused base URL, which is
+  what a route whose registration failed during the hang was otherwise
+  waiting on with no live proxy ever left to load it.
 - **Routes.** Write and register a route before a spawn; retire it when the
   terminal exits, hibernates by exiting, is archived, or is removed. A route
   registration in flight — the file is written but the running proxy has not
