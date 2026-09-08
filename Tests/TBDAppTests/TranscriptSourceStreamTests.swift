@@ -284,6 +284,38 @@ struct TranscriptSourceStreamTests {
         #expect(provisional?.text.isEmpty == true)
     }
 
+    /// The cap must never take the *newest* message, which is what makes it
+    /// inert while a single turn is the only thing resident.
+    ///
+    /// A long answer crosses the ceiling and then ends on the same tick its
+    /// `stop` lands. Dropping it there leaves nothing to fold, the fold's
+    /// "found nothing keeps the prior provisional" rule takes over, and the row
+    /// is stranded at `.streaming` holding a partial answer that nothing can
+    /// ever complete. This test fails on exactly that path: without the
+    /// exclusion the fold returns nil, `refreshStream` reports no news, and no
+    /// provisional exists at all.
+    @Test("a single message past the ceiling still completes with its full text")
+    func aLoneMessagePastTheCeilingSurvivesItsOwnStop() async throws {
+        let path = try Self.scratchDir() + "/stream.jsonl"
+        var lines: [ModelProxyStreamLine] = [.start(message: "msg_a", at: Self.started)]
+        for _ in 0..<10_001 {
+            lines.append(.text(message: "msg_a", index: 0, text: "x"))
+        }
+        lines.append(.stop(message: "msg_a"))
+        #expect(lines.count > 10_000, "the fixture must actually cross the ceiling")
+        try Self.write(try Self.lines(lines), to: path)
+
+        let source = TranscriptSource()
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: Self.t0))
+
+        let provisional = await source.provisional(sessionID: "s1")
+        #expect(provisional?.messageID == "msg_a")
+        #expect(provisional?.phase == .complete(at: Self.t0),
+                "the stop arrived in the same tick that crossed the ceiling")
+        #expect(provisional?.text.count == 10_001,
+                "no part of the only message on screen may be dropped")
+    }
+
     // MARK: - Transcript confirmation
 
     private static let assistantLine = #"{"type":"assistant","uuid":"a1","timestamp":"2026-08-26T10:00:00.000Z","message":{"role":"assistant","id":"msg_a","content":[{"type":"text","text":"hi"}]}}"#

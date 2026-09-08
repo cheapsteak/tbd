@@ -62,4 +62,31 @@ struct TranscriptPaneRegistrationTests {
         #expect(TranscriptPaneTransport.resolve(path: "/tmp/session.jsonl")
                 == .appSide(path: "/tmp/session.jsonl"))
     }
+
+    /// An empty stream path means "no stream file", the same as nil — otherwise
+    /// the registration would have every tick stat `""` forever.
+    @Test("an empty stream path registers as no stream path at all")
+    func emptyStreamPathIsCarriedAsNil() async {
+        let scheduler = TranscriptPollScheduler(source: TranscriptSource())
+        let pane = TranscriptPaneToken()
+        await TranscriptPaneRegistration.apply(
+            sessionID: "s1", path: "/tmp/whatever", streamPath: "",
+            tier: .foreground, token: pane, scheduler: scheduler)
+        #expect(await scheduler.registeredSessionIDs == ["s1"])
+        #expect(await scheduler.registeredStreamPath(sessionID: "s1") == nil)
+        await scheduler.deregister(sessionID: "s1", token: pane)
+    }
+
+    /// The other half, so the normalisation above cannot pass by dropping every
+    /// stream path.
+    @Test("a usable stream path is carried through to the registration")
+    func usableStreamPathIsCarried() async {
+        let scheduler = TranscriptPollScheduler(source: TranscriptSource())
+        let pane = TranscriptPaneToken()
+        await TranscriptPaneRegistration.apply(
+            sessionID: "s1", path: "/tmp/whatever", streamPath: "/tmp/stream.jsonl",
+            tier: .foreground, token: pane, scheduler: scheduler)
+        #expect(await scheduler.registeredStreamPath(sessionID: "s1") == "/tmp/stream.jsonl")
+        await scheduler.deregister(sessionID: "s1", token: pane)
+    }
 }

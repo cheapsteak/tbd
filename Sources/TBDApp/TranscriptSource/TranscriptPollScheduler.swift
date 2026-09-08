@@ -132,6 +132,16 @@ actor TranscriptPollScheduler {
         registrations[sessionID]?.holders.count ?? 0
     }
 
+    /// The model-proxy stream file `sessionID` is registered to tail, or nil
+    /// when it has none (or is not registered at all).
+    ///
+    /// Read-only, and here so a test can pin what a registration actually
+    /// carries rather than infer it from a tick's side effects. Nothing in the
+    /// app reads it.
+    func registeredStreamPath(sessionID: String) -> String? {
+        registrations[sessionID]?.streamPath
+    }
+
     /// The generation of the live registration for `sessionID`, or nil when it
     /// is not registered.
     ///

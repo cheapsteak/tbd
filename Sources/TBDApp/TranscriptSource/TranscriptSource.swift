@@ -282,8 +282,14 @@ actor TranscriptSource {
     func refreshStream(sessionID: String, path: String, now: Date) -> Bool {
         var entry = streamEntries[sessionID]
         if let existing = entry, existing.path != path {
-            // A different file under the same session id. Nothing read from the
-            // old one describes the new one.
+            // A different file under the same session id, so the *working* copy
+            // starts empty: nothing read from the old one describes the new one.
+            //
+            // The stored entry is deliberately not cleared here. If the new file
+            // cannot be stat'd or read below, this returns without writing
+            // anything back and the old path's provisional keeps the row — an
+            // unreadable file is no news, never "the answer was withdrawn". The
+            // switch takes effect on the first tick the new file can be read.
             entry = nil
         }
         var working = entry ?? StreamEntry(
@@ -362,21 +368,34 @@ actor TranscriptSource {
     ///
     /// Only a message that has already ended is dropped: an in-flight one is
     /// still being appended to, and removing its head would leave the fold
-    /// rendering a torn suffix of the very turn on screen. So a single
-    /// pathologically long turn is allowed to exceed the ceiling rather than be
-    /// mangled — the ceiling is a defence against accumulation across turns,
-    /// which is the shape that actually grows without bound.
+    /// rendering a torn suffix of the very turn on screen.
+    ///
+    /// The **newest** message is never dropped either, ended or not — which is
+    /// also what keeps the cap inert while a single message is the only one
+    /// resident. A long turn crosses the ceiling and then ends on the same tick
+    /// its `stop` lands; dropping it there would fold to nothing, and the stored
+    /// provisional would be stranded at `.streaming` holding a partial answer
+    /// that nothing can ever complete. So a single pathologically long turn is
+    /// allowed past the ceiling rather than be mangled or lost — the ceiling is
+    /// a defence against accumulation *across* turns, which is the shape that
+    /// actually grows without bound.
     private static func capped(_ lines: [ModelProxyStreamLine]) -> [ModelProxyStreamLine] {
         guard lines.count > maxStreamLines else { return lines }
         var kept = lines
-        while kept.count > maxStreamLines, let oldest = oldestEndedMessage(in: kept) {
+        while kept.count > maxStreamLines,
+              let newest = kept.last?.message,
+              let oldest = oldestEndedMessage(in: kept, excluding: newest) {
             kept.removeAll { $0.message == oldest }
         }
         return kept
     }
 
-    /// The id of the earliest-appearing message that has a terminal line.
-    private static func oldestEndedMessage(in lines: [ModelProxyStreamLine]) -> String? {
+    /// The id of the earliest-appearing message that has a terminal line,
+    /// ignoring `newest` — the message the last line belongs to, which the
+    /// caller must keep whether or not it has ended.
+    private static func oldestEndedMessage(
+        in lines: [ModelProxyStreamLine], excluding newest: String
+    ) -> String? {
         var ended: Set<String> = []
         for line in lines {
             switch line {
@@ -385,6 +404,7 @@ actor TranscriptSource {
             case .start, .block, .text: break
             }
         }
+        ended.remove(newest)
         guard !ended.isEmpty else { return nil }
         return lines.first { ended.contains($0.message) }?.message
     }

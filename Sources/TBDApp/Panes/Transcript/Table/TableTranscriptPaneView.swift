@@ -110,6 +110,19 @@ struct TableTranscriptPaneView: View {
         terminal?.claudeSessionID
     }
 
+    /// The identity of the current run of `pollLoop`. Every input the loop
+    /// reads once lives here, so a change to any of them restarts it; see
+    /// `TaskKey`.
+    private var taskKey: TaskKey {
+        TaskKey.resolve(
+            terminalID: terminalID,
+            sessionID: currentSessionID,
+            retryToken: retryToken,
+            transcriptPath: terminal?.transcriptPath,
+            streamingEnabled: appState.transcriptStreamingEnabled,
+            terminalStreamPath: terminal?.transcriptStreamPath)
+    }
+
     private var messages: [TranscriptItem] {
         guard let sid = currentSessionID else { return [] }
         return appState.sessionTranscripts[sid] ?? []
@@ -132,10 +145,7 @@ struct TableTranscriptPaneView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: TaskKey(
-            terminalID: terminalID, sessionID: currentSessionID, retryToken: retryToken,
-            hasTranscriptPath: !(terminal?.transcriptPath ?? "").isEmpty
-        )) {
+        .task(id: taskKey) {
             await pollLoop()
         }
         .onAppear { recordWatchdogContext(count: displayedMessages.count) }
@@ -446,14 +456,15 @@ struct TableTranscriptPaneView: View {
                 state.touchSessionTranscript(sessionID)
             }
         }
-        // The model-proxy stream file this session's terminal was spawned
-        // with, when the daemon reports streaming as effective. Read once: the
-        // path is stamped at spawn and never changes, so a terminal either has
-        // one for its whole life or never gets one, and re-reading it each tier
-        // change would only risk minting a generation for no reason.
-        let streamPath = appState.transcriptStreamingEnabled
-            ? terminal?.transcriptStreamPath
-            : nil
+        // The model-proxy stream file this session's terminal was spawned with,
+        // when the daemon reports streaming as effective. Read once, and taken
+        // from `taskKey` so that the value this loop runs on is by construction
+        // the value its `.task(id:)` was keyed on: the path itself is stamped at
+        // spawn and never changes, but the *flag* in front of it can be flipped
+        // in Settings at any moment, and a flip restarts this loop rather than
+        // being noticed mid-run. Re-reading it on every tier change would only
+        // risk minting a generation for no reason.
+        let streamPath = taskKey.streamPath
 
         // One token per run of this task, so the hold belongs to *this* pane.
         // The deregistration at the bottom happens whenever this task notices
@@ -657,11 +668,47 @@ struct TableTranscriptPaneView: View {
 /// moment the path lands. Only *whether* a path exists is part of the key, never
 /// the path string, so a session's path value can churn without restarting the
 /// loop.
-private struct TaskKey: Equatable {
+/// The identity of one run of the pane's poll loop. `.task(id:)` restarts the
+/// loop whenever this changes, so every input the loop reads *once* has to be
+/// part of it — otherwise the loop keeps running against a stale reading of it
+/// and only an unrelated remount repairs the pane.
+///
+/// `streamPath` is here for exactly that reason: `appSideLoop` resolves the
+/// model-proxy stream file once, at the top, and flipping the Settings toggle
+/// changes what that resolution yields. Without it in the key, turning
+/// "Stream assistant text into the transcript" on would do nothing for a pane
+/// already on screen — which is the direction the soak depends on. Restarting
+/// is cheap and safe here: `TranscriptPollScheduler.register` is idempotent per
+/// token, and it already mints a fresh generation when a path changes.
+///
+/// Internal, not private, so the resolution can be asserted directly rather
+/// than only through a SwiftUI view tree — the same shape, and for the same
+/// reason, as `TranscriptPaneTransport.resolve`.
+struct TaskKey: Equatable {
     let terminalID: UUID
     let sessionID: String?
     let retryToken: Int
     let hasTranscriptPath: Bool
+    /// The stream file this run of the loop will register, or nil when the
+    /// daemon reports streaming off or the terminal was spawned without one.
+    let streamPath: String?
+
+    static func resolve(
+        terminalID: UUID,
+        sessionID: String?,
+        retryToken: Int,
+        transcriptPath: String?,
+        streamingEnabled: Bool,
+        terminalStreamPath: String?
+    ) -> TaskKey {
+        let stream = terminalStreamPath ?? ""
+        return TaskKey(
+            terminalID: terminalID,
+            sessionID: sessionID,
+            retryToken: retryToken,
+            hasTranscriptPath: !(transcriptPath ?? "").isEmpty,
+            streamPath: streamingEnabled && !stream.isEmpty ? stream : nil)
+    }
 }
 
 /// SwiftUI identity for the table transcript representable. Composes the terminal
