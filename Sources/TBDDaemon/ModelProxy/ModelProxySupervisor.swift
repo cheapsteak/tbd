@@ -1384,8 +1384,8 @@ actor ModelProxySupervisor {
                 """
                 the model proxy (pid \(target.state.pid, privacy: .public)) on port \
                 \(target.state.port, privacy: .public) has missed \
-                \(consecutiveHungPolls, privacy: .public) consecutive status polls; treating it \
-                as hung and sending SIGTERM
+                \(self.consecutiveHungPolls, privacy: .public) consecutive status polls; treating \
+                it as hung and sending SIGTERM
                 """)
             signaller.terminateProcessOnly(target.state.pid)
             hangTermSentAtFailureCount = consecutiveHungPolls
