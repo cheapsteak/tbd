@@ -105,6 +105,10 @@ final class ProxyServer: Sendable {
     /// it.
     var streamsInFlight: Int { inFlight.value }
 
+    /// When a daemon last drove a `/tbd/…` verb. The retention watch samples
+    /// this and `streamsInFlight` together (spec, "Retention").
+    var lastDaemonContact: Date { control.lastDaemonContact }
+
     /// Binds loopback and returns the port actually bound, which is the point
     /// of the call when `port` was zero.
     @discardableResult

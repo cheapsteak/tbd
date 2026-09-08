@@ -57,6 +57,10 @@ final class ControlEndpoints: Sendable {
     static let statusUnreadableBody = #"{"error":"status could not be encoded"}"#
 
     private let routes: RouteTable
+    /// When a daemon last spoke to this proxy. Every `/tbd/…` call from
+    /// loopback stamps it, and the retention watch reads it; see
+    /// `LastDaemonContact`.
+    private let contact: LastDaemonContact
     private let status: @Sendable () -> ModelProxyStatus
     /// Called once the retire drain finishes. Production passes `exit(0)`; a
     /// test passes a recorder, which is the only reason the process's own exit
@@ -78,11 +82,13 @@ final class ControlEndpoints: Sendable {
         onRetire: @escaping @Sendable () -> Void,
         closeListener: @escaping @Sendable () async -> Void,
         streamsInFlight: @escaping @Sendable () -> Int,
+        contact: LastDaemonContact = LastDaemonContact(),
         pollInterval: Duration = .milliseconds(250),
         drainCap: Duration = .seconds(600),
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.routes = routes
+        self.contact = contact
         self.status = status
         self.onRetire = onRetire
         self.closeListener = closeListener
@@ -91,6 +97,10 @@ final class ControlEndpoints: Sendable {
         self.drainCap = drainCap
         self.clock = clock
     }
+
+    /// When a daemon last drove one of these verbs, readable without awaiting
+    /// anything — the retention watch samples it on a timer.
+    var lastDaemonContact: Date { contact.value }
 
     // MARK: - Dispatch
 
@@ -110,6 +120,14 @@ final class ControlEndpoints: Sendable {
             Self.log.error("refused a control request from a non-loopback address")
             return Response(.forbidden, Self.forbiddenBody)
         }
+
+        // Stamped for every `/tbd/…` verb, including the ones that end in 404
+        // or 405: what the retention watch asks is "has anybody been
+        // supervising this proxy", and a daemon that asked for an endpoint
+        // this image does not have is still a daemon that is there. Stamped
+        // after the loopback guard and not before, because a refused caller is
+        // by definition not the daemon.
+        contact.stamp()
 
         let verb = method.uppercased()
         switch path {
@@ -331,6 +349,39 @@ final class ControlEndpoints: Sendable {
     }
 
     private static let loopbackV6: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+}
+
+/// The moment a daemon last spoke to this proxy.
+///
+/// Seeded at construction rather than at the epoch: a proxy that has never
+/// been contacted has still only just started, and seeding at zero would make
+/// every fresh proxy instantly eligible to retire itself. The 24-hour window
+/// (spec, "Retention") therefore runs from start-up until the first `/tbd/…`
+/// call and from that call afterwards.
+///
+/// A `Date` rather than a `Clock` instant, per the repo's clock/date split:
+/// this is *data* being compared against a wall-clock window, while the watch's
+/// polling interval is *behavior* and takes the injected `Clock`. The `now`
+/// seam is here so a test can move the stamp without moving the machine.
+final class LastDaemonContact: Sendable {
+    private let lock = NSLock()
+    private let now: @Sendable () -> Date
+    private nonisolated(unsafe) var stamped: Date
+
+    init(now: @escaping @Sendable () -> Date = { Date() }) {
+        self.now = now
+        self.stamped = now()
+    }
+
+    var value: Date { lock.withLock { stamped } }
+
+    func stamp() {
+        // Read the clock outside the lock: `now` is injected, and a test's
+        // closure has no business running under a lock this process's control
+        // path also takes.
+        let moment = now()
+        lock.withLock { stamped = moment }
+    }
 }
 
 /// A one-shot claim. The first caller wins and every later one is told so.

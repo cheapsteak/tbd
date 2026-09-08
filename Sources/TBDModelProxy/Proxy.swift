@@ -38,6 +38,20 @@ enum TBDModelProxyExit {
     /// probes `GET /tbd/status` on that port, adopts a TBD proxy that answers,
     /// and mints a fresh port when anything else holds it.
     static let bindFailed: Int32 = 3
+    /// Another live proxy already holds `proxy.lock` for this home. Its own
+    /// code rather than a bind failure, because the two call for opposite
+    /// responses: a bind failure is a port to probe and possibly re-mint,
+    /// while this says a proxy for this home is already running and the right
+    /// move is to leave it alone. Only reachable when no `--lock-fd` was
+    /// inherited — a spawner that took the lock itself has already learned
+    /// this before it spawned anything.
+    static let lockHeld: Int32 = 4
+    /// The home the proxy was pointed at could not be made usable — its
+    /// `proxy/`, `proxy/routes/` or `streams/` directory could not be created,
+    /// or its lock file could not be opened for a reason other than
+    /// contention. Retrying the same command line will fail the same way until
+    /// somebody fixes the filesystem, so it is deliberately not `bindFailed`.
+    static let homeUnusable: Int32 = 5
 }
 
 /// What the daemon puts on the proxy's command line.
@@ -152,17 +166,94 @@ enum TBDModelProxyMain {
             lock-fd \(arguments.lockDescriptor.map(String.init) ?? "none", privacy: .public)
             """)
 
-        // Every path this process owns hangs off the home it was given, so the
-        // one `TBD_HOME` override below is all it takes to give a test — or a
-        // second checkout — its own proxy with no injection seam added for the
-        // purpose.
-        let homeEnvironment = ["TBD_HOME": arguments.home]
-        let routes = RouteTable(
-            routesDir: TBDConstants.modelProxyRoutesDir(environment: homeEnvironment),
-            streamsDir: TBDConstants.streamsDir(environment: homeEnvironment))
+        // 1. Session first, disposition second — the holder's order, for the
+        //    holder's reasons (`Sources/TBDHolder/Holder.swift`). `setsid`
+        //    puts this process in a session of its own, so a Ctrl-C aimed at
+        //    whatever spawned it cannot reach it and it orphans to launchd
+        //    rather than dying with its spawner. `SIGHUP` ignored covers the
+        //    controlling terminal going away; `SIGPIPE` ignored turns a write
+        //    to a closed connection into an `EPIPE` the forwarder handles
+        //    instead of a signal that kills a proxy serving other sessions.
+        //
+        //    EPERM here means we are already a process-group leader — a proxy
+        //    started from a shell for diagnosis — which is not a reason to
+        //    refuse to run.
+        if setsid() == -1 {
+            ProxyLog.main.debug(
+                "setsid failed (errno \(errno, privacy: .public)); already a session leader")
+        }
+        signal(SIGHUP, SIG_IGN)
+        signal(SIGPIPE, SIG_IGN)
 
-        let tee = StreamTee(
-            streamsDir: TBDConstants.streamsDir(environment: homeEnvironment))
+        // 2. Termination is armed before anything that can block, so a SIGTERM
+        //    arriving during start-up is honoured rather than killing the
+        //    process by default action. `DispatchSource` rather than
+        //    `signal(2)`: the handler then runs on a queue instead of in
+        //    signal context and may do real work. The disposition must be
+        //    ignored first, or the default action wins the race.
+        let stopped = ProxyStopSignal()
+        signal(SIGTERM, SIG_IGN)
+        signal(SIGINT, SIG_IGN)
+        let sources = [SIGTERM, SIGINT].map { number -> DispatchSourceSignal in
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
+            source.setEventHandler {
+                ProxyLog.main.debug("received signal \(number, privacy: .public), stopping")
+                stopped.stop(reason: "signal \(number)")
+            }
+            source.resume()
+            return source
+        }
+
+        // Every path this process owns hangs off the home it was given, so the
+        // one `TBD_HOME` override inside `ProxyPaths` is all it takes to give a
+        // test — or a second checkout — its own proxy with no injection seam
+        // added for the purpose.
+        let paths = ProxyPaths(home: arguments.home)
+        do {
+            try paths.create()
+        } catch {
+            FileHandle.standardError.write(
+                Data(
+                    "TBDModelProxy: could not prepare \(arguments.home): "
+                        + "\(error.localizedDescription)\n".utf8))
+            exit(TBDModelProxyExit.homeUnusable)
+        }
+
+        // 3. The lock, before any bind, is what makes "a proxy for this home is
+        //    already running" answerable without connecting to it.
+        //
+        //    Two ways to hold it, one meaning. A `--lock-fd` was taken by the
+        //    spawner and rode in on a `dup2` file action, which is proof of
+        //    ownership precisely because a descriptor cannot be inherited by
+        //    accident; it is kept open, untouched, for this process's whole
+        //    life, and closing it would drop the lock. Without one — a test, a
+        //    proxy started by hand — this process takes the lock itself. A
+        //    second proxy on one home fails here either way.
+        var ownLock: HolderLock? = nil
+        if let inherited = arguments.lockDescriptor {
+            ProxyLog.main.debug(
+                "holding the inherited lock descriptor \(inherited, privacy: .public)")
+        } else {
+            do {
+                ownLock = try HolderLock.acquire(path: paths.lockPath)
+            } catch HolderLock.Error.alreadyHeld(let path) {
+                FileHandle.standardError.write(
+                    Data("TBDModelProxy: another proxy already holds \(path)\n".utf8))
+                exit(TBDModelProxyExit.lockHeld)
+            } catch {
+                FileHandle.standardError.write(
+                    Data("TBDModelProxy: \(error.localizedDescription)\n".utf8))
+                exit(TBDModelProxyExit.homeUnusable)
+            }
+        }
+        // Read once, and named, so the lock is visibly still owned past the
+        // branch that took it: the descriptor stays open until `exit`, because
+        // closing it is what would release the lock.
+        let heldDescriptor: Int32 = ownLock?.fileDescriptor ?? arguments.lockDescriptor ?? -1
+        ProxyLog.main.debug("lock held on descriptor \(heldDescriptor, privacy: .public)")
+
+        let routes = RouteTable(routesDir: paths.routesDir, streamsDir: paths.streamsDir)
+        let tee = StreamTee(streamsDir: paths.streamsDir)
 
         // The port the kernel actually assigned, which `--port 0` does not
         // know until the bind below returns. Status must report the port a
@@ -191,11 +282,11 @@ enum TBDModelProxyMain {
                     streamsInFlight: 0, routeCount: 0)
             },
             // Reached only after `POST /tbd/retire` has closed the listener and
-            // drained the streams that were still running on it.
-            onRetire: {
-                ProxyLog.main.debug("retired; exiting")
-                exit(0)
-            })
+            // drained the streams that were still running on it. It joins the
+            // one shutdown path rather than calling `exit` itself, so the pid
+            // file is reclaimed the same way on every route out of this
+            // process.
+            onRetire: { stopped.stop(reason: "retire") })
 
         // `run()` is synchronous and returns `Never`, so the async start is
         // driven to completion here rather than escaping into a task nobody
@@ -224,30 +315,39 @@ enum TBDModelProxyMain {
             boundPort.value = port
             ProxyLog.main.debug("bound port \(port, privacy: .public)")
         case .failure(let error):
+            // Deliberately no pid file on this path: a reader who finds one is
+            // entitled to assume the port in it is bound.
             FileHandle.standardError.write(
                 Data("TBDModelProxy: bind failed: \(error.localizedDescription)\n".utf8))
             exit(TBDModelProxyExit.bindFailed)
         }
 
-        // Signals are taken with `DispatchSource` rather than `signal(2)`, so
-        // the handler runs on a queue instead of in signal context and may do
-        // real work — closing the listener and draining in-flight streams once
-        // there is something to drain. The disposition must be ignored first,
-        // or the default action kills the process before the source fires.
-        let stopped = DispatchSemaphore(value: 0)
-        signal(SIGTERM, SIG_IGN)
-        signal(SIGINT, SIG_IGN)
-        let sources = [SIGTERM, SIGINT].map { number -> DispatchSourceSignal in
-            let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
-            source.setEventHandler {
-                ProxyLog.main.debug("received signal \(number, privacy: .public), stopping")
-                stopped.signal()
-            }
-            source.resume()
-            return source
+        // 4. The pid file, after the bind, so the port in it is a port that is
+        //    actually listening. A failure here is logged and survived: the
+        //    proxy is already serving, and the daemon finds it by the port in
+        //    its config row rather than by this file.
+        let pid = getpid()
+        do {
+            try ProxyPIDFile.write(path: paths.pidPath, pid: pid, port: boundPort.value)
+        } catch {
+            ProxyLog.main.error(
+                """
+                could not write \(paths.pidPath, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
         }
 
-        stopped.wait()
+        // 5. The retention watch. It samples on the clock and joins the same
+        //    shutdown path as a signal, so a self-retiring proxy reclaims its
+        //    pid file exactly as a TERMed one does.
+        let retireWatch = ProxyRetireWatch(
+            lastDaemonContact: { server.lastDaemonContact },
+            streamsInFlight: { server.streamsInFlight },
+            onRetire: { stopped.stop(reason: "unattended for 24h with no stream in flight") })
+        let watchTask = Task { await retireWatch.run() }
+
+        let reason = stopped.wait()
+        watchTask.cancel()
         // Keeps the sources alive until the wait returns; a cancelled source
         // stops delivering, and a released one is cancelled.
         for source in sources { source.cancel() }
@@ -258,20 +358,233 @@ enum TBDModelProxyMain {
             stopOutcome.finish(.success(()))
         }
         _ = stopOutcome.wait()
+
+        // Only while it is still ours. A retiring proxy exits *after* its
+        // successor has bound the port and written its own pid file, and an
+        // unconditional unlink here would leave that live successor with no
+        // rendezvous.
+        let removed = ProxyPIDFile.removeIfOwned(path: paths.pidPath, pid: pid)
+        ProxyLog.main.debug(
+            """
+            exiting (\(reason, privacy: .public)); \
+            pid file \(removed ? "removed" : "left in place", privacy: .public)
+            """)
         exit(0)
+    }
+}
+
+/// The one way out of `run()`: whichever of a signal, a `POST /tbd/retire`
+/// drain, or the retention watch gets there first wakes the main thread and
+/// says why.
+///
+/// A semaphore plus a one-shot reason rather than a bare `DispatchSemaphore`,
+/// because three unrelated paths reach it and the log line that follows is the
+/// only place a reader learns which one did. Extra `stop` calls are counted by
+/// the semaphore and ignored by the reason, which is what makes it safe for a
+/// SIGTERM to land while a retire drain is already finishing.
+final class ProxyStopSignal: Sendable {
+    private let ready = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private nonisolated(unsafe) var reason: String?
+
+    func stop(reason: String) {
+        lock.withLock {
+            guard self.reason == nil else { return }
+            self.reason = reason
+        }
+        ready.signal()
+    }
+
+    /// Blocks until the first `stop` and returns its reason.
+    func wait() -> String {
+        ready.wait()
+        return lock.withLock { reason } ?? "unknown"
     }
 }
 
 /// The proxy's build identity, as `GET /tbd/status` reports it.
 ///
-/// A6 supplies the real identity — the daemon compares it against its own
-/// build to decide whether a running proxy is one of its own or a stale image
-/// from an older install. Until then it is a constant, which is honest: every
-/// proxy answering "dev" is a proxy the version rule cannot tell apart, and
-/// that is exactly the state of things before A6 lands.
+/// The daemon compares this against the identity it computes for the sibling
+/// `TBDModelProxy` binary it would spawn, and retires a proxy whose version
+/// *differs* (spec, "Supervisor"). The formula lives in `TBDShared` so both
+/// sides compute the same string — see `ModelProxyVersion`.
+///
+/// Computed once, at first use, from the executable this process is running.
+/// Once rather than per request because the file cannot change identity under
+/// a running image in any way this process could act on: a rebuild replaces
+/// the file, and the process keeps the inode it was exec'd from.
 enum TBDModelProxyVersion {
-    // A6 supplies the real identity.
-    static let current = "dev"
+    static let current: String = ModelProxyVersion.currentExecutable()
+}
+
+// MARK: - The home's directories
+
+/// Every path a proxy owns, derived from the home it was given.
+///
+/// The single `TBD_HOME` override is the whole seam: `TBDConstants` composes
+/// all of these from it, so a test — or a second checkout — gets its own proxy
+/// with nothing injected for the purpose, and no path here is hand-built from
+/// `$HOME`.
+struct ProxyPaths: Sendable {
+    let proxyDir: URL
+    let routesDir: URL
+    let streamsDir: URL
+    let lockPath: String
+    let pidPath: String
+
+    init(home: String) {
+        let environment = ["TBD_HOME": home]
+        proxyDir = TBDConstants.modelProxyDir(environment: environment)
+        routesDir = TBDConstants.modelProxyRoutesDir(environment: environment)
+        streamsDir = TBDConstants.streamsDir(environment: environment)
+        lockPath = TBDConstants.modelProxyLockPath(environment: environment)
+        pidPath = TBDConstants.modelProxyPIDPath(environment: environment)
+    }
+
+    /// Creates the three directories at mode 0700, before anything binds.
+    ///
+    /// 0700 and not the umask's answer: `routes/` holds forwarding tokens and
+    /// `streams/` holds the assistant's own words, and both sit in a home the
+    /// user owns on a machine other accounts may share. The mode is also
+    /// *re-applied* to a directory that already existed, so a home created by
+    /// an older image — or by a umask that let group bits through — is
+    /// tightened rather than trusted.
+    func create(fileManager: FileManager = .default) throws {
+        for directory in [proxyDir, routesDir, streamsDir] {
+            try fileManager.createDirectory(
+                at: directory, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            // Best effort: a directory somebody else owns cannot be chmod'ed,
+            // and refusing to start over a mode is worse than starting.
+            try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        }
+    }
+}
+
+// MARK: - The pid file
+
+/// `<home>/proxy/proxy.pid`: `<pid>\n<port>\n`, written after the bind.
+///
+/// After, so that a reader who sees the file can trust the port — the whole
+/// point of the file for a human debugging a home, since the daemon reads the
+/// port out of its config row rather than from here.
+enum ProxyPIDFile {
+    static func contents(pid: Int32, port: Int) -> String {
+        "\(pid)\n\(port)\n"
+    }
+
+    /// Written temp-and-rename (`Data`'s `.atomic`), so a reader never sees a
+    /// half-written file and a crash mid-write leaves the previous one intact.
+    static func write(path: String, pid: Int32, port: Int) throws {
+        try Data(contents(pid: pid, port: port).utf8)
+            .write(to: URL(fileURLWithPath: path), options: [.atomic])
+    }
+
+    /// The pid a pid file's first line names, or nil for anything else.
+    static func pid(inContentsOf path: String) -> Int32? {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8),
+            let first = text.split(separator: "\n").first
+        else {
+            return nil
+        }
+        return Int32(first.trimmingCharacters(in: .whitespaces))
+    }
+
+    /// Unlinks the pid file, but only while it still names `pid`.
+    ///
+    /// Load-bearing on the retire path and not defensive tidiness: a retiring
+    /// proxy answers, drains, and exits *after* its successor has already
+    /// bound the port and written its own pid file. An unconditional unlink on
+    /// the way out would delete the successor's file and leave a live proxy
+    /// with no rendezvous.
+    @discardableResult
+    static func removeIfOwned(path: String, pid: Int32) -> Bool {
+        guard self.pid(inContentsOf: path) == pid else { return false }
+        return unlink(path) == 0
+    }
+}
+
+// MARK: - Retention
+
+/// Retires a proxy nobody is supervising (spec, "Retention").
+///
+/// A proxy outlives the daemon that spawned it deliberately — that is the
+/// point of a separate process — so nothing else would ever reclaim one whose
+/// TBD install was deleted, whose home was abandoned, or whose daemon simply
+/// never came back. The watch samples two facts on a timer and retires only
+/// when both hold: no daemon has driven a `/tbd/…` verb inside the window, and
+/// no stream is in flight. The second is what keeps a long turn from being cut
+/// by a timer.
+///
+/// **Why the interval is a `Clock` and the window is a `Date` span.** The
+/// repo's split: `Duration` is behavior, `Date` is data. The 60-second pacing
+/// is this loop's own behavior and rides the injected clock, so a test crosses
+/// it in a couple of advances. The 24 hours is a span between two wall-clock
+/// moments — one of them stamped by an inbound request — and comparing it on a
+/// monotonic clock would answer the wrong question after a laptop sleeps.
+struct ProxyRetireWatch: Sendable {
+    static let log = Logger(subsystem: "com.tbd.modelproxy", category: "retention")
+
+    /// Production pacing. Sixty seconds against a 24-hour window is 1440
+    /// samples over the window — the cost of a wake-up per minute buys a
+    /// bounded overshoot rather than precision anybody needs.
+    static let defaultCheckInterval: Duration = .seconds(60)
+    static let defaultUnattendedAfter: TimeInterval = 24 * 60 * 60
+
+    private let lastDaemonContact: @Sendable () -> Date
+    private let streamsInFlight: @Sendable () -> Int
+    private let onRetire: @Sendable () -> Void
+    private let checkInterval: Duration
+    private let unattendedAfter: TimeInterval
+    private let now: @Sendable () -> Date
+    private let clock: any Clock<Duration>
+
+    init(
+        lastDaemonContact: @escaping @Sendable () -> Date,
+        streamsInFlight: @escaping @Sendable () -> Int,
+        onRetire: @escaping @Sendable () -> Void,
+        checkInterval: Duration = ProxyRetireWatch.defaultCheckInterval,
+        unattendedAfter: TimeInterval = ProxyRetireWatch.defaultUnattendedAfter,
+        now: @escaping @Sendable () -> Date = { Date() },
+        clock: any Clock<Duration> = ContinuousClock()
+    ) {
+        self.lastDaemonContact = lastDaemonContact
+        self.streamsInFlight = streamsInFlight
+        self.onRetire = onRetire
+        self.checkInterval = checkInterval
+        self.unattendedAfter = unattendedAfter
+        self.now = now
+        self.clock = clock
+    }
+
+    /// One sample, without the loop around it.
+    func isUnattendedAndIdle(at moment: Date) -> Bool {
+        guard streamsInFlight() == 0 else { return false }
+        return moment.timeIntervalSince(lastDaemonContact()) >= unattendedAfter
+    }
+
+    /// Samples until one comes back true, then hands over to `onRetire` once
+    /// and returns. Sleeps first, so a proxy cannot retire before it has
+    /// served anything.
+    func run() async {
+        while !Task.isCancelled {
+            do {
+                try await clock.sleep(for: checkInterval)
+            } catch {
+                return
+            }
+            let moment = now()
+            guard isUnattendedAndIdle(at: moment) else { continue }
+            let unattendedFor = Int(moment.timeIntervalSince(lastDaemonContact()))
+            Self.log.info(
+                """
+                retiring: no daemon has driven a control endpoint for \
+                \(unattendedFor, privacy: .public)s and no stream is in flight
+                """)
+            onRetire()
+            return
+        }
+    }
 }
 
 /// The port the listener actually bound.

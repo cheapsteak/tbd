@@ -410,6 +410,10 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
+                // `TestClock`, for the retention watch. Its production window
+                // is 24 hours, and the only honest way to cross one in a test
+                // is virtual time.
+                .product(name: "Clocks", package: "swift-clocks"),
             ]
         ),
     ]
