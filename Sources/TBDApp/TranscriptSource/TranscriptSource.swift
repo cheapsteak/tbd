@@ -395,8 +395,8 @@ actor TranscriptSource {
     /// still being appended to, and removing its head would leave the fold
     /// rendering a torn suffix of the very turn on screen.
     ///
-    /// The **newest** message is never dropped either, ended or not — which is
-    /// also what keeps the cap inert while a single message is the only one
+    /// The **most recent** message is never dropped either, ended or not — which
+    /// is also what keeps the cap inert while a single message is the only one
     /// resident. A long turn crosses the ceiling and then ends on the same tick
     /// its `stop` lands; dropping it there would fold to nothing, and the stored
     /// provisional would be stranded at `.streaming` holding a partial answer
@@ -404,11 +404,21 @@ actor TranscriptSource {
     /// allowed past the ceiling rather than be mangled or lost — the ceiling is
     /// a defence against accumulation *across* turns, which is the shape that
     /// actually grows without bound.
+    ///
+    /// "Most recent" is `StreamFileReader.mostRecentMessageID` — the message
+    /// whose first line appears latest, the same ranking the fold picks with —
+    /// and not the owner of the last retained line. Those diverge exactly when
+    /// two parent requests interleave: an older message that keeps appending
+    /// after a newer one has started and stopped owns the last line, so ranking
+    /// by it protects the *older* turn and evicts every line of the newer one,
+    /// which is the message the fold is rendering. Ranking by first-line
+    /// position instead means eviction can only ever move the row forward to a
+    /// later turn, never rewind it to an earlier one.
     private static func capped(_ lines: [ModelProxyStreamLine]) -> [ModelProxyStreamLine] {
         guard lines.count > maxStreamLines else { return lines }
         var kept = lines
         while kept.count > maxStreamLines,
-              let newest = kept.last?.message,
+              let newest = StreamFileReader.mostRecentMessageID(in: kept),
               let oldest = oldestEndedMessage(in: kept, excluding: newest) {
             kept.removeAll { $0.message == oldest }
         }
@@ -416,8 +426,8 @@ actor TranscriptSource {
     }
 
     /// The id of the earliest-appearing message that has a terminal line,
-    /// ignoring `newest` — the message the last line belongs to, which the
-    /// caller must keep whether or not it has ended.
+    /// ignoring `newest` — the most recent message by first-line position,
+    /// which the caller must keep whether or not it has ended.
     private static func oldestEndedMessage(
         in lines: [ModelProxyStreamLine], excluding newest: String
     ) -> String? {

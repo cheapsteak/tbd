@@ -329,6 +329,81 @@ struct TranscriptSourceStreamTests {
                 "no part of the only message on screen may be dropped")
     }
 
+    /// Two parent requests in flight: the *older* message owns the last line
+    /// while a *newer* one holds the row.
+    ///
+    /// `msg_a` starts first and keeps appending; `msg_b` starts after it, says
+    /// its piece and stops; then `msg_a` pushes the file past the ceiling. The
+    /// fold renders `msg_b` — the most recent message with text, ranked by
+    /// where its first line appears — so the cap must not evict it.
+    ///
+    /// What discriminates: under the old `kept.last?.message` rule the
+    /// protected message is `msg_a`, the owner of the last line, which leaves
+    /// the already-ended `msg_b` as the oldest evictable message. Every one of
+    /// its lines is dropped and the fold falls back to `msg_a` — the row
+    /// rewinds to the earlier turn. This test then reads `msg_a`, not `msg_b`.
+    @Test("the cap keeps the newer of two interleaved messages, not the last line's owner")
+    func aNewerInterleavedMessageSurvivesTheCeiling() async throws {
+        let path = try Self.scratchDir() + "/stream.jsonl"
+        var lines: [ModelProxyStreamLine] = [
+            .start(message: "msg_a", at: Self.started),
+            .text(message: "msg_a", index: 0, text: "the older answer"),
+            .start(message: "msg_b", at: Self.started.addingTimeInterval(1)),
+            .text(message: "msg_b", index: 0, text: "the newer answer"),
+            .stop(message: "msg_b"),
+        ]
+        for _ in 0..<10_000 {
+            lines.append(.text(message: "msg_a", index: 0, text: "x"))
+        }
+        #expect(lines.count > 10_000, "the fixture must actually cross the ceiling")
+        try Self.write(try Self.lines(lines), to: path)
+
+        let source = TranscriptSource()
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: Self.t0))
+
+        let provisional = await source.provisional(sessionID: "s1")
+        #expect(provisional?.messageID == "msg_b",
+                "the cap may not evict the message the fold renders")
+        #expect(provisional?.text == "the newer answer",
+                "every line of the newer message must survive the eviction")
+        #expect(provisional?.phase == .complete(at: Self.t0))
+    }
+
+    /// The same interleaving with the names the other way round, and an
+    /// `aborted` end rather than a `stop`: `msg_b` is the one that starts first
+    /// and keeps appending, `msg_a` is the newer message that ends.
+    ///
+    /// What discriminates: as above, the old rule protects the last line's
+    /// owner `msg_b` and evicts the newer `msg_a` wholesale, so this test reads
+    /// `msg_b` and the older text. Ranking by first-line position protects
+    /// `msg_a`, and with nothing else ended the cap drops nothing at all.
+    @Test("the mirrored interleaving keeps the newer message too, aborted or not")
+    func aNewerInterleavedAbortedMessageSurvivesTheCeiling() async throws {
+        let path = try Self.scratchDir() + "/stream.jsonl"
+        var lines: [ModelProxyStreamLine] = [
+            .start(message: "msg_b", at: Self.started),
+            .text(message: "msg_b", index: 0, text: "the older answer"),
+            .start(message: "msg_a", at: Self.started.addingTimeInterval(1)),
+            .text(message: "msg_a", index: 0, text: "the newer answer"),
+            .aborted(message: "msg_a", reason: "the proxy died mid-turn"),
+        ]
+        for _ in 0..<10_000 {
+            lines.append(.text(message: "msg_b", index: 0, text: "x"))
+        }
+        #expect(lines.count > 10_000, "the fixture must actually cross the ceiling")
+        try Self.write(try Self.lines(lines), to: path)
+
+        let source = TranscriptSource()
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: Self.t0))
+
+        let provisional = await source.provisional(sessionID: "s1")
+        #expect(provisional?.messageID == "msg_a",
+                "the cap may not evict the message the fold renders")
+        #expect(provisional?.text == "the newer answer")
+        #expect(provisional?.phase == .aborted(reason: "the proxy died mid-turn"),
+                "an aborted message counts as ended, and is still the newest")
+    }
+
     // MARK: - Chunk-split equivalence
 
     /// Three messages: two that finished and one that has only started, with
