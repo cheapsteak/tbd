@@ -316,30 +316,67 @@ struct ModelProxySupervisorTests {
     /// transiently, so the test must advance through the first backoff step for
     /// the second attempt to land. That is what makes the backoff part of the
     /// assertion rather than an unexercised parameter.
+    ///
+    /// **It is also the suite's only two-hop test, and that is why it runs on
+    /// `EventDrivenTestClock` while its siblings stay on `TestClock`.** The
+    /// second sleep is armed *inside* `respawn`, after a spawn attempt that has
+    /// already failed — a fire-then-re-arm, which `Tests/CLAUDE.md`
+    /// ("Re-arming") names as the sharp edge of every clock handshake. On
+    /// `TestClock` the re-arm can only be observed by polling
+    /// `checkSuspension()`, whose `megaYield` is 20 serially-awaited
+    /// background-QoS tasks; under the fast parallel pass that probe competes
+    /// with the very task it is waiting for, and this test reddened three
+    /// consecutive CI dispatches of one SHA having observed exactly **one**
+    /// clock advance in 170 s — the first hop landed and the second never found
+    /// the re-armed sleeper. `EventDrivenTestClock` signals arming from inside
+    /// the critical section that registers the sleeper, so
+    /// `requireAdvanceWhenArmed` parks on a continuation instead of racing a
+    /// probe loop, and each hop advances only once the sleep it is meant to fire
+    /// is provably in the ledger. Strict (`require`) rather than soft, because
+    /// the chain is only sound step by step: a missed arming throws before
+    /// virtual time moves, instead of desyncing the ledger and hanging later
+    /// with no attribution.
+    ///
+    /// The verdict is the spawn count and the ports it was asked for. Advancing
+    /// on this clock does not run the resumed task's code, so the assertion
+    /// waits on the observable — never on elapsed time.
     @Test("a proxy that exits is reaped and respawned after the backoff")
     func respawnsAfterDeath() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+        let spawner = fixture.spawner
 
-        await fixture.spawner.answer(.success(pid: 800, port: SupervisorFixture.deadPort))
-        let supervisor = fixture.supervisor()
+        await spawner.answer(.success(pid: 800, port: SupervisorFixture.deadPort))
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.start()
         #expect(await supervisor.current?.pid == 800)
 
         // The child exits; the first respawn attempt fails transiently and the
         // second succeeds.
-        await fixture.spawner.reap(pid: 800, status: 0)
-        await fixture.spawner.answer(.failure(.launchFailed(errno: EAGAIN)))
-        await fixture.spawner.answer(.success(pid: 801, port: SupervisorFixture.deadPort))
+        await spawner.reap(pid: 800, status: 0)
+        await spawner.answer(.failure(.launchFailed(errno: EAGAIN)))
+        await spawner.answer(.success(pid: 801, port: SupervisorFixture.deadPort))
 
-        let landed = await fixture.clock.advanceUntil(
-            "the proxy to be respawned", by: fixture.watchInterval,
+        // Hop 1: the watch interval. The tick it fires collects the dead child
+        // and burns the immediate respawn attempt.
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        // Hop 2: the backoff sleep `respawn` arms after that attempt failed.
+        // Nothing else can be in the ledger here — the watch does not re-arm
+        // its interval until `tick` returns, and `tick` does not return until
+        // `respawn` does — so the wait landing is itself the proof that the
+        // first attempt happened.
+        try await clock.requireAdvanceWhenArmed(by: fixture.firstBackoff)
+
+        let landed = try await waitFor(
+            "the successor to be recorded",
+            observed: { "spawn calls \(await spawner.calls())" },
             { await supervisor.current?.pid == 801 })
         await supervisor.stop()
 
         #expect(landed)
         #expect(
-            await fixture.spawner.calls()
+            await spawner.calls()
                 == [0, SupervisorFixture.deadPort, SupervisorFixture.deadPort],
             "the successor is spawned on the port the dead one held")
     }
@@ -835,6 +872,10 @@ private struct SupervisorFixture {
     let clock: TestClock<Duration>
     let ownVersion = "12345-1700000000"
     let watchInterval: Duration = .seconds(15)
+    /// The first step of the respawn backoff, named rather than repeated so a
+    /// test that has to advance THROUGH it cannot pick a different number from
+    /// the one the supervisor sleeps on.
+    let firstBackoff: Duration = .seconds(1)
 
     var environment: [String: String] { ["TBD_HOME": home.path] }
     var paths: ProxyHomePaths { ProxyHomePaths(home: home) }
@@ -856,10 +897,16 @@ private struct SupervisorFixture {
     /// asks for: a fake proxy binds a real loopback port and the config row
     /// names it, so nothing has to be redirected for the client to reach it —
     /// and a probe of a port with no listener fails for the real reason.
+    ///
+    /// `clock` defaults to this fixture's `TestClock`; a test whose handshake
+    /// with the watch is more than one hop passes an `EventDrivenTestClock`
+    /// instead — see `respawnsAfterDeath` for why that is not a blanket
+    /// migration.
     func supervisor(
         clientFactory: @escaping @Sendable (Int) -> ModelProxyClient = {
             ModelProxyClient(port: $0)
-        }
+        },
+        clock overrideClock: (any Clock<Duration>)? = nil
     ) -> ModelProxySupervisor {
         ModelProxySupervisor(
             config: db.config,
@@ -869,8 +916,8 @@ private struct SupervisorFixture {
             processIdentity: identity,
             clientFactory: clientFactory,
             watchInterval: watchInterval,
-            respawnBackoff: [.seconds(1), .seconds(5)],
-            clock: clock)
+            respawnBackoff: [firstBackoff, .seconds(5)],
+            clock: overrideClock ?? clock)
     }
 
     func supervisorWithoutSpawner() -> ModelProxySupervisor {
