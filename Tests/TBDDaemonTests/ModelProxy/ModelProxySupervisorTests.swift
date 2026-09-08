@@ -547,7 +547,10 @@ struct ModelProxySupervisorTests {
                 await supervisor.startIfEnabled()
             }
         }
-        await supervisor.beginDraining()
+        // Driven off the cooperative pool as well: the hook blocks until the
+        // flip lands, and both sides of that hand-off have to be able to run
+        // while a sibling suite is deliberately saturating the pool.
+        await gateHoldingTask { await supervisor.beginDraining() }.value
         await supervisor.stop()
 
         #expect(
@@ -628,7 +631,7 @@ struct ModelProxySupervisorTests {
                 await supervisor.start()
             }
         }
-        await supervisor.beginDraining()
+        await gateHoldingTask { await supervisor.beginDraining() }.value
         await supervisor.stop()
 
         #expect(await supervisor.current?.pid == 6231, "the successor was adopted mid-poll")
@@ -1921,17 +1924,27 @@ private final class StatusHookBox: @unchecked Sendable {
 ///
 /// Only ever called from a `FakeProxyProcess` status hook, and the thread it
 /// blocks is the fake server's own accept thread — never a cooperative one, so
-/// this cannot starve the pool the released side runs on (`Tests/CLAUDE.md`,
-/// "Thread-blocking gates run off the cooperative pool"). The actor `body`
-/// talks to is suspended awaiting the very response this hook precedes, which
-/// is what makes the hand-off deterministic rather than lucky.
+/// the *holding* side needs nothing (`Tests/CLAUDE.md`, "Thread-blocking gates
+/// run off the cooperative pool"). The actor `body` talks to is suspended
+/// awaiting the very response this hook precedes, which is what makes the
+/// hand-off deterministic rather than lucky.
 ///
-/// `waitForGate` bounds it regardless: a future change that broke that
+/// **The releasing side is pinned too, and that is not belt-and-braces.** The
+/// usual advice — hold off the pool, release on it — assumes the pool can be
+/// reached. This suite shares a process with `BoundedGateWaitTests`, whose
+/// whole subject is a deliberately saturated pool: with every cooperative
+/// thread parked for 120 s, a release scheduled on the pool does not run, and
+/// this gate expired for reasons that had nothing to do with the drain it was
+/// arranging. `gateHoldingTask` puts `body` and every default-actor hop it
+/// makes (SE-0417) on threads these tests own, so the hand-off completes
+/// whatever the pool is doing.
+///
+/// `waitForGate` bounds it regardless: a future change that broke the
 /// arrangement reports a named gate and lets the test's own assertions fail,
-/// instead of hanging the suite.
+/// rather than hanging the suite.
 private func runBlocking(_ gate: String, _ body: @escaping @Sendable () async -> Void) {
     let finished = DispatchSemaphore(value: 0)
-    Task {
+    _ = gateHoldingTask {
         await body()
         finished.signal()
     }
