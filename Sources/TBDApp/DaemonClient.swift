@@ -1215,6 +1215,38 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the model-proxy gate (default OFF). Read fresh at spawn time, so
+    /// no daemon restart is needed — but it applies only to sessions started
+    /// after the call: a session's Messages API base URL is fixed in the
+    /// environment it was spawned with. Sending either value is an explicit
+    /// gesture that survives a later change to the shipped default.
+    ///
+    /// Turning it off also clears the transcript-streaming flag; the daemon
+    /// does that itself, in one transaction, so the app writes one value and
+    /// re-reads capabilities to learn what landed.
+    func setModelProxyEnabled(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetModelProxyEnabled,
+            params: ConfigSetModelProxyEnabledParams(enabled: enabled)
+        )
+    }
+
+    /// Persist the transcript-streaming gate (default OFF), which decides
+    /// whether the transcript renders a provisional assistant row from the
+    /// proxy's stream file. Applies to sessions started after the call, for the
+    /// same reason as the proxy gate.
+    ///
+    /// Turning it on also sets the model-proxy flag — the daemon couples them,
+    /// because the file this reads does not exist without the proxy — so the
+    /// app sends this one value even while the proxy is off and reads the
+    /// coupled result back out of capabilities.
+    func setTranscriptStreamingEnabled(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetTranscriptStreamingEnabled,
+            params: ConfigSetTranscriptStreamingParams(enabled: enabled)
+        )
+    }
+
     /// Persist the Claude cloud sessions gate (default OFF). The daemon builds
     /// its provider manager only at boot, so this takes effect on the next
     /// daemon restart rather than the next gesture.

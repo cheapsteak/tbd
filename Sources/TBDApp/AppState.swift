@@ -1501,6 +1501,23 @@ final class AppState {
         { [daemonClient] enabled in
             try await daemonClient.setTranscriptComposerEnabled(enabled: enabled)
         }
+    /// How `setModelProxyEnabled` persists the model-proxy gate — injectable
+    /// for the same reason as `controlModeSetter`.
+    @ObservationIgnored
+    lazy var modelProxyFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in
+            try await daemonClient.setModelProxyEnabled(enabled: enabled)
+        }
+    /// How `setTranscriptStreamingEnabled` persists the streaming gate —
+    /// injectable for the same reason as `controlModeSetter`. Separate from
+    /// `modelProxyFlagSetter` even though the two flags are coupled: the
+    /// coupling is the daemon's, and an app that wrote both would be guessing
+    /// at a rule it does not own.
+    @ObservationIgnored
+    lazy var transcriptStreamingFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in
+            try await daemonClient.setTranscriptStreamingEnabled(enabled: enabled)
+        }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.
