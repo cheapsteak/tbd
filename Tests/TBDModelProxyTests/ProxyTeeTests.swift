@@ -389,6 +389,61 @@ extension ModelProxySuites {
             }
         }
 
+        @Test("a write that fails mid-message gives the terminal's in-flight slot back")
+        func failedWriteReleasesTheInFlightCount() async throws {
+            // The slot is what decides whether the *next* message truncates the
+            // file. A give-up that kept it would leave every later turn on this
+            // terminal appending, and the file's only bound — truncation when
+            // nothing is in flight (spec, "Retention") — would be gone for the
+            // life of the proxy. One ENOSPC on a `start` line is enough.
+            //
+            // Driven through the tee directly: a filesystem that accepts an
+            // `open` and then refuses a `write` is not a state a loopback test
+            // can produce, so the write itself is the injected seam.
+            let root = proxyScratchRoot(prefix: "pxwfail")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let streamsDir = root.appendingPathComponent("streams")
+
+            // `start` and the text block's `block` line land; the first delta
+            // fails, which is a failure *after* the message was counted.
+            let writes = FailingWriter(succeedingWrites: 2)
+            let tee = StreamTee(
+                streamsDir: streamsDir,
+                writeBytes: { descriptor, bytes in writes.write(descriptor, bytes) })
+
+            let terminalID = UUID()
+            let route = ModelProxyRoute(
+                token: ModelProxyRoute.mintToken(), terminalID: terminalID,
+                upstream: "http://127.0.0.1:1", streamingEnabled: true)
+            let session = try #require(
+                await tee.beginSession(
+                    route: route, method: "POST", pathSuffix: "/v1/messages",
+                    requestHeaders: [], requestBody: Array(Self.parentBody.utf8),
+                    responseStatus: 200,
+                    responseHeaders: [("content-type", "text/event-stream")]))
+
+            session.feed(sseEvent("message_start", messageStartPayload(id: "msg_W")))
+            session.feed(sseEvent("content_block_start", textBlockStartPayload(index: 0)))
+            session.feed(sseEvent("content_block_delta", textDeltaPayload(index: 0, text: "boom")))
+
+            var released = false
+            for _ in 0..<250 where !released {
+                released = await tee.inFlightCount(terminalID: terminalID) == 0
+                if !released { try? await Task.sleep(nanoseconds: 20_000_000) }
+            }
+            #expect(released, "a failed write kept the terminal's in-flight slot for good")
+            #expect(writes.attempts >= 3, "the injected writer was never asked to fail")
+
+            // And the end of the stream does not double-release or resurrect it.
+            session.end(error: nil)
+            var settled = false
+            for _ in 0..<50 where !settled {
+                settled = await tee.inFlightCount(terminalID: terminalID) == 0
+                if !settled { try? await Task.sleep(nanoseconds: 20_000_000) }
+            }
+            #expect(settled)
+        }
+
         // MARK: The decision, directly
 
         @Test("the tee decision refuses everything that is not a parent conversation stream")
@@ -561,5 +616,26 @@ final class SpyTee: StreamTeeing, @unchecked Sendable {
             if handle != nil { opened += 1 }
         }
         return handle
+    }
+}
+
+/// A `writeBytes` seam that accepts a fixed number of lines and then fails
+/// every one after, the way a filesystem that has just run out of space does.
+final class FailingWriter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let succeedingWrites: Int
+    private var calls = 0
+
+    init(succeedingWrites: Int) { self.succeedingWrites = succeedingWrites }
+
+    var attempts: Int { lock.withLock { calls } }
+
+    func write(_ descriptor: Int32, _ bytes: [UInt8]) -> Bool {
+        let ordinal = lock.withLock { () -> Int in
+            calls += 1
+            return calls
+        }
+        guard ordinal <= succeedingWrites else { return false }
+        return StreamTee.writeAllBytes(descriptor, bytes)
     }
 }

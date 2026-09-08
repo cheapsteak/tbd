@@ -44,27 +44,29 @@ actor StreamTee: StreamTeeing {
     /// data, and `Duration` is behaviour (CLAUDE.md, "New delays and timers
     /// take an injected clock").
     private let now: @Sendable () -> Date
-    /// Held because every timed subsystem in this repo takes the seam and the
-    /// tee is the one place a retention pass would land. Nothing in the tee
-    /// sleeps today, which is why nothing reads it yet.
-    private let clock: any Clock<Duration>
     private let fileManager: FileManager
+    /// How a line reaches the file. See `writeAllBytes`.
+    private let writeBytes: @Sendable (Int32, [UInt8]) -> Bool
 
     /// Messages that have written a `start` line and not yet written a
     /// terminal one, per terminal. This is what decides truncation.
     private var inFlight: [UUID: Int] = [:]
     private var sessions: [UUID: SessionState] = [:]
 
+    /// No `clock` parameter, deliberately: nothing in the tee sleeps, polls or
+    /// times out, and a stored clock nothing reads is dead state. `now` is the
+    /// *date* seam, which is a different thing — `at` on a `start` line is
+    /// persisted data (CLAUDE.md: "`Duration` is behavior, `Date` is data").
     init(
         streamsDir: URL,
         fileManager: FileManager = .default,
         now: @escaping @Sendable () -> Date = { Date() },
-        clock: any Clock<Duration> = ContinuousClock()
+        writeBytes: @escaping @Sendable (Int32, [UInt8]) -> Bool = StreamTee.writeAllBytes
     ) {
         self.streamsDir = streamsDir
         self.fileManager = fileManager
         self.now = now
-        self.clock = clock
+        self.writeBytes = writeBytes
     }
 
     /// Number of messages currently between their `start` line and their
@@ -206,7 +208,14 @@ actor StreamTee: StreamTeeing {
     private func finish(id: UUID, error: Error?) {
         guard let state = sessions.removeValue(forKey: id) else { return }
         defer { close(state) }
-        guard !state.abandoned, let message = state.openMessage else { return }
+        guard !state.abandoned, let message = state.openMessage else {
+            // Nothing left to write, but the claim on the terminal's in-flight
+            // count goes back regardless. `giveUp` already released every path
+            // that reaches here; this is the net under any future one, because
+            // a slot never given back is a file that never truncates again.
+            release(state)
+            return
+        }
         // The rule is deliberately "no stop line" rather than "an error
         // arrived": measured on CI, an upstream that truncates a chunked body
         // reaches `URLSession` as a *clean* completion, so a message the model
@@ -321,9 +330,7 @@ actor StreamTee: StreamTeeing {
         if let message = state.openMessage {
             write(.aborted(message: message, reason: reason), state: state)
         }
-        release(state)
-        state.abandoned = true
-        close(state)
+        giveUp(state)
     }
 
     // MARK: - The file
@@ -371,37 +378,62 @@ actor StreamTee: StreamTeeing {
     }
 
     /// Writes one line, newline included. Never throws: a write that fails
-    /// closes this message's tee and logs once, and forwarding — which never
+    /// gives up on this message and logs once, and forwarding — which never
     /// awaits any of this — is untouched.
     private func write(_ line: ModelProxyStreamLine, state: SessionState) {
         guard state.descriptor >= 0 else { return }
         guard let encoded = try? line.encodedLine() else {
             Self.log.error("a stream line could not be encoded; tee off for this message")
-            state.abandoned = true
-            close(state)
+            giveUp(state)
             return
         }
-        let bytes = Array("\(encoded)\n".utf8)
+        guard writeBytes(state.descriptor, Array("\(encoded)\n".utf8)) else {
+            let code = errno
+            Self.log.error(
+                "stream file write failed (errno \(code, privacy: .public)); tee off for this message"
+            )
+            giveUp(state)
+            return
+        }
+    }
+
+    /// Stops writing for this session — and, first, gives the terminal its
+    /// in-flight slot back.
+    ///
+    /// The order is the whole point. A write can fail *after* `start` has
+    /// counted the message, and `finish` writes nothing more for an abandoned
+    /// session, so a give-up that only set the flag would leave the count at
+    /// one for good: every later `message_start` on that terminal would append,
+    /// and the file's one bound — truncation when nothing is in flight — would
+    /// be gone. One ENOSPC on a `start` line is enough to lose it.
+    private func giveUp(_ state: SessionState) {
+        release(state)
+        state.abandoned = true
+        close(state)
+    }
+
+    /// One line's worth of `write(2)`, retried past `EINTR` and past a short
+    /// write. True when every byte landed.
+    ///
+    /// A `static` behind an injected closure rather than a call in place, so a
+    /// test can fail a write at a chosen point in a message: the failure this
+    /// exists for — a full or broken filesystem mid-turn — has no other seam a
+    /// test on loopback can reach.
+    static func writeAllBytes(_ descriptor: Int32, _ bytes: [UInt8]) -> Bool {
         var written = 0
         while written < bytes.count {
             let count = bytes.withUnsafeBytes { buffer -> Int in
                 guard let base = buffer.baseAddress else { return -1 }
-                return Darwin.write(
-                    state.descriptor, base.advanced(by: written), bytes.count - written)
+                return Darwin.write(descriptor, base.advanced(by: written), bytes.count - written)
             }
             if count > 0 {
                 written += count
                 continue
             }
             if count < 0, errno == EINTR { continue }
-            let code = errno
-            Self.log.error(
-                "stream file write failed (errno \(code, privacy: .public)); tee off for this message"
-            )
-            state.abandoned = true
-            close(state)
-            return
+            return false
         }
+        return true
     }
 
     /// Closes the descriptor. No `fsync`: the reader is a tailer on the same
