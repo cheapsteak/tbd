@@ -140,6 +140,16 @@ actor ModelProxySupervisor {
     /// replaced for its version, because "differs from nothing" is not a fact.
     private let ownVersion: String?
     private let processIdentity: any ProcessIdentityChecking
+    private let pidFile: any ModelProxyPIDFileReading
+    /// This daemon's home in the one form both sides compare, computed once.
+    ///
+    /// `ModelProxyStatus.canonicalHome` resolves symlinks against the
+    /// filesystem, and adoption asks this question on every probe; the answer
+    /// cannot change while the daemon runs, so it is resolved here rather than
+    /// per call.
+    private let canonicalHome: String
+    /// `<home>/proxy/proxy.pid` — the file the proxy writes after its bind.
+    private let pidFilePath: String
     private let clientFactory: @Sendable (Int) -> ModelProxyClient
     private let watchInterval: Duration
     private let respawnBackoff: [Duration]
@@ -214,6 +224,7 @@ actor ModelProxySupervisor {
         spawner: (any ModelProxySpawning)?,
         ownVersion: String?,
         processIdentity: any ProcessIdentityChecking = ProcessTableIdentityCheck(),
+        pidFile: any ModelProxyPIDFileReading = ModelProxyPIDFile(),
         clientFactory: @escaping @Sendable (Int) -> ModelProxyClient = { ModelProxyClient(port: $0) },
         watchInterval: Duration = .seconds(15),
         respawnBackoff: [Duration] = [.seconds(1), .seconds(5), .seconds(30)],
@@ -224,6 +235,9 @@ actor ModelProxySupervisor {
         self.spawner = spawner
         self.ownVersion = ownVersion
         self.processIdentity = processIdentity
+        self.pidFile = pidFile
+        self.canonicalHome = ModelProxyStatus.canonicalHome(home.path)
+        self.pidFilePath = ProxyHomePaths(home: home).pidPath
         self.clientFactory = clientFactory
         self.watchInterval = watchInterval
         self.respawnBackoff = respawnBackoff
@@ -366,6 +380,30 @@ actor ModelProxySupervisor {
 
     // MARK: - Lifecycle
 
+    /// **The gate** (spec, "The daemon" → "Supervisor" → Gate): the supervisor
+    /// runs only while `config.model_proxy_enabled` is on.
+    ///
+    /// The one door for both the boot path and the runtime flip, so the two
+    /// cannot disagree about what "enabled" means. The column is re-read here
+    /// rather than passed in, because the caller that just wrote it and the
+    /// caller that booted minutes ago are asking the same question and only
+    /// one of them holds an answer.
+    ///
+    /// A config the daemon cannot read is treated as off. That is the shipped
+    /// default for this flag, and starting a proxy on a failed read would be a
+    /// background process nobody asked for.
+    func startIfEnabled() async {
+        guard (try? await config.get())?.modelProxyEnabled == true else {
+            Self.logger.debug(
+                """
+                the model proxy is disabled for \(self.home.path, privacy: .public); \
+                not starting a supervisor
+                """)
+            return
+        }
+        await start()
+    }
+
     /// Adopt or spawn, then start the watch. Never throws: a proxy that could
     /// not be started is a streaming nicety that is unavailable, never a
     /// daemon that failed to start.
@@ -401,6 +439,52 @@ actor ModelProxySupervisor {
         // stall every stop, and one short enough not to would change nothing.
         // What a pass does not collect stays pending for the next `start()`,
         // and is refused adoption until it is collected either way.
+        await drainPendingReap()
+    }
+
+    /// Stops the watch **and asks the proxy to go away**, which is what turning
+    /// the flag off means.
+    ///
+    /// The difference from `stop()` is the whole point of having two. `stop()`
+    /// is shutdown: the proxy is meant to outlive this daemon, and the next one
+    /// adopts it back through the port in the config row. This is a user saying
+    /// they do not want the feature — leaving a proxy listening, holding a
+    /// lock, and self-retiring only after 24 hours would make the toggle a
+    /// promise the daemon does not keep.
+    ///
+    /// `retire()` returns once the listener is closed and the lock released;
+    /// the proxy is still draining whatever is in flight, for up to ten
+    /// minutes, and nothing here waits for it. A session already spawned keeps
+    /// its `ANTHROPIC_BASE_URL` for its life either way — that is fixed in its
+    /// environment at spawn — so draining is what keeps the flip from cutting a
+    /// turn in half.
+    func retireProxy() async {
+        let target = live
+        await stop()
+        guard let target else { return }
+        Self.logger.info(
+            """
+            the model proxy is being switched off for \(self.home.path, privacy: .public); \
+            retiring pid \(target.state.pid, privacy: .public) on port \
+            \(target.state.port, privacy: .public)
+            """)
+        do {
+            try await client(port: target.state.port).retire()
+        } catch {
+            // Nothing to fall back to, and nothing to escalate to: the proxy
+            // is not this daemon's to signal on the adopted path, and on the
+            // spawned path killing it would cut the very turns the drain
+            // exists to protect. It self-retires after its own idle window.
+            Self.logger.error(
+                """
+                the model proxy on port \(target.state.port, privacy: .public) would not retire: \
+                \(error.localizedDescription, privacy: .public); dropping it anyway — no session \
+                will be routed while the flag is off
+                """)
+        }
+        // Through the one door, so a child of ours is queued for collection
+        // rather than left a zombie the next `start()` would refuse to adopt.
+        dropLive()
         await drainPendingReap()
     }
 
@@ -446,11 +530,32 @@ actor ModelProxySupervisor {
     }
 
     /// Probes `/tbd/status` on `port` and adopts what answers, but only when
-    /// the process table confirms the pid and start time it named.
+    /// four independent facts agree that the responder is this home's proxy
+    /// (spec, "Adoption identity").
+    ///
+    /// The four are not redundant, and each closes a case the others admit:
+    ///
+    ///   - **The home.** Two TBD homes on one machine draw their ports from
+    ///     one ephemeral range, so the kernel can hand one of them the port the
+    ///     other's config row still names. Every other field would match: the
+    ///     pid and start time describe a real live TBD proxy, and a
+    ///     same-version install reports the same version. Only the home tells
+    ///     them apart.
+    ///   - **The process table.** A pid on its own is not an identity — the
+    ///     kernel reissues numbers — so the start time is matched too, exactly
+    ///     as `AgentReaper` does before it signals anything.
+    ///   - **The pid file.** The status answer is written by whatever is
+    ///     listening; the pid file is written by the process that took
+    ///     `proxy.lock` and bound the port. Requiring them to agree ties the
+    ///     responder to this home's rendezvous rather than trusting a payload
+    ///     to describe itself.
+    ///   - **The port in that file.** A pid file left by a proxy on a different
+    ///     port is a rendezvous that has moved on; adopting against it would
+    ///     send every later control call to a port the file does not vouch for.
     ///
     /// Returns false for every other outcome — nothing listening, an answer
     /// that is not a status document, a status document describing a process
-    /// that is not there — because all three mean the same thing to the
+    /// that is not there — because all of them mean the same thing to the
     /// caller: this port is not holding a proxy this daemon may take over.
     private func adoptIfMatching(port: Int) async -> Bool {
         let status: ModelProxyStatus
@@ -472,12 +577,58 @@ actor ModelProxySupervisor {
                 """)
             return false
         }
+        guard status.home.isEmpty == false else {
+            Self.logger.error(
+                """
+                the proxy answering on port \(port, privacy: .public) (pid \
+                \(status.pid, privacy: .public)) reports no home, so it is an image older than \
+                the field and cannot be placed; not adopting it
+                """)
+            return false
+        }
+        let answeredHome = ModelProxyStatus.canonicalHome(status.home)
+        guard answeredHome == canonicalHome else {
+            Self.logger.error(
+                """
+                the proxy answering on port \(port, privacy: .public) (pid \
+                \(status.pid, privacy: .public)) serves \(answeredHome, privacy: .public), not \
+                \(self.canonicalHome, privacy: .public); not adopting another home's proxy
+                """)
+            return false
+        }
         guard processIdentity.matches(pid: status.pid, startTime: status.processStartTime) else {
             Self.logger.error(
                 """
                 a process answering /tbd/status on port \(port, privacy: .public) claims pid \
                 \(status.pid, privacy: .public), which the process table does not confirm; \
                 not adopting it
+                """)
+            return false
+        }
+        guard let published = pidFile.read(path: pidFilePath) else {
+            Self.logger.error(
+                """
+                a process answering /tbd/status on port \(port, privacy: .public) claims pid \
+                \(status.pid, privacy: .public), but this home's pid file is missing or \
+                unreadable; not adopting it
+                """)
+            return false
+        }
+        guard published.pid == status.pid else {
+            Self.logger.error(
+                """
+                this home's pid file names pid \(published.pid, privacy: .public) and the \
+                process answering on port \(port, privacy: .public) claims pid \
+                \(status.pid, privacy: .public); not adopting it
+                """)
+            return false
+        }
+        guard published.port == port else {
+            Self.logger.error(
+                """
+                this home's pid file names port \(published.port, privacy: .public) for pid \
+                \(published.pid, privacy: .public), and the proxy was probed on port \
+                \(port, privacy: .public); not adopting it
                 """)
             return false
         }

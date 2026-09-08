@@ -26,6 +26,11 @@ import Testing
 ///   - **the clock** is a `TestClock`, so the watch interval and the respawn
 ///     backoff are advanced rather than waited out.
 ///
+/// The rendezvous is not stubbed: `FakeProxyProcess` writes a real
+/// `<home>/proxy/proxy.pid` the way the real binary does, and the adoption
+/// cases that must be refused corrupt that file rather than a reader — so what
+/// the daemon parses is what a proxy would have written.
+///
 /// Every path is under `TBD_TEST_SCRATCH_ROOT` via `fencedScratchRoot`, and
 /// every `TBDConstants` lookup takes an explicit `["TBD_HOME": …]` — no
 /// `setenv`, so nothing here needs `TBDHomeSerialized` and nothing can reach
@@ -44,7 +49,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 4242)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 4242, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 4242, startTime: proxy.processStartTime)
@@ -72,7 +77,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 4242)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 4242, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         // Deliberately nothing admitted: the process table denies pid 4242.
@@ -86,6 +91,255 @@ struct ModelProxySupervisorTests {
         #expect(current?.adopted == false)
         #expect(current?.pid == 77)
         #expect(await fixture.spawner.calls() == [proxy.port])
+    }
+
+    // MARK: - Adoption identity
+
+    /// **The collision the `home` field exists for** (spec, "Adoption
+    /// identity"). Two TBD homes on one machine draw their ports from one
+    /// ephemeral range, so the kernel can hand a second install the port this
+    /// daemon's config row names. Everything else about it matches: a real live
+    /// process the table confirms, at a start time that agrees, of this
+    /// daemon's own version, with a pid file in *this* home naming exactly that
+    /// pid and port. Only the home says it is somebody else's, and that alone
+    /// must refuse the adoption.
+    @Test("a proxy serving another TBD home is not adopted")
+    func doesNotAdoptAProxyServingAnotherHome() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let elsewhere = fixture.root.appendingPathComponent("another-install")
+        let proxy = try ForeignHomeProxyProcess(
+            version: fixture.ownVersion, pid: 5150, home: elsewhere.path)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 5150, startTime: proxy.processStartTime)
+        // Every other check is set up to PASS, so the home is the only thing
+        // that can refuse this.
+        try fixture.publishPidFile(pid: 5150, port: proxy.port)
+        await fixture.spawner.answer(.success(pid: 5151, port: SupervisorFixture.deadPort))
+
+        let supervisor = fixture.supervisor()
+        await supervisor.start()
+        await supervisor.stop()
+
+        #expect(await supervisor.current?.pid == 5151, "another home's proxy must not be adopted")
+        #expect(await supervisor.current?.adopted == false)
+        #expect(await fixture.spawner.calls() == [proxy.port])
+    }
+
+    /// A proxy built before the `home` field reports none, and a daemon that
+    /// cannot place a process must not take it over.
+    @Test("a proxy that reports no home at all is not adopted")
+    func doesNotAdoptAProxyWithNoHome() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try ForeignHomeProxyProcess(
+            version: fixture.ownVersion, pid: 5160, home: "")
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 5160, startTime: proxy.processStartTime)
+        try fixture.publishPidFile(pid: 5160, port: proxy.port)
+        await fixture.spawner.answer(.success(pid: 5161, port: SupervisorFixture.deadPort))
+
+        let supervisor = fixture.supervisor()
+        await supervisor.start()
+        await supervisor.stop()
+
+        #expect(await supervisor.current?.pid == 5161)
+        #expect(await fixture.spawner.calls() == [proxy.port])
+    }
+
+    /// The status answer is written by whatever is listening; the pid file is
+    /// written by the process that took `proxy.lock` and bound the port. With
+    /// no such file there is nothing tying the responder to this home's
+    /// rendezvous, so it is not adopted.
+    @Test("a responder with no pid file in this home is not adopted")
+    func doesNotAdoptWithoutAPidFile() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 5170, home: fixture.home)
+        defer { proxy.stop() }
+        proxy.unpublishPidFile()
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 5170, startTime: proxy.processStartTime)
+        await fixture.spawner.answer(.success(pid: 5171, port: SupervisorFixture.deadPort))
+
+        let supervisor = fixture.supervisor()
+        await supervisor.start()
+        await supervisor.stop()
+
+        #expect(await supervisor.current?.pid == 5171)
+        #expect(await supervisor.current?.adopted == false)
+        #expect(await fixture.spawner.calls() == [proxy.port])
+    }
+
+    /// The pid file names one process and the responder claims to be another.
+    /// One of the two is lying and there is no way to tell which, so neither is
+    /// adopted.
+    @Test("a pid file naming a different process refuses the adoption")
+    func doesNotAdoptOnAPidFileMismatch() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 5180, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 5180, startTime: proxy.processStartTime)
+        // The rendezvous names somebody else — a predecessor mid-retirement, or
+        // a file from an install that is no longer the one answering.
+        try fixture.publishPidFile(pid: 5181, port: proxy.port)
+        await fixture.spawner.answer(.success(pid: 5182, port: SupervisorFixture.deadPort))
+
+        let supervisor = fixture.supervisor()
+        await supervisor.start()
+        await supervisor.stop()
+
+        #expect(await supervisor.current?.pid == 5182)
+        #expect(await fixture.spawner.calls() == [proxy.port])
+    }
+
+    /// The pid file agrees about the process and disagrees about the port. The
+    /// rendezvous has moved on; adopting here would send every later control
+    /// call to a port this home's file does not vouch for.
+    @Test("a pid file naming a different port refuses the adoption")
+    func doesNotAdoptOnAPidFilePortMismatch() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 5190, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 5190, startTime: proxy.processStartTime)
+        try fixture.publishPidFile(pid: 5190, port: SupervisorFixture.otherDeadPort)
+        await fixture.spawner.answer(.success(pid: 5191, port: SupervisorFixture.deadPort))
+
+        let supervisor = fixture.supervisor()
+        await supervisor.start()
+        await supervisor.stop()
+
+        #expect(await supervisor.current?.pid == 5191)
+        #expect(await fixture.spawner.calls() == [proxy.port])
+    }
+
+    /// The positive of the four above, stated once as one assertion rather than
+    /// inferred from `adoptsMatchingProxyAtStartup`: home, process table, pid
+    /// and port all agree, and the proxy is taken over.
+    @Test("a proxy whose home, process table entry and pid file all agree is adopted")
+    func adoptsWhenEveryIdentityCheckAgrees() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 5200, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 5200, startTime: proxy.processStartTime)
+        #expect(
+            fixture.readPidFile() == ModelProxyPIDFileRecord(pid: 5200, port: proxy.port),
+            "the fixture must publish a pid file, or the refusals above prove nothing")
+
+        let supervisor = fixture.supervisor()
+        await supervisor.start()
+        await supervisor.stop()
+
+        #expect(await supervisor.current?.pid == 5200)
+        #expect(await supervisor.current?.adopted == true)
+        #expect(await fixture.spawner.calls().isEmpty)
+    }
+
+    // MARK: - The flag gate
+
+    /// The gate (spec, "The daemon" → "Supervisor" → Gate). `model_proxy_enabled`
+    /// is default-off and shipped that way, so a daemon that booted without it
+    /// must not start a proxy — not spawn one, not adopt one, not even probe.
+    @Test("with the flag off the supervisor starts nothing")
+    func theFlagOffStartsNothing() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        // A spawn is queued so the refusal cannot pass by there being nothing
+        // to take.
+        await fixture.spawner.answer(.success(pid: 6100, port: SupervisorFixture.deadPort))
+        #expect(try await fixture.db.config.get().modelProxyEnabled == false)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        await supervisor.stop()
+
+        #expect(await fixture.spawner.calls().isEmpty, "a disabled flag must not spawn a proxy")
+        #expect(await supervisor.current == nil)
+        #expect(
+            try await fixture.db.config.get().modelProxyPort == nil,
+            "a disabled flag must not mint a port either")
+    }
+
+    /// The other half, which is what makes the test above discriminating: with
+    /// the flag on, the same call spawns.
+    @Test("with the flag on the supervisor starts")
+    func theFlagOnStarts() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        try await fixture.db.config.setModelProxyEnabled(true)
+        await fixture.spawner.answer(.success(pid: 6110, port: SupervisorFixture.deadPort))
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        await supervisor.stop()
+
+        #expect(await fixture.spawner.calls() == [0])
+        #expect(await supervisor.current?.pid == 6110)
+    }
+
+    /// Turning the flag off is not the gesture a shutdown makes. The proxy is
+    /// asked to retire — it is holding a lock and would otherwise self-retire
+    /// only after 24 hours — and it stops being this supervisor's.
+    @Test("retireProxy asks the running proxy to go away and drops it")
+    func retireProxyRetiresAndDrops() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6120, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.admit(pid: 6120, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        #expect(await supervisor.current?.pid == 6120)
+
+        await supervisor.retireProxy()
+
+        #expect(
+            proxy.requests().contains { $0.method == "POST" && $0.path == "/tbd/retire" },
+            "the flag going off must ask the proxy to retire")
+        #expect(await supervisor.current == nil, "a retired proxy is no longer this daemon's")
+    }
+
+    /// **The discriminating half.** `stop()` is shutdown, and a proxy outliving
+    /// its daemon is the point of a separate process: the next daemon adopts it
+    /// back through the port in the config row. A `stop()` that retired would
+    /// end every session's route on every daemon restart.
+    @Test("stop leaves the proxy running")
+    func stopDoesNotRetire() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6130, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.admit(pid: 6130, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        await supervisor.stop()
+
+        #expect(proxy.requests().allSatisfy { $0.path != "/tbd/retire" })
+        #expect(await supervisor.current?.pid == 6130, "shutdown keeps the proxy it adopted")
     }
 
     // MARK: - Startup: spawn
@@ -141,7 +395,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6060)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6060, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         // The startup probe would adopt on its own, so the identity is
@@ -266,7 +520,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: "9999-1", pid: 7070)
+        let proxy = try FakeProxyProcess(version: "9999-1", pid: 7070, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 7070, startTime: proxy.processStartTime)
@@ -294,7 +548,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 7080)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 7080, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 7080, startTime: proxy.processStartTime)
@@ -412,7 +666,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 9090)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 9090, home: fixture.home)
         // Stopped again below, on purpose; the defer is for the paths where an
         // expectation fails before that and the listener would otherwise leak.
         defer { proxy.stop() }
@@ -451,7 +705,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 8080)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 8080, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         // Denied once so the startup probe does not adopt: this case is about
@@ -510,7 +764,7 @@ struct ModelProxySupervisorTests {
         // the process it claims to be is exactly what a corpse looks like from
         // the supervisor's side, and it is what makes the wrong adoption
         // possible at all.
-        let proxy = try FakeProxyProcess(version: "9999-1", pid: 7075)
+        let proxy = try FakeProxyProcess(version: "9999-1", pid: 7075, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.denyOnce()
@@ -576,7 +830,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 9100)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 9100, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         // Denied once so startup spawns rather than adopts: this case needs the
@@ -625,7 +879,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 4040)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 4040, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 4040, startTime: proxy.processStartTime)
@@ -661,7 +915,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 3030)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 3030, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 3030, startTime: proxy.processStartTime)
@@ -716,7 +970,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 3031, routeStatus: 500)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 3031, home: fixture.home, routeStatus: 500)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 3031, startTime: proxy.processStartTime)
@@ -760,7 +1014,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 3032)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 3032, home: fixture.home)
         // As above: stopped mid-test, and stopped again here if an expectation
         // fails first.
         defer { proxy.stop() }
@@ -801,7 +1055,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 3033)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 3033, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 3033, startTime: proxy.processStartTime)
@@ -830,7 +1084,7 @@ struct ModelProxySupervisorTests {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
 
-        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 3034)
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 3034, home: fixture.home)
         defer { proxy.stop() }
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 3034, startTime: proxy.processStartTime)
@@ -933,6 +1187,21 @@ private struct SupervisorFixture {
             clock: clock)
     }
 
+    /// Overwrites `<home>/proxy/proxy.pid` with a record of this test's
+    /// choosing — the rendezvous half of adoption, for the cases that must be
+    /// refused because it disagrees with what answered.
+    func publishPidFile(pid: Int32, port: Int) throws {
+        try FileManager.default.createDirectory(
+            at: paths.proxyDir, withIntermediateDirectories: true)
+        try Data("\(pid)\n\(port)\n".utf8)
+            .write(to: URL(fileURLWithPath: paths.pidPath), options: [.atomic])
+    }
+
+    /// What that file currently says, read through the production parser.
+    func readPidFile() -> ModelProxyPIDFileRecord? {
+        ModelProxyPIDFile().read(path: paths.pidPath)
+    }
+
     func tearDown() {
         try? FileManager.default.removeItem(at: root)
     }
@@ -1016,6 +1285,12 @@ private final class StubIdentity: ProcessIdentityChecking, @unchecked Sendable {
 /// A `TBDModelProxy`'s control endpoint and nothing else: it answers
 /// `/tbd/status` with a document the daemon's decoder accepts, takes a retire
 /// and both route verbs, and records everything that arrived.
+///
+/// **It also publishes a pid file**, because a real proxy does and adoption now
+/// requires the two to agree (spec, "Adoption identity"). Publishing it here
+/// rather than in each test keeps every existing adoption case describing one
+/// honest proxy; the cases that must be *refused* corrupt the file on purpose,
+/// through `publishPidFile`/`unpublishPidFile`.
 private final class FakeProxyProcess: @unchecked Sendable {
     /// Sub-second on purpose: the status document carries microseconds, and a
     /// coder that rounded them away would make every adoption fail.
@@ -1023,22 +1298,47 @@ private final class FakeProxyProcess: @unchecked Sendable {
 
     private let server: LoopbackHTTPTestServer
     private let pidBox: PidBox
+    private let paths: ProxyHomePaths
     let processStartTime = FakeProxyProcess.startedAt
 
     var port: Int { server.port }
 
     /// Makes the listener answer for another process from now on — one port
     /// changing hands, which is what another daemon's replacement looks like
-    /// from the supervisor's side.
-    func becomePid(_ pid: Int32) { pidBox.value = pid }
+    /// from the supervisor's side. The pid file moves with it, as it does in
+    /// life: the successor writes its own after binding.
+    func becomePid(_ pid: Int32) {
+        pidBox.value = pid
+        try? publishPidFile(pid: pid, port: server.port)
+    }
 
-    init(version: String, pid: Int32, routeStatus: Int = 200) throws {
+    /// Writes `<home>/proxy/proxy.pid` naming `pid` and `port`.
+    func publishPidFile(pid: Int32, port: Int) throws {
+        try FileManager.default.createDirectory(
+            at: paths.proxyDir, withIntermediateDirectories: true)
+        try Data("\(pid)\n\(port)\n".utf8)
+            .write(to: URL(fileURLWithPath: paths.pidPath), options: [.atomic])
+    }
+
+    /// Removes it — a home whose proxy died without unlinking, or one that
+    /// never wrote a file at all.
+    func unpublishPidFile() {
+        try? FileManager.default.removeItem(atPath: paths.pidPath)
+    }
+
+    init(version: String, pid: Int32, home: URL, routeStatus: Int = 200) throws {
         // The listener's port is not known until it is bound, so the status
         // document is composed per request out of a box the initializer fills
         // afterwards rather than baked into the handler.
         let portBox = PortBox()
         let pidBox = PidBox(pid)
         self.pidBox = pidBox
+        self.paths = ProxyHomePaths(home: home)
+        // Canonical, exactly as the real proxy reports it: the daemon compares
+        // canonical forms, and a fake that echoed a raw path would make the
+        // home check pass or fail for the wrong reason under a symlinked
+        // scratch root (`/var` versus `/private/var` on Darwin).
+        let servedHome = ModelProxyStatus.canonicalHome(home.path)
         let started = FakeProxyProcess.startedAt
         self.server = try LoopbackHTTPTestServer { request in
             if request.method == "DELETE", request.path.hasPrefix("/tbd/routes/") {
@@ -1048,7 +1348,8 @@ private final class FakeProxyProcess: @unchecked Sendable {
             case ("GET", "/tbd/status"):
                 let document = ModelProxyStatus(
                     version: version, pid: pidBox.value, processStartTime: started,
-                    port: portBox.value, streamsInFlight: 0, routeCount: 0)
+                    port: portBox.value, streamsInFlight: 0, routeCount: 0,
+                    home: servedHome)
                 guard let data = try? document.encodedForStatusResponse() else {
                     return LoopbackHTTPTestServer.Reply(status: 500, body: "{}")
                 }
@@ -1062,9 +1363,48 @@ private final class FakeProxyProcess: @unchecked Sendable {
             }
         }
         portBox.value = server.port
+        try publishPidFile(pid: pid, port: server.port)
     }
 
     func requests() -> [LoopbackHTTPTestServer.Request] { server.requests() }
+    func stop() { server.stop() }
+}
+
+/// A `FakeProxyProcess` that reports somebody else's TBD home.
+///
+/// A separate listener rather than a flag on the one above, because the case it
+/// exists for is a *different install* answering on this home's port: every
+/// other field of its status is a real, live, same-version TBD proxy, and only
+/// the home says otherwise.
+private final class ForeignHomeProxyProcess: @unchecked Sendable {
+    private let server: LoopbackHTTPTestServer
+    let processStartTime = Date(timeIntervalSince1970: 1_700_000_000.123_456)
+
+    var port: Int { server.port }
+
+    init(version: String, pid: Int32, home: String) throws {
+        let portBox = PortBox()
+        let started = processStartTime
+        // The empty string passes through uncanonicalized on purpose: it is
+        // what an image older than the `home` field decodes to, and running it
+        // through `canonicalHome` would turn "said nothing" into the process's
+        // working directory — a different case with a different branch.
+        let servedHome = home.isEmpty ? "" : ModelProxyStatus.canonicalHome(home)
+        self.server = try LoopbackHTTPTestServer { request in
+            guard request.method == "GET", request.path == "/tbd/status" else {
+                return LoopbackHTTPTestServer.Reply(status: 404, body: "{}")
+            }
+            let document = ModelProxyStatus(
+                version: version, pid: pid, processStartTime: started,
+                port: portBox.value, streamsInFlight: 0, routeCount: 0, home: servedHome)
+            guard let data = try? document.encodedForStatusResponse() else {
+                return LoopbackHTTPTestServer.Reply(status: 500, body: "{}")
+            }
+            return .ok(String(decoding: data, as: UTF8.self))
+        }
+        portBox.value = server.port
+    }
+
     func stop() { server.stop() }
 }
 

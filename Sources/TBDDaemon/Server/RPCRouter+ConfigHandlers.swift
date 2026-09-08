@@ -435,10 +435,28 @@ extension RPCRouter {
     /// The coupling — turning the proxy off also writes streaming off, in one
     /// transaction — lives in `ConfigStore.setModelProxyEnabled`, not here, so
     /// every caller of the store gets it, not only this RPC.
+    ///
+    /// **The supervisor follows the flag on the daemon already running**, which
+    /// is the half a column write cannot do: the boot path starts a supervisor
+    /// only when the flag was already on, so without this a user who turned the
+    /// proxy on would get routes minted against nothing until the next restart.
+    /// On the way off the running proxy is retired rather than merely
+    /// abandoned — see `retireProxy`.
+    ///
+    /// Acted on the *written* value rather than on a flip computed from a
+    /// preceding read: both calls are idempotent (`startIfEnabled` returns
+    /// early on a supervisor already started, `retireProxy` on one holding no
+    /// proxy), so a second call in the same direction changes nothing, and no
+    /// window opens between reading the old value and writing the new one.
     func handleConfigSetModelProxyEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(
             ConfigSetModelProxyEnabledParams.self, from: paramsData)
         try await db.config.setModelProxyEnabled(params.enabled)
+        if params.enabled {
+            await modelProxySupervisor?.startIfEnabled()
+        } else {
+            await modelProxySupervisor?.retireProxy()
+        }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
@@ -457,12 +475,22 @@ extension RPCRouter {
     /// readers act on is `Config.transcriptStreamingEffective`, the conjunction
     /// of the two columns, because a hand-edited row can hold a combination no
     /// gesture here can produce.
+    ///
+    /// Because turning streaming on turns the proxy on, this is also a way to
+    /// arm the supervisor, and it starts one for the same reason
+    /// `setModelProxyEnabled` does: a user who asked for the provisional row
+    /// and got no proxy would see a stream file that never appears. Turning
+    /// streaming **off** retires nothing — the proxy column is untouched by
+    /// that direction, and a route still routes.
     func handleConfigSetTranscriptStreamingEnabled(
         _ paramsData: Data
     ) async throws -> RPCResponse {
         let params = try decoder.decode(
             ConfigSetTranscriptStreamingParams.self, from: paramsData)
         try await db.config.setTranscriptStreamingEnabled(params.enabled)
+        if params.enabled {
+            await modelProxySupervisor?.startIfEnabled()
+        }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

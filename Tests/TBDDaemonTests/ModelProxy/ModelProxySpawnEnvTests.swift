@@ -55,6 +55,15 @@ final class FakeModelProxySupervisor: ModelProxySupervising, @unchecked Sendable
     func routeToken(forTerminal terminalID: UUID) async -> String? { tokenForTerminal }
 
     func capabilitySnapshot() async -> ModelProxyCapabilitySnapshot { snapshot }
+
+    /// The runtime flag's two gestures, recorded rather than performed: the
+    /// config RPC's whole job is to make exactly one of these calls, and
+    /// counting them is how that is checked without a proxy process.
+    private(set) var startCalls = 0
+    private(set) var retireCalls = 0
+
+    func startIfEnabled() async { startCalls += 1 }
+    func retireProxy() async { retireCalls += 1 }
 }
 
 /// **What a holder spawn's environment becomes when the model proxy is on, and

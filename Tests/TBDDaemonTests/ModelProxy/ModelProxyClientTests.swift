@@ -26,7 +26,8 @@ struct ModelProxyClientTests {
             processStartTime: startTime,
             port: port,
             streamsInFlight: 2,
-            routeCount: 3)
+            routeCount: 3,
+            home: "/opt/example/tbd")
         return String(decoding: try status.encodedForStatusResponse(), as: UTF8.self)
     }
 

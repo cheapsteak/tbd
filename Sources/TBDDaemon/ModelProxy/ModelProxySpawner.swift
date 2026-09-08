@@ -318,22 +318,13 @@ struct ModelProxySpawner: Sendable {
     /// The port in a pid file that names `pid`, or nil for a missing file, an
     /// unreadable one, or one that names somebody else.
     ///
-    /// The format is `ProxyPIDFile.contents(pid:port:)` — `"<pid>\n<port>\n"`
-    /// — written atomically by the proxy after its bind. It is parsed rather
-    /// than shared because that helper lives in the proxy's executable target,
-    /// which no library can import; the live spawn test is what keeps the two
-    /// spellings honest, since it reads what the real binary writes.
+    /// The parse is `ModelProxyPIDFile`'s, so the spawner and the supervisor's
+    /// adoption check read one spelling of the file rather than two.
     static func publishedPort(path: String, pid: pid_t) -> Int? {
-        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-        guard lines.count >= 2,
-            let published = Int32(lines[0].trimmingCharacters(in: .whitespaces)),
-            published == pid,
-            let port = Int(lines[1].trimmingCharacters(in: .whitespaces))
-        else {
+        guard let record = ModelProxyPIDFile().read(path: path), record.pid == pid else {
             return nil
         }
-        return port
+        return record.port
     }
 
     /// The exit status of `pid` if it has exited, having reaped it; nil while

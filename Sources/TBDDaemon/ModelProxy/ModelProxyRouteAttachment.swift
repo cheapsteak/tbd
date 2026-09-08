@@ -75,10 +75,16 @@ protocol ModelProxyRouting: Sendable {
 }
 
 /// Everything the daemon asks of the supervisor. `RPCRouter` holds this one
-/// because it both retires routes (terminal deletion) and reports capabilities;
-/// the two lifecycle types hold the narrower `ModelProxyRouting`.
+/// because it retires routes (terminal deletion), reports capabilities, and
+/// carries the flag's runtime flip; the two lifecycle types hold the narrower
+/// `ModelProxyRouting`.
 protocol ModelProxySupervising: ModelProxyRouting {
     func capabilitySnapshot() async -> ModelProxyCapabilitySnapshot
+    /// Start supervising, if `config.model_proxy_enabled` is on. Idempotent.
+    func startIfEnabled() async
+    /// Stop supervising and ask the running proxy to retire — what turning the
+    /// flag off means, as distinct from the `stop()` a shutdown performs.
+    func retireProxy() async
 }
 
 extension ModelProxySupervisor: ModelProxySupervising {}
