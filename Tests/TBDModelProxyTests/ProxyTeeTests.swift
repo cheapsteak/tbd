@@ -422,26 +422,34 @@ extension ModelProxySuites {
                     responseStatus: 200,
                     responseHeaders: [("content-type", "text/event-stream")]))
 
+            // Fed in two stages, so the count is *observed at one* before the
+            // failing write rather than assumed to have got there. A single
+            // stage reads zero on its first sample — the state the tee starts
+            // in — and passes without ever reaching the failure.
             session.feed(sseEvent("message_start", messageStartPayload(id: "msg_W")))
             session.feed(sseEvent("content_block_start", textBlockStartPayload(index: 0)))
+
+            let counted = await settles("the message was counted in flight") {
+                await tee.inFlightCount(terminalID: terminalID) == 1
+            }
+            #expect(counted, "the message never started; the tee wrote nothing")
+            #expect(summarizeStream(streamFile(streamsDir, terminalID)) == [
+                "start:msg_W", "block:msg_W:0",
+            ])
+
             session.feed(sseEvent("content_block_delta", textDeltaPayload(index: 0, text: "boom")))
 
-            var released = false
-            for _ in 0..<250 where !released {
-                released = await tee.inFlightCount(terminalID: terminalID) == 0
-                if !released { try? await Task.sleep(nanoseconds: 20_000_000) }
+            let released = await settles("the failed write gave the slot back") {
+                await tee.inFlightCount(terminalID: terminalID) == 0
             }
             #expect(released, "a failed write kept the terminal's in-flight slot for good")
             #expect(writes.attempts >= 3, "the injected writer was never asked to fail")
 
-            // And the end of the stream does not double-release or resurrect it.
+            // And the end of the stream neither double-releases nor resurrects it.
             session.end(error: nil)
-            var settled = false
-            for _ in 0..<50 where !settled {
-                settled = await tee.inFlightCount(terminalID: terminalID) == 0
-                if !settled { try? await Task.sleep(nanoseconds: 20_000_000) }
-            }
-            #expect(settled)
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            let finalCount = await tee.inFlightCount(terminalID: terminalID)
+            #expect(finalCount == 0)
         }
 
         // MARK: The decision, directly
@@ -617,6 +625,26 @@ final class SpyTee: StreamTeeing, @unchecked Sendable {
         }
         return handle
     }
+}
+
+/// The stream file under a given streams directory, whether or not it exists.
+func streamFile(_ streamsDir: URL, _ terminalID: UUID) -> URL {
+    streamsDir.appendingPathComponent(TBDConstants.streamFileName(terminalID: terminalID))
+}
+
+/// Polls an `async` condition until it holds. The sibling of `waitUntil` for a
+/// sample that has to await an actor, which that one's `@Sendable` synchronous
+/// closure cannot do.
+func settles(
+    _ what: String, seconds: Double = 5, _ isSatisfied: () async -> Bool
+) async -> Bool {
+    let deadline = ContinuousClock().now + .seconds(seconds)
+    while ContinuousClock().now < deadline {
+        if await isSatisfied() { return true }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+    }
+    Issue.record("\(what) — never held within \(seconds) seconds")
+    return false
 }
 
 /// A `writeBytes` seam that accepts a fixed number of lines and then fails
