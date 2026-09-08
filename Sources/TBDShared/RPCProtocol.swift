@@ -388,6 +388,19 @@ public enum RPCMethod {
     /// feature's only opt-in. Reading needs no method of its own: `config.get`
     /// already carries the resolved value.
     public static let configSetTranscriptComposerEnabled = "config.setTranscriptComposerEnabled"
+    /// The model-proxy gate (`model_proxy_enabled`) — whether a new pty-holder
+    /// session's Messages API traffic is routed through the loopback proxy.
+    /// Reading needs no method of its own: `config.get` carries the resolved
+    /// value and `daemon.capabilities` carries it beside the supported/port
+    /// facts that explain a greyed-out toggle.
+    public static let configSetModelProxyEnabled = "config.setModelProxyEnabled"
+    /// The transcript-streaming gate (`transcript_streaming_enabled`) — whether
+    /// the transcript renders a provisional assistant row from the proxy's
+    /// stream file. Coupled to `configSetModelProxyEnabled`: streaming on turns
+    /// the proxy on, and the proxy off turns streaming off. Reading needs no
+    /// method of its own, for the same reason.
+    public static let configSetTranscriptStreamingEnabled =
+        "config.setTranscriptStreamingEnabled"
     /// The update mode (`update_mode`) — `off`, `check` or `auto`. The one
     /// policy the daemon holds about updating itself. Reading needs no method
     /// of its own: `config.get` and `daemon.capabilities` both carry the
@@ -1883,6 +1896,38 @@ public struct ConfigSetPtyHolderEnabledParams: Codable, Sendable {
 /// column out of its NULL "never chose" state, so an operator who turns the
 /// feature off stays off when the shipped default graduates.
 public struct ConfigSetTranscriptComposerEnabledParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setModelProxyEnabled` — the model-proxy gate (default OFF
+/// during soak), which decides whether a *new* pty-holder session is spawned
+/// with its Messages API base URL pointed at the loopback proxy. Writing either
+/// value is the explicit gesture that lifts the column out of its NULL "never
+/// chose" state, so an operator who turns the feature off stays off when the
+/// shipped default graduates.
+///
+/// Turning it off also writes `transcript_streaming_enabled` off — the daemon
+/// does that in one transaction, because the provisional transcript row reads a
+/// file only the proxy writes.
+public struct ConfigSetModelProxyEnabledParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setTranscriptStreamingEnabled` — the transcript-streaming
+/// gate (default OFF during soak), which decides whether the transcript renders
+/// a provisional assistant row from the proxy's stream file. Writing either
+/// value is the explicit gesture that lifts the column out of its NULL "never
+/// chose" state.
+///
+/// Turning it on also writes `model_proxy_enabled` on — the file it reads does
+/// not exist without the proxy, so asking for streaming is asking for both.
+///
+/// Named without the method's trailing `Enabled`: the symmetrical
+/// `ConfigSetTranscriptStreamingEnabledParams` is 41 characters and SwiftLint's
+/// `type_name` rule caps the length at 40.
+public struct ConfigSetTranscriptStreamingParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
@@ -3780,6 +3825,38 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// it did before. Resolved through `Config.transcriptComposerEnabledDefault`,
     /// so an install that never touched the toggle reports the shipped default.
     public let transcriptComposerEnabled: Bool
+    /// Whether the model-proxy gate (`model_proxy_enabled`) is set. Default OFF
+    /// while it soaks. Read at spawn time, so the Settings toggle reads it back
+    /// from here rather than from a local guess — and a session already running
+    /// keeps the base URL fixed in its environment either way.
+    ///
+    /// `var` rather than `let` deliberately: this type's memberwise initializer
+    /// is at the type-checker's expression budget, so a caller may have to
+    /// construct with the older arguments and assign the newer fields after.
+    public var modelProxyEnabled: Bool
+    /// Whether this daemon could actually route a session through a proxy — a
+    /// live supervisor with a bound port. Computed daemon-side, exactly as
+    /// `ptyHolderSupported` is, so the app never probes loopback itself.
+    ///
+    /// With the flag on and this false, every spawn proceeds unproxied — so
+    /// Settings disables the streaming toggle and says why rather than offering
+    /// a switch that would change nothing.
+    public var modelProxySupported: Bool
+    /// The loopback port the proxy is listening on, or nil when there is none.
+    /// Diagnostic: it is what Settings shows so an operator can curl the
+    /// proxy's own `/tbd/status` without going into `~/tbd/state.db`.
+    public var modelProxyPort: Int?
+    /// The running proxy's build version, or nil when there is none. The
+    /// supervisor retires a proxy whose version differs from the daemon's own
+    /// binary, so a value here that disagrees with the app's version is the
+    /// visible form of "a retire is due".
+    public var modelProxyVersion: String?
+    /// Whether transcript streaming is effective — the *conjunction* of
+    /// `transcript_streaming_enabled` and `model_proxy_enabled`, resolved
+    /// daemon-side. A hand-edited row holding streaming on with the proxy off
+    /// streams nothing, and this field says so rather than making the app
+    /// re-derive the pair.
+    public var transcriptStreamingEnabled: Bool
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -3798,7 +3875,12 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 updateMode: UpdateMode = Config.updateModeDefault,
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
                 ptyHolderSupported: Bool = false,
-                transcriptComposerEnabled: Bool = Config.transcriptComposerEnabledDefault) {
+                transcriptComposerEnabled: Bool = Config.transcriptComposerEnabledDefault,
+                modelProxyEnabled: Bool = Config.modelProxyDefault,
+                modelProxySupported: Bool = false,
+                modelProxyPort: Int? = nil,
+                modelProxyVersion: String? = nil,
+                transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault) {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
@@ -3817,6 +3899,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.ptyHolderEnabled = ptyHolderEnabled
         self.ptyHolderSupported = ptyHolderSupported
         self.transcriptComposerEnabled = transcriptComposerEnabled
+        self.modelProxyEnabled = modelProxyEnabled
+        self.modelProxySupported = modelProxySupported
+        self.modelProxyPort = modelProxyPort
+        self.modelProxyVersion = modelProxyVersion
+        self.transcriptStreamingEnabled = transcriptStreamingEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -3881,6 +3968,21 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         transcriptComposerEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptComposerEnabled)
             ?? Config.transcriptComposerEnabledDefault
+        // New fields for the model proxy. A daemon that does not send
+        // `modelProxyEnabled` runs no proxy at all, so fall through to the
+        // shipped defaults rather than assuming the route is live. `supported`,
+        // `port` and `version` are facts about THIS daemon's running proxy, so
+        // absent values are honestly false/nil — which greys the toggles out on
+        // an older daemon instead of offering switches it would ignore.
+        modelProxyEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .modelProxyEnabled) ?? Config.modelProxyDefault
+        modelProxySupported = try c.decodeIfPresent(
+            Bool.self, forKey: .modelProxySupported) ?? false
+        modelProxyPort = try c.decodeIfPresent(Int.self, forKey: .modelProxyPort)
+        modelProxyVersion = try c.decodeIfPresent(String.self, forKey: .modelProxyVersion)
+        transcriptStreamingEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .transcriptStreamingEnabled)
+            ?? Config.transcriptStreamingDefault
     }
 }
 

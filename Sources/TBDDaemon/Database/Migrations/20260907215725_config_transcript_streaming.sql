@@ -1,0 +1,15 @@
+-- Gate for the transcript's provisional assistant row — the row that grows
+-- from the model proxy's stream file and is retired when the JSONL line for
+-- that message lands.
+--
+-- No DEFAULT clause, deliberately. ADD COLUMN ... DEFAULT would backfill every
+-- existing row, destroying the distinction between "nobody has chosen" (NULL)
+-- and "chose off" (0) — which is what made auto_hibernate_enabled impossible to
+-- graduate without a forcing UPDATE that also reset deliberate opt-ins.
+-- The shipped default lives in exactly one place:
+-- Config.transcriptStreamingDefault.
+--
+-- Streaming needs the proxy, so the resolved value is the conjunction of this
+-- column and model_proxy_enabled: a hand-edited row with streaming on and the
+-- proxy off streams nothing.
+ALTER TABLE config ADD COLUMN transcript_streaming_enabled INTEGER;

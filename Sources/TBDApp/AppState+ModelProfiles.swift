@@ -471,6 +471,73 @@ extension AppState {
         }
     }
 
+    /// Help text for the model-proxy toggle. A stored constant rather than a
+    /// literal in the view so it is assertable: it must say what the switch
+    /// puts in the request path and when the change takes hold, because a
+    /// session's base URL is fixed in the environment it was spawned with and
+    /// nothing already running moves.
+    static let modelProxyHelp = """
+        Routes new Claude sessions through a loopback proxy TBD runs, so TBD \
+        can see the model stream. Applies to sessions started after you change \
+        it. Off by default (soaking).
+        """
+
+    /// Help text for the transcript-streaming toggle. Assertable for the same
+    /// reason as `modelProxyHelp`, and it carries one promise the operator
+    /// cannot see anywhere else: flipping this one switch flips the proxy on
+    /// too, because the stream file it reads is written by nothing else.
+    static let transcriptStreamingHelp = """
+        Shows assistant text in the transcript pane as it is generated, before \
+        it reaches the session file. Turning this on also turns on the model \
+        proxy. Applies to sessions started after you change it.
+        """
+
+    /// Why the transcript-streaming toggle is inert on this daemon. Shown only
+    /// when `modelProxySupported` is false: with no proxy there is no stream
+    /// file, so the switch would change nothing an operator could observe.
+    static let transcriptStreamingUnsupportedCaption =
+        "Needs the TBD model proxy, which this daemon could not start."
+
+    /// Persist the model-proxy gate, then re-fetch capabilities so the Settings
+    /// toggle reflects the daemon's persisted state.
+    ///
+    /// **Applies to sessions started after the call, and to no others.** A
+    /// session's Messages API base URL is fixed in the environment it was
+    /// spawned with, so turning this on never reroutes a running session and
+    /// turning it off never takes a live route away.
+    ///
+    /// Writes one flag. Turning the proxy off also clears transcript streaming,
+    /// but the daemon does that in the same transaction — the read-back is how
+    /// the app learns it happened.
+    func setModelProxyEnabled(_ enabled: Bool) async {
+        do {
+            try await modelProxyFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set model proxy: \(error, privacy: .public)")
+            showAlert("Failed to set the model proxy: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Persist the transcript-streaming gate, then re-fetch capabilities so the
+    /// Settings toggle reflects the daemon's persisted state. Applies to
+    /// sessions started after the call, for the same reason as the proxy gate.
+    ///
+    /// Sends the gesture unconditionally, including while the proxy is off:
+    /// turning streaming on turns the proxy on too, and that coupling belongs
+    /// to the daemon. An app that pre-empted the write would make this switch a
+    /// no-op on exactly the installs that never opted into the proxy.
+    func setTranscriptStreamingEnabled(_ enabled: Bool) async {
+        do {
+            try await transcriptStreamingFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set transcript streaming: \(error, privacy: .public)")
+            showAlert(
+                "Failed to set transcript streaming: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Persist the worktree auto-trust switch, then re-fetch capabilities so
     /// the Settings toggle reflects the daemon's persisted state. Applies to
     /// the next Claude spawn or wake; never un-trusts an already-seeded path.
