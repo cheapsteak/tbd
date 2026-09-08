@@ -155,10 +155,13 @@ persists it. Every later proxy is asked to bind that port. The daemon takes
 `proxy.lock` **before** any bind, the same ordering the holder spawner uses
 before touching a socket path, so two daemons on one TBD home cannot both mint.
 
-On address-in-use the daemon probes the status endpoint on that port. A TBD
-proxy answering is adopted. Anything else means an unrelated process took the
-port while TBD was stopped; the daemon mints a fresh port and updates the
-column. Sessions spawned against the old port lose the proxy for their
+On address-in-use the daemon probes the status endpoint on that port. The
+status payload names the TBD home the proxy was started for, and the daemon
+adopts only a proxy that names its own home and whose pid and start time match
+the process table. Anything else, including a proxy that belongs to another
+TBD home on the same machine after an ephemeral-port coincidence, means the
+port is not this daemon's to use; the daemon mints a fresh port and updates
+the column, and never retires or replaces a proxy it did not adopt. Sessions spawned against the old port lose the proxy for their
 remaining life, because Claude reads `ANTHROPIC_BASE_URL` once at start. That
 is the blast radius of a port change, and it is confined to the window in
 which TBD was entirely stopped: a running proxy holds its port across every
@@ -167,7 +170,9 @@ daemon restart.
 ### Control endpoint
 
 - `GET /tbd/status` returns the proxy's version, pid, process start time, port,
-  and the number of streams in flight.
+  the TBD home it was started for, and the number of streams in flight. The
+  home is what lets a daemon tell its own proxy from another home's on a
+  colliding port; every adoption checks it.
 - `POST /tbd/retire` closes the listener and **answers as soon as it is
   closed**, then finishes its in-flight streams without a port and exits. The
   successor binds the moment the answer arrives. No stream is cut, and the
