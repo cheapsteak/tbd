@@ -484,8 +484,18 @@ foreground, 2 s background, 10 s inactive — and under the same reset rule: a
 file whose size fell below the consumed offset is re-read from byte zero. The
 reader folds the tagged lines into a `ProvisionalMessage`: the message id,
 the concatenated text of its text blocks in index order, and whether it is
-complete, aborted, or still growing. When several messages are present it
-keeps the most recent that has text.
+complete, aborted, or still growing.
+
+When several messages are present, the fold keeps **the most recent message
+that has text** — most recent by position in the file, which is the order the
+tee controls. A message that has only started and produced nothing holds the
+row only when no message has any text at all, so that a pane can show that a
+turn has begun. The consequence matters to the retire rules below: a newer
+`start` does not by itself take the row away from a finished message, because
+until that new message emits its first delta the finished one is still the
+best thing to show. A finished message's row therefore leaves on confirmation,
+on the first text of a newer message, or on the 60-second rule — never on the
+mere appearance of a successor.
 
 The transcript's incremental ingest also records the API `message.id` of every
 assistant line it consumes. That is a row-local read, so it does not violate
@@ -500,7 +510,7 @@ the resolved streaming flag is on and its message id is unconfirmed. It is
 retired when:
 
 - the JSONL ingests an assistant line with that message id;
-- a newer `start` line replaces it;
+- a newer message with text supersedes it;
 - the stream is aborted;
 - a completed stream stays unconfirmed for 60 seconds, which backstops any
   side request the tee filter misses. The value sits above the worst JSONL
@@ -512,8 +522,19 @@ retired when:
 
 `TranscriptStreamPlan.updateLast` already renders a last row whose content
 version changed, so a growing row costs one tail re-render per tick. A subtle
-trailing cursor marks the row provisional. Session History and the transcript
-overlay never register a stream path and never see a provisional row.
+trailing cursor marks the row provisional.
+
+The provisional row lives in the same per-session transcript store the live
+pane publishes into, and **Session History reads that same store** — its
+session list is the daemon's enumeration of the worktree's JSONL files, which
+includes a session a pane is streaming right now, and selecting a session
+deliberately reuses whatever the store already holds rather than refetching.
+So History filters the row out at its read site, by the `stream:` prefix on
+the item id: only settled rows reach it, and a live session read through
+History looks exactly like one read after the fact. The transcript overlay
+needs no such filter, because it resolves an item by an id a row hands it and
+no gesture can hand it a provisional one — assistant bubbles carry no overlay
+affordance, and the row is always an assistant bubble.
 
 ### Failure handling
 
@@ -585,10 +606,14 @@ SSE shape and costs zero tokens.
   survives a flipped default, and NULL follows it. The GC leg keeps young and
   live files and unlinks the rest.
 - **App.** The provisional row appears, grows, and is replaced by the
-  confirming JSONL line; retires on abort, on a newer start, and on the 60 s
-  rule; sorts after pending questions; and with streaming off is never
-  published while the file still updates. Chunk-split equivalence over a
-  captured stream file.
+  confirming JSONL line; retires on abort, on a newer message taking the row,
+  and on the 60 s rule; sorts after pending questions; and with streaming off
+  is never published while the file still updates. Chunk-split equivalence:
+  *"a file delivered in arbitrary chunks folds to what the whole file folds
+  to"* writes one encoded stream file to disk in seeded-random chunk splits —
+  including one inside a `text` line's JSON string and one inside a multi-byte
+  character — refreshing after each write, and requires the provisional it ends
+  on to equal the whole-file fold taken at the same instant.
 - **Live verification, deferred until a restart is permitted on the
   development machine:** the shipped `TBDModelProxy` on a holder terminal
   carries an interactive claude.ai-login turn and the pane shows its text
