@@ -211,6 +211,13 @@ enum TBDModelProxyMain {
         // test — or a second checkout — its own proxy with no injection seam
         // added for the purpose.
         let paths = ProxyPaths(home: arguments.home)
+        // Resolved once, here, and not per request: the daemon compares this
+        // against its own home to tell its proxy from one serving a different
+        // TBD home that the kernel happened to hand the same ephemeral port.
+        // Both sides canonicalize through the same function, because
+        // `~/tbd`, `/tmp/x/../x/tbd` and a path through a symlinked `/var` are
+        // one directory and have to compare equal.
+        let servedHome = ModelProxyStatus.canonicalHome(arguments.home)
         do {
             try paths.create()
         } catch {
@@ -288,7 +295,7 @@ enum TBDModelProxyMain {
                 ModelProxyStatus(
                     version: TBDModelProxyVersion.current, pid: getpid(),
                     processStartTime: processStart, port: boundPort.value,
-                    streamsInFlight: 0, routeCount: 0)
+                    streamsInFlight: 0, routeCount: 0, home: servedHome)
             },
             // Reached only after `POST /tbd/retire` has closed the listener and
             // drained the streams that were still running on it. It joins the

@@ -75,6 +75,35 @@ extension ModelProxySuites {
             }
         }
 
+        @Test("status names the TBD home the proxy serves")
+        func statusReportsTheHome() async throws {
+            // Two TBD homes on one machine draw their proxy port from the same
+            // ephemeral range, and every other field of a status answer would
+            // match across them: both name a live TBD proxy, and a same-version
+            // install reports the same identity. The home is the field that
+            // makes the two tellable apart, so a daemon adopts the process
+            // holding its port only when this equals its own.
+            try await withProxy(
+                prefix: "pxhome",
+                script: { _, _ in FakeUpstream.Script(events: []) }
+            ) { harness in
+                let reported = try await status(harness)
+                #expect(reported.home == harness.home)
+                // Canonical: the same directory reached through a symlinked
+                // `/var` or a `..` segment has to compare equal to this, so an
+                // uncanonicalized answer is a daemon that refuses to adopt its
+                // own proxy.
+                #expect(reported.home == ModelProxyStatus.canonicalHome(harness.home))
+                #expect(!reported.home.isEmpty)
+                // The rest of the identity arrives unchanged around it — the
+                // two counters are the only fields the endpoint replaces — so
+                // a `home` filled from some other field of the closure fails
+                // here rather than passing on a coincidence.
+                #expect(reported.version == "test")
+                #expect(reported.port == harness.port)
+            }
+        }
+
         // MARK: Retire
 
         @Test("retire answers before the drain and a successor binds the port")
@@ -129,7 +158,8 @@ extension ModelProxySuites {
                     status: {
                         ModelProxyStatus(
                             version: "successor", pid: getpid(), processStartTime: Date(),
-                            port: harness.port, streamsInFlight: 0, routeCount: 0)
+                            port: harness.port, streamsInFlight: 0, routeCount: 0,
+                            home: harness.home)
                     },
                     onRetire: {})
                 let bindStarted = ContinuousClock().now
@@ -198,7 +228,8 @@ extension ModelProxySuites {
                 routes: routes,
                 status: { ModelProxyStatus(
                     version: "test", pid: getpid(), processStartTime: Date(), port: 0,
-                    streamsInFlight: 0, routeCount: 0) },
+                    streamsInFlight: 0, routeCount: 0,
+                    home: ModelProxyStatus.canonicalHome(root.path)) },
                 onRetire: { retired.set() },
                 closeListener: { closed.set() },
                 streamsInFlight: { 1 },
@@ -234,7 +265,8 @@ extension ModelProxySuites {
                 routes: routes,
                 status: { ModelProxyStatus(
                     version: "test", pid: getpid(), processStartTime: Date(), port: 0,
-                    streamsInFlight: 0, routeCount: 0) },
+                    streamsInFlight: 0, routeCount: 0,
+                    home: ModelProxyStatus.canonicalHome(root.path)) },
                 onRetire: { retires.increment() },
                 closeListener: {},
                 // Idle: the drain's first sample is already zero, so nothing
@@ -279,7 +311,8 @@ extension ModelProxySuites {
                 routes: routes,
                 status: { ModelProxyStatus(
                     version: "test", pid: getpid(), processStartTime: Date(), port: 0,
-                    streamsInFlight: 0, routeCount: 0) },
+                    streamsInFlight: 0, routeCount: 0,
+                    home: ModelProxyStatus.canonicalHome(root.path)) },
                 onRetire: { retires.increment() },
                 closeListener: { closes.increment() },
                 streamsInFlight: { 0 },
@@ -314,7 +347,7 @@ extension ModelProxySuites {
             let started = Date(timeIntervalSince1970: 1_789_234_567.123456)
             let status = ModelProxyStatus(
                 version: "dev", pid: 4321, processStartTime: started, port: 51234,
-                streamsInFlight: 2, routeCount: 3)
+                streamsInFlight: 2, routeCount: 3, home: "/tmp/pinned/tbd")
 
             let decoded = try ModelProxyStatus.decodeStatusResponse(
                 try status.encodedForStatusResponse())

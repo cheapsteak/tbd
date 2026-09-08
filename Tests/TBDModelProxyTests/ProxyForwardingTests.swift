@@ -989,6 +989,9 @@ struct ProxyHarness: Sendable {
     /// cannot be reused by another against a port the kernel has since given
     /// to somebody else.
     let session: URLSession
+    /// The scratch directory standing in for a TBD home, canonical, which is
+    /// the form the status endpoint reports and a daemon compares against.
+    let home: String
 
     func url(_ suffix: String) -> URL {
         // Force-unwrapped deliberately: every caller composes this from a
@@ -1049,6 +1052,10 @@ func withProxy(
 
         let routesDir = root.appendingPathComponent("proxy/routes")
         let streamsDir = root.appendingPathComponent("streams")
+        // Canonical, as `run()` reports it: the scratch root lives under a
+        // `/tmp` or `/var` that is itself a symlink on macOS, so the raw path
+        // and the resolved one differ here in practice.
+        let canonicalHome = ModelProxyStatus.canonicalHome(root.path)
         try FileManager.default.createDirectory(at: routesDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: streamsDir, withIntermediateDirectories: true)
 
@@ -1076,7 +1083,8 @@ func withProxy(
             status: {
                 ModelProxyStatus(
                     version: "test", pid: getpid(), processStartTime: Date(),
-                    port: portBox.value, streamsInFlight: -1, routeCount: -1)
+                    port: portBox.value, streamsInFlight: -1, routeCount: -1,
+                    home: canonicalHome)
             },
             onRetire: onRetire ?? {},
             // An explicit environment, so the forwarder's proxy resolution
@@ -1103,7 +1111,7 @@ func withProxy(
         let harness = ProxyHarness(
             port: port, token: token, terminalID: terminalID, upstream: upstream,
             routesDir: routesDir, streamsDir: streamsDir, server: server, routes: table,
-            session: session)
+            session: session, home: canonicalHome)
         try await withPhaseDeadline("request", seconds: 60) { try await body(harness) }
         await teardown()
     } catch {

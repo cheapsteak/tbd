@@ -178,10 +178,10 @@ final class ControlEndpoints: Sendable {
     /// The proxy's identity and its live counters.
     ///
     /// The injected closure supplies what only the process knows — its build
-    /// identity, pid, start time and port — and the two counters are read here,
-    /// at the moment of the request, from the server's own in-flight counter
-    /// and the route table's cached count. The closure is synchronous by
-    /// contract and cannot await an actor, and a status reporting a count
+    /// identity, pid, start time, port and home — and the two counters are read
+    /// here, at the moment of the request, from the server's own in-flight
+    /// counter and the route table's cached count. The closure is synchronous
+    /// by contract and cannot await an actor, and a status reporting a count
     /// somebody had cached at start-up would be worse than no count at all.
     private func statusResponse() -> Response {
         let identity = status()
@@ -191,7 +191,8 @@ final class ControlEndpoints: Sendable {
             processStartTime: identity.processStartTime,
             port: identity.port,
             streamsInFlight: streamsInFlight(),
-            routeCount: routes.currentCount)
+            routeCount: routes.currentCount,
+            home: identity.home)
         guard let encoded = try? live.encodedForStatusResponse(),
             let text = String(data: encoded, encoding: .utf8)
         else {

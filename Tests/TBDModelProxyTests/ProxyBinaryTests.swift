@@ -305,7 +305,8 @@ extension ProxyBinaryTests {
                 status: {
                     ModelProxyStatus(
                         version: "test", pid: getpid(), processStartTime: Date(), port: 0,
-                        streamsInFlight: 0, routeCount: 0)
+                        streamsInFlight: 0, routeCount: 0,
+                        home: ModelProxyStatus.canonicalHome(root.path))
                 },
                 onRetire: {},
                 closeListener: {},
@@ -363,7 +364,18 @@ extension ModelProxySuites {
 
         @Test("it binds, answers status, and writes a pid file naming that port")
         func bindsAndWritesPidFile() async throws {
-            let home = proxyScratchRoot(prefix: "pxrun").path
+            // Launched through a symlink to the real scratch directory, so the
+            // path the binary is handed and the path it must report are
+            // different strings for one directory. That is the everyday case —
+            // `/var` and `/tmp` are symlinks on macOS — and a daemon comparing
+            // an uncanonicalized answer against its own home would refuse to
+            // adopt its own proxy.
+            let real = proxyScratchRoot(prefix: "pxrun")
+            try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+            let link = real.deletingLastPathComponent()
+                .appendingPathComponent(real.lastPathComponent + "-link")
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+            let home = link.path
             let proxy = try ProxyProcess.start(home: home)
             defer { proxy.terminate() }
 
@@ -377,6 +389,16 @@ extension ModelProxySuites {
             #expect(status.pid == proxy.pid)
             #expect(status.port == pidFile.port)
             #expect(status.streamsInFlight == 0)
+
+            // The home the daemon compares against its own before it adopts
+            // the process holding its port, canonical rather than echoed back:
+            // the `--home` above went in through a symlink, and the answer
+            // names the directory it resolves to.
+            #expect(status.home == ModelProxyStatus.canonicalHome(real.path))
+            #expect(status.home == ModelProxyStatus.canonicalHome(home))
+            #expect(
+                status.home != home,
+                "the proxy echoed its --home back rather than canonicalizing it")
 
             // The identity the daemon compares against its own sibling binary.
             // "dev" was the placeholder this task replaced; "unknown" is what a
