@@ -84,8 +84,12 @@ extension ModelProxySuites {
             // no-listener gap is the successor's bind time rather than the length
             // of whatever turn is still running.
             let retired = ProxyFlagBox()
+            // Six events a second apart: the stream has to still be running
+            // when the successor binds, and the successor's bind is allowed to
+            // wait out a squatter (see below), so the script's length is the
+            // budget both of those come out of.
             let ticks = (1...6).map { index in
-                (delayMs: 500, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
+                (delayMs: 1000, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
 
             try await withProxy(
@@ -107,7 +111,7 @@ extension ModelProxySuites {
 
                 #expect((retireResponse as? HTTPURLResponse)?.statusCode == 200)
                 #expect(String(decoding: body, as: UTF8.self) == ControlEndpoints.retiringBody)
-                // Bounded well under the ~3 seconds the stream still has to run:
+                // Bounded well under the ~6 seconds the stream still has to run:
                 // an answer that waited for the drain could not land this early.
                 #expect(answered < .milliseconds(500), "retire answered after \(answered)")
                 #expect(harness.server.streamsInFlight == 1, "the stream was cut by the retire")
@@ -127,13 +131,20 @@ extension ModelProxySuites {
                 let bindStarted = ContinuousClock().now
                 var boundPort: Int?
                 var lastBindError: (any Error)?
-                // Retried inside the second the promise allows rather than
-                // tried once: an ephemeral port the retire just freed is a port
-                // any concurrently starting listener in this process can be
-                // handed, and that is a squatter, not a broken handshake. The
-                // bound is still the assertion — a successor that cannot take
-                // the port within a second fails here with what it last saw.
-                while ContinuousClock().now - bindStarted < .seconds(1) {
+                // Retried rather than tried once: an ephemeral port the retire
+                // just freed is a port any concurrently starting listener — in
+                // this process or in another test's child — can be handed, and
+                // that is a squatter, not a broken handshake. Four seconds
+                // rather than one because the squatter is real: it took this
+                // port on two of three CI runs once the suite that spawns real
+                // proxy binaries landed ahead of this one.
+                //
+                // Widening the allowance does NOT weaken the claim, because the
+                // claim is not "within N seconds" — it is "while the old
+                // streams are still running", and `streamsInFlight == 1` below
+                // is what asserts it. A bind that only succeeded because the
+                // last stream ended fails there, whatever the allowance is.
+                while ContinuousClock().now - bindStarted < .seconds(4) {
                     do {
                         boundPort = try await withPhaseDeadline("successor bind", seconds: 5) {
                             try await successor.start()
