@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import NIOHTTP1
 import Testing
@@ -220,6 +221,130 @@ extension ModelProxySuites {
                 #expect(lines.contains("text:msg_B:0:half"))
                 let sawStop = lines.contains(where: { $0.hasPrefix("stop:") })
                 #expect(!sawStop, "a cut stream was recorded as a finished one")
+            }
+        }
+
+        @Test("an upstream error event ends the message as aborted with the upstream's reason")
+        func abortedOnUpstreamErrorEvent() async throws {
+            // The API's own mid-stream failure: a `message_start` has already
+            // been written, the model then gives up, and the frames stop. The
+            // reason recorded is the upstream's own `error.type`, because that
+            // is what distinguishes "the model was overloaded" from every
+            // other way a turn can end — and the reader of the stream file has
+            // no other source for it.
+            let events = [
+                sseEvent("message_start", messageStartPayload(id: "msg_E")),
+                sseEvent("content_block_start", textBlockStartPayload(index: 0)),
+                sseEvent("content_block_delta", textDeltaPayload(index: 0, text: "half")),
+                sseEvent(
+                    "error",
+                    #"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#),
+            ]
+
+            try await withProxy(
+                prefix: "pxerrev",
+                script: { _, _ in
+                    FakeUpstream.Script(events: events.map { (delayMs: 50, bytes: $0) })
+                },
+                streamingEnabled: true,
+                teeFactory: { StreamTee(streamsDir: $0) }
+            ) { harness in
+                let (data, response) = try await harness.session.data(
+                    for: parentRequest(harness, body: Self.parentBody))
+                #expect((response as? HTTPURLResponse)?.statusCode == 200)
+                // Forwarding is untouched by the tee's verdict: the client sees
+                // the error frame and decides for itself what to do about it.
+                #expect(String(decoding: data, as: UTF8.self).contains("overloaded_error"))
+
+                let file = harness.streamFile
+                await waitUntil(
+                    "the tee wrote its terminal line", sample: { summarizeStream(file) },
+                    isSatisfied: { $0.last == "aborted:msg_E:overloaded_error" })
+
+                let lines = summarizeStream(file)
+                #expect(lines.first == "start:msg_E")
+                #expect(lines.contains("text:msg_E:0:half"))
+                #expect(
+                    !lines.contains(where: { $0.hasPrefix("stop:") }),
+                    "a failed message was recorded as a finished one")
+            }
+        }
+
+        @Test("an event larger than the parser's cap abandons the message and forwards on")
+        func oversizedEventAbandonsTheMessage() async throws {
+            // The parser holds everything since the last blank line, so an
+            // upstream that never sends a terminator would grow it without
+            // bound. What is bounded is the *message*, not the process and not
+            // the response: the client keeps receiving every byte, and only
+            // the transcript copy gives up.
+            let oversized = Array(
+                ("data: " + String(repeating: "x", count: StreamTee.maxPendingEventBytes + 4096))
+                    .utf8)
+
+            try await withProxy(
+                prefix: "pxovers",
+                script: { _, _ in
+                    FakeUpstream.Script(events: [
+                        (delayMs: 0, bytes: sseEvent("message_start", messageStartPayload(id: "msg_O"))),
+                        // No terminating blank line, so nothing ever completes
+                        // the event and the parser's pending buffer is what
+                        // grows.
+                        (delayMs: 50, bytes: oversized),
+                    ])
+                },
+                streamingEnabled: true,
+                teeFactory: { StreamTee(streamsDir: $0) }
+            ) { harness in
+                let (data, response) = try await harness.session.data(
+                    for: parentRequest(harness, body: Self.parentBody))
+                #expect((response as? HTTPURLResponse)?.statusCode == 200)
+                // Every byte the upstream sent still reached the client, which
+                // is the half of this that matters to the turn.
+                #expect(
+                    data.count > StreamTee.maxPendingEventBytes,
+                    "the relay dropped bytes the tee refused to parse; got \(data.count)")
+
+                let file = harness.streamFile
+                await waitUntil(
+                    "the tee abandoned the oversized message", sample: { summarizeStream(file) },
+                    isSatisfied: {
+                        $0.last == "aborted:msg_O:\(StreamTee.oversizedEventReason)"
+                    })
+                #expect(summarizeStream(file).first == "start:msg_O")
+            }
+        }
+
+        // MARK: The file itself
+
+        @Test("a stream file is created readable and writable only by its owner")
+        func streamFileIsOwnerOnly() async throws {
+            // The file holds one conversation's assistant text in the clear on
+            // a shared machine. 0600 is asserted rather than assumed because
+            // the mode passed to `open` is masked by the process umask, and
+            // the tee's `fchmod` is what makes the result the same on a
+            // machine whose umask is 0 and on a file that already existed.
+            try await withProxy(
+                prefix: "pxmode",
+                script: { _, _ in sseTextAnswer(messageID: "msg_M", deltas: ["mode"]) },
+                streamingEnabled: true,
+                teeFactory: { StreamTee(streamsDir: $0) }
+            ) { harness in
+                let (_, response) = try await harness.session.data(
+                    for: parentRequest(harness, body: Self.parentBody))
+                #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+                let file = harness.streamFile
+                await waitUntil(
+                    "the tee wrote its stop line", sample: { summarizeStream(file) },
+                    isSatisfied: { $0.last == "stop:msg_M" })
+
+                var info = stat()
+                let statted = file.path.withCString { stat($0, &info) }
+                #expect(statted == 0, "stat(\(file.path)) failed with errno \(errno)")
+                let mode = info.st_mode & 0o777
+                #expect(
+                    mode == 0o600,
+                    "stream file mode was 0\(String(mode, radix: 8)), not 0600")
             }
         }
 

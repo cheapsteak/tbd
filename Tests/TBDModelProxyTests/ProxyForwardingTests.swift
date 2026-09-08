@@ -1,3 +1,4 @@
+import CFNetwork
 import Darwin
 import Foundation
 import NIOHTTP1
@@ -12,7 +13,7 @@ import Testing
 ///
 /// Each of them binds real loopback listeners and asserts on *arrival times* —
 /// that an event reaches the client as it arrives, that a text line lands
-/// before the stream ends, that a retire answers inside 500 ms. Three such
+/// before the stream ends, that a retire answers before its drain. Three such
 /// suites racing on a 3-core CI runner measure the runner's load rather than
 /// the proxy: the cut-stream test lost its body chunk that way the first time
 /// the tee and control suites ran beside it. They also mint and free ephemeral
@@ -69,6 +70,14 @@ extension ModelProxySuites {
                 request.setValue("s", forHTTPHeaderField: "x-claude-code-session-id")
                 request.setValue("js", forHTTPHeaderField: "x-stainless-lang")
                 request.setValue("gzip", forHTTPHeaderField: "accept-encoding")
+                // The header the whole feature depends on. `URLSession`
+                // documents `Authorization` among the fields it reserves and
+                // may set itself, so that it survives the upstream leg
+                // unchanged is a promise worth pinning rather than assuming:
+                // a proxy that dropped or rewrote it turns every turn into a
+                // 401 the moment a base URL is set.
+                request.setValue(
+                    "Bearer test-token-not-real", forHTTPHeaderField: "Authorization")
 
                 let (_, response) = try await harness.session.data(for: request)
                 #expect((response as? HTTPURLResponse)?.statusCode == 200)
@@ -85,6 +94,9 @@ extension ModelProxySuites {
                 #expect(received.head.headers.first(name: "anthropic-version") == "2023-06-01")
                 #expect(received.head.headers.first(name: "x-claude-code-session-id") == "s")
                 #expect(received.head.headers.first(name: "x-stainless-lang") == "js")
+                #expect(
+                    received.head.headers.first(name: "authorization")
+                        == "Bearer test-token-not-real")
 
                 // `accept-encoding` is the one request header that never passes
                 // through. It is replaced rather than merely dropped because
@@ -102,7 +114,7 @@ extension ModelProxySuites {
 
         @Test("each event reaches the client as it arrives, not batched at the end")
         func relaysStreamChunkByChunk() async throws {
-            let spacingMs = 300
+            let spacingMs = 600
             let events = (1...3).map { index in
                 (delayMs: spacingMs, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
@@ -126,13 +138,16 @@ extension ModelProxySuites {
 
                 #expect(arrivals.count == 3)
                 guard arrivals.count >= 2 else { return }
-                // The scripted spacing is 300 ms; asserting 200 leaves room for a
-                // loaded CI machine to be late without letting a proxy that
-                // buffered the whole stream — which would deliver all three within
-                // a millisecond of each other — pass.
+                // The scripted spacing is 600 ms and the assertion is 300, so
+                // half the interval can be lost to a loaded runner before the
+                // test reddens — and a proxy that buffered the whole stream,
+                // which delivers all three within a millisecond of each other,
+                // still cannot pass. The headroom is in the scripted spacing
+                // rather than in a smaller floor for a reason: lowering the
+                // floor towards zero eventually stops discriminating at all.
                 let gap = arrivals[1] - arrivals[0]
                 #expect(
-                    gap >= .milliseconds(200),
+                    gap >= .milliseconds(300),
                     "second event arrived \(gap) after the first; a buffered relay collapses this to ~0")
             }
         }
@@ -732,6 +747,124 @@ extension ModelProxySuites {
             // `https://api.anthropic.com//v1/messages` — a different path, and a
             // 404 from the API.
             #expect(stored.upstream + "/v1/messages" == "https://api.anthropic.com/v1/messages")
+        }
+    }
+}
+
+// MARK: - The upstream session's proxy environment
+
+extension ModelProxySuites {
+    /// How `HTTPS_PROXY` and `NO_PROXY` become a `connectionProxyDictionary`.
+    ///
+    /// Tested as a pure function over an injected environment, because it is
+    /// the only way it can be tested at all: `connectionProxyDictionary` has
+    /// no observable effect on a loopback request, and a test that read the
+    /// developer's real shell would pass or fail by whose machine ran it.
+    /// What it decides is not cosmetic — a user behind a corporate proxy
+    /// reaches the model API through this, and a loopback exception that went
+    /// missing would send the proxy's own tests through a proxy that cannot
+    /// answer them.
+    @Suite("Proxy upstream session")
+    struct ProxyUpstreamSessionTests {
+        static func dictionary(_ environment: [String: String]) -> [AnyHashable: Any]? {
+            UpstreamForwarder.proxyDictionary(environment: environment)
+        }
+
+        static func host(_ dictionary: [AnyHashable: Any]?) -> String? {
+            dictionary?[kCFNetworkProxiesHTTPSProxy as String] as? String
+        }
+
+        static func port(_ dictionary: [AnyHashable: Any]?) -> Int? {
+            dictionary?[kCFNetworkProxiesHTTPSPort as String] as? Int
+        }
+
+        static func exceptions(_ dictionary: [AnyHashable: Any]?) -> [String] {
+            dictionary?[kCFNetworkProxiesExceptionsList as String] as? [String] ?? []
+        }
+
+        @Test("NO_PROXY=* means no proxy dictionary at all")
+        func noProxyWildcardShortCircuits() {
+            // The conventional "never proxy anything". Honoring it by
+            // returning no dictionary is what makes the `HTTPS_PROXY` beside
+            // it inert, rather than leaving an exception list that would have
+            // to match every host in the world.
+            #expect(
+                Self.dictionary(["NO_PROXY": "*", "HTTPS_PROXY": "http://proxy.acme:8080"]) == nil)
+            // Lowercase spelling and surrounding whitespace, both of which a
+            // real shell profile produces.
+            #expect(
+                Self.dictionary(["no_proxy": " * ", "https_proxy": "proxy.acme:8080"]) == nil)
+        }
+
+        @Test("no HTTPS_PROXY means no proxy dictionary")
+        func absentProxyMeansNoDictionary() {
+            #expect(Self.dictionary([:]) == nil)
+            #expect(Self.dictionary(["NO_PROXY": ".acme.com"]) == nil)
+            #expect(Self.dictionary(["HTTPS_PROXY": "   "]) == nil)
+        }
+
+        @Test("a bare host:port is read as a host and a port, not as a scheme")
+        func bareHostPortIsParsed() {
+            // The trap this exists for: `URLComponents` reads `proxy.acme` in
+            // `proxy.acme:3128` as the *scheme*, so a bare `host:port` — as
+            // common in these variables as a URL — parses to a nil host unless
+            // a scheme is put in front of it first.
+            let dictionary = Self.dictionary(["HTTPS_PROXY": "proxy.acme:3128"])
+            #expect(Self.host(dictionary) == "proxy.acme")
+            #expect(Self.port(dictionary) == 3128)
+            #expect(dictionary?[kCFNetworkProxiesHTTPSEnable as String] as? Bool == true)
+        }
+
+        @Test("a URL-shaped proxy keeps its host, and its scheme supplies the default port")
+        func urlShapedProxyIsParsed() {
+            let explicit = Self.dictionary(["HTTPS_PROXY": "http://proxy.acme:8080"])
+            #expect(Self.host(explicit) == "proxy.acme")
+            #expect(Self.port(explicit) == 8080)
+
+            let httpDefault = Self.dictionary(["https_proxy": "http://proxy.acme"])
+            #expect(Self.host(httpDefault) == "proxy.acme")
+            #expect(Self.port(httpDefault) == 80)
+
+            let httpsDefault = Self.dictionary(["HTTPS_PROXY": "https://proxy.acme"])
+            #expect(Self.host(httpsDefault) == "proxy.acme")
+            #expect(Self.port(httpsDefault) == 443)
+        }
+
+        @Test("a leading-dot NO_PROXY entry becomes a glob and a bare host stays exact")
+        func leadingDotEntriesBecomeGlobs() {
+            // `NO_PROXY` suffix-matches on a leading dot by convention;
+            // CFNetwork's exception list is glob-shaped, so the two spellings
+            // are not the same string and `.acme.com` left alone would match
+            // nothing.
+            let dictionary = Self.dictionary([
+                "HTTPS_PROXY": "http://proxy.acme:8080",
+                "NO_PROXY": ".acme.com, internal.acme ,,.corp.example",
+            ])
+            let exceptions = Self.exceptions(dictionary)
+            #expect(exceptions.contains("*.acme.com"))
+            #expect(exceptions.contains("*.corp.example"))
+            #expect(exceptions.contains("internal.acme"))
+            #expect(!exceptions.contains(".acme.com"))
+            // Empty entries between commas are dropped rather than becoming an
+            // exception that matches nothing under a name of its own.
+            #expect(!exceptions.contains(""))
+        }
+
+        @Test("loopback is in the exception list whatever the environment says")
+        func loopbackIsAlwaysExcepted() {
+            // A route's upstream is normally `https://api.anthropic.com`, but
+            // every test in this file points one at a loopback fake — and a
+            // developer with `HTTPS_PROXY` in their shell would otherwise send
+            // those through a corporate proxy that cannot reach 127.0.0.1.
+            for environment in [
+                ["HTTPS_PROXY": "http://proxy.acme:8080"],
+                ["HTTPS_PROXY": "http://proxy.acme:8080", "NO_PROXY": ".acme.com"],
+            ] {
+                let exceptions = Self.exceptions(Self.dictionary(environment))
+                #expect(exceptions.contains("127.0.0.1"), "environment: \(environment)")
+                #expect(exceptions.contains("localhost"), "environment: \(environment)")
+                #expect(exceptions.contains("::1"), "environment: \(environment)")
+            }
         }
     }
 }

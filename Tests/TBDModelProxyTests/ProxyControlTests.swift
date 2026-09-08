@@ -111,9 +111,13 @@ extension ModelProxySuites {
 
                 #expect((retireResponse as? HTTPURLResponse)?.statusCode == 200)
                 #expect(String(decoding: body, as: UTF8.self) == ControlEndpoints.retiringBody)
-                // Bounded well under the ~6 seconds the stream still has to run:
-                // an answer that waited for the drain could not land this early.
-                #expect(answered < .milliseconds(500), "retire answered after \(answered)")
+                // Bounded well under the ~6 seconds the stream still has to
+                // run: an answer that waited for the drain could not land this
+                // early. Two seconds rather than 500 ms because the claim is
+                // "before the drain", not "in 500 ms" — and a loaded runner
+                // that took 600 ms to turn one loopback round trip around
+                // would redden a proxy that did exactly the right thing.
+                #expect(answered < .seconds(2), "retire answered after \(answered)")
                 #expect(harness.server.streamsInFlight == 1, "the stream was cut by the retire")
                 #expect(!retired.value, "the process was handed over before the drain finished")
 
