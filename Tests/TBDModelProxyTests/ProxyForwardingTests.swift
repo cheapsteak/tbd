@@ -425,7 +425,19 @@ extension ModelProxySuites {
             // The event is delayed so the head is a message of its own: the
             // assertion is about a body that stops mid-flight, not about what a
             // client makes of a response whose head and death arrive together.
-            let event = Array("event: content_block_delta\ndata: {\"i\":0}\n\n".utf8)
+            //
+            // The body arrives in two writes with clear air between them, and
+            // that gap is load-bearing rather than cosmetic. The relay's
+            // upstream leg is a `URLSession`, and a write immediately followed
+            // by the peer's FIN reaches it as data and a truncation error at
+            // once — with no guarantee the delegate is handed the bytes before
+            // the error. Measured: with a single write the client received the
+            // head and no body at all on a loaded runner. Writing the event's
+            // first line 300 ms before the line that precedes the close puts
+            // the relayed bytes beyond that race, while the close still
+            // follows a write immediately, which is the shape under test.
+            let eventHead = Array("event: content_block_delta\n".utf8)
+            let eventTail = Array("data: {\"i\":0}\n\n".utf8)
 
             try await withProxy(
                 prefix: "pxcut",
@@ -443,9 +455,11 @@ extension ModelProxySuites {
                             // body short of a declared length is the truncation
                             // `didCompleteWithError` does report, and so it is the
                             // one that can exercise the relay's cut path at all.
-                            ("content-length", "\(event.count + 64)"),
+                            ("content-length", "\(eventHead.count + eventTail.count + 64)"),
                         ],
-                        events: [(delayMs: 200, bytes: event)],
+                        events: [
+                            (delayMs: 200, bytes: eventHead), (delayMs: 300, bytes: eventTail),
+                        ],
                         closeWithoutStop: true)
                 }
             ) { harness in
