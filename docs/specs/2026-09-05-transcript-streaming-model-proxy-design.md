@@ -102,11 +102,14 @@ credentials, and logs no headers or bodies. For an event-stream response to a
 conversation request it tees text deltas into a per-terminal file under the
 TBD home. The tee never blocks forwarding.
 
-**The daemon** decides who is proxied and keeps the proxy alive. With the
-proxy flag on, a holder spawn for a non-Bedrock profile gets a route and a
-base URL pointing at it. A supervisor adopts a live proxy at startup, spawns
-one when absent, respawns on death, replaces a proxy whose version differs
-from its own, and retires routes when their terminals end.
+**The daemon** decides who is proxied and keeps the proxy alive, and does
+both only while `model_proxy_enabled` is on. With the flag on, a holder spawn
+for a non-Bedrock profile gets a route and a base URL pointing at it, and a
+supervisor adopts a live proxy at startup, spawns one when absent, respawns on
+death, replaces a proxy whose version differs from its own, and retires routes
+when their terminals end. With the flag off the supervisor never starts: no
+probe, no spawn, no watch, and a fresh install runs no process it did not run
+before.
 
 **The app** tails the stream file at the transcript scheduler's existing
 cadence and publishes one provisional assistant row per session. The daemon
@@ -155,13 +158,12 @@ persists it. Every later proxy is asked to bind that port. The daemon takes
 `proxy.lock` **before** any bind, the same ordering the holder spawner uses
 before touching a socket path, so two daemons on one TBD home cannot both mint.
 
-On address-in-use the daemon probes the status endpoint on that port. The
-status payload names the TBD home the proxy was started for, and the daemon
-adopts only a proxy that names its own home and whose pid and start time match
-the process table. Anything else, including a proxy that belongs to another
-TBD home on the same machine after an ephemeral-port coincidence, means the
-port is not this daemon's to use; the daemon mints a fresh port and updates
-the column, and never retires or replaces a proxy it did not adopt. Sessions spawned against the old port lose the proxy for their
+On address-in-use the daemon probes the status endpoint on that port and
+adopts only a process that passes the identity check below. Anything else,
+including a proxy that belongs to another TBD home on the same machine after
+an ephemeral-port coincidence, means the port is not this daemon's to use; the
+daemon mints a fresh port and updates the column, and never retires or
+replaces a proxy it did not adopt. Sessions spawned against the old port lose the proxy for their
 remaining life, because Claude reads `ANTHROPIC_BASE_URL` once at start. That
 is the blast radius of a port change, and it is confined to the window in
 which TBD was entirely stopped: a running proxy holds its port across every
@@ -181,8 +183,30 @@ daemon restart.
 - `POST /tbd/routes` and `DELETE /tbd/routes/<token>` tell the proxy a route
   file was written or should be dropped, so it need not watch the directory.
 
-Adoption matches `status` against the process table by pid and start time, the
-identity check `AgentReaper` already makes before signalling anything.
+### Adoption identity
+
+A status document is a network response, and a local process that wins the
+port-bind race can put anything in one. Adoption therefore trusts nothing the
+document says about the responder that the daemon cannot confirm from ground
+truth of its own, and requires all of the following:
+
+- The pid the document names is the pid written in `proxy.pid` under this
+  daemon's own TBD home, and the port recorded beside it is the port being
+  probed. The proxy writes that file after its bind, holding `proxy.lock`,
+  inside a directory only this user can write. A process of another user
+  cannot forge it, and a process of this user already holds every credential
+  the proxy would carry, so there is nothing left for an impersonation to gain.
+- The process table confirms that pid: it is alive, its start time matches the
+  document's within a second, and its executable is `TBDModelProxy`. This is
+  the check `AgentReaper` makes before signalling anything, extended by the
+  executable gate; a pid recycled by an unrelated process fails it.
+- The document names this daemon's TBD home. Redundant with the pid file for
+  an honest proxy, and kept because it is what makes the log line for a
+  refused adoption say *which* home the answering proxy belongs to.
+
+A responder that is not the pid-file process is refused whatever it claims,
+because the two things an impersonator can be truthful about, its own pid and
+start time, are exactly the two the pid file does not name.
 
 ### Routes
 
@@ -308,8 +332,14 @@ without a route rather than fighting the user's setting.
 `ModelProxySupervisor`, a new actor under `Sources/TBDDaemon/ModelProxy/`,
 owns the proxy's life on an injected clock:
 
-- **Startup.** Read the persisted port. Probe `/tbd/status`. Adopt on a pid
-  and start-time match. Otherwise take the lock and spawn, then persist what
+- **Gate.** Nothing below runs unless `model_proxy_enabled` is on. The
+  daemon starts the supervisor only when the flag is on at startup or when the
+  flag is turned on; turning the flag off stops the watch and asks the running
+  proxy to retire, so it drains what is in flight and exits. A daemon shutdown
+  stops the watch and leaves the proxy alive, since outliving the daemon is
+  the point of a separate process.
+- **Startup.** Read the persisted port. Probe `/tbd/status`. Adopt on the
+  identity check above. Otherwise take the lock and spawn, then persist what
   the proxy reports.
 - **Watch.** Poll `status` on a bounded interval. On death, respawn with
   bounded backoff. On a version different from the daemon's own binary, ask
@@ -486,14 +516,17 @@ SSE shape and costs zero tokens.
   foreground poll interval of its generation, rather than at message end.
 - A session behind the proxy is byte-for-byte as correct as one without it:
   same responses, same retries, same prompt-cache hits.
-- With both flags off, no code path introduced here runs.
+- With both flags off, no code path introduced here runs: the supervisor is
+  not started, no proxy is spawned or probed, and no spawn is routed.
 
 ## Non-goals
 
 - Tmux-backed sessions.
 - Thinking and tool-input streaming, and any change to tool cards.
 - Persisting streamed text; the JSONL remains the record.
-- Bedrock, Vertex, and Foundry profiles, which use other endpoints.
+- Bedrock profiles, the one credential kind whose endpoint is not the
+  Anthropic API. Any kind added later that talks to another endpoint is
+  excluded the same way: routing keys off the profile's kind, not its URL.
 - Any use of the proxy beyond forwarding and the tee: no caching, no
   rewriting, no routing between providers.
 
