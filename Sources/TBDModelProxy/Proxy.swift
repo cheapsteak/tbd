@@ -161,22 +161,41 @@ enum TBDModelProxyMain {
             routesDir: TBDConstants.modelProxyRoutesDir(environment: homeEnvironment),
             streamsDir: TBDConstants.streamsDir(environment: homeEnvironment))
 
-        // `status` and `onRetire` are the seams `GET /tbd/status` and
-        // `POST /tbd/retire` read, and both endpoints answer 501 until Task A5
-        // lands them; nothing calls either closure yet. The placeholders are
-        // deliberately inert rather than half-right — a status that reported a
-        // plausible-looking route count nobody had counted would be worse than
-        // one that is obviously unwired.
+        let tee = StreamTee(
+            streamsDir: TBDConstants.streamsDir(environment: homeEnvironment))
+
+        // The port the kernel actually assigned, which `--port 0` does not
+        // know until the bind below returns. Status must report the port a
+        // successor would have to take, not the one this process asked for.
+        let boundPort = ProxyPortBox(requested: arguments.port)
+        // Read once from the kernel rather than composed from "now": the
+        // daemon adopts a proxy by matching this against the process table, so
+        // a value invented here is one that can only ever fail to match.
+        // `nil` is a kernel that refused to describe this process, which is
+        // not a reason to refuse to start; the adoption probe simply will not
+        // match, and the daemon mints a fresh port.
+        let processStart = ProcessStartTime.startTime(pid: getpid()) ?? Date()
+
         let server = ProxyServer(
             port: arguments.port,
             routes: routes,
-            tee: nil,
+            tee: tee,
+            // Identity and port only: the control endpoint fills in
+            // `streamsInFlight` and `routeCount` from live state at the moment
+            // of the request, because this closure is synchronous and cannot
+            // await the route table's actor.
             status: {
                 ModelProxyStatus(
-                    version: "unwired", pid: getpid(), processStartTime: Date(),
-                    port: arguments.port, streamsInFlight: 0, routeCount: 0)
+                    version: TBDModelProxyVersion.current, pid: getpid(),
+                    processStartTime: processStart, port: boundPort.value,
+                    streamsInFlight: 0, routeCount: 0)
             },
-            onRetire: {})
+            // Reached only after `POST /tbd/retire` has closed the listener and
+            // drained the streams that were still running on it.
+            onRetire: {
+                ProxyLog.main.debug("retired; exiting")
+                exit(0)
+            })
 
         // `run()` is synchronous and returns `Never`, so the async start is
         // driven to completion here rather than escaping into a task nobody
@@ -202,6 +221,7 @@ enum TBDModelProxyMain {
 
         switch startOutcome.wait() {
         case .success(let port):
+            boundPort.value = port
             ProxyLog.main.debug("bound port \(port, privacy: .public)")
         case .failure(let error):
             FileHandle.standardError.write(
@@ -239,6 +259,36 @@ enum TBDModelProxyMain {
         }
         _ = stopOutcome.wait()
         exit(0)
+    }
+}
+
+/// The proxy's build identity, as `GET /tbd/status` reports it.
+///
+/// A6 supplies the real identity — the daemon compares it against its own
+/// build to decide whether a running proxy is one of its own or a stale image
+/// from an older install. Until then it is a constant, which is honest: every
+/// proxy answering "dev" is a proxy the version rule cannot tell apart, and
+/// that is exactly the state of things before A6 lands.
+enum TBDModelProxyVersion {
+    // A6 supplies the real identity.
+    static let current = "dev"
+}
+
+/// The port the listener actually bound.
+///
+/// `--port 0` is the first proxy on a TBD home, and the number that matters —
+/// the one the daemon persists and every later proxy is asked for — exists
+/// only after the bind. The box is written once, from `run()`, and read from
+/// the status closure on whatever thread a control request arrives on.
+final class ProxyPortBox: Sendable {
+    private let lock = NSLock()
+    private nonisolated(unsafe) var port: Int
+
+    init(requested: Int) { self.port = requested }
+
+    var value: Int {
+        get { lock.withLock { port } }
+        set { lock.withLock { port = newValue } }
     }
 }
 

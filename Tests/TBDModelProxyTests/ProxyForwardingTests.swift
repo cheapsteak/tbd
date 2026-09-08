@@ -704,6 +704,11 @@ func withProxy(
     script: @escaping FakeUpstream.Handler,
     streamingEnabled: Bool = false,
     tee: (any StreamTeeing)? = nil,
+    /// Builds the tee once the scratch `streams/` directory exists, which is
+    /// the only way a test can hand the server a real `StreamTee`: the
+    /// directory is minted in here, after the caller has been called.
+    teeFactory: (@Sendable (URL) -> any StreamTeeing)? = nil,
+    onRetire: (@Sendable () -> Void)? = nil,
     body: @escaping @Sendable (ProxyHarness) async throws -> Void
 ) async throws {
     let upstream = FakeUpstream(script: script)
@@ -746,14 +751,21 @@ func withProxy(
         let table = RouteTable(routesDir: routesDir, streamsDir: streamsDir)
         try await table.loadAll()
 
+        // The identity half of a status answer, as `run()` composes it. The
+        // two counters are deliberately wrong here — the control endpoint
+        // replaces them with live state, and a test that reads them back is
+        // reading the server's own counter and route table rather than this.
+        // The same box `run()` uses, for the same reason: `--port 0` means the
+        // number worth reporting does not exist until the bind returns.
+        let portBox = ProxyPortBox(requested: 0)
         let server = ProxyServer(
-            port: 0, routes: table, tee: tee,
+            port: 0, routes: table, tee: teeFactory?(streamsDir) ?? tee,
             status: {
                 ModelProxyStatus(
-                    version: "test", pid: 0, processStartTime: Date(), port: 0,
-                    streamsInFlight: 0, routeCount: 0)
+                    version: "test", pid: getpid(), processStartTime: Date(),
+                    port: portBox.value, streamsInFlight: -1, routeCount: -1)
             },
-            onRetire: {},
+            onRetire: onRetire ?? {},
             // An explicit environment, so the forwarder's proxy resolution
             // cannot pick up an `HTTPS_PROXY` from the developer's shell and
             // send a loopback request through a corporate proxy. The short
@@ -767,6 +779,7 @@ func withProxy(
         let port = try await withPhaseDeadline("proxy bind", seconds: 20) {
             try await server.start()
         }
+        portBox.value = port
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 15

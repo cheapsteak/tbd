@@ -53,24 +53,20 @@ protocol TeeSessionHandle: Sendable {
 final class ProxyServer: Sendable {
     static let log = Logger(subsystem: "com.tbd.modelproxy", category: "server")
 
-    /// What every `/tbd/...` request answers until Task A5 lands the control
-    /// endpoints. One dispatch point, so that task replaces a single `switch`
-    /// rather than hunting for the paths.
-    static let controlNotWiredBody = #"{"error":"not yet wired"}"#
     static let unknownRouteBody = #"{"error":"unknown route"}"#
 
     private let requestedPort: Int
     private let routes: RouteTable
     private let tee: (any StreamTeeing)?
-    /// Read by `GET /tbd/status` in Task A5. Stored now so the wiring the
-    /// daemon's supervisor needs is settled before the endpoint exists.
-    private let status: @Sendable () -> ModelProxyStatus
-    /// Called by `POST /tbd/retire` in Task A5.
-    private let onRetire: @Sendable () -> Void
     private let forwarder: UpstreamForwarder
     private let group: MultiThreadedEventLoopGroup
-    private let inFlight = StreamCounter()
-    private let channelBox = ChannelBox()
+    private let inFlight: StreamCounter
+    private let channelBox: ChannelBox
+    /// The `/tbd/...` verbs. Built here rather than held by the request
+    /// handler so every connection answers from one object, and built over the
+    /// counter and the channel box rather than over `self` so the server does
+    /// not retain a closure that retains the server.
+    private let control: ControlEndpoints
 
     init(
         port: Int,
@@ -78,15 +74,30 @@ final class ProxyServer: Sendable {
         tee: (any StreamTeeing)?,
         status: @escaping @Sendable () -> ModelProxyStatus,
         onRetire: @escaping @Sendable () -> Void,
-        forwarder: UpstreamForwarder = UpstreamForwarder(session: UpstreamForwarder.makeSession())
+        forwarder: UpstreamForwarder = UpstreamForwarder(session: UpstreamForwarder.makeSession()),
+        clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.requestedPort = port
         self.routes = routes
         self.tee = tee
-        self.status = status
-        self.onRetire = onRetire
         self.forwarder = forwarder
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        // Locals first, then the stored properties: the control endpoints
+        // close over the box and the counter rather than over `self`, so the
+        // server does not retain a closure that retains the server, and a
+        // class initializer may not read a stored property before every one of
+        // them has a value.
+        let channelBox = ChannelBox()
+        let inFlight = StreamCounter()
+        self.channelBox = channelBox
+        self.inFlight = inFlight
+        self.control = ControlEndpoints(
+            routes: routes,
+            status: status,
+            onRetire: onRetire,
+            closeListener: { await ProxyServer.closeListener(channelBox) },
+            streamsInFlight: { inFlight.value },
+            clock: clock)
     }
 
     /// Number of forwarded responses whose head has been relayed and whose end
@@ -102,9 +113,19 @@ final class ProxyServer: Sendable {
         let tee = self.tee
         let forwarder = self.forwarder
         let inFlight = self.inFlight
+        let control = self.control
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(.backlog, value: 64)
+            // Load-bearing for the retire handshake, not a habit: NIO does not
+            // set this by default, and on BSD a bind fails with EADDRINUSE
+            // while *any* socket holds that local port — which the connections
+            // carrying a retiring proxy's in-flight streams do. Without it the
+            // successor could not take the port until the last turn finished,
+            // and "the successor binds the moment the answer arrives" (spec,
+            // "Control endpoint") would be false. With it, BSD still refuses a
+            // second *listener*, so two live proxies cannot share a port.
+            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             // Claude aborts a stream that has been silent for 300 seconds and
             // counts SSE pings, so an event must reach the socket when it
             // arrives. Nagle would hold a small write back waiting for company
@@ -117,7 +138,8 @@ final class ProxyServer: Sendable {
                     try channel.pipeline.syncOperations.configureHTTPServerPipeline()
                     try channel.pipeline.syncOperations.addHandler(
                         ProxyRequestHandler(
-                            routes: routes, tee: tee, forwarder: forwarder, inFlight: inFlight))
+                            routes: routes, tee: tee, forwarder: forwarder, inFlight: inFlight,
+                            control: control))
                 }
             }
 
@@ -133,10 +155,16 @@ final class ProxyServer: Sendable {
     }
 
     /// Stops accepting new connections. In-flight responses keep streaming on
-    /// the connections they are already on — the retire handshake in Task A5
-    /// answers as soon as this returns and drains afterwards.
+    /// the connections they are already on — `POST /tbd/retire` answers as soon
+    /// as this returns and drains afterwards.
     func closeListener() async {
-        guard let channel = channelBox.take() else { return }
+        await Self.closeListener(channelBox)
+    }
+
+    /// The same close, reachable without a `ProxyServer`, so the retire verb
+    /// can hold the box instead of the server.
+    private static func closeListener(_ box: ChannelBox) async {
+        guard let channel = box.take() else { return }
         try? await channel.close()
     }
 
@@ -219,6 +247,7 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
     private let tee: (any StreamTeeing)?
     private let forwarder: UpstreamForwarder
     private let inFlight: StreamCounter
+    private let control: ControlEndpoints
 
     private var head: HTTPRequestHead?
     /// The whole request body, buffered before anything is forwarded.
@@ -231,12 +260,13 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
 
     init(
         routes: RouteTable, tee: (any StreamTeeing)?, forwarder: UpstreamForwarder,
-        inFlight: StreamCounter
+        inFlight: StreamCounter, control: ControlEndpoints
     ) {
         self.routes = routes
         self.tee = tee
         self.forwarder = forwarder
         self.inFlight = inFlight
+        self.control = control
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -292,10 +322,15 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
         return (token, suffix)
     }
 
-    /// True for the control endpoints Task A5 owns.
+    /// True for everything the control endpoints own.
+    ///
+    /// The whole `/tbd/` subtree, not only the three verbs: a path under it
+    /// that names no endpoint is a supervisor's mistake and gets a control
+    /// answer — 404 after the loopback check — rather than falling through to
+    /// the forwarder's "unknown route", which would say the wrong thing about
+    /// a request that never named a route at all.
     static func isControlPath(_ path: String) -> Bool {
-        path == "/tbd/status" || path == "/tbd/retire" || path == "/tbd/routes"
-            || path.hasPrefix("/tbd/routes/")
+        path == "/tbd" || path.hasPrefix("/tbd/")
     }
 
     private func dispatch(context: ChannelHandlerContext, head: HTTPRequestHead, body: [UInt8]) {
@@ -303,11 +338,25 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
         let keepAlive = head.isKeepAlive
 
         if Self.isControlPath(path) {
-            // One dispatch point for `/tbd/...`, replaced wholesale in Task
-            // A5 by the status, retire and routes handlers.
-            Self.respondJSON(
-                context: context, status: .notImplemented,
-                body: ProxyServer.controlNotWiredBody, keepAlive: keepAlive)
+            let boxed = SendableChannelContext(
+                context: context, eventLoop: context.eventLoop,
+                allocator: context.channel.allocator)
+            // Read here, on the event loop, and handed over as a value: every
+            // `ChannelHandlerContext` property is the event loop's to touch
+            // (CLAUDE.md, "NIO thread safety").
+            let remoteAddress = context.remoteAddress
+            let control = self.control
+            let method = head.method.rawValue
+            // Unstructured and untracked, unlike a forward: a control answer
+            // is one write with nothing upstream to cancel, and `forwardTask`
+            // is the handle `channelInactive` uses to stop a model request
+            // nobody will read.
+            Task {
+                let response = await control.handle(
+                    method: method, path: path, body: body, remoteAddress: remoteAddress)
+                ProxyRequestHandler.respondJSON(
+                    on: boxed, status: response.status, body: response.body, keepAlive: keepAlive)
+            }
             return
         }
 

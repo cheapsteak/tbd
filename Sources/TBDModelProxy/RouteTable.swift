@@ -71,6 +71,13 @@ actor RouteTable {
     private let streamsDir: URL
     private let fileManager: FileManager
     private var routes: [String: ModelProxyRoute] = [:]
+    /// The same number as `count`, readable without awaiting the actor.
+    ///
+    /// `GET /tbd/status` is answered from a synchronous closure — the shape
+    /// the daemon's adoption probe needs — so the count it reports cannot come
+    /// from an actor-isolated property. The box is written on every path that
+    /// changes `routes` and read from nowhere else.
+    private let liveCount = RouteCountBox()
     /// Tokens whose file has already been reported bad, so a directory that
     /// holds one unreadable file does not log once per `loadAll`.
     private var reportedBad: Set<String> = []
@@ -82,6 +89,9 @@ actor RouteTable {
     }
 
     var count: Int { routes.count }
+
+    /// `count` without the await. See `liveCount`.
+    nonisolated var currentCount: Int { liveCount.value }
 
     /// Reads every `*.json` under `routesDir`.
     ///
@@ -110,6 +120,7 @@ actor RouteTable {
                 report(token: token, error: error)
             }
         }
+        liveCount.value = routes.count
         Self.log.debug("loaded \(self.routes.count, privacy: .public) route(s)")
     }
 
@@ -172,6 +183,7 @@ actor RouteTable {
                 token: route.token, terminalID: route.terminalID, upstream: base,
                 streamingEnabled: route.streamingEnabled, createdAt: route.createdAt)
         routes[token] = normalized
+        liveCount.value = routes.count
         reportedBad.remove(token)
         return normalized
     }
@@ -193,6 +205,7 @@ actor RouteTable {
     func remove(token: String) {
         guard ModelProxyRoute.isValidToken(token) else { return }
         let route = routes.removeValue(forKey: token)
+        liveCount.value = routes.count
         reportedBad.remove(token)
 
         try? fileManager.removeItem(
@@ -221,5 +234,18 @@ actor RouteTable {
         let reason = (error as? RouteError)?.reason ?? "\(error)"
         Self.log.error(
             "skipping route \(token, privacy: .private): \(reason, privacy: .public)")
+    }
+}
+
+/// The route count, readable off the actor. A lock rather than an atomic
+/// because the value is written under the actor's isolation anyway and read
+/// once per status request; the lock is the cheaper thing to reason about.
+private final class RouteCountBox: Sendable {
+    private let lock = NSLock()
+    private nonisolated(unsafe) var count = 0
+
+    var value: Int {
+        get { lock.withLock { count } }
+        set { lock.withLock { count = newValue } }
     }
 }

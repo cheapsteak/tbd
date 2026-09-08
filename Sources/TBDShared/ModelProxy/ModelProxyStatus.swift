@@ -32,3 +32,39 @@ public struct ModelProxyStatus: Codable, Sendable, Equatable {
         self.routeCount = routeCount
     }
 }
+
+// MARK: - Wire coding
+
+extension ModelProxyStatus {
+    /// The one coder pair for `GET /tbd/status`.
+    ///
+    /// Pinned to ISO-8601 for the same reason a route file is
+    /// (`ModelProxyRoute.encodedForRouteFile`): the proxy writes this and the
+    /// daemon reads it, out of two binaries that are upgraded independently,
+    /// and a writer on `.deferredToDate` against a reader on `.iso8601` would
+    /// turn `processStartTime` into a value the adoption check can only refuse.
+    /// Adoption is exactly the decision that hangs on this field, so the
+    /// disagreement would not fail loudly — it would quietly mint a new port
+    /// and orphan the running proxy.
+    private static func makeEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+
+    private static func makeDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+
+    /// The body of a `GET /tbd/status` answer.
+    public func encodedForStatusResponse() throws -> Data {
+        try Self.makeEncoder().encode(self)
+    }
+
+    /// Decodes what `GET /tbd/status` answered.
+    public static func decodeStatusResponse(_ data: Data) throws -> ModelProxyStatus {
+        try makeDecoder().decode(ModelProxyStatus.self, from: data)
+    }
+}
