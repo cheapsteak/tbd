@@ -1442,7 +1442,14 @@ extension WorktreeLifecycle {
         // talk to the Messages API, so neither may be handed an
         // `ANTHROPIC_BASE_URL`. The gate is structural rather than a field
         // check — the other branches never call `attach` at all.
-        var primaryAttachment = ModelProxyRouteAttachment.Outcome.notAttempted
+        //
+        // **Optional, and there is no empty `Outcome` to use instead.** An
+        // attachment that stood for "never attempted" would have to carry an
+        // empty environment, and `attachment.sensitiveEnv` would then compile at
+        // a shell or Codex spawn site and launch it with no env overrides, no
+        // `DISABLE_AUTO_UPDATE`, and no auth env at all — silently. `nil` makes
+        // that read a compile error instead.
+        var primaryAttachment: ModelProxyRouteAttachment.Outcome? = nil
         switch primaryTerminalKind {
         case .shell:
             primaryCommand = defaultShell
@@ -1557,9 +1564,9 @@ extension WorktreeLifecycle {
             // Only the holder transport is routed (spec: pty-holder only), so
             // the registry is the gate. A refusal returns this environment
             // unchanged; nothing below can fail because of it.
-            primaryAttachment = .unproxied(mergedEnvOverrides)
+            var attachment = ModelProxyRouteAttachment.Outcome.unproxied(mergedEnvOverrides)
             if useHolderTransport, let holderRegistry {
-                primaryAttachment = await ModelProxyRouteAttachment.attach(
+                attachment = await ModelProxyRouteAttachment.attach(
                     terminalID: plannedTerminalID1,
                     config: config,
                     profileKind: resolvedProfile?.kind,
@@ -1574,6 +1581,7 @@ extension WorktreeLifecycle {
                     baseEnvironment: holderRegistry.environment,
                     supervisor: modelProxySupervisor)
             }
+            primaryAttachment = attachment
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
                 forkSession: carryover != nil,
@@ -1587,11 +1595,13 @@ extension WorktreeLifecycle {
                 initialPrompt: isResume ? nil : effectivePrompt,
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
-                // Nil on a routed spawn: the profile's endpoint is the route's
-                // upstream now, and passing it here would inline an
-                // `export ANTHROPIC_BASE_URL=…` that runs after — and
-                // therefore over — the route the process environment carries.
-                profileBaseURL: primaryAttachment.builderBaseURL(
+                // The route's own URL on a routed spawn, the profile's
+                // otherwise. The builder inlines an
+                // `export ANTHROPIC_BASE_URL=…` that runs after the shell's rc
+                // files, which is how this endpoint survives a `.zshrc` that
+                // sets one of its own — a defence the profile's URL has always
+                // had and the route needs just as much.
+                profileBaseURL: attachment.builderBaseURL(
                     profile: resolvedProfile?.baseURL),
                 // Per-spawn model override (picker model buttons) wins over
                 // the profile default for this initial spawn only.
@@ -1615,10 +1625,10 @@ extension WorktreeLifecycle {
             // so auth/routing stays final and free-form vars can't clobber it.
             // The attachment's environment is the free-form overrides plus the
             // route (or exactly the overrides, when nothing was routed), and
-            // the builder cannot clobber the route from there: a routed spawn
-            // was built with no profile base URL, so `ANTHROPIC_BASE_URL` is
-            // not among the keys it returns.
-            primarySensitiveEnv = primaryAttachment.sensitiveEnv
+            // the builder cannot disagree with it about the endpoint: it was
+            // given the very URL the attachment carries, so the two copies of
+            // `ANTHROPIC_BASE_URL` that meet here are one value.
+            primarySensitiveEnv = attachment.sensitiveEnv
                 .merging(spawn.sensitiveEnv) { _, builder in builder }
             primaryProfileID = resolvedProfile?.profileID
             primaryLabel = TerminalLabel.claudeCode
@@ -1719,7 +1729,7 @@ extension WorktreeLifecycle {
                 // that exists without it for even one suspension can be
                 // snapshotted by a concurrent caller, and a late stamp would
                 // make every replacement that snapshot authorized reject.
-                transcriptStreamPath: primaryAttachment.streamPath
+                transcriptStreamPath: primaryAttachment?.streamPath
             )
         } catch {
             // Best-effort creation-time cleanup on both transports: a resource

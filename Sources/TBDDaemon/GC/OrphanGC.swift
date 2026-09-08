@@ -875,6 +875,12 @@ public actor OrphanGC {
     /// route file whose terminal no longer exists and a stream file nothing will
     /// ever tail again.
     ///
+    /// The keep bias in `ModelProxyFileCollector` is what makes that safe, and
+    /// the cost it is sized against is the **route** file's, not the stream
+    /// file's: a stream reaped early loses one turn's provisional transcript
+    /// view, while a route reaped from under a live session 404s that session
+    /// from the proxy's next restart onward. See the collector's own note.
+    ///
     /// Rows are read once, before any gate. A row that commits during the sweep
     /// is therefore not in the set — which is exactly what the grace window
     /// covers, since a file written by a spawn that recent is younger than

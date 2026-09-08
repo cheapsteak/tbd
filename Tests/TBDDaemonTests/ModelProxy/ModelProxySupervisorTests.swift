@@ -594,6 +594,18 @@ struct ModelProxySupervisorTests {
     /// The verdict is the spawn count and the ports it was asked for. Advancing
     /// on this clock does not run the resumed task's code, so the assertion
     /// waits on the observable — never on elapsed time.
+    ///
+    /// **What hop 2 relies on, for whoever changes `tick` next.** The second
+    /// advance is sound only because exactly one sleeper can be in the ledger
+    /// when it fires: the watch loop does not re-arm its interval until `tick`
+    /// returns, `tick` does not return until `respawn` does, and `respawn`'s
+    /// backoff is the only `clock.sleep` on that path. So "a sleep was armed"
+    /// and "the first respawn attempt has happened" are the same fact here, and
+    /// the advance cannot land on the wrong sleeper. Add a second `clock.sleep`
+    /// anywhere reachable from `tick` — a poll, a debounce, a settle — and that
+    /// stops being true: `requireAdvanceWhenArmed` would fire on whichever
+    /// sleeper armed first, and this test would start passing or hanging for
+    /// reasons that have nothing to do with the backoff.
     @Test("a proxy that exits is reaped and respawned after the backoff")
     func respawnsAfterDeath() async throws {
         let fixture = try SupervisorFixture.make()

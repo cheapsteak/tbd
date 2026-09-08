@@ -58,6 +58,17 @@ public enum ModelProxyFileDecision: Sendable, Equatable {
 /// mtime alone would reap the route out from under a session that has been
 /// running for a day.
 ///
+/// **The two files do not cost the same when that goes wrong, and the route
+/// costs more.** A stream file reaped early loses the transcript's provisional
+/// view of one turn — a display surface, and the session keeps talking. A route
+/// file is load-bearing: the running proxy holds its table in memory and would
+/// not notice, but every respawn and every version replacement rebuilds that
+/// table by reading this directory (`Sources/TBDModelProxy/RouteTable.swift`),
+/// so a route reaped from under a live session 404s that session's requests
+/// from the next proxy restart onward — long after the sweep, with nothing
+/// connecting the two. The gates above are keep-biased enough that this stays
+/// theoretical, and it is why they are written to fail towards keeping.
+///
 /// **This leg never touches `proxy.lock`, `proxy.pid` or `proxy.log`, and the
 /// omission is deliberate rather than pending.** Those three live in the proxy
 /// directory itself, one level above `routes/`, and this collector is pointed

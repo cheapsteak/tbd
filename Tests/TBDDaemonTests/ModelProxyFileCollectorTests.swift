@@ -2,12 +2,15 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TestSupport
 
 /// Tier 2: a real proxy directory on disk plus an in-memory database. The
 /// routes base, the streams base, the scratchpad base and the clock are all
 /// injected; nothing here resolves a production path and no process is spawned.
 ///
-/// The sandbox is a fresh directory removed in `deinit`, and every fixture is
+/// The sandbox is a fresh directory under `TBD_TEST_SCRATCH_ROOT`, so a run
+/// killed part-way leaves it for the wrapper's EXIT trap rather than for
+/// nobody; `deinit` removes it on every ordinary path. Every fixture is
 /// backdated against a fixed clock so the grace window has elapsed for anything
 /// a test does not deliberately make young.
 @Suite("Model proxy file GC")
@@ -23,8 +26,7 @@ struct ModelProxyFileCollectorTests: ~Copyable {
     let grace = Config.defaultGCGraceSeconds
 
     init() {
-        sandbox = URL(
-            fileURLWithPath: "/tmp/tbd-gcmp-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        sandbox = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbd-gcmp"), isDirectory: true)
         proxyBase = sandbox.appendingPathComponent("proxy", isDirectory: true)
         routesDir = proxyBase.appendingPathComponent("routes", isDirectory: true)
         streamsDir = sandbox.appendingPathComponent("streams", isDirectory: true)

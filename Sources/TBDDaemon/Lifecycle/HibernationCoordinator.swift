@@ -1200,9 +1200,10 @@ public actor HibernationCoordinator {
             initialPrompt: initialPrompt,
             profileSecret: resolvedProfile?.secret,
             profileKind: resolvedProfile?.kind,
-            // Nil on a routed wake, exactly as on the create path: the
-            // profile's endpoint is the route's upstream now, and inlining it
-            // here would run over the route.
+            // The route's own URL on a routed wake, exactly as on the create
+            // path: the builder's inline export runs after the shell's rc
+            // files, which is what keeps a `.zshrc` that sets
+            // `ANTHROPIC_BASE_URL` from taking this session off its route.
             profileBaseURL: attachment.builderBaseURL(profile: resolvedProfile?.baseURL),
             profileModel: resolvedProfile?.model,
             profileAwsRegion: resolvedProfile?.awsRegion,
@@ -1222,8 +1223,9 @@ public actor HibernationCoordinator {
             "TBD_TERMINAL_ID": terminal.id.uuidString,
         ]
         // The attachment's environment is the free-form overrides plus the
-        // route; the builder's auth env layers on top and cannot clobber the
-        // route, because a routed spawn was built with no profile base URL.
+        // route; the builder's auth env layers on top and cannot disagree with
+        // it about the endpoint, because it was given the very URL the
+        // attachment carries.
         let sensitiveEnv = attachment.sensitiveEnv
             .merging(spawn.sensitiveEnv) { _, builder in builder }
 

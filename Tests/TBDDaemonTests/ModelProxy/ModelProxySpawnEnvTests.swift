@@ -362,10 +362,10 @@ struct ModelProxySpawnEnvTests {
     /// environment is applied — so a profile with its own `ANTHROPIC_BASE_URL`
     /// used to clobber the route's, and the session went straight to the
     /// profile endpoint while the row recorded a stream file that never filled.
-    /// Deciding routing before `build` and passing `profileBaseURL: nil` is
-    /// what keeps one value in play: the composed spawn must name the proxy
-    /// once, in the environment, and the profile's endpoint nowhere at all.
-    @Test("a routed spawn carries the proxy base URL once, and the profile's endpoint nowhere")
+    /// Deciding routing before `build` is what keeps one endpoint in play: the
+    /// composed spawn names the proxy, in the environment and in the export,
+    /// and the profile's endpoint nowhere at all.
+    @Test("a routed spawn carries the proxy base URL, and the profile's endpoint nowhere")
     func routedSpawnIsNotClobberedByTheProfileEndpoint() async throws {
         let supervisor = FakeModelProxySupervisor(port: 51_842)
         let (launch, attachment) = await composeSpawn(
@@ -376,45 +376,39 @@ struct ModelProxySpawnEnvTests {
         // the upstream and only as the upstream.
         #expect(supervisor.made.first?.upstream == Self.profileBaseURL)
 
-        let baseURL = try #require(launch.environment["ANTHROPIC_BASE_URL"])
-        #expect(baseURL == "http://127.0.0.1:51842/r/\(supervisor.token)")
-        // One value in play, and it is the proxy's. The environment is a
-        // dictionary, so "exactly once" there is structural; what the defect
-        // actually produced was a SECOND assignment in the command string,
-        // which the command assertions below are what rule out.
-        #expect(baseURL != Self.profileBaseURL)
+        let proxyURL = "http://127.0.0.1:51842/r/\(supervisor.token)"
+        #expect(launch.environment["ANTHROPIC_BASE_URL"] == proxyURL)
+        #expect(launch.environment["ANTHROPIC_BASE_URL"] != Self.profileBaseURL)
 
         let command = commandLine(launch)
-        #expect(
-            !command.contains("ANTHROPIC_BASE_URL"),
-            """
-            the spawn command still exports ANTHROPIC_BASE_URL, which runs after the process \
-            environment and takes the session off its route: \(command)
-            """)
         #expect(
             !command.contains(Self.profileBaseURL),
             "the profile endpoint reached the command line of a routed spawn: \(command)")
     }
 
-    /// **The rule the whole `sensitiveEnv` routing exists for.** A route token
-    /// is a bearer credential for this session's upstream, and `holderLaunch`
-    /// inlines `env` as `export K='v';` in front of the command — which lands
-    /// in the job's argv, where one `ps -ww` reads it.
-    @Test("the route token reaches the job's environment and never its command line")
-    func tokenTravelsInTheEnvironmentOnly() async throws {
+    /// **The rc-file defence, in the direction that matters now.** The inline
+    /// export runs after the shell's startup files, so it is what a user whose
+    /// `.zshrc` sets `ANTHROPIC_BASE_URL` would otherwise lose the route to. A
+    /// routed spawn must export the *proxy* URL there — the same value the
+    /// process environment carries, from the same field, so the two cannot
+    /// drift.
+    @Test("a routed spawn exports the proxy URL inline, so an rc file cannot take the route away")
+    func routedSpawnDefendsItsRouteAgainstRCFiles() async throws {
         let supervisor = FakeModelProxySupervisor(port: 51_842)
         let (launch, _) = await composeSpawn(
             config: proxyOnConfig(), supervisor: supervisor)
 
-        #expect(launch.environment["ANTHROPIC_BASE_URL"]?.contains(supervisor.token) == true)
         let command = commandLine(launch)
+        let proxyURL = "http://127.0.0.1:51842/r/\(supervisor.token)"
         #expect(
-            !command.contains(supervisor.token),
-            """
-            the route token reached the holder's command line, where `ps` shows it to every \
-            process running as this user: \(command)
-            """)
-        #expect(!command.contains("ANTHROPIC_BASE_URL"))
+            command.contains("export ANTHROPIC_BASE_URL="),
+            "a routed spawn must re-export its endpoint after the rc files: \(command)")
+        #expect(
+            command.contains(proxyURL),
+            "the inline export names something other than the route: \(command)")
+        #expect(launch.environment["ANTHROPIC_BASE_URL"] == proxyURL)
+        // `NO_PROXY` is not one of the builder's routing keys and must stay out
+        // of the command line: it rides the process environment alone.
         #expect(!command.contains("NO_PROXY"))
     }
 
@@ -424,26 +418,26 @@ struct ModelProxySpawnEnvTests {
     /// the two sites share — the seam both of them call to decide what the
     /// builder is told — so a wake that regressed to passing the profile's URL
     /// would have to do it by not calling this at all.
-    @Test("the builder is told nothing about the profile endpoint once a route is in play")
+    @Test("the builder is told the route's endpoint, not the profile's, once a route is in play")
     func builderBaseURLDropsTheProfileEndpointWhenRouted() async throws {
+        let supervisor = FakeModelProxySupervisor(port: 51_842)
         let routed = await attach(
             config: proxyOnConfig(),
             profileBaseURL: Self.profileBaseURL,
-            supervisor: FakeModelProxySupervisor(port: 51_842))
+            supervisor: supervisor)
         #expect(routed.routed)
-        #expect(routed.builderBaseURL(profile: Self.profileBaseURL) == nil)
+        #expect(
+            routed.builderBaseURL(profile: Self.profileBaseURL)
+                == "http://127.0.0.1:51842/r/\(supervisor.token)",
+            "a routed spawn must hand the builder the route's own URL")
 
-        // Every unrouted outcome hands the profile's URL straight through —
-        // the refusal, and the two states that never attempt a route at all.
+        // Every unrouted outcome hands the profile's URL straight through.
         let refused = await attach(
             config: Config(),
             profileBaseURL: Self.profileBaseURL,
             supervisor: FakeModelProxySupervisor(port: 51_842))
         #expect(!refused.routed)
         #expect(refused.builderBaseURL(profile: Self.profileBaseURL) == Self.profileBaseURL)
-        #expect(
-            ModelProxyRouteAttachment.Outcome.notAttempted
-                .builderBaseURL(profile: Self.profileBaseURL) == Self.profileBaseURL)
         #expect(
             ModelProxyRouteAttachment.Outcome.unproxied([:])
                 .builderBaseURL(profile: nil) == nil)

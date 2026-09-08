@@ -545,8 +545,20 @@ This design introduces three new resources, and names who reclaims each.
   `gcGraceSeconds`, or whose age cannot be read, is kept; a file whose
   terminal row still exists and is not exited is kept; the rest are unlinked.
 - **Rendezvous residue** in the proxy directory: `proxy.lock`, `proxy.pid`,
-  `proxy.log`. Swept by the same collector shape as the holder's, anchored to
-  a lock nobody holds.
+  `proxy.log`. Outside the route and stream leg's reach by construction — that
+  collector is pointed at `routes/` and `streams/`, one level below the
+  directory these three sit in, so it cannot enumerate them. **An unheld lock
+  is the wrong anchor for them**, and that is why: a retiring proxy releases
+  its lock the moment it closes its listener and then drains in-flight streams
+  for up to ten minutes, so "nobody holds the lock" routinely describes a
+  process that is very much alive, and unlinking its pid file or its log would
+  take the record away from the thing still writing it. The residue belongs to
+  a later leg anchored on **pid liveness** — read `proxy.pid`, confirm the
+  process it names through the same identity check adoption uses, and only then
+  sweep the triple — which asks a different question from the file leg and
+  wants a soak of its own. Until it exists, the three files are bounded rather
+  than unbounded: there is one of each per home, and every new proxy overwrites
+  them.
 - **The port** is one integer in the config row; nothing accumulates.
 
 ## Security

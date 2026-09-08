@@ -115,6 +115,14 @@ enum ModelProxyRouteAttachment {
     /// unproxied).
     struct Outcome: Sendable {
         let sensitiveEnv: [String: String]
+        /// The proxy URL a routed spawn talks to — `http://127.0.0.1:<port>/r/<token>`
+        /// — and nil for every unrouted outcome.
+        ///
+        /// Held rather than re-derived because `builderBaseURL` has to hand the
+        /// spawn builder the *same* value the process environment carries; two
+        /// derivations of one URL is exactly the kind of near-miss that would
+        /// leave a session on a route the daemon does not think it is on.
+        let baseURL: String?
         let streamPath: String?
         /// The route this attachment minted, for a caller that has to drop
         /// *this* route rather than whatever route the terminal currently
@@ -127,37 +135,51 @@ enum ModelProxyRouteAttachment {
 
         /// The session runs against the model API directly, as it always did.
         static func unproxied(_ sensitiveEnv: [String: String]) -> Outcome {
-            Outcome(sensitiveEnv: sensitiveEnv, streamPath: nil, token: nil)
+            Outcome(sensitiveEnv: sensitiveEnv, baseURL: nil, streamPath: nil, token: nil)
         }
-
-        /// This spawn was never a proxy candidate — a tmux transport, or a
-        /// primary that is not Claude. Carries no environment because the
-        /// caller's own is the launch environment on that path.
-        static let notAttempted = Outcome(sensitiveEnv: [:], streamPath: nil, token: nil)
 
         /// A route was minted and this spawn will run against it.
         ///
         /// **Read before `ClaudeSpawnCommandBuilder.build`, not after.** The
-        /// builder re-exports every profile routing key inline into the command
-        /// string, and those exports run *after* the process environment is
-        /// applied — so a routed spawn must be built with `profileBaseURL: nil`
-        /// or the profile's own endpoint wins and the route is minted, stamped
-        /// on the row, and never used.
+        /// builder is given `builderBaseURL`, which needs this decision to have
+        /// been made already.
         var routed: Bool { token != nil }
 
         /// The `profileBaseURL` `ClaudeSpawnCommandBuilder.build` must be given
-        /// for this spawn: the profile's own, or **nil once a route is in
-        /// play**.
+        /// for this spawn: **the route's own URL once a route is in play**, and
+        /// the profile's otherwise.
+        ///
+        /// The builder does two things with this value — it puts it in the
+        /// spawn's `sensitiveEnv`, and it re-exports it inline into the command
+        /// string, where the export runs *after* the shell's rc files. That
+        /// second half is a defence, not a redundancy: a user whose `.zshrc`
+        /// sets `ANTHROPIC_BASE_URL` would otherwise have it clobber whatever
+        /// the process environment carried, and a routed session would go
+        /// straight to that endpoint while the row recorded a stream file that
+        /// never fills. The profile's URL has always been defended that way;
+        /// once a route replaces it as the endpoint this session must reach, the
+        /// route needs the same defence.
+        ///
+        /// **So the proxy URL is carried twice, in the environment and in the
+        /// inline export, and the duplication is deliberate** — they are one
+        /// value from one field, so they cannot disagree, and the second is what
+        /// survives an rc file.
+        ///
+        /// It puts the route token in the job's argv, where any process running
+        /// as this user can read it with `ps -ww`. That is not a widening: the
+        /// route files under `~/tbd/proxy/routes/` are mode-0700 in a directory
+        /// the same user owns, so every token is already readable by exactly
+        /// that set of processes. Losing the rc-file defence would be a real
+        /// failure; this is not one.
         ///
         /// A named function rather than a ternary at each spawn site, because
         /// the two sites are the create path and the wake path and a third will
         /// exist one day: the expression is the whole fix, it is easy to leave
-        /// out, and leaving it out fails silently — the session reaches the
-        /// profile endpoint, the route is minted, the row records a stream file
-        /// that never fills, and nothing errors. As a function it is greppable,
-        /// it is one thing to get right, and it has a test of its own.
+        /// out, and leaving it out fails silently. As a function it is
+        /// greppable, it is one thing to get right, and it has a test of its
+        /// own.
         func builderBaseURL(profile: String?) -> String? {
-            routed ? nil : profile
+            baseURL ?? profile
         }
 
         /// The same attachment carrying `environment` instead.
@@ -165,11 +187,13 @@ enum ModelProxyRouteAttachment {
         /// The routing decision is made before the spawn command is composed,
         /// and the launch environment is only complete after it — the builder's
         /// auth env merges on top. This is how the two meet: the decision keeps
-        /// its token and stream path, and the caller substitutes the
+        /// its route and stream path, and the caller substitutes the
         /// environment it will actually launch with, so no spawn site can hold
         /// an attachment whose environment is not the one it uses.
         func withEnvironment(_ environment: [String: String]) -> Outcome {
-            Outcome(sensitiveEnv: environment, streamPath: streamPath, token: token)
+            Outcome(
+                sensitiveEnv: environment, baseURL: baseURL,
+                streamPath: streamPath, token: token)
         }
     }
 
@@ -252,6 +276,7 @@ enum ModelProxyRouteAttachment {
             extending: sensitiveEnv["NO_PROXY"] ?? baseEnvironment["NO_PROXY"])
         return Outcome(
             sensitiveEnv: env,
+            baseURL: baseURL,
             streamPath: TBDConstants.streamFilePath(
                 terminalID: terminalID, environment: baseEnvironment),
             token: route.token)
@@ -260,10 +285,14 @@ enum ModelProxyRouteAttachment {
     /// Drops one named route, for a caller holding the token of the route it
     /// itself minted. Use this — never the terminal-id form below — to undo an
     /// attachment whose spawn did not happen.
+    ///
+    /// The outcome is optional because a spawn site that never attempted a
+    /// route holds no outcome at all: there is deliberately no "empty" `Outcome`
+    /// to stand in for one. See `WorktreeLifecycle+Create`'s `primaryAttachment`.
     static func retire(
-        _ outcome: Outcome, terminalID: UUID, supervisor: (any ModelProxyRouting)?
+        _ outcome: Outcome?, terminalID: UUID, supervisor: (any ModelProxyRouting)?
     ) async {
-        guard let supervisor, let token = outcome.token else { return }
+        guard let supervisor, let token = outcome?.token else { return }
         await supervisor.retireRoute(token: token, terminalID: terminalID)
         logger.debug(
             "retired an unused model proxy route for terminal \(terminalID.uuidString, privacy: .public)")
