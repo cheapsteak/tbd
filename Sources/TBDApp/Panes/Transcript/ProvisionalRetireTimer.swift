@@ -111,11 +111,11 @@ actor ProvisionalRetireTimer {
         alarms[sessionID]?.task.cancel()
         let clock = self.clock
         generation &+= 1
-        let generation = self.generation
+        let armed = generation
         alarms[sessionID] = Alarm(
             messageID: messageID,
             due: deadline,
-            generation: generation,
+            generation: armed,
             task: Task { [weak self] in
                 try? await clock.sleep(for: after)
                 guard let self else { return }
@@ -124,7 +124,7 @@ actor ProvisionalRetireTimer {
                 // has already moved past this generation, and the fire is
                 // dropped. `Task.isCancelled` cannot stand in for it — see
                 // ``generation``.
-                guard await self.claimFire(sessionID: sessionID, generation: generation) else {
+                guard await self.claimFire(sessionID: sessionID, generation: armed) else {
                     return
                 }
                 await fire()
