@@ -103,7 +103,6 @@ struct ModelProxyClientTests {
             port: server.port,
             session: ModelProxyClient.makeSession(requestTimeout: 0.4),
             requestTimeout: 0.4)
-        let started = Date()
         do {
             _ = try await client.status()
             Issue.record("a silent proxy answered a status probe")
@@ -113,9 +112,13 @@ struct ModelProxyClientTests {
                 return
             }
         }
-        // Generous, because the claim is "it gave up" rather than "it gave up
-        // in exactly 400 ms"; a budget that never expired is what this catches.
-        #expect(Date().timeIntervalSince(started) < 20)
+        // Deliberately no wall-clock assertion. `timeoutIntervalForRequest` is
+        // a budget the URL loading system spends on a starved cooperative
+        // pool, not a deadline: this call returned in 32 seconds against a
+        // 0.4-second timeout on a saturated CI runner. The claim is that it
+        // gives up at all rather than hanging forever, and a true hang is
+        // caught by the harness's own time limit, so measuring the elapsed
+        // time here only manufactures a flake.
         #expect(server.requests().count == 1, "the request never reached the listener")
     }
 

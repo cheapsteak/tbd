@@ -176,15 +176,25 @@ struct ModelProxySpawnerTests {
         let fixture = try SpawnerFixture.make(
             body: """
                 printf '%s\\n%s\\n' "$$" "$2" > "$4/proxy/proxy.pid"
-                exec sleep 30
+                exec sleep 600
                 """)
         defer { fixture.tearDown() }
 
         _ = try await fixture.spawner().spawn(port: 51234, home: fixture.home)
 
         // Still held — by the child, which inherited it and is still running.
-        #expect(throws: HolderLock.Error.alreadyHeld(path: fixture.paths.lockPath)) {
-            _ = try HolderLock.acquire(path: fixture.paths.lockPath)
+        //
+        // Written as a do/catch rather than `#expect(throws:)` because the
+        // failing branch has to **release what it acquired**: a leaked
+        // descriptor would leave this process holding the lock, and the
+        // re-acquire below — the assertion that actually matters — would then
+        // fail for a reason that has nothing to do with the daemon's copy.
+        do {
+            let unexpected = try HolderLock.acquire(path: fixture.paths.lockPath)
+            unexpected.release()
+            Issue.record("the lock was free while the spawned child was still running")
+        } catch HolderLock.Error.alreadyHeld {
+            // Expected: the child holds it.
         }
 
         // And released the moment the child dies, which is only true if the
@@ -208,20 +218,31 @@ struct ModelProxySpawnerTests {
     /// alive would block every later spawn for this home for as long as it
     /// ran.
     ///
-    /// The budget here is a real three seconds rather than a faked ten, and
-    /// that is deliberate: the claim is about a child that *started* and never
-    /// announced itself, so the budget has to outlast an `execve`. An
-    /// `ImmediateClock` would spend all ten seconds of credit in a few
+    /// Two numbers here are load-bearing, and both were learned from a red CI
+    /// run rather than reasoned out.
+    ///
+    /// **The budget is real, not faked.** The claim is about a child that
+    /// *started* and never announced itself, so it has to outlast an `execve`.
+    /// An `ImmediateClock` would spend all ten seconds of credit in a few
     /// milliseconds and kill a process that had not reached its first line —
-    /// the assertion would then pass without ever exercising the case.
+    /// passing without ever exercising the case. Twenty polls of 100 ms is the
+    /// smallest budget that still clears an `execve` on a starved runner.
+    ///
+    /// **The fake sleeps ten minutes, not thirty seconds.** The spawner spends
+    /// its budget as *credit* — it adds the poll interval per iteration rather
+    /// than reading a clock — so twenty polls can take a minute of real time on
+    /// a saturated runner. A fake that exited after thirty seconds got reaped
+    /// first, and the spawner correctly reported `childExited(status: 0)`:
+    /// right answer, wrong question. The fake must be unable to end on its own.
     @Test("a proxy that never publishes a port is killed and reported as a timeout")
     func aSilentProxyIsKilled() async throws {
-        let fixture = try SpawnerFixture.make(body: "exec sleep 30")
+        let fixture = try SpawnerFixture.make(body: "exec sleep 600")
         defer { fixture.tearDown() }
 
         await #expect(throws: ModelProxySpawner.Error.bindTimeout) {
-            _ = try await fixture.spawner(bindTimeout: .seconds(3)).spawn(
-                port: 51234, home: fixture.home)
+            _ = try await fixture.spawner(
+                bindTimeout: .seconds(2), bindPollInterval: .milliseconds(100)
+            ).spawn(port: 51234, home: fixture.home)
         }
 
         // Non-vacuity: the fake really ran, so what was killed was a live
@@ -362,11 +383,14 @@ struct SpawnerFixture {
     /// An rc-free environment with no `TBD_HOME`: a passing run must not be
     /// the accident of the developer's own config, and the spawner is supposed
     /// to be telling the child its home on the command line.
-    func spawner(bindTimeout: Duration = .seconds(10)) -> ModelProxySpawner {
+    func spawner(
+        bindTimeout: Duration = .seconds(10),
+        bindPollInterval: Duration = .milliseconds(20)
+    ) -> ModelProxySpawner {
         ModelProxySpawner(
             executableURL: executable,
             bindTimeout: bindTimeout,
-            bindPollInterval: .milliseconds(20),
+            bindPollInterval: bindPollInterval,
             environment: ["PATH": "/usr/bin:/bin"])
     }
 
