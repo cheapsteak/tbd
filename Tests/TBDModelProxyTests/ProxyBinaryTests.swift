@@ -445,7 +445,8 @@ extension ModelProxySuites {
             defer { proxy.terminate() }
             let pidFile = try await proxy.awaitPIDFile()
 
-            var request = URLRequest(url: try ProxyProcess.url(port: pidFile.port, path: "/r/\(token)/v1/messages"))
+            let routeURL = try ProxyProcess.url(port: pidFile.port, path: "/r/\(token)/v1/messages")
+            var request = URLRequest(url: routeURL)
             request.httpMethod = "POST"
             request.httpBody = Data(#"{"model":"claude"}"#.utf8)
             let (body, response) = try await ProxyProcess.session.data(for: request)
@@ -782,7 +783,8 @@ final class ProxyProcess: @unchecked Sendable {
 
     /// `GET /tbd/status` on a loopback port.
     static func status(port: Int) async throws -> ModelProxyStatus {
-        let (data, response) = try await session.data(from: try url(port: port, path: "/tbd/status"))
+        let statusURL = try url(port: port, path: "/tbd/status")
+        let (data, response) = try await session.data(from: statusURL)
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
         return try ModelProxyStatus.decodeStatusResponse(data)
     }

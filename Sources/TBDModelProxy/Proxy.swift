@@ -212,10 +212,10 @@ enum TBDModelProxyMain {
         do {
             try paths.create()
         } catch {
-            FileHandle.standardError.write(
-                Data(
-                    "TBDModelProxy: could not prepare \(arguments.home): "
-                        + "\(error.localizedDescription)\n".utf8))
+            let diagnostic =
+                "TBDModelProxy: could not prepare \(arguments.home): "
+                + "\(error.localizedDescription)\n"
+            FileHandle.standardError.write(Data(diagnostic.utf8))
             exit(TBDModelProxyExit.homeUnusable)
         }
 
