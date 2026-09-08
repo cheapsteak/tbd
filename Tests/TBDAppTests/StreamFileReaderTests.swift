@@ -192,6 +192,30 @@ struct StreamFileReaderTests {
             == .complete(at: Self.now.addingTimeInterval(60)))
     }
 
+    /// The successor exists but has said nothing yet, and the message before
+    /// it finished. Selection is "most recent *with text*", so the finished
+    /// message keeps the row — and it must keep its `.complete` phase too, or a
+    /// pane would show a settled answer as though it were still streaming and
+    /// C4's retire rules would never start their clock.
+    @Test("A completed message survives an empty successor, phase intact")
+    func completedMessageOutlivesAnEmptySuccessor() {
+        let folded = StreamFileReader.fold(
+            lines: [
+                .start(message: "msg_a", at: Self.started),
+                .text(message: "msg_a", index: 0, text: "the answer"),
+                .stop(message: "msg_a"),
+                .start(message: "msg_b", at: Self.started.addingTimeInterval(1)),
+            ],
+            now: Self.now
+        )
+
+        #expect(folded == ProvisionalMessage(
+            messageID: "msg_a",
+            text: "the answer",
+            phase: .complete(at: Self.now)
+        ))
+    }
+
     // MARK: - Degenerate input
 
     @Test("No lines folds to nil")
