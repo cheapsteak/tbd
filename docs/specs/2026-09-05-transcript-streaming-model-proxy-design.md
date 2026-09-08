@@ -525,7 +525,9 @@ retired when:
   and read, so a proxy killed mid-turn — which writes neither, and whose
   request the JSONL will not confirm either — has no other way off the screen.
   The window is the proxy's own drain cap, the longest a legitimate stream can
-  still be in flight. Sixty seconds would be wrong here: the tee records text
+  still be in flight — literally that constant (`ModelProxyLimits.drainCap` in
+  `TBDShared`, which both the proxy's retire drain and the pane read), not a
+  second value that happens to agree with it. Sixty seconds would be wrong here: the tee records text
   deltas, and a healthy turn streaming a large tool-input block emits none for
   minutes.
 

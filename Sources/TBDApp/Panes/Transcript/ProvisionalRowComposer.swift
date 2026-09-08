@@ -23,14 +23,30 @@ import TBDShared
 /// what marks the row provisional downstream — `transcriptRenderNodes(from:)`
 /// reads the prefix, nothing else has to be threaded through.
 ///
-/// **Retirement.** Four of the six rules are announced by something the pane
-/// already watches. Confirmation arrives with a transcript read, an abort and a
-/// newer `start` (which `StreamFileReader.fold` resolves inside the fold, not
-/// here) arrive with a stream-file change, and the flag going off restarts the
-/// pane's loop. The other two — a completed message nobody ever confirms, and a
-/// stream that simply stops arriving — are announced by nothing at all, which
-/// is why ``ProvisionalRetireTimer`` exists. Both are deadlines, they differ
-/// only in what they measure from and how long they allow.
+/// **Retirement.** Six rules take the row down, and every one of them is
+/// listed here:
+///
+/// 1. **Confirmed** — the session's own JSONL has caught up with the message
+///    id, so the settled row replaces the provisional one.
+/// 2. **Aborted** — the stream file records an `aborted` line for the message.
+/// 3. **Superseded** — a newer message's lines make it the one the fold
+///    renders, so the older row is no longer the row on screen.
+/// 4. **Streaming switched off** — the resolved streaming flag is off, whatever
+///    the stream file holds.
+/// 5. **Completed but unconfirmed for 60 s** — ``unconfirmedRetireAfter``,
+///    measured from the stop the reader saw.
+/// 6. **Streaming but silent for 600 s** — ``silentStreamRetireAfter``,
+///    measured from the last line the reader saw, and equal to the proxy's own
+///    drain cap.
+///
+/// The first four are announced by something the pane already watches:
+/// confirmation arrives with a transcript read, an abort and a newer `start`
+/// (which `StreamFileReader.fold` resolves inside the fold, not here) arrive
+/// with a stream-file change, and the flag going off restarts the pane's loop.
+/// The last two — a completed message nobody ever confirms, and a stream that
+/// simply stops arriving — are announced by nothing at all, which is why
+/// ``ProvisionalRetireTimer`` exists. Both are deadlines; they differ only in
+/// what they measure from and how long they allow.
 enum ProvisionalRowComposer {
 
     /// How long a *completed* stream message may stay unconfirmed before its
@@ -56,8 +72,11 @@ enum ProvisionalRowComposer {
     /// streaming a large tool-input block emits none of them for minutes while
     /// the request is perfectly healthy. The proxy's own drain cap is the
     /// longest a legitimate stream can still be in flight, so a stream quiet
-    /// for longer than that is one nothing is coming back for.
-    static let silentStreamRetireAfter: Duration = .seconds(600)
+    /// for longer than that is one nothing is coming back for. It *is* that
+    /// cap — ``TBDShared/ModelProxyLimits/drainCap``, the same constant
+    /// `TBDModelProxy`'s retire drain sleeps on — rather than a second literal
+    /// that happens to agree with it.
+    static let silentStreamRetireAfter: Duration = ModelProxyLimits.drainCap
 
     /// Prefix on the provisional row's item id. Deliberately a prefix of the
     /// real message id rather than an opaque token, so the row's identity is

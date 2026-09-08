@@ -87,7 +87,7 @@ final class ControlEndpoints: Sendable {
         streamsInFlight: @escaping @Sendable () -> Int,
         contact: LastDaemonContact = LastDaemonContact(),
         pollInterval: Duration = .milliseconds(250),
-        drainCap: Duration = .seconds(600),
+        drainCap: Duration = ModelProxyLimits.drainCap,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.routes = routes

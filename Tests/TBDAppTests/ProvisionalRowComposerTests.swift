@@ -233,8 +233,9 @@ struct ProvisionalRowComposerTests {
     @Test("the retire window is 60 seconds and the prefix is stream:")
     func constantsAreWhatTheDesignDeclares() {
         #expect(ProvisionalRowComposer.unconfirmedRetireAfter == .seconds(60))
-        #expect(ProvisionalRowComposer.silentStreamRetireAfter == .seconds(600),
-                "the silent-stream window is the proxy's own drain cap")
+        #expect(ProvisionalRowComposer.silentStreamRetireAfter == ModelProxyLimits.drainCap,
+                "the silent-stream window IS the proxy's own drain cap, not a copy of it")
+        #expect(ModelProxyLimits.drainCap == .seconds(600))
         #expect(ProvisionalRowComposer.idPrefix == "stream:")
         #expect(ProvisionalRowComposer.isProvisional(itemID: "stream:msg_a"))
         #expect(!ProvisionalRowComposer.isProvisional(itemID: "msg_a"))
