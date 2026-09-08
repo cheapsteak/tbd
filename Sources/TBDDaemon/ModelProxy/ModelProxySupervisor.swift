@@ -319,8 +319,17 @@ actor ModelProxySupervisor {
     /// One non-blocking `waitpid` per pid we are still waiting to collect.
     private func drainPendingReap() async {
         guard let spawner, !pendingReap.isEmpty else { return }
-        for (pid, attemptsLeft) in pendingReap {
-            if let status = await spawner.reapIfExited(pid: pid) {
+        for pid in Array(pendingReap.keys) {
+            let reaped = await spawner.reapIfExited(pid: pid)
+            // The actor suspends at that await and two passes can overlap — a
+            // `stop()` sweeping while a `tick()` already in flight sweeps too.
+            // So the budget is re-read here rather than carried across the
+            // suspension: writing a decremented snapshot back for an entry the
+            // other pass has since collected and forgotten would resurrect a
+            // pid that is no longer this supervisor's, and a resurrected entry
+            // refuses adoption of whatever the kernel next hands that number.
+            guard let attemptsLeft = pendingReap[pid] else { continue }
+            if let status = reaped {
                 forgetSpawned(pid: pid)
                 Self.logger.info(
                     """
@@ -584,6 +593,15 @@ actor ModelProxySupervisor {
     private func recordSpawn(
         pid: pid_t, port: Int, requested: Int, decision: PortDecision
     ) async {
+        // A spawn abandons whatever was live: a proxy left behind by a
+        // `stop()`/`start()` pair whose adoption did not take it back, or one
+        // a `.bindFailed` recovery has just spawned past. An abandonment that
+        // skips `dropLive` is a child nothing collects and a corpse
+        // `adoptIfMatching` cannot refuse, which is the whole reason there is
+        // one door. Before `rememberSpawned` and not after: were the kernel to
+        // hand this spawn the number an adopted predecessor had just released,
+        // queueing afterwards would queue the newborn.
+        dropLive()
         rememberSpawned(pid: pid)
 
         switch decision {
@@ -702,12 +720,35 @@ actor ModelProxySupervisor {
                 dropLive()
                 return
             }
+            guard status.pid == live.state.pid else {
+                // The port is serving a process other than the one recorded —
+                // another daemon replaced the proxy under us, or ours went and
+                // something else took the port. Moving the pid under the flag
+                // the old one carried would carry two *derived* facts to a pid
+                // they were never derived for: whether a death is read off
+                // `waitpid` or off the process table, and whether this is a
+                // corpse of ours that must be refused. Both come out of
+                // `adoptIfMatching`, so the move goes through it — behind a
+                // drop of the predecessor through the one door.
+                Self.logger.info(
+                    """
+                    port \(live.state.port, privacy: .public) now answers for pid \
+                    \(status.pid, privacy: .public) and not \(live.state.pid, privacy: .public); \
+                    dropping the one we held and adopting afresh
+                    """)
+                let port = live.state.port
+                dropLive()
+                if await adoptIfMatching(port: port) {
+                    await replaceIfVersionDiffers()
+                }
+                return
+            }
             // The proxy is the authority on its own version: a spawned one was
             // recorded optimistically as this daemon's, and this is where that
             // gets corrected.
             self.live = Live(
                 state: State(
-                    pid: status.pid, port: live.state.port, version: status.version,
+                    pid: live.state.pid, port: live.state.port, version: status.version,
                     adopted: live.state.adopted),
                 identityAnchor: status.processStartTime)
             await replaceIfVersionDiffers()

@@ -458,6 +458,12 @@ struct ModelProxySupervisorTests {
     /// never be adopted back: `kill(pid, 0)` succeeds on a zombie and `ps`
     /// still prints its command line, so the identity check confirms it and
     /// `current` would end up naming a dead port that no later branch revises.
+    ///
+    /// Both abandonments in the run are covered, because they are abandoned by
+    /// different code: the first child is dropped by the version replacement,
+    /// the second by the spawn the restart performs when adoption refuses the
+    /// corpse. A supervisor that queued only on the first path leaks the
+    /// second, and it leaks it on exactly the toggle path B2.3 will use.
     @Test("a proxy this daemon replaced is collected, and a restart never adopts it back")
     func replacedProxyIsReapedAndNeverAdoptedBack() async throws {
         let fixture = try SupervisorFixture.make()
@@ -501,13 +507,74 @@ struct ModelProxySupervisorTests {
             await fixture.spawner.calls() == [proxy.port, proxy.port, proxy.port],
             "each replacement takes the port the last one held")
 
-        // And it is collected rather than left a zombie. The exit lands after
-        // the watch is gone, so `stop()` is the only thing left that can reap.
+        // And both are collected rather than left zombies. 7075 was dropped by
+        // the version replacement; 7076 was dropped by the spawn on the
+        // `start()` above, which is the abandonment a supervisor that only
+        // queued on the retire path would miss entirely — the pid stays in
+        // `spawnedPids`, never enters `pendingReap`, and nothing ever waits for
+        // it. Both exits land after the watch is gone, so `stop()` is the only
+        // thing left that can reap.
         await fixture.spawner.reap(pid: 7075, status: 0)
+        await fixture.spawner.reap(pid: 7076, status: 0)
         await supervisor.stop()
         #expect(
-            await fixture.spawner.collected() == [7075],
-            "a child this daemon dropped is waited for, not leaked")
+            await fixture.spawner.collected().sorted() == [7075, 7076],
+            "every child this daemon dropped is waited for, not leaked")
+    }
+
+    /// A port that starts answering for a different process is a **new**
+    /// adoption, not a rename of the old one.
+    ///
+    /// Two facts in `State` are derived from the pid and from nothing else:
+    /// `adopted`, which decides whether a death is read off `waitpid` or off
+    /// the process table, and the corpse refusal, which is what keeps a child
+    /// this daemon dropped from being taken back. Carrying either across to a
+    /// pid it was never derived for is wrong in both directions, so the move
+    /// goes through the adoption path. Here the port passes from a proxy this
+    /// daemon spawned to one it did not: the successor has to come out
+    /// adopted, and the predecessor has to be queued for collection on the way
+    /// past rather than dropped on the floor.
+    @Test("a port that begins answering for another process is adopted afresh")
+    func aMovedPidIsReadoptedRatherThanRenamed() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 9100)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        // Denied once so startup spawns rather than adopts: this case needs the
+        // first proxy to be *ours*, which is the half a rename gets wrong.
+        fixture.identity.denyOnce()
+        fixture.identity.admit(pid: 9100, startTime: proxy.processStartTime)
+        fixture.identity.admit(pid: 9101, startTime: proxy.processStartTime)
+        await fixture.spawner.answer(.success(pid: 9100, port: proxy.port))
+
+        let supervisor = fixture.supervisor()
+        await supervisor.start()
+        #expect(await supervisor.current?.pid == 9100)
+        #expect(await supervisor.current?.adopted == false, "a child of ours is never adopted")
+
+        // The port changes hands: another daemon replaced the proxy, or ours
+        // went and something else bound the port it held.
+        proxy.becomePid(9101)
+        let moved = await fixture.clock.advanceUntil(
+            "the port to be re-adopted for its new process", by: fixture.watchInterval,
+            { await supervisor.current?.pid == 9101 })
+
+        #expect(moved, "a status answer naming another pid must not be ignored")
+        #expect(
+            await supervisor.current?.adopted == true,
+            "a pid this daemon never spawned is not its child, whatever the last one was")
+        #expect(
+            await fixture.spawner.calls() == [proxy.port],
+            "a port that is still serving a proxy is adopted, not spawned past")
+
+        // And the child the move abandoned is collected, not left a zombie.
+        await fixture.spawner.reap(pid: 9100, status: 0)
+        await supervisor.stop()
+        #expect(
+            await fixture.spawner.collected() == [9100],
+            "the predecessor a move abandons is still this daemon's child")
     }
 
     /// One control client per port, for the life of the supervisor.
@@ -908,15 +975,23 @@ private final class FakeProxyProcess: @unchecked Sendable {
     private static let startedAt = Date(timeIntervalSince1970: 1_700_000_000.123_456)
 
     private let server: LoopbackHTTPTestServer
+    private let pidBox: PidBox
     let processStartTime = FakeProxyProcess.startedAt
 
     var port: Int { server.port }
+
+    /// Makes the listener answer for another process from now on — one port
+    /// changing hands, which is what another daemon's replacement looks like
+    /// from the supervisor's side.
+    func becomePid(_ pid: Int32) { pidBox.value = pid }
 
     init(version: String, pid: Int32, routeStatus: Int = 200) throws {
         // The listener's port is not known until it is bound, so the status
         // document is composed per request out of a box the initializer fills
         // afterwards rather than baked into the handler.
         let portBox = PortBox()
+        let pidBox = PidBox(pid)
+        self.pidBox = pidBox
         let started = FakeProxyProcess.startedAt
         self.server = try LoopbackHTTPTestServer { request in
             if request.method == "DELETE", request.path.hasPrefix("/tbd/routes/") {
@@ -925,7 +1000,7 @@ private final class FakeProxyProcess: @unchecked Sendable {
             switch (request.method, request.path) {
             case ("GET", "/tbd/status"):
                 let document = ModelProxyStatus(
-                    version: version, pid: pid, processStartTime: started,
+                    version: version, pid: pidBox.value, processStartTime: started,
                     port: portBox.value, streamsInFlight: 0, routeCount: 0)
                 guard let data = try? document.encodedForStatusResponse() else {
                     return LoopbackHTTPTestServer.Reply(status: 500, body: "{}")
@@ -956,6 +1031,20 @@ private final class ClientBuildCounter: @unchecked Sendable {
     }
 
     func counts() -> [Int: Int] { lock.withLock { built } }
+}
+
+/// A box for the pid the fake reports, so a test can move a port from one
+/// process to another while the supervisor is watching it.
+private final class PidBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Int32
+
+    init(_ pid: Int32) { stored = pid }
+
+    var value: Int32 {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
+    }
 }
 
 /// A box for the port, because the handler closure is built before the
