@@ -577,7 +577,7 @@ struct TranscriptStreamPollSchedulingTests {
         let clock = TestClock()
         let scheduler = TranscriptPollScheduler(source: source, clock: clock)
         let news = NewsLog()
-        await scheduler.setOnChange { sessionID in await news.record(sessionID) }
+        await scheduler.setOnChangeIfUnset { sessionID in await news.record(sessionID) }
 
         // Consume the transcript up front, so nothing there can move and the
         // stream file is the only thing left that can produce news.
@@ -622,7 +622,7 @@ struct TranscriptStreamPollSchedulingTests {
         let clock = TestClock()
         let scheduler = TranscriptPollScheduler(source: source, clock: clock)
         let news = NewsLog()
-        await scheduler.setOnChange { sessionID in await news.record(sessionID) }
+        await scheduler.setOnChangeIfUnset { sessionID in await news.record(sessionID) }
 
         await scheduler.register(
             sessionID: "s1", path: transcriptPath, tier: .background,

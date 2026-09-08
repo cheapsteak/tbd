@@ -98,11 +98,12 @@ actor TranscriptPollScheduler {
     /// registrations hold a copy, so nothing accumulates per retired session.
     private var lastGeneration: UInt64 = 0
     private var appActive = true
-    /// One handler for every registration, not one per session. Each pane sets
-    /// the same closure and it is passed the session id that changed, so a
-    /// later pane overwriting an earlier one's handler is harmless — they are
-    /// interchangeable. Do not "fix" this into a per-session dictionary; that
-    /// would keep a torn-down pane's closure alive.
+    /// One handler for every registration, not one per session. It is passed
+    /// the session id that changed, and it carries nothing belonging to the
+    /// pane that installed it — so the first pane to mount installs it and
+    /// every later one finds it already there (see ``setOnChangeIfUnset``). Do
+    /// not "fix" this into a per-session dictionary; that would keep a
+    /// torn-down pane's closure alive.
     private var onChange: (@Sendable (String) async -> Void)?
     private let source: TranscriptSource
     /// The instant a stream refresh stamps its lines with.
@@ -114,6 +115,21 @@ actor TranscriptPollScheduler {
     private let now: @Sendable () -> Date
     private let clock: any Clock<Duration>
 
+    /// The app's one provisional-row retire timer, created with this scheduler
+    /// and on its clock.
+    ///
+    /// It lives here because its lifetime is the *registration's*, not any
+    /// pane's. An alarm is armed by a publish, and every publish in the app
+    /// runs through the single ``onChange`` slot above; a pane that mounts,
+    /// remounts, or is restarted by a Settings flip must therefore find the
+    /// same instance the previous one armed into, or a session's live alarm
+    /// ends up in one instance while the pane that would cancel it holds
+    /// another — and the orphan then fires after ``deregister`` has already
+    /// forgotten the session, publishing an empty transcript for it.
+    /// `nonisolated` because it is an immutable `Sendable` actor reference:
+    /// `publish` can take it without a hop through this actor.
+    nonisolated let provisionalRetire: ProvisionalRetireTimer
+
     init(
         source: TranscriptSource,
         now: @escaping @Sendable () -> Date = { Date() },
@@ -122,6 +138,7 @@ actor TranscriptPollScheduler {
         self.source = source
         self.now = now
         self.clock = clock
+        self.provisionalRetire = ProvisionalRetireTimer(clock: clock)
     }
 
     var registeredSessionIDs: Set<String> { Set(registrations.keys) }
@@ -164,8 +181,40 @@ actor TranscriptPollScheduler {
         registrations[sessionID]?.generation
     }
 
-    func setOnChange(_ handler: @escaping @Sendable (String) async -> Void) {
+    /// Installs the change handler, unless one is already installed.
+    ///
+    /// Deliberately not a plain setter. Panes call this on every mount and the
+    /// closures are interchangeable — none of them carries anything belonging
+    /// to the pane that built it — so re-seating one buys nothing, and the
+    /// habit of re-seating it is what let a per-pane object ride into this slot
+    /// and split one session's alarms across two instances. Keeping the first
+    /// closure is safe: it holds `AppState` weakly, plus the same source and
+    /// retire timer this scheduler already owns, and no view.
+    func setOnChangeIfUnset(_ handler: @escaping @Sendable (String) async -> Void) {
+        guard onChange == nil else { return }
         onChange = handler
+    }
+
+    /// Cancels the provisional retire alarm for `sessionID` — unless a pane is
+    /// still holding that session registered.
+    ///
+    /// The guard is the whole point. The viewer-slot LRU permits two panes onto
+    /// one session, and a deadline rule is announced by nothing: cancelling an
+    /// alarm a surviving pane's row still depends on strands that row on screen
+    /// until the pane closes. So the gesture belongs to the *last* holder
+    /// leaving, and a departing pane that is not the last one asks for it in
+    /// vain.
+    ///
+    /// ``deregister`` makes this call itself, after dropping the registration
+    /// and **before** `TranscriptSource.forget` — the ordering is load-bearing.
+    /// An alarm that survives into the forget wakes up, publishes what the
+    /// source no longer has, and writes an empty transcript into
+    /// `AppState.sessionTranscripts`, where `AppState+History.selectSession`
+    /// reads `[]` as a cached answer and never refetches from disk. Session
+    /// History for that session would then read empty for good.
+    func disarmProvisional(sessionID: String) async {
+        guard registrations[sessionID] == nil else { return }
+        await provisionalRetire.disarm(sessionID: sessionID)
     }
 
     /// Adds `token`'s hold on `sessionID`, at the tier that pane declares.
@@ -250,6 +299,11 @@ actor TranscriptPollScheduler {
     /// Making the teardown conditional on the holder set emptying settles the
     /// two-panes-on-one-session case by the same stroke: either may leave, and
     /// the session keeps polling for whoever is left.
+    ///
+    /// The provisional retire alarm is cancelled here too, on the same
+    /// last-holder branch and ahead of the forget — the only place that knows
+    /// both that nobody is watching any more and that the source is about to
+    /// drop what the alarm would republish. See ``disarmProvisional``.
     func deregister(sessionID: String, token: TranscriptPaneToken) async {
         guard var registration = registrations[sessionID] else { return }
         guard registration.holders.removeValue(forKey: token) != nil else { return }
@@ -263,6 +317,8 @@ actor TranscriptPollScheduler {
         }
         registration.task?.cancel()
         registrations.removeValue(forKey: sessionID)
+        // Before the forget, never after it: see `disarmProvisional`.
+        await disarmProvisional(sessionID: sessionID)
         await source.forget(sessionID: sessionID)
     }
 

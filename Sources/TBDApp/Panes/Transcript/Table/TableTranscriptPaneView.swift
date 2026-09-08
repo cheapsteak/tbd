@@ -445,8 +445,10 @@ struct TableTranscriptPaneView: View {
     /// re-declares it whenever its visibility changes; the scheduler never
     /// derives one.
     ///
-    /// `clock` drives both the tier re-declaration wait and the provisional
-    /// row's retire alarm; the repo's clock seam, last parameter, defaulted.
+    /// `clock` drives this loop's own tier re-declaration wait; the repo's
+    /// clock seam, last parameter, defaulted. The provisional row's retire
+    /// alarm sleeps on the *scheduler's* clock instead, because the timer it
+    /// arms into belongs to the scheduler and outlives every pane.
     private func appSideLoop(path: String, clock: any Clock<Duration> = ContinuousClock()) async {
         // Every input this run reads *once* is read here, before the first
         // `await`: `taskKey` is a computed property over `AppState`, so
@@ -459,15 +461,21 @@ struct TableTranscriptPaneView: View {
         let source = appState.transcriptSource
         let state = appState
 
-        // The retire alarms for this run of the loop; this pane's own session
-        // is disarmed when it ends, and no other's.
-        // They back the single retire rule no file change can announce; see
-        // `ProvisionalRetireTimer`. Its state is keyed by session id because
-        // the closure below goes into the scheduler's one app-wide slot and so
-        // sees publishes for every registered session, not just this pane's.
-        let retireTimer = ProvisionalRetireTimer(clock: clock)
+        // The app's one retire timer, taken from the scheduler rather than
+        // built here. It backs the two retire rules no file change can
+        // announce; see `ProvisionalRetireTimer`. A pane must not own one: the
+        // closure below goes into the scheduler's single app-wide slot, so a
+        // second pane mounting — or a Settings flip restarting every streaming
+        // pane at once — would move the arming into a fresh instance while the
+        // first pane still held the only one its teardown could reach. The
+        // orphaned alarm then fires after the session has been forgotten and
+        // publishes an empty transcript for it.
+        let retireTimer = scheduler.provisionalRetire
 
-        await scheduler.setOnChange { [weak state] sessionID in
+        // Installed once for the whole app, not re-seated per mount: the
+        // closure carries nothing of this pane's (see
+        // `TranscriptPollScheduler.onChange`).
+        await scheduler.setOnChangeIfUnset { [weak state] sessionID in
             guard let state else { return }
             await Self.publish(
                 sessionID: sessionID, state: state, source: source, retireTimer: retireTimer)
@@ -525,17 +533,18 @@ struct TableTranscriptPaneView: View {
                 sessionID: sid, path: path, streamPath: streamPath,
                 tier: tier, token: token)
         }
+        // Releasing this pane's hold also cancels the session's retire alarm,
+        // but only when this was the last holder and only ahead of the
+        // source's forget — `deregister` is the one place that knows both.
         await scheduler.deregister(sessionID: sid, token: token)
-        // A pane that goes away disarms **its own** session's alarm and no
-        // other. This instance is reachable from the scheduler's one app-wide
-        // `onChange` slot, so it may hold alarms for sessions other panes are
-        // showing, and the deadline rules are the retire rules nothing
-        // re-announces: cancelling another session's alarm here would strand
-        // its provisional row on screen forever. The alarms left armed are
-        // safe — the sleeping task is retained by its own `fire` closure,
-        // clears itself when it fires, and its callback (`publish`) captures
-        // only `AppState`, the source and this timer, never a view.
-        await retireTimer.disarm(sessionID: sid)
+        // And the pane says so itself, for the case `deregister` returns early
+        // from: a token whose hold was already released while the registration
+        // has since gone away entirely. Never a blanket disarm — the timer
+        // holds alarms for every session, and the scheduler refuses this one
+        // while any pane still has the session registered, because a deadline
+        // rule is announced by nothing and cancelling a live pane's alarm
+        // would strand its row on screen.
+        await scheduler.disarmProvisional(sessionID: sid)
     }
 
     /// One publish: read what the source has for `sessionID`, merge the
@@ -610,9 +619,9 @@ struct TableTranscriptPaneView: View {
         // that was just withdrawn — disarms.
         //
         // Both gestures name `sessionID`, and that is load-bearing rather than
-        // decorative: one timer instance serves every session that publishes
-        // through the scheduler's single on-change slot, so an unkeyed disarm
-        // here would let ordinary transcript news for one session cancel
+        // decorative: the scheduler's one timer instance serves every session
+        // that publishes through its single on-change slot, so an unkeyed
+        // disarm here would let ordinary transcript news for one session cancel
         // another session's pending retire alarm.
         if let provisional,
            items.last.map({ ProvisionalRowComposer.isProvisional(itemID: $0.id) }) == true,

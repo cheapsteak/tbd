@@ -663,17 +663,156 @@ struct ProvisionalRowPublishTests {
                 "and the replacement alarm is still pending")
     }
 
-    /// The handoff production actually performs, which the single-instance
-    /// two-session test does not reach: `appSideLoop` builds a **new**
-    /// `ProvisionalRetireTimer` on every pane mount and drops it into the
-    /// scheduler's single `onChange` slot, so a remount leaves the previous
-    /// instance's alarm pending with nothing left holding it.
+    /// What a mounting pane does to get a retire timer, in one place: it takes
+    /// the scheduler's. `appSideLoop` has exactly this line, and the tests
+    /// below drive it once per pane so "a second pane mounted" is the gesture
+    /// production makes rather than a claim about it.
+    private static func timerForMountingPane(
+        _ scheduler: TranscriptPollScheduler
+    ) -> ProvisionalRetireTimer {
+        scheduler.provisionalRetire
+    }
+
+    /// The handoff production actually performs. Panes mount, remount and are
+    /// restarted wholesale by a Settings flip, and every one of them publishes
+    /// through the scheduler's single `onChange` slot.
     ///
-    /// The property being pinned is that this is safe: a fired alarm only ever
-    /// runs an ordinary publish, which recomputes from the source and the
-    /// state, so it retires the row it should retire regardless of which
-    /// instance woke up — and it touches no other session on the way.
-    @Test("a retire alarm survives a remount onto a second timer and lands on its own session")
+    /// What discriminates: while a pane built its own `ProvisionalRetireTimer`
+    /// per mount, the two handles below were different objects, the row's
+    /// re-arm landed in the one the *second* pane installed, and the first
+    /// pane's teardown reached only its own. The orphan then outlived
+    /// `TranscriptSource.forget` and republished an empty transcript for a
+    /// session nothing was watching — which `AppState+History.selectSession`
+    /// caches as an answer, so Session History for it read empty for good.
+    @Test("a pane that tore down leaves no orphan alarm for a later mount to fire")
+    func aTornDownPaneLeavesNoOrphanAlarm() async throws {
+        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
+        defer { Self.removeSuite(suite) }
+        let path = try Self.streamFileWithOneTextLine()
+        let source = TranscriptSource()
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: Self.t0))
+        let state = await Self.makeState(streaming: true, suite: suite)
+        let clock = TestClock()
+        let date = MovableDate(Self.t0)
+        let scheduler = TranscriptPollScheduler(source: source, clock: clock)
+
+        // Pane A mounts on the streaming session and publishes: a row with a
+        // ten-minute silent-stream deadline, and an alarm to match.
+        let paneA = TranscriptPaneToken()
+        let timerA = Self.timerForMountingPane(scheduler)
+        await scheduler.register(
+            sessionID: "s1", path: path, streamPath: path,
+            tier: .background, token: paneA)
+        await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source,
+            retireTimer: timerA, now: { date.now })
+        #expect(await timerA.armedMessage(sessionID: "s1") == "msg_a")
+
+        // Pane B mounts — a second pane, or the same pane restarted by a
+        // Settings flip. It takes a timer the way every pane does.
+        let timerB = Self.timerForMountingPane(scheduler)
+        #expect(timerA === timerB, "a pane mounting must not mint a second timer")
+
+        // Nine minutes in, a line arrives for A's row and it re-arms — through
+        // the handle the pane that mounted last is holding.
+        date.advance(by: 540)
+        let more = try ModelProxyStreamLine
+            .text(message: "msg_a", index: 0, text: "lo").encodedLine()
+        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((more + "\n").utf8))
+        try handle.close()
+        #expect(await source.refreshStream(sessionID: "s1", path: path, now: date.now))
+        await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source,
+            retireTimer: timerB, now: { date.now })
+        #expect(await Self.publishedIDs(state) == ["stream:msg_a"])
+
+        // A tears down: the hold goes, the alarm goes with it, and the source
+        // forgets the session — the real teardown sequence, in its real order.
+        await scheduler.deregister(sessionID: "s1", token: paneA)
+        await scheduler.disarmProvisional(sessionID: "s1")
+        #expect(await timerB.armedSessionCount == 0,
+                "the re-armed alarm was reachable from the departing pane's teardown")
+
+        // Past every deadline either arm could have set.
+        await clock.advance(by: .seconds(1_200))
+        let published = await pollUntilTrue(timeout: .seconds(1)) {
+            await Self.publishedIDs(state) != ["stream:msg_a"]
+        }
+        #expect(published == .timedOut,
+                "nothing may publish for a session that has been forgotten")
+        #expect(await Self.publishedIDs(state) == ["stream:msg_a"])
+    }
+
+    /// Two panes, two sessions, one timer — the arrangement the app is in
+    /// whenever more than one transcript is open. Each session's row must
+    /// retire on its own rule and its own instant, and neither may take the
+    /// other down on the way.
+    ///
+    /// The rules are deliberately different: A completed and unconfirmed (60 s
+    /// from its stop), B streaming and quiet (600 s from its last line). A
+    /// timer that kept one alarm for the whole app, or one deadline for the
+    /// whole table, fails between the two advances below.
+    @Test("two sessions arm and retire independently through the one timer")
+    func twoSessionsRetireIndependently() async throws {
+        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
+        defer { Self.removeSuite(suite) }
+        let source = try await Self.sourceWithCompletedMessage(now: Self.t0)
+        let streamingPath = try Self.streamFileWithOneTextLine()
+        #expect(await source.refreshStream(sessionID: "s2", path: streamingPath, now: Self.t0))
+        let state = await Self.makeState(streaming: true, suite: suite)
+        let clock = TestClock()
+        let date = MovableDate(Self.t0)
+        let scheduler = TranscriptPollScheduler(source: source, clock: clock)
+        let timer = Self.timerForMountingPane(scheduler)
+
+        await TableTranscriptPaneView.publish(
+            sessionID: "s1", state: state, source: source,
+            retireTimer: timer, now: { date.now })
+        // A's alarm is the only sleeper on this clock, so waiting for one
+        // proves *it* is armed before any virtual time moves. B's may register
+        // a moment later, which is why the advance that fires it is generous
+        // rather than exact; A's is not, because "A retires on its own minute"
+        // is the claim being made.
+        await clock.waitForSuspension()
+        await TableTranscriptPaneView.publish(
+            sessionID: "s2", state: state, source: source,
+            retireTimer: timer, now: { date.now })
+        #expect(await Self.publishedIDs(state) == ["stream:msg_a"])
+        #expect(await Self.publishedIDs(state, session: "s2") == ["stream:msg_a"])
+        #expect(await timer.armedSessionCount == 2, "one timer, two live alarms")
+
+        // A's minute is up; B's ten are not.
+        date.advance(by: 61)
+        await clock.advance(by: .seconds(61))
+        let aWithdrawn = await pollUntilTrue(timeout: .seconds(10)) {
+            await Self.publishedIDs(state).isEmpty
+        }
+        #expect(aWithdrawn == .satisfied, "A retires on the unconfirmed rule")
+        #expect(await Self.publishedIDs(state, session: "s2") == ["stream:msg_a"],
+                "and B's row is untouched by it")
+        #expect(await timer.armedMessage(sessionID: "s2") == "msg_a",
+                "B's alarm is still pending on its own, longer window")
+
+        // And B's, on its own deadline rather than A's.
+        date.advance(by: 540)
+        await clock.advance(by: .seconds(700))
+        let bWithdrawn = await pollUntilTrue(timeout: .seconds(10)) {
+            await Self.publishedIDs(state, session: "s2").isEmpty
+        }
+        #expect(bWithdrawn == .satisfied, "B retires on the silent-stream rule")
+        let cleared = await pollUntilTrue(timeout: .seconds(10)) {
+            await timer.armedSessionCount == 0
+        }
+        #expect(cleared == .satisfied, "and neither alarm re-arms after firing")
+    }
+
+    /// A remount, which used to be the moment a second timer appeared. Now it
+    /// is the moment a pane finds the alarm the previous one armed, and the
+    /// property to pin is that the row retires exactly once, on the deadline it
+    /// was given before the remount.
+    @Test("a remounted pane finds the same timer and retires the row it inherited")
     func aRemountedPaneStillRetiresTheRightSession() async throws {
         let suite = "tbd-provisional-publish-\(UUID().uuidString)"
         defer { Self.removeSuite(suite) }
@@ -682,33 +821,35 @@ struct ProvisionalRowPublishTests {
         try await Self.addPlainTranscript(to: source, sessionID: "s2")
         let state = await Self.makeState(streaming: true, suite: suite)
         let clock = TestClock()
+        let scheduler = TranscriptPollScheduler(source: source, clock: clock)
 
-        // Mount one: the pane's own timer arms A's 60-second backstop.
-        let firstTimer = ProvisionalRetireTimer(clock: clock)
+        // Mount one arms A's 60-second backstop.
+        let mounted = Self.timerForMountingPane(scheduler)
         await TableTranscriptPaneView.publish(
             sessionID: "s1", state: state, source: source,
-            retireTimer: firstTimer, now: { date.now })
-        #expect(await firstTimer.armedMessage(sessionID: "s1") == "msg_a")
+            retireTimer: mounted, now: { date.now })
+        #expect(await mounted.armedMessage(sessionID: "s1") == "msg_a")
 
-        // The remount. A second instance takes the scheduler's on-change slot;
-        // the first is unreachable from the app but its alarm is still asleep.
+        // The remount, half-way through the window.
         date.advance(by: 30)
         await clock.advanceWhenSuspended(by: .seconds(30))
-        let secondTimer = ProvisionalRetireTimer(clock: clock)
+        let remounted = Self.timerForMountingPane(scheduler)
+        #expect(remounted === mounted, "a remount finds the timer, it does not build one")
         await TableTranscriptPaneView.publish(
             sessionID: "s1", state: state, source: source,
-            retireTimer: secondTimer, now: { date.now })
-        #expect(await secondTimer.armedMessage(sessionID: "s1") == "msg_a",
-                "the new instance arms the same row for the remainder of its window")
+            retireTimer: remounted, now: { date.now })
+        #expect(await remounted.armedMessage(sessionID: "s1") == "msg_a",
+                "the row it inherited is still armed, on its original deadline")
+        #expect(await remounted.armedSessionCount == 1)
         #expect(await Self.publishedIDs(state) == ["stream:msg_a"])
 
-        // A publish for another session through the new instance, the case the
+        // A publish for another session through the same timer, the case the
         // keying exists for.
         await TableTranscriptPaneView.publish(
             sessionID: "s2", state: state, source: source,
-            retireTimer: secondTimer, now: { date.now })
-        #expect(await secondTimer.armedMessage(sessionID: "s1") == "msg_a",
-                "B's publish through the new timer must not disarm A")
+            retireTimer: remounted, now: { date.now })
+        #expect(await remounted.armedMessage(sessionID: "s1") == "msg_a",
+                "B's publish must not disarm A")
 
         date.advance(by: 31)
         await clock.advance(by: .seconds(31))
@@ -716,21 +857,13 @@ struct ProvisionalRowPublishTests {
             await Self.publishedIDs(state).isEmpty
         }
         #expect(withdrawn == .satisfied,
-                "whichever instance woke up, the re-publish retires A's row")
+                "the row retires on the deadline it was given before the remount")
         #expect(await Self.publishedIDs(state, session: "s2").isEmpty == false,
-                "and B's transcript is untouched by either instance")
-        // Both alarms were due at the same virtual instant and clear themselves
-        // as they fire, so this is polled rather than read once: which of the
-        // two finishes first is not something the test gets to decide.
+                "and B's transcript is untouched")
         let cleared = await pollUntilTrue(timeout: .seconds(10)) {
-            // Read both, then compare: `&&` takes its right side as a
-            // nonisolated autoclosure, which cannot await an actor's property.
-            let abandoned = await firstTimer.armedSessionCount
-            let live = await secondTimer.armedSessionCount
-            return abandoned == 0 && live == 0
+            await remounted.armedSessionCount == 0
         }
-        #expect(cleared == .satisfied,
-                "neither the abandoned instance nor the live one re-arms after firing")
+        #expect(cleared == .satisfied, "and nothing re-arms after firing")
     }
 
     /// One text line, no terminal line: what a stream in flight and a proxy

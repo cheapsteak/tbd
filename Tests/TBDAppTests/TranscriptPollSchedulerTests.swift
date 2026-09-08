@@ -66,6 +66,80 @@ struct TranscriptPollSchedulerTests {
         #expect(await scheduler.registeredSessionIDs.isEmpty)
     }
 
+    /// The provisional retire alarm's lifetime is the *registration's*, not any
+    /// pane's, and this is the seam that makes it so.
+    ///
+    /// Two claims, and each one fails a different wrong implementation. A pane
+    /// that is not the last holder must not take the alarm down — the survivor
+    /// is still showing the row it belongs to and a deadline rule is announced
+    /// by nothing, so nothing would ever re-arm it. And the last one leaving
+    /// must, because `deregister` forgets the session immediately afterwards
+    /// and an alarm that outlived that would publish an empty transcript for a
+    /// session nobody is watching.
+    @Test("the last holder leaving disarms the session's retire alarm; an earlier one does not")
+    func onlyTheLastHolderDisarmsTheRetireAlarm() async {
+        let scheduler = TranscriptPollScheduler(source: TranscriptSource(), clock: TestClock())
+        let first = TranscriptPaneToken()
+        let second = TranscriptPaneToken()
+        await scheduler.register(
+            sessionID: "s1", path: "/nonexistent", tier: .background, token: first)
+        await scheduler.register(
+            sessionID: "s1", path: "/nonexistent", tier: .background, token: second)
+
+        await scheduler.provisionalRetire.arm(
+            sessionID: "s1", messageID: "msg_a",
+            deadline: Date(timeIntervalSince1970: 1_700_000_060),
+            after: .seconds(60)) {}
+        #expect(await scheduler.provisionalRetire.armedMessage(sessionID: "s1") == "msg_a")
+
+        await scheduler.disarmProvisional(sessionID: "s1")
+        #expect(await scheduler.provisionalRetire.armedMessage(sessionID: "s1") == "msg_a",
+                "asked for while two panes hold the session, the disarm is refused")
+
+        await scheduler.deregister(sessionID: "s1", token: first)
+        #expect(await scheduler.provisionalRetire.armedMessage(sessionID: "s1") == "msg_a",
+                "one pane leaving must not strand the pane that stayed")
+
+        await scheduler.deregister(sessionID: "s1", token: second)
+        #expect(await scheduler.provisionalRetire.armedMessage(sessionID: "s1") == nil,
+                "the last holder leaving takes the alarm with it")
+        #expect(await scheduler.provisionalRetire.armedSessionCount == 0)
+    }
+
+    /// Two schedulers are two apps; one scheduler is one timer, however many
+    /// panes ask it for one. The property the pane relies on when it takes the
+    /// timer instead of building one.
+    @Test("every pane asking one scheduler for a retire timer gets the same instance")
+    func oneSchedulerOwnsOneRetireTimer() {
+        let scheduler = TranscriptPollScheduler(source: TranscriptSource())
+        let other = TranscriptPollScheduler(source: TranscriptSource())
+        #expect(scheduler.provisionalRetire === scheduler.provisionalRetire)
+        #expect(scheduler.provisionalRetire !== other.provisionalRetire)
+    }
+
+    /// The slot holds one closure for the whole app and the closures are
+    /// interchangeable, so the habit of re-seating it per mount buys nothing —
+    /// and that habit is what let a per-pane object ride into it.
+    @Test("a second pane's handler does not displace the first")
+    func theChangeHandlerIsInstalledOnce() async throws {
+        let scheduler = TranscriptPollScheduler(source: TranscriptSource())
+        let first = NotifyRecorder()
+        let second = NotifyRecorder()
+        await scheduler.setOnChangeIfUnset { await first.record($0) }
+        await scheduler.setOnChangeIfUnset { await second.record("second:" + $0) }
+
+        let pane = TranscriptPaneToken()
+        await scheduler.register(
+            sessionID: "s1", path: "/nonexistent", tier: .background, token: pane)
+        let generation = try #require(await scheduler.registeredGeneration(sessionID: "s1"))
+        await scheduler.finishTick(sessionID: "s1", generation: generation, hasNews: true)
+
+        #expect(await first.published == ["s1"])
+        #expect(await second.published.isEmpty)
+
+        await scheduler.deregister(sessionID: "s1", token: pane)
+    }
+
     private static let line = #"{"type":"user","uuid":"a","timestamp":"2026-08-26T10:00:00.000Z","message":{"role":"user","content":"hello"}}"#
 
     private func tempTranscript(_ name: String) throws -> String {
@@ -194,7 +268,7 @@ struct TranscriptPollSchedulerTests {
     func staleTickDoesNotPublish() async throws {
         let scheduler = TranscriptPollScheduler(source: TranscriptSource())
         let recorder = NotifyRecorder()
-        await scheduler.setOnChange { await recorder.record($0) }
+        await scheduler.setOnChangeIfUnset { await recorder.record($0) }
 
         let pane = TranscriptPaneToken()
         await scheduler.register(
@@ -214,7 +288,7 @@ struct TranscriptPollSchedulerTests {
     func liveTickPublishes() async throws {
         let scheduler = TranscriptPollScheduler(source: TranscriptSource())
         let recorder = NotifyRecorder()
-        await scheduler.setOnChange { await recorder.record($0) }
+        await scheduler.setOnChangeIfUnset { await recorder.record($0) }
 
         let pane = TranscriptPaneToken()
         await scheduler.register(
@@ -239,7 +313,7 @@ struct TranscriptPollSchedulerTests {
         let source = TranscriptSource()
         let scheduler = TranscriptPollScheduler(source: source)
         let recorder = NotifyRecorder()
-        await scheduler.setOnChange { await recorder.record($0) }
+        await scheduler.setOnChangeIfUnset { await recorder.record($0) }
 
         let closing = TranscriptPaneToken()
         let reopened = TranscriptPaneToken()
@@ -280,7 +354,7 @@ struct TranscriptPollSchedulerTests {
         let source = TranscriptSource()
         let scheduler = TranscriptPollScheduler(source: source)
         let recorder = NotifyRecorder()
-        await scheduler.setOnChange { await recorder.record($0) }
+        await scheduler.setOnChangeIfUnset { await recorder.record($0) }
 
         // The cadence is beside the point here; the slow tier is what keeps a
         // real poll tick from reaching the recorder while the test runs.
@@ -321,7 +395,7 @@ struct TranscriptPollSchedulerTests {
         let source = TranscriptSource()
         let scheduler = TranscriptPollScheduler(source: source)
         let recorder = NotifyRecorder()
-        await scheduler.setOnChange { await recorder.record($0) }
+        await scheduler.setOnChangeIfUnset { await recorder.record($0) }
 
         let first = TranscriptPaneToken()
         let second = TranscriptPaneToken()
