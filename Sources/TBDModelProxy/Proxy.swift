@@ -188,7 +188,7 @@ enum TBDModelProxyMain {
                 // A directory that cannot be listed is worth a line and not
                 // worth refusing to start over: the daemon rewrites route
                 // files as it spawns, so an empty table recovers by itself.
-                try routes.loadAll()
+                try await routes.loadAll()
             } catch {
                 ProxyLog.main.error(
                     "route load failed: \(error.localizedDescription, privacy: .public)")

@@ -412,7 +412,11 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
         let promise = context.eventLoop.makePromise(of: Void.self)
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: promise)
         if !keepAlive {
-            promise.futureResult.whenComplete { _ in context.close(promise: nil) }
+            // The channel, not the context: `whenComplete` takes a `@Sendable`
+            // closure, `ChannelHandlerContext` is not `Sendable`, and `Channel`
+            // is — closing through it is the same close, correctly typed.
+            let channel = context.channel
+            promise.futureResult.whenComplete { _ in channel.close(promise: nil) }
         }
     }
 
@@ -524,7 +528,8 @@ private final class ResponseRelay: @unchecked Sendable {
             // framing has no terminating chunk, which is exactly what it would
             // have seen from the upstream directly.
             if !keepAlive || error != nil {
-                promise.futureResult.whenComplete { _ in context.close(promise: nil) }
+                let channel = context.channel
+                promise.futureResult.whenComplete { _ in channel.close(promise: nil) }
             }
         }
     }
@@ -579,7 +584,8 @@ extension ProxyRequestHandler {
             let promise = context.eventLoop.makePromise(of: Void.self)
             context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(nil)), promise: promise)
             if !keepAlive {
-                promise.futureResult.whenComplete { _ in context.close(promise: nil) }
+                let channel = context.channel
+                promise.futureResult.whenComplete { _ in channel.close(promise: nil) }
             }
         }
     }
