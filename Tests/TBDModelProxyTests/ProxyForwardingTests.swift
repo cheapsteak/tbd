@@ -298,8 +298,16 @@ struct ProxyForwardingTests {
         // drains on, and the tee's `end(error:)`, which is the only signal an
         // `aborted` stream line can come from.
         let recorder = RecordingTee()
-        let events = (1...3).map { index in
-            (delayMs: 400, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
+        // Deliberately far longer than the cut it is cut by. NIO's
+        // `HTTPServerPipelineHandler` swallows `read()` while a response is
+        // outstanding, so a client's FIN is not seen when it arrives — the
+        // proxy learns the connection is gone when a later write to it fails.
+        // A script that ended near that moment would let a relay which
+        // reported nothing on cancellation still be rescued by the stream
+        // finishing on its own, and the test would pass for the wrong reason.
+        // 40 events at 250 ms is 10 seconds of stream against a 5-second wait.
+        let events = (1...40).map { index in
+            (delayMs: 250, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
         }
 
         try await withProxy(
@@ -339,11 +347,13 @@ struct ProxyForwardingTests {
             // having finished on its own.
             #expect(harness.upstream.requests.count == 1)
 
+            // Bounded well below the script's own 10 seconds, so a relay that
+            // only ends because the upstream ran out of events cannot pass.
             await waitUntil(
-                "the relay released its in-flight stream",
+                "the relay released its in-flight stream", seconds: 5,
                 sample: { harness.server.streamsInFlight }, isSatisfied: { $0 == 0 })
             await waitUntil(
-                "the tee was told the stream ended",
+                "the tee was told the stream ended", seconds: 5,
                 sample: { recorder.endCount }, isSatisfied: { $0 == 1 })
             #expect(recorder.beginCount == 1)
             // Exactly once: `relayEnd` deduplicates, and a second end would
@@ -395,25 +405,55 @@ struct ProxyForwardingTests {
         // wrote `.end` here, the client would read a complete response that
         // happened to stop early — and Claude would treat a half-written
         // message as the whole answer instead of retrying.
+        //
+        // The event is delayed so the head is a message of its own: the
+        // assertion is about a body that stops mid-flight, not about what a
+        // client makes of a response whose head and death arrive together.
         let event = Array("event: content_block_delta\ndata: {\"i\":0}\n\n".utf8)
 
         try await withProxy(
             prefix: "pxcut",
             script: { _, _ in
                 FakeUpstream.Script(
-                    events: [(delayMs: 0, bytes: event)], closeWithoutStop: true)
+                    events: [(delayMs: 200, bytes: event)], closeWithoutStop: true)
             }
         ) { harness in
-            var request = URLRequest(url: harness.url("/v1/messages"))
-            request.httpMethod = "POST"
-            request.httpBody = Data(#"{"stream":true}"#.utf8)
-
-            // The chunked body never gets its terminating chunk, so the client
-            // reports a failed load rather than a completed short one — the
-            // whole point of not writing `.end` on a cut.
-            await #expect(throws: (any Error).self) {
-                _ = try await harness.session.data(for: request)
+            // Read on a raw socket rather than through `URLSession`: the
+            // contract is about the bytes on the wire — a chunked body that
+            // stops without its terminating chunk — and how a particular
+            // client maps that to an error is its own business.
+            let requestBody = #"{"stream":true}"#
+            let request = """
+                POST /r/\(harness.token)/v1/messages HTTP/1.1\r
+                Host: 127.0.0.1\r
+                Content-Type: application/json\r
+                Content-Length: \(requestBody.utf8.count)\r
+                Connection: close\r
+                \r
+                \(requestBody)
+                """
+            let port = harness.port
+            let response = try await withPhaseDeadline("cut read", seconds: 30) {
+                try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<String, any Error>) in
+                    DispatchQueue.global().async {
+                        continuation.resume(
+                            with: Result { try rawHTTPExchange(port: port, request: request) })
+                    }
+                }
             }
+
+            #expect(
+                response.hasPrefix("HTTP/1.1 200"),
+                "the head was relayed before the cut; got: \(response.prefix(64))")
+            #expect(response.lowercased().contains("transfer-encoding: chunked"))
+            #expect(response.contains("content_block_delta"))
+            // The terminating chunk is the whole difference between a response
+            // that completed and one that was cut.
+            #expect(
+                !response.hasSuffix("0\r\n\r\n"),
+                "the relay wrote a terminating chunk on a cut stream; tail: "
+                    + String(response.suffix(48)).debugDescription)
 
             #expect(harness.upstream.requests.count == 1)
             await waitUntil(
