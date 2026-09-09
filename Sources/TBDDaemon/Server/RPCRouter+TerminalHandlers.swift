@@ -1121,6 +1121,14 @@ extension RPCRouter {
         let plannedTerminalID = UUID()
         let defaultShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
 
+        // One config read for the whole revive, and the transport gate asked
+        // once from it. Both branches below spawn exactly one terminal, so a
+        // second reading of the flag could only disagree with this one and
+        // leave the row recording a transport the spawn did not take.
+        let reviveConfig = try? await db.config.get()
+        let transport = TerminalSpawnTransport.decide(
+            config: reviveConfig, registry: holderRegistry)
+
         // Request row after the terminal ID is minted and before the first
         // tmux act, so it names the session it is about to bring back.
         let actuationID = try await beginActuation(
@@ -1137,7 +1145,6 @@ extension RPCRouter {
             } else {
                 repo = nil
             }
-            let reviveConfig = try? await db.config.get()
             var resolvedProfile: ResolvedModelProfile? = nil
             do {
                 resolvedProfile = try await modelProfileResolver.resolve(repoID: worktree.repoID)
@@ -1206,7 +1213,8 @@ extension RPCRouter {
                     claudeSessionID: sessionID,
                     profileID: resolvedProfile?.profileID,
                     cols: resolvedCols,
-                    rows: resolvedRows
+                    rows: resolvedRows,
+                    transport: transport
                 )
             }
             logger.info("revive: resumed claude session \(sessionID, privacy: .public) as terminal \(terminal.id, privacy: .public) in worktree \(worktree.id, privacy: .public)")
@@ -1241,7 +1249,8 @@ extension RPCRouter {
                 claudeSessionID: nil,
                 profileID: nil,
                 cols: resolvedCols,
-                rows: resolvedRows
+                rows: resolvedRows,
+                transport: transport
             )
         }
         logger.info("revive: opened shell terminal \(terminal.id, privacy: .public) from history entry \(entry.id, privacy: .public) (capture present: \(haveCapture, privacy: .public))")
@@ -1250,9 +1259,9 @@ extension RPCRouter {
     }
 
     /// Shared plumbing for spawning an ADDITIONAL terminal into a live worktree
-    /// during revive: create the window, insert the row, append it to the
-    /// persisted tab order as the new active tab, and broadcast the same
-    /// `.terminalCreated` delta the normal create path emits.
+    /// during revive: spawn it, insert the row, append it to the persisted tab
+    /// order as the new active tab, and broadcast the same `.terminalCreated`
+    /// delta the normal create path emits.
     private func spawnRevivedTerminal(
         worktree: Worktree,
         plannedTerminalID: UUID,
@@ -1264,17 +1273,16 @@ extension RPCRouter {
         claudeSessionID: String?,
         profileID: UUID?,
         cols: Int,
-        rows: Int
+        rows: Int,
+        transport: TerminalSpawnTransport
     ) async throws -> Terminal {
-        // Revived terminals stay on tmux: a revive restores a session's tab
-        // from history, and the transport it is restored onto is unchanged by
-        // this port. Pinned rather than decided, so the spawn still goes
-        // through the one spawn-and-record step every path shares.
+        // The transport is decided like every other spawn's — once, by the
+        // caller, from the same gate — and carried here rather than re-asked.
         let terminal = try await tmux.withWorktreeServerLock(
             db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
         ) { currentWorktree in
             try await prepareTmuxServer(
-                for: .tmux, worktree: currentWorktree, cols: cols, rows: rows)
+                for: transport, worktree: currentWorktree, cols: cols, rows: rows)
             return try await lifecycle.spawnTerminal(
                 id: plannedTerminalID,
                 worktreeID: currentWorktree.id,
@@ -1289,7 +1297,7 @@ extension RPCRouter {
                 claudeSessionID: claudeSessionID,
                 profileID: profileID,
                 kind: kind,
-                transport: .tmux,
+                transport: transport,
                 attachment: nil,
                 modelProxySupervisor: modelProxySupervisor)
         }
@@ -2225,6 +2233,13 @@ extension RPCRouter {
         // the row would disagree in the other direction.
         let swapDeskRole: WatchDeskRole? = mode == .inPlace ? oldTerminal.watchDeskRole : nil
         let swapConfig = try? await db.config.get()
+        // The transport gate, asked once per swap from that one config read.
+        // Only `.fork` spawns anything — `.inPlace` respawns the row it already
+        // has, and refused above on a holder row — so this is the transport the
+        // fork tab is born onto, decided before the command is composed and
+        // carried into the spawn rather than re-derived there.
+        let forkTransport = TerminalSpawnTransport.decide(
+            config: swapConfig, registry: holderRegistry)
         var env = SystemPromptBuilder.promptLayers(
             repo: repo, worktree: worktree.worktree, scratchInstructions: swapConfig?.scratchInstructions,
             scratchRenamePrompt: swapConfig?.scratchRenamePrompt)
@@ -2419,7 +2434,8 @@ extension RPCRouter {
                     profileID: resolved?.profileID,
                     scheduleRecapture: scheduleRecapture,
                     cols: resolvedCols,
-                    rows: resolvedRows
+                    rows: resolvedRows,
+                    transport: forkTransport
                 )
 
             case .inPlace:
@@ -2481,17 +2497,16 @@ extension RPCRouter {
         profileID: UUID?,
         scheduleRecapture: Bool,
         cols: Int,
-        rows: Int
+        rows: Int,
+        transport: TerminalSpawnTransport
     ) async throws -> RPCResponse {
-        // A fork tab stays on tmux: it is an in-worktree copy of a session
-        // that is already running, and the transport it is copied onto is
-        // unchanged by this port. Pinned rather than decided, so the spawn
-        // still goes through the one spawn-and-record step every path shares.
+        // The transport is decided like every other spawn's — once, by the
+        // caller, from the same gate — and carried here rather than re-asked.
         let (newTerminal, currentServer) = try await tmux.withWorktreeServerLock(
             db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
         ) { currentWorktree in
             try await prepareTmuxServer(
-                for: .tmux, worktree: currentWorktree, cols: cols, rows: rows)
+                for: transport, worktree: currentWorktree, cols: cols, rows: rows)
             let terminal = try await lifecycle.spawnTerminal(
                 id: plannedTerminalID,
                 worktreeID: currentWorktree.id,
@@ -2506,7 +2521,7 @@ extension RPCRouter {
                 claudeSessionID: storedSessionID,
                 profileID: profileID,
                 kind: .claude,
-                transport: .tmux,
+                transport: transport,
                 attachment: nil,
                 modelProxySupervisor: modelProxySupervisor)
             return (terminal, currentWorktree.tmuxServer)
@@ -2517,12 +2532,32 @@ extension RPCRouter {
         )))
 
         if scheduleRecapture {
-            scheduleSessionRecapture(
-                terminalID: newTerminal.id,
-                paneID: newTerminal.tmuxPaneID,
-                server: currentServer,
-                expectedIncarnationID: newTerminal.sessionIncarnationID
-            )
+            // The recapture has to address the process it will read, and the
+            // two transports address it differently: a tmux row through its
+            // pane, a holder row through the pid the holder recorded for the
+            // job it forked (its pane id is the empty string by construction).
+            // A holder row with no child pid cannot happen through
+            // `spawnTerminal`, which writes both pids out of the handle the
+            // spawn returned — so this is a report, not a fallback.
+            let target: SessionRecaptureTarget?
+            if newTerminal.transport == .holder {
+                if let childPID = newTerminal.childPID {
+                    target = .holderChild(pid: childPID)
+                } else {
+                    logger.warning(
+                        "fork swap: holder terminal \(newTerminal.id, privacy: .public) recorded no child pid — skipping session recapture")
+                    target = nil
+                }
+            } else {
+                target = .tmuxPane(server: currentServer, paneID: newTerminal.tmuxPaneID)
+            }
+            if let target {
+                scheduleSessionRecapture(
+                    terminalID: newTerminal.id,
+                    target: target,
+                    expectedIncarnationID: newTerminal.sessionIncarnationID
+                )
+            }
         }
 
         guard let updated = try await db.terminals.get(id: newTerminal.id) else {
@@ -2650,8 +2685,7 @@ extension RPCRouter {
         if scheduleRecapture, respawnError == nil {
             scheduleSessionRecapture(
                 terminalID: oldTerminal.id,
-                paneID: paneID,
-                server: server,
+                target: .tmuxPane(server: server, paneID: paneID),
                 expectedIncarnationID: incarnationID
             )
         }
@@ -2696,19 +2730,20 @@ extension RPCRouter {
     /// Schedule the post-resume session-id recapture. `claude --resume <id>
     /// --fork-session` (the `.fork` swap path) forks the conversation into a NEW
     /// session file with a fresh UUID; mirror the wake path's pattern — wait ~5s
-    /// for Claude to settle, then capture the new id from the pane and persist it
-    /// against `terminalID`. (On the `.inPlace` path there is no `--fork-session`,
-    /// so the id is unchanged and the recapture is a harmless no-op.)
+    /// for Claude to settle, then capture the new id from whatever the `target`
+    /// names and persist it against `terminalID`. (On the `.inPlace` path there
+    /// is no `--fork-session`, so the id is unchanged and the recapture is a
+    /// harmless no-op.)
     private func scheduleSessionRecapture(
         terminalID: UUID,
-        paneID: String,
-        server: String,
+        target: SessionRecaptureTarget,
         expectedIncarnationID: UUID?
     ) {
-        SessionRecaptureScheduler(db: db, tmux: tmux).schedule(
+        let scheduler = sessionRecaptureFactory?(db, tmux)
+            ?? SessionRecaptureScheduler(db: db, tmux: tmux)
+        scheduler.schedule(
             terminalID: terminalID,
-            paneID: paneID,
-            server: server,
+            target: target,
             expectedIncarnationID: expectedIncarnationID
         )
     }

@@ -13,6 +13,52 @@ struct PreSessionSpawn: Sendable {
     let paneID: String
     let markerPath: String
     let hookPath: String
+    /// The transport the hook tab was born onto. Both the liveness probe and
+    /// the teardown branch on it: a holder-backed tab has no window to look for
+    /// and no pane to kill, and its `windowID`/`paneID` are the empty string by
+    /// construction, exactly as its row's columns are.
+    let transport: TerminalTransport
+    /// The pids the holder spawn recorded, for the one path that must reclaim
+    /// them after the terminal row is gone (a worktree cascaded away mid-wait).
+    /// Nil on the tmux transport.
+    let holderPID: Int32?
+    let childPID: Int32?
+    /// When the job behind `childPID` started, as the row recorded it.
+    ///
+    /// The teardown may not signal that pid without it: a pid on its own is not
+    /// an identity, and the start time is the one fact `execve` cannot move.
+    /// Nil on the tmux transport, and nil for a row written before the column
+    /// existed — which the readers spell `holderChildStartedAt ?? createdAt`,
+    /// the same fallback the reaper's holder leg and the park ladder use.
+    let childStartedAt: Date?
+
+    /// Written out rather than synthesized so every existing caller — the
+    /// recovery sweep, which resumes a wait from a row, and the tests that
+    /// describe a wait without spawning one — keeps constructing a tmux
+    /// descriptor unchanged.
+    init(
+        terminalID: UUID,
+        tmuxServer: String,
+        windowID: String,
+        paneID: String,
+        markerPath: String,
+        hookPath: String,
+        transport: TerminalTransport = .tmux,
+        holderPID: Int32? = nil,
+        childPID: Int32? = nil,
+        childStartedAt: Date? = nil
+    ) {
+        self.terminalID = terminalID
+        self.tmuxServer = tmuxServer
+        self.windowID = windowID
+        self.paneID = paneID
+        self.markerPath = markerPath
+        self.hookPath = hookPath
+        self.transport = transport
+        self.holderPID = holderPID
+        self.childPID = childPID
+        self.childStartedAt = childStartedAt
+    }
 }
 
 /// How a pre-session hook run ended.
@@ -137,7 +183,14 @@ extension WorktreeLifecycle {
             markerPath: markerPath,
             shell: defaultShell
         )
-        let (window, tmuxServer) = try await tmux.withWorktreeServerLock(
+        // The transport gate, the same one every other spawn asks. A hook tab is
+        // a session like any other once it is running: it holds a pty, it is
+        // read through the same surfaces, and nothing about running a hook
+        // wants a tmux server of its own.
+        let preSessionConfig = try? await db.config.get()
+        let transport = TerminalSpawnTransport.decide(
+            config: preSessionConfig, registry: holderRegistry)
+        let (terminal, tmuxServer) = try await tmux.withWorktreeServerLock(
             db: db, worktreeID: worktreeID, allowedStatuses: [worktree.status]
         ) { currentWorktree in
             let currentPath = currentWorktree.path
@@ -150,43 +203,44 @@ extension WorktreeLifecycle {
                 "TBD_REPO_PATH": repo?.path ?? currentPath,
                 "TBD_BRANCH": currentWorktree.branch,
             ]
-            let initialWindowID = try await tmux.ensureServer(
-                server: currentWorktree.tmuxServer,
-                session: "main",
-                cwd: currentPath,
-                cols: resolvedCols,
-                rows: resolvedRows)
-            let window = try await tmux.createWindow(
-                server: currentWorktree.tmuxServer,
-                session: "main",
-                cwd: currentPath,
-                shellCommand: command,
+            // Only the tmux transport needs a server — and then the untracked
+            // window `new-session` creates has to be killed once the real one
+            // exists, exactly as before.
+            var initialWindowID: String?
+            if !transport.isHolder {
+                initialWindowID = try await tmux.ensureServer(
+                    server: currentWorktree.tmuxServer,
+                    session: "main",
+                    cwd: currentPath,
+                    cols: resolvedCols,
+                    rows: resolvedRows)
+            }
+            // The one spawn-and-record step every path shares: it creates the
+            // window or the holder job, writes the row that records which, and
+            // owns both rollbacks.
+            let terminal = try await spawnTerminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxServer: currentWorktree.tmuxServer,
+                workingDirectory: currentPath,
+                command: command,
                 env: env,
                 sensitiveEnv: Self.hookPaneEnv,
                 cols: resolvedCols,
-                rows: resolvedRows
-            )
-            do {
-                _ = try await db.terminals.create(
-                    id: terminalID,
-                    worktreeID: worktreeID,
-                    tmuxWindowID: window.windowID,
-                    tmuxPaneID: window.paneID,
-                    label: TerminalLabel.preSession,
-                    kind: .shell
-                )
-            } catch {
-                try? await tmux.killWindow(
-                    server: currentWorktree.tmuxServer,
-                    windowID: window.windowID)
-                throw error
-            }
+                rows: resolvedRows,
+                label: TerminalLabel.preSession,
+                claudeSessionID: nil,
+                profileID: nil,
+                kind: .shell,
+                transport: transport,
+                attachment: nil,
+                modelProxySupervisor: modelProxySupervisor)
             if let initialWindowID {
                 try? await tmux.killWindow(
                     server: currentWorktree.tmuxServer,
                     windowID: initialWindowID)
             }
-            return (window, currentWorktree.tmuxServer)
+            return (terminal, currentWorktree.tmuxServer)
         }
         if claimsFocus {
             // The pre-session terminal is the only tab until phase 3 runs.
@@ -212,10 +266,14 @@ extension WorktreeLifecycle {
         return PreSessionSpawn(
             terminalID: terminalID,
             tmuxServer: tmuxServer,
-            windowID: window.windowID,
-            paneID: window.paneID,
+            windowID: terminal.tmuxWindowID,
+            paneID: terminal.tmuxPaneID,
             markerPath: markerPath,
-            hookPath: hookPath
+            hookPath: hookPath,
+            transport: terminal.transport,
+            holderPID: terminal.holderPID,
+            childPID: terminal.childPID,
+            childStartedAt: terminal.holderChildStartedAt
         )
     }
 
@@ -231,8 +289,48 @@ extension WorktreeLifecycle {
         return .completed(exitCode: code)
     }
 
-    /// Polls for the completion marker. Short-circuits when the hook's tmux
-    /// window disappears (user killed the pane). Reads + deletes the marker.
+    /// Whether the hook's own terminal is still there to finish the run — the
+    /// "did the user close it" probe, asked in the terms each transport has.
+    ///
+    /// On tmux that is the window: killing the pane destroys it, and the row
+    /// outlives it. On the holder there is no window, so the analogue of a
+    /// killed pane is the *tab* going away — a holder-backed tab is closed by
+    /// deleting its row, and the teardown that does it disposes the holder in
+    /// the same step. The job's own pid is the second half: a hook that was
+    /// killed directly leaves the row untouched, and nothing else here would
+    /// notice. A spawn that recorded no child pid answers on the row alone
+    /// rather than reporting a dead tab it cannot see.
+    ///
+    /// **Only a nil result means the tab is gone.** A read that THREW says
+    /// nothing about the row, and reading it as a deletion would report
+    /// `.paneKilled` for a hook that is still running — after which phase 3
+    /// starts the primary agent on a tree the hook has not finished preparing.
+    /// A transient database error is answered "assume alive", the same way the
+    /// worktree-row existence check in `runPreSessionPhase3` answers it, so the
+    /// wait simply continues and the next poll asks again.
+    private func hookTerminalIsAlive(
+        preSession: PreSessionSpawn, tmuxServer: String
+    ) async -> Bool {
+        switch preSession.transport {
+        case .tmux:
+            return await tmux.windowExists(
+                server: tmuxServer, windowID: preSession.windowID)
+        case .holder:
+            let row: Terminal?
+            do {
+                row = try await db.terminals.get(id: preSession.terminalID)
+            } catch {
+                logger.warning("hook terminal \(preSession.terminalID, privacy: .public) liveness check failed: \(error.localizedDescription, privacy: .public) — assuming its tab is still there and continuing the wait")
+                return true
+            }
+            guard row != nil else { return false }
+            guard let childPID = preSession.childPID else { return true }
+            return processSignaller.isAlive(childPID)
+        }
+    }
+
+    /// Polls for the completion marker. Short-circuits when the hook's terminal
+    /// disappears (user closed it). Reads + deletes the marker.
     func waitForPreSessionCompletion(
         preSession: PreSessionSpawn, tmuxServer: String
     ) async -> PreSessionOutcome {
@@ -244,10 +342,9 @@ extension WorktreeLifecycle {
             if let outcome = Self.consumeMarker(atPath: preSession.markerPath) {
                 return outcome
             }
-            let windowAlive = await tmux.windowExists(
-                server: tmuxServer, windowID: preSession.windowID
-            )
-            if !windowAlive {
+            let hookTabAlive = await hookTerminalIsAlive(
+                preSession: preSession, tmuxServer: tmuxServer)
+            if !hookTabAlive {
                 // Same-iteration race: the hook can write the marker after the
                 // fileExists check above and exit (closing the pane) before the
                 // windowExists check. Re-check the marker once so a hook that
@@ -323,9 +420,23 @@ extension WorktreeLifecycle {
         }
         guard rowExists else {
             logger.warning("phase-3: worktree \(worktree.id, privacy: .public) row disappeared mid-wait — skipping primary spawn and cleaning up")
-            try? await tmux.killWindow(
-                server: preSession.tmuxServer, windowID: preSession.windowID
-            )
+            switch preSession.transport {
+            case .tmux:
+                try? await tmux.killWindow(
+                    server: preSession.tmuxServer, windowID: preSession.windowID
+                )
+            case .holder:
+                // The terminal row went with the worktree, so nothing can read
+                // the pids back any more — this is the last moment either can
+                // be named, and the descriptor phase 2b returned is where they
+                // are. A hook tab is never routed through the model proxy, so
+                // there is no route to retire here.
+                await abandonHookHolder(
+                    terminalID: preSession.terminalID,
+                    holderPID: preSession.holderPID,
+                    childPID: preSession.childPID,
+                    childStartedAt: preSession.childStartedAt)
+            }
             return
         }
 
@@ -436,34 +547,134 @@ extension WorktreeLifecycle {
     /// Best-effort: a failure here must never take down the worktree, whose
     /// checkout and agent terminals are already valid.
     func closePreSessionTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
+        await closeHookTerminal(worktree: worktree, preSession: preSession)
+    }
+
+    /// Shared hook-tab teardown (pre-session and auto-closed setup tabs), from
+    /// the descriptor the tab's spawn returned.
+    ///
+    /// The row is the authority on the transport for as long as it can be read;
+    /// the descriptor answers when it cannot. Both halves are load-bearing. A
+    /// row that has already been deleted — or one whose read threw — would
+    /// otherwise fall into the tmux arm and issue `kill-window` against a
+    /// `windowID` that is the empty string for a holder tab, while the holder,
+    /// the job it forked and its rendezvous files outlive the only record of
+    /// their pids. The descriptor is where those pids are, which is why the
+    /// rowless case is reclaimable at all.
+    ///
+    /// A read that *throws* is deliberately folded into "unreadable" rather
+    /// than retried or surfaced: the answer then comes from the descriptor,
+    /// which is a strictly safer place to take it from than the alternative of
+    /// giving up on a teardown whose whole purpose is reclamation. The two
+    /// halves then differ only in where the pids are read from — both reclaim
+    /// through `abandonHookHolder`, and neither retires a model-proxy route,
+    /// because a hook tab is spawned with no attachment (`attachment: nil` at
+    /// both hook-tab spawn sites) and so is never routed. A row-backed *agent*
+    /// tab would not be safe to tear down this way, which is why this
+    /// reasoning is local to hook tabs.
+    func closeHookTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
         await closeHookTerminal(
             worktree: worktree,
             tmuxServer: preSession.tmuxServer,
             terminalID: preSession.terminalID,
-            windowID: preSession.windowID
+            windowID: preSession.windowID,
+            unreadableRowTransport: preSession.transport,
+            holderPID: preSession.holderPID,
+            childPID: preSession.childPID,
+            childStartedAt: preSession.childStartedAt
         )
     }
 
-    /// Shared hook-tab teardown (pre-session and auto-closed setup tabs):
-    /// kill the tmux window, delete the terminal + tab rows, prune the tab
-    /// from the persisted tab order, broadcast `.terminalRemoved`. The prune
-    /// is a no-op on the create-success path (the primary spawn already set
-    /// an order without the hook tab) and keeps the stored order consistent
-    /// on the paths that appended the tab (manual re-run, setup auto-close).
+    /// The tmux spelling, for a caller holding tmux coordinates rather than a
+    /// descriptor: a row it cannot read can only have been the tmux tab those
+    /// coordinates describe.
+    ///
+    /// No production caller: every hook tab is torn down from the descriptor
+    /// its spawn returned. It is kept because the tmux-coordinate tests
+    /// (`TerminalHistoryTests.closeHookTerminalCapturesBeforeTeardown`,
+    /// `HookTabTransportGateTests`) address the teardown the way a caller
+    /// without a descriptor would, and that is a shape worth keeping reachable.
     func closeHookTerminal(
         worktree: Worktree, tmuxServer: String, terminalID: UUID, windowID: String
     ) async {
-        // Preserve the hook tab's output before the window dies so a user can
-        // read an auto-closed setup/pre-session run later (Session History →
-        // Closed Terminals). Best-effort: captureOnClose logs failures and
-        // the teardown proceeds unchanged.
-        if let terminal = try? await db.terminals.get(id: terminalID) {
-            await db.terminalHistory.captureOnClose(terminal: terminal) {
-                try await tmux.capturePaneScrollback(
-                    server: tmuxServer, paneID: terminal.tmuxPaneID)
+        await closeHookTerminal(
+            worktree: worktree,
+            tmuxServer: tmuxServer,
+            terminalID: terminalID,
+            windowID: windowID,
+            unreadableRowTransport: .tmux,
+            holderPID: nil,
+            childPID: nil,
+            childStartedAt: nil
+        )
+    }
+
+    /// The teardown itself: tear the session down in the terms its transport
+    /// uses, delete the terminal + tab rows, prune the tab from the persisted
+    /// tab order, broadcast `.terminalRemoved`. The prune is a no-op on the
+    /// create-success path (the primary spawn already set an order without the
+    /// hook tab) and keeps the stored order consistent on the paths that
+    /// appended the tab (manual re-run, setup auto-close).
+    private func closeHookTerminal(
+        worktree: Worktree,
+        tmuxServer: String,
+        terminalID: UUID,
+        windowID: String,
+        unreadableRowTransport: TerminalTransport,
+        holderPID: Int32?,
+        childPID: Int32?,
+        childStartedAt: Date?
+    ) async {
+        let terminal = try? await db.terminals.get(id: terminalID)
+        switch terminal?.transport ?? unreadableRowTransport {
+        case .holder:
+            // No Closed Terminals capture for a holder hook tab: the holder has
+            // no scrollback dump yet (issue #851 §4, Phase 2 item "Closed-
+            // terminal history on holder dispose"), which is exactly what
+            // `disposeHolder` already does on every other teardown of a holder
+            // row. The tmux kill would be worse than a no-op here — a holder
+            // row's `windowID` names nothing, and the holder, its job and its
+            // rendezvous files would outlive the row that is their only record.
+            //
+            // Reclaimed through `abandonHookHolder` on both halves, not
+            // through `disposeHolder`: a hook tab is spawned with
+            // `attachment: nil`, so it is never routed through the model proxy
+            // and there is no route for the row-shaped teardown to retire —
+            // what is left of it is an unverified kill by recorded pid, which
+            // is exactly what a hook tab must not do (see
+            // `HolderRegistry.abandonVerifiedJob`). The row is still the better
+            // source for the pids while it can be read.
+            if let terminal {
+                await abandonHookHolder(
+                    terminalID: terminal.id,
+                    holderPID: terminal.holderPID,
+                    childPID: terminal.childPID,
+                    // The anchor every other reader of a holder row uses, and
+                    // the reason the fallback is `createdAt`: a row written
+                    // before the start-time column existed still has to be
+                    // reclaimable.
+                    childStartedAt: terminal.holderChildStartedAt ?? terminal.createdAt)
+            } else {
+                // No row to read the pids back from, so the descriptor's own
+                // pids are all there is — the same reclaim phase 3 does when a
+                // cascading worktree delete takes the terminal row with it.
+                await abandonHookHolder(
+                    terminalID: terminalID, holderPID: holderPID, childPID: childPID,
+                    childStartedAt: childStartedAt)
             }
+        case .tmux:
+            // Preserve the hook tab's output before the window dies so a user
+            // can read an auto-closed setup/pre-session run later (Session
+            // History → Closed Terminals). Best-effort: captureOnClose logs
+            // failures and the teardown proceeds unchanged.
+            if let terminal {
+                await db.terminalHistory.captureOnClose(terminal: terminal) {
+                    try await tmux.capturePaneScrollback(
+                        server: tmuxServer, paneID: terminal.tmuxPaneID)
+                }
+            }
+            try? await tmux.killWindow(server: tmuxServer, windowID: windowID)
         }
-        try? await tmux.killWindow(server: tmuxServer, windowID: windowID)
         do {
             try await db.terminals.delete(id: terminalID)
             try await db.tabs.delete(tabID: terminalID)
@@ -477,6 +688,36 @@ extension WorktreeLifecycle {
             )))
         } catch {
             logger.warning("failed to close hook terminal \(terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Reclaims a holder-backed hook tab from the pids its spawn recorded —
+    /// identity-checking the job before signalling it.
+    ///
+    /// `abandonVerifiedJob` rather than the general `abandon`, and that is the
+    /// point of this method existing. A hook tab's job has very often exited
+    /// before anything tears the tab down — the setup tab auto-closes *because*
+    /// the hook finished — so the recorded pid may by then belong to whatever
+    /// the kernel handed the number to next, and the general path would kill it
+    /// and its process group on a recorded number alone.
+    ///
+    /// It also serves the case where the row is already gone: the row-shaped
+    /// teardown (`disposeHolder`) reads its pids off a row that no longer
+    /// exists. A daemon with no registry is reported rather than passed over —
+    /// it is exactly the daemon whose holder and job nothing else would ever
+    /// find.
+    private func abandonHookHolder(
+        terminalID: UUID, holderPID: Int32?, childPID: Int32?, childStartedAt: Date?
+    ) async {
+        guard let holderRegistry else {
+            logger.warning("hook terminal \(terminalID, privacy: .public) runs on the holder transport but this daemon has no holder registry, so its holder and job were left running")
+            return
+        }
+        if let left = await holderRegistry.abandonVerifiedJob(
+            terminalID: terminalID, holderPID: holderPID, childPID: childPID,
+            childStartedAt: childStartedAt
+        ) {
+            logger.warning("hook terminal \(terminalID, privacy: .public) holder teardown incomplete: \(left, privacy: .public)")
         }
     }
 

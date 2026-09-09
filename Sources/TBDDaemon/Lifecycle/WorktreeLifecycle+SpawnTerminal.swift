@@ -57,10 +57,12 @@ extension WorktreeLifecycle {
     /// **The one place a terminal is spawned and its row written, on either
     /// transport.**
     ///
-    /// Every spawn path — the primary terminal at worktree creation, the extra
-    /// terminals `terminal.create` opens, and `terminal.continueInCodex` —
-    /// decides *what* to run on its own (the command, the two environments, the
-    /// label and kind) and hands the result here, because the part that
+    /// Every spawn path — the primary terminal at worktree creation, the setup
+    /// and pre-session hook tabs, restored archived sessions, the extra
+    /// terminals `terminal.create` opens, `terminal.continueInCodex`,
+    /// revive-from-history tabs and fork-session tabs — decides *what* to run on
+    /// its own (the command, the two environments, the label and kind) and
+    /// hands the result here, because the part that
     /// diverges by transport is the same at all of them and subtle enough that
     /// a second copy is a second thing to get wrong: the holder launch
     /// composition, the row that records the transport and the pids, the stamp
@@ -71,9 +73,9 @@ extension WorktreeLifecycle {
     /// The tmux server is the caller's to ensure, and only on the tmux
     /// transport: a holder-backed session needs no server at all, and ensuring
     /// one anyway would resurrect the very resource the transport exists to
-    /// remove. The primary path memoizes that ensure because its setup-hook tab
-    /// can still want a server on the holder path; the RPC handlers make it
-    /// once, under the same lock they call this from.
+    /// remove. The primary path memoizes that ensure because it opens several
+    /// tabs and any of them may be the first to need one; the RPC handlers make
+    /// it once, under the same lock they call this from.
     ///
     /// - Parameters:
     ///   - env: inlined as `export K='v';` in front of the command on both

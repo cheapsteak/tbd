@@ -15,8 +15,8 @@ struct SessionRecaptureSchedulerTests {
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
             tmux: TmuxManager(dryRun: true),
-            captureSessionID: { server, paneID in
-                guard server == "tbd-recapture", paneID == "%7" else { return nil }
+            captureSessionID: { target in
+                guard target == .tmuxPane(server: "tbd-recapture", paneID: "%7") else { return nil }
                 return detectedSessionID
             },
             clock: clock
@@ -41,7 +41,7 @@ struct SessionRecaptureSchedulerTests {
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
             tmux: TmuxManager(dryRun: true),
-            captureSessionID: { _, _ in nil },
+            captureSessionID: { _ in nil },
             clock: clock
         )
 
@@ -65,7 +65,7 @@ struct SessionRecaptureSchedulerTests {
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
             tmux: TmuxManager(dryRun: true),
-            captureSessionID: { _, _ in capture.capture() },
+            captureSessionID: { _ in capture.capture() },
             clock: clock)
 
         let recapture = scheduler.schedule(
@@ -103,7 +103,7 @@ struct SessionRecaptureSchedulerTests {
         let scheduler = SessionRecaptureScheduler(
             db: fixture.db,
             tmux: TmuxManager(dryRun: true),
-            captureSessionID: { _, _ in capture.capture() },
+            captureSessionID: { _ in capture.capture() },
             clock: clock)
 
         let recapture = scheduler.schedule(
@@ -132,6 +132,38 @@ struct SessionRecaptureSchedulerTests {
         let stored = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
         #expect(stored.pendingSessionIncarnationID != nil)
         #expect(stored.claudeSessionID == fixture.sourceSessionID)
+    }
+
+    /// A holder target reaches the detector unchanged and persists exactly as a
+    /// pane target does. The scheduler carries the target; it never inspects it,
+    /// so the fact worth pinning is that the case survives the hop and the write
+    /// still lands.
+    @Test func holderChildTargetReachesTheDetectorAndPersists() async throws {
+        let fixture = try await makeFixture()
+        let clock = TestClock<Duration>()
+        let detectedSessionID = UUID().uuidString
+        let seen = ObservedTargets()
+        let scheduler = SessionRecaptureScheduler(
+            db: fixture.db,
+            tmux: TmuxManager(dryRun: true),
+            captureSessionID: { target in
+                seen.append(target)
+                return detectedSessionID
+            },
+            clock: clock
+        )
+
+        let recapture = scheduler.schedule(
+            terminalID: fixture.terminal.id,
+            target: .holderChild(pid: 4242),
+            expectedIncarnationID: fixture.terminal.sessionIncarnationID
+        )
+
+        await clock.advanceWhenSuspended(by: .seconds(5))
+        await recapture.value
+        #expect(seen.all == [.holderChild(pid: 4242)])
+        let updated = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(updated.claudeSessionID == detectedSessionID)
     }
 
     private func makeFixture() async throws -> (
@@ -187,5 +219,19 @@ private final class BlockingSessionCapture: @unchecked Sendable {
 
     func release() {
         releaseGate.signal()
+    }
+}
+
+/// Lock-guarded record of the targets a scheduler handed its detector closure.
+private final class ObservedTargets: @unchecked Sendable {
+    private let lock = NSLock()
+    private var targets: [SessionRecaptureTarget] = []
+
+    func append(_ target: SessionRecaptureTarget) {
+        lock.withLock { targets.append(target) }
+    }
+
+    var all: [SessionRecaptureTarget] {
+        lock.withLock { targets }
     }
 }

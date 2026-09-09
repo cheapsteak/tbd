@@ -1112,9 +1112,12 @@ extension HibernationCoordinator {
         broadcastHibernation(
             terminal: currentTerminal, hibernated: false, keepWarm: currentTerminal.keepWarm,
             tmuxWindowID: "", tmuxPaneID: "")
-        // No `SessionRecaptureScheduler`: it re-reads the session id off a tmux
-        // pane's screen, and this row has no pane. A holder session's resumed
-        // id is recaptured the way every other fact about it is — from hooks.
+        // No `SessionRecaptureScheduler`: a holder wake knows the id it resumed
+        // and hooks report the id the agent settles on, so there is nothing for
+        // a recapture to discover. Should that change, `SessionRecaptureTarget`
+        // has a `.holderChild(pid:)` case that addresses this row's job
+        // directly — the absence here is a decision about what is worth
+        // reading, not a coordinate the scheduler lacks.
         logger.info("woke holder-backed terminal \(terminal.id, privacy: .public) (resume \(sessionID, privacy: .public), holder \(handle.holderPID, privacy: .public), child \(handle.childPID, privacy: .public))")
         // The incarnation this wake minted for the replacement agent, the same
         // fact the tmux arm reports: it is what scopes a caller's wait to the

@@ -237,6 +237,14 @@ actor HolderRegistry {
     /// pretending it could have spawned one. Adoption does not need it: an
     /// already-running holder is reached through its socket.
     private let spawner: HolderSpawner?
+    /// How this registry asks the kernel about, and signals, a pid.
+    ///
+    /// Injected rather than reached for statically because the one path that
+    /// *verifies* a pid before signalling it — `abandonVerifiedJob` — is only
+    /// testable if the process table can be scripted: the whole point of that
+    /// check is what it does about a pid the kernel has handed to somebody
+    /// else, and that is not a state a test can arrange with real processes.
+    private let signaller: any ProcessSignaller
     /// Whether this registry can start a holder at all — that is, whether
     /// `spawn` can do anything but throw `.holderExecutableUnavailable`.
     ///
@@ -425,6 +433,7 @@ actor HolderRegistry {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         listTerminals: @escaping @Sendable () async throws -> [Terminal],
         spawner: HolderSpawner? = nil,
+        signaller: any ProcessSignaller = ProductionProcessSignaller(),
         busyRetryBudget: Duration = HolderRegistry.defaultBusyRetryBudget,
         adoptAllBudget: Duration = HolderRegistry.defaultAdoptAllBudget,
         clock: any Clock<Duration> = ContinuousClock()
@@ -433,6 +442,7 @@ actor HolderRegistry {
         self.environment = environment
         self.listTerminals = listTerminals
         self.spawner = spawner
+        self.signaller = signaller
         self.canSpawn = spawner != nil
         self.busyRetryBudget = busyRetryBudget
         self.adoptAllBudget = adoptAllBudget
@@ -633,10 +643,25 @@ actor HolderRegistry {
     /// pid. Each one leaks a live process, so each is reported rather than
     /// swallowed.
     func abandon(terminal: Terminal) async -> String? {
+        await abandon(
+            terminalID: terminal.id,
+            holderPID: terminal.holderPID,
+            childPID: terminal.childPID)
+    }
+
+    /// The same teardown for a caller that no longer has a row to read the pids
+    /// back from.
+    ///
+    /// The pre-session hook tab is the case: its worktree row can be cascaded
+    /// away mid-wait, taking every terminal row with it, and what is left is
+    /// the descriptor phase 2b returned. The rendezvous still comes from this
+    /// registry's own environment, so the caller needs nothing but the pids it
+    /// was handed at spawn.
+    func abandon(terminalID: UUID, holderPID: Int32?, childPID: Int32?) async -> String? {
         let socketPath: String
         do {
             socketPath = try HolderRendezvous.socketPath(
-                sessionID: terminal.id, environment: environment)
+                sessionID: terminalID, environment: environment)
         } catch {
             return "\(error)"
         }
@@ -647,16 +672,143 @@ actor HolderRegistry {
         // signal — deliberately, since `kill(0, …)` would signal the daemon's
         // own process group.
         await abandon(
-            terminalID: terminal.id,
+            terminalID: terminalID,
             handle: HolderHandle(
-                holderPID: terminal.holderPID ?? 0,
-                childPID: terminal.childPID ?? 0,
+                holderPID: holderPID ?? 0,
+                childPID: childPID ?? 0,
                 socketPath: socketPath))
-        guard terminal.childPID != nil else {
-            return "terminal \(terminal.id) recorded no child pid, so its holder was told to "
+        guard childPID != nil else {
+            return "terminal \(terminalID) recorded no child pid, so its holder was told to "
                 + "let go but the job it forked was not killed"
         }
         return nil
+    }
+
+    /// The hook-tab spelling of the teardown above: the same `forget`, the
+    /// same reap, and a job kill that happens **only** once the pid has been
+    /// proved to still name the process this session recorded.
+    ///
+    /// A hook tab is the one holder session whose job has usually already
+    /// exited by the time anything tears it down — the setup tab's auto-close
+    /// fires *because* the hook finished — so the window between the job's
+    /// death and this teardown is wide open, and a pid the kernel reissued in
+    /// it is the pid `dispose` would signal. `jobProcessGroup`'s `pgid ==
+    /// childPID` test does not close that: a reissued pid that is its own
+    /// session leader (any shell a stranger's `forkpty` made) passes it, and
+    /// the group-widening `SIGKILL` then takes that whole stranger's session.
+    ///
+    /// So the identity check the reaper's holder leg and the park ladder both
+    /// apply is applied here too, against the same anchor and the same window,
+    /// and with the same asymmetry: **every answer but `.same` keeps.** A
+    /// missed job is one process a later sweep can still find; a wrong kill
+    /// destroys somebody else's work on a machine running dozens of sessions.
+    ///
+    /// It is deliberately *not* `dispose`'s behaviour, and must not be folded
+    /// into it. `isHolderChildExecutable` admits agents and login shells only,
+    /// so a plain holder terminal whose shell exec'd into `htop` would never be
+    /// killed on `terminal.delete` if the general path adopted this gate. Hook
+    /// tabs are narrower by construction: their job is the shell wrapper this
+    /// daemon composed, and it is the only thing that may ever run there.
+    ///
+    /// The holder is told to let go, and reaped, on every path — including the
+    /// ones that decline to kill. Leaving the daemon holding a pty whose job it
+    /// cannot identify would keep a reader alive over a session nobody can
+    /// describe, and the holder is this daemon's own child, so nothing else can
+    /// collect it.
+    ///
+    /// Returns a description of what was left running, or nil when the whole
+    /// teardown was carried out.
+    func abandonVerifiedJob(
+        terminalID: UUID, holderPID: Int32?, childPID: Int32?, childStartedAt: Date?
+    ) async -> String? {
+        let socketPath: String
+        do {
+            socketPath = try HolderRendezvous.socketPath(
+                sessionID: terminalID, environment: environment)
+        } catch {
+            return "\(error)"
+        }
+        await release(terminalID: terminalID)
+        statuses[terminalID] = nil
+
+        let client = HolderClient(socketPath: socketPath)
+        try? await client.forget()
+        await client.close()
+
+        // `dispose` resolves the job's process group *before* the `forget`, so
+        // that a group member which ignored the hangup is still reachable after
+        // the leader died of it. There is no such pre-resolve here, and there
+        // cannot be: this path may only signal a pid it has identified, and a
+        // group whose leader is gone is a group whose members it cannot
+        // identify at all. `signaller.forceKill` widens to the group on its own
+        // when the pid is still there to name one, which is every case this
+        // path is allowed to kill in.
+        let left = killVerifiedJob(
+            terminalID: terminalID, childPID: childPID, childStartedAt: childStartedAt)
+        await reap(holderPID: holderPID ?? 0)
+        return left
+    }
+
+    /// The decision half of `abandonVerifiedJob`: whether this pid may be
+    /// signalled, and what to say when it may not.
+    ///
+    /// Split out so the ladder reads top to bottom in the order its gates
+    /// actually fail — no pid, no anchor, a corpse, a stranger — and so the
+    /// `forget`/reap either side of it stay unconditional.
+    private func killVerifiedJob(
+        terminalID: UUID, childPID: Int32?, childStartedAt: Date?
+    ) -> String? {
+        guard let childPID, childPID > 1 else {
+            // `0` is the sentinel a row that never recorded a pid decodes to,
+            // and signalling it would reach the daemon's own process group —
+            // the hazard `jobProcessGroup` guards in the same words.
+            return "terminal \(terminalID) recorded no child pid, so its holder was told to "
+                + "let go but the job it forked was not killed"
+        }
+        guard let childStartedAt else {
+            Self.logger.warning(
+                """
+                hook terminal \(terminalID, privacy: .public) recorded no child start time, so \
+                pid \(childPID, privacy: .public) could not be identified and was left alone
+                """)
+            return "terminal \(terminalID) recorded no child start time, so the job at pid "
+                + "\(childPID) could not be proved to be ours and was left running"
+        }
+        // A corpse first, and for the reason `holderChildDisposition` asks it
+        // first: `ps` prints a zombie's command in parentheses, which the
+        // executable gate below would read as a stranger's. A zombie is past
+        // its last instruction and its number cannot be reissued while the
+        // entry stands, so there is nothing here to kill and nothing to fear.
+        if signaller.stat(childPID)?.hasPrefix("Z") == true { return nil }
+        let verdict = ProcessIdentityCheck.verify(
+            pid: childPID,
+            startedWithin: AgentReaper.defaultHolderIdentityWindow,
+            of: childStartedAt,
+            executableIsAcceptable: AgentReaper.isHolderChildExecutable,
+            signaller: signaller)
+        switch verdict {
+        case .same:
+            // `forceKill` widens to the process group exactly as `killJob`
+            // does — `ProductionProcessSignaller.signal` group-kills when the
+            // pid is its own group leader, which a `forkpty` job always is —
+            // so a job that declined the hangup is still reclaimed with its
+            // descendants.
+            signaller.forceKill(childPID)
+            return nil
+        case .notRunning:
+            // The job exited on its own, which on the auto-close path is the
+            // ordinary case rather than an exception.
+            return nil
+        case .startTimeUnreadable, .startTimeMismatch, .commandUnreadable, .foreignExecutable:
+            Self.logger.warning(
+                """
+                hook terminal \(terminalID, privacy: .public) left pid \
+                \(childPID, privacy: .public) running: it did not verify as this session's job \
+                (\(String(describing: verdict), privacy: .public))
+                """)
+            return "terminal \(terminalID) left its job running: pid \(childPID) did not verify "
+                + "(\(String(describing: verdict)))"
+        }
     }
 
     /// `forget`, kill, reap: the holder closes the pty master and winds down,
