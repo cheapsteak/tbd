@@ -1,4 +1,5 @@
 import Darwin
+import Dispatch
 import Foundation
 
 // Running a child process from a test without blocking a cooperative thread.
@@ -123,9 +124,11 @@ private final class ProcessOutputCollector: @unchecked Sendable {
     private func deliver(_ record: (ProcessOutputCollector) -> Void) {
         let ready: (CheckedContinuation<ProcessOutput, any Error>, ProcessOutput)? = lock.withLock {
             record(self)
-            guard let status, let stdout, let stderr, let waiting = continuation else { return nil }
-            continuation = nil
-            return (waiting, ProcessOutput(status: status, stdout: stdout, stderr: stderr))
+            guard let exitStatus = self.status, let out = self.stdout, let err = self.stderr,
+                let waiting = self.continuation
+            else { return nil }
+            self.continuation = nil
+            return (waiting, ProcessOutput(status: exitStatus, stdout: out, stderr: err))
         }
         guard let ready else { return }
         ready.0.resume(returning: ready.1)

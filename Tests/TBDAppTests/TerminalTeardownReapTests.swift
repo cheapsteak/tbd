@@ -275,6 +275,9 @@ struct TerminalTeardownReapTests {
             }
             usleep(10_000)
         }
+        // Unreachable: the last attempt always leaves through the `guard` above,
+        // whatever it produced. Present because the loop's bound is a constant
+        // the compiler will not reason about.
         return StartedChild(pid: pid, failureErrno: failureErrno)
     }
 
