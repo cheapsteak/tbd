@@ -66,9 +66,10 @@ struct ModelProxySpawner: Sendable {
         /// replace it.
         case lockHeld
         /// The proxy could not bind the port it was asked for. The supervisor
-        /// probes `/tbd/status` on that port from here: a TBD proxy answering
-        /// is adopted, anything else means the port is somebody else's and a
-        /// fresh one is minted (spec, "Port").
+        /// probes `/tbd/status` on that port from here and a TBD proxy
+        /// answering is adopted. Otherwise, while a session is still routed
+        /// against the port, it waits a bounded window for a transient holder
+        /// to let go before it mints a fresh port (spec, "Port").
         case bindFailed(port: Int)
         /// A directory under the home could not be created, or the lock file
         /// could not be opened for a reason other than contention. Respawning

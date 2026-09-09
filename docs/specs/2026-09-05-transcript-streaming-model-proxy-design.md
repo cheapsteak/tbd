@@ -174,14 +174,38 @@ before touching a socket path, so two daemons on one TBD home cannot both mint.
 On address-in-use the daemon probes the status endpoint on that port and
 adopts only a process that passes the identity check below. Anything else,
 including a proxy that belongs to another TBD home on the same machine after
-an ephemeral-port coincidence, means the port is not this daemon's to use; the
-daemon mints a fresh port and updates the column, and never retires or
-replaces a proxy it did not adopt. Sessions spawned against the old port lose the proxy for their
+an ephemeral-port coincidence, is not this daemon's to use, and is never
+retired or replaced.
+
+Before it gives such a port up, and only while a session is still routed
+against it, the daemon waits for it. The condition is the whole justification:
+with nothing routed there is nothing to strand, and a wait would only delay the
+daemon's boot and the Settings toggle. The question the wait turns on is who
+holds the number, asked with a plain loopback connect. A refused connect means
+nothing is listening, so the holder is transient — macOS hands TCP ephemeral
+ports out sequentially from one global counter (`net.inet.tcp.randomize_ports`
+is 0; across the 16,384 numbers in 49152-65535 a freed number came back after
+16,220 allocations, measured at 0.15 s on an idle machine), so a number a proxy
+has just freed is routinely handed to an ordinary short-lived client socket
+before the successor binds. That is retried every 2 seconds for 30 seconds. An
+accepted connect whose occupant fails the identity check is a foreign listener,
+which is bound and will not let go, so the port is given up after two
+consecutive sightings rather than at the end of the window. Giving up mints a
+fresh port and updates the column.
+
+Thirty seconds is sized against Claude's 183-second retry budget for a refused
+base URL, measured from the worst path that reaches a respawn: the hang ladder
+already spends four missed polls, two ticks after SIGTERM, and one more tick to
+notice the kill — 105 seconds — before the respawn starts, and 105 + 30 leaves
+room for the spawn itself and a watch tick.
+
+Sessions spawned against the old port lose the proxy for their
 remaining life, because Claude reads `ANTHROPIC_BASE_URL` once at start. That
 is the blast radius of a port change. A running proxy holds its port across
 every daemon restart, so one way to reach that radius is a window in which TBD
 was entirely stopped; the other is the gap a retire opens, in which the freed
-number is briefly anyone's.
+number is briefly anyone's — and that gap is what the wait covers, so only a
+holder that outlives the window reaches the blast radius.
 
 ### Control endpoint
 
@@ -714,8 +738,10 @@ SSE shape and costs zero tokens.
   no other header is. An unknown token is refused and nothing reaches the
   stub. The `HEAD` probe and count-tokens are forwarded. A failing tee leaves
   the client's bytes intact. Adopt, spawn, retire, and respawn on an injected
-  clock. Address-in-use against a non-TBD listener mints a new port; against a
-  TBD proxy adopts it. Retire answers before the drain finishes. A signal
+  clock. Address-in-use against a TBD proxy adopts it; against a transient
+  holder, with a session routed, is retried on the clock and keeps the port;
+  against a foreign listener mints sooner; with no session routed mints at
+  once. Retire answers before the drain finishes. A signal
   retires a proxy carrying a stream rather than cutting it, a second signal
   ends the drain, and a signal with nothing in flight exits promptly.
 - **Tee.** A request with `x-claude-code-agent-id`, or with an empty `tools`

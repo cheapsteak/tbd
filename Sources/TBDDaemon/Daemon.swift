@@ -1286,6 +1286,14 @@ public final class Daemon: Sendable {
         // budget, on a machine where the proxy binds pathologically slowly. It
         // is also flag-gated, so nobody running the shipped default pays any of
         // it.
+        //
+        // One case costs more, deliberately. When a session is still routed
+        // against the persisted port and something transient holds it, the
+        // supervisor's port wait adds up to 30 seconds
+        // (`ModelProxySupervisor.defaultPortRetryAttempts` ×
+        // `defaultPortRetryInterval`) trying to keep that port. It is paid in
+        // exactly the case where minting a fresh one would strand a live
+        // session, and in no other.
 
         await modelProxySupervisor?.startIfEnabled()
 

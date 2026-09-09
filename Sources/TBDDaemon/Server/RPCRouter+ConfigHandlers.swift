@@ -455,7 +455,12 @@ extension RPCRouter {
     /// Both are awaited before this RPC answers, which is what makes the
     /// Settings checkbox's response wait on them. Milliseconds normally, and
     /// bounded in the worst case by the control client's 2-second probe plus
-    /// the spawner's 10-second bind budget. Answering early would be worse than
+    /// the spawner's 10-second bind budget — and, when a session is still
+    /// routed against the persisted port and something transient holds it, by
+    /// the supervisor's port wait of up to 30 seconds
+    /// (`ModelProxySupervisor.defaultPortRetryAttempts` ×
+    /// `defaultPortRetryInterval`), paid only in the case where minting a fresh
+    /// port would strand that session. Answering early would be worse than
     /// the wait: the reply is what the app reloads its capabilities on, and a
     /// reply that landed before the supervisor had a port would render the
     /// toggle's own state wrong.

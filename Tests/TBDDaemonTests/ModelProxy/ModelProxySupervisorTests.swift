@@ -865,6 +865,11 @@ struct ModelProxySupervisorTests {
     /// thing holding it is not a TBD proxy. The supervisor must spawn on zero
     /// and **overwrite** the stored port — `ensureModelProxyPort` is
     /// conditional and would leave the stale value in place.
+    ///
+    /// This is the **nobody-routed** branch of the port wait's gate, which is
+    /// why it still mints at once: `routedSessionsAlive` defaults to "none", so
+    /// a fresh port strands nothing. `refusedBindIsRetriedWhileASessionIsRouted`
+    /// is the other branch, where the same refused bind is waited out instead.
     @Test("a persisted port held by a stranger is re-minted")
     func remintsPortWhenHeldByStranger() async throws {
         let fixture = try SupervisorFixture.make()
@@ -883,6 +888,307 @@ struct ModelProxySupervisorTests {
         #expect(
             try await fixture.db.config.get().modelProxyPort == SupervisorFixture.otherDeadPort,
             "the re-mint must overwrite the stale port, not leave it")
+    }
+
+    // MARK: - The port wait
+
+    /// **The port wait's whole reason** (spec, "Port"): a port a routed session
+    /// carries in its `ANTHROPIC_BASE_URL` is not this daemon's to give up
+    /// while something transient holds it.
+    ///
+    /// Before this behaviour existed the sequence below spawned twice — once on
+    /// the persisted port, then immediately on zero — and rewrote the column, so
+    /// every session already routed against the old port spent Claude's
+    /// 183-second retry budget on a refused connect and failed its turn. The
+    /// discriminating observable is therefore the spawner's call list: it must
+    /// read `[deadPort, deadPort, deadPort]` and never contain a zero, and the
+    /// column must still name the port it named at the start.
+    ///
+    /// `deadPort` is a privileged number, so the production `LoopbackPortProbe`
+    /// the fixture delegates to answers `.refused` there through the real
+    /// syscalls — a transient holder, which is what the wait is for.
+    ///
+    /// **The clock handshake.** `start()` does not return until the wait does,
+    /// so it runs in a task of its own and each hop is a
+    /// `requireAdvanceWhenArmed`. Exactly one sleeper can be in the ledger at
+    /// each hop: `start()` has not created the watch yet, and the wait's own
+    /// `clock.sleep` is the only one on this path.
+    @Test("a bind refused on the persisted port is retried on the clock and the port kept")
+    func refusedBindIsRetriedWhileASessionIsRouted() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+
+        try await fixture.db.config.setModelProxyPort(SupervisorFixture.deadPort)
+        await fixture.spawner.answer(.failure(.bindFailed(port: SupervisorFixture.deadPort)))
+        await fixture.spawner.answer(.failure(.bindFailed(port: SupervisorFixture.deadPort)))
+        await fixture.spawner.answer(.success(pid: 7301, port: SupervisorFixture.deadPort))
+
+        let supervisor = fixture.supervisor(routedSessionsAlive: { true }, clock: clock)
+        let starting = Task { await supervisor.start() }
+        defer { starting.cancel() }
+        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+        await starting.value
+        await supervisor.stop()
+
+        #expect(
+            await fixture.spawner.calls() == [
+                SupervisorFixture.deadPort, SupervisorFixture.deadPort, SupervisorFixture.deadPort,
+            ],
+            "every attempt asks for the port the routed sessions already carry")
+        let current = await supervisor.current
+        #expect(current?.port == SupervisorFixture.deadPort)
+        #expect(current?.pid == 7301)
+        #expect(
+            try await fixture.db.config.get().modelProxyPort == SupervisorFixture.deadPort,
+            "a port that was waited out and taken back is never rewritten")
+    }
+
+    /// The wait is bounded, and the bound is the other half of the claim: a
+    /// holder that never lets go must not keep this home unproxied forever.
+    ///
+    /// A short `portRetryAttempts` so the budget is reached in three hops
+    /// rather than fifteen. The verdict is that the mint happens **once** —
+    /// a give-up that fell back into the retry loop, or a loop that minted on
+    /// every pass, would show more than one zero in the call list.
+    @Test("a refusal that never clears mints after the budget and rewrites the column once")
+    func refusedBindGivesUpAfterTheBudget() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+
+        try await fixture.db.config.setModelProxyPort(SupervisorFixture.deadPort)
+        for _ in 0..<4 {
+            await fixture.spawner.answer(.failure(.bindFailed(port: SupervisorFixture.deadPort)))
+        }
+        await fixture.spawner.answer(.success(pid: 7311, port: SupervisorFixture.otherDeadPort))
+
+        let supervisor = fixture.supervisor(
+            routedSessionsAlive: { true }, portRetryAttempts: 3, clock: clock)
+        let starting = Task { await supervisor.start() }
+        defer { starting.cancel() }
+        for _ in 0..<3 {
+            try await clock.requireAdvanceWhenArmed(
+                by: ModelProxySupervisor.defaultPortRetryInterval)
+        }
+        await starting.value
+        await supervisor.stop()
+
+        let calls = await fixture.spawner.calls()
+        #expect(
+            calls == [
+                SupervisorFixture.deadPort, SupervisorFixture.deadPort,
+                SupervisorFixture.deadPort, SupervisorFixture.deadPort, 0,
+            ],
+            "the budgeted attempts all ask for the old port, and only the last mints")
+        #expect(calls.filter { $0 == 0 }.count == 1, "the mint happens once, not once per pass")
+        #expect(
+            try await fixture.db.config.get().modelProxyPort == SupervisorFixture.otherDeadPort,
+            "giving up overwrites the column with the port that was actually taken")
+    }
+
+    /// The shipped window, pinned because its **product** is what has to sit
+    /// between two other numbers.
+    ///
+    /// 2 s × 15 = 30 s. Claude retries a refused base URL for 183 s (spec,
+    /// "Failure semantics"), and the worst path that reaches a respawn is the
+    /// hang ladder — four missed polls (60 s), `hangSignalKillDelay` ticks
+    /// (30 s), one more tick to notice the kill (15 s) = 105 s, which
+    /// `hungProxyEscalatesToSignalsThenRespawns` pins from the other end.
+    /// 105 + 30 = 135 s, leaving roughly 45 s for the spawn itself and a watch
+    /// tick. Widening either constant without redoing that arithmetic is how
+    /// the wait starts outliving the budget it exists to fit inside.
+    @Test("the shipped port wait fits inside Claude's retry budget")
+    func portWaitDefaultsFitTheRetryBudget() {
+        #expect(ModelProxySupervisor.defaultPortRetryInterval == .seconds(2))
+        #expect(ModelProxySupervisor.defaultPortRetryAttempts == 15)
+    }
+
+    /// A listener is not a transient, and the wait must not spend its whole
+    /// window on one.
+    ///
+    /// The occupant here is a real HTTP listener that answers a real status
+    /// document naming **another TBD home** — every other field is a live,
+    /// same-version proxy, so only the identity check refuses it. It accepts
+    /// connections, so it will still be there in thirty seconds.
+    ///
+    /// Two observables discriminate. Before this behaviour the call list read
+    /// `[proxy.port, 0]` with no wait at all; a wait that could not tell a
+    /// listener from a transient would need fifteen hops and thirty seconds of
+    /// virtual time. This takes exactly one interval and one extra attempt.
+    @Test("a foreign listener is given up after two sightings, not the whole budget")
+    func foreignListenerIsGivenUpAfterTwoSightings() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+
+        let elsewhere = fixture.root.appendingPathComponent("another-install")
+        let proxy = try ForeignHomeProxyProcess(
+            version: fixture.ownVersion, pid: 7320, home: elsewhere.path)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        await fixture.spawner.answer(.failure(.bindFailed(port: proxy.port)))
+        await fixture.spawner.answer(.failure(.bindFailed(port: proxy.port)))
+        await fixture.spawner.answer(.success(pid: 7321, port: SupervisorFixture.otherDeadPort))
+
+        let supervisor = fixture.supervisor(routedSessionsAlive: { true }, clock: clock)
+        let starting = Task { await supervisor.start() }
+        defer { starting.cancel() }
+        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+        await starting.value
+        await supervisor.stop()
+
+        #expect(
+            await fixture.spawner.calls() == [proxy.port, proxy.port, 0],
+            "two sightings, then the mint")
+        #expect(
+            try await fixture.db.config.get().modelProxyPort == SupervisorFixture.otherDeadPort)
+        #expect(
+            clock.now.offset == ModelProxySupervisor.defaultPortRetryInterval,
+            "one interval of virtual time, not the whole window")
+    }
+
+    /// **Adoption keeps the first word.** A refused bind whose occupant passes
+    /// the identity check is this home's own proxy — one that came up between
+    /// the failed bind and the probe — and it is taken over with no wait and no
+    /// mint.
+    ///
+    /// The startup probe is denied once so the spawn is reached at all, exactly
+    /// as `lockHeldProbesAndAdopts` does; the second check admits. This
+    /// discriminates against a wait that concluded "foreign listener" from an
+    /// accepted connect without letting adoption answer first: that shape would
+    /// count the daemon's own proxy as a stranger and eventually mint past it.
+    ///
+    /// That there is no wait is not asserted through the clock but through the
+    /// call itself: `start()` returns without the test ever advancing virtual
+    /// time, and a wait would have parked it on this clock indefinitely.
+    @Test("an occupant that passes identity is adopted without a wait")
+    func refusedBindAdoptsAnOccupantThatPassesIdentity() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 7330, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.denyOnce()
+        fixture.identity.admit(pid: 7330, startTime: proxy.processStartTime)
+        await fixture.spawner.answer(.failure(.bindFailed(port: proxy.port)))
+
+        let supervisor = fixture.supervisor(routedSessionsAlive: { true }, clock: clock)
+        await supervisor.start()
+        await supervisor.stop()
+
+        let current = await supervisor.current
+        #expect(current?.pid == 7330)
+        #expect(current?.adopted == true)
+        #expect(await fixture.spawner.calls() == [proxy.port], "no second spawn, and no mint")
+        #expect(try await fixture.db.config.get().modelProxyPort == proxy.port)
+    }
+
+    /// The other branch of the wait's gate: with nothing routed against the
+    /// port, nothing is stranded by a fresh one, so the wait is not paid at all.
+    ///
+    /// This is `remintsPortWhenHeldByStranger` said the other way round — that
+    /// one takes the default `routedSessionsAlive`, this one is explicit about
+    /// which fact does the work — and it is what keeps the wait from delaying
+    /// every boot and every Settings toggle on an install with no proxied
+    /// session running. `start()` returning with virtual time never advanced is
+    /// the proof that nothing slept.
+    @Test("with no session routed a refused bind mints at once")
+    func refusedBindMintsAtOnceWithNothingRouted() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+
+        try await fixture.db.config.setModelProxyPort(SupervisorFixture.deadPort)
+        await fixture.spawner.answer(.failure(.bindFailed(port: SupervisorFixture.deadPort)))
+        await fixture.spawner.answer(.success(pid: 7351, port: SupervisorFixture.otherDeadPort))
+
+        let supervisor = fixture.supervisor(routedSessionsAlive: { false }, clock: clock)
+        await supervisor.start()
+        await supervisor.stop()
+
+        #expect(await fixture.spawner.calls() == [SupervisorFixture.deadPort, 0])
+        #expect(
+            try await fixture.db.config.get().modelProxyPort == SupervisorFixture.otherDeadPort)
+        #expect(clock.now.offset == .zero, "no interval was waited")
+    }
+
+    /// A probe that cannot say who holds the port — a listener whose backlog is
+    /// full, or an errno that is neither success nor `ECONNREFUSED` — is
+    /// treated as a transient and waited out.
+    ///
+    /// The conservative direction is the claim: waiting out a listener costs a
+    /// delayed mint, while minting past a transient strands live sessions. A
+    /// classification that folded `.undetermined` in with `.accepted` would
+    /// give the port up after two probes instead of keeping it.
+    @Test("an undetermined probe is waited out like a refusal")
+    func undeterminedProbeIsWaitedOut() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+        fixture.portProbe.force(.undetermined("no answer within 1s"))
+
+        try await fixture.db.config.setModelProxyPort(SupervisorFixture.deadPort)
+        await fixture.spawner.answer(.failure(.bindFailed(port: SupervisorFixture.deadPort)))
+        await fixture.spawner.answer(.success(pid: 7361, port: SupervisorFixture.deadPort))
+
+        let supervisor = fixture.supervisor(routedSessionsAlive: { true }, clock: clock)
+        let starting = Task { await supervisor.start() }
+        defer { starting.cancel() }
+        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+        await starting.value
+        await supervisor.stop()
+
+        #expect(
+            await fixture.spawner.calls()
+                == [SupervisorFixture.deadPort, SupervisorFixture.deadPort])
+        #expect(await supervisor.current?.pid == 7361)
+        #expect(try await fixture.db.config.get().modelProxyPort == SupervisorFixture.deadPort)
+    }
+
+    /// **A version replacement goes through the wait too.** `POST /tbd/retire`
+    /// answers the moment the listener is closed and the lock is released, and
+    /// the successor binds right behind it — which is precisely the gap in
+    /// which the freed ephemeral number can be handed to an unrelated client
+    /// socket. Minting there would strand every session the retiring proxy was
+    /// serving, which is the population this whole path exists for.
+    ///
+    /// The fake keeps listening after the retire (it is an HTTP server, not a
+    /// proxy), so the port probe is forced to `.refused` to stand in for the
+    /// closed listener; a refused connect never reaches the status endpoint, so
+    /// the still-listening fake cannot be re-adopted behind the failed bind.
+    @Test("a version replace goes through the port wait")
+    func versionReplaceWaitsForThePort() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+        fixture.portProbe.force(.refused)
+
+        let proxy = try FakeProxyProcess(version: "9999-1", pid: 7340, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 7340, startTime: proxy.processStartTime)
+        await fixture.spawner.answer(.failure(.bindFailed(port: proxy.port)))
+        await fixture.spawner.answer(.success(pid: 7341, port: proxy.port))
+
+        let supervisor = fixture.supervisor(routedSessionsAlive: { true }, clock: clock)
+        let starting = Task { await supervisor.start() }
+        defer { starting.cancel() }
+        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+        await starting.value
+        await supervisor.stop()
+
+        #expect(
+            proxy.requests().contains { $0.method == "POST" && $0.path == "/tbd/retire" },
+            "the mismatched proxy is still asked to retire")
+        #expect(
+            await fixture.spawner.calls() == [proxy.port, proxy.port],
+            "the successor waits for the port rather than minting past it")
+        #expect(await supervisor.current?.pid == 7341)
+        #expect(try await fixture.db.config.get().modelProxyPort == proxy.port)
     }
 
     /// `.lockHeld` says a live proxy owns this rendezvous. The supervisor
@@ -1329,6 +1635,76 @@ struct ModelProxySupervisorTests {
             "the respawn targets the port the hung proxy held")
 
         await supervisor.stop()
+    }
+
+    /// **The end of the hang ladder is the case the port wait was written
+    /// for.** A SIGKILLed proxy frees its port abruptly, and macOS hands
+    /// ephemeral numbers out sequentially from one counter, so the number is
+    /// routinely re-handed to a short-lived client socket before the successor
+    /// binds. Minting there strands every session the killed proxy was serving
+    /// — the population the ladder took 105 seconds to reach.
+    ///
+    /// The ladder above is walked verbatim up to the kill landing; from there
+    /// the respawn meets a refused bind. The port probe is *forced* to
+    /// `.refused` rather than the fake being stopped: the fake's port is an
+    /// ephemeral number and a suite running in parallel could be handed it,
+    /// which would make the real probe answer `.accepted` for a stranger's
+    /// listener and turn this into the foreign-listener case.
+    ///
+    /// Two hops, and only one sleeper can be in the ledger at each. The first
+    /// is the watch interval, whose tick notices the kill and burns the refused
+    /// bind; the second is the wait's own sleep, and the watch cannot have
+    /// re-armed because it does not do so until `tick` returns. Before this
+    /// behaviour the call list read `[proxy.port, 0]`.
+    @Test("the hang ladder's respawn goes through the port wait")
+    func hangLadderRespawnWaitsForThePort() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+        // Named here rather than reached through `fixture` below: the
+        // `observed:` closure is `@Sendable`, and the actor is what it needs.
+        let spawner = fixture.spawner
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6310, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 6310, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor(routedSessionsAlive: { true }, clock: clock)
+        await supervisor.start()
+        #expect(await supervisor.current?.pid == 6310)
+
+        proxy.failNextStatusResponses(20)
+        // Four misses to SIGTERM, `hangSignalKillDelay` more to SIGKILL.
+        for _ in 1...6 {
+            try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        }
+        try await clock.requireSleeperArmed()
+        #expect(fixture.signaller.killed() == [6310], "the ladder reached SIGKILL")
+
+        // The kill lands: the process leaves the table, its listener is gone,
+        // and something transient has the number.
+        fixture.portProbe.force(.refused)
+        fixture.identity.forget(pid: 6310)
+        await fixture.spawner.answer(.failure(.bindFailed(port: proxy.port)))
+        await fixture.spawner.answer(.success(pid: 6311, port: proxy.port))
+
+        // Hop 1: the tick that notices the kill and burns the refused bind.
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        // Hop 2: the port wait's own sleep, the only sleeper on this path.
+        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+
+        let landed = try await waitFor(
+            "the successor to take the port back",
+            observed: { "spawn calls \(await spawner.calls())" },
+            { await supervisor.current?.pid == 6311 })
+        await supervisor.stop()
+
+        #expect(landed)
+        #expect(
+            await fixture.spawner.calls() == [proxy.port, proxy.port],
+            "the killed proxy's port is waited out, never minted past")
+        #expect(try await fixture.db.config.get().modelProxyPort == proxy.port)
     }
 
     /// The identity re-check right before every signal is what this pins: a
@@ -1845,6 +2221,7 @@ private struct SupervisorFixture {
     let spawner: StubSpawner
     let identity: StubIdentity
     let signaller: StubSignaller
+    let portProbe: StubPortProbe
     let clock: TestClock<Duration>
     let ownVersion = "12345-1700000000"
     let watchInterval: Duration = .seconds(15)
@@ -1867,6 +2244,7 @@ private struct SupervisorFixture {
             spawner: StubSpawner(),
             identity: StubIdentity(),
             signaller: StubSignaller(),
+            portProbe: StubPortProbe(),
             clock: TestClock())
     }
 
@@ -1887,6 +2265,7 @@ private struct SupervisorFixture {
         clientFactory: @escaping @Sendable (Int) -> ModelProxyClient = {
             ModelProxyClient(port: $0)
         },
+        portRetryAttempts: Int = ModelProxySupervisor.defaultPortRetryAttempts,
         clock overrideClock: (any Clock<Duration>)? = nil
     ) -> ModelProxySupervisor {
         ModelProxySupervisor(
@@ -1896,10 +2275,12 @@ private struct SupervisorFixture {
             ownVersion: ownVersion,
             processIdentity: identity,
             signaller: signaller,
+            portProbe: portProbe,
             routedSessionsAlive: routedSessionsAlive,
             clientFactory: clientFactory,
             watchInterval: watchInterval,
             respawnBackoff: [firstBackoff, .seconds(5)],
+            portRetryAttempts: portRetryAttempts,
             clock: overrideClock ?? clock)
     }
 
@@ -2008,6 +2389,34 @@ private final class StubIdentity: ProcessIdentityChecking, @unchecked Sendable {
             guard let known = admitted[pid] else { return false }
             return abs(known.timeIntervalSince(startTime)) < 0.000_001
         }
+    }
+}
+
+/// The port probe, **real by default**.
+///
+/// Delegating to the production `LoopbackPortProbe` is what keeps the ordinary
+/// cases honest: `SupervisorFixture.deadPort` is a privileged number nothing in
+/// a test runner can be listening on, so it is a prompt `ECONNREFUSED` through
+/// the same syscalls the daemon makes, and a `FakeProxyProcess` is a real
+/// listener on a real loopback port that answers `.accepted` for the same
+/// reason a stranger's proxy would.
+///
+/// A forced answer is for the one shape that cannot be arranged honestly: a
+/// case whose port is an *ephemeral* number a fake has just released, which a
+/// suite running in parallel could be handed in the meantime. There the port's
+/// real occupancy is nobody's to predict, and the fact under test is what the
+/// supervisor does with the answer rather than how it obtained it.
+private final class StubPortProbe: LoopbackPortProbing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var forced: LoopbackPortOccupancy?
+
+    func force(_ occupancy: LoopbackPortOccupancy) {
+        lock.withLock { forced = occupancy }
+    }
+
+    func occupancy(port: Int) -> LoopbackPortOccupancy {
+        if let answer = lock.withLock({ forced }) { return answer }
+        return LoopbackPortProbe().occupancy(port: port)
     }
 }
 
