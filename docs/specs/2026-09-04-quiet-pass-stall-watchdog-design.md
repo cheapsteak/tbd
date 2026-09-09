@@ -247,10 +247,9 @@ pays the test-target compile: three consecutive warm-cache runs on main measured
 a slow compile plus a full run of tests. 1b and 2 run against a warm build and
 finish in three to four minutes when healthy, so 600 s is comfortably more than
 double a healthy run while still ending a wedge inside the step's own bound. The
-step timeouts sit above their budgets by the margin the expiry path needs; the
-30-minute bounds the fast passes used to carry existed to let per-test limits
-fire first and name a test, and the watchdog does that job both sooner and with
-a stack.
+step timeouts sit above their budgets by only the margin the expiry path needs:
+a step bound wide enough for per-test limits to fire first would buy nothing,
+because the watchdog names the test sooner and with a stack.
 
 Five seconds of sampling is what it takes to show a blocked thread
 unambiguously: a parked thread looks identical in every sample, so more buys
