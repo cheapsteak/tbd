@@ -816,6 +816,36 @@ struct ModelProxySupervisorTests {
         #expect(await fixture.spawner.calls().isEmpty)
     }
 
+    /// The third state of the same gate, and the reason it throws instead of
+    /// folding: a terminal table that could not be read is not "nothing is
+    /// routed".
+    ///
+    /// Here the answer is the same as "nothing" — with the flag off, the only
+    /// thing a supervisor would do is keep a proxy alive for sessions that may
+    /// not exist, and starting one on an unanswered question is a background
+    /// process nobody asked for. `reclaimPortWaitsWhenTheGateCannotBeRead`
+    /// pins the *opposite* choice at the other caller, which is exactly why the
+    /// fold cannot live inside the closure.
+    @Test("a flag-off boot whose gate cannot be read starts nothing")
+    func aFlagOffBootWithAnUnreadableGateStartsNothing() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(
+            version: fixture.ownVersion, pid: 6205, home: fixture.home, routeCount: 1)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        fixture.identity.admit(pid: 6205, startTime: proxy.processStartTime)
+
+        let supervisor = fixture.supervisor(routedSessionsAlive: { throw GateUnreadable() })
+        await supervisor.startIfEnabled()
+        await supervisor.stop()
+
+        #expect(await supervisor.current == nil)
+        #expect(proxy.requests().isEmpty, "nothing was even probed")
+        #expect(await fixture.spawner.calls().isEmpty)
+    }
+
     /// **The discriminating half.** `stop()` is shutdown, and a proxy outliving
     /// its daemon is the point of a separate process: the next daemon adopts it
     /// back through the port in the config row. A `stop()` that retired would
@@ -943,6 +973,48 @@ struct ModelProxySupervisorTests {
         #expect(
             try await fixture.db.config.get().modelProxyPort == SupervisorFixture.deadPort,
             "a port that was waited out and taken back is never rewritten")
+    }
+
+    /// **The gate fails closed in the direction that keeps the port.** A
+    /// terminal table too busy to answer is exactly the machine on which a
+    /// contended port is being fought over, and the two mistakes do not cost
+    /// the same: waiting out a port nothing is routed against delays a boot by
+    /// thirty seconds, while minting past one that is strands a live session
+    /// for the rest of its life.
+    ///
+    /// This is `refusedBindIsRetriedWhileASessionIsRouted` with the gate
+    /// throwing instead of answering, and it discriminates against a
+    /// `try? … ?? false` fold on the closure: that reads an unreadable table as
+    /// "nothing is routed" and mints at once, which is the failure the whole
+    /// wait exists to prevent. The other caller wants the opposite answer —
+    /// `aFlagOffBootWithAnUnreadableGateStartsNothing` — which is why the
+    /// closure throws and each caller decides beside itself.
+    @Test("a gate that cannot be read waits rather than mints")
+    func reclaimPortWaitsWhenTheGateCannotBeRead() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+
+        try await fixture.db.config.setModelProxyPort(SupervisorFixture.deadPort)
+        await fixture.spawner.answer(.failure(.bindFailed(port: SupervisorFixture.deadPort)))
+        await fixture.spawner.answer(.success(pid: 7371, port: SupervisorFixture.deadPort))
+
+        let supervisor = fixture.supervisor(
+            routedSessionsAlive: { throw GateUnreadable() }, clock: clock)
+        let starting = Task { await supervisor.start() }
+        defer { starting.cancel() }
+        try await clock.requireAdvanceWhenArmed(by: ModelProxySupervisor.defaultPortRetryInterval)
+        await starting.value
+        await supervisor.stop()
+
+        #expect(
+            await fixture.spawner.calls()
+                == [SupervisorFixture.deadPort, SupervisorFixture.deadPort],
+            "an unreadable gate waits the holder out; it never mints on zero")
+        #expect(await supervisor.current?.pid == 7371)
+        #expect(
+            try await fixture.db.config.get().modelProxyPort == SupervisorFixture.deadPort,
+            "and the column the routed sessions carry is left alone")
     }
 
     /// The wait is bounded, and the bound is the other half of the claim: a
@@ -2261,7 +2333,7 @@ private struct SupervisorFixture {
     /// otherwise, which is the answer that makes a flag-off boot run nothing —
     /// the shipped install.
     func supervisor(
-        routedSessionsAlive: @escaping @Sendable () async -> Bool = { false },
+        routedSessionsAlive: @escaping @Sendable () async throws -> Bool = { false },
         clientFactory: @escaping @Sendable (Int) -> ModelProxyClient = {
             ModelProxyClient(port: $0)
         },
@@ -2392,6 +2464,14 @@ private final class StubIdentity: ProcessIdentityChecking, @unchecked Sendable {
     }
 }
 
+/// What a terminal table that cannot be read throws.
+///
+/// The production closure's failures are GRDB's — a busy timeout, lock
+/// contention — and nothing in the supervisor inspects the error beyond
+/// logging it, so a bare marker is the honest stand-in: the fact under test is
+/// that the question went unanswered, not what went wrong underneath.
+private struct GateUnreadable: Error {}
+
 /// The port probe, **real by default**.
 ///
 /// Delegating to the production `LoopbackPortProbe` is what keeps the ordinary
@@ -2414,9 +2494,12 @@ private final class StubPortProbe: LoopbackPortProbing, @unchecked Sendable {
         lock.withLock { forced = occupancy }
     }
 
-    func occupancy(port: Int) -> LoopbackPortOccupancy {
+    /// The forced answer is read out from under the lock **before** the
+    /// suspension, never across it: holding an `NSLock` over an `await` blocks
+    /// whatever thread the continuation resumes on.
+    func occupancy(port: Int) async -> LoopbackPortOccupancy {
         if let answer = lock.withLock({ forced }) { return answer }
-        return LoopbackPortProbe().occupancy(port: port)
+        return await LoopbackPortProbe().occupancy(port: port)
     }
 }
 

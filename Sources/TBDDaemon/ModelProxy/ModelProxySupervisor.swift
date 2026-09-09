@@ -168,7 +168,18 @@ actor ModelProxySupervisor {
     /// wants from the terminal table and taking the table would make the
     /// supervisor's tests need one. Its default answers "none", which is the
     /// answer that makes a supervisor with nothing injected run nothing.
-    private let routedSessionsAlive: @Sendable () async -> Bool
+    ///
+    /// **It throws rather than folding an unreadable table into "none",
+    /// because the two callers disagree about what an unanswered question
+    /// means.** A drain-only boot that cannot read the table must start
+    /// nothing: erring the other way spawns a proxy for sessions that may not
+    /// exist. The port wait must assume one *is* routed and wait: erring the
+    /// other way mints past a live session, which is the failure the wait
+    /// exists to prevent — and a busy database is exactly the moment a
+    /// contended port is being fought over. One fold here would have to pick
+    /// one of those, so neither is picked here; each caller decides beside
+    /// itself.
+    private let routedSessionsAlive: @Sendable () async throws -> Bool
     /// This daemon's home in the one form both sides compare, computed once.
     ///
     /// `ModelProxyStatus.canonicalHome` resolves symlinks against the
@@ -375,7 +386,7 @@ actor ModelProxySupervisor {
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
         pidFile: any ModelProxyPIDFileReading = ModelProxyPIDFile(),
         portProbe: any LoopbackPortProbing = LoopbackPortProbe(),
-        routedSessionsAlive: @escaping @Sendable () async -> Bool = { false },
+        routedSessionsAlive: @escaping @Sendable () async throws -> Bool = { false },
         clientFactory: @escaping @Sendable (Int) -> ModelProxyClient = { ModelProxyClient(port: $0) },
         watchInterval: Duration = .seconds(15),
         respawnBackoff: [Duration] = [.seconds(1), .seconds(5), .seconds(30)],
@@ -413,7 +424,7 @@ actor ModelProxySupervisor {
     static func production(
         config: ConfigStore,
         home: URL,
-        routedSessionsAlive: @escaping @Sendable () async -> Bool,
+        routedSessionsAlive: @escaping @Sendable () async throws -> Bool,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         clock: any Clock<Duration> = ContinuousClock()
     ) -> ModelProxySupervisor {
@@ -597,11 +608,26 @@ actor ModelProxySupervisor {
     /// routed, and only until they are done.
     private func startDrainingIfSessionsAreRouted() async {
         guard !started else { return }
-        guard await routedSessionsAlive() else {
-            Self.logger.debug(
+        do {
+            guard try await routedSessionsAlive() else {
+                Self.logger.debug(
+                    """
+                    the model proxy is disabled for \(self.home.path, privacy: .public) and no \
+                    session is routed through it; not starting a supervisor
+                    """)
+                return
+            }
+        } catch {
+            // The flag is off, so the only thing a supervisor would do here is
+            // keep a proxy alive for sessions that may not exist. Starting one
+            // on a question nobody answered is a background process nobody
+            // asked for; the next boot asks again.
+            Self.logger.error(
                 """
-                the model proxy is disabled for \(self.home.path, privacy: .public) and no session \
-                is routed through it; not starting a supervisor
+                the model proxy is disabled for \(self.home.path, privacy: .public) and the \
+                terminal table could not be read: \
+                \(error.localizedDescription, privacy: .public); not starting a drain on an \
+                unanswered question
                 """)
             return
         }
@@ -1256,7 +1282,7 @@ actor ModelProxySupervisor {
             if let routedAnswer {
                 routed = routedAnswer
             } else {
-                routed = await routedSessionsAlive()
+                routed = await aSessionIsRoutedOrTheTableCannotSay(port: port)
                 routedAnswer = routed
             }
             guard routed else {
@@ -1319,6 +1345,31 @@ actor ModelProxySupervisor {
         }
     }
 
+    /// The port wait's reading of the gate: **an unanswerable question counts
+    /// as "yes, a session is routed".**
+    ///
+    /// A terminal table too busy to answer is exactly the machine on which a
+    /// contended port is being fought over, so this is the moment the fold
+    /// matters most — and the two mistakes do not cost the same. Waiting out a
+    /// port nothing is routed against delays a boot by thirty seconds; minting
+    /// past one that is strands a live session for the rest of its life. The
+    /// drain-only boot reads the same failure the other way, which is why the
+    /// closure throws rather than deciding for both.
+    private func aSessionIsRoutedOrTheTableCannotSay(port: Int) async -> Bool {
+        do {
+            return try await routedSessionsAlive()
+        } catch {
+            Self.logger.error(
+                """
+                could not read whether a session is still routed against port \
+                \(port, privacy: .public): \(error.localizedDescription, privacy: .public); \
+                assuming one is and waiting, because minting past a routed session is the \
+                failure this wait exists to prevent
+                """)
+            return true
+        }
+    }
+
     /// Gives the port up: mint a fresh one, overwrite the column, and say
     /// plainly what that costs.
     ///
@@ -1368,7 +1419,7 @@ actor ModelProxySupervisor {
     /// *why* it refused; this adds only which of the three cases the probe saw,
     /// at `.debug`, because it is asked once per interval for the whole window.
     private func classifyOccupant(of port: Int) async -> Occupant {
-        switch portProbe.occupancy(port: port) {
+        switch await portProbe.occupancy(port: port) {
         case .refused:
             Self.logger.debug(
                 """

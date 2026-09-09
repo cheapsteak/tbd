@@ -19,18 +19,18 @@ struct LoopbackPortProbeTests {
     /// `ECONNREFUSED`. That is what a freed ephemeral number held by nothing
     /// looks like.
     @Test("a port with no listener is refused")
-    func aPortWithNoListenerIsRefused() {
-        #expect(LoopbackPortProbe().occupancy(port: 1) == .refused)
+    func aPortWithNoListenerIsRefused() async {
+        #expect(await LoopbackPortProbe().occupancy(port: 1) == .refused)
     }
 
     /// The discriminating half: a real listener on a real loopback port, which
     /// accepts the connection in the kernel without the accept loop having to
     /// answer anything.
     @Test("a port with a listener is accepted")
-    func aPortWithAListenerIsAccepted() throws {
+    func aPortWithAListenerIsAccepted() async throws {
         let server = try LoopbackHTTPTestServer { _ in .ok("{}") }
         defer { server.stop() }
 
-        #expect(LoopbackPortProbe().occupancy(port: server.port) == .accepted)
+        #expect(await LoopbackPortProbe().occupancy(port: server.port) == .accepted)
     }
 }

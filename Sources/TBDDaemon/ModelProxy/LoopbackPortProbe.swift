@@ -1,4 +1,5 @@
 import Darwin
+import Dispatch
 import Foundation
 
 /// Who, if anyone, accepts a TCP connection on a loopback port right now.
@@ -16,7 +17,7 @@ enum LoopbackPortOccupancy: Sendable, Equatable {
 /// The one question `ModelProxySupervisor`'s port wait turns on, as a protocol
 /// so a test can force an answer for a port a fake has just released.
 protocol LoopbackPortProbing: Sendable {
-    func occupancy(port: Int) -> LoopbackPortOccupancy
+    func occupancy(port: Int) async -> LoopbackPortOccupancy
 }
 
 /// A plain non-blocking `connect(2)` to `127.0.0.1:<port>`, and nothing else.
@@ -43,12 +44,28 @@ protocol LoopbackPortProbing: Sendable {
 /// with no listener is refused by the same stack — so the bound is only ever
 /// spent on the pathological third case (a listener whose backlog is full),
 /// which is reported as `.undetermined` and treated as a transient.
+///
+/// **The syscalls run on a GCD thread, never on the cooperative pool.** That
+/// pool is only as wide as the machine has cores — three on a CI runner — and a
+/// thread blocked in `poll(2)` there is one the supervisor's actor and every
+/// other task on the machine cannot use for as long as the bound lasts. A
+/// blocking syscall with a hard one-second ceiling is exactly what GCD's global
+/// queue is for, so the probe hops to it and suspends its caller instead.
 struct LoopbackPortProbe: LoopbackPortProbing {
     /// How long a connect that went asynchronous may take before the answer is
     /// `.undetermined`.
     static let connectBoundMilliseconds: Int32 = 1000
 
-    func occupancy(port: Int) -> LoopbackPortOccupancy {
+    func occupancy(port: Int) async -> LoopbackPortOccupancy {
+        await withCheckedContinuation { (continuation: CheckedContinuation<LoopbackPortOccupancy, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: LoopbackPortProbe.probe(port: port))
+            }
+        }
+    }
+
+    /// The syscall sequence itself, synchronous and off the cooperative pool.
+    private static func probe(port: Int) -> LoopbackPortOccupancy {
         guard let networkPort = UInt16(exactly: port), networkPort > 0 else {
             return .undetermined("\(port) is not a port number")
         }
