@@ -513,6 +513,233 @@ struct ModelProxySupervisorTests {
             "a proxy the supervisor believes it retired must not stay current")
     }
 
+    // MARK: - Collecting what the drain retired
+
+    /// **The bug this section exists for.** A proxy this daemon spawned is its
+    /// child, and `POST /tbd/retire` returns as soon as the listener is closed —
+    /// the process itself is still draining what is in flight and exits some
+    /// seconds later. A supervisor that stopped its watch on the retire made one
+    /// `waitpid(WNOHANG)` pass, found the child still running, and then had
+    /// nothing left that would ever call `waitpid` again: the pid sat
+    /// `<defunct>` until some later `start()`, which on the toggle path may
+    /// never come.
+    ///
+    /// So the watch outlives the retire, in an idle whose only work is the reap
+    /// pass, and the tick after the exit collects it.
+    ///
+    /// Discriminating against the pre-fix code twice over: `isWatching` is false
+    /// there the moment the drain finishes, and with no watch left nothing
+    /// advances the clock into the pass that collects 6600 — `collected()` stays
+    /// empty for as long as the test cares to wait.
+    @Test("the watch outlives the retire and collects the child it dropped")
+    func aDrainedChildIsCollectedByTheWatchThatOutlivesTheRetire() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+        let spawner = fixture.spawner
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6600, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        // Denied once so startup spawns rather than adopts: only a child of this
+        // process is ours to `waitpid`, and only a child can be left a zombie.
+        fixture.identity.denyOnce()
+        fixture.identity.admit(pid: 6600, startTime: proxy.processStartTime)
+        await fixture.spawner.answer(.success(pid: 6600, port: proxy.port))
+
+        let supervisor = fixture.supervisor(clock: clock)
+        await supervisor.startIfEnabled()
+        #expect(await supervisor.current?.pid == 6600)
+        #expect(await supervisor.current?.adopted == false, "a child of ours is never adopted")
+
+        // The flag goes off with nothing routed, so the drain finishes on the
+        // gesture: retire, drop, and — the fix — keep the watch.
+        try await fixture.db.config.setModelProxyEnabled(false)
+        await supervisor.beginDraining()
+        #expect(await supervisor.current == nil)
+        #expect(proxy.requests().contains { $0.method == "POST" && $0.path == "/tbd/retire" })
+        #expect(
+            await supervisor.isWatching,
+            "the child is still running, so the watch that will collect it must not have stopped")
+        #expect(
+            await fixture.spawner.collected().isEmpty,
+            "a proxy that has only just been asked to retire has not exited yet")
+
+        // It finishes draining and exits; the next tick is the pass that
+        // collects it, and there is nothing left for the watch to do afterwards.
+        await fixture.spawner.reap(pid: 6600, status: 0)
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        let collected = try await waitFor(
+            "the drained proxy's exit to be collected",
+            observed: { "collected \(await spawner.collected())" },
+            { await spawner.collected() == [6600] })
+        let stopped = try await waitFor(
+            "the reap-only watch to stop once nothing is pending",
+            { await supervisor.isWatching == false })
+
+        #expect(collected, "the exit of a child this daemon dropped is waited for, not leaked")
+        #expect(stopped)
+        #expect(
+            clock.hasSleeper == false,
+            "a watch that has stopped arms no further sleep — this idle is not a poller forever")
+    }
+
+    /// The other end of the idle: a child that never exits.
+    ///
+    /// `reapAttemptBudget` is 40 attempts, one per 15-second tick — ten minutes,
+    /// which is the cap the proxy itself drains under and so the longest an exit
+    /// can legitimately take. Past it an answer of nothing forever means the pid
+    /// is not this process's to collect, and `drainPendingReap` gives up on it;
+    /// with nothing pending the idle ends and the watch stops. What must not
+    /// happen is a supervisor that polls for a corpse for the rest of the
+    /// daemon's life.
+    ///
+    /// Discriminates against the pre-fix code at the first hop: the watch is
+    /// already stopped there, nothing is armed on the clock, and
+    /// `requireAdvanceWhenArmed` gives up rather than advancing.
+    @Test("a drained child that never exits ends the idle after the attempt budget")
+    func aDrainedChildThatNeverExitsStopsTheWatchAfterTheBudget() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6610, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.denyOnce()
+        fixture.identity.admit(pid: 6610, startTime: proxy.processStartTime)
+        await fixture.spawner.answer(.success(pid: 6610, port: proxy.port))
+
+        let supervisor = fixture.supervisor(clock: clock)
+        await supervisor.startIfEnabled()
+        try await fixture.db.config.setModelProxyEnabled(false)
+        await supervisor.beginDraining()
+        #expect(await supervisor.isWatching)
+
+        // 39 attempts is one short of the budget. `reapIfExited` reports nothing
+        // for all of them — this child never exits.
+        for _ in 1...39 {
+            try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        }
+        // The re-arm after the 39th tick is the proof that it finished, so the
+        // assertion below observes the state rather than guessing at it.
+        try await clock.requireSleeperArmed()
+        #expect(
+            await supervisor.isWatching,
+            "one attempt short of the budget, the supervisor is still waiting for the exit")
+
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        let stopped = try await waitFor(
+            "the idle to end once the attempt budget is spent",
+            { await supervisor.isWatching == false })
+
+        #expect(stopped)
+        #expect(
+            await fixture.spawner.collected().isEmpty,
+            "nothing exited, so nothing was collected — the idle ended by giving up")
+        #expect(clock.hasSleeper == false, "and it armed no further tick")
+    }
+
+    /// The corpse refusal is untouched by the idle. While the pid is pending, a
+    /// listener still answering for it is a dead port with no branch left that
+    /// would revise it — `kill(pid, 0)` succeeds on a zombie and the fake here
+    /// answers exactly as one — so a supervisor restarted mid-idle has to spawn
+    /// afresh rather than take it back.
+    ///
+    /// Discriminating half: `isWatching` after the drain, which is false in the
+    /// pre-fix code because the retire stopped the watch there.
+    @Test("a restart during the reap idle refuses to adopt the corpse")
+    func aRestartDuringTheReapIdleRefusesTheCorpse() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6620, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.denyOnce()
+        fixture.identity.admit(pid: 6620, startTime: proxy.processStartTime)
+        await fixture.spawner.answer(.success(pid: 6620, port: proxy.port))
+
+        let supervisor = fixture.supervisor()
+        await supervisor.startIfEnabled()
+        try await fixture.db.config.setModelProxyEnabled(false)
+        await supervisor.beginDraining()
+        #expect(await supervisor.isWatching, "the drop queued a child, so the idle is running")
+
+        // A daemon shutdown lands in the middle of the idle, and the daemon that
+        // replaces it starts over. Nothing is advanced across it: the question is
+        // what `start()` decides, not what a later tick corrects.
+        await supervisor.stop()
+        await fixture.spawner.answer(.success(pid: 6621, port: SupervisorFixture.deadPort))
+        await supervisor.start()
+
+        #expect(await supervisor.current?.pid == 6621, "the corpse must not be adopted back")
+        #expect(await supervisor.current?.adopted == false)
+        await supervisor.stop()
+    }
+
+    /// The flag coming back on during the idle is a return to normal service
+    /// through the watch that is already running: the mode is left, `start()`
+    /// finds the supervisor already started and does nothing, and the tick the
+    /// idle had already armed reconciles a fresh proxy.
+    ///
+    /// **One watch task, and the assertion says so.** A second one would tick
+    /// this supervisor twice for the rest of the daemon's life — two status
+    /// polls per interval, two reconciles racing each other for the port.
+    ///
+    /// Discriminates twice against the pre-fix code, where the retire left no
+    /// watch and `startIfEnabled` therefore ran the whole startup algorithm
+    /// itself: the proxy would be current before any tick, and `isWatching`
+    /// after the drain is false.
+    @Test("the flag coming back on during the reap idle resumes on the same watch")
+    func theFlagComingBackOnDuringTheReapIdleResumesNormalService() async throws {
+        let fixture = try SupervisorFixture.make()
+        defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
+        let spawner = fixture.spawner
+
+        let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 6630, home: fixture.home)
+        defer { proxy.stop() }
+        try await fixture.db.config.setModelProxyPort(proxy.port)
+        try await fixture.db.config.setModelProxyEnabled(true)
+        fixture.identity.denyOnce()
+        fixture.identity.admit(pid: 6630, startTime: proxy.processStartTime)
+        await fixture.spawner.answer(.success(pid: 6630, port: proxy.port))
+
+        let supervisor = fixture.supervisor(clock: clock)
+        await supervisor.startIfEnabled()
+        try await fixture.db.config.setModelProxyEnabled(false)
+        await supervisor.beginDraining()
+        #expect(await supervisor.isWatching)
+
+        // The user changes their mind while the corpse is still uncollected. The
+        // successor is spawned on a dead port: this case is about which task does
+        // the spawning, and a second listener would only add a probe to it.
+        await fixture.spawner.answer(.success(pid: 6631, port: SupervisorFixture.deadPort))
+        try await fixture.db.config.setModelProxyEnabled(true)
+        await supervisor.startIfEnabled()
+        #expect(
+            await supervisor.current == nil,
+            "the running watch does the reconcile; the flip must not start a second startup")
+
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        let resumed = try await waitFor(
+            "the resumed watch to reconcile a fresh proxy",
+            observed: { "spawn calls \(await spawner.calls())" },
+            { await supervisor.current?.pid == 6631 })
+        try await clock.requireSleeperArmed()
+
+        #expect(resumed)
+        #expect(clock.sleeperCount == 1, "one watch task, so one sleeper — not two")
+        #expect(
+            await fixture.spawner.calls() == [proxy.port, proxy.port],
+            "the successor asks for the port the retired proxy held")
+        await supervisor.stop()
+    }
+
     // MARK: - The drain's own races
 
     /// **The window Important 1 of the final review found.** The immediate
