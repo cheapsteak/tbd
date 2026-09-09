@@ -3016,23 +3016,20 @@ extension RPCRouter {
         // a row and a refusal outcome, unlike a malformed payload that names
         // no act.
         if terminal.transport == .holder {
-            // ─── What the holder arm cannot carry yet ───
+            // ─── What the holder arm cannot frame in one write ───
             //
             // Computed ahead of the call to `performHolderSend` below so that
-            // function sees only payloads it can deliver, and so nothing
-            // inside that arm changes: PR #816 owns it.
+            // function sees only payloads it can deliver. A single body of
+            // text — one line or many — composes into the holder's one write
+            // cleanly, wrapped in bracketed paste when the child's mode calls
+            // for it. What has no single-write framing yet is a message that is
+            // more than one body: several parts, or a lone image whose write
+            // would also have to carry the dispatch envelope. See
+            // `holderCompositeRefusal`.
             let compositeCause: String?
             switch payload {
             case .parts(let parts, _) where parts.count > 1:
                 compositeCause = "a message in more than one part"
-            case .parts(let parts, _)
-                where parts.contains(where: { part in
-                    if case .text(let value) = part { return value.contains("\n") }
-                    return false
-                }):
-                compositeCause = "a message containing a newline"
-            case .text(let body, _, _) where body.contains("\n"):
-                compositeCause = "a message containing a newline"
             case .parts, .text, .keys:
                 compositeCause = nil
             }
