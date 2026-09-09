@@ -294,6 +294,20 @@ extension ModelProxySuites {
                         // The "no stream was cut" half of the test does not come out
                         // of this wait either: it is the in-flight count above and
                         // the six events below.
+                        //
+                        // **Thirty, and deliberately not `TestDeadlines
+                        // .saturatedPass`**, which `Tests/CLAUDE.md` otherwise
+                        // asks of every bounded wait in a fast-pass target. This
+                        // one is coupled to a resource it does not own: the
+                        // response the drain below reads is still open on
+                        // `harness.session`, whose `timeoutIntervalForResource` is
+                        // 30 seconds (`withProxy`). A bind wait allowed to run
+                        // past that kills the stream it is holding up, and turns
+                        // one diagnosed failure into a second, unrelated one —
+                        // which is the cascade the skip-when-not-free check above
+                        // was added to stop. Raising this number means raising
+                        // that one too, for every test the harness serves; until
+                        // then the pair moves together or not at all.
                         let poll = await pollUntilTrue(
                             timeout: .seconds(30), pollInterval: .milliseconds(50)
                         ) {
