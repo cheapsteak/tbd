@@ -289,6 +289,14 @@ extension WorktreeLifecycle {
     /// killed directly leaves the row untouched, and nothing else here would
     /// notice. A spawn that recorded no child pid answers on the row alone
     /// rather than reporting a dead tab it cannot see.
+    ///
+    /// **Only a nil result means the tab is gone.** A read that THREW says
+    /// nothing about the row, and reading it as a deletion would report
+    /// `.paneKilled` for a hook that is still running — after which phase 3
+    /// starts the primary agent on a tree the hook has not finished preparing.
+    /// A transient database error is answered "assume alive", the same way the
+    /// worktree-row existence check in `runPreSessionPhase3` answers it, so the
+    /// wait simply continues and the next poll asks again.
     private func hookTerminalIsAlive(
         preSession: PreSessionSpawn, tmuxServer: String
     ) async -> Bool {
@@ -297,9 +305,14 @@ extension WorktreeLifecycle {
             return await tmux.windowExists(
                 server: tmuxServer, windowID: preSession.windowID)
         case .holder:
-            guard (try? await db.terminals.get(id: preSession.terminalID)) != nil else {
-                return false
+            let row: Terminal?
+            do {
+                row = try await db.terminals.get(id: preSession.terminalID)
+            } catch {
+                logger.warning("hook terminal \(preSession.terminalID, privacy: .public) liveness check failed: \(error.localizedDescription, privacy: .public) — assuming its tab is still there and continuing the wait")
+                return true
             }
+            guard row != nil else { return false }
             guard let childPID = preSession.childPID else { return true }
             return processSignaller.isAlive(childPID)
         }
@@ -407,7 +420,10 @@ extension WorktreeLifecycle {
                 // be named, and the descriptor phase 2b returned is where they
                 // are. A hook tab is never routed through the model proxy, so
                 // there is no route to retire here.
-                await abandonHookHolder(preSession)
+                await abandonHookHolder(
+                    terminalID: preSession.terminalID,
+                    holderPID: preSession.holderPID,
+                    childPID: preSession.childPID)
             }
             return
         }
@@ -519,36 +535,86 @@ extension WorktreeLifecycle {
     /// Best-effort: a failure here must never take down the worktree, whose
     /// checkout and agent terminals are already valid.
     func closePreSessionTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
+        await closeHookTerminal(worktree: worktree, preSession: preSession)
+    }
+
+    /// Shared hook-tab teardown (pre-session and auto-closed setup tabs), from
+    /// the descriptor the tab's spawn returned.
+    ///
+    /// The row is the authority on the transport for as long as it can be read;
+    /// the descriptor answers when it cannot. Both halves are load-bearing. A
+    /// row that has already been deleted — or one whose read threw — would
+    /// otherwise fall into the tmux arm and issue `kill-window` against a
+    /// `windowID` that is the empty string for a holder tab, while the holder,
+    /// the job it forked and its rendezvous files outlive the only record of
+    /// their pids. The descriptor is where those pids are, which is why the
+    /// rowless case is reclaimable at all.
+    func closeHookTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
         await closeHookTerminal(
             worktree: worktree,
             tmuxServer: preSession.tmuxServer,
             terminalID: preSession.terminalID,
-            windowID: preSession.windowID
+            windowID: preSession.windowID,
+            unreadableRowTransport: preSession.transport,
+            holderPID: preSession.holderPID,
+            childPID: preSession.childPID
         )
     }
 
-    /// Shared hook-tab teardown (pre-session and auto-closed setup tabs):
-    /// kill the tmux window, delete the terminal + tab rows, prune the tab
-    /// from the persisted tab order, broadcast `.terminalRemoved`. The prune
-    /// is a no-op on the create-success path (the primary spawn already set
-    /// an order without the hook tab) and keeps the stored order consistent
-    /// on the paths that appended the tab (manual re-run, setup auto-close).
+    /// The tmux spelling, for a caller holding tmux coordinates rather than a
+    /// descriptor: a row it cannot read can only have been the tmux tab those
+    /// coordinates describe.
     func closeHookTerminal(
         worktree: Worktree, tmuxServer: String, terminalID: UUID, windowID: String
     ) async {
+        await closeHookTerminal(
+            worktree: worktree,
+            tmuxServer: tmuxServer,
+            terminalID: terminalID,
+            windowID: windowID,
+            unreadableRowTransport: .tmux,
+            holderPID: nil,
+            childPID: nil
+        )
+    }
+
+    /// The teardown itself: tear the session down in the terms its transport
+    /// uses, delete the terminal + tab rows, prune the tab from the persisted
+    /// tab order, broadcast `.terminalRemoved`. The prune is a no-op on the
+    /// create-success path (the primary spawn already set an order without the
+    /// hook tab) and keeps the stored order consistent on the paths that
+    /// appended the tab (manual re-run, setup auto-close).
+    private func closeHookTerminal(
+        worktree: Worktree,
+        tmuxServer: String,
+        terminalID: UUID,
+        windowID: String,
+        unreadableRowTransport: TerminalTransport,
+        holderPID: Int32?,
+        childPID: Int32?
+    ) async {
         let terminal = try? await db.terminals.get(id: terminalID)
-        if let terminal, terminal.transport == .holder {
+        switch terminal?.transport ?? unreadableRowTransport {
+        case .holder:
             // No Closed Terminals capture for a holder hook tab: the holder has
             // no scrollback dump yet (issue #851 §4, Phase 2 item "Closed-
             // terminal history on holder dispose"), which is exactly what
             // `disposeHolder` already does on every other teardown of a holder
-            // row. The kill below would be worse than a no-op here — a holder
+            // row. The tmux kill would be worse than a no-op here — a holder
             // row's `windowID` names nothing, and the holder, its job and its
             // rendezvous files would outlive the row that is their only record.
-            if let left = await disposeHolder(for: terminal) {
-                logger.warning("hook terminal \(terminalID, privacy: .public) holder teardown incomplete: \(left, privacy: .public)")
+            if let terminal {
+                if let left = await disposeHolder(for: terminal) {
+                    logger.warning("hook terminal \(terminalID, privacy: .public) holder teardown incomplete: \(left, privacy: .public)")
+                }
+            } else {
+                // No row to read the pids back from, so the descriptor's own
+                // pids are all there is — the same reclaim phase 3 does when a
+                // cascading worktree delete takes the terminal row with it.
+                await abandonHookHolder(
+                    terminalID: terminalID, holderPID: holderPID, childPID: childPID)
             }
-        } else {
+        case .tmux:
             // Preserve the hook tab's output before the window dies so a user
             // can read an auto-closed setup/pre-session run later (Session
             // History → Closed Terminals). Best-effort: captureOnClose logs
@@ -584,17 +650,17 @@ extension WorktreeLifecycle {
     /// the pids off a row that no longer exists. A daemon with no registry is
     /// reported rather than passed over — it is exactly the daemon whose holder
     /// and job nothing else would ever find.
-    private func abandonHookHolder(_ preSession: PreSessionSpawn) async {
+    private func abandonHookHolder(
+        terminalID: UUID, holderPID: Int32?, childPID: Int32?
+    ) async {
         guard let holderRegistry else {
-            logger.warning("phase-3: hook terminal \(preSession.terminalID, privacy: .public) runs on the holder transport but this daemon has no holder registry, so its holder and job were left running")
+            logger.warning("hook terminal \(terminalID, privacy: .public) runs on the holder transport but this daemon has no holder registry, so its holder and job were left running")
             return
         }
         if let left = await holderRegistry.abandon(
-            terminalID: preSession.terminalID,
-            holderPID: preSession.holderPID,
-            childPID: preSession.childPID
+            terminalID: terminalID, holderPID: holderPID, childPID: childPID
         ) {
-            logger.warning("phase-3: hook terminal \(preSession.terminalID, privacy: .public) holder teardown incomplete: \(left, privacy: .public)")
+            logger.warning("hook terminal \(terminalID, privacy: .public) holder teardown incomplete: \(left, privacy: .public)")
         }
     }
 

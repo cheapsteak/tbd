@@ -60,12 +60,7 @@ extension WorktreeLifecycle {
         switch outcome {
         case .completed(exitCode: 0):
             logger.info("setup hook completed cleanly for worktree \(worktree.id, privacy: .public) — closing its tab")
-            await closeHookTerminal(
-                worktree: worktree,
-                tmuxServer: setup.tmuxServer,
-                terminalID: setup.terminalID,
-                windowID: setup.windowID
-            )
+            await closeHookTerminal(worktree: worktree, preSession: setup)
         case .completed(let exitCode):
             logger.info("setup hook failed (exit \(exitCode, privacy: .public)) for worktree \(worktree.id, privacy: .public) — leaving its tab open")
         case .timedOut:

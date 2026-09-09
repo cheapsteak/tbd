@@ -280,6 +280,14 @@ struct ForkSwapTransportGateTests {
                 terminalID: holderSource.id, newProfileID: nil, mode: .inPlace)))
 
         #expect(!response.success)
+        // The refusal itself, not merely a failure: `.inPlace` on a holder row
+        // has several other ways to fail (an unresolvable profile, a missing
+        // source session), and only this text says the transport was what
+        // stopped it.
+        #expect(
+            response.error?.contains(
+                RPCRouter.holderInPlaceSwapRefusal(terminalID: holderSource.id)) == true,
+            "the swap failed for some other reason: \(response.error ?? "success")")
         #expect(fixture.recorder.count("new-window") == 0)
     }
 }

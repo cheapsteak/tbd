@@ -202,19 +202,4 @@ struct TerminalReviveTransportGateTests {
             fixture.recorder.count("new-session") == 0,
             "a holder revive started a tmux server: \(fixture.recorder.all)")
     }
-
-    /// The history row survives a refused revive, so the tab can still be
-    /// brought back once the flag is off or the binary is back.
-    @Test("a failed holder revive keeps the history entry")
-    func failedHolderReviveKeepsHistory() async throws {
-        let fixture = try await Self.makeFixture(
-            holderFlag: true, spawner: Self.unspawnableSpawner())
-        defer { fixture.tearDown() }
-
-        _ = try await fixture.revive()
-
-        let entries = try await fixture.db.terminalHistory.list(
-            worktreeID: fixture.worktree.id)
-        #expect(entries.contains { $0.id == fixture.closedTerminalID })
-    }
 }

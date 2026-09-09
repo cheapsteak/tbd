@@ -423,8 +423,9 @@ struct HolderSpawnGateTests {
     /// first, and the probe's clock is immediate, so a recapture armed for it
     /// would have recorded its pane before the tmux control's did; observing
     /// the control's write is therefore proof that the holder's absence is real
-    /// and not merely early. The pane list is asserted whole rather than
-    /// searched, so a holder pane appearing alongside the tmux one still fails.
+    /// and not merely early. The target list is asserted whole rather than
+    /// searched, so a recapture armed for the holder session alongside the tmux
+    /// one still fails — whichever coordinate it was given.
     @Test func recaptureIsScheduledForTmuxSessionsAndNotForHolderOnes() async throws {
         let recapture = RecaptureProbe()
         let fixture = try await GateFixture.make(flagEnabled: true, recapture: recapture)
@@ -459,7 +460,9 @@ struct HolderSpawnGateTests {
                 == RecaptureProbe.detectedSessionID
         }
         #expect(landed)
-        #expect(recapture.panes == [tmuxRow.tmuxPaneID])
+        #expect(recapture.targets == [
+            .tmuxPane(server: fixture.worktree.tmuxServer, paneID: tmuxRow.tmuxPaneID)
+        ])
 
         let holderAfter = try #require(try await fixture.db.terminals.get(id: holderID))
         #expect(
@@ -709,6 +712,122 @@ struct HolderSpawnGateTests {
         #expect(
             !issued.contains(where: { $0.contains("new-window") }),
             "the setup hook tab created a tmux window: \(issued)")
+    }
+
+    /// Setup auto-close on the holder: the tab closes, and closing it reclaims
+    /// the holder instead of addressing a tmux window that never existed.
+    ///
+    /// Three facts, and the two after the row are what a row assertion alone
+    /// would miss. `remain-on-exit` must never be issued: it is a tmux
+    /// property, and the reason for setting it — keep the dead pane so the
+    /// teardown can capture its scrollback — has no holder counterpart, because
+    /// a holder teardown captures nothing. Then the job must be dead and the
+    /// rendezvous socket gone, which together say `closeHookTerminal` reached
+    /// `disposeHolder`: a teardown that deleted the row through the tmux arm
+    /// would satisfy every assertion about the row while leaving a holder, a
+    /// job and a socket that nothing names any more.
+    ///
+    /// The other arm of that same `remain-on-exit` decision is
+    /// `AutoCloseSetupTests.flagOnCleanExitClosesSetupTab`, which asserts the
+    /// property is set exactly once and targets the setup window.
+    @Test func setupAutoCloseOnTheHolderClosesTheTabAndReclaimsItsHolder() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: true)
+        defer { fixture.tearDown() }
+        try await fixture.db.config.setAutoCloseSetup(enabled: true)
+        try fixture.installWorktreeHook(.setup)
+
+        let created = try await fixture.spawnPrimaryTerminals()
+
+        #expect(created.count == 2)
+        #expect(created[1].label == TerminalLabel.setup)
+        let setup = try #require(try await fixture.db.terminals.get(id: created[1].id))
+        #expect(setup.transport == .holder)
+        let holderPID = try #require(setup.holderPID)
+        let childPID = try #require(setup.childPID)
+        #expect(holderPID != childPID)
+        #expect(holderProcessIsAlive(holderPID))
+        #expect(holderProcessIsAlive(childPID))
+
+        let socketPath = try HolderRendezvous.socketPath(
+            sessionID: setup.id, environment: fixture.environment)
+        #expect(
+            FileManager.default.fileExists(atPath: socketPath),
+            "no holder rendezvous at \(socketPath) for an auto-closing setup tab")
+
+        let issued = fixture.tmuxCommands()
+        #expect(
+            !issued.contains(where: { $0.contains("remain-on-exit") }),
+            "the holder setup tab asked tmux to keep a pane it never had: \(issued)")
+        #expect(
+            !issued.contains(where: { $0.contains("new-window") }),
+            "the auto-closing setup tab created a tmux window: \(issued)")
+        #expect(
+            !issued.contains(where: { $0.contains("new-session") }),
+            "the auto-closing setup tab started a tmux server: \(issued)")
+
+        // Stand in for the hook's clean exit: the job is the pinned gate shell,
+        // which ignores the wrapper's argv, so the marker never lands on its
+        // own. The spawn deleted any stale one, so this goes after it.
+        try fixture.writeHookMarker(
+            at: WorktreeLifecycle.setupMarkerPath(worktreeID: fixture.worktree.id),
+            exitCode: 0)
+
+        let closed = try await pollUntil("the auto-closed setup tab's row to be deleted") {
+            try await fixture.db.terminals.get(id: setup.id) == nil
+        }
+        #expect(closed)
+        let jobGone = await pollUntil("the setup tab's job to be killed") {
+            !holderProcessIsAlive(childPID)
+        }
+        #expect(jobGone)
+        let socketGone = await pollUntil("the setup holder's rendezvous socket to go") {
+            !FileManager.default.fileExists(atPath: socketPath)
+        }
+        #expect(socketGone)
+    }
+
+    /// A holder-backed pre-session tab is reclaimed when the worktree row
+    /// vanishes mid-wait.
+    ///
+    /// The cascade is what makes this the hard case: it takes the terminal row
+    /// with it, so the wait returns at once AND `disposeHolder` — which reads
+    /// the pids off a row — has nothing to read. The descriptor phase 2b
+    /// returned is the only remaining route to that holder, and a dead job with
+    /// a removed rendezvous socket is the proof it was taken. No `kill-window`,
+    /// because a holder row's window id names nothing.
+    @Test func phase3ReclaimsAHolderHookTabWhenTheWorktreeRowVanishes() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: true)
+        defer { fixture.tearDown() }
+        try fixture.installWorktreeHook(.preSession)
+
+        let spawn = try #require(try await fixture.spawnPreSessionTerminal())
+        #expect(spawn.transport == .holder)
+        let childPID = try #require(spawn.childPID)
+        #expect(holderProcessIsAlive(childPID))
+        let socketPath = try HolderRendezvous.socketPath(
+            sessionID: spawn.terminalID, environment: fixture.environment)
+        #expect(FileManager.default.fileExists(atPath: socketPath))
+
+        try await fixture.deleteWorktreeRow()
+        await fixture.runPreSessionPhase3(spawn)
+
+        let remaining = try await fixture.db.terminals.list(worktreeID: fixture.worktree.id)
+        #expect(
+            remaining.isEmpty,
+            "phase 3 spawned terminals into a worktree that no longer exists")
+        let issued = fixture.tmuxCommands()
+        #expect(
+            !issued.contains(where: { $0.contains("kill-window") }),
+            "the holder hook tab was torn down through tmux: \(issued)")
+
+        let jobGone = await pollUntil("the hook tab's job to be killed") {
+            !holderProcessIsAlive(childPID)
+        }
+        #expect(jobGone)
+        let socketGone = await pollUntil("the hook holder's rendezvous socket to go") {
+            !FileManager.default.fileExists(atPath: socketPath)
+        }
+        #expect(socketGone)
     }
 
     /// The setup tab's other arm: with the flag off it is a tmux window, hook
@@ -982,7 +1101,15 @@ private final class GateFixture {
                 .appendingPathComponent("claude", isDirectory: true))
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: configDirManager)
+            configDirManager: configDirManager,
+            // The hook-tab waits this fixture arms are polled, not slept
+            // through: the setup auto-close watcher has to see a marker written
+            // by the test (the job here is the pinned gate shell, which ignores
+            // the wrapper's argv, so nothing writes one on its own). 0.05 keeps
+            // that turnaround off the production half-second, and the timeout is
+            // a hang bound rather than a budget anything is expected to use.
+            preSessionTimeout: 30,
+            preSessionPollInterval: 0.05)
         lifecycle.holderRegistry = registry
         if let recapture {
             lifecycle.sessionRecaptureFactory = { db, tmux in
@@ -1141,6 +1268,37 @@ private final class GateFixture {
     func spawnPreSessionTerminal() async throws -> PreSessionSpawn? {
         try await router.lifecycle.spawnPreSessionTerminal(
             worktree: worktree, repo: repo, worktreePath: worktree.localPath)
+    }
+
+    /// Phase 3 of the create path, entered with the descriptor phase 2b
+    /// returned — the marker wait, then the primary spawn or the bail-out.
+    func runPreSessionPhase3(_ spawn: PreSessionSpawn) async {
+        await router.lifecycle.runPreSessionPhase3(
+            preSession: spawn,
+            worktree: worktree, repo: repo,
+            worktreePath: worktree.localPath,
+            skipClaude: true,
+            completionAction: .markActive)
+    }
+
+    /// Writes the completion marker a hook would have written.
+    ///
+    /// Standing in for the hook is not a shortcut here: the job every holder in
+    /// this fixture runs is the pinned gate shell, which ignores the `-c`
+    /// command it is handed, so the wrapper's marker never lands on its own.
+    /// Both spawns delete a stale marker before starting, so this must be
+    /// called only after the spawn has returned.
+    func writeHookMarker(at path: String, exitCode: Int) throws {
+        try FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        try "\(exitCode)\n".write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    /// Deletes the worktree row, cascading every terminal row with it — what a
+    /// repo removal does to a worktree whose hook tab is still being waited on.
+    func deleteWorktreeRow() async throws {
+        try await db.worktrees.delete(id: worktree.id)
     }
 
     /// The `terminalHistory.revive` RPC, through the router.

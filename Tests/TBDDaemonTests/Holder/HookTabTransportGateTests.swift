@@ -29,6 +29,22 @@ struct HookTabTransportGateTests {
         HolderSpawner(executableURL: URL(fileURLWithPath: "/nonexistent/TBDHolder"))
     }
 
+    /// A signaller for which no pid is ever alive.
+    ///
+    /// Its whole job is to make one assertion discriminate: a descriptor that
+    /// recorded no child pid must answer "still there" on the row alone, and
+    /// stating the alternative as "every pid this could be asked about is dead"
+    /// leaves the probe nowhere else to get a yes from.
+    private struct AlwaysDeadProcessSignaller: ProcessSignaller {
+        func isAlive(_ pid: Int32) -> Bool { false }
+        func terminate(_ pid: Int32) {}
+        func forceKill(_ pid: Int32) {}
+        func children(ofServerPID serverPID: Int32) -> [Int32] { [] }
+        func commandLine(_ pid: Int32) -> String? { nil }
+        func stat(_ pid: Int32) -> String? { nil }
+        func startTime(_ pid: Int32) -> Date? { nil }
+    }
+
     private static func registry(spawner: HolderSpawner?, home: String) -> HolderRegistry {
         HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
@@ -208,6 +224,121 @@ struct HookTabTransportGateTests {
         #expect(outcome == .completed(exitCode: 0))
         #expect(!FileManager.default.fileExists(
             atPath: WorktreeLifecycle.preSessionMarkerPath(worktreeID: fx.worktree.id)))
+    }
+
+    /// A spawn that recorded no child pid answers on the row alone.
+    ///
+    /// `spawnTerminal` always records one, so this is a row a defect would
+    /// produce rather than one the product writes — and the safe answer to "is
+    /// a tab whose job I cannot name still running" is yes. Reading the missing
+    /// pid as a dead job would report `.paneKilled` for every such tab, and
+    /// phase 3 would then start the primary agent on a tree the hook had not
+    /// finished preparing.
+    ///
+    /// The wait therefore has to run out its budget for this to pass, which is
+    /// what the short timeout buys: nothing here can end it early, and one poll
+    /// is enough for the misreading to show.
+    @Test("a holder spawn with no child pid keeps waiting instead of reporting a killed pane")
+    func holderSpawnWithoutAChildPIDKeepsWaiting() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let fx = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
+
+        let lifecycle = makeLifecycle(
+            db: fx.db, timeout: 0.2, windowIsDead: { _ in false },
+            processSignaller: AlwaysDeadProcessSignaller())
+        let terminal = try await fx.db.terminals.create(
+            worktreeID: fx.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.preSession, kind: .shell,
+            transport: .holder, holderPID: 1111)
+
+        let outcome = await lifecycle.waitForPreSessionCompletion(
+            preSession: holderSpawnDescriptor(
+                terminalID: terminal.id, worktreeID: fx.worktree.id, childPID: nil),
+            tmuxServer: "tbd-test")
+
+        #expect(outcome == .timedOut)
+    }
+
+    /// A liveness read that THREW is not a deleted tab.
+    ///
+    /// Closing the database connection makes the row read fail rather than
+    /// answer nil — the same transient shape
+    /// `PreSessionHookTests.dbErrorDuringRowCheckDoesNotTearDownPreSessionWindow`
+    /// induces for the worktree-row check one layer up. Only nil means the tab
+    /// is gone; an error says nothing about it, and treating it as a deletion
+    /// would abandon a hook that is still running.
+    @Test("a failed row read keeps the holder wait going")
+    func failedRowReadIsNotReadAsAClosedTab() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let fx = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
+
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[9004] = .init(aliveInitially: true)
+        let lifecycle = makeLifecycle(
+            db: fx.db, timeout: 0.2, windowIsDead: { _ in false },
+            processSignaller: signaller)
+        try fx.db.writerForTests.close()
+
+        let outcome = await lifecycle.waitForPreSessionCompletion(
+            preSession: holderSpawnDescriptor(
+                terminalID: UUID(), worktreeID: fx.worktree.id, childPID: 9004),
+            tmuxServer: "tbd-test")
+
+        #expect(outcome == .timedOut, "a database error was read as a closed holder tab")
+    }
+
+    // MARK: - Abandoning a hook tab whose row is already gone
+
+    /// A holder hook tab left by a daemon with no registry is reported, and
+    /// never killed through tmux.
+    ///
+    /// This is the branch that separates the two transports on the phase-3
+    /// bail-out. The tmux arm's whole cleanup is a `kill-window`; issuing one
+    /// for a holder tab addresses the empty string, so its absence is the only
+    /// observable that says the holder arm was taken. With no registry there is
+    /// nothing left to reclaim the holder with — that is a report, not a
+    /// crash — and phase 3 must still return without spawning anything into a
+    /// worktree that no longer exists.
+    @Test("a holder hook tab with no registry is never torn down through tmux")
+    func holderHookTabWithoutARegistryIssuesNoKillWindow() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let fx = try await makeWorktreeFixture()
+        defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
+
+        let recorder = PreSessionRecordedCommands()
+        var lifecycle = makeLifecycle(db: fx.db, recorder: recorder, timeout: 2)
+        // Pinned rather than assumed: the branch under test is the one a daemon
+        // in mock mode takes, and it must stay reachable if `makeLifecycle`
+        // ever starts wiring a registry.
+        lifecycle.holderRegistry = nil
+
+        // The cascade a repo removal performs mid-wait: the worktree row goes,
+        // and every terminal row goes with it. The descriptor is what is left.
+        try await fx.db.worktrees.delete(id: fx.worktree.id)
+
+        await lifecycle.runPreSessionPhase3(
+            preSession: holderSpawnDescriptor(
+                terminalID: UUID(), worktreeID: fx.worktree.id, childPID: 2222),
+            worktree: fx.worktree, repo: fx.repo,
+            worktreePath: fx.repoDir.path,
+            skipClaude: true,
+            completionAction: .markActive)
+
+        let remaining = try await fx.db.terminals.list(worktreeID: fx.worktree.id)
+        #expect(
+            remaining.isEmpty,
+            "phase 3 created terminal rows for a worktree that no longer exists")
+        #expect(
+            !recorder.snapshot().contains { $0.contains("kill-window") },
+            "a holder hook tab was torn down through tmux: \(recorder.snapshot())")
+        #expect(
+            !recorder.snapshot().contains { $0.contains("new-window") },
+            "phase 3 spawned primaries after the row vanished: \(recorder.snapshot())")
     }
 
     // MARK: - Teardown
