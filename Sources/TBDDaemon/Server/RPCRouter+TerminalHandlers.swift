@@ -2786,17 +2786,19 @@ extension RPCRouter {
             + "--verify."
     }
 
-    /// The refusal `terminal.send --keys` returns for a holder-backed row.
+    /// The refusal `terminal.send --keys` returns when a name in the sequence
+    /// is not one the holder's named-key table knows.
     ///
-    /// Named keys are tmux key names (`Escape`, `C-c`, `Enter`), resolved by
-    /// tmux itself into the bytes a terminal expects. Writing them to a pty
-    /// master needs that table on this side, and there is no holder mapping
-    /// yet — so this refuses rather than guessing at bytes, which would type
-    /// something nobody asked for into a live session.
-    static func holderKeysRefusal(terminalID: UUID) -> String {
+    /// The names are tmux's own `send-keys` spellings (`Escape`, `C-c`,
+    /// `Enter`); `HolderNamedKeys` maps each to the bytes a child reads. A name
+    /// outside that table has no defined bytes, so the whole send is refused by
+    /// that name rather than guessing — and refused before any byte is written,
+    /// so a valid key earlier in the sequence does not land half a request.
+    static func holderUnknownKeyRefusal(terminalID: UUID, key: String) -> String {
         "terminal.send --keys was refused: terminal \(terminalID) runs on the pty-holder "
-            + "transport, which has no named-key mapping yet — nothing was sent. Send the "
-            + "literal text instead (--text, with --submit for Enter)."
+            + "transport, which has no mapping for the key name \"\(key)\" — nothing was "
+            + "sent. Check the spelling against tmux's send-keys names, or send the literal "
+            + "text instead (--text, with --submit for Enter)."
     }
 
     /// The refusal `terminal.send` returns for a holder-backed row in a daemon
@@ -3599,9 +3601,9 @@ extension RPCRouter {
             text = body
             submit = submitting
             envelopeEligible = true
-        case .keys:
-            return await refuseHolderSend(
-                actuationID, Self.holderKeysRefusal(terminalID: terminal.id))
+        case .keys(let names, _):
+            return await deliverHolderKeys(
+                names: names, terminal: terminal, actuationID: actuationID, courier: courier)
         case .parts(let parts, let submitting) where parts.count == 1:
             // Shape-valid and NOT composite — `performTerminalSend`'s
             // `holderCompositeRefusal` gate already turned away a multi-part or
@@ -3747,6 +3749,71 @@ extension RPCRouter {
                 modesObserved: modesObserved)
             return RPCResponse(error: reason)
         }
+    }
+
+    /// Deliver a named-key sequence to a holder-backed row, paced.
+    ///
+    /// The mode reading is taken once, up front, for the same reason the text
+    /// path takes it: the cursor-key family's bytes depend on DECCKM, so the
+    /// answer must be the same for every key in the sequence. Every name is
+    /// resolved against that one reading before any byte is written, so an
+    /// unknown name refuses the whole send having typed nothing — a valid
+    /// `Enter` ahead of a misspelled key never lands half a request.
+    ///
+    /// Past that gate the pacing is `PacedKeySender`'s, one key at a time, and
+    /// each key is one courier write: a single-byte control (`ESC`, `C-c`) in
+    /// its own write, a multi-byte sequence (`ESC O A`) contiguous. The first
+    /// write the courier cannot make stops the sequence and is recorded as a
+    /// transport failure, matching the text path — a partial send is never
+    /// dressed up as success.
+    private func deliverHolderKeys(
+        names: [String], terminal: Terminal, actuationID: String,
+        courier: HolderInjectionCourier
+    ) async -> RPCResponse {
+        let reading = await holderModeReading(terminalID: terminal.id)
+        let modeSource = reading.map { ActuationModeSource($0.source) } ?? .unavailable
+        let modeAge = reading?.ageMilliseconds
+        let modesObserved = reading?.modesObserved
+        let modes = reading?.modes
+
+        // Validate the whole sequence before writing a byte: an unknown name
+        // refuses the send by that name and records a refusal, not a transport
+        // failure — nothing was attempted against the transport.
+        for name in names where HolderNamedKeys.bytes(for: name, modes: modes) == nil {
+            return await refuseHolderSend(
+                actuationID, Self.holderUnknownKeyRefusal(terminalID: terminal.id, key: name))
+        }
+
+        do {
+            try await pacedKeySender.send(names) { key in
+                // Unreachable after the validation above — the modes captured
+                // here are the same reading — but the closure must resolve to
+                // bytes, and a defensive throw beats a force-unwrap.
+                guard let bytes = HolderNamedKeys.bytes(for: key, modes: modes) else {
+                    throw HolderInjectionFailure(
+                        reason: "no holder byte mapping for key \(key)")
+                }
+                switch await courier.deliver(terminalID: terminal.id, bytes: bytes) {
+                case .viewerWrote, .daemonWrote:
+                    return
+                case .notDelivered(let reason):
+                    throw HolderInjectionFailure(reason: reason)
+                }
+            }
+        } catch {
+            let reason = (error as? HolderInjectionFailure)?.reason ?? "\(error)"
+            await finishActuation(
+                actuationID, .transportFailed, error: reason,
+                modeSource: modeSource, modeAgeMilliseconds: modeAge,
+                modesObserved: modesObserved)
+            return RPCResponse(error: reason)
+        }
+
+        await finishActuation(
+            actuationID, .dispatched,
+            modeSource: modeSource, modeAgeMilliseconds: modeAge,
+            modesObserved: modesObserved)
+        return .ok()
     }
 
     /// What the child's modes are, as best this daemon can say.
@@ -5196,4 +5263,9 @@ extension RPCRouter {
             text: params.includeBody ? (detail.text ?? "Output no longer available.") : "",
             attachment: detail.attachment))
     }
+}
+
+private struct HolderInjectionFailure: LocalizedError {
+    let reason: String
+    var errorDescription: String? { reason }
 }

@@ -134,7 +134,7 @@ struct TerminalSend: AsyncParsableCommand {
                                   standing unless --submit is also passed.
               --text "…" --submit  the message, submitted. This is the pair every
                                   delivery uses.
-              --keys "Escape Enter"  whitespace-separated tmux key names, sent one
+              --keys "Escape Enter"  whitespace-separated key names, sent one
                                   at a time. Interrupt is a keys payload
                                   (--keys "C-c"). Enter is itself a key, so
                                   --submit does not apply here.
@@ -164,7 +164,7 @@ struct TerminalSend: AsyncParsableCommand {
     @Option(name: .long, help: "Text to send")
     var text: String?
 
-    @Option(name: .long, help: "Whitespace-separated tmux key names to send, e.g. \"Escape Enter\" or \"C-c\"")
+    @Option(name: .long, help: "Whitespace-separated key names to send, e.g. \"Escape Enter\" or \"C-c\"")
     var keys: String?
 
     @Flag(name: .long, help: "Press Enter after sending text")

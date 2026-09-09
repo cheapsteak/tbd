@@ -1531,6 +1531,7 @@ struct HolderTmuxAssumptionGateTests {
     /// live; this is how the composition's own branches are pinned.
     private func oracle(
         bracketedPaste: Bool,
+        applicationCursor: Bool = false,
         modesObserved: Bool = true,
         source: TerminalScreen.Source = .daemon,
         ageMilliseconds: Int = 0
@@ -1539,7 +1540,7 @@ struct HolderTmuxAssumptionGateTests {
             TerminalModeReading(
                 modes: TerminalScreen.ChildModes(
                     bracketedPaste: bracketedPaste,
-                    applicationCursor: false,
+                    applicationCursor: applicationCursor,
                     alternateScreen: false),
                 modesObserved: modesObserved,
                 source: source,
@@ -1837,8 +1838,42 @@ struct HolderTmuxAssumptionGateTests {
         #expect(recorded.snapshot().isEmpty)
     }
 
-    @Test("terminal.send --keys refuses a holder row by naming the missing key mapping")
-    func sendKeysRefusesHolderRow() async throws {
+    @Test("terminal.send --keys types the mode-independent keys as their fixed bytes")
+    func sendKeysTypesFixedBytesIntoHolderRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let writes = HolderWrites()
+
+        // No oracle and no registry: nothing can answer the child's modes. That
+        // is the point — `Escape` and `Enter` are one fixed sequence in every
+        // mode, so a mode-blind daemon still types them exactly, and the send
+        // records itself as a guess made blind rather than refusing.
+        let rpc = router(db, tmux: tmux)
+        rpc.holderInjectionCourier = writes.courier()
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(terminalID: terminal.id, keys: "Escape Enter")))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        // Two keys, two writes, in order: `ESC` then carriage return. Each key
+        // is its own courier write — a paced sequence, not one concatenated
+        // blob — so the child sees the same boundaries a keyboard would give it.
+        #expect(writes.all == [Data([0x1b]), Data([0x0d])],
+                "expected ESC then CR as two writes, got \(writes.all.map({ Array($0) }))")
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["result"] as? String == "dispatched")
+        #expect(outcome["modeSource"] as? String == "unavailable")
+        #expect(recorded.snapshot().isEmpty,
+                "terminal.send --keys reached tmux for a holder row: \(recorded.snapshot())")
+    }
+
+    @Test("terminal.send --keys sends the cursor keys in SS3 form under application-cursor mode")
+    func sendKeysUpUsesApplicationCursorForm() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -1850,12 +1885,72 @@ struct HolderTmuxAssumptionGateTests {
 
         let rpc = router(db, tmux: tmux)
         rpc.holderInjectionCourier = writes.courier()
+        rpc.holderModeOracle = oracle(bracketedPaste: false, applicationCursor: true)
         let response = await rpc.handle(try RPCRequest(
             method: RPCMethod.terminalSend,
-            params: TerminalSendParams(terminalID: terminal.id, keys: "Escape Enter")))
+            params: TerminalSendParams(terminalID: terminal.id, keys: "Up")))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        // DECCKM on: the child asked for SS3, so `Up` is `ESC O A` and nothing
+        // else. `0x4f` is `O`, `0x41` is `A`.
+        #expect(writes.all == [Data([0x1b, 0x4f, 0x41])],
+                "expected ESC O A, got \(writes.all.map({ Array($0) }))")
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["result"] as? String == "dispatched")
+        #expect(recorded.snapshot().isEmpty)
+    }
+
+    @Test("terminal.send --keys sends the cursor keys in CSI form without application-cursor mode")
+    func sendKeysUpUsesCsiFormWithoutApplicationCursor() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: tmux)
+        rpc.holderInjectionCourier = writes.courier()
+        rpc.holderModeOracle = oracle(bracketedPaste: false, applicationCursor: false)
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(terminalID: terminal.id, keys: "Up")))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        // DECCKM off — a shell at its prompt: `Up` is the CSI form `ESC [ A`.
+        // `0x5b` is `[`.
+        #expect(writes.all == [Data([0x1b, 0x5b, 0x41])],
+                "expected ESC [ A, got \(writes.all.map({ Array($0) }))")
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["result"] as? String == "dispatched")
+        #expect(recorded.snapshot().isEmpty)
+    }
+
+    @Test("terminal.send --keys refuses an unknown key name, having written nothing")
+    func sendKeysRefusesUnknownKeyName() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: tmux)
+        rpc.holderInjectionCourier = writes.courier()
+        // `Escape` is a valid name, `Bogus` is not. The whole send is refused
+        // by the unknown name — nothing is typed, not even the valid key ahead
+        // of it, so a bad request never lands half a sequence.
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(terminalID: terminal.id, keys: "Escape Bogus")))
 
         #expect(!response.success)
-        #expect(response.error == RPCRouter.holderKeysRefusal(terminalID: terminal.id))
+        #expect(response.error
+            == RPCRouter.holderUnknownKeyRefusal(terminalID: terminal.id, key: "Bogus"))
         #expect(writes.all.isEmpty, "a refused key send must type nothing")
         #expect(recorded.snapshot().isEmpty)
     }
