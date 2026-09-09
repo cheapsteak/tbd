@@ -146,6 +146,10 @@ struct ForkSwapTransportGateTests {
         // A live tmux Claude tab with a NON-blank transcript: a blank session
         // plans `.fresh`, which schedules no recapture at all, and the target
         // is what this suite is about.
+        // `fencedScratchRoot` mints a path and creates nothing; the atomic
+        // write below needs the directory to exist.
+        try FileManager.default.createDirectory(
+            atPath: home, withIntermediateDirectories: true)
         let transcript = (home as NSString).appendingPathComponent("source.jsonl")
         try #"{"type":"user","message":{"content":"fork this"}}"#
             .write(toFile: transcript, atomically: true, encoding: .utf8)
