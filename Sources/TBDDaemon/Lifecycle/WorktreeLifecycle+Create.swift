@@ -1347,18 +1347,22 @@ extension WorktreeLifecycle {
         // and another for an extra one. See `TerminalSpawnTransport.decide`.
         let transport = TerminalSpawnTransport.decide(config: config, registry: holderRegistry)
 
-        // The tmux server is ensured LAZILY on the holder path, and eagerly —
-        // in exactly the place it always was — on the tmux path.
+        // The tmux server is ensured for the tmux transport and not at all for
+        // the holder one.
         //
         // That asymmetry is the point of the transport. A holder-backed session
-        // needs no tmux server at all, and calling `ensureServer` anyway would
+        // needs no tmux server, and calling `ensureServer` anyway would
         // resurrect the very resource this design exists to remove: a server
-        // process, its socket, and a window nobody reads. But the setup-hook
-        // terminal below is still tmux for Milestone A, so the holder path can
-        // still end up needing one — and when it does, it must get the same
-        // server, the same control-mode wiring, and the same untracked-initial-
-        // window cleanup the tmux path gets. Hence one memoized ensure rather
-        // than two spellings that could drift.
+        // process, its socket, and a window nobody reads. Every tab this
+        // function opens — the primary, the setup-hook tab, the archived-
+        // session restores — is born onto the transport the gate chose, so on
+        // the holder path nothing below asks for a server.
+        //
+        // The ensure stays memoized because the tmux path reaches it from more
+        // than one place: eagerly here, and again from the restore loop, which
+        // must get the same server, the same control-mode wiring and the same
+        // untracked-initial-window cleanup rather than a second spelling that
+        // could drift.
         var initialWindowID: String?
         var tmuxServerEnsured = false
         func ensureTmuxServerOnce() async throws {
@@ -1679,21 +1683,20 @@ extension WorktreeLifecycle {
                 TBDConstants.hookPath(repoID: $0, eventName: HookEvent.setup.rawValue)
             }
         )
-        // The setup terminal stays on tmux for Milestone A, whatever the
-        // primary's transport. It is a hook runner, not an agent surface, and
-        // moving it would mean a second holder per worktree before anything has
-        // soaked one.
+        // The setup tab is born onto the same transport as the primary, through
+        // the same gate and the same spawn.
         //
-        // The cost is that on the holder path it is the ONLY thing that wants a
-        // tmux server. So it is spawned there only when the repo actually has a
-        // setup hook: without one this tab is a bare shell, and starting a tmux
-        // server, a session and a window for a bare shell is exactly the cost
-        // the transport exists to remove. On the tmux path the server exists
+        // On the holder it is spawned only when the repo actually has a setup
+        // hook: without one this tab is a bare shell, and a second holder
+        // process for a bare shell nobody asked for is exactly the cost the
+        // transport exists to remove. On the tmux path the server exists
         // regardless and the tab is created unconditionally, as it always has
         // been — the flag must not change what the flag-off path does.
         let wantsSetupTerminal = repo != nil && (!transport.isHolder || setupHookPath != nil)
         if let repo, wantsSetupTerminal {
-            try await ensureTmuxServerOnce()
+            if !transport.isHolder {
+                try await ensureTmuxServerOnce()
+            }
             let plannedTerminalID2 = UUID()
             createdTerminalIDs.append(plannedTerminalID2)
             let setupCommand: String
@@ -1732,49 +1735,52 @@ extension WorktreeLifecycle {
                 "TBD_REPO_PATH": repo.path,
                 "TBD_BRANCH": worktree.branch,
             ]
-            let window2 = try await tmux.createWindow(
-                server: tmuxServer,
-                session: "main",
-                cwd: worktreePath,
-                shellCommand: setupCommand,
+            let setupTerminal = try await spawnTerminal(
+                id: plannedTerminalID2,
+                worktreeID: worktreeID,
+                tmuxServer: tmuxServer,
+                workingDirectory: worktreePath,
+                command: setupCommand,
                 env: setupEnv,
                 sensitiveEnv: setupSensitiveEnv,
                 cols: resolvedCols,
-                rows: resolvedRows
-            )
-            do {
-                _ = try await db.terminals.create(
-                    id: plannedTerminalID2,
-                    worktreeID: worktreeID,
-                    tmuxWindowID: window2.windowID,
-                    tmuxPaneID: window2.paneID,
-                    label: TerminalLabel.setup,
-                    kind: .shell
-                )
-            } catch {
-                try? await tmux.killWindow(server: tmuxServer, windowID: window2.windowID)
-                throw error
-            }
+                rows: resolvedRows,
+                label: TerminalLabel.setup,
+                claudeSessionID: nil,
+                profileID: nil,
+                kind: .shell,
+                transport: transport,
+                attachment: nil,
+                modelProxySupervisor: modelProxySupervisor)
             createdTerminals.append((id: plannedTerminalID2, label: TerminalLabel.setup))
             if let setupMarkerPath, let setupHookPath {
-                // The auto-close wrapper lets the pane EXIT on hook success,
-                // and tmux destroys the window the instant it does — before
-                // the watcher's teardown can capture the scrollback for
+                // `remain-on-exit` is a tmux property and only tmux needs it:
+                // the auto-close wrapper lets the pane EXIT on hook success and
+                // tmux destroys the window the instant it does, before the
+                // watcher's teardown can capture the scrollback for
                 // closed-terminal history. Keep the dead pane around; the
-                // teardown's killWindow removes it after capturing.
+                // teardown's killWindow removes it after capturing. On the
+                // holder that teardown captures nothing at all (see
+                // `closeHookTerminal`), so nothing there needs a dead job kept.
                 // Best-effort: a failure only costs the captured history.
-                do {
-                    try await tmux.setRemainOnExit(server: tmuxServer, windowID: window2.windowID)
-                } catch {
-                    logger.warning("setup auto-close: remain-on-exit failed for window \(window2.windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                if !transport.isHolder {
+                    do {
+                        try await tmux.setRemainOnExit(
+                            server: tmuxServer, windowID: setupTerminal.tmuxWindowID)
+                    } catch {
+                        logger.warning("setup auto-close: remain-on-exit failed for window \(setupTerminal.tmuxWindowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
                 }
                 setupAutoCloseSpawn = PreSessionSpawn(
                     terminalID: plannedTerminalID2,
                     tmuxServer: tmuxServer,
-                    windowID: window2.windowID,
-                    paneID: window2.paneID,
+                    windowID: setupTerminal.tmuxWindowID,
+                    paneID: setupTerminal.tmuxPaneID,
                     markerPath: setupMarkerPath,
-                    hookPath: setupHookPath
+                    hookPath: setupHookPath,
+                    transport: setupTerminal.transport,
+                    holderPID: setupTerminal.holderPID,
+                    childPID: setupTerminal.childPID
                 )
             }
         }
@@ -1840,38 +1846,38 @@ extension WorktreeLifecycle {
                     "TBD_WORKTREE_ID": worktreeID.uuidString,
                     "TBD_TERMINAL_ID": plannedID.uuidString,
                 ]
-                // Archived-session restores stay on tmux for Milestone A, for
-                // the same reason as the setup terminal: one holder per
-                // worktree is the shape being soaked. They therefore need the
-                // server, which the holder path has not started.
-                try await ensureTmuxServerOnce()
-                let window = try await tmux.createWindow(
-                    server: tmuxServer,
-                    session: "main",
-                    cwd: worktreePath,
-                    shellCommand: spawn.command,
+                // A restored archived session is born onto the same transport
+                // as the primary, through the same gate and the same spawn, so
+                // only the tmux one wants a server.
+                //
+                // It is NOT routed through the model proxy — and neither are
+                // revive-from-history tabs or fork-session tabs. A route has to
+                // be minted before the command is composed, because the command
+                // re-exports the profile's own routing keys over it, and these
+                // three sites do not compose their commands that way yet. That
+                // is a follow-up rather than a regression: a tmux spawn was
+                // never routed either, so nothing loses a route it used to have.
+                if !transport.isHolder {
+                    try await ensureTmuxServerOnce()
+                }
+                _ = try await spawnTerminal(
+                    id: plannedID,
+                    worktreeID: worktreeID,
+                    tmuxServer: tmuxServer,
+                    workingDirectory: worktreePath,
+                    command: spawn.command,
                     env: perTermEnv,
                     // Same free-form-under-auth layering as the primary terminal.
                     sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
                     cols: resolvedCols,
-                    rows: resolvedRows
-                )
-                do {
-                    _ = try await db.terminals.create(
-                        id: plannedID,
-                        worktreeID: worktreeID,
-                        tmuxWindowID: window.windowID,
-                        tmuxPaneID: window.paneID,
-                        label: TerminalLabel.claudeCode,
-                        claudeSessionID: sessionID,
-                        profileID: resolvedProfile?.profileID,
-                        kind: .claude
-                    )
-                } catch {
-                    try? await tmux.killWindow(
-                        server: tmuxServer, windowID: window.windowID)
-                    throw error
-                }
+                    rows: resolvedRows,
+                    label: TerminalLabel.claudeCode,
+                    claudeSessionID: sessionID,
+                    profileID: resolvedProfile?.profileID,
+                    kind: .claude,
+                    transport: transport,
+                    attachment: nil,
+                    modelProxySupervisor: modelProxySupervisor)
                 createdTerminals.append((id: plannedID, label: TerminalLabel.claudeCode))
             }
         }

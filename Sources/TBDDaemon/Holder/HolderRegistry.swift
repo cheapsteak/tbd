@@ -633,10 +633,25 @@ actor HolderRegistry {
     /// pid. Each one leaks a live process, so each is reported rather than
     /// swallowed.
     func abandon(terminal: Terminal) async -> String? {
+        await abandon(
+            terminalID: terminal.id,
+            holderPID: terminal.holderPID,
+            childPID: terminal.childPID)
+    }
+
+    /// The same teardown for a caller that no longer has a row to read the pids
+    /// back from.
+    ///
+    /// The pre-session hook tab is the case: its worktree row can be cascaded
+    /// away mid-wait, taking every terminal row with it, and what is left is
+    /// the descriptor phase 2b returned. The rendezvous still comes from this
+    /// registry's own environment, so the caller needs nothing but the pids it
+    /// was handed at spawn.
+    func abandon(terminalID: UUID, holderPID: Int32?, childPID: Int32?) async -> String? {
         let socketPath: String
         do {
             socketPath = try HolderRendezvous.socketPath(
-                sessionID: terminal.id, environment: environment)
+                sessionID: terminalID, environment: environment)
         } catch {
             return "\(error)"
         }
@@ -647,13 +662,13 @@ actor HolderRegistry {
         // signal — deliberately, since `kill(0, …)` would signal the daemon's
         // own process group.
         await abandon(
-            terminalID: terminal.id,
+            terminalID: terminalID,
             handle: HolderHandle(
-                holderPID: terminal.holderPID ?? 0,
-                childPID: terminal.childPID ?? 0,
+                holderPID: holderPID ?? 0,
+                childPID: childPID ?? 0,
                 socketPath: socketPath))
-        guard terminal.childPID != nil else {
-            return "terminal \(terminal.id) recorded no child pid, so its holder was told to "
+        guard childPID != nil else {
+            return "terminal \(terminalID) recorded no child pid, so its holder was told to "
                 + "let go but the job it forked was not killed"
         }
         return nil

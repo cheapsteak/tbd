@@ -470,16 +470,15 @@ struct HolderSpawnGateTests {
             """)
     }
 
-    /// Archived-session restores stay on tmux even when the primary is a
-    /// holder — and the holder path starts the tmux server they need.
+    /// Archived-session restores follow the primary's transport.
     ///
-    /// Milestone A soaks exactly one holder per worktree, so the extra restored
-    /// sessions are tmux windows. That is only sound if the server exists: the
-    /// holder path skips the eager `ensureServer` the tmux path does, so the
-    /// restore loop must ask for one itself. The `new-session` assertion is
-    /// what holds it to that — a restore issued into a server nobody started
-    /// would still produce a row here and fail only in production.
-    @Test func archivedSessionRestoresStayOnTmuxUnderAHolderPrimary() async throws {
+    /// The restore decides through the same gate and spawns through the same
+    /// function as every other tab, so under a holder primary the restored row
+    /// is a holder row too — and, critically, NO tmux server is started for it.
+    /// The `new-session` assertion is the one that would catch a restore that
+    /// still asked for a server it no longer needs: the row would look right
+    /// and a tmux server would be running behind it.
+    @Test func archivedSessionRestoresFollowTheHolderPrimary() async throws {
         let fixture = try await GateFixture.make(flagEnabled: true)
         defer { fixture.tearDown() }
 
@@ -495,22 +494,237 @@ struct HolderSpawnGateTests {
                 .first { $0.claudeSessionID == "ARCHIVED-RESTORED" },
             "the second archived session was never restored")
         #expect(
-            restored.transport == .tmux,
-            "an archived-session restore was put on the holder transport")
+            restored.transport == .holder,
+            "an archived-session restore was left on tmux under a holder primary")
+        let holderPID = try #require(restored.holderPID)
+        let childPID = try #require(restored.childPID)
+        #expect(holderPID != childPID)
+        #expect(holderProcessIsAlive(holderPID))
+        #expect(holderProcessIsAlive(childPID))
+        #expect(restored.tmuxWindowID.isEmpty)
+        #expect(restored.tmuxPaneID.isEmpty)
+
+        let issued = fixture.tmuxCommands()
+        #expect(
+            !issued.contains(where: { $0.contains("new-session") }),
+            "the restore started a tmux server it does not need: \(issued)")
+        #expect(
+            !issued.contains(where: { $0.contains("new-window") }),
+            "the restore created a tmux window: \(issued)")
+    }
+
+    /// The other arm: with the flag off a restore is a tmux window, resuming
+    /// the session it was archived with. Without this, a restore that always
+    /// took the holder — or never restored at all — would pass above.
+    @Test func archivedSessionRestoresStayOnTmuxWithTheFlagOff() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: false)
+        defer { fixture.tearDown() }
+
+        _ = try await fixture.spawnClaudePrimaryTerminals(
+            archivedClaudeSessions: ["ARCHIVED-PRIMARY", "ARCHIVED-RESTORED"])
+
+        let restored = try #require(
+            try await fixture.db.terminals.list(worktreeID: fixture.worktree.id)
+                .first { $0.claudeSessionID == "ARCHIVED-RESTORED" },
+            "the second archived session was never restored")
+        #expect(restored.transport == .tmux)
         #expect(!restored.tmuxWindowID.isEmpty)
-        #expect(!restored.tmuxPaneID.isEmpty)
         #expect(restored.holderPID == nil)
         #expect(restored.childPID == nil)
 
         let issued = fixture.tmuxCommands()
         #expect(
             issued.contains(where: { $0.contains("new-session") }),
-            "the restore ran without the holder path ever starting a tmux server: \(issued)")
+            "the restore ran without a tmux server: \(issued)")
         #expect(
             issued.contains(where: {
                 $0.contains("new-window") && $0.contains("--resume ARCHIVED-RESTORED")
             }),
             "no tmux window was created to resume the archived session: \(issued)")
+    }
+
+    // MARK: - Revive from history
+
+    /// `terminalHistory.revive` with the flag on: the revived tab is born onto
+    /// a real holder, with no tmux server anywhere behind it.
+    @Test func historyReviveFlagOnSpawnsOntoTheHolder() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: true)
+        defer { fixture.tearDown() }
+        let entryID = try await fixture.seedClosedShellHistoryEntry()
+
+        let revived = try await fixture.historyRevive(entryID: entryID)
+
+        let row = try #require(try await fixture.db.terminals.get(id: revived.id))
+        #expect(row.transport == .holder)
+        let holderPID = try #require(row.holderPID)
+        let childPID = try #require(row.childPID)
+        #expect(holderPID != childPID)
+        #expect(holderProcessIsAlive(holderPID))
+        #expect(holderProcessIsAlive(childPID))
+        #expect(row.tmuxWindowID.isEmpty)
+        #expect(row.tmuxPaneID.isEmpty)
+
+        let socketPath = try HolderRendezvous.socketPath(
+            sessionID: row.id, environment: fixture.environment)
+        #expect(
+            FileManager.default.fileExists(atPath: socketPath),
+            "no holder rendezvous at \(socketPath) for a revived holder tab")
+
+        let issued = fixture.tmuxCommands()
+        #expect(
+            !issued.contains(where: { $0.contains("new-window") }),
+            "the revive created a tmux window: \(issued)")
+        #expect(
+            !issued.contains(where: { $0.contains("new-session") }),
+            "the revive started a tmux server: \(issued)")
+    }
+
+    /// The other arm, unchanged: a revive with the flag off is a tmux window
+    /// in a tmux server.
+    @Test func historyReviveFlagOffStaysOnTmux() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: false)
+        defer { fixture.tearDown() }
+        let entryID = try await fixture.seedClosedShellHistoryEntry()
+
+        let revived = try await fixture.historyRevive(entryID: entryID)
+
+        let row = try #require(try await fixture.db.terminals.get(id: revived.id))
+        #expect(row.transport == .tmux)
+        #expect(!row.tmuxWindowID.isEmpty)
+        #expect(row.holderPID == nil)
+        #expect(row.childPID == nil)
+        let socketPath = try HolderRendezvous.socketPath(
+            sessionID: row.id, environment: fixture.environment)
+        #expect(
+            !FileManager.default.fileExists(atPath: socketPath),
+            "a holder rendezvous was created for a tmux-transport revive")
+    }
+
+    // MARK: - Fork-session swap
+
+    /// A `.fork` swap with the flag on lands on a real holder, and its session
+    /// recapture addresses the holder's CHILD rather than a pane.
+    ///
+    /// The target assertion is the load-bearing half. A holder row's pane id is
+    /// the empty string by construction, so a fork that kept scheduling
+    /// `.tmuxPane` would poll a coordinate that can never resolve — and would
+    /// write whatever it happened to find onto the row.
+    @Test func forkSwapFlagOnSpawnsOntoTheHolderAndRecapturesItsChild() async throws {
+        let recapture = RecaptureProbe()
+        let fixture = try await GateFixture.make(flagEnabled: true, recapture: recapture)
+        defer { fixture.tearDown() }
+        let source = try await fixture.seedClaudeSourceTerminal()
+
+        let response = try await fixture.forkSwap(terminalID: source.id)
+        #expect(response.success, "\(response.error ?? "")")
+
+        let forked = try #require(
+            try await fixture.db.terminals.list(worktreeID: fixture.worktree.id)
+                .first { $0.id != source.id },
+            "the fork created no new terminal row")
+        #expect(forked.transport == .holder)
+        let holderPID = try #require(forked.holderPID)
+        let childPID = try #require(forked.childPID)
+        #expect(holderPID != childPID)
+        #expect(holderProcessIsAlive(holderPID))
+        #expect(holderProcessIsAlive(childPID))
+        #expect(forked.tmuxWindowID.isEmpty)
+
+        let landed = await pollUntil("the fork's session recapture to be scheduled") {
+            !recapture.targets.isEmpty
+        }
+        #expect(landed)
+        #expect(recapture.targets == [.holderChild(pid: childPID)])
+        #expect(recapture.panes.isEmpty, "a holder fork scheduled a pane recapture")
+
+        // The source tab is untouched — a fork copies, it does not move.
+        #expect(try await fixture.db.terminals.get(id: source.id) != nil)
+    }
+
+    // MARK: - Hook tabs
+
+    /// The pre-session hook tab is born onto the holder with the flag on, and
+    /// the descriptor phase 3 carries records the pids it will need.
+    @Test func preSessionHookTabSpawnsOntoTheHolder() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: true)
+        defer { fixture.tearDown() }
+        try fixture.installWorktreeHook(.preSession)
+
+        let spawn = try #require(try await fixture.spawnPreSessionTerminal())
+
+        #expect(spawn.transport == .holder)
+        let holderPID = try #require(spawn.holderPID)
+        let childPID = try #require(spawn.childPID)
+        #expect(holderPID != childPID)
+        #expect(holderProcessIsAlive(holderPID))
+        #expect(holderProcessIsAlive(childPID))
+        #expect(spawn.windowID.isEmpty)
+        #expect(spawn.paneID.isEmpty)
+
+        let row = try #require(try await fixture.db.terminals.get(id: spawn.terminalID))
+        #expect(row.transport == .holder)
+        #expect(row.label == TerminalLabel.preSession)
+
+        let issued = fixture.tmuxCommands()
+        #expect(
+            !issued.contains(where: { $0.contains("new-session") }),
+            "the pre-session hook tab started a tmux server: \(issued)")
+        #expect(
+            !issued.contains(where: { $0.contains("new-window") }),
+            "the pre-session hook tab created a tmux window: \(issued)")
+    }
+
+    /// With a setup hook installed, the setup tab is a holder row beside the
+    /// primary — still no tmux server, and two holders rather than one.
+    ///
+    /// The hook-less case is `flagOnSpawnsOntoHolder`'s `created.count == 1`:
+    /// without a hook the tab is a bare shell and a second holder process
+    /// nobody asked for.
+    @Test func setupHookTabFollowsTheHolderPrimary() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: true)
+        defer { fixture.tearDown() }
+        try fixture.installWorktreeHook(.setup)
+
+        let created = try await fixture.spawnPrimaryTerminals()
+
+        #expect(created.count == 2)
+        #expect(created[1].label == TerminalLabel.setup)
+        let setup = try #require(try await fixture.db.terminals.get(id: created[1].id))
+        #expect(setup.transport == .holder)
+        let holderPID = try #require(setup.holderPID)
+        let childPID = try #require(setup.childPID)
+        #expect(holderPID != childPID)
+        #expect(holderProcessIsAlive(holderPID))
+        #expect(holderProcessIsAlive(childPID))
+        #expect(setup.tmuxWindowID.isEmpty)
+
+        let primary = try #require(try await fixture.db.terminals.get(id: created[0].id))
+        #expect(primary.transport == .holder)
+        #expect(primary.holderPID != setup.holderPID, "both tabs share one holder")
+
+        let issued = fixture.tmuxCommands()
+        #expect(
+            !issued.contains(where: { $0.contains("new-session") }),
+            "the setup hook tab started a tmux server: \(issued)")
+        #expect(
+            !issued.contains(where: { $0.contains("new-window") }),
+            "the setup hook tab created a tmux window: \(issued)")
+    }
+
+    /// The setup tab's other arm: with the flag off it is a tmux window, hook
+    /// or no hook, exactly as it always has been.
+    @Test func setupHookTabStaysOnTmuxWithTheFlagOff() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: false)
+        defer { fixture.tearDown() }
+        try fixture.installWorktreeHook(.setup)
+
+        let created = try await fixture.spawnPrimaryTerminals()
+
+        #expect(created.count == 2)
+        let setup = try #require(try await fixture.db.terminals.get(id: created[1].id))
+        #expect(setup.transport == .tmux)
+        #expect(!setup.tmuxWindowID.isEmpty)
+        #expect(setup.holderPID == nil)
     }
 }
 
@@ -530,11 +744,20 @@ private final class RecaptureProbe: @unchecked Sendable {
     static let detectedSessionID = "RECAPTURED-BY-THE-PROBE"
 
     private let lock = NSLock()
-    private var recorded: [String] = []
+    private var recorded: [SessionRecaptureTarget] = []
 
-    /// The panes recapture was scheduled against, in order.
-    var panes: [String] {
+    /// Every target recapture was scheduled against, in order.
+    var targets: [SessionRecaptureTarget] {
         lock.withLock { recorded }
+    }
+
+    /// The panes recapture was scheduled against, in order — the tmux targets
+    /// only, so an assertion about panes keeps meaning what it always did.
+    var panes: [String] {
+        targets.compactMap {
+            if case .tmuxPane(_, let paneID) = $0 { return paneID }
+            return nil
+        }
     }
 
     func scheduler(db: TBDDatabase, tmux: TmuxManager) -> SessionRecaptureScheduler {
@@ -543,8 +766,8 @@ private final class RecaptureProbe: @unchecked Sendable {
             tmux: tmux,
             // `withLock` rather than `lock()`/`unlock()`: this closure is
             // `async`, where the unscoped pair is unavailable.
-            captureSessionID: { [self] _, paneID in
-                lock.withLock { recorded.append(paneID) }
+            captureSessionID: { [self] target in
+                lock.withLock { recorded.append(target) }
                 return Self.detectedSessionID
             },
             clock: ImmediateClock())
@@ -771,6 +994,13 @@ private final class GateFixture {
             configDirManager: configDirManager,
             actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
+        if let recapture {
+            // The router builds its own scheduler for the swap paths, so the
+            // probe has to be wired into both seams to observe a fork.
+            router.sessionRecaptureFactory = { db, tmux in
+                recapture.scheduler(db: db, tmux: tmux)
+            }
+        }
         // Codex is never launched here: the job is the pinned gate shell,
         // which ignores its argv. The stubs only have to satisfy the handlers'
         // pre-spawn resolution, so the Codex branches can reach the gate.
@@ -886,6 +1116,64 @@ private final class GateFixture {
 
     func capturePaneCalls() -> Int { capturePaneCounter.count }
     func tmuxCommands() -> [String] { recordedCommands.all }
+
+    /// Installs an executable `.worktree-hooks/<event>` in the worktree's
+    /// checkout. `HookResolver` only looks at the filesystem, and this fixture's
+    /// worktree path IS the repo checkout, so no commit is needed.
+    ///
+    /// The script itself never runs the hook tab's *program* — the job is the
+    /// pinned gate shell, which ignores its argv — so what this installs is the
+    /// fact that a hook RESOLVES, which is what both hook-tab decisions read.
+    @discardableResult
+    func installWorktreeHook(_ event: HookEvent) throws -> String {
+        let dir = URL(fileURLWithPath: worktree.localPath)
+            .appendingPathComponent(".worktree-hooks", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent(event.rawValue).path
+        try "#!/bin/sh\nexit 0\n".write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: path)
+        return path
+    }
+
+    /// The production pre-session spawn, entered exactly as worktree creation
+    /// enters it.
+    func spawnPreSessionTerminal() async throws -> PreSessionSpawn? {
+        try await router.lifecycle.spawnPreSessionTerminal(
+            worktree: worktree, repo: repo, worktreePath: worktree.localPath)
+    }
+
+    /// The `terminalHistory.revive` RPC, through the router.
+    func historyRevive(entryID: UUID) async throws -> Terminal {
+        let response = await router.handle(
+            try RPCRequest(
+                method: RPCMethod.terminalHistoryRevive,
+                params: TerminalHistoryReviveParams(
+                    worktreeID: worktree.id, id: entryID)))
+        if let error = response.error {
+            Issue.record("terminalHistory.revive failed: \(error)")
+        }
+        return try response.decodeResult(Terminal.self)
+    }
+
+    /// A closed SHELL terminal in this worktree's history, ready to revive.
+    func seedClosedShellHistoryEntry() async throws -> UUID {
+        let closed = Terminal(
+            worktreeID: worktree.id, tmuxWindowID: "@closed", tmuxPaneID: "%closed",
+            label: nil, kind: .shell)
+        await db.terminalHistory.store(
+            terminal: closed, text: "prior shell output\n", closedAt: Date())
+        return closed.id
+    }
+
+    /// The `terminal.swapProfile` RPC in `.fork` mode, through the router.
+    func forkSwap(terminalID: UUID) async throws -> RPCResponse {
+        await router.handle(
+            try RPCRequest(
+                method: RPCMethod.terminalSwapProfile,
+                params: TerminalSwapProfileParams(
+                    terminalID: terminalID, newProfileID: nil, mode: .fork)))
+    }
 
     /// Kills every holder this fixture started AND every job those holders
     /// forked, then clears the scratch roots. A test that leaves either behind

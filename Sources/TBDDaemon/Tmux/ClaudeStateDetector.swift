@@ -64,34 +64,55 @@ public struct ClaudeStateDetector: Sendable {
             .appendingPathComponent("\(pid).json")
     }
 
+    /// The session id of the Claude process a recapture target names, on either
+    /// transport.
+    public func captureSessionID(target: SessionRecaptureTarget) async -> String? {
+        switch target {
+        case .tmuxPane(let server, let paneID):
+            return await captureSessionID(server: server, paneID: paneID)
+        case .holderChild(let pid):
+            return await captureSessionID(rootPID: Int(pid))
+        }
+    }
+
     public func captureSessionID(server: String, paneID: String) async -> String? {
+        guard let pidStr = try? await tmux.panePID(server: server, paneID: paneID),
+              let panePID = Int(pidStr) else { return nil }
+        return await captureSessionID(rootPID: panePID)
+    }
+
+    /// Resolve a session id from the root pid of a session's own process tree.
+    ///
+    /// The same ladder serves both transports because the pid means the same
+    /// shape of thing on each. On tmux the root is `#{pane_pid}`: with
+    /// `zsh -i -l -c "claude …"` (see `TmuxManager.shellFlags(forShell:)`) zsh
+    /// may exec into Claude directly, so that pid IS the Claude process, and
+    /// otherwise it is the shell that started one. On the holder the root is
+    /// the job the holder forked — the `zsh -c` shell composed by
+    /// `holderLaunch`, or Claude itself once that shell execs into it — which
+    /// is the identical pair of cases. So: read the root's session file first,
+    /// and fall back to the single `claude` child beneath it.
+    func captureSessionID(rootPID: Int) async -> String? {
+        if let id = readSessionID(forPID: rootPID) { return id }
+
+        // Fallback: the root is a shell and Claude is a child process.
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-P", String(rootPID), "-x", "claude"]
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
         do {
-            let pidStr = try await tmux.panePID(server: server, paneID: paneID)
-            guard let panePID = Int(pidStr) else { return nil }
-
-            // With `zsh -i -l -c "claude ..."` (see
-            // TmuxManager.shellFlags(forShell:)), zsh may exec into Claude directly,
-            // so pane_pid IS the Claude process (not a shell parent).
-            // Try the pane PID's session file first.
-            if let id = readSessionID(forPID: panePID) { return id }
-
-            // Fallback: pane_pid is a shell, Claude is a child process.
-            let process = Process()
-            let pipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-            process.arguments = ["-P", String(panePID), "-x", "claude"]
-            process.standardOutput = pipe
-            process.standardError = FileHandle.nullDevice
             try process.run()
-            process.waitUntilExit()
-
-            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            let pids = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                .split(separator: "\n").compactMap { Int($0) }
-            guard pids.count == 1, let claudePID = pids.first else { return nil }
-
-            return readSessionID(forPID: claudePID)
         } catch { return nil }
+        process.waitUntilExit()
+
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let pids = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "\n").compactMap { Int($0) }
+        guard pids.count == 1, let claudePID = pids.first else { return nil }
+
+        return readSessionID(forPID: claudePID)
     }
 
     /// Read a Claude session file for a given PID. Returns nil if file doesn't exist or is invalid.

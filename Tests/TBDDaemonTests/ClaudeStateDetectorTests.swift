@@ -118,3 +118,84 @@ struct ClaudeStateDetectorSessionPathTests {
                 .sessionFilePath(forPID: 7).path == expected)
     }
 }
+
+/// The two shapes a recapture target can take, resolved through the one ladder
+/// that serves both transports.
+///
+/// The holder arm is the new half: a holder-backed session has no pane, so its
+/// recapture addresses the pid the holder recorded for the job it forked, and
+/// the read has to land in the same host store the tmux arm reads. The tmux arm
+/// runs beside it in this suite so a resolver that answered only for holders —
+/// or ignored the target's payload entirely — cannot pass.
+///
+/// Explicit environment dictionaries, never `setenv`: this suite is not nested
+/// under `TBDHomeSerialized`, and mutating the process-global variable would
+/// hand every concurrently running suite the real `~/.claude`.
+@Suite("ClaudeStateDetector recapture targets")
+struct ClaudeStateDetectorTargetTests {
+
+    /// Thread-safe tally of the tmux argv a dry-run manager was asked to run.
+    private final class ArgvRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var argvs: [[String]] = []
+        func record(_ argv: [String]) {
+            lock.lock(); defer { lock.unlock() }
+            argvs.append(argv)
+        }
+        var all: [[String]] {
+            lock.lock(); defer { lock.unlock() }
+            return argvs
+        }
+    }
+
+    @Test("a holder-child target reads the job's own session file, without tmux")
+    func holderChildTargetReadsTheSessionFile() async throws {
+        let fm = FileManager.default
+        let host = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-detector-holder-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: host) }
+        try fm.createDirectory(
+            at: host.appendingPathComponent("sessions", isDirectory: true),
+            withIntermediateDirectories: true)
+        // A pid the holder would have recorded for the job it forked. Nothing
+        // is signalled or inspected — only the file at its path is read.
+        let childPID: Int32 = 424242
+        try #"{"pid":424242,"sessionId":"holder-child-session"}"#.write(
+            to: host.appendingPathComponent("sessions/\(childPID).json"),
+            atomically: true, encoding: .utf8)
+
+        let recorder = ArgvRecorder()
+        let detector = ClaudeStateDetector(
+            tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorder.record($0) }),
+            environment: ["TBD_CLAUDE_HOST_HOME": host.path])
+
+        let captured = await detector.captureSessionID(target: .holderChild(pid: childPID))
+
+        #expect(captured == "holder-child-session")
+        #expect(
+            recorder.all.isEmpty,
+            "a holder recapture shelled out to tmux: \(recorder.all)")
+    }
+
+    /// The other arm, on the same detector shape: a pane target still resolves
+    /// through `panePID`, which a dry-run manager answers `0` for — a pid with
+    /// no session file and no `claude` child — so the answer is nil rather than
+    /// a session id borrowed from somewhere else.
+    @Test("a tmux-pane target with no live pane resolves to nil")
+    func tmuxPaneTargetWithoutAPaneIsNil() async throws {
+        let fm = FileManager.default
+        let host = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-detector-pane-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: host) }
+        try fm.createDirectory(at: host, withIntermediateDirectories: true)
+
+        let detector = ClaudeStateDetector(
+            tmux: TmuxManager(dryRun: true),
+            environment: ["TBD_CLAUDE_HOST_HOME": host.path])
+
+        let captured = await detector.captureSessionID(
+            target: .tmuxPane(server: "tbd-detector", paneID: "%7"))
+
+        #expect(captured == nil)
+    }
+}

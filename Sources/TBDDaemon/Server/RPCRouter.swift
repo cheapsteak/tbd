@@ -248,6 +248,22 @@ public final class RPCRouter: Sendable {
     /// cannot route.
     nonisolated(unsafe) var modelProxySupervisor: (any ModelProxySupervising)?
 
+    /// How the swap paths build the scheduler that recaptures a resumed
+    /// session's ID. `nil` in production, which builds the ordinary
+    /// `SessionRecaptureScheduler(db:tmux:)`. The mirror of
+    /// `WorktreeLifecycle.sessionRecaptureFactory`, for the same reason.
+    ///
+    /// A seam because the branch it feeds — which target a fork tab's recapture
+    /// is scheduled against — is otherwise unobservable from outside. A real
+    /// scheduler's only trace is a database write five wall seconds later, made
+    /// only if a live Claude process answers; "it was scheduled against the
+    /// pane" and "it was scheduled against the holder's child" look identical
+    /// from the row. Injecting the scheduler makes the decision itself the
+    /// observable, on virtual time.
+    nonisolated(unsafe) var sessionRecaptureFactory: (
+        @Sendable (TBDDatabase, TmuxManager) -> SessionRecaptureScheduler
+    )?
+
     /// Delivers `terminal.send` to a holder-backed session, routed by who is
     /// reading its pty. Set by `Daemon` after construction, beside the registry
     /// and the sidecar it is built from. `nil` in mock mode and in tests that

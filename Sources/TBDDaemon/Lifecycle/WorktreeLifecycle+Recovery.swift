@@ -155,7 +155,15 @@ extension WorktreeLifecycle {
                         repoID: rid,
                         eventName: HookEvent.preSession.rawValue
                     )
-                ) ?? ""
+                ) ?? "",
+                // Carried from the row: a resumed wait must probe the hook tab
+                // in the terms its own transport has. A holder-backed tab has
+                // no tmux window, so a descriptor that claimed `.tmux` would
+                // ask a server that was never started and read the answer as a
+                // closed pane.
+                transport: preSessionTerminal.transport,
+                holderPID: preSessionTerminal.holderPID,
+                childPID: preSessionTerminal.childPID
             )
             // Distinguish an interrupted CREATE from an interrupted REVIVE:
             // a mid-revive row still carries its archived Claude sessions

@@ -59,7 +59,12 @@ func makeLifecycle(
     subscriptions: StateSubscriptionManager? = nil,
     timeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
     windowIsDead: (@Sendable (String) -> Bool)? = nil,
-    listWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil
+    listWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil,
+    // The liveness seam the holder branch of the hook-tab wait reads: a
+    // holder-backed tab has no tmux window to look for, so "is it still there"
+    // is the row plus the job's own pid. Defaulted so no existing caller
+    // changes; only the holder suites pass one.
+    processSignaller: ProcessSignaller = ProductionProcessSignaller()
 ) -> WorktreeLifecycle {
     var dryRunRecorder: (@Sendable ([String]) -> Void)?
     if let recorder {
@@ -77,7 +82,8 @@ func makeLifecycle(
         hooks: HookResolver(),
         subscriptions: subscriptions,
         preSessionTimeout: timeout,
-        preSessionPollInterval: 0.05
+        preSessionPollInterval: 0.05,
+        processSignaller: processSignaller
     )
 }
 
