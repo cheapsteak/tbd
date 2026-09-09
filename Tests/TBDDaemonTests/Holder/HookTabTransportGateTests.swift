@@ -45,7 +45,10 @@ struct HookTabTransportGateTests {
         func startTime(_ pid: Int32) -> Date? { nil }
     }
 
-    private static func registry(spawner: HolderSpawner?, home: String) -> HolderRegistry {
+    private static func registry(
+        spawner: HolderSpawner?, home: String,
+        signaller: any ProcessSignaller = ProductionProcessSignaller()
+    ) -> HolderRegistry {
         HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
             environment: [
@@ -54,8 +57,15 @@ struct HookTabTransportGateTests {
                 "SHELL": "/bin/sh",
             ],
             listTerminals: { [] },
-            spawner: spawner)
+            spawner: spawner,
+            signaller: signaller)
     }
+
+    /// The pid the teardown tests' rows record, and the start time they record
+    /// beside it. A pid this daemon never spawned and a stamp far in the past:
+    /// nothing here may be answered by the real process table.
+    private static let jobPID: Int32 = 8802
+    private static let jobStartedAt = Date(timeIntervalSince1970: 1_800_000_000)
 
     // MARK: - Spawn
 
@@ -422,6 +432,100 @@ struct HookTabTransportGateTests {
         #expect(try await fx.db.worktrees.getTabOrder(worktreeID: fx.worktree.id).isEmpty)
         #expect(try await fx.db.terminalHistory.list(worktreeID: fx.worktree.id).isEmpty,
                 "a holder hook tab was written to Closed Terminals")
+    }
+
+    /// A holder hook tab whose recorded child pid now belongs to somebody else
+    /// is torn down without signalling anything.
+    ///
+    /// The window this closes is real and routine: a hook tab is closed
+    /// *because* its hook finished, so its job has usually already exited and
+    /// the kernel is free to hand the number out again. The row cleanup still
+    /// has to happen — a tab whose terminal is gone must not survive it — and
+    /// so does the absence of every tmux gesture, so this discriminates against
+    /// both a teardown that kills blind and one that fell into the tmux arm.
+    @Test("closing a holder hook tab never signals a recycled child pid")
+    func holderHookTabTeardownSkipsARecycledPID() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let fx = try await makeWorktreeFixture(status: .active)
+        defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
+
+        let recorder = PreSessionRecordedCommands()
+        let captureCalls = CaptureCounter()
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[Self.jobPID] = .init(aliveInitially: true)
+        // Alive, wearing a shell's command line, and started an hour away from
+        // the anchor the row recorded: only the start time separates it.
+        signaller.cmdlines[Self.jobPID] = "zsh -c make"
+        signaller.startTimes[Self.jobPID] = Self.jobStartedAt.addingTimeInterval(3600)
+
+        let scratch = fencedScratchRoot(prefix: "tbdhtg")
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+        var lifecycle = Self.teardownLifecycle(
+            db: fx.db, recorder: recorder, captureCalls: captureCalls)
+        lifecycle.holderRegistry = Self.registry(
+            spawner: nil, home: scratch, signaller: signaller)
+
+        let terminal = try await fx.db.terminals.create(
+            worktreeID: fx.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.preSession, kind: .shell,
+            transport: .holder, holderPID: nil, childPID: Self.jobPID,
+            holderChildStartedAt: Self.jobStartedAt)
+        try await fx.db.worktrees.setTabOrder(
+            worktreeID: fx.worktree.id, tabIDs: [terminal.id])
+
+        await lifecycle.closeHookTerminal(
+            worktree: fx.worktree, tmuxServer: "tbd-test",
+            terminalID: terminal.id, windowID: "")
+
+        #expect(signaller.killed.isEmpty, "a recycled pid was force-killed by the hook teardown")
+        #expect(signaller.terminated.isEmpty, "a recycled pid was signalled by the hook teardown")
+        #expect(captureCalls.count == 0)
+        #expect(
+            !recorder.snapshot().contains { $0.contains("kill-window") },
+            "a holder hook tab was killed through tmux: \(recorder.snapshot())")
+        #expect(try await fx.db.terminals.get(id: terminal.id) == nil)
+        #expect(try await fx.db.worktrees.getTabOrder(worktreeID: fx.worktree.id).isEmpty)
+    }
+
+    /// The other half of the same decision, and the reason the one above is not
+    /// simply "never kill anything": a job whose pid still verifies against the
+    /// row's recorded start time is reclaimed.
+    @Test("closing a holder hook tab force-kills a job that verifies")
+    func holderHookTabTeardownKillsAVerifiedJob() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let fx = try await makeWorktreeFixture(status: .active)
+        defer { try? FileManager.default.removeItem(at: fx.repoDir.deletingLastPathComponent()) }
+
+        let recorder = PreSessionRecordedCommands()
+        let captureCalls = CaptureCounter()
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[Self.jobPID] = .init(
+            aliveInitially: true, aliveAfterTerminate: true, aliveAfterKill: false)
+        signaller.cmdlines[Self.jobPID] = "/bin/zsh -i -l -c hook"
+        signaller.startTimes[Self.jobPID] = Self.jobStartedAt
+
+        let scratch = fencedScratchRoot(prefix: "tbdhtg")
+        defer { try? FileManager.default.removeItem(atPath: scratch) }
+        var lifecycle = Self.teardownLifecycle(
+            db: fx.db, recorder: recorder, captureCalls: captureCalls)
+        lifecycle.holderRegistry = Self.registry(
+            spawner: nil, home: scratch, signaller: signaller)
+
+        let terminal = try await fx.db.terminals.create(
+            worktreeID: fx.worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.preSession, kind: .shell,
+            transport: .holder, holderPID: nil, childPID: Self.jobPID,
+            holderChildStartedAt: Self.jobStartedAt)
+
+        await lifecycle.closeHookTerminal(
+            worktree: fx.worktree, tmuxServer: "tbd-test",
+            terminalID: terminal.id, windowID: "")
+
+        #expect(signaller.killed == [Self.jobPID])
+        #expect(captureCalls.count == 0)
+        #expect(try await fx.db.terminals.get(id: terminal.id) == nil)
     }
 
     /// The tmux arm, unchanged, so a teardown that took the holder branch for

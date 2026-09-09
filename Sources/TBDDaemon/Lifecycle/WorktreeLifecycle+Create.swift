@@ -1780,7 +1780,8 @@ extension WorktreeLifecycle {
                     hookPath: setupHookPath,
                     transport: setupTerminal.transport,
                     holderPID: setupTerminal.holderPID,
-                    childPID: setupTerminal.childPID
+                    childPID: setupTerminal.childPID,
+                    childStartedAt: setupTerminal.holderChildStartedAt
                 )
             }
         }

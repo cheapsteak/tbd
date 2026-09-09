@@ -1070,6 +1070,16 @@ private final class GateFixture {
     /// inside one of those windows would let a teardown that reclaimed nothing
     /// pass on the job's natural exit. Every holder started here is killed by
     /// `tearDown`, so the length costs a run nothing.
+    ///
+    /// The sleep is deliberately **not** `exec`ed. A hook tab's teardown
+    /// identity-checks the job before signalling it
+    /// (`HolderRegistry.abandonVerifiedJob`), and that check accepts only an
+    /// agent binary or a login shell — so a job that replaced its own image
+    /// with `sleep` would be refused as a stranger and the teardown tests would
+    /// prove the refusal rather than the kill. Left un-`exec`ed, the job's
+    /// command line is `/bin/sh <path> …` courtesy of the shebang, whose
+    /// basename `sh` is one the check admits; the shell is the pty session's
+    /// leader, so the group-widening `SIGKILL` takes the `sleep` with it.
     private static func writeGateShell(in home: String) throws -> String {
         try FileManager.default.createDirectory(
             atPath: home, withIntermediateDirectories: true,
@@ -1078,7 +1088,7 @@ private final class GateFixture {
         try """
         #!/bin/sh
         printf 'GATE-OK\\n'
-        exec sleep 600
+        sleep 600
         """.write(toFile: path, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o700], ofItemAtPath: path)
@@ -1400,13 +1410,22 @@ private final class GateFixture {
     /// Kills one holder and the job it forked. Signalling a pid that is already
     /// gone is how this is expected to end on the passing path: the process has
     /// been reaped, `kill` answers `ESRCH`, and nothing happens.
+    ///
+    /// The job is killed by **group** where it leads one, by the same rule
+    /// `HolderRegistry.jobProcessGroup` applies: a `forkpty` job is the session
+    /// leader of its own pty, so its group id is its own pid, and a group id
+    /// that is anything else names a group this fixture did not create and must
+    /// not signal. The gate shell runs its `sleep` as an ordinary child rather
+    /// than `exec`ing it, so a pid-exact kill here would leave that child
+    /// behind for the rest of its ten minutes.
     private func reclaim(holderPID: Int32?, childPID: Int32?) {
         if let holderPID, holderPID > 0 {
             kill(holderPID, SIGKILL)
             var ignored: Int32 = 0
             _ = waitpid(holderPID, &ignored, 0)
         }
-        if let childPID, childPID > 0, holderProcessIsAlive(childPID) {
+        if let childPID, childPID > 1, holderProcessIsAlive(childPID) {
+            if getpgid(childPID) == childPID { kill(-childPID, SIGKILL) }
             kill(childPID, SIGKILL)
         }
     }

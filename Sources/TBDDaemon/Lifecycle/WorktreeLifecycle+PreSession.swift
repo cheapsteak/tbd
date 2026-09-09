@@ -23,6 +23,14 @@ struct PreSessionSpawn: Sendable {
     /// Nil on the tmux transport.
     let holderPID: Int32?
     let childPID: Int32?
+    /// When the job behind `childPID` started, as the row recorded it.
+    ///
+    /// The teardown may not signal that pid without it: a pid on its own is not
+    /// an identity, and the start time is the one fact `execve` cannot move.
+    /// Nil on the tmux transport, and nil for a row written before the column
+    /// existed — which the readers spell `holderChildStartedAt ?? createdAt`,
+    /// the same fallback the reaper's holder leg and the park ladder use.
+    let childStartedAt: Date?
 
     /// Written out rather than synthesized so every existing caller — the
     /// recovery sweep, which resumes a wait from a row, and the tests that
@@ -37,7 +45,8 @@ struct PreSessionSpawn: Sendable {
         hookPath: String,
         transport: TerminalTransport = .tmux,
         holderPID: Int32? = nil,
-        childPID: Int32? = nil
+        childPID: Int32? = nil,
+        childStartedAt: Date? = nil
     ) {
         self.terminalID = terminalID
         self.tmuxServer = tmuxServer
@@ -48,6 +57,7 @@ struct PreSessionSpawn: Sendable {
         self.transport = transport
         self.holderPID = holderPID
         self.childPID = childPID
+        self.childStartedAt = childStartedAt
     }
 }
 
@@ -262,7 +272,8 @@ extension WorktreeLifecycle {
             hookPath: hookPath,
             transport: terminal.transport,
             holderPID: terminal.holderPID,
-            childPID: terminal.childPID
+            childPID: terminal.childPID,
+            childStartedAt: terminal.holderChildStartedAt
         )
     }
 
@@ -423,7 +434,8 @@ extension WorktreeLifecycle {
                 await abandonHookHolder(
                     terminalID: preSession.terminalID,
                     holderPID: preSession.holderPID,
-                    childPID: preSession.childPID)
+                    childPID: preSession.childPID,
+                    childStartedAt: preSession.childStartedAt)
             }
             return
         }
@@ -553,15 +565,13 @@ extension WorktreeLifecycle {
     /// A read that *throws* is deliberately folded into "unreadable" rather
     /// than retried or surfaced: the answer then comes from the descriptor,
     /// which is a strictly safer place to take it from than the alternative of
-    /// giving up on a teardown whose whole purpose is reclamation. What that
-    /// costs is the one step the row-shaped teardown adds over the descriptor
-    /// one — `disposeHolder(for:)` retires the row's model-proxy route before
-    /// abandoning the holder, and `abandonHookHolder` only abandons. A hook tab
-    /// is spawned with no attachment (`attachment: nil` at both hook-tab spawn
-    /// sites), so it is never routed and there is nothing to retire; the two
-    /// paths reclaim exactly the same things here. A row-backed *agent* tab
-    /// would not be safe to answer this way, which is why this reasoning is
-    /// local to hook tabs.
+    /// giving up on a teardown whose whole purpose is reclamation. The two
+    /// halves then differ only in where the pids are read from — both reclaim
+    /// through `abandonHookHolder`, and neither retires a model-proxy route,
+    /// because a hook tab is spawned with no attachment (`attachment: nil` at
+    /// both hook-tab spawn sites) and so is never routed. A row-backed *agent*
+    /// tab would not be safe to tear down this way, which is why this
+    /// reasoning is local to hook tabs.
     func closeHookTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
         await closeHookTerminal(
             worktree: worktree,
@@ -570,7 +580,8 @@ extension WorktreeLifecycle {
             windowID: preSession.windowID,
             unreadableRowTransport: preSession.transport,
             holderPID: preSession.holderPID,
-            childPID: preSession.childPID
+            childPID: preSession.childPID,
+            childStartedAt: preSession.childStartedAt
         )
     }
 
@@ -593,7 +604,8 @@ extension WorktreeLifecycle {
             windowID: windowID,
             unreadableRowTransport: .tmux,
             holderPID: nil,
-            childPID: nil
+            childPID: nil,
+            childStartedAt: nil
         )
     }
 
@@ -610,7 +622,8 @@ extension WorktreeLifecycle {
         windowID: String,
         unreadableRowTransport: TerminalTransport,
         holderPID: Int32?,
-        childPID: Int32?
+        childPID: Int32?,
+        childStartedAt: Date?
     ) async {
         let terminal = try? await db.terminals.get(id: terminalID)
         switch terminal?.transport ?? unreadableRowTransport {
@@ -622,16 +635,32 @@ extension WorktreeLifecycle {
             // row. The tmux kill would be worse than a no-op here — a holder
             // row's `windowID` names nothing, and the holder, its job and its
             // rendezvous files would outlive the row that is their only record.
+            //
+            // Reclaimed through `abandonHookHolder` on both halves, not
+            // through `disposeHolder`: a hook tab is spawned with
+            // `attachment: nil`, so it is never routed through the model proxy
+            // and there is no route for the row-shaped teardown to retire —
+            // what is left of it is an unverified kill by recorded pid, which
+            // is exactly what a hook tab must not do (see
+            // `HolderRegistry.abandonVerifiedJob`). The row is still the better
+            // source for the pids while it can be read.
             if let terminal {
-                if let left = await disposeHolder(for: terminal) {
-                    logger.warning("hook terminal \(terminalID, privacy: .public) holder teardown incomplete: \(left, privacy: .public)")
-                }
+                await abandonHookHolder(
+                    terminalID: terminal.id,
+                    holderPID: terminal.holderPID,
+                    childPID: terminal.childPID,
+                    // The anchor every other reader of a holder row uses, and
+                    // the reason the fallback is `createdAt`: a row written
+                    // before the start-time column existed still has to be
+                    // reclaimable.
+                    childStartedAt: terminal.holderChildStartedAt ?? terminal.createdAt)
             } else {
                 // No row to read the pids back from, so the descriptor's own
                 // pids are all there is — the same reclaim phase 3 does when a
                 // cascading worktree delete takes the terminal row with it.
                 await abandonHookHolder(
-                    terminalID: terminalID, holderPID: holderPID, childPID: childPID)
+                    terminalID: terminalID, holderPID: holderPID, childPID: childPID,
+                    childStartedAt: childStartedAt)
             }
         case .tmux:
             // Preserve the hook tab's output before the window dies so a user
@@ -662,22 +691,31 @@ extension WorktreeLifecycle {
         }
     }
 
-    /// Reclaims a holder-backed hook tab whose terminal row is already gone,
-    /// from the pids its spawn recorded.
+    /// Reclaims a holder-backed hook tab from the pids its spawn recorded —
+    /// identity-checking the job before signalling it.
     ///
-    /// The row-shaped teardown (`disposeHolder`) cannot serve here: it reads
-    /// the pids off a row that no longer exists. A daemon with no registry is
-    /// reported rather than passed over — it is exactly the daemon whose holder
-    /// and job nothing else would ever find.
+    /// `abandonVerifiedJob` rather than the general `abandon`, and that is the
+    /// point of this method existing. A hook tab's job has very often exited
+    /// before anything tears the tab down — the setup tab auto-closes *because*
+    /// the hook finished — so the recorded pid may by then belong to whatever
+    /// the kernel handed the number to next, and the general path would kill it
+    /// and its process group on a recorded number alone.
+    ///
+    /// It also serves the case where the row is already gone: the row-shaped
+    /// teardown (`disposeHolder`) reads its pids off a row that no longer
+    /// exists. A daemon with no registry is reported rather than passed over —
+    /// it is exactly the daemon whose holder and job nothing else would ever
+    /// find.
     private func abandonHookHolder(
-        terminalID: UUID, holderPID: Int32?, childPID: Int32?
+        terminalID: UUID, holderPID: Int32?, childPID: Int32?, childStartedAt: Date?
     ) async {
         guard let holderRegistry else {
             logger.warning("hook terminal \(terminalID, privacy: .public) runs on the holder transport but this daemon has no holder registry, so its holder and job were left running")
             return
         }
-        if let left = await holderRegistry.abandon(
-            terminalID: terminalID, holderPID: holderPID, childPID: childPID
+        if let left = await holderRegistry.abandonVerifiedJob(
+            terminalID: terminalID, holderPID: holderPID, childPID: childPID,
+            childStartedAt: childStartedAt
         ) {
             logger.warning("hook terminal \(terminalID, privacy: .public) holder teardown incomplete: \(left, privacy: .public)")
         }

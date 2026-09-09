@@ -163,7 +163,13 @@ extension WorktreeLifecycle {
                 // closed pane.
                 transport: preSessionTerminal.transport,
                 holderPID: preSessionTerminal.holderPID,
-                childPID: preSessionTerminal.childPID
+                childPID: preSessionTerminal.childPID,
+                // A resumed wait anchors the identity check the same way every
+                // other reader of a holder row does: the recorded start time,
+                // falling back to the row's own `createdAt` for a row written
+                // before that column existed.
+                childStartedAt: preSessionTerminal.holderChildStartedAt
+                    ?? preSessionTerminal.createdAt
             )
             // Distinguish an interrupted CREATE from an interrupted REVIVE:
             // a mid-revive row still carries its archived Claude sessions
