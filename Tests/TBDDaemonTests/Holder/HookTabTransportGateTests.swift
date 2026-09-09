@@ -329,10 +329,11 @@ struct HookTabTransportGateTests {
             skipClaude: true,
             completionAction: .markActive)
 
-        let remaining = try await fx.db.terminals.list(worktreeID: fx.worktree.id)
-        #expect(
-            remaining.isEmpty,
-            "phase 3 created terminal rows for a worktree that no longer exists")
+        // No assertion that the worktree's terminal rows are empty: the
+        // cascade above emptied them before phase 3 ran, and the foreign key
+        // would refuse a row for a deleted worktree anyway, so it cannot fail
+        // whatever phase 3 does. The `new-window` assertion below is the one
+        // the code under test can actually break.
         #expect(
             !recorder.snapshot().contains { $0.contains("kill-window") },
             "a holder hook tab was torn down through tmux: \(recorder.snapshot())")

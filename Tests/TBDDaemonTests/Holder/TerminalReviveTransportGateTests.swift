@@ -43,7 +43,6 @@ struct TerminalReviveTransportGateTests {
         let db: TBDDatabase
         let router: RPCRouter
         let recorder: TmuxArgvRecorder
-        let environment: [String: String]
         let worktree: Worktree
         let closedTerminalID: UUID
         let home: String
@@ -127,7 +126,7 @@ struct TerminalReviveTransportGateTests {
             terminal: closed, text: "prior shell output\n", closedAt: Date())
 
         return Fixture(
-            db: db, router: router, recorder: recorder, environment: environment,
+            db: db, router: router, recorder: recorder,
             worktree: worktree, closedTerminalID: closed.id, home: home,
             worktreePath: worktreePath)
     }
@@ -139,11 +138,11 @@ struct TerminalReviveTransportGateTests {
         #expect(row.holderPID == nil)
         #expect(row.childPID == nil)
         #expect(fixture.recorder.count("new-window") == 1)
-        let socketPath = try HolderRendezvous.socketPath(
-            sessionID: terminal.id, environment: fixture.environment)
-        #expect(
-            !FileManager.default.fileExists(atPath: socketPath),
-            "a holder rendezvous was created for a tmux-transport revive")
+        // No rendezvous-absence assertion here: every fixture in this suite is
+        // built with either no spawner or one whose executable does not exist,
+        // so nothing in it can bind a socket and the absence would hold for a
+        // revive that had taken the holder path too. The live suite
+        // (`HolderSpawnGateTests`) is where that assertion discriminates.
     }
 
     // MARK: - Flag off

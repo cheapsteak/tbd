@@ -549,6 +549,19 @@ extension WorktreeLifecycle {
     /// the job it forked and its rendezvous files outlive the only record of
     /// their pids. The descriptor is where those pids are, which is why the
     /// rowless case is reclaimable at all.
+    ///
+    /// A read that *throws* is deliberately folded into "unreadable" rather
+    /// than retried or surfaced: the answer then comes from the descriptor,
+    /// which is a strictly safer place to take it from than the alternative of
+    /// giving up on a teardown whose whole purpose is reclamation. What that
+    /// costs is the one step the row-shaped teardown adds over the descriptor
+    /// one — `disposeHolder(for:)` retires the row's model-proxy route before
+    /// abandoning the holder, and `abandonHookHolder` only abandons. A hook tab
+    /// is spawned with no attachment (`attachment: nil` at both hook-tab spawn
+    /// sites), so it is never routed and there is nothing to retire; the two
+    /// paths reclaim exactly the same things here. A row-backed *agent* tab
+    /// would not be safe to answer this way, which is why this reasoning is
+    /// local to hook tabs.
     func closeHookTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
         await closeHookTerminal(
             worktree: worktree,
@@ -564,6 +577,12 @@ extension WorktreeLifecycle {
     /// The tmux spelling, for a caller holding tmux coordinates rather than a
     /// descriptor: a row it cannot read can only have been the tmux tab those
     /// coordinates describe.
+    ///
+    /// No production caller: every hook tab is torn down from the descriptor
+    /// its spawn returned. It is kept because the tmux-coordinate tests
+    /// (`TerminalHistoryTests.closeHookTerminalCapturesBeforeTeardown`,
+    /// `HookTabTransportGateTests`) address the teardown the way a caller
+    /// without a descriptor would, and that is a shape worth keeping reachable.
     func closeHookTerminal(
         worktree: Worktree, tmuxServer: String, terminalID: UUID, windowID: String
     ) async {

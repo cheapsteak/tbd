@@ -128,69 +128,126 @@ struct ClaudeStateDetectorSessionPathTests {
 /// runs beside it in this suite so a resolver that answered only for holders —
 /// or ignored the target's payload entirely — cannot pass.
 ///
+/// Both arms are asserted positively. A pane target on a dry-run manager
+/// answers `0` unless a test says otherwise, and `0` names no session file and
+/// no `claude` child, so a "returns nil" tmux test passes for a detector that
+/// resolves nothing at all — including one that never consulted its target. The
+/// pid hook is therefore injected and its answer is what the assertion is built
+/// on, with the failure to read a pane pid as the separate negative case.
+///
 /// Explicit environment dictionaries, never `setenv`: this suite is not nested
 /// under `TBDHomeSerialized`, and mutating the process-global variable would
 /// hand every concurrently running suite the real `~/.claude`.
 @Suite("ClaudeStateDetector recapture targets")
 struct ClaudeStateDetectorTargetTests {
 
-    /// Thread-safe tally of the tmux argv a dry-run manager was asked to run.
-    private final class ArgvRecorder: @unchecked Sendable {
+    /// A pane-pid query that cannot be answered — what a `list-panes` against a
+    /// pane that is gone amounts to.
+    private struct PaneQueryFailed: Error {}
+
+    /// Thread-safe tally of the pane-pid queries a dry-run manager was asked
+    /// for. The hook is a `@Sendable` closure called from whatever executor the
+    /// detector happens to be on.
+    ///
+    /// It counts the query `panePID` itself makes, which is the only tmux call
+    /// either arm of this resolution can produce — `dryRunRecorder` cannot see
+    /// it, because `panePID` answers from this hook in dry run without
+    /// recording any argv, so a recorder-based assertion here is vacuous.
+    private final class PanePIDProbe: @unchecked Sendable {
         private let lock = NSLock()
-        private var argvs: [[String]] = []
-        func record(_ argv: [String]) {
+        private var recorded: [[String]] = []
+        func record(server: String, paneID: String) {
             lock.lock(); defer { lock.unlock() }
-            argvs.append(argv)
+            recorded.append([server, paneID])
         }
-        var all: [[String]] {
+        /// Every `(server, paneID)` the manager was asked about, in order.
+        /// Asserted whole rather than counted, so a query that reached tmux
+        /// with the wrong coordinate fails here rather than passing a tally.
+        var queries: [[String]] {
             lock.lock(); defer { lock.unlock() }
-            return argvs
+            return recorded
         }
+    }
+
+    /// A host store with one session file in it, written the way Claude writes
+    /// one for the process at `pid`.
+    private static func makeHostStore(
+        pid: Int32, sessionID: String
+    ) throws -> URL {
+        let host = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-detector-target-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: host.appendingPathComponent("sessions", isDirectory: true),
+            withIntermediateDirectories: true)
+        try #"{"pid":\#(pid),"sessionId":"\#(sessionID)"}"#.write(
+            to: host.appendingPathComponent("sessions/\(pid).json"),
+            atomically: true, encoding: .utf8)
+        return host
     }
 
     @Test("a holder-child target reads the job's own session file, without tmux")
     func holderChildTargetReadsTheSessionFile() async throws {
-        let fm = FileManager.default
-        let host = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("tbd-detector-holder-\(UUID().uuidString)", isDirectory: true)
-        defer { try? fm.removeItem(at: host) }
-        try fm.createDirectory(
-            at: host.appendingPathComponent("sessions", isDirectory: true),
-            withIntermediateDirectories: true)
         // A pid the holder would have recorded for the job it forked. Nothing
         // is signalled or inspected — only the file at its path is read.
         let childPID: Int32 = 424242
-        try #"{"pid":424242,"sessionId":"holder-child-session"}"#.write(
-            to: host.appendingPathComponent("sessions/\(childPID).json"),
-            atomically: true, encoding: .utf8)
+        let host = try Self.makeHostStore(pid: childPID, sessionID: "holder-child-session")
+        defer { try? FileManager.default.removeItem(at: host) }
 
-        let recorder = ArgvRecorder()
+        let probe = PanePIDProbe()
         let detector = ClaudeStateDetector(
-            tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorder.record($0) }),
+            tmux: TmuxManager(dryRun: true, dryRunPanePID: { server, paneID in
+                probe.record(server: server, paneID: paneID)
+                return "0"
+            }),
             environment: ["TBD_CLAUDE_HOST_HOME": host.path])
 
         let captured = await detector.captureSessionID(target: .holderChild(pid: childPID))
 
         #expect(captured == "holder-child-session")
         #expect(
-            recorder.all.isEmpty,
-            "a holder recapture shelled out to tmux: \(recorder.all)")
+            probe.queries.isEmpty,
+            "a holder recapture resolved a tmux pane pid: \(probe.queries)")
     }
 
-    /// The other arm, on the same detector shape: a pane target still resolves
-    /// through `panePID`, which a dry-run manager answers `0` for — a pid with
-    /// no session file and no `claude` child — so the answer is nil rather than
-    /// a session id borrowed from somewhere else.
-    @Test("a tmux-pane target with no live pane resolves to nil")
-    func tmuxPaneTargetWithoutAPaneIsNil() async throws {
-        let fm = FileManager.default
-        let host = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("tbd-detector-pane-\(UUID().uuidString)", isDirectory: true)
-        defer { try? fm.removeItem(at: host) }
-        try fm.createDirectory(at: host, withIntermediateDirectories: true)
+    /// The other arm, on the same detector shape: a pane target resolves the
+    /// pane's pid first and reads the session file of whatever that names.
+    @Test("a tmux-pane target resolves through the pane's own pid")
+    func tmuxPaneTargetResolvesThroughThePanePID() async throws {
+        let panePID: Int32 = 515151
+        let host = try Self.makeHostStore(pid: panePID, sessionID: "pane-session")
+        defer { try? FileManager.default.removeItem(at: host) }
+
+        let probe = PanePIDProbe()
+        let detector = ClaudeStateDetector(
+            tmux: TmuxManager(dryRun: true, dryRunPanePID: { server, paneID in
+                probe.record(server: server, paneID: paneID)
+                return String(panePID)
+            }),
+            environment: ["TBD_CLAUDE_HOST_HOME": host.path])
+
+        let captured = await detector.captureSessionID(
+            target: .tmuxPane(server: "tbd-detector", paneID: "%7"))
+
+        #expect(captured == "pane-session")
+        // The target's payload has to reach the query, or the pid above says
+        // nothing about which pane was asked for.
+        #expect(probe.queries == [["tbd-detector", "%7"]])
+    }
+
+    /// And the failure this arm has to answer for: a pane whose pid cannot be
+    /// read at all resolves to nil rather than to a session id borrowed from
+    /// somewhere else.
+    @Test("a tmux-pane target whose pane pid cannot be read is nil")
+    func tmuxPaneTargetWithoutAPanePIDIsNil() async throws {
+        // The same store as the positive case, so a detector that answered from
+        // anything other than the pane's pid would still find a file to read.
+        let host = try Self.makeHostStore(pid: 515151, sessionID: "pane-session")
+        defer { try? FileManager.default.removeItem(at: host) }
 
         let detector = ClaudeStateDetector(
-            tmux: TmuxManager(dryRun: true),
+            tmux: TmuxManager(dryRun: true, dryRunPanePID: { _, _ in
+                throw PaneQueryFailed()
+            }),
             environment: ["TBD_CLAUDE_HOST_HOME": host.path])
 
         let captured = await detector.captureSessionID(

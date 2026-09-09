@@ -633,10 +633,20 @@ struct HolderSpawnGateTests {
         #expect(holderProcessIsAlive(childPID))
         #expect(forked.tmuxWindowID.isEmpty)
 
-        let landed = await pollUntil("the fork's session recapture to be scheduled") {
+        // Through the one bounded poll the suite keeps (`Tests/CLAUDE.md`
+        // rule 5), and reported the one way a CI summary preserves: a timeout
+        // carries its own description on the primary failure line, while a
+        // harness cancellation says nothing at all — attribution for that
+        // belongs to whatever did the cancelling.
+        let landed = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             !recapture.targets.isEmpty
         }
-        #expect(landed)
+        if landed == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "the fork's session recapture to be scheduled",
+                observed: "\(recapture.targets)",
+                deadline: TestDeadlines.saturatedPass))
+        }
         #expect(recapture.targets == [.holderChild(pid: childPID)])
         #expect(recapture.panes.isEmpty, "a holder fork scheduled a pane recapture")
 
@@ -744,6 +754,9 @@ struct HolderSpawnGateTests {
         #expect(setup.transport == .holder)
         let holderPID = try #require(setup.holderPID)
         let childPID = try #require(setup.childPID)
+        // This test deletes the row teardown would otherwise sweep from, so the
+        // pids are handed over the moment they are read.
+        fixture.rememberHolder(holderPID: holderPID, childPID: childPID)
         #expect(holderPID != childPID)
         #expect(holderProcessIsAlive(holderPID))
         #expect(holderProcessIsAlive(childPID))
@@ -772,18 +785,36 @@ struct HolderSpawnGateTests {
             at: WorktreeLifecycle.setupMarkerPath(worktreeID: fixture.worktree.id),
             exitCode: 0)
 
-        let closed = try await pollUntil("the auto-closed setup tab's row to be deleted") {
-            try await fixture.db.terminals.get(id: setup.id) == nil
+        let closed = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            // A read that throws is not a deletion — only a row that is
+            // genuinely absent ends this wait.
+            do {
+                return try await fixture.db.terminals.get(id: setup.id) == nil
+            } catch {
+                return false
+            }
         }
-        #expect(closed)
-        let jobGone = await pollUntil("the setup tab's job to be killed") {
+        if closed == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "the auto-closed setup tab's row to be deleted",
+                observed: nil, deadline: TestDeadlines.saturatedPass))
+        }
+        let jobGone = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             !holderProcessIsAlive(childPID)
         }
-        #expect(jobGone)
-        let socketGone = await pollUntil("the setup holder's rendezvous socket to go") {
+        if jobGone == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "the setup tab's job (pid \(childPID)) to be killed",
+                observed: nil, deadline: TestDeadlines.saturatedPass))
+        }
+        let socketGone = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             !FileManager.default.fileExists(atPath: socketPath)
         }
-        #expect(socketGone)
+        if socketGone == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "the setup holder's rendezvous socket at \(socketPath) to go",
+                observed: nil, deadline: TestDeadlines.saturatedPass))
+        }
     }
 
     /// A holder-backed pre-session tab is reclaimed when the worktree row
@@ -803,6 +834,8 @@ struct HolderSpawnGateTests {
         let spawn = try #require(try await fixture.spawnPreSessionTerminal())
         #expect(spawn.transport == .holder)
         let childPID = try #require(spawn.childPID)
+        // The cascade below takes the row teardown would otherwise sweep from.
+        fixture.rememberHolder(holderPID: spawn.holderPID, childPID: childPID)
         #expect(holderProcessIsAlive(childPID))
         let socketPath = try HolderRendezvous.socketPath(
             sessionID: spawn.terminalID, environment: fixture.environment)
@@ -820,14 +853,22 @@ struct HolderSpawnGateTests {
             !issued.contains(where: { $0.contains("kill-window") }),
             "the holder hook tab was torn down through tmux: \(issued)")
 
-        let jobGone = await pollUntil("the hook tab's job to be killed") {
+        let jobGone = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             !holderProcessIsAlive(childPID)
         }
-        #expect(jobGone)
-        let socketGone = await pollUntil("the hook holder's rendezvous socket to go") {
+        if jobGone == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "the hook tab's job (pid \(childPID)) to be killed",
+                observed: nil, deadline: TestDeadlines.saturatedPass))
+        }
+        let socketGone = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             !FileManager.default.fileExists(atPath: socketPath)
         }
-        #expect(socketGone)
+        if socketGone == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "the hook holder's rendezvous socket at \(socketPath) to go",
+                observed: nil, deadline: TestDeadlines.saturatedPass))
+        }
     }
 
     /// The setup tab's other arm: with the flag off it is a tmux window, hook
@@ -979,6 +1020,8 @@ private final class GateFixture {
     private let capturePaneCounter: Counter
     private let recordedCommands: CommandLog
     private var torndown = false
+    private let rememberedLock = NSLock()
+    private var remembered: [(holderPID: Int32?, childPID: Int32?)] = []
 
     /// A thread-safe tally. The dry-run hooks are `@Sendable` closures called
     /// from whatever executor the handler happens to be on.
@@ -1021,6 +1064,12 @@ private final class GateFixture {
     /// production composition hands it, which is the point: the job is a
     /// controlled two-line program instead of whatever the developer's `$SHELL`
     /// would have done with it.
+    ///
+    /// It sleeps far longer than any wait in this suite deliberately. The
+    /// teardown tests wait for this job to *die*, and a sleep that could expire
+    /// inside one of those windows would let a teardown that reclaimed nothing
+    /// pass on the job's natural exit. Every holder started here is killed by
+    /// `tearDown`, so the length costs a run nothing.
     private static func writeGateShell(in home: String) throws -> String {
         try FileManager.default.createDirectory(
             atPath: home, withIntermediateDirectories: true,
@@ -1029,7 +1078,7 @@ private final class GateFixture {
         try """
         #!/bin/sh
         printf 'GATE-OK\\n'
-        exec sleep 30
+        exec sleep 600
         """.write(toFile: path, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o700], ofItemAtPath: path)
@@ -1333,24 +1382,56 @@ private final class GateFixture {
                     terminalID: terminalID, newProfileID: nil, mode: .fork)))
     }
 
+    /// Records a holder and its job so `tearDown` can reclaim them from
+    /// something other than a terminal row.
+    ///
+    /// The row-derived sweep is the normal route, and it is enough for every
+    /// test that leaves its rows in place. It is not enough for the teardown
+    /// tests: they assert that a row was DELETED, so the very regression they
+    /// exist to catch — a teardown that removed the row and reclaimed nothing —
+    /// would leave the holder and its job running for the rest of the run with
+    /// nothing left naming their pids. Call this as soon as the pids are read.
+    func rememberHolder(holderPID: Int32?, childPID: Int32?) {
+        rememberedLock.lock()
+        defer { rememberedLock.unlock() }
+        remembered.append((holderPID: holderPID, childPID: childPID))
+    }
+
+    /// Kills one holder and the job it forked. Signalling a pid that is already
+    /// gone is how this is expected to end on the passing path: the process has
+    /// been reaped, `kill` answers `ESRCH`, and nothing happens.
+    private func reclaim(holderPID: Int32?, childPID: Int32?) {
+        if let holderPID, holderPID > 0 {
+            kill(holderPID, SIGKILL)
+            var ignored: Int32 = 0
+            _ = waitpid(holderPID, &ignored, 0)
+        }
+        if let childPID, childPID > 0, holderProcessIsAlive(childPID) {
+            kill(childPID, SIGKILL)
+        }
+    }
+
     /// Kills every holder this fixture started AND every job those holders
     /// forked, then clears the scratch roots. A test that leaves either behind
     /// leaks a process for the rest of the run — bounded at the job's own
-    /// `sleep 30`, but it compounds across runs.
+    /// `sleep`, but that is ten minutes and it compounds across runs.
+    ///
+    /// Two sources, because neither covers the other: the terminal rows name
+    /// every holder still on the books, and `rememberHolder` names the ones
+    /// whose rows a test deleted on purpose.
     func tearDown() {
         guard !torndown else { return }
         torndown = true
 
         let rows = (try? blockingTerminals()) ?? []
         for row in rows where row.transport == .holder {
-            if let holderPID = row.holderPID, holderPID > 0 {
-                kill(holderPID, SIGKILL)
-                var ignored: Int32 = 0
-                _ = waitpid(holderPID, &ignored, 0)
-            }
-            if let childPID = row.childPID, childPID > 0, holderProcessIsAlive(childPID) {
-                kill(childPID, SIGKILL)
-            }
+            reclaim(holderPID: row.holderPID, childPID: row.childPID)
+        }
+        rememberedLock.lock()
+        let recorded = remembered
+        rememberedLock.unlock()
+        for entry in recorded {
+            reclaim(holderPID: entry.holderPID, childPID: entry.childPID)
         }
         let registry = self.registry
         Task.detached { await registry.releaseAll() }
