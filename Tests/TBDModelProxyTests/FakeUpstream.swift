@@ -67,8 +67,16 @@ final class FakeUpstream: @unchecked Sendable {
     }
 
     /// Binds loopback on a kernel-assigned port and returns it.
+    ///
+    /// `async` on the bind future's `get()` rather than synchronous on
+    /// `wait()`: `EventLoopFuture.wait()` parks the calling thread until the
+    /// bind completes, and every caller here is a test body running on Swift's
+    /// cooperative pool — three threads wide on CI's runner, and shared with
+    /// every other suspended task in the process. `Tests/CLAUDE.md`
+    /// ("Thread-blocking gates run off the cooperative pool") has the wedge
+    /// this produces when a few such holds coincide.
     @discardableResult
-    func start() throws -> Int {
+    func start() async throws -> Int {
         let script = self.script
         let record: @Sendable (HTTPRequestHead, [UInt8]) -> Void = { [weak self] head, body in
             guard let self else { return }
@@ -87,7 +95,7 @@ final class FakeUpstream: @unchecked Sendable {
                 }
             }
 
-        let bound = try bootstrap.bind(host: "127.0.0.1", port: 0).wait()
+        let bound = try await bootstrap.bind(host: "127.0.0.1", port: 0).get()
         channel = bound
         // Thrown rather than defaulted: port 0 is a legal thing to *ask* for
         // and means "the kernel picks one", so handing it back as the bound
@@ -99,14 +107,26 @@ final class FakeUpstream: @unchecked Sendable {
         return port
     }
 
-    /// Closes the listener and shuts the event loop down. Safe to call twice,
-    /// and safe to call after a `start()` that threw — which is why callers
-    /// register their `defer { stop() }` *before* starting, so a failed bind
-    /// cannot leak the event-loop group.
+    /// Asks the listener to close and the event loop group to shut down, and
+    /// returns immediately. Safe to call twice, and safe to call after a
+    /// `start()` that threw — which is why callers register their
+    /// `defer { stop() }` *before* starting, so a failed bind cannot leak the
+    /// event-loop group.
+    ///
+    /// **Nothing here blocks**, which is what lets it stay in a `defer` (a
+    /// `defer` cannot `await`). The previous shape did both halves
+    /// synchronously — `close().wait()` and `syncShutdownGracefully()` — and a
+    /// `defer` in a test body runs on a cooperative-pool thread, which is the
+    /// hold `Tests/CLAUDE.md` names under "Thread-blocking gates run off the
+    /// cooperative pool". Neither half has a result any caller reads: the
+    /// close is a teardown, and `shutdownGracefully` reports through a callback
+    /// on a background queue that discards it. What a test observes about this
+    /// fake — `requests`, and the bytes it already served — is lock-guarded and
+    /// unaffected by when the loops actually stop.
     func stop() {
-        try? channel?.close().wait()
+        channel?.close(promise: nil)
         channel = nil
-        try? group.syncShutdownGracefully()
+        group.shutdownGracefully { _ in }
     }
 }
 

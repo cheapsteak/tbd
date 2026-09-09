@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import NIOCore
 import NIOHTTP1
+import TestSupport
 import Testing
 
 @testable import TBDModelProxy
@@ -46,27 +47,28 @@ struct ProxyBinaryTests {
     /// one refuses before it can touch a home or bind anything. The environment
     /// is explicit and rc-free for the same reason every holder bootstrap is —
     /// nothing here may come from the developer's shell.
+    ///
+    /// `async` on `collectOutput(of:)` rather than synchronous on two
+    /// `readDataToEndOfFile()` calls plus `waitUntilExit()`: each of those
+    /// parks the calling thread until the child is done, and in a synchronous
+    /// test body that thread belongs to the cooperative pool CI's runner has
+    /// three of (`Tests/CLAUDE.md`, "Thread-blocking gates run off the
+    /// cooperative pool"). This one test held three of the three, and two runs
+    /// went silent for ~30 minutes with no failing test to name.
     @Test("a bad invocation exits 2 with a usage diagnostic and a silent stdout")
-    func aBadInvocationExitsTwoWithAUsageDiagnostic() throws {
+    func aBadInvocationExitsTwoWithAUsageDiagnostic() async throws {
         let executable = try #require(ProxyExecutable.locate())
         let process = Process()
         process.executableURL = executable
         process.arguments = ["--stream-dir", "/tmp"]
         process.environment = ["PATH": "/usr/bin:/bin"]
-        let stderrPipe = Pipe()
-        let stdoutPipe = Pipe()
-        process.standardError = stderrPipe
-        process.standardOutput = stdoutPipe
-        try process.run()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        let output = try await collectOutput(of: process)
 
-        #expect(process.terminationStatus == TBDModelProxyExit.badArguments)
-        let diagnostic = String(decoding: stderrData, as: UTF8.self)
+        #expect(output.status == TBDModelProxyExit.badArguments)
+        let diagnostic = String(decoding: output.stderr, as: UTF8.self)
         #expect(diagnostic.contains("unknown argument --stream-dir"))
         #expect(diagnostic.contains("--lock-fd"), "the usage line must name the descriptor flag")
-        #expect(stdoutData.isEmpty, "a proxy must never write to stdout")
+        #expect(output.stdout.isEmpty, "a proxy must never write to stdout")
     }
 
     /// The exit taxonomy Part B2's supervisor branches on. Pinned as a set of
@@ -504,7 +506,7 @@ extension ModelProxySuites {
                 (delayMs: 400, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
             let upstream = FakeUpstream { _, _ in FakeUpstream.Script(events: ticks) }
-            let upstreamPort = try upstream.start()
+            let upstreamPort = try await upstream.start()
             defer { upstream.stop() }
 
             let home = proxyScratchRoot(prefix: "pxsigd").path
@@ -607,7 +609,7 @@ extension ModelProxySuites {
                 (delayMs: 500, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
             let upstream = FakeUpstream { _, _ in FakeUpstream.Script(events: ticks) }
-            let upstreamPort = try upstream.start()
+            let upstreamPort = try await upstream.start()
             defer { upstream.stop() }
 
             let home = proxyScratchRoot(prefix: "pxsig2").path
@@ -723,7 +725,7 @@ extension ModelProxySuites {
             // connections linger — does not let two *listeners* share a port on
             // BSD, which is what makes this reachable at all.
             let squatter = FakeUpstream { _, _ in FakeUpstream.Script(events: []) }
-            let takenPort = try squatter.start()
+            let takenPort = try await squatter.start()
             defer { squatter.stop() }
 
             let home = proxyScratchRoot(prefix: "pxbind").path
@@ -751,7 +753,7 @@ extension ModelProxySuites {
                     headers: [("content-type", "application/json")],
                     events: [(delayMs: 0, bytes: Array(#"{"ok":true}"#.utf8))])
             }
-            let upstreamPort = try upstream.start()
+            let upstreamPort = try await upstream.start()
             defer { upstream.stop() }
 
             let home = proxyScratchRoot(prefix: "pxload").path
@@ -861,7 +863,7 @@ extension ModelProxySuites {
                 (delayMs: 1000, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
             let upstream = FakeUpstream { _, _ in FakeUpstream.Script(events: ticks) }
-            let upstreamPort = try upstream.start()
+            let upstreamPort = try await upstream.start()
             defer { upstream.stop() }
 
             let home = proxyScratchRoot(prefix: "pxrelk").path

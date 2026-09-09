@@ -1094,22 +1094,22 @@ func withProxy(
     let sessionBox = ClientSessionBox()
 
     func teardown() async {
-        // Both of these can block: `ProxyServer.stop()` shuts an event-loop
-        // group down, and `FakeUpstream.stop()` does it synchronously. They run
-        // under their own deadlines so a teardown that wedges reports rather
-        // than eating the job's whole budget.
+        // `ProxyServer.stop()` can block — it shuts an event-loop group down —
+        // so it runs under its own deadline, and a teardown that wedges reports
+        // rather than eating the job's whole budget. `FakeUpstream.stop()`
+        // needs neither: it asks the listener and the group to close and
+        // returns at once (see its doc comment), so there is nothing to bound
+        // and nothing to move off the cooperative pool.
         if let server = serverBox.take() {
             _ = try? await withPhaseDeadline("proxy stop", seconds: 20) { await server.stop() }
         }
-        _ = try? await withPhaseDeadline("upstream stop", seconds: 20) {
-            await offCooperativePool { upstream.stop() }
-        }
+        upstream.stop()
         sessionBox.take()?.invalidateAndCancel()
         try? FileManager.default.removeItem(at: root)
     }
 
     do {
-        let upstreamPort = try upstream.start()
+        let upstreamPort = try await upstream.start()
 
         let routesDir = root.appendingPathComponent("proxy/routes")
         let streamsDir = root.appendingPathComponent("streams")
@@ -1230,18 +1230,6 @@ func withPhaseDeadline<Value: Sendable>(
     work.cancel()
     timer.cancel()
     return try result.get()
-}
-
-/// Runs a blocking call on a `DispatchQueue` rather than on the cooperative
-/// pool, which has one thread per core and is what every other test in the
-/// process is also running on.
-func offCooperativePool(_ work: @escaping @Sendable () -> Void) async {
-    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-        DispatchQueue.global().async {
-            work()
-            continuation.resume()
-        }
-    }
 }
 
 /// A one-shot value: the first `finish` wins and wakes whoever is awaiting.

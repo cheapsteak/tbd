@@ -386,6 +386,13 @@ let package = Package(
             dependencies: [
                 "TBDHolder",
                 "TBDShared",
+                // `collectOutput(of:)`, which runs a spawned binary to
+                // completion without parking a cooperative-pool thread on
+                // `waitUntilExit()`. It brings `TBDDaemonLib` in behind it,
+                // which nothing here needs; the alternative is a second
+                // hand-rolled blocking wait in a target that spawns children,
+                // which is the thing that helper exists to end.
+                "TestSupport",
             ]
         ),
         // The model proxy's own suite, carrying the same load-bearing
