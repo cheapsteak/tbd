@@ -228,18 +228,18 @@ jobs:
 
   test:
     runs-on: macos-26
-    # 90, deliberately NOT sized to this job's 15.3-minute observed worst case
-    # (10.7 median). The four test steps below carry `timeout-minutes` of 25, 15,
-    # 15 and 15 — a 70-minute step budget — and they exist so that a wedged suite
-    # dies on a step that names which pass hung, after that step's own watchdog
-    # has captured the stacks. A job bound at or below 70 would pre-empt all four
-    # and kill the run with the uninformative message those step bounds were
-    # written to avoid. 90 clears the step budget with room for checkout,
+    # 100, deliberately NOT sized to this job's 15.3-minute observed worst case
+    # (10.7 median). The four test steps below carry `timeout-minutes` of 35, 15,
+    # 15 and 15 — an 80-minute step budget — and they exist so that a wedged
+    # suite dies on a step that names which pass hung, after that step's own
+    # watchdog has captured the stacks. A job bound at or below 80 would pre-empt
+    # all four and kill the run with the uninformative message those step bounds
+    # were written to avoid. 100 clears the step budget with room for checkout,
     # `brew install tmux`, the cache restore, the watchdog harness and the final
     # build — none of which is individually timed — while cutting worst-case
-    # occupancy of one of the five macOS slots from six hours to an hour and a
-    # half.
-    timeout-minutes: 90
+    # occupancy of one of the five macOS slots from six hours to about an hour
+    # and forty minutes.
+    timeout-minutes: 100
     # All four test steps below append their `.flaky(issue:)` retry records
     # here (docs/specs/2026-07-24-test-hardening-design.md §7), so one run
     # produces one artifact covering all three fast passes and the quiet pass
@@ -465,9 +465,9 @@ jobs:
       # floor still clears and every step stays green while the new target's
       # tests execute nowhere. Expressing step 2 as "everything except
       # TBDDaemonTests and TBDDaemonLiveTests" closes it — a new target lands
-      # in step 2 automatically and runs. Step 1a takes the A–L half of
+      # in step 2 automatically and runs. Step 1a takes the A–O half of
       # TBDDaemonTests, step 1b takes the REST of TBDDaemonTests as a complement
-      # of 1a rather than as an `[M-Z]` enumeration (a suite renamed to start
+      # of 1a rather than as a `[P-Z]` enumeration (a suite renamed to start
       # with a digit or an underscore would fall out of both halves otherwise),
       # step 2 takes the complement of steps 1+3, the quiet pass takes
       # TBDDaemonLiveTests: no gap, no overlap, nothing to maintain.
@@ -489,11 +489,16 @@ jobs:
       # which is the only number the check can see; don't "correct" them to the
       # listed totals.
       #
-      # The two daemon halves are floored at 1000 and 1500. A local heuristic
-      # count, attributed by declared suite name and undercounting parameterized
-      # tests, puts A–L near 2,100 and M–Z near 3,100; the floors sit
-      # deliberately far below that and will be recalibrated from the counts the
-      # first CI run of this split prints, which is the only source that
+      # The two daemon halves are floored at 1200 and 1500. Where the cut goes
+      # is measured, not guessed: the split's first CI run (34305400310) cut at
+      # `[A-L]` and executed 1918 and 3703 — a third and two thirds, not the
+      # halving the split exists for — with 51 s and 114 s of test time. A local
+      # count of `@Test` attributed to the top-level suite that declares it
+      # predicted 1919 for that same cut, so that heuristic is worth trusting to
+      # within a test; it puts M, N and O at 582 between them, which moves the
+      # cut to `[A-O]` for an expected split near 2,500 / 3,120. The floors sit
+      # deliberately far below either half and will be recalibrated from the
+      # counts this cut's first run prints, which is the only source that
       # measures what actually executes.
       #
       # And the executed count is NOT stable run to run: two CI runs on one PR,
@@ -561,23 +566,35 @@ jobs:
       # puts the failure messages inside it. `scripts/test.sh` forwards
       # unrecognised arguments straight through to `swift test`.
       # ---------------------------------------------------------------------
-      - name: Test (fast parallel pass 1a — TBDDaemonTests A–L)
+      - name: Test (fast parallel pass 1a — TBDDaemonTests A–O)
         id: fast_pass_daemon_a
-        # 25, not 15 like its neighbours: this step runs the FIRST `swift test`,
-        # so it pays the whole test-target compile on top of its own runtime.
-        # Three consecutive warm-cache runs on main measured 2m22s / 3m33s /
-        # 6m02s for the compile alone, and a cold cache (Package.resolved
-        # change, cache eviction) is slower still. The 1200 s watchdog budget
-        # below is what actually bounds a wedge; this bound is the platform
+        # 35, against 15 for its neighbours, because this step runs the FIRST
+        # `swift test` and so pays the whole test-target compile on top of its
+        # own runtime — and because the cost of that compile is dominated by
+        # whether the SwiftPM cache hit.
+        #
+        # Measured over the 45 most recent concluded runs of this workflow
+        # (2026-09-05 to 2026-09-09), the first test step took between 73 s and
+        # 1250 s. The three slowest — 1010 s (run 34255127220), 1115 s
+        # (34267900663) and 1250 s (34255164378) — are exactly the runs whose
+        # "Cache SwiftPM build artifacts" step finished in 1–4 s, which is what
+        # a cache MISS looks like: a hit spends 25–56 s restoring. So 1250 s is
+        # the measured cold-cache figure, and it covers a full 5,529-test daemon
+        # pass, more than this step now runs. Warm-cache runs still spread
+        # 73–996 s, because every run force-rebuilds TBDShared and TBDDaemonLib
+        # and a PR's first run restores only the deps-only fallback key.
+        #
+        # The 1800 s watchdog budget below is what actually bounds a wedge — 45%
+        # above that measured worst case — and this step bound is the platform
         # backstop behind it, sized to clear the budget with room for the
         # sampling and the kill sweep.
-        timeout-minutes: 25
+        timeout-minutes: 35
         run: |
           scripts/ci/watched-test-pass.sh \
-            --name fast-pass-daemon-a --budget-seconds 1200 \
-            --floor 1000 \
+            --name fast-pass-daemon-a --budget-seconds 1800 \
+            --floor 1200 \
             --floor-message 'the --filter regex matched nothing or the target was renamed.' \
-            -- --fingerprint --parallel --filter '^TBDDaemonTests\.[A-L]' \
+            -- --fingerprint --parallel --filter '^TBDDaemonTests\.[A-O]' \
                --xunit-output /tmp/xunit-daemon-a.xml --experimental-xunit-message-failure
 
       - name: Test (fast parallel pass 1b — the rest of TBDDaemonTests)
@@ -590,14 +607,15 @@ jobs:
         # passes take on a run that is already red.
         if: ${{ !cancelled() && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
         # 15: the compile is already paid, so this is test runtime plus SPM's
-        # no-op build check. The 600 s budget bounds a wedge; this clears it.
+        # no-op build check — 128 s of step time on the split's first CI run.
+        # The 600 s budget bounds a wedge; this clears it.
         timeout-minutes: 15
         run: |
           scripts/ci/watched-test-pass.sh \
             --name fast-pass-daemon-b --budget-seconds 600 \
             --floor 1500 \
             --floor-message 'the --filter/--skip pair over-matched or the target was renamed.' \
-            -- --fingerprint --parallel --filter '^TBDDaemonTests\.' --skip '^TBDDaemonTests\.[A-L]' \
+            -- --fingerprint --parallel --filter '^TBDDaemonTests\.' --skip '^TBDDaemonTests\.[A-O]' \
                --xunit-output /tmp/xunit-daemon-b.xml --experimental-xunit-message-failure
 
       - name: Test (fast parallel pass 2 — everything except TBDDaemonTests and the live target)
@@ -606,12 +624,12 @@ jobs:
         # and step 2 are COMPLEMENTS" block above. A new test target lands here
         # on its own.
         if: ${{ !cancelled() && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
-        # 15. The 30 this step used to carry existed to let the per-test limits
-        # fire first and attribute a hang to a named test, because being killed
-        # by the platform timeout names nothing. The watchdog now does that job
-        # properly and sooner: it bounds the pass at 600 s and hands back the
-        # stacks of whatever was running, so the platform bound only has to clear
-        # the budget plus the sampling and kill sweep.
+        # 15. A step bound wide enough for the per-test limits to fire first and
+        # attribute a hang to a named test would buy nothing now: the watchdog
+        # does that job sooner and with a stack. It bounds the pass at 600 s —
+        # against 71 s of step time on the split's first CI run — so the
+        # platform bound only has to clear the budget plus the sampling and kill
+        # sweep.
         timeout-minutes: 15
         run: |
           scripts/ci/watched-test-pass.sh \

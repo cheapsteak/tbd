@@ -224,11 +224,11 @@ hide a pass's verdict.
 
 | Constant | Value | Basis |
 | --- | --- | --- |
-| fast pass 1a budget | 1200 s | cold-cache compile up to ~6 min + ~4 min of tests |
-| fast pass 1a `timeout-minutes` | 25 min | budget + sampling margin |
-| fast pass 1b budget | 600 s | tests only; healthy 3–4 min |
+| fast pass 1a budget | 1800 s | 1.45× the 1250 s cold-cache first pass measured over 45 runs |
+| fast pass 1a `timeout-minutes` | 35 min | budget + sampling margin |
+| fast pass 1b budget | 600 s | tests only; 128 s of step time measured |
 | fast pass 1b `timeout-minutes` | 15 min | budget + sampling margin |
-| fast pass 2 budget | 600 s | tests only; healthy 3–4 min |
+| fast pass 2 budget | 600 s | tests only; 71 s of step time measured |
 | fast pass 2 `timeout-minutes` | 15 min | budget + sampling margin |
 | quiet pass budget | 720 s | 6 × the 117 s healthy pass |
 | quiet pass `timeout-minutes` | 15 min | platform bound |
@@ -241,12 +241,21 @@ The healthy quiet pass reports `Test run with 179 tests in 37 suites passed
 after 116.847 seconds`, so its budget is six times a normal run and still three
 minutes short of the step timeout.
 
-The fast-pass budgets are sized against what those steps actually spend. Only 1a
-pays the test-target compile: three consecutive warm-cache runs on main measured
-2m22s, 3m33s and 6m02s for it, and a cold cache is slower, so 1a's budget covers
-a slow compile plus a full run of tests. 1b and 2 run against a warm build and
-finish in three to four minutes when healthy, so 600 s is comfortably more than
-double a healthy run while still ending a wedge inside the step's own bound. The
+The fast-pass budgets are sized against what those steps actually spend, and 1a
+is the only one that pays the test-target compile. Measured over the 45 most
+recent concluded runs of `test.yml` (2026-09-05 to 2026-09-09), the first test
+step took between 73 s and 1250 s. The three slowest — 1010 s (run 34255127220),
+1115 s (34267900663) and 1250 s (34255164378) — are exactly the runs whose
+"Cache SwiftPM build artifacts" step finished in 1 to 4 seconds, which is what a
+cache MISS looks like; a hit spends 25 to 56 seconds restoring. So 1250 s is the
+measured cold-cache figure, over a full 5,529-test daemon pass — more than 1a
+now runs — and 1800 s clears it by 45%. The warm-cache runs still spread
+73–996 s, because every run force-rebuilds TBDShared and TBDDaemonLib and a PR's
+first run restores only the deps-only fallback key, so a budget sized to the
+warm median would end healthy runs. 1b and 2 run against that warm build and
+measured 128 s and 71 s of step time on the split's first CI run, so 600 s is
+several times a healthy run while still ending a wedge inside the step's own
+bound. The
 step timeouts sit above their budgets by only the margin the expiry path needs:
 a step bound wide enough for per-test limits to fire first would buy nothing,
 because the watchdog names the test sooner and with a stack.

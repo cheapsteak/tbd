@@ -394,6 +394,16 @@ if kill -0 "$pipeline" 2>/dev/null; then
       deeper_first="$pid $deeper_first"
     done
     for pid in $direct_children; do
+      # The same `is_target` skip the deep walk above applies, so a sampled
+      # target is filtered out of EVERY order rather than only most of them.
+      # By construction the direct children are `script` and `tee`, and neither
+      # can be a target — the fallback excludes both by name, and no forwarded
+      # argument carries `swiftpm-testing`, `xctest` or `TBDPackageTests` — so
+      # this closes a documented invariant rather than a reachable path, which
+      # is why the harness has no fixture for it.
+      if is_target "$pid"; then
+        continue
+      fi
       comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
       case "${comm##*/}" in
         tee) tee_pids="$tee_pids $pid" ;;

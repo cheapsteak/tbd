@@ -247,7 +247,7 @@ because it is mostly suspended waiting for a turn. Population went 3013 → 4536
 in three weeks. Two consequences, both load-bearing.
 
 **The fast pass is three sequential steps in one job.** `test.yml` runs
-`--filter '^TBDDaemonTests\.[A-L]'` (1a), then that filter's complement within
+`--filter '^TBDDaemonTests\.[A-O]'` (1a), then that filter's complement within
 the daemon target (1b), then
 `--skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.'` (2), all sharing one build.
 Halving the in-flight population halves the tail: measured under induced load
@@ -256,7 +256,13 @@ with arms interleaved, means over 5 iterations, p90 26.4 s → 14.6 s and p50
 re-pays SPM's no-op build check and process startup). Quote that figure, not the
 +6 s a single iteration showed; it did not survive the other four. Splitting the
 daemon target again pays that startup cost a third time and buys the same
-halving on the half where the tail actually lives. This is not
+halving on the half where the tail actually lives. **Where the cut goes is
+measured, not guessed:** cut at `[A-L]` the two halves executed 1918 and 3703,
+which is a third and two thirds rather than a halving, so the cut moved to
+`[A-O]`. A local count of `@Test` attributed to the top-level suite that
+declares it predicted 1919 for that same cut, so use it — it is accurate to
+within a test — and re-cut from the counts CI prints whenever the halves drift
+apart again. This is not
 the "sharding across runners" that
 `docs/specs/2026-07-24-test-hardening-design.md` §1 rejected and §2 lists as a
 non-goal — that was about extra *jobs* paying the 5-concurrent-macOS-job cap and
@@ -267,7 +273,7 @@ silently zero-match like a `--filter` regex": `swift test --filter` exits GREEN
 on zero matches, so a new `TBDFooTests` named in no list would run in
 **no** pass with nothing going red — and the floors could not catch that,
 because adding a target reduces no existing step's count. Written as
-complements, 1b absorbs any daemon suite that falls outside `[A-L]` (including
+complements, 1b absorbs any daemon suite that falls outside `[A-O]` (including
 one renamed to start with a digit) and step 2 absorbs any new target, so the
 four passes partition the package by construction. The per-step floors have a
 narrower job: catching a target that *is* named in one of these regexes
