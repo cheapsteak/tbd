@@ -407,6 +407,11 @@ let package = Package(
             dependencies: [
                 "TBDModelProxy",
                 "TBDShared",
+                // `pollUntilTrue`, the repo's one bounded poll. It brings
+                // `TBDDaemonLib` in behind it, which nothing else here needs;
+                // the alternative is a seventh hand-rolled poll loop, which is
+                // the thing that helper exists to end.
+                "TestSupport",
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),

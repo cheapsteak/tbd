@@ -2,6 +2,7 @@ import CFNetwork
 import Darwin
 import Foundation
 import NIOHTTP1
+import TestSupport
 import Testing
 
 @testable import TBDModelProxy
@@ -336,9 +337,19 @@ extension ModelProxySuites {
             // A script that ended near that moment would let a relay which
             // reported nothing on cancellation still be rescued by the stream
             // finishing on its own, and the test would pass for the wrong reason.
-            // 40 events at 250 ms is 10 seconds of stream against a 5-second wait.
+            // 40 events at 1 s is 40 seconds of stream against the 20-second
+            // waits below. The ratio is what matters and it is a discriminating
+            // threshold rather than a hang guard, so it is sized by moving the
+            // *script* out rather than by shortening the wait: at 250 ms an
+            // event the stream ran out after 10 s, which left only a 5-second
+            // wait, and 5 seconds is inside the scheduling latency fast pass 2
+            // routinely shows — it went red on CI with the count still at 1
+            // while nothing was wrong with the relay. Nothing waits for this
+            // script to finish: the client cuts after the first event, and
+            // `ScriptedUpstreamHandler` stops rescheduling as soon as its
+            // channel goes inactive.
             let events = (1...40).map { index in
-                (delayMs: 250, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
+                (delayMs: 1000, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
 
             try await withProxy(
@@ -373,18 +384,18 @@ extension ModelProxySuites {
                     }
                 }
                 #expect(seen.contains("event: tick"), "the client never saw a first event")
-                // The stream is still running upstream — two more events at 400 ms
-                // are scripted — so nothing below can be explained by the response
-                // having finished on its own.
+                // The stream is still running upstream — 39 more events, a second
+                // apart, are scripted — so nothing below can be explained by the
+                // response having finished on its own.
                 #expect(harness.upstream.requests.count == 1)
 
-                // Bounded well below the script's own 10 seconds, so a relay that
+                // Bounded well below the script's own 40 seconds, so a relay that
                 // only ends because the upstream ran out of events cannot pass.
                 await waitUntil(
-                    "the relay released its in-flight stream", seconds: 5,
+                    "the relay released its in-flight stream", seconds: 20,
                     sample: { harness.server.streamsInFlight }, isSatisfied: { $0 == 0 })
                 await waitUntil(
-                    "the tee was told the stream ended", seconds: 5,
+                    "the tee was told the stream ended", seconds: 20,
                     sample: { recorder.endCount }, isSatisfied: { $0 == 1 })
                 #expect(recorder.beginCount == 1)
                 // Exactly once: `relayEnd` deduplicates, and a second end would
@@ -939,14 +950,34 @@ struct ProxyWaitTimeout: LocalizedError {
     }
 }
 
+/// Carries a poll's last sample out of the closure that took it, so a timeout
+/// reports the value the wait actually saw rather than one re-read after the
+/// budget expired (`Tests/CLAUDE.md`, "Timeout errors must report observed
+/// state").
+private final class ProxyObservationBox<Observed: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Observed
+
+    init(_ initial: Observed) { stored = initial }
+
+    var value: Observed { lock.withLock { stored } }
+    func put(_ observed: Observed) { lock.withLock { stored = observed } }
+}
+
 /// Samples until `isSatisfied` holds, and records what it last saw if it never
 /// does.
 ///
 /// A poll rather than a signal because the things waited on here — a counter
 /// decremented on an event loop, a tee fed from a task of its own — have no
-/// completion the test can await. The interval is short and the budget
-/// generous, so a passing run costs milliseconds and a broken one names itself
-/// instead of hanging the job.
+/// completion the test can await.
+///
+/// The loop itself is `pollUntilTrue`, the repo's one bounded poll, rather than
+/// a seventh hand-rolled one: this used to sleep through `try? await
+/// Task.sleep`, which cannot tell expiry from cancellation and throws
+/// *instantly* once the task is cancelled — turning a 20 ms poll into a busy
+/// spin over its whole remaining budget on a cooperative thread every other
+/// test in the pass is queued behind. What stays here is the diagnostic, which
+/// is the only part that was ever this helper's own.
 @discardableResult
 func waitUntil<Observed: Sendable>(
     _ what: String,
@@ -954,18 +985,27 @@ func waitUntil<Observed: Sendable>(
     sample: @escaping @Sendable () -> Observed,
     isSatisfied: @escaping @Sendable (Observed) -> Bool
 ) async -> Bool {
-    let deadline = ContinuousClock().now + .seconds(seconds)
-    var last = sample()
-    while !isSatisfied(last) {
-        guard ContinuousClock().now < deadline else {
-            Issue.record(
-                ProxyWaitTimeout(what: what, observed: "\(last)", seconds: seconds))
-            return false
-        }
-        try? await Task.sleep(nanoseconds: 20_000_000)
-        last = sample()
+    let last = ProxyObservationBox(sample())
+    let outcome = await pollUntilTrue(
+        timeout: .seconds(seconds), pollInterval: .milliseconds(20)
+    ) {
+        let observed = sample()
+        last.put(observed)
+        return isSatisfied(observed)
     }
-    return true
+    switch outcome {
+    case .satisfied:
+        return true
+    case .cancelled:
+        // Reported nowhere, per `pollUntilTrue`'s contract: attribution belongs
+        // to whatever cancelled this test, not to a wait that may have been
+        // about to succeed. The `false` is for the two callers that gate a
+        // message on it, and a cancelled test is already ending.
+        return false
+    case .timedOut:
+        Issue.record(ProxyWaitTimeout(what: what, observed: "\(last.value)", seconds: seconds))
+        return false
+    }
 }
 
 // MARK: - Harness
@@ -1015,6 +1055,26 @@ struct ProxyHarness: Sendable {
 /// of them inside a 4,800-test pass is invisible: the runner's stdout is block
 /// buffered, so the log names whichever test flushed last rather than the one
 /// that stopped. A phase that overruns names itself and fails the test instead.
+///
+/// `body` runs inside a single "request" phase (60s), sized for an ordinary
+/// request/response round trip against `Tests/CLAUDE.md`'s fast-pass-2 numbers
+/// (p90 51.4s / max 55.3s reported per-test on a green run). A test whose
+/// follow-on work needs its own, differently-sized budget — a bind that races
+/// a squatter, a multi-second drain — should not stack that work inside
+/// `body`: `withPhaseDeadline` races its operation against a plain
+/// `Task.sleep` timer that starts ticking the moment "request" begins, so
+/// nested phases *share* that 60s wall-clock window rather than getting one
+/// each, and a slow nested phase can trip the generic
+/// `ProxyPhaseTimeout("request", 60)` instead of its own named diagnostic
+/// (this is exactly what happened to the successor-bind wait in
+/// `retireAnswersBeforeDrainAndSuccessorCanBind`). Pass `afterRequest`
+/// instead: it runs after `body` returns, with the harness still live and
+/// before teardown, but outside "request"'s deadline — so it can size its own
+/// phases as siblings, not children, of "request". State `body` opens that
+/// `afterRequest` still needs (a still-streaming response body, say) crosses
+/// between them the way every other cross-closure value in this file does —
+/// a small `@unchecked Sendable` box captured by both — rather than through a
+/// return value, so this signature does not have to grow a generic for it.
 func withProxy(
     prefix: String,
     script: @escaping FakeUpstream.Handler,
@@ -1025,7 +1085,8 @@ func withProxy(
     /// directory is minted in here, after the caller has been called.
     teeFactory: (@Sendable (URL) -> any StreamTeeing)? = nil,
     onRetire: (@Sendable () -> Void)? = nil,
-    body: @escaping @Sendable (ProxyHarness) async throws -> Void
+    body: @escaping @Sendable (ProxyHarness) async throws -> Void,
+    afterRequest: (@Sendable (ProxyHarness) async throws -> Void)? = nil
 ) async throws {
     let upstream = FakeUpstream(script: script)
     let root = proxyScratchRoot(prefix: prefix)
@@ -1113,6 +1174,9 @@ func withProxy(
             routesDir: routesDir, streamsDir: streamsDir, server: server, routes: table,
             session: session, home: canonicalHome)
         try await withPhaseDeadline("request", seconds: 60) { try await body(harness) }
+        if let afterRequest {
+            try await afterRequest(harness)
+        }
         await teardown()
     } catch {
         await teardown()
@@ -1121,9 +1185,11 @@ func withProxy(
 }
 
 /// A scratch directory under the run root `scripts/test.sh` reclaims, so a
-/// killed test process leaks nothing. Duplicated from `TestSupport`'s
-/// `fencedScratchRoot` rather than imported: that target pulls in
-/// `TBDDaemonLib`, and this one deliberately links only the proxy and NIO.
+/// killed test process leaks nothing. The `URL`-returning sibling of
+/// `TestSupport.fencedScratchRoot` — every caller here composes further path
+/// components onto it — agreeing with it on the fenced root and differing only
+/// in the unfenced fallback, which is `FileManager`'s temporary directory
+/// rather than `/tmp`.
 func proxyScratchRoot(prefix: String) -> URL {
     let fenced = ProcessInfo.processInfo.environment["TBD_TEST_SCRATCH_ROOT"] ?? ""
     let root = fenced.isEmpty ? FileManager.default.temporaryDirectory.path : fenced

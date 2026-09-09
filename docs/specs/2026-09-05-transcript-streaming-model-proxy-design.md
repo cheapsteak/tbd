@@ -178,9 +178,10 @@ an ephemeral-port coincidence, means the port is not this daemon's to use; the
 daemon mints a fresh port and updates the column, and never retires or
 replaces a proxy it did not adopt. Sessions spawned against the old port lose the proxy for their
 remaining life, because Claude reads `ANTHROPIC_BASE_URL` once at start. That
-is the blast radius of a port change, and it is confined to the window in
-which TBD was entirely stopped: a running proxy holds its port across every
-daemon restart.
+is the blast radius of a port change. A running proxy holds its port across
+every daemon restart, so one way to reach that radius is a window in which TBD
+was entirely stopped; the other is the gap a retire opens, in which the freed
+number is briefly anyone's.
 
 ### Control endpoint
 
@@ -198,6 +199,12 @@ daemon restart.
   file is unlinked only if it is still its own. The successor binds the moment
   the answer arrives. No stream is cut, and the no-listener gap is the
   successor's bind time, far inside Claude's 183-second retry budget.
+  A retire frees the port; it cannot reserve it. Ephemeral ports come from one
+  range every socket on the machine draws from, so an unrelated socket can be
+  handed that number inside the gap — and `SO_REUSEADDR`, which is what lets a
+  successor bind past the predecessor's own lingering connections, does nothing
+  against a socket that does not set it. A successor that loses the race meets
+  the address-in-use path above rather than a broken handshake.
 - `POST /tbd/routes` and `DELETE /tbd/routes/<token>` tell the proxy a route
   file was written or should be dropped, so it need not watch the directory.
 
