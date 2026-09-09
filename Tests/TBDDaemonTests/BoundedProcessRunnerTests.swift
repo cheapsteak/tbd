@@ -283,21 +283,29 @@ struct BoundedProcessRunnerTests {
     /// it a single process: `SIG_IGN` survives `exec`, so the sleeping process
     /// itself ignores SIGTERM, holds the stdout pipe, and strands no grandchild.
     ///
-    /// **What discriminates here is the child, and the fixture is sized so that
-    /// stays true.** The sleeper outlives `TestDeadlines.saturatedPass` several
-    /// times over (`Self.childLifetimeSeconds`), so "the escalation ran" and
-    /// "the call waited its child out" can never produce the same observation:
-    /// a call that waits its child out cannot return inside the bound, and a
-    /// child nobody killed cannot be gone inside it either. A 30 s sleeper —
-    /// what this fixture used to be — collapsed that distinction, because
-    /// natural exit beat the bound.
+    /// **What discriminates here is the child, and both bounds are read off it
+    /// rather than off a stopwatch.** The two diagnoses this test separates are
+    /// "the escalation ran" and "the call waited its child out", and the child's
+    /// own lifetime is what tells them apart: a call that waits its child out
+    /// cannot return before `Self.childLifetimeSeconds` have passed, and a child
+    /// nobody killed is still alive when the `waitFor` below looks for it. So
+    /// the elapsed bound is the lifetime itself — an observable of the code
+    /// under test — and not a wall-clock ceiling.
     ///
-    /// Both bounds are therefore `TestDeadlines.saturatedPass` rather than a
-    /// snappier number. A wall-clock ceiling tuned to the healthy path (~1.2 s)
-    /// measures the runner instead of the code: fast pass 1 runs ~1800 tests in
-    /// parallel on a loaded macOS runner whose per-test latency has a p50 near
-    /// 65 s, and the 20 s ceiling this used to carry went red at 31.3 s on green
-    /// code.
+    /// **A ceiling sized against the pass is still a ceiling on the runner.**
+    /// `TestDeadlines.saturatedPass` (90 s) sat close enough to fast pass 1's
+    /// own numbers — p50 65.6 s, p99 92.1 s, max 95.5 s reported per test on a
+    /// **green** run — that this test reddened twice in a row on an unrelated
+    /// PR at elapsed 103–107 s, on a runner shared with two other runs (runs
+    /// 34284111508 attempt 3 and 34286874077). Its predecessor, a 20 s ceiling
+    /// tuned to the healthy path's ~1.2 s, had gone red at 31.3 s for the same
+    /// reason. Neither number was ever an assertion about the code.
+    ///
+    /// `childLifetimeSeconds` is 600 so that the bound derived from it clears
+    /// those sightings and that pacing by roughly six times over, while staying
+    /// a bound a genuinely stuck call still trips: a call that really did wait
+    /// its child out returns at ten minutes, and this fails at ten minutes with
+    /// the elapsed time in the message.
     ///
     /// The *wedged-snapshot* property — that a blocking snapshot cannot cost
     /// another call its deadline — is pinned deterministically by
@@ -321,8 +329,12 @@ struct BoundedProcessRunnerTests {
             Issue.record("expected .timedOut, got \(outcome)")
             return
         }
-        #expect(elapsed < TestDeadlines.saturatedPass,
-                "a 300 ms deadline resolved after \(elapsed) — the call waited its child out")
+        #expect(elapsed < .seconds(Self.childLifetimeSeconds),
+                """
+                a 300 ms deadline resolved after \(elapsed), which is past the \
+                \(Self.childLifetimeSeconds)s the child would have slept — the call waited its \
+                child out instead of killing it
+                """)
 
         let recorded = Self.readPid(from: pidFile)
         defer { if let recorded { kill(recorded, SIGKILL) } }
@@ -460,12 +472,23 @@ struct BoundedProcessRunnerTests {
         func set() { value = true }
     }
 
-    /// How long the TERM-ignoring sleeper lives. It must dominate every bound in
-    /// this suite — all of which are `TestDeadlines.saturatedPass` (90 s) — so a
-    /// child that is gone is a child something KILLED, never one that finished
-    /// its sleep inside the wait. Each such child is signalled by the escalation
-    /// under test and, failing that, by its test's own `defer`.
-    private static let childLifetimeSeconds = 300
+    /// How long the TERM-ignoring sleeper lives. Two jobs, and the second is why
+    /// the number is this large.
+    ///
+    /// It must dominate every `waitFor` in this suite — all of which are
+    /// `TestDeadlines.saturatedPass` (90 s) — so a child that is gone is a child
+    /// something KILLED, never one that finished its sleep inside the wait. Each
+    /// such child is signalled by the escalation under test and, failing that,
+    /// by its test's own `defer`.
+    ///
+    /// It is also the elapsed bound in
+    /// `aTermIgnoringChildIsKilledByTheEscalationAtItsDeadline`, which is what
+    /// makes that bound an observable of the code rather than a stopwatch on the
+    /// runner. That use is what sets the value: it has to dominate a saturated
+    /// fast pass 1, whose green-run per-test latency is p50 65.6 s / p99 92.1 s
+    /// and which produced two 103–107 s sightings of that test against a 90 s
+    /// ceiling. 600 s clears both by roughly six times.
+    private static let childLifetimeSeconds = 600
 
     /// A `sh -c` body that records its own pid, then becomes a long-lived sleeper
     /// that ignores SIGTERM. `SIG_IGN` is inherited across `exec`, so the

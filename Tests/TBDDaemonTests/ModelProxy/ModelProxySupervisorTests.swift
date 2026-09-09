@@ -24,8 +24,12 @@ import Testing
 ///   - **the process table** is a `StubIdentity` that can admit a pid, deny
 ///     one, or forget one between polls, which is what a proxy dying looks
 ///     like from the supervisor's side;
-///   - **the clock** is a `TestClock`, so the watch interval and the respawn
-///     backoff are advanced rather than waited out.
+///   - **the clock** is virtual, so the watch interval and the respawn backoff
+///     are advanced rather than waited out. Most cases take an
+///     `EventDrivenTestClock`, whose arming handshake is a signal rather than
+///     a poll; the three that advance a fixed number of times and then assert
+///     that nothing further happened keep the fixture's `TestClock`.
+///     `SupervisorFixture.supervisor(clock:)` has the split and the reason.
 ///
 /// The rendezvous is not stubbed: `FakeProxyProcess` writes a real
 /// `<home>/proxy/proxy.pid` the way the real binary does, and the adoption
@@ -373,14 +377,20 @@ struct ModelProxySupervisorTests {
     /// drain never reads a route count: what is observed here is only the
     /// respawn, which the old retire-on-off behaviour could not have produced —
     /// it stopped the watch and dropped the proxy before any of this.
+    ///
+    /// On `EventDrivenTestClock` for the reason ``respawnsAfterDeath`` spells
+    /// out: the watch is a fire-then-re-arm loop, so a wait that observes the
+    /// re-arm by polling `checkSuspension()` competes with the very task it is
+    /// waiting for.
     @Test("a proxy that dies while draining is still respawned")
     func drainingStillRespawnsAProxyThatDies() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
 
         try await fixture.db.config.setModelProxyEnabled(true)
         await fixture.spawner.answer(.success(pid: 6150, port: SupervisorFixture.deadPort))
-        let supervisor = fixture.supervisor()
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.startIfEnabled()
         #expect(await supervisor.current?.pid == 6150)
 
@@ -390,12 +400,18 @@ struct ModelProxySupervisorTests {
 
         await fixture.spawner.reap(pid: 6150, status: 0)
         await fixture.spawner.answer(.success(pid: 6151, port: SupervisorFixture.deadPort))
-        let respawned = await fixture.clock.advanceUntil(
-            "the draining proxy to be respawned", by: fixture.watchInterval,
-            { await supervisor.current?.pid == 6151 })
+        // One tick: it collects the dead child and the immediate respawn
+        // attempt succeeds, so `respawn`'s backoff never arms and exactly one
+        // sleeper — the watch interval — is in the ledger at each step.
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        // The re-arm is the proof that tick finished; advancing on this clock
+        // does not run the resumed task's post-sleep code.
+        try await clock.requireSleeperArmed()
         await supervisor.stop()
 
-        #expect(respawned)
+        #expect(
+            await supervisor.current?.pid == 6151,
+            "a proxy that dies while draining is respawned rather than dropped")
         #expect(
             await fixture.spawner.calls()
                 == [0, SupervisorFixture.deadPort],
@@ -407,10 +423,22 @@ struct ModelProxySupervisorTests {
     /// route as it exits, so the count reaching zero is the last of them
     /// finishing — at which point the proxy is retired and the supervisor
     /// stops.
+    ///
+    /// The one ladder in this file that cannot end on a re-arm. The proxy here
+    /// is **adopted**, so nothing is pending collection when the drain
+    /// finishes: `enterReapOnlyIdle` takes its empty-`pendingReap` branch and
+    /// stops the watch outright, and no sleeper ever registers again. (A drain
+    /// that retired a child of this daemon's leaves the watch running in the
+    /// reap-only idle instead — that is
+    /// `aDrainedChildIsCollectedByTheWatchThatOutlivesTheRetire`, and it is why
+    /// this comment names the branch rather than the method.) The proof that
+    /// the tick finished is therefore the observable it produced — a bounded
+    /// wait on a positive fact, in the same shape ``respawnsAfterDeath`` uses.
     @Test("the last route retiring retires the proxy and stops the watch")
     func drainingEndsWhenTheLastRouteGoes() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
 
         let proxy = try FakeProxyProcess(
             version: fixture.ownVersion, pid: 6160, home: fixture.home, routeCount: 2)
@@ -419,15 +447,20 @@ struct ModelProxySupervisorTests {
         try await fixture.db.config.setModelProxyEnabled(true)
         fixture.identity.admit(pid: 6160, startTime: proxy.processStartTime)
 
-        let supervisor = fixture.supervisor()
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.startIfEnabled()
         try await fixture.db.config.setModelProxyEnabled(false)
         await supervisor.beginDraining()
         #expect(await supervisor.current?.pid == 6160, "two routes in flight keep it")
 
         proxy.setRouteCount(0)
-        let retired = await fixture.clock.advanceUntil(
-            "the drained proxy to be retired", by: fixture.watchInterval,
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        let retired = try await waitFor(
+            "the drained proxy to be retired",
+            observed: {
+                let pid = await supervisor.current?.pid
+                return pid.map { "still holding pid \($0)" } ?? "no proxy"
+            },
             { await supervisor.current == nil })
         await supervisor.stop()
 
@@ -444,10 +477,14 @@ struct ModelProxySupervisorTests {
     /// The zero route count is the discriminating half: it is exactly the input
     /// that retires the proxy in `drainingEndsWhenTheLastRouteGoes`, and here it
     /// must not.
+    ///
+    /// On `EventDrivenTestClock` with the ladder ``respawnsAfterDeath``
+    /// describes: one tick, waited for rather than polled for.
     @Test("turning the flag back on while draining keeps the proxy")
     func drainingIsClearedByTheFlagComingBackOn() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
 
         let proxy = try FakeProxyProcess(
             version: fixture.ownVersion, pid: 6170, home: fixture.home, routeCount: 1)
@@ -456,7 +493,7 @@ struct ModelProxySupervisorTests {
         try await fixture.db.config.setModelProxyEnabled(true)
         fixture.identity.admit(pid: 6170, startTime: proxy.processStartTime)
 
-        let supervisor = fixture.supervisor()
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.startIfEnabled()
         try await fixture.db.config.setModelProxyEnabled(false)
         await supervisor.beginDraining()
@@ -467,12 +504,13 @@ struct ModelProxySupervisorTests {
         proxy.setRouteCount(0)
 
         let pollsBefore = proxy.requests().filter { $0.path == "/tbd/status" }.count
-        let polled = await fixture.clock.advanceUntil(
-            "a watch poll after the flag came back on", by: fixture.watchInterval,
-            { proxy.requests().filter { $0.path == "/tbd/status" }.count > pollsBefore })
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        try await clock.requireSleeperArmed()
         await supervisor.stop()
 
-        #expect(polled)
+        #expect(
+            proxy.requests().filter { $0.path == "/tbd/status" }.count > pollsBefore,
+            "the watch kept polling after the flag came back on")
         #expect(
             proxy.requests().allSatisfy { $0.path != "/tbd/retire" },
             "a supervisor that is no longer draining must not retire on an empty route table")
@@ -1573,24 +1611,31 @@ struct ModelProxySupervisorTests {
     /// on its next tick. This is the discriminating half of the two tests
     /// above — without it, a supervisor that gave up on every failed spawn
     /// would pass them both.
+    ///
+    /// On `EventDrivenTestClock` with the ladder ``respawnsAfterDeath``
+    /// describes. One tick: the reconcile it runs finds no proxy and takes the
+    /// second stubbed answer, and `reconcile` arms no sleep of its own, so the
+    /// watch interval is the only sleeper in the ledger.
     @Test("a spawn that failed for a transient reason is retried by the watch")
     func retriesATransientSpawnFailure() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
 
         await fixture.spawner.answer(.failure(.childExited(status: -9)))
         await fixture.spawner.answer(.success(pid: 7, port: SupervisorFixture.deadPort))
 
-        let supervisor = fixture.supervisor()
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.start()
         #expect(await supervisor.current == nil)
 
-        let landed = await fixture.clock.advanceUntil(
-            "the watch to retry the spawn", by: fixture.watchInterval,
-            { await supervisor.current?.pid == 7 })
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        try await clock.requireSleeperArmed()
         await supervisor.stop()
 
-        #expect(landed)
+        #expect(
+            await supervisor.current?.pid == 7,
+            "a transient spawn failure is retried on the next tick")
     }
 
     /// No binary beside the daemon means no proxy, and that is a supported
@@ -1752,20 +1797,40 @@ struct ModelProxySupervisorTests {
     /// A proxy that is alive but slow to answer must not be replaced. This is
     /// the discriminating half of `respawnsAfterDeath`: the status probe fails
     /// in both, and only the process table tells them apart.
+    ///
+    /// **On `EventDrivenTestClock`, and for the same mechanism as its sibling.**
+    /// Three ticks is three re-arms, and on `TestClock` each one can only be
+    /// observed by polling `checkSuspension()`, whose `megaYield` is 20
+    /// serially-awaited background-QoS tasks — under the saturated fast pass
+    /// that probe floods the cooperative pool with exactly the low-priority
+    /// work the watch task needs a turn from. `advanceWhenSuspended` is also
+    /// the *soft* wait: a missed re-arm records an issue and advances anyway,
+    /// which moves `now` past a deadline that is not in the ledger yet and
+    /// desyncs the clock for every step after it. The strict ladder below
+    /// throws before anything advances instead.
+    ///
+    /// Exactly one sleeper is in the ledger at each step: every poll fails and
+    /// there is no identity anchor yet, so `tick` takes the "keep it" branch
+    /// and reaches no other `clock.sleep`.
     @Test("a live proxy that misses a status poll is kept, not replaced")
     func doesNotRespawnAProxyThatIsStillAlive() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
 
         await fixture.spawner.answer(.success(pid: 810, port: SupervisorFixture.deadPort))
-        let supervisor = fixture.supervisor()  // no listener: every status poll fails
+        // No listener: every status poll fails.
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.start()
         #expect(await supervisor.current?.pid == 810)
 
         // `reapIfExited` reports nothing, so the child is still running.
-        for _ in 0..<3 {
-            await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
+        for _ in 1...3 {
+            try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
         }
+        // The re-arm after the third tick is what makes the absence below an
+        // observation rather than a guess about whether that tick had run yet.
+        try await clock.requireSleeperArmed()
         await supervisor.stop()
 
         #expect(await supervisor.current?.pid == 810)
@@ -2057,10 +2122,16 @@ struct ModelProxySupervisorTests {
     /// An **adopted** proxy is not this daemon's child, so `waitpid` can never
     /// collect it: its death is read off the process table instead. The
     /// supervisor spawns a replacement on the port it held.
+    ///
+    /// On `EventDrivenTestClock` with the ladder ``respawnsAfterDeath``
+    /// describes. One tick: the poll fails, the process table refuses the
+    /// anchor, and the immediate respawn attempt succeeds — so `respawn`'s
+    /// backoff never arms and the watch interval is the only sleeper.
     @Test("an adopted proxy that leaves the process table is replaced")
     func replacesAnAdoptedProxyThatDied() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
 
         let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 9090, home: fixture.home)
         // Stopped again below, on purpose; the defer is for the paths where an
@@ -2069,7 +2140,7 @@ struct ModelProxySupervisorTests {
         try await fixture.db.config.setModelProxyPort(proxy.port)
         fixture.identity.admit(pid: 9090, startTime: proxy.processStartTime)
 
-        let supervisor = fixture.supervisor()
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.start()
         #expect(await supervisor.current?.adopted == true)
 
@@ -2078,12 +2149,13 @@ struct ModelProxySupervisorTests {
         fixture.identity.forget(pid: 9090)
         await fixture.spawner.answer(.success(pid: 9091, port: adoptedPort))
 
-        let landed = await fixture.clock.advanceUntil(
-            "the dead adopted proxy to be replaced", by: fixture.watchInterval,
-            { await supervisor.current?.pid == 9091 })
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        try await clock.requireSleeperArmed()
         await supervisor.stop()
 
-        #expect(landed)
+        #expect(
+            await supervisor.current?.pid == 9091,
+            "an adopted proxy gone from the process table is replaced")
         #expect(await fixture.spawner.calls() == [adoptedPort])
     }
 
@@ -2096,10 +2168,18 @@ struct ModelProxySupervisorTests {
     /// the first and keep a dead proxy forever, with `current` naming a port
     /// nothing is listening on. The process table is what tells them apart,
     /// for a child exactly as for an adopted proxy.
+    ///
+    /// On `EventDrivenTestClock` with the ladder ``respawnsAfterDeath``
+    /// describes, and two ticks rather than one: the first is the quiet poll
+    /// that records the identity anchor, the second is the death. Each waits
+    /// for the re-arm the previous tick left behind, which is what proves that
+    /// tick finished — the anchor especially, since the second tick is
+    /// meaningless without it.
     @Test("a spawned proxy that leaves the process table is replaced, waitpid or not")
     func replacesASpawnedProxyWaitpidCannotCollect() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
 
         let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 8080, home: fixture.home)
         defer { proxy.stop() }
@@ -2110,13 +2190,14 @@ struct ModelProxySupervisorTests {
         fixture.identity.admit(pid: 8080, startTime: proxy.processStartTime)
         await fixture.spawner.answer(.success(pid: 8080, port: proxy.port))
 
-        let supervisor = fixture.supervisor()
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.start()
         #expect(await supervisor.current?.adopted == false)
 
         // One quiet poll, which is where a spawned proxy gets the identity
         // anchor the death check reads: the start time it answered with.
-        await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        try await clock.requireSleeperArmed()
         #expect(await supervisor.current?.pid == 8080)
 
         let heldPort = proxy.port
@@ -2126,12 +2207,13 @@ struct ModelProxySupervisorTests {
         // process cannot collect, so `reapIfExited` keeps answering nothing.
         await fixture.spawner.answer(.success(pid: 8081, port: heldPort))
 
-        let landed = await fixture.clock.advanceUntil(
-            "the lost child to be replaced", by: fixture.watchInterval,
-            { await supervisor.current?.pid == 8081 })
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        try await clock.requireSleeperArmed()
         await supervisor.stop()
 
-        #expect(landed, "a child waitpid cannot collect must not collapse into keep-forever")
+        #expect(
+            await supervisor.current?.pid == 8081,
+            "a child waitpid cannot collect must not collapse into keep-forever")
         #expect(await fixture.spawner.calls() == [heldPort, heldPort])
     }
 
@@ -2151,10 +2233,17 @@ struct ModelProxySupervisorTests {
     /// the second by the spawn the restart performs when adoption refuses the
     /// corpse. A supervisor that queued only on the first path leaks the
     /// second, and it leaks it on exactly the toggle path B2.3 will use.
+    ///
+    /// On `EventDrivenTestClock` with the ladder ``respawnsAfterDeath``
+    /// describes. One tick: the poll answers with a version that differs, and
+    /// the replacement happens inside that tick — `replaceIfVersionDiffers`
+    /// retires and spawns without sleeping, so the watch interval stays the
+    /// only sleeper in the ledger.
     @Test("a proxy this daemon replaced is collected, and a restart never adopts it back")
     func replacedProxyIsReapedAndNeverAdoptedBack() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
 
         // The fake answers for pid 7075 throughout — a listener that outlives
         // the process it claims to be is exactly what a corpse looks like from
@@ -2168,17 +2257,18 @@ struct ModelProxySupervisorTests {
         await fixture.spawner.answer(.success(pid: 7075, port: proxy.port))
         await fixture.spawner.answer(.success(pid: 7076, port: proxy.port))
 
-        let supervisor = fixture.supervisor()
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.start()
         #expect(await supervisor.current?.pid == 7075)
         #expect(await supervisor.current?.adopted == false, "a child of ours is never adopted")
 
         // The first poll reads the version the proxy actually reports, which
         // differs, so this daemon retires and replaces its own child.
-        let replaced = await fixture.clock.advanceUntil(
-            "the mismatched child to be replaced", by: fixture.watchInterval,
-            { await supervisor.current?.pid == 7076 })
-        #expect(replaced)
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        try await clock.requireSleeperArmed()
+        #expect(
+            await supervisor.current?.pid == 7076,
+            "a child whose version differs is retired and replaced")
 
         // What the runtime toggle does. Nothing is advanced across it: the
         // whole question is what `start()` decides, not what a watch tick
@@ -2221,10 +2311,15 @@ struct ModelProxySupervisorTests {
     /// daemon spawned to one it did not: the successor has to come out
     /// adopted, and the predecessor has to be queued for collection on the way
     /// past rather than dropped on the floor.
+    ///
+    /// On `EventDrivenTestClock` with the ladder ``respawnsAfterDeath``
+    /// describes. One tick: the poll answers for another pid, and the drop and
+    /// the fresh adoption both happen inside it, neither of them sleeping.
     @Test("a port that begins answering for another process is adopted afresh")
     func aMovedPidIsReadoptedRatherThanRenamed() async throws {
         let fixture = try SupervisorFixture.make()
         defer { fixture.tearDown() }
+        let clock = EventDrivenTestClock()
 
         let proxy = try FakeProxyProcess(version: fixture.ownVersion, pid: 9100, home: fixture.home)
         defer { proxy.stop() }
@@ -2236,7 +2331,7 @@ struct ModelProxySupervisorTests {
         fixture.identity.admit(pid: 9101, startTime: proxy.processStartTime)
         await fixture.spawner.answer(.success(pid: 9100, port: proxy.port))
 
-        let supervisor = fixture.supervisor()
+        let supervisor = fixture.supervisor(clock: clock)
         await supervisor.start()
         #expect(await supervisor.current?.pid == 9100)
         #expect(await supervisor.current?.adopted == false, "a child of ours is never adopted")
@@ -2244,11 +2339,12 @@ struct ModelProxySupervisorTests {
         // The port changes hands: another daemon replaced the proxy, or ours
         // went and something else bound the port it held.
         proxy.becomePid(9101)
-        let moved = await fixture.clock.advanceUntil(
-            "the port to be re-adopted for its new process", by: fixture.watchInterval,
-            { await supervisor.current?.pid == 9101 })
+        try await clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
+        try await clock.requireSleeperArmed()
 
-        #expect(moved, "a status answer naming another pid must not be ignored")
+        #expect(
+            await supervisor.current?.pid == 9101,
+            "a status answer naming another pid must not be ignored")
         #expect(
             await supervisor.current?.adopted == true,
             "a pid this daemon never spawned is not its child, whatever the last one was")
@@ -2552,10 +2648,15 @@ private struct SupervisorFixture {
     /// names it, so nothing has to be redirected for the client to reach it —
     /// and a probe of a port with no listener fails for the real reason.
     ///
-    /// `clock` defaults to this fixture's `TestClock`; a test whose handshake
-    /// with the watch is more than one hop passes an `EventDrivenTestClock`
-    /// instead — see `respawnsAfterDeath` for why that is not a blanket
-    /// migration.
+    /// `clock` defaults to this fixture's `TestClock`, which now serves only
+    /// the three cases that advance a fixed number of times and then assert
+    /// that **nothing further happened**. Every case that waits for the watch to *do*
+    /// something passes an `EventDrivenTestClock` instead: the watch is a
+    /// fire-then-re-arm loop, and on `TestClock` a re-arm can only be observed
+    /// by polling `checkSuspension()`, whose `megaYield` is 20 serially-awaited
+    /// background-QoS tasks — the probe starves the very task it waits for
+    /// under the saturated fast pass. See `respawnsAfterDeath` for the field
+    /// evidence and `hungProxyEscalatesToSignalsThenRespawns` for the ladder.
     /// `routedSessionsAlive` answers "no session is routed" unless a case says
     /// otherwise, which is the answer that makes a flag-off boot run nothing —
     /// the shipped install.

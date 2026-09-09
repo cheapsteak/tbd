@@ -386,6 +386,13 @@ let package = Package(
             dependencies: [
                 "TBDHolder",
                 "TBDShared",
+                // `collectOutput(of:)`, which runs a spawned binary to
+                // completion without parking a cooperative-pool thread on
+                // `waitUntilExit()`. It brings `TBDDaemonLib` in behind it,
+                // which nothing here needs; the alternative is a second
+                // hand-rolled blocking wait in a target that spawns children,
+                // which is the thing that helper exists to end.
+                "TestSupport",
             ]
         ),
         // The model proxy's own suite, carrying the same load-bearing
@@ -415,10 +422,6 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
-                // `TestClock`, for the retention watch. Its production window
-                // is 24 hours, and the only honest way to cross one in a test
-                // is virtual time.
-                .product(name: "Clocks", package: "swift-clocks"),
             ]
         ),
     ]

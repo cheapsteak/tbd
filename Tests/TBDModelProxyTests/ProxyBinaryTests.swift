@@ -1,8 +1,8 @@
-import Clocks
 import Darwin
 import Foundation
 import NIOCore
 import NIOHTTP1
+import TestSupport
 import Testing
 
 @testable import TBDModelProxy
@@ -46,27 +46,28 @@ struct ProxyBinaryTests {
     /// one refuses before it can touch a home or bind anything. The environment
     /// is explicit and rc-free for the same reason every holder bootstrap is —
     /// nothing here may come from the developer's shell.
+    ///
+    /// `async` on `collectOutput(of:)` rather than synchronous on two
+    /// `readDataToEndOfFile()` calls plus `waitUntilExit()`: each of those
+    /// parks the calling thread until the child is done, and in a synchronous
+    /// test body that thread belongs to the cooperative pool CI's runner has
+    /// three of (`Tests/CLAUDE.md`, "Thread-blocking gates run off the
+    /// cooperative pool"). This one test held three of the three, and two runs
+    /// went silent for ~30 minutes with no failing test to name.
     @Test("a bad invocation exits 2 with a usage diagnostic and a silent stdout")
-    func aBadInvocationExitsTwoWithAUsageDiagnostic() throws {
+    func aBadInvocationExitsTwoWithAUsageDiagnostic() async throws {
         let executable = try #require(ProxyExecutable.locate())
         let process = Process()
         process.executableURL = executable
         process.arguments = ["--stream-dir", "/tmp"]
         process.environment = ["PATH": "/usr/bin:/bin"]
-        let stderrPipe = Pipe()
-        let stdoutPipe = Pipe()
-        process.standardError = stderrPipe
-        process.standardOutput = stdoutPipe
-        try process.run()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        let output = try await collectOutput(of: process)
 
-        #expect(process.terminationStatus == TBDModelProxyExit.badArguments)
-        let diagnostic = String(decoding: stderrData, as: UTF8.self)
+        #expect(output.status == TBDModelProxyExit.badArguments)
+        let diagnostic = String(decoding: output.stderr, as: UTF8.self)
         #expect(diagnostic.contains("unknown argument --stream-dir"))
         #expect(diagnostic.contains("--lock-fd"), "the usage line must name the descriptor flag")
-        #expect(stdoutData.isEmpty, "a proxy must never write to stdout")
+        #expect(output.stdout.isEmpty, "a proxy must never write to stdout")
     }
 
     /// The exit taxonomy Part B2's supervisor branches on. Pinned as a set of
@@ -191,10 +192,22 @@ extension ProxyBinaryTests {
     ///
     /// The window is virtual on two axes, and they are different seams on
     /// purpose. The *pacing* — how often the watch wakes — rides the injected
-    /// `Clock`, so a `TestClock` crosses it without a real sleep. The *window*
+    /// `Clock`, so virtual time crosses it without a real sleep. The *window*
     /// is a span between two `Date`s, which is what the production check
     /// compares, and the test moves that wall clock by hand. `Duration` is
     /// behavior, `Date` is data.
+    ///
+    /// **The pacing clock is an `EventDrivenTestClock`, because `run()` is a
+    /// sleep-then-sample loop.** Every advance past the first is a re-arm, and
+    /// on `TestClock` a re-arm can only be observed by polling
+    /// `checkSuspension()`, whose `megaYield` is 20 serially-awaited
+    /// background-QoS tasks — under the saturated fast pass that probe floods
+    /// the cooperative pool with exactly the low-priority work the watch task
+    /// needs a turn from. The helper these tests used instead advanced blindly
+    /// up to 40 times and re-checked a sample counter, which is 80 megaYields
+    /// of the same work; here each advance waits for the arming that makes it
+    /// sound, and the arming that follows a sample is what proves the sample
+    /// happened.
     @Suite("Proxy retention watch")
     struct ProxyRetentionTests {
 
@@ -203,13 +216,14 @@ extension ProxyBinaryTests {
             let start = Date(timeIntervalSince1970: 1_800_000_000)
             let wall = MovableWallClock(start)
             let retires = TestCounter()
-            let clock = TestClock()
+            let clock = EventDrivenTestClock()
+            let interval = Duration.seconds(60)
 
             let watch = ProxyRetireWatch(
                 lastDaemonContact: { start },
                 streamsInFlight: { 0 },
                 onRetire: { retires.increment() },
-                checkInterval: .seconds(60),
+                checkInterval: interval,
                 unattendedAfter: 24 * 60 * 60,
                 now: { wall.read() },
                 clock: clock)
@@ -218,20 +232,29 @@ extension ProxyBinaryTests {
 
             // First sample: the contact is fresh, so nothing happens. This is
             // the discriminating leg — a watch that retired on its first tick
-            // would satisfy every assertion below and fail here.
-            await advanceUntilSampled(clock, wall)
+            // would satisfy every assertion below and fail here. The re-arm
+            // after the advance is what proves the sample was taken.
+            try await clock.requireAdvanceWhenArmed(by: interval)
+            try await clock.requireSleeperArmed()
             #expect(retires.value == 0, "the watch retired a proxy contacted a moment ago")
 
-            // A day passes on the wall clock while the daemon says nothing.
+            // A day passes on the wall clock while the daemon says nothing. No
+            // re-arm follows this sample — `run()` hands over and returns — so
+            // the observable is what proves it landed.
             wall.advance(24 * 60 * 60)
-            await advanceUntilSampled(clock, wall)
+            try await clock.requireAdvanceWhenArmed(by: interval)
             await waitUntil(
-                "the watch retired the unattended proxy", sample: { retires.value },
-                isSatisfied: { $0 >= 1 })
+                "the watch retired the unattended proxy",
+                seconds: TestDeadlines.saturatedPassSeconds,
+                sample: { retires.value }, isSatisfied: { $0 >= 1 })
 
             // Once, and then the loop is done: `onRetire` ends the process, and
-            // a second call would be a second exit.
-            await clock.advance(by: .seconds(600))
+            // a second call would be a second exit. A watch that kept looping
+            // would arm another sleep, which is what this rules out — watched
+            // for rather than settled for, so a late arming is still caught.
+            #expect(
+                await watchForSleeper(on: clock) == false,
+                "the retention watch armed another sleep after it had retired")
             #expect(retires.value == 1)
         }
 
@@ -245,13 +268,14 @@ extension ProxyBinaryTests {
             let inFlight = TestCounter()
             inFlight.set(1)
             let retires = TestCounter()
-            let clock = TestClock()
+            let clock = EventDrivenTestClock()
+            let interval = Duration.seconds(60)
 
             let watch = ProxyRetireWatch(
                 lastDaemonContact: { start },
                 streamsInFlight: { inFlight.value },
                 onRetire: { retires.increment() },
-                checkInterval: .seconds(60),
+                checkInterval: interval,
                 unattendedAfter: 24 * 60 * 60,
                 now: { wall.read() },
                 clock: clock)
@@ -259,15 +283,19 @@ extension ProxyBinaryTests {
             defer { task.cancel() }
 
             wall.advance(48 * 60 * 60)
-            await advanceUntilSampled(clock, wall)
+            try await clock.requireAdvanceWhenArmed(by: interval)
+            try await clock.requireSleeperArmed()
             #expect(retires.value == 0, "a turn in flight was cut by the retention watch")
 
-            // The turn ends; the next sample retires.
+            // The turn ends; the next sample retires, and that sample is the
+            // last — `run()` returns rather than re-arming, so the observable
+            // is what proves it landed.
             inFlight.set(0)
-            await advanceUntilSampled(clock, wall)
+            try await clock.requireAdvanceWhenArmed(by: interval)
             await waitUntil(
-                "the watch retired once the last stream ended", sample: { retires.value },
-                isSatisfied: { $0 >= 1 })
+                "the watch retired once the last stream ended",
+                seconds: TestDeadlines.saturatedPassSeconds,
+                sample: { retires.value }, isSatisfied: { $0 >= 1 })
         }
 
         /// The predicate without the loop, at the boundary, and against the
@@ -292,29 +320,6 @@ extension ProxyBinaryTests {
             #expect(!watch.isUnattendedAndIdle(at: start.addingTimeInterval(window * 10)))
         }
 
-        /// Advances virtual time until the watch has taken one more sample.
-        ///
-        /// A plain `advance` is not enough on its own: `TestClock.advance` moves
-        /// `now` whether or not a sleeper is armed, and an advance that lands
-        /// before the watch has parked leaves the clock permanently ahead of a
-        /// sleep scheduled afterwards. Retrying is self-healing — a later
-        /// advance passes the deadline the sleeper eventually registered — and
-        /// the sample count makes "it never ran at all" a named failure rather
-        /// than an assertion that passes vacuously.
-        ///
-        /// The count comes from the wall clock: `run()` reads `now()` exactly
-        /// once per iteration, after its sleep returns.
-        private func advanceUntilSampled(
-            _ clock: TestClock<Duration>, _ wall: MovableWallClock,
-            interval: Duration = .seconds(60)
-        ) async {
-            let before = wall.reads
-            for _ in 0..<40 {
-                await clock.advance(by: interval)
-                if wall.reads > before { return }
-            }
-            Issue.record("the retention watch never took a sample")
-        }
     }
 }
 
@@ -504,7 +509,7 @@ extension ModelProxySuites {
                 (delayMs: 400, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
             let upstream = FakeUpstream { _, _ in FakeUpstream.Script(events: ticks) }
-            let upstreamPort = try upstream.start()
+            let upstreamPort = try await upstream.start()
             defer { upstream.stop() }
 
             let home = proxyScratchRoot(prefix: "pxsigd").path
@@ -607,7 +612,7 @@ extension ModelProxySuites {
                 (delayMs: 500, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
             let upstream = FakeUpstream { _, _ in FakeUpstream.Script(events: ticks) }
-            let upstreamPort = try upstream.start()
+            let upstreamPort = try await upstream.start()
             defer { upstream.stop() }
 
             let home = proxyScratchRoot(prefix: "pxsig2").path
@@ -723,7 +728,7 @@ extension ModelProxySuites {
             // connections linger — does not let two *listeners* share a port on
             // BSD, which is what makes this reachable at all.
             let squatter = FakeUpstream { _, _ in FakeUpstream.Script(events: []) }
-            let takenPort = try squatter.start()
+            let takenPort = try await squatter.start()
             defer { squatter.stop() }
 
             let home = proxyScratchRoot(prefix: "pxbind").path
@@ -751,7 +756,7 @@ extension ModelProxySuites {
                     headers: [("content-type", "application/json")],
                     events: [(delayMs: 0, bytes: Array(#"{"ok":true}"#.utf8))])
             }
-            let upstreamPort = try upstream.start()
+            let upstreamPort = try await upstream.start()
             defer { upstream.stop() }
 
             let home = proxyScratchRoot(prefix: "pxload").path
@@ -861,7 +866,7 @@ extension ModelProxySuites {
                 (delayMs: 1000, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
             let upstream = FakeUpstream { _, _ in FakeUpstream.Script(events: ticks) }
-            let upstreamPort = try upstream.start()
+            let upstreamPort = try await upstream.start()
             defer { upstream.stop() }
 
             let home = proxyScratchRoot(prefix: "pxrelk").path
@@ -1003,25 +1008,20 @@ extension ModelProxySuites {
 
 // MARK: - Test doubles
 
-/// A wall clock the test moves by hand, counting reads.
+/// A wall clock the test moves by hand.
 ///
-/// The count is what makes the retention watch observable: `run()` reads
-/// `now()` exactly once per iteration, so a change in `reads` is proof it took
-/// a sample rather than an assumption that it did.
+/// The `Date` half of the retention watch's two seams: the window it compares
+/// is a span between two `Date`s, and this is what lets a test cross a
+/// twenty-four-hour one without waiting. The pacing half rides the injected
+/// `Clock` instead — `Duration` is behavior, `Date` is data.
 final class MovableWallClock: @unchecked Sendable {
     private let lock = NSLock()
     private var now: Date
-    private var readCount = 0
 
     init(_ start: Date) { self.now = start }
 
-    var reads: Int { lock.withLock { readCount } }
-
     func read() -> Date {
-        lock.withLock {
-            readCount += 1
-            return now
-        }
+        lock.withLock { now }
     }
 
     func advance(_ interval: TimeInterval) {

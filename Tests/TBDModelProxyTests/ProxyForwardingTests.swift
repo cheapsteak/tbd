@@ -336,75 +336,100 @@ extension ModelProxySuites {
             // proxy learns the connection is gone when a later write to it fails.
             // A script that ended near that moment would let a relay which
             // reported nothing on cancellation still be rescued by the stream
-            // finishing on its own, and the test would pass for the wrong reason.
-            // 40 events at 1 s is 40 seconds of stream against the 20-second
-            // waits below. The ratio is what matters and it is a discriminating
-            // threshold rather than a hang guard, so it is sized by moving the
-            // *script* out rather than by shortening the wait: at 250 ms an
-            // event the stream ran out after 10 s, which left only a 5-second
-            // wait, and 5 seconds is inside the scheduling latency fast pass 2
-            // routinely shows — it went red on CI with the count still at 1
-            // while nothing was wrong with the relay. Nothing waits for this
-            // script to finish: the client cuts after the first event, and
-            // `ScriptedUpstreamHandler` stops rescheduling as soon as its
-            // channel goes inactive.
-            let events = (1...40).map { index in
+            // finishing on its own, and the test would pass for the wrong
+            // reason. So the ratio between the script and the waits is the
+            // whole assertion, and it is kept by moving the *script* out rather
+            // than by shortening the waits.
+            //
+            // 200 events at 1 s is 200 seconds of stream against the
+            // `TestDeadlines.saturatedPass` (90 s) waits below. Both earlier
+            // sizings failed the same way and from the same end: at 250 ms an
+            // event the stream ran out after 10 s, leaving a 5-second wait, and
+            // 5 seconds is well inside the scheduling latency fast pass 2
+            // shows — it went red with the count still at 1 and nothing wrong
+            // with the relay. Forty seconds of script and 20-second waits then
+            // went red twice more, on two unrelated PRs (runs 34302602847 and
+            // 34296850539 attempt 1), for the same reason: what these waits
+            // observe is released by production code queued on the same
+            // cooperative pool as every other test in the pass, so a bound
+            // below that pass's own per-test latency measures the runner rather
+            // than the relay. 90 s is the shared constant for exactly that, and
+            // 200 s keeps the ratio it needs.
+            //
+            // Nothing waits for this script to finish: the client cuts after
+            // the first event, and `ScriptedUpstreamHandler` stops rescheduling
+            // as soon as its channel goes inactive.
+            let events = (1...200).map { index in
                 (delayMs: 1000, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
 
             try await withProxy(
                 prefix: "pxcd",
                 script: { _, _ in FakeUpstream.Script(events: events) },
-                tee: recorder
-            ) { harness in
-                let requestBody = #"{"stream":true}"#
-                let request = """
-                    POST /r/\(harness.token)/v1/messages HTTP/1.1\r
-                    Host: 127.0.0.1\r
-                    Content-Type: application/json\r
-                    Content-Length: \(requestBody.utf8.count)\r
-                    \r
-                    \(requestBody)
-                    """
-                let port = harness.port
-                // A raw socket rather than a cancelled `URLSession` task: the
-                // moment the client's FIN goes out has to be the test's to choose,
-                // because every assertion below is about what the proxy does after
-                // it.
-                let seen = try await withPhaseDeadline("cut after first event", seconds: 30) {
-                    try await withCheckedThrowingContinuation {
-                        (continuation: CheckedContinuation<String, any Error>) in
-                        DispatchQueue.global().async {
-                            continuation.resume(
-                                with: Result {
-                                    try rawHTTPCutAfterMarker(
-                                        port: port, request: request, marker: "event: tick")
-                                })
+                tee: recorder,
+                // Only the cut — the request this phase is named for. The two
+                // waits that follow it run in `afterRequest`, outside
+                // "request"'s 60-second deadline: at 90 s apiece they would
+                // otherwise trip the generic `ProxyPhaseTimeout("request", 60)`
+                // instead of their own diagnosed message, because nested phases
+                // share "request"'s window rather than getting one each. See
+                // `withProxy`'s doc comment.
+                body: { harness in
+                    let requestBody = #"{"stream":true}"#
+                    let request = """
+                        POST /r/\(harness.token)/v1/messages HTTP/1.1\r
+                        Host: 127.0.0.1\r
+                        Content-Type: application/json\r
+                        Content-Length: \(requestBody.utf8.count)\r
+                        \r
+                        \(requestBody)
+                        """
+                    let port = harness.port
+                    // A raw socket rather than a cancelled `URLSession` task: the
+                    // moment the client's FIN goes out has to be the test's to
+                    // choose, because every assertion below is about what the
+                    // proxy does after it.
+                    let seen = try await withPhaseDeadline("cut after first event", seconds: 30) {
+                        try await withCheckedThrowingContinuation {
+                            (continuation: CheckedContinuation<String, any Error>) in
+                            DispatchQueue.global().async {
+                                continuation.resume(
+                                    with: Result {
+                                        try rawHTTPCutAfterMarker(
+                                            port: port, request: request, marker: "event: tick")
+                                    })
+                            }
                         }
                     }
+                    #expect(seen.contains("event: tick"), "the client never saw a first event")
+                    // The stream is still running upstream — 199 more events, a
+                    // second apart, are scripted — so nothing below can be
+                    // explained by the response having finished on its own.
+                    #expect(harness.upstream.requests.count == 1)
+                },
+                afterRequest: { harness in
+                    // Bounded well below the script's own 200 seconds, so a relay
+                    // that only ends because the upstream ran out of events cannot
+                    // pass. `TestDeadlines.saturatedPass` rather than a literal:
+                    // both of these are released by production code queued on the
+                    // pass's own cooperative pool.
+                    await waitUntil(
+                        "the relay released its in-flight stream",
+                        seconds: TestDeadlines.saturatedPassSeconds,
+                        sample: { harness.server.streamsInFlight }, isSatisfied: { $0 == 0 })
+                    await waitUntil(
+                        "the tee was told the stream ended",
+                        seconds: TestDeadlines.saturatedPassSeconds,
+                        sample: { recorder.endCount }, isSatisfied: { $0 == 1 })
+                    #expect(recorder.beginCount == 1)
+                    // Exactly once: `relayEnd` deduplicates, and a second end would
+                    // reach a tee that has already written its terminal line.
+                    #expect(recorder.endCount == 1)
+                    #expect(
+                        recorder.lastEndError != nil,
+                        "a hung-up turn is an aborted one, so the tee's end carries an error")
                 }
-                #expect(seen.contains("event: tick"), "the client never saw a first event")
-                // The stream is still running upstream — 39 more events, a second
-                // apart, are scripted — so nothing below can be explained by the
-                // response having finished on its own.
-                #expect(harness.upstream.requests.count == 1)
-
-                // Bounded well below the script's own 40 seconds, so a relay that
-                // only ends because the upstream ran out of events cannot pass.
-                await waitUntil(
-                    "the relay released its in-flight stream", seconds: 20,
-                    sample: { harness.server.streamsInFlight }, isSatisfied: { $0 == 0 })
-                await waitUntil(
-                    "the tee was told the stream ended", seconds: 20,
-                    sample: { recorder.endCount }, isSatisfied: { $0 == 1 })
-                #expect(recorder.beginCount == 1)
-                // Exactly once: `relayEnd` deduplicates, and a second end would
-                // reach a tee that has already written its terminal line.
-                #expect(recorder.endCount == 1)
-                #expect(
-                    recorder.lastEndError != nil,
-                    "a hung-up turn is an aborted one, so the tee's end carries an error")
-            }
+            )
         }
 
         @Test("a stream in flight is counted while it runs and released when it ends")
@@ -1094,22 +1119,22 @@ func withProxy(
     let sessionBox = ClientSessionBox()
 
     func teardown() async {
-        // Both of these can block: `ProxyServer.stop()` shuts an event-loop
-        // group down, and `FakeUpstream.stop()` does it synchronously. They run
-        // under their own deadlines so a teardown that wedges reports rather
-        // than eating the job's whole budget.
+        // `ProxyServer.stop()` can block — it shuts an event-loop group down —
+        // so it runs under its own deadline, and a teardown that wedges reports
+        // rather than eating the job's whole budget. `FakeUpstream.stop()`
+        // needs neither: it asks the listener and the group to close and
+        // returns at once (see its doc comment), so there is nothing to bound
+        // and nothing to move off the cooperative pool.
         if let server = serverBox.take() {
             _ = try? await withPhaseDeadline("proxy stop", seconds: 20) { await server.stop() }
         }
-        _ = try? await withPhaseDeadline("upstream stop", seconds: 20) {
-            await offCooperativePool { upstream.stop() }
-        }
+        upstream.stop()
         sessionBox.take()?.invalidateAndCancel()
         try? FileManager.default.removeItem(at: root)
     }
 
     do {
-        let upstreamPort = try upstream.start()
+        let upstreamPort = try await upstream.start()
 
         let routesDir = root.appendingPathComponent("proxy/routes")
         let streamsDir = root.appendingPathComponent("streams")
@@ -1230,18 +1255,6 @@ func withPhaseDeadline<Value: Sendable>(
     work.cancel()
     timer.cancel()
     return try result.get()
-}
-
-/// Runs a blocking call on a `DispatchQueue` rather than on the cooperative
-/// pool, which has one thread per core and is what every other test in the
-/// process is also running on.
-func offCooperativePool(_ work: @escaping @Sendable () -> Void) async {
-    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-        DispatchQueue.global().async {
-            work()
-            continuation.resume()
-        }
-    }
 }
 
 /// A one-shot value: the first `finish` wins and wakes whoever is awaiting.

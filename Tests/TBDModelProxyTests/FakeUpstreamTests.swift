@@ -16,7 +16,7 @@ struct FakeUpstreamTests {
         // safe on an unstarted server, and a bind that throws would otherwise
         // leave the event-loop group running for the rest of the test process.
         defer { upstream.stop() }
-        let port = try upstream.start()
+        let port = try await upstream.start()
 
         let requestBody = Data(#"{"model":"claude-stub","stream":true}"#.utf8)
         var request = URLRequest(url: try #require(URL(string: "http://127.0.0.1:\(port)/v1/messages")))

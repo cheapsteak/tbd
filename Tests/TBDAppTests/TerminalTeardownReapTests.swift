@@ -224,24 +224,68 @@ struct TerminalTeardownReapTests {
     /// size, and both coordinators answer inside `MainActor.assumeIsolated` —
     /// which traps off main. Production starts every PTY from a main-isolated
     /// context, so this matches it; only the waiting below happens off main.
+    ///
+    /// **`ENXIO` gets a syscall retry, and nothing else does.** The two
+    /// "a second cleanup() tears nothing down" tests close a pty master and
+    /// immediately `forkpty` again; the kernel hands back the lowest free pty
+    /// number, which is the one just closed and still being revoked, and the
+    /// slave open answers `ENXIO`. The test's own diagnostic caught it in the
+    /// act on run 34178198566 — `/dev/ttys* entries: 31; kern.tty.ptmx_max:
+    /// 511; open fds: 118` — so nothing was exhausted and the next attempt
+    /// gets a different number. A retry of the *syscall* on one named errno is
+    /// not the blanket test retry `Tests/CLAUDE.md` bans under "Quarantine":
+    /// it does not re-run a body or suppress a failure, every other errno
+    /// falls straight through to ``ForkptyProducedNoPid``, and three attempts
+    /// that all answer `ENXIO` still fail with the machine state that decides
+    /// the cause.
+    ///
+    /// The 10 ms `usleep` between attempts is a real sleep on the main thread,
+    /// which this synchronous `@MainActor` helper cannot avoid: it has no
+    /// suspension point to yield at, and the revoke it is waiting out is a
+    /// kernel-side transition rather than anything scheduling can hurry. It is
+    /// on the failure path only, so a healthy run never reaches it.
     @MainActor
     private func startChild(
         delegate: LocalProcessDelegate, lifetime: String, assign: @MainActor (LocalProcess) -> Void
     ) -> StartedChild {
-        // Production configuration (see the suite comment): exit monitor on
-        // main, data delivered inline on the IO thread.
-        let process = LocalProcess(delegate: delegate, dispatchQueue: .main, directDelivery: true)
-        process.startProcess(
-            executable: "/bin/sleep", args: [lifetime], environment: nil, execName: nil)
-        // Read `shellPid` and `errno` before anything else can clobber the
-        // thread's errno: a nil `PseudoTerminalHelpers.fork` is the only way
-        // `shellPid` stays 0 here, and this is the last statement at which its
-        // cause is still legible. See `StartedChild`.
-        let pid = process.shellPid
-        let failureErrno = pid <= 0 ? errno : 0
-        assign(process)
+        var pid: pid_t = 0
+        var failureErrno: Int32 = 0
+        for attempt in 1...Self.forkptyAttempts {
+            // A fresh `LocalProcess` per attempt: the one that failed has a
+            // half-built pty of its own, and reusing it would ask a second
+            // `startProcess` to fix up state the first left behind.
+            //
+            // Production configuration (see the suite comment): exit monitor on
+            // main, data delivered inline on the IO thread.
+            let process = LocalProcess(delegate: delegate, dispatchQueue: .main, directDelivery: true)
+            process.startProcess(
+                executable: "/bin/sleep", args: [lifetime], environment: nil, execName: nil)
+            // Read `shellPid` and `errno` before anything else can clobber the
+            // thread's errno: a nil `PseudoTerminalHelpers.fork` is the only way
+            // `shellPid` stays 0 here, and this is the last statement at which its
+            // cause is still legible. See `StartedChild`.
+            pid = process.shellPid
+            failureErrno = pid <= 0 ? errno : 0
+            guard pid <= 0, failureErrno == ENXIO, attempt < Self.forkptyAttempts else {
+                // Assigned only for the attempt whose result is returned, so
+                // the coordinator never ends up owning a `LocalProcess` this
+                // helper has already given up on.
+                assign(process)
+                return StartedChild(pid: pid, failureErrno: failureErrno)
+            }
+            usleep(10_000)
+        }
+        // Unreachable: the last attempt always leaves through the `guard` above,
+        // whatever it produced. Present because the loop's bound is a constant
+        // the compiler will not reason about.
         return StartedChild(pid: pid, failureErrno: failureErrno)
     }
+
+    /// How many times a `forkpty` that answered `ENXIO` is asked again. Three,
+    /// because the race it covers is one revoke wide: the number is free by the
+    /// next attempt or the machine has a different problem, which the
+    /// diagnostic then names.
+    private static let forkptyAttempts = 3
 
     /// Throws ``ForkptyProducedNoPid`` when any of the named children came back
     /// without a pid, sampling the machine state that names the cause.
