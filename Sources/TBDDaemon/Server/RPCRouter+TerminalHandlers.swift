@@ -961,7 +961,7 @@ extension RPCRouter {
     }
 
     /// The refusal `terminal.delete`'s activity rails return for a busy row
-    /// they will not close. Named beside its verb, like `holderVerifyRefusal`
+    /// they will not close. Named beside its verb, like `holderCompositeRefusal`
     /// and its siblings, so the CLI, the app and this handler's tests name the same
     /// reason rather than three near-misses.
     ///
@@ -2770,22 +2770,6 @@ extension RPCRouter {
         case suppressed
     }
 
-    /// The refusal `terminal.send --verify` returns for a holder-backed row.
-    ///
-    /// It names *verification*, not the transport, and the distinction is the
-    /// whole point: typing into a holder session works, and a caller told
-    /// otherwise would stop trying. What has no holder implementation is the
-    /// delivery *observation* — the verifier re-reads the pane through tmux
-    /// (`redeliverVerifiedPayload` and `consultPaneBeforeTyping` both speak
-    /// tmux), and a holder session has no pane to re-read. Refused rather than
-    /// downgraded to an unverified send, per the rule that a request for
-    /// evidence is never answered with a silence that reads like confirmation.
-    static func holderVerifyRefusal(terminalID: UUID) -> String {
-        "terminal.send --verify was refused: terminal \(terminalID) runs on the pty-holder "
-            + "transport, which has no delivery observation — nothing was sent. Resend without "
-            + "--verify."
-    }
-
     /// The refusal `terminal.send --keys` returns when a name in the sequence
     /// is not one the holder's named-key table knows.
     ///
@@ -3490,23 +3474,33 @@ extension RPCRouter {
     /// actuation row, the same dispatch envelope, the same per-terminal
     /// serializer lane (this runs inside it). What changes is the destination —
     /// `HolderInjectionCourier` routes by whether a viewer owns the pty — and
-    /// four things this transport cannot do yet, each refused by name rather
+    /// two things this transport cannot frame yet, each refused by name rather
     /// than by "the holder transport", so a caller learns which capability is
     /// missing:
     ///
-    /// - `--verify` has no delivery observation here.
-    /// - `--keys` has no named-key → bytes mapping here (tmux owns that table).
-    /// - A composite send — more than one part, or a payload containing a
-    ///   newline — has no framing here at all; it is refused ahead of this
-    ///   function, by the composite gate in `performTerminalSend` (see "What
-    ///   the holder arm cannot carry yet" there). The `.parts` case below
-    ///   still turns away a multi-part payload defensively, but that gate
-    ///   means it should never see one.
+    /// - A composite send — more than one part — has no single-write framing
+    ///   here at all; it is refused ahead of this function, by the composite
+    ///   gate in `performTerminalSend` (see "What the holder arm cannot frame
+    ///   in one write" there). The `.parts` case below still turns away a
+    ///   multi-part payload defensively, but that gate means it should never
+    ///   see one.
     /// - An image-only message that would carry the dispatch envelope has
     ///   nowhere to put it: the envelope cannot ride ahead of a path that
     ///   attaches only when the paste is the path and nothing else, and there
     ///   is no second write to give it. Refused in the `.parts` arm below,
     ///   where the disposition is known.
+    ///
+    /// `--verify` flows through, it is not refused as a transport limit: a
+    /// verify-armed send to an observable agent session is composed here,
+    /// delivered by the courier, and armed for observation exactly as the tmux
+    /// arm arms it — the observation reads the child's transcript tail, not a
+    /// pane, so it is transport-blind. The daemon's own supervision rails arm
+    /// it by default whenever `delivery_verification_enabled` is on. The gate
+    /// near the top of this function refuses only the three states in which no
+    /// observation could be produced — an explicit `--verify` at a target with
+    /// no transcript, the flag off, or no verifier wired — mirroring the tmux
+    /// arm's gate. `--keys` composes through `deliverHolderKeys`, which owns
+    /// the named-key → bytes mapping.
     ///
     /// A daemon with no courier has no input path at all, and says so.
     ///
@@ -3574,9 +3568,56 @@ extension RPCRouter {
             return await refuseHolderSend(
                 actuationID, Self.holderInputUnavailable(terminalID: terminal.id))
         }
-        if payload.isVerifyArmed {
-            return await refuseHolderSend(
-                actuationID, Self.holderVerifyRefusal(terminalID: terminal.id))
+
+        // ─── Can this send be verified here? ───
+        //
+        // The observation is transport-blind — it reads the child's transcript
+        // tail, not a pane — so the same three preconditions the tmux arm
+        // checks apply on the holder arm too, and the gate below mirrors it.
+        // What differs is who arms it: an explicit `--verify` from any actor,
+        // or the daemon's own supervision rails by default whenever the flag is
+        // on and the target can be observed. `effectiveVerifyArmed` folds both
+        // in, and the arm seam in `deliverHolderText` reads the same value.
+        //
+        // The daemon-default term carries `supportsDeliveryObservation` so it
+        // stays false for a shell holder: a shell is still SERVED by the oracle
+        // (bare bytes), it just cannot be observed, so a daemon rail's send to
+        // one proceeds unarmed rather than refusing. Only an explicit `--verify`
+        // on a shell reaches the first refusal below — because only then is
+        // `effectiveVerifyArmed` true while the target cannot be observed.
+        let verifyEnabled = (try? await db.config.get())?.deliveryVerificationEnabled ?? false
+        let effectiveVerifyArmed = payload.isVerifyArmed
+            || (actor?.kind == ActuationActor.Kind.daemon
+                && verifyEnabled && Self.supportsDeliveryObservation(terminal))
+        if effectiveVerifyArmed {
+            if !Self.supportsDeliveryObservation(terminal) {
+                let kindName = (terminal.kind ?? .shell).rawValue
+                let message = """
+                    terminal.send --verify was refused: terminal \
+                    \(terminal.id.uuidString) is a \(kindName) session, and delivery can only \
+                    be observed for a Claude session today — nothing was sent. Resend without \
+                    --verify.
+                    """
+                return await refuseHolderSend(actuationID, message)
+            }
+            if !verifyEnabled {
+                let message = """
+                    terminal.send --verify was refused: delivery verification is disabled \
+                    (config.delivery_verification_enabled is off) — nothing was sent. Enable \
+                    it with the config.setDeliveryVerification RPC and restart the daemon, or \
+                    resend without --verify to accept an unverified send.
+                    """
+                return await refuseHolderSend(actuationID, message)
+            }
+            if deliveryVerifier == nil {
+                let message = """
+                    terminal.send --verify was refused: delivery verification is enabled but \
+                    this daemon has no verifier wired, so the flag was turned on after it \
+                    started — nothing was sent. Restart the daemon to arm the observation, or \
+                    resend without --verify to accept an unverified send.
+                    """
+                return await refuseHolderSend(actuationID, message)
+            }
         }
         let text: String
         let submit: Bool
@@ -3647,7 +3688,8 @@ extension RPCRouter {
 
         return await deliverHolderText(
             text, submit: submit, terminal: terminal, actuationID: actuationID,
-            actor: actor, envelope: envelope, envelopeEligible: envelopeEligible, courier: courier)
+            actor: actor, envelope: envelope, envelopeEligible: envelopeEligible,
+            verifyArmed: effectiveVerifyArmed, courier: courier)
     }
 
     /// Deliver one body of text to a holder-backed session: the same envelope
@@ -3660,10 +3702,18 @@ extension RPCRouter {
     /// ahead of `envelope`'s disposition and `carriesDispatchEnvelope`: a lone
     /// image part passes `false` so the quoted path it built from is never
     /// prefixed, no matter what those two would otherwise decide.
+    ///
+    /// `verifyArmed` is the resolved arming decision from `performHolderSend`'s
+    /// gate — an explicit `--verify` or the daemon rails' default — already
+    /// checked against the three preconditions there. On a successful write it
+    /// hands the composed `body` (envelope and text, before paste-marker
+    /// wrapping) to the verifier, exactly as the tmux arm does. An empty body
+    /// arms nothing: `--text "" --submit` presses Enter and has no delivery to
+    /// observe.
     private func deliverHolderText(
         _ text: String, submit: Bool, terminal: Terminal, actuationID: String,
         actor: ActuationActor?, envelope: DispatchEnvelopeDisposition,
-        envelopeEligible: Bool, courier: HolderInjectionCourier
+        envelopeEligible: Bool, verifyArmed: Bool, courier: HolderInjectionCourier
     ) async -> RPCResponse {
         // Asked BEFORE anything is composed, because the answer decides the
         // bytes. Two sources, in order: the test seam if one is installed, then
@@ -3729,6 +3779,22 @@ extension RPCRouter {
                 actuationID, .dispatched,
                 modeSource: modeSource, modeAgeMilliseconds: modeAge,
                 modesObserved: modesObserved)
+            // Hand off to the observation, exactly as the tmux arm does after
+            // `.dispatched`: reached only on a successful write, only when the
+            // send was verify-armed, and only for a non-empty body — a
+            // verify-less send, a refusal, a transport failure and a bare Enter
+            // all arm nothing. The delivered payload is `body`: the envelope
+            // and text as composed, before paste-marker wrapping, so the
+            // verifier observes the transcript for what the child received, not
+            // for the control bytes that framed it.
+            if verifyArmed, !body.isEmpty {
+                await deliveryVerifier?.armVerification(
+                    actuationID: actuationID,
+                    terminalID: terminal.id,
+                    sessionID: terminal.claudeSessionID,
+                    deliveredPayload: body,
+                    submit: submit)
+            }
             return .ok()
         case .notDelivered(let reason):
             // The transport, not a decision: the daemon tried to write and
