@@ -408,6 +408,7 @@ custom_rules:
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Archive\\.swift"     # archive teardown; covered by worktree.archive / auto-archive-on-merge
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Forget\\.swift"      # forget teardown; covered by worktree.forget
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Create\\.swift"      # primary-terminal spawn; covered by worktree.create / scratch.create / revive
+      - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+SpawnTerminal\\.swift" # the one spawn-and-record step every spawn path calls; covered by the caller's row: terminal.create / terminal.continueInCodex / worktree.create / scratch.create / revive
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+PreSession\\.swift"  # hook-terminal spawn and close; covered by worktree.rerunPreSession / create
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Reconcile\\.swift"   # the reconcile rail; one row per act at its own entry point
       - "Sources/TBDDaemon/Nightwatch/DeskSessionManager\\.swift"             # the nightwatch-desk rail: its pastes, spawn and close

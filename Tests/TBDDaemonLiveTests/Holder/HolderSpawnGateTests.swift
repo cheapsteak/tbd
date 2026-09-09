@@ -192,6 +192,139 @@ struct HolderSpawnGateTests {
         #expect(created[1].label == TerminalLabel.setup)
     }
 
+    // MARK: - Extra terminals
+
+    /// `terminal.create` with the flag off: today's behaviour, unchanged — a
+    /// tmux window, a tmux row, no rendezvous anywhere.
+    @Test func terminalCreateFlagOffStaysOnTmux() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: false)
+        defer { fixture.tearDown() }
+
+        let terminal = try await fixture.terminalCreate(
+            TerminalCreateParams(worktreeID: fixture.worktree.id, cmd: "htop"))
+
+        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(row.transport == .tmux)
+        #expect(!row.tmuxWindowID.isEmpty)
+        #expect(row.holderPID == nil)
+        #expect(row.childPID == nil)
+        let socketPath = try HolderRendezvous.socketPath(
+            sessionID: row.id, environment: fixture.environment)
+        #expect(
+            !FileManager.default.fileExists(atPath: socketPath),
+            "a holder rendezvous was created for a tmux-transport extra terminal")
+    }
+
+    /// `terminal.create` with the flag on: an extra terminal is born onto a
+    /// real holder exactly as a primary is — a holder, a job, a row naming
+    /// both, an empty tmux coordinate, and no tmux server started for it.
+    ///
+    /// A shell command, because the holder runs any command and the gate must
+    /// not be Claude-shaped: a port that routed only `type: .claude` to the
+    /// holder would pass every Claude-typed assertion and leave every plain
+    /// terminal on tmux.
+    @Test func terminalCreateFlagOnSpawnsAnExtraTerminalOntoTheHolder() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: true)
+        defer { fixture.tearDown() }
+
+        let terminal = try await fixture.terminalCreate(
+            TerminalCreateParams(worktreeID: fixture.worktree.id, cmd: "htop"))
+
+        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(row.transport == .holder)
+        let holderPID = try #require(row.holderPID)
+        let childPID = try #require(row.childPID)
+        #expect(holderPID != childPID)
+        #expect(holderProcessIsAlive(holderPID))
+        #expect(holderProcessIsAlive(childPID))
+        #expect(row.holderChildStartedAt != nil, "the identity anchor was not stamped at spawn")
+        #expect(row.tmuxWindowID.isEmpty)
+        #expect(row.tmuxPaneID.isEmpty)
+        #expect(row.transcriptStreamPath == nil, "a shell was routed through the model proxy")
+
+        let socketPath = try HolderRendezvous.socketPath(
+            sessionID: row.id, environment: fixture.environment)
+        #expect(
+            FileManager.default.fileExists(atPath: socketPath),
+            "no holder rendezvous at \(socketPath) for a holder-transport extra terminal")
+        #expect(await fixture.registry.reader(for: row.id) != nil)
+
+        let issued = fixture.tmuxCommands()
+        #expect(
+            !issued.contains(where: { $0.contains("new-window") }),
+            "the holder path created a tmux window: \(issued)")
+        #expect(
+            !issued.contains(where: { $0.contains("new-session") }),
+            "the holder path started a tmux server: \(issued)")
+    }
+
+    /// An extra Claude terminal on the holder is routed through the model
+    /// proxy exactly as a primary session is: one route minted for this
+    /// terminal, its stream path stamped in the row's insert, and the pids
+    /// beside it.
+    @Test func terminalCreateRoutesAnExtraClaudeTerminalLikeAPrimary() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: true)
+        defer { fixture.tearDown() }
+        try await fixture.db.config.setTranscriptStreamingEnabled(true)
+        let supervisor = RoutingRecorder()
+        fixture.router.modelProxySupervisor = supervisor
+
+        let terminal = try await fixture.terminalCreate(
+            TerminalCreateParams(worktreeID: fixture.worktree.id, type: .claude))
+
+        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(row.transport == .holder)
+        #expect(row.holderPID != nil)
+        #expect(row.childPID != nil)
+        #expect(row.kind == .claude)
+        let routed = supervisor.made
+        #expect(routed.map(\.terminalID) == [row.id])
+        #expect(routed.first?.streamingEnabled == true)
+        #expect(supervisor.retired.isEmpty, "the route was retired under a spawn that succeeded")
+        let streamPath = try #require(row.transcriptStreamPath)
+        #expect(streamPath == TBDConstants.streamFilePath(
+            terminalID: row.id, environment: fixture.environment))
+    }
+
+    /// A Codex extra terminal takes the holder too, as the primary path's
+    /// Codex branch does. The executable is a stub path: the job is the pinned
+    /// gate shell, which ignores its argv.
+    @Test func terminalCreateFlagOnSpawnsACodexTerminalOntoTheHolder() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: true)
+        defer { fixture.tearDown() }
+
+        let terminal = try await fixture.terminalCreate(
+            TerminalCreateParams(worktreeID: fixture.worktree.id, type: .codex))
+
+        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(row.transport == .holder)
+        #expect(row.kind == .codex)
+        #expect(row.label == TerminalLabel.codex)
+        #expect(row.holderPID != nil)
+        #expect(row.childPID != nil)
+        #expect(row.transcriptStreamPath == nil, "Codex was routed through the model proxy")
+        #expect(row.tmuxWindowID.isEmpty)
+    }
+
+    /// `terminal.continueInCodex` spawns through the same function, so the
+    /// resumed Codex terminal is born onto the holder with the flag on.
+    @Test func continueInCodexFlagOnSpawnsOntoTheHolder() async throws {
+        let fixture = try await GateFixture.make(flagEnabled: true)
+        defer { fixture.tearDown() }
+        let source = try await fixture.seedClaudeSourceTerminal()
+
+        let terminalID = try await fixture.continueInCodex(terminalID: source.id)
+
+        let row = try #require(try await fixture.db.terminals.get(id: terminalID))
+        #expect(row.transport == .holder)
+        #expect(row.kind == .codex)
+        #expect(row.holderPID != nil)
+        #expect(row.childPID != nil)
+        #expect(row.tmuxWindowID.isEmpty)
+        // The source is preserved, as it always was.
+        #expect(try await fixture.db.terminals.get(id: source.id) != nil)
+    }
+
     // MARK: - The read
 
     /// `terminal.output` on a holder row renders the daemon's emulator, and
@@ -418,6 +551,62 @@ private final class RecaptureProbe: @unchecked Sendable {
     }
 }
 
+// MARK: - A routing recorder
+
+/// A `ModelProxySupervisor` stand-in for the routed extra-terminal case: it
+/// records the routes it was asked to mint and drops, and names a port so the
+/// attachment produces a base URL. No proxy process is started — the job is the
+/// gate shell, and nothing here connects to the URL.
+private final class RoutingRecorder: ModelProxySupervising, @unchecked Sendable {
+    struct Made: Sendable, Equatable {
+        let terminalID: UUID
+        let upstream: String
+        let streamingEnabled: Bool
+    }
+
+    private let lock = NSLock()
+    private var madeStorage: [Made] = []
+    private var retiredStorage: [String] = []
+    let token = "0123456789abcdef0123456789abcdef"
+
+    var made: [Made] {
+        lock.lock(); defer { lock.unlock() }
+        return madeStorage
+    }
+
+    var retired: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return retiredStorage
+    }
+
+    func makeRoute(
+        terminalID: UUID, upstream: String, streamingEnabled: Bool
+    ) async throws -> ModelProxyRoute {
+        // `withLock` rather than `lock()`/`unlock()`: this method is `async`,
+        // where the unscoped pair is unavailable.
+        lock.withLock {
+            madeStorage.append(Made(
+                terminalID: terminalID, upstream: upstream, streamingEnabled: streamingEnabled))
+        }
+        return ModelProxyRoute(
+            token: token, terminalID: terminalID,
+            upstream: upstream, streamingEnabled: streamingEnabled)
+    }
+
+    func baseURL(for route: ModelProxyRoute) async -> String? {
+        "http://127.0.0.1:51842/r/\(route.token)"
+    }
+
+    func retireRoute(token: String, terminalID: UUID) async {
+        lock.withLock { retiredStorage.append(token) }
+    }
+
+    func routeToken(forTerminal terminalID: UUID) async -> String? { nil }
+    func capabilitySnapshot() async -> ModelProxyCapabilitySnapshot { .none }
+    func startIfEnabled() async {}
+    func beginDraining() async {}
+}
+
 // MARK: - Fixture
 
 /// A worktree, a database, a router and a registry, wired the way the daemon
@@ -557,17 +746,20 @@ private final class GateFixture {
             repoID: repo.id, name: "main", branch: "main", path: repoDir.path,
             tmuxServer: TmuxManager.serverName(forRepoPath: repoDir.path))
 
+        // The Claude spawn branches — the primary's and `terminal.create`'s —
+        // seed folder trust and resolve a projects root through this manager.
+        // Injected at the fixture's own scratch root so neither reaches the
+        // developer's store — the seam `Tests/CLAUDE.md` names, rather than a
+        // `setenv`. One instance for the lifecycle and the router, because the
+        // router's Claude branch resolves through its own.
+        let configDirManager = ClaudeProfileConfigDirManager(
+            baseDirectory: URL(fileURLWithPath: home)
+                .appendingPathComponent("profiles", isDirectory: true),
+            hostBaseDirectory: URL(fileURLWithPath: home)
+                .appendingPathComponent("claude", isDirectory: true))
         var lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            // The Claude spawn branch below seeds folder trust and resolves a
-            // projects root through this manager. Injected at the fixture's own
-            // scratch root so neither reaches the developer's store — the seam
-            // `Tests/CLAUDE.md` names, rather than a `setenv`.
-            configDirManager: ClaudeProfileConfigDirManager(
-                baseDirectory: URL(fileURLWithPath: home)
-                    .appendingPathComponent("profiles", isDirectory: true),
-                hostBaseDirectory: URL(fileURLWithPath: home)
-                    .appendingPathComponent("claude", isDirectory: true)))
+            configDirManager: configDirManager)
         lifecycle.holderRegistry = registry
         if let recapture {
             lifecycle.sessionRecaptureFactory = { db, tmux in
@@ -576,8 +768,18 @@ private final class GateFixture {
         }
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
+            configDirManager: configDirManager,
             actuationLog: makeTestActuationLog())
         router.holderRegistry = registry
+        // Codex is never launched here: the job is the pinned gate shell,
+        // which ignores its argv. The stubs only have to satisfy the handlers'
+        // pre-spawn resolution, so the Codex branches can reach the gate.
+        router.codexExecutableResolver = { "/opt/test/bin/codex" }
+        router.codexHomeEnsurer = {
+            URL(fileURLWithPath: home).appendingPathComponent("codex-home", isDirectory: true)
+        }
+        router.codexProfileFlagResolver = { _ in "--profile" }
+        router.codexSessionImport = { _, _, _, _, _ in "thread-gate-1" }
 
         return GateFixture(
             db: db, router: router, registry: registry, environment: environment,
@@ -623,6 +825,49 @@ private final class GateFixture {
             archivedClaudeSessions: archivedClaudeSessions,
             preSessionTerminalID: nil,
             carryover: carryover)
+    }
+
+    /// The `terminal.create` RPC, through the router, exactly as the app's
+    /// "new terminal" and `tbd terminal create` reach it.
+    func terminalCreate(_ params: TerminalCreateParams) async throws -> Terminal {
+        let response = await router.handle(
+            try RPCRequest(method: RPCMethod.terminalCreate, params: params))
+        if let error = response.error {
+            Issue.record("terminal.create failed: \(error)")
+        }
+        return try response.decodeResult(Terminal.self)
+    }
+
+    /// The `terminal.continueInCodex` RPC, through the router. Returns the
+    /// resumed Codex terminal's id.
+    func continueInCodex(terminalID: UUID) async throws -> UUID {
+        let response = await router.handle(
+            try RPCRequest(
+                method: RPCMethod.terminalContinueInCodex,
+                params: TerminalContinueInCodexParams(terminalID: terminalID)))
+        if let error = response.error {
+            Issue.record("terminal.continueInCodex failed: \(error)")
+        }
+        return try response.decodeResult(TerminalContinueInCodexResult.self).terminalID
+    }
+
+    /// A Claude terminal row with a transcript on disk — what
+    /// `terminal.continueInCodex` imports from. Written directly rather than
+    /// spawned, because only the row and the file are read.
+    func seedClaudeSourceTerminal() async throws -> Terminal {
+        let transcript = "\(home)/source.jsonl"
+        try #"{"type":"user","message":{"content":"continue this"}}"#
+            .write(toFile: transcript, atomically: true, encoding: .utf8)
+        let source = try await db.terminals.create(
+            worktreeID: worktree.id,
+            tmuxWindowID: "@source",
+            tmuxPaneID: "%source",
+            label: TerminalLabel.claudeCode,
+            claudeSessionID: "claude-session",
+            kind: .claude)
+        try await db.terminals.updateSession(
+            id: source.id, sessionID: "claude-session", transcriptPath: transcript)
+        return try #require(try await db.terminals.get(id: source.id))
     }
 
     /// The `terminal.output` RPC, through the router's real handler.

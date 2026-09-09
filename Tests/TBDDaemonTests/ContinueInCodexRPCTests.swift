@@ -265,4 +265,75 @@ struct ContinueInCodexRPCTests {
         #expect(try await fixture.db.terminals.list(
             worktreeID: fixture.worktree.id) == [source])
     }
+
+    // MARK: - The transport gate
+
+    /// A registry built on `spawner`, with a `TBD_HOME` of its own under the
+    /// run's scratch root — the failing spawn leaves a lock and a log at its
+    /// rendezvous there. Returns that root for the caller's `defer` to remove.
+    private func attachRegistry(to fixture: Fixture, spawner: HolderSpawner?) -> String {
+        let home = fencedScratchRoot(prefix: "tbdcic")
+        fixture.router.holderRegistry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: [
+                "TBD_HOME": home,
+                "PATH": "/usr/bin:/bin",
+                "SHELL": "/bin/sh",
+            ],
+            listTerminals: { [] },
+            spawner: spawner)
+        return home
+    }
+
+    /// The flag on with nothing to spawn with falls back to tmux, the same
+    /// answer every other spawn path gives: the resumed Codex terminal still
+    /// opens, on a window.
+    @Test("with the holder flag on and no spawner, the resumed terminal falls back to tmux")
+    func flagOnWithoutASpawnerFallsBackToTmux() async throws {
+        let fixture = try await makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try await fixture.db.config.setPtyHolderEnabled(true)
+        let holderHome = attachRegistry(to: fixture, spawner: nil)
+        defer { try? FileManager.default.removeItem(atPath: holderHome) }
+        let source = try await createClaudeSource(in: fixture)
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalContinueInCodex,
+            params: TerminalContinueInCodexParams(terminalID: source.id)))
+
+        #expect(response.success, "\(response.error ?? "")")
+        let result = try response.decodeResult(TerminalContinueInCodexResult.self)
+        let target = try #require(try await fixture.db.terminals.get(id: result.terminalID))
+        #expect(target.transport == .tmux)
+        #expect(!target.tmuxWindowID.isEmpty)
+        #expect(target.holderPID == nil)
+        #expect(fixture.recorder.commands.filter { $0.contains("new-window") }.count == 1)
+    }
+
+    /// The flag on with a registry that can spawn takes the holder path — and
+    /// a holder that fails to start fails the request the way a tmux failure
+    /// does: an error, no row, and no window created behind it.
+    @Test("with the holder flag on, a holder spawn failure creates no window and no row")
+    func flagOnHolderSpawnFailureIsAtomic() async throws {
+        let fixture = try await makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try await fixture.db.config.setPtyHolderEnabled(true)
+        let holderHome = attachRegistry(
+            to: fixture,
+            spawner: HolderSpawner(
+                executableURL: URL(fileURLWithPath: "/nonexistent/TBDHolder")))
+        defer { try? FileManager.default.removeItem(atPath: holderHome) }
+        let source = try await createClaudeSource(in: fixture)
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalContinueInCodex,
+            params: TerminalContinueInCodexParams(terminalID: source.id)))
+
+        #expect(
+            response.error?.contains("/nonexistent/TBDHolder") == true,
+            "the resumed terminal did not take the holder path: \(response.error ?? "success")")
+        #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
+        #expect(try await fixture.db.terminals.list(
+            worktreeID: fixture.worktree.id) == [source])
+    }
 }

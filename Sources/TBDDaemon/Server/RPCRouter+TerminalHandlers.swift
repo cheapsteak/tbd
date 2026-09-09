@@ -209,6 +209,15 @@ extension RPCRouter {
         // is folded in per-branch once the profile is resolved.
         let createConfig = try? await db.config.get()
 
+        // The transport gate, the same one the primary spawn asks: an extra
+        // terminal honours `pty_holder_enabled` exactly as a worktree's first
+        // one does, and falls back to tmux for exactly the same reasons. A
+        // config that could not be read reads as nobody having chosen the
+        // holder. Decided once, here, so the routing decision below and the
+        // spawn cannot disagree about it.
+        let decidedTransport = TerminalSpawnTransport.decide(
+            config: createConfig, registry: holderRegistry)
+
         // Build env vars available in all TBD terminals
         var env = SystemPromptBuilder.promptLayers(
             repo: repo, worktree: worktree.worktree, scratchInstructions: createConfig?.scratchInstructions,
@@ -272,44 +281,32 @@ extension RPCRouter {
                     db: db, worktreeID: params.worktreeID,
                     allowedStatuses: [worktree.status]
                 ) { currentWorktree in
-                    _ = try await tmux.ensureServer(
-                        server: currentWorktree.tmuxServer,
-                        session: "main",
-                        cwd: currentWorktree.path,
-                        cols: resolvedCols,
-                        rows: resolvedRows)
-                    await self.controlMode?.enableIfGated(
-                        serverName: currentWorktree.tmuxServer)
-                    let window = try await tmux.createWindow(
-                        server: currentWorktree.tmuxServer,
-                        session: "main",
-                        cwd: currentWorktree.path,
-                        shellCommand: CodexSpawnCommandBuilder.build(
+                    try await prepareTmuxServer(
+                        for: decidedTransport, worktree: currentWorktree,
+                        cols: resolvedCols, rows: resolvedRows)
+                    // The holder runs any command, so a Codex terminal takes
+                    // the transport the flag chose exactly as the primary
+                    // path's Codex branch does. No attachment: Codex does not
+                    // talk to the Messages API and is never routed.
+                    return try await lifecycle.spawnTerminal(
+                        id: plannedTerminalID,
+                        worktreeID: params.worktreeID,
+                        tmuxServer: currentWorktree.tmuxServer,
+                        workingDirectory: currentWorktree.path,
+                        command: CodexSpawnCommandBuilder.build(
                             initialPrompt: params.prompt,
                             executablePath: codexPreparation.executablePath),
                         env: codexSpawnEnv,
                         sensitiveEnv: codexEnvOverrides,
                         cols: resolvedCols,
-                        rows: resolvedRows
-                    )
-
-                    do {
-                        return try await db.terminals.create(
-                            id: plannedTerminalID,
-                            worktreeID: params.worktreeID,
-                            tmuxWindowID: window.windowID,
-                            tmuxPaneID: window.paneID,
-                            label: TerminalLabel.codex,
-                            claudeSessionID: nil,
-                            profileID: nil,
-                            kind: .codex
-                        )
-                    } catch {
-                        try? await tmux.killWindow(
-                            server: currentWorktree.tmuxServer,
-                            windowID: window.windowID)
-                        throw error
-                    }
+                        rows: resolvedRows,
+                        label: TerminalLabel.codex,
+                        claudeSessionID: nil,
+                        profileID: nil,
+                        kind: .codex,
+                        transport: decidedTransport,
+                        attachment: nil,
+                        modelProxySupervisor: modelProxySupervisor)
                 }
             }
 
@@ -366,6 +363,14 @@ extension RPCRouter {
                 return RPCResponse(error: message)
             }
         }
+
+        // A login session stays on tmux whatever the flag says. Its whole point
+        // is the auto-`/login` pump `armLoginSession` starts, which reads the
+        // pane's text and types into it through tmux; the holder transport has
+        // no such pump, and a login tab that opened on a holder would sit at
+        // the composer with nothing typing `/login` into it. Every other
+        // terminal takes the decided transport.
+        let transport: TerminalSpawnTransport = isLoginSession ? .tmux : decidedTransport
 
         // Build the spawn command via the pure helper.
         let appendSystemPrompt: String?
@@ -439,6 +444,62 @@ extension RPCRouter {
             )
         }
 
+        // Hoisted out of the `build` call because the model proxy must read
+        // the SAME resolved file the spawn runs with: whether it sets
+        // `env.ANTHROPIC_BASE_URL` decides whether a route can be honored at
+        // all. Resolving it a second time would rewrite the per-session
+        // overlay and could answer about a different file.
+        let overlayPath: String? = isClaudeType
+            ? ClaudeHookOverlay.resolveOverlayPath(
+                fallbackModels: resolvedProfile?.fallbackModels,
+                sessionKey: plannedTerminalID.uuidString,
+                // Repo fragment is file-backed config, read fresh at
+                // spawn time — applies on every spawn path, resume included.
+                repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                // Per-spawn fragment applies to FRESH spawns only; a
+                // resume must not reapply it. Hooks overlay still resolves
+                // for resumes — only extraSettingsJSON goes nil.
+                extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil
+              )
+            : nil
+
+        // Free-form env overrides for Claude terminals: global < repo <
+        // profile. Shell/custom-cmd terminals are out of scope and get no
+        // overrides, so theirs is empty and the builder's env below stands
+        // alone.
+        let mergedEnvOverrides: [String: String] = isClaudeType
+            ? EnvOverrideResolver.merge(
+                global: createConfig?.envOverrides,
+                repo: repo?.envOverrides,
+                profile: resolvedProfile?.envOverrides)
+            : [:]
+
+        // **The routing decision, before the command is composed** — the same
+        // five steps the primary spawn takes, through the same function, so an
+        // extra Claude terminal on the holder transport is routed exactly as a
+        // primary session is. The builder re-exports the profile's routing
+        // keys inline into the command it returns, and those exports run after
+        // the process environment, so the decision has to exist before `build`
+        // is given its base URL. Only the `.claude` kind ever asks: a shell has
+        // no upstream, and its `nil` here is structural rather than a field
+        // check.
+        let attachment: ModelProxyRouteAttachment.Outcome?
+        if isClaudeType {
+            attachment = await ModelProxyRouteAttachment.attachIfRoutable(
+                terminalID: plannedTerminalID,
+                isHolderSpawn: transport.isHolder,
+                config: createConfig,
+                profileKind: resolvedProfile?.kind,
+                profileBaseURL: resolvedProfile?.baseURL,
+                envOverrides: mergedEnvOverrides,
+                // The SAME resolved overlay the spawn runs with, read above.
+                overlayPath: overlayPath,
+                holderEnvironment: holderRegistry?.environment,
+                supervisor: modelProxySupervisor)
+        } else {
+            attachment = nil
+        }
+
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: params.resumeSessionID,
             freshSessionID: freshSessionID,
@@ -446,91 +507,62 @@ extension RPCRouter {
             initialPrompt: params.prompt,
             profileSecret: resolvedProfile?.secret,
             profileKind: resolvedProfile?.kind,
-            profileBaseURL: resolvedProfile?.baseURL,
+            // The route's own URL on a routed spawn, the profile's otherwise —
+            // and the profile's again for a shell, which has no attachment.
+            // The builder inlines an `export ANTHROPIC_BASE_URL=…` that runs
+            // after the shell's rc files, which is how this endpoint survives
+            // a `.zshrc` that sets one of its own.
+            profileBaseURL: attachment?.builderBaseURL(profile: resolvedProfile?.baseURL)
+                ?? resolvedProfile?.baseURL,
             profileModel: resolvedProfile?.model,
             profileAwsRegion: resolvedProfile?.awsRegion,
             profileAwsProfile: resolvedProfile?.awsProfile,
             profileConfigDir: profileConfigDir,
             cmd: params.cmd,
             shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
-            settingsOverlayPath: isClaudeType
-                ? ClaudeHookOverlay.resolveOverlayPath(
-                    fallbackModels: resolvedProfile?.fallbackModels,
-                    sessionKey: plannedTerminalID.uuidString,
-                    // Repo fragment is file-backed config, read fresh at
-                    // spawn time — applies on every spawn path, resume included.
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                    // Per-spawn fragment applies to FRESH spawns only; a
-                    // resume must not reapply it. Hooks overlay still resolves
-                    // for resumes — only extraSettingsJSON goes nil.
-                    extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil
-                  )
-                : nil,
+            settingsOverlayPath: overlayPath,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,
             envSettingOverrides: claudeEnvOverrides,
             sessionName: worktree.displayName
         )
 
         // For Claude terminals, layer the builder's auth/routing env ON TOP of
-        // the merged free-form overrides (global < repo < profile) so auth wins.
-        // Shell/custom-cmd terminals are out of scope and get no overrides.
-        let primarySensitiveEnv: [String: String]
-        if isClaudeType {
-            let mergedEnvOverrides = EnvOverrideResolver.merge(
-                global: createConfig?.envOverrides,
-                repo: repo?.envOverrides,
-                profile: resolvedProfile?.envOverrides
-            )
-            primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
-        } else {
-            primarySensitiveEnv = spawn.sensitiveEnv
-        }
+        // the attachment's — the merged free-form overrides plus the route —
+        // so auth wins. Through the attachment's own method, because the
+        // primary and wake paths make the same merge and the order is silent
+        // when it is wrong. A shell has no attachment and gets the builder's
+        // env alone, as it always has.
+        let primarySensitiveEnv = attachment?.launchEnvironment(mergingBuilder: spawn.sensitiveEnv)
+            ?? spawn.sensitiveEnv
         let terminalKind: TerminalKind? = isClaudeType ? .claude : .shell
         let spawnEnv = env
         let spawnProfileID = resolvedProfile?.profileID
-        let (window, terminal, currentServer) = try await actuating(actuationID) {
+        let (terminal, currentServer) = try await actuating(actuationID) {
             try await tmux.withWorktreeServerLock(
                 db: db, worktreeID: params.worktreeID,
                 allowedStatuses: [worktree.status]
             ) { currentWorktree in
-                _ = try await tmux.ensureServer(
-                    server: currentWorktree.tmuxServer,
-                    session: "main",
-                    cwd: currentWorktree.path,
-                    cols: resolvedCols,
-                    rows: resolvedRows)
-                await self.controlMode?.enableIfGated(
-                    serverName: currentWorktree.tmuxServer)
-                let window = try await tmux.createWindow(
-                    server: currentWorktree.tmuxServer,
-                    session: "main",
-                    cwd: currentWorktree.path,
-                    shellCommand: spawn.command,
+                try await prepareTmuxServer(
+                    for: transport, worktree: currentWorktree,
+                    cols: resolvedCols, rows: resolvedRows)
+                let terminal = try await lifecycle.spawnTerminal(
+                    id: plannedTerminalID,
+                    worktreeID: params.worktreeID,
+                    tmuxServer: currentWorktree.tmuxServer,
+                    workingDirectory: currentWorktree.path,
+                    command: spawn.command,
                     env: spawnEnv,
                     sensitiveEnv: primarySensitiveEnv,
                     cols: resolvedCols,
-                    rows: resolvedRows
-                )
-
-                let terminal: Terminal
-                do {
-                    terminal = try await db.terminals.create(
-                        id: plannedTerminalID,
-                        worktreeID: params.worktreeID,
-                        tmuxWindowID: window.windowID,
-                        tmuxPaneID: window.paneID,
-                        label: label,
-                        claudeSessionID: claudeSessionID,
-                        profileID: spawnProfileID,
-                        kind: terminalKind
-                    )
-                } catch {
-                    try? await tmux.killWindow(
-                        server: currentWorktree.tmuxServer,
-                        windowID: window.windowID)
-                    throw error
-                }
-                return (window, terminal, currentWorktree.tmuxServer)
+                    rows: resolvedRows,
+                    label: label,
+                    claudeSessionID: claudeSessionID,
+                    profileID: spawnProfileID,
+                    kind: terminalKind,
+                    transport: transport,
+                    attachment: attachment,
+                    modelProxySupervisor: modelProxySupervisor)
+                return (terminal, currentWorktree.tmuxServer)
             }
         }
 
@@ -541,7 +573,7 @@ extension RPCRouter {
         if isLoginSession, let profile = resolvedProfile {
             await armLoginSession(
                 terminalID: terminal.id,
-                paneID: window.paneID,
+                paneID: terminal.tmuxPaneID,
                 server: currentServer,
                 profile: profile
             )
@@ -549,6 +581,34 @@ extension RPCRouter {
 
         await finishActuation(actuationID, .dispatched)
         return try RPCResponse(result: terminal)
+    }
+
+    /// The tmux half of a spawn's setup, made under the worktree's server lock
+    /// and only on the tmux transport: the server, and the gated control-mode
+    /// connection beside it. A holder-backed session needs no server at all,
+    /// and ensuring one anyway would resurrect the very resource the transport
+    /// exists to remove — the same asymmetry the primary spawn path keeps with
+    /// its memoized ensure.
+    ///
+    /// Through the lifecycle's `TmuxManager`, not the router's: `spawnTerminal`
+    /// creates the window on the lifecycle's, and the server it is created in
+    /// must be the one that was ensured. The daemon wires one manager into
+    /// both; a test fixture that builds two would otherwise ensure a server on
+    /// one and open a window on the other.
+    func prepareTmuxServer(
+        for transport: TerminalSpawnTransport,
+        worktree: LocalWorktree,
+        cols: Int,
+        rows: Int
+    ) async throws {
+        guard !transport.isHolder else { return }
+        _ = try await lifecycle.tmux.ensureServer(
+            server: worktree.tmuxServer,
+            session: "main",
+            cwd: worktree.path,
+            cols: cols,
+            rows: rows)
+        await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
     }
 
     /// Post-spawn wiring for a profile login session:
@@ -1349,44 +1409,32 @@ extension RPCRouter {
         cols: Int,
         rows: Int
     ) async throws -> Terminal {
+        // Revived terminals stay on tmux: a revive restores a session's tab
+        // from history, and the transport it is restored onto is unchanged by
+        // this port. Pinned rather than decided, so the spawn still goes
+        // through the one spawn-and-record step every path shares.
         let terminal = try await tmux.withWorktreeServerLock(
             db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
         ) { currentWorktree in
-            _ = try await tmux.ensureServer(
-                server: currentWorktree.tmuxServer,
-                session: "main",
-                cwd: currentWorktree.path,
-                cols: cols,
-                rows: rows)
-            await self.controlMode?.enableIfGated(
-                serverName: currentWorktree.tmuxServer)
-            let window = try await tmux.createWindow(
-                server: currentWorktree.tmuxServer,
-                session: "main",
-                cwd: currentWorktree.path,
-                shellCommand: spawnCommand,
+            try await prepareTmuxServer(
+                for: .tmux, worktree: currentWorktree, cols: cols, rows: rows)
+            return try await lifecycle.spawnTerminal(
+                id: plannedTerminalID,
+                worktreeID: currentWorktree.id,
+                tmuxServer: currentWorktree.tmuxServer,
+                workingDirectory: currentWorktree.path,
+                command: spawnCommand,
                 env: env,
                 sensitiveEnv: sensitiveEnv,
                 cols: cols,
-                rows: rows
-            )
-            do {
-                return try await db.terminals.create(
-                    id: plannedTerminalID,
-                    worktreeID: currentWorktree.id,
-                    tmuxWindowID: window.windowID,
-                    tmuxPaneID: window.paneID,
-                    label: label,
-                    claudeSessionID: claudeSessionID,
-                    profileID: profileID,
-                    kind: kind
-                )
-            } catch {
-                try? await tmux.killWindow(
-                    server: currentWorktree.tmuxServer,
-                    windowID: window.windowID)
-                throw error
-            }
+                rows: rows,
+                label: label,
+                claudeSessionID: claudeSessionID,
+                profileID: profileID,
+                kind: kind,
+                transport: .tmux,
+                attachment: nil,
+                modelProxySupervisor: modelProxySupervisor)
         }
         var order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
         if !order.contains(terminal.id) { order.append(terminal.id) }
@@ -2578,47 +2626,33 @@ extension RPCRouter {
         cols: Int,
         rows: Int
     ) async throws -> RPCResponse {
-        let (newTerminal, window, currentServer) = try await tmux.withWorktreeServerLock(
+        // A fork tab stays on tmux: it is an in-worktree copy of a session
+        // that is already running, and the transport it is copied onto is
+        // unchanged by this port. Pinned rather than decided, so the spawn
+        // still goes through the one spawn-and-record step every path shares.
+        let (newTerminal, currentServer) = try await tmux.withWorktreeServerLock(
             db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
         ) { currentWorktree in
-            _ = try await tmux.ensureServer(
-                server: currentWorktree.tmuxServer,
-                session: "main",
-                cwd: currentWorktree.path,
-                cols: cols,
-                rows: rows)
-            await self.controlMode?.enableIfGated(
-                serverName: currentWorktree.tmuxServer)
-            let window = try await tmux.createWindow(
-                server: currentWorktree.tmuxServer,
-                session: "main",
-                cwd: currentWorktree.path,
-                shellCommand: spawnCommand,
+            try await prepareTmuxServer(
+                for: .tmux, worktree: currentWorktree, cols: cols, rows: rows)
+            let terminal = try await lifecycle.spawnTerminal(
+                id: plannedTerminalID,
+                worktreeID: currentWorktree.id,
+                tmuxServer: currentWorktree.tmuxServer,
+                workingDirectory: currentWorktree.path,
+                command: spawnCommand,
                 env: env,
                 sensitiveEnv: sensitiveEnv,
                 cols: cols,
-                rows: rows
-            )
-
-            let terminal: Terminal
-            do {
-                terminal = try await db.terminals.create(
-                    id: plannedTerminalID,
-                    worktreeID: currentWorktree.id,
-                    tmuxWindowID: window.windowID,
-                    tmuxPaneID: window.paneID,
-                    label: "claude",
-                    claudeSessionID: storedSessionID,
-                    profileID: profileID,
-                    kind: .claude
-                )
-            } catch {
-                try? await tmux.killWindow(
-                    server: currentWorktree.tmuxServer,
-                    windowID: window.windowID)
-                throw error
-            }
-            return (terminal, window, currentWorktree.tmuxServer)
+                rows: rows,
+                label: "claude",
+                claudeSessionID: storedSessionID,
+                profileID: profileID,
+                kind: .claude,
+                transport: .tmux,
+                attachment: nil,
+                modelProxySupervisor: modelProxySupervisor)
+            return (terminal, currentWorktree.tmuxServer)
         }
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
@@ -2628,7 +2662,7 @@ extension RPCRouter {
         if scheduleRecapture {
             scheduleSessionRecapture(
                 terminalID: newTerminal.id,
-                paneID: window.paneID,
+                paneID: newTerminal.tmuxPaneID,
                 server: currentServer,
                 expectedIncarnationID: newTerminal.sessionIncarnationID
             )

@@ -422,7 +422,9 @@ Losing the rc-file defence would be a real failure; this is not one.
 
 The terminal row records `transcriptStreamPath`, the absolute stream file path,
 handed to the app the way `transcriptPath` is. Resume and wake spawns take the
-same branch.
+same branch, and so do the extra terminals `terminal.create` opens: an extra
+Claude terminal born onto the holder transport is routed exactly as a primary
+session is, through the same routing decision and the same row insert.
 
 A spawn with no live proxy proceeds unproxied and logs the omission at error.
 A streaming nicety never blocks or delays a session.
