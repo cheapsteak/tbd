@@ -123,137 +123,185 @@ extension ModelProxySuites {
                 (delayMs: 1000, bytes: Array("event: tick\ndata: {\"n\":\(index)}\n\n".utf8))
             }
 
+            // Carries the still-streaming response body from `body` to
+            // `afterRequest`, which runs after "request"'s deadline has
+            // already been raced and lost interest in the operation — see
+            // `withProxy`'s doc comment for why that hand-off happens through
+            // a captured box rather than a return value.
+            let streamBox = ProxyBytesBox()
+
             try await withProxy(
                 prefix: "pxret",
                 script: { _, _ in FakeUpstream.Script(events: ticks) },
-                onRetire: { retired.set() }
-            ) { harness in
-                var request = URLRequest(url: harness.url("/v1/messages"))
-                request.httpMethod = "POST"
-                request.httpBody = Data(#"{"stream":true}"#.utf8)
-                let (bytes, response) = try await harness.session.bytes(for: request)
-                #expect((response as? HTTPURLResponse)?.statusCode == 200)
-                #expect(harness.server.streamsInFlight == 1)
+                onRetire: { retired.set() },
+                // Only the retire round trip and the connect-refused check —
+                // literally the "request" this phase is named for. The
+                // successor-bind wait and the post-bind drain used to run in
+                // here too, sharing this 60s window three ways; they now run
+                // in `afterRequest`, each under its own budget.
+                body: { harness in
+                    var request = URLRequest(url: harness.url("/v1/messages"))
+                    request.httpMethod = "POST"
+                    request.httpBody = Data(#"{"stream":true}"#.utf8)
+                    let (bytes, response) = try await harness.session.bytes(for: request)
+                    streamBox.put(bytes)
+                    #expect((response as? HTTPURLResponse)?.statusCode == 200)
+                    #expect(harness.server.streamsInFlight == 1)
 
-                let asked = ContinuousClock().now
-                let (body, retireResponse) = try await harness.session.data(
-                    for: controlRequest(port: harness.port, method: "POST", path: "/tbd/retire"))
-                let answered = ContinuousClock().now - asked
+                    let asked = ContinuousClock().now
+                    let (body, retireResponse) = try await harness.session.data(
+                        for: controlRequest(port: harness.port, method: "POST", path: "/tbd/retire"))
+                    let answered = ContinuousClock().now - asked
 
-                #expect((retireResponse as? HTTPURLResponse)?.statusCode == 200)
-                #expect(String(decoding: body, as: UTF8.self) == ControlEndpoints.retiringBody)
-                // Bounded well under the ~6 seconds the stream still has to
-                // run: an answer that waited for the drain could not land this
-                // early. Two seconds rather than 500 ms because the claim is
-                // "before the drain", not "in 500 ms" — and a loaded runner
-                // that took 600 ms to turn one loopback round trip around
-                // would redden a proxy that did exactly the right thing.
-                #expect(answered < .seconds(2), "retire answered after \(answered)")
-                #expect(harness.server.streamsInFlight == 1, "the stream was cut by the retire")
-                #expect(!retired.value, "the process was handed over before the drain finished")
+                    #expect((retireResponse as? HTTPURLResponse)?.statusCode == 200)
+                    #expect(String(decoding: body, as: UTF8.self) == ControlEndpoints.retiringBody)
+                    // Bounded well under the ~6 seconds the stream still has to
+                    // run: an answer that waited for the drain could not land this
+                    // early. Two seconds rather than 500 ms because the claim is
+                    // "before the drain", not "in 500 ms" — and a loaded runner
+                    // that took 600 ms to turn one loopback round trip around
+                    // would redden a proxy that did exactly the right thing.
+                    #expect(answered < .seconds(2), "retire answered after \(answered)")
+                    #expect(harness.server.streamsInFlight == 1, "the stream was cut by the retire")
+                    #expect(!retired.value, "the process was handed over before the drain finished")
 
-                // The claim the handshake makes, asserted where no race can
-                // turn it: at the instant the answer lands, a connect to the
-                // port must be refused. Only a listening socket answers one, so
-                // a refusal is proof the listener is gone — and a proxy that
-                // wrote its 200 first and closed afterwards is still accepting
-                // here, however its successor's bind goes. The bind below
-                // cannot carry this claim on its own, because a retire frees
-                // the port and cannot reserve it.
-                #expect(
-                    connectRefused(port: harness.port),
-                    "the port still accepted a connection when the retire answered")
+                    // The claim the handshake makes, asserted where no race can
+                    // turn it: at the instant the answer lands, a connect to the
+                    // port must be refused. Only a listening socket answers one, so
+                    // a refusal is proof the listener is gone — and a proxy that
+                    // wrote its 200 first and closed afterwards is still accepting
+                    // here, however its successor's bind goes. The bind below
+                    // cannot carry this claim on its own, because a retire frees
+                    // the port and cannot reserve it.
+                    #expect(
+                        connectRefused(port: harness.port),
+                        "the port still accepted a connection when the retire answered")
+                },
+                // Everything here used to be the back half of `body`, stacked
+                // inside `withProxy`'s 60-second "request" phase alongside the
+                // retire round trip and the connect-refused check above. On
+                // fast-pass-2 — the population this suite runs in —
+                // `Tests/CLAUDE.md` measures p90 51.4s and max 55.3s reported
+                // per-test on a green run; a 30-35s bind wait sharing that
+                // window with everything else in `body` had too little
+                // headroom left, and a starved run could trip the generic
+                // `ProxyPhaseTimeout("request", 60)` instead of the bind
+                // wait's own diagnosed message. Running here instead, after
+                // "request" has already returned, gives the bind wait and the
+                // drain each an independent budget that cannot draw on
+                // "request"'s or on each other's.
+                afterRequest: { harness in
+                    let bytes = streamBox.value!
 
-                // The successor takes the port while the first proxy is still
-                // delivering. This is what `SO_REUSEADDR` on the listener buys:
-                // the connections carrying the in-flight streams still hold the
-                // port, and a bind those refused would fail on the first
-                // attempt and on every one after it.
-                let successor = ProxyServer(
-                    port: harness.port, routes: harness.routes, tee: nil,
-                    status: {
-                        ModelProxyStatus(
-                            version: "successor", pid: getpid(), processStartTime: Date(),
-                            port: harness.port, streamsInFlight: 0, routeCount: 0,
-                            home: harness.home)
-                    },
-                    onRetire: {})
-                let bindStarted = ContinuousClock().now
-                let bindOutcome = ProxyBindOutcomeBox()
-                // Waited out rather than budgeted, because a retire frees the
-                // port and cannot reserve it. macOS hands ephemeral ports out
-                // sequentially from one global counter — `net.inet.tcp
-                // .randomize_ports` is 0 — across the 16,384 numbers in
-                // 49152-65535, so a freed one comes back around after a single
-                // wrap of that range: 16,220 allocations, measured at 0.15 s on
-                // an idle machine. Beside every other socket-opening test in
-                // the pass, the number this retire just freed is one an
-                // unrelated connect or listener can be handed at once, and
-                // `SO_REUSEADDR` buys nothing against that: a socket that does
-                // not set it refuses a `SO_REUSEADDR` bind, EADDRINUSE, for as
-                // long as it lives. A squatter is somebody else holding a port,
-                // not a broken handshake — which is why the handshake is
-                // asserted above, off the socket the retire answered on, and
-                // why this wait only has to outlast the squatter.
-                //
-                // Thirty seconds rather than the four this waited before, which
-                // a peer test's listener outlived four times on `main` in one
-                // day. It stays well inside `withProxy`'s 60-second "request"
-                // phase deadline. The "no stream was cut" half of the test does
-                // not come out of this wait either: it is the in-flight count
-                // above and the six events below.
-                let poll = await pollUntilTrue(
-                    timeout: .seconds(30), pollInterval: .milliseconds(50)
-                ) {
-                    do {
-                        bindOutcome.bound(
-                            try await withPhaseDeadline("successor bind", seconds: 5) {
-                                try await successor.start()
-                            })
-                        return true
-                    } catch {
-                        bindOutcome.failed(error)
-                        return false
+                    // The successor takes the port while the first proxy is still
+                    // delivering. This is what `SO_REUSEADDR` on the listener buys:
+                    // the connections carrying the in-flight streams still hold the
+                    // port, and a bind those refused would fail on the first
+                    // attempt and on every one after it.
+                    let successor = ProxyServer(
+                        port: harness.port, routes: harness.routes, tee: nil,
+                        status: {
+                            ModelProxyStatus(
+                                version: "successor", pid: getpid(), processStartTime: Date(),
+                                port: harness.port, streamsInFlight: 0, routeCount: 0,
+                                home: harness.home)
+                        },
+                        onRetire: {})
+                    let bindStarted = ContinuousClock().now
+                    let bindOutcome = ProxyBindOutcomeBox()
+                    // Waited out rather than budgeted, because a retire frees the
+                    // port and cannot reserve it. macOS hands ephemeral ports out
+                    // sequentially from one global counter — `net.inet.tcp
+                    // .randomize_ports` is 0 — across the 16,384 numbers in
+                    // 49152-65535, so a freed one comes back around after a single
+                    // wrap of that range: 16,220 allocations, measured at 0.15 s on
+                    // an idle machine. Beside every other socket-opening test in
+                    // the pass, the number this retire just freed is one an
+                    // unrelated connect or listener can be handed at once, and
+                    // `SO_REUSEADDR` buys nothing against that: a socket that does
+                    // not set it refuses a `SO_REUSEADDR` bind, EADDRINUSE, for as
+                    // long as it lives. A squatter is somebody else holding a port,
+                    // not a broken handshake — which is why the handshake is
+                    // asserted in `body`, off the socket the retire answered on,
+                    // and why this wait only has to outlast the squatter.
+                    //
+                    // Thirty seconds rather than the four this waited before,
+                    // which a peer test's listener outlived four times on `main`
+                    // in one day. It now runs in `afterRequest` (see above) with
+                    // that 30s entirely to itself, rather than sharing
+                    // `withProxy`'s 60-second "request" phase with the retire
+                    // round trip, the connect-refused check, and the drain below.
+                    // The "no stream was cut" half of the test does not come out
+                    // of this wait either: it is the in-flight count above and
+                    // the six events below.
+                    let poll = await pollUntilTrue(
+                        timeout: .seconds(30), pollInterval: .milliseconds(50)
+                    ) {
+                        do {
+                            bindOutcome.bound(
+                                try await withPhaseDeadline("successor bind", seconds: 5) {
+                                    try await successor.start()
+                                })
+                            return true
+                        } catch {
+                            bindOutcome.failed(error)
+                            return false
+                        }
                     }
-                }
-                let bindTook = ContinuousClock().now - bindStarted
-                switch poll {
-                case .satisfied:
-                    #expect(bindOutcome.port == harness.port, "the successor bound some other port")
-                case .cancelled:
-                    // Attribution belongs to whatever cancelled this test, not
-                    // to a wait that was about to succeed.
-                    break
-                case .timedOut:
-                    // Both built before the macro, not inside it: `Issue.record`
-                    // takes a `Comment`, and a nested closure interpolated into
-                    // one is the shape that failed to compile in Task A4.
-                    let bindFailure = bindOutcome.lastError ?? "no error"
-                    // Which kind of squatter, asked the one way a test inside
-                    // the process can: a connect that is answered means
-                    // somebody is listening on the port, a refused one means a
-                    // socket that never listens — a client connection's local
-                    // port, say — holds it.
-                    let holder = connectRefused(port: harness.port)
-                        ? "nothing is listening on it"
-                        : "something is listening on it"
-                    Issue.record(
-                        """
-                        the successor did not take the port in \(bindTook): \(bindFailure); \
-                        \(holder)
-                        """)
-                }
-                await successor.stop()
+                    let bindTook = ContinuousClock().now - bindStarted
+                    switch poll {
+                    case .satisfied:
+                        #expect(bindOutcome.port == harness.port, "the successor bound some other port")
+                    case .cancelled:
+                        // Attribution belongs to whatever cancelled this test, not
+                        // to a wait that was about to succeed.
+                        break
+                    case .timedOut:
+                        // Both built before the macro, not inside it: `Issue.record`
+                        // takes a `Comment`, and a nested closure interpolated into
+                        // one is the shape that failed to compile in Task A4.
+                        let bindFailure = bindOutcome.lastError ?? "no error"
+                        // Which kind of squatter, asked the one way a test inside
+                        // the process can: a connect that is answered means
+                        // somebody is listening on the port, a refused one means a
+                        // socket that never listens — a client connection's local
+                        // port, say — holds it.
+                        let holder = connectRefused(port: harness.port)
+                            ? "nothing is listening on it"
+                            : "something is listening on it"
+                        Issue.record(
+                            """
+                            the successor did not take the port in \(bindTook): \(bindFailure); \
+                            \(holder)
+                            """)
+                    }
+                    await successor.stop()
 
-                // No stream was cut: every scripted event still arrives.
-                var arrived = 0
-                for try await line in bytes.lines where line.hasPrefix("event: ") { arrived += 1 }
-                #expect(arrived == 6)
+                    // No stream was cut: every scripted event still arrives. Its
+                    // own named phase, sized like this file's other body-read
+                    // phases ("raw status" 20s, "redirect read" 25s) rather than
+                    // folded into "request": the six ticks are a second apart and
+                    // already fully sent by the time the bind wait above returns
+                    // (it can run up to 30s against a 6s script), so this mostly
+                    // drains an already-buffered connection. 20s is generous
+                    // scheduling slack for fast-pass-2 without being able to mask
+                    // a real hang — it sits comfortably under that pass's 55.3s
+                    // green-run max (`Tests/CLAUDE.md`).
+                    let arrived = try await withPhaseDeadline("stream drain", seconds: 20) {
+                        () -> Int in
+                        var count = 0
+                        for try await line in bytes.lines where line.hasPrefix("event: ") {
+                            count += 1
+                        }
+                        return count
+                    }
+                    #expect(arrived == 6)
 
-                await waitUntil(
-                    "the drain handed the process over", sample: { retired.value },
-                    isSatisfied: { $0 })
-            }
+                    await waitUntil(
+                        "the drain handed the process over", sample: { retired.value },
+                        isSatisfied: { $0 })
+                }
+            )
         }
 
         @Test("the drain gives up at its cap and hands over anyway")
@@ -668,6 +716,20 @@ final class ProxyBindOutcomeBox: @unchecked Sendable {
 
     func bound(_ port: Int) { lock.withLock { boundPort = port } }
     func failed(_ error: any Error) { lock.withLock { failure = "\(error)" } }
+}
+
+/// Carries a still-open `URLSession.AsyncBytes` stream from `withProxy`'s
+/// "request" phase into `afterRequest`, which needs to keep reading it under
+/// a phase of its own — see the doc comment on `withProxy`.
+final class ProxyBytesBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: URLSession.AsyncBytes?
+
+    /// Force-unwrapped at every call site deliberately: `body` always puts a
+    /// value before `afterRequest` reads one, so a nil here is a broken test
+    /// wiring rather than a condition worth propagating.
+    var value: URLSession.AsyncBytes? { lock.withLock { stored } }
+    func put(_ bytes: URLSession.AsyncBytes) { lock.withLock { stored = bytes } }
 }
 
 final class ProxyCountBox: @unchecked Sendable {

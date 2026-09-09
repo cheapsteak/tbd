@@ -1015,6 +1015,26 @@ struct ProxyHarness: Sendable {
 /// of them inside a 4,800-test pass is invisible: the runner's stdout is block
 /// buffered, so the log names whichever test flushed last rather than the one
 /// that stopped. A phase that overruns names itself and fails the test instead.
+///
+/// `body` runs inside a single "request" phase (60s), sized for an ordinary
+/// request/response round trip against `Tests/CLAUDE.md`'s fast-pass-2 numbers
+/// (p90 51.4s / max 55.3s reported per-test on a green run). A test whose
+/// follow-on work needs its own, differently-sized budget — a bind that races
+/// a squatter, a multi-second drain — should not stack that work inside
+/// `body`: `withPhaseDeadline` races its operation against a plain
+/// `Task.sleep` timer that starts ticking the moment "request" begins, so
+/// nested phases *share* that 60s wall-clock window rather than getting one
+/// each, and a slow nested phase can trip the generic
+/// `ProxyPhaseTimeout("request", 60)` instead of its own named diagnostic
+/// (this is exactly what happened to the successor-bind wait in
+/// `retireAnswersBeforeDrainAndSuccessorCanBind`). Pass `afterRequest`
+/// instead: it runs after `body` returns, with the harness still live and
+/// before teardown, but outside "request"'s deadline — so it can size its own
+/// phases as siblings, not children, of "request". State `body` opens that
+/// `afterRequest` still needs (a still-streaming response body, say) crosses
+/// between them the way every other cross-closure value in this file does —
+/// a small `@unchecked Sendable` box captured by both — rather than through a
+/// return value, so this signature does not have to grow a generic for it.
 func withProxy(
     prefix: String,
     script: @escaping FakeUpstream.Handler,
@@ -1025,7 +1045,8 @@ func withProxy(
     /// directory is minted in here, after the caller has been called.
     teeFactory: (@Sendable (URL) -> any StreamTeeing)? = nil,
     onRetire: (@Sendable () -> Void)? = nil,
-    body: @escaping @Sendable (ProxyHarness) async throws -> Void
+    body: @escaping @Sendable (ProxyHarness) async throws -> Void,
+    afterRequest: (@Sendable (ProxyHarness) async throws -> Void)? = nil
 ) async throws {
     let upstream = FakeUpstream(script: script)
     let root = proxyScratchRoot(prefix: prefix)
@@ -1113,6 +1134,9 @@ func withProxy(
             routesDir: routesDir, streamsDir: streamsDir, server: server, routes: table,
             session: session, home: canonicalHome)
         try await withPhaseDeadline("request", seconds: 60) { try await body(harness) }
+        if let afterRequest {
+            try await afterRequest(harness)
+        }
         await teardown()
     } catch {
         await teardown()
