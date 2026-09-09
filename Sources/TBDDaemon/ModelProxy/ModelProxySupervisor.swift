@@ -148,14 +148,38 @@ actor ModelProxySupervisor {
     /// itself is this daemon's to signal.
     private let signaller: any ProcessSignaller
     private let pidFile: any ModelProxyPIDFileReading
+    /// How this daemon asks who is holding a port it could not bind — a plain
+    /// loopback connect, whose errno tells a transient holder of the number
+    /// from a listener. See `LoopbackPortProbe` for why the control client
+    /// cannot answer this question.
+    private let portProbe: any LoopbackPortProbing
     /// Whether any session spawned through the proxy is still alive — one
-    /// database question, asked once, at a boot that finds the flag off.
+    /// database question, asked at a boot that finds the flag off, **and on
+    /// every refused bind**.
+    ///
+    /// The second caller is the port wait: waiting for a held port to come free
+    /// is worth paying only while a session is still routed against it, because
+    /// that session's `ANTHROPIC_BASE_URL` names the port for the rest of its
+    /// life and minting a fresh one strands it. With nothing routed there is
+    /// nothing to strand, and the wait would only delay this daemon's boot and
+    /// the Settings toggle.
     ///
     /// A closure rather than a store, because it is the only thing this actor
     /// wants from the terminal table and taking the table would make the
     /// supervisor's tests need one. Its default answers "none", which is the
     /// answer that makes a supervisor with nothing injected run nothing.
-    private let routedSessionsAlive: @Sendable () async -> Bool
+    ///
+    /// **It throws rather than folding an unreadable table into "none",
+    /// because the two callers disagree about what an unanswered question
+    /// means.** A drain-only boot that cannot read the table must start
+    /// nothing: erring the other way spawns a proxy for sessions that may not
+    /// exist. The port wait must assume one *is* routed and wait: erring the
+    /// other way mints past a live session, which is the failure the wait
+    /// exists to prevent — and a busy database is exactly the moment a
+    /// contended port is being fought over. One fold here would have to pick
+    /// one of those, so neither is picked here; each caller decides beside
+    /// itself.
+    private let routedSessionsAlive: @Sendable () async throws -> Bool
     /// This daemon's home in the one form both sides compare, computed once.
     ///
     /// `ModelProxyStatus.canonicalHome` resolves symlinks against the
@@ -188,6 +212,43 @@ actor ModelProxySupervisor {
     /// Giving up after the last step is not permanent: `respawn` says so, and
     /// the next watch tick sees no proxy and starts a fresh burst.
     private let respawnBackoff: [Duration]
+    /// How long the port wait leaves between attempts to bind a port something
+    /// else is holding.
+    ///
+    /// Two seconds because a refused bind is cheap — the proxy exits with
+    /// status 3 within milliseconds of trying — so a finer cadence would only
+    /// churn processes for an answer that cannot arrive faster.
+    private let portRetryInterval: Duration
+    /// How many refused binds the port wait tolerates before it gives the port
+    /// up and mints a fresh one.
+    private let portRetryAttempts: Int
+    /// The shipped cadence and count, named because their **product** is the
+    /// number that has to sit between two other numbers.
+    ///
+    /// The window (2s × 15 = 30s) has to be wider than a transient holder
+    /// typically keeps an ephemeral number. macOS hands TCP ephemeral ports out
+    /// sequentially from one global counter, so a number a retiring or killed
+    /// proxy just freed is often handed to an ordinary short-lived client
+    /// socket before the successor binds; that socket's lifetime is sub-second
+    /// to a few seconds, and 30s clears it comfortably.
+    ///
+    /// It also has to stay well inside the 183 seconds Claude retries a refused
+    /// base URL for (spec, "Failure semantics"), measured from the *worst* path
+    /// that reaches a respawn — the hang ladder, which already spends four
+    /// missed polls (60s) plus `hangSignalKillDelay` ticks (30s) plus one more
+    /// tick to notice the kill (15s) = 105s before the respawn starts. 105 + 30
+    /// = 135s, which leaves roughly 45s for the spawn itself and a watch tick.
+    static let defaultPortRetryInterval: Duration = .seconds(2)
+    static let defaultPortRetryAttempts = 15
+    /// Consecutive probes that find a listener — not this home's proxy, and so
+    /// not adoptable — before the port is given up.
+    ///
+    /// A listener is not a transient: it is bound and accepting, and it will
+    /// still be there in thirty seconds, so spending the whole window on it
+    /// only delays the mint that has to happen anyway. Two sightings rather
+    /// than one because a single accepted connect can be the tail of a holder
+    /// that is closing; a second one an interval later says it is not.
+    private static let foreignListenerPatience = 2
     /// Consecutive missed `/tbd/status` polls, all while the process table
     /// still confirms the proxy, before this daemon treats it as hung rather
     /// than merely slow.
@@ -334,10 +395,13 @@ actor ModelProxySupervisor {
         processIdentity: any ProcessIdentityChecking = ProcessTableIdentityCheck(),
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
         pidFile: any ModelProxyPIDFileReading = ModelProxyPIDFile(),
-        routedSessionsAlive: @escaping @Sendable () async -> Bool = { false },
+        portProbe: any LoopbackPortProbing = LoopbackPortProbe(),
+        routedSessionsAlive: @escaping @Sendable () async throws -> Bool = { false },
         clientFactory: @escaping @Sendable (Int) -> ModelProxyClient = { ModelProxyClient(port: $0) },
         watchInterval: Duration = .seconds(15),
         respawnBackoff: [Duration] = [.seconds(1), .seconds(5), .seconds(30)],
+        portRetryInterval: Duration = ModelProxySupervisor.defaultPortRetryInterval,
+        portRetryAttempts: Int = ModelProxySupervisor.defaultPortRetryAttempts,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.config = config
@@ -347,12 +411,15 @@ actor ModelProxySupervisor {
         self.processIdentity = processIdentity
         self.signaller = signaller
         self.pidFile = pidFile
+        self.portProbe = portProbe
         self.routedSessionsAlive = routedSessionsAlive
         self.canonicalHome = ModelProxyStatus.canonicalHome(home.path)
         self.pidFilePath = ProxyHomePaths(home: home).pidPath
         self.clientFactory = clientFactory
         self.watchInterval = watchInterval
         self.respawnBackoff = respawnBackoff
+        self.portRetryInterval = portRetryInterval
+        self.portRetryAttempts = portRetryAttempts
         self.clock = clock
         self.routes = ModelProxyRouteStore(home: home)
     }
@@ -367,7 +434,7 @@ actor ModelProxySupervisor {
     static func production(
         config: ConfigStore,
         home: URL,
-        routedSessionsAlive: @escaping @Sendable () async -> Bool,
+        routedSessionsAlive: @escaping @Sendable () async throws -> Bool,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         clock: any Clock<Duration> = ContinuousClock()
     ) -> ModelProxySupervisor {
@@ -572,11 +639,26 @@ actor ModelProxySupervisor {
     /// routed, and only until they are done.
     private func startDrainingIfSessionsAreRouted() async {
         guard !started else { return }
-        guard await routedSessionsAlive() else {
-            Self.logger.debug(
+        do {
+            guard try await routedSessionsAlive() else {
+                Self.logger.debug(
+                    """
+                    the model proxy is disabled for \(self.home.path, privacy: .public) and no \
+                    session is routed through it; not starting a supervisor
+                    """)
+                return
+            }
+        } catch {
+            // The flag is off, so the only thing a supervisor would do here is
+            // keep a proxy alive for sessions that may not exist. Starting one
+            // on a question nobody answered is a background process nobody
+            // asked for; the next boot asks again.
+            Self.logger.error(
                 """
-                the model proxy is disabled for \(self.home.path, privacy: .public) and no session \
-                is routed through it; not starting a supervisor
+                the model proxy is disabled for \(self.home.path, privacy: .public) and the \
+                terminal table could not be read: \
+                \(error.localizedDescription, privacy: .public); not starting a drain on an \
+                unanswered question
                 """)
             return
         }
@@ -1149,21 +1231,18 @@ actor ModelProxySupervisor {
             return false
 
         case .bindFailed(let port):
-            // Somebody has the port. A TBD proxy is adopted; anything else
-            // means it was taken while TBD was stopped, and a fresh port is
-            // minted (spec, "Port").
-            if await adoptIfMatching(port: port) { return true }
+            // Somebody has the port. The port wait asks who, adopts a TBD
+            // proxy, and otherwise decides between waiting the holder out and
+            // minting (spec, "Port"). A kernel-assigned port has no wait to
+            // run: there is no persisted number a session could be routed
+            // against, so only the adoption half applies.
             guard requested > 0 else {
+                if await adoptIfMatching(port: port) { return true }
                 Self.logger.error(
                     "the model proxy could not bind a kernel-assigned port; not retrying")
                 return false
             }
-            Self.logger.error(
-                """
-                port \(port, privacy: .public) is held by something that is not a TBD proxy; \
-                minting a fresh one. Sessions spawned against the old port keep it for their life
-                """)
-            return await attemptSpawn(port: 0, decision: .overwrite)
+            return await reclaimPort(port)
 
         case .homeUnusable:
             permanentlyDown = true
@@ -1190,6 +1269,247 @@ actor ModelProxySupervisor {
                 \(error.localizedDescription, privacy: .public)
                 """)
             return false
+        }
+    }
+
+    // MARK: - The port wait
+
+    /// **The port wait** (spec, "Port"): a bounded attempt to keep the port
+    /// this home's sessions are already routed against, before giving it up.
+    ///
+    /// The port is not a detail of this daemon's bookkeeping. It is written
+    /// into every routed session's `ANTHROPIC_BASE_URL` at spawn and read once,
+    /// so a session lives and dies on the number it was given: minting a fresh
+    /// one strands every session on the old port, which then spends Claude's
+    /// 183-second retry budget on a refused connect and fails the turn.
+    ///
+    /// So minting is the last answer here, not the first, and three facts have
+    /// to be established before it:
+    ///
+    ///   - **Is it ours?** Asked first on every pass through the loop, because
+    ///     a proxy that was mid-bind when this daemon's own bind lost can be
+    ///     answering by the time it is probed. Adoption wins outright and costs
+    ///     no wait.
+    ///   - **Is it a listener or a transient?** `portProbe` answers with an
+    ///     errno rather than a fold: a refused connect means nothing is
+    ///     listening, so the number is held by something that will let go of it
+    ///     — macOS hands ephemeral ports out sequentially from one counter, so
+    ///     a number a retire or a kill just freed is routinely handed to a
+    ///     short-lived client socket before the successor binds. An accepted
+    ///     connect that adoption refuses is a foreign listener, which will not
+    ///     let go, and is given up after `foreignListenerPatience` sightings.
+    ///   - **Is anything stranded?** Asked once, and only after the first probe
+    ///     has had its chance to adopt: with no session routed against the port
+    ///     there is nothing to protect, and the wait would only delay this
+    ///     daemon's boot and the Settings toggle.
+    ///
+    /// - Returns: whether a proxy is current afterwards.
+    private func reclaimPort(_ port: Int) async -> Bool {
+        guard let spawner else {
+            Self.logger.info(
+                """
+                no model proxy binary beside this daemon; sessions for \
+                \(self.home.path, privacy: .public) will not be proxied
+                """)
+            return false
+        }
+
+        // One, for the bind that brought us here.
+        var refusedBinds = 1
+        var listenerSightings = 0
+        // The gate is one database question and its answer cannot usefully
+        // change inside a 30-second window, so it is asked at most once — but
+        // lazily, so an adoptable proxy on the first probe is taken without
+        // asking it at all.
+        var routedAnswer: Bool?
+
+        while true {
+            switch await classifyOccupant(of: port) {
+            case .ours:
+                return true
+            case .foreignListener(let detail):
+                listenerSightings += 1
+                if listenerSightings >= Self.foreignListenerPatience {
+                    Self.logger.error(
+                        """
+                        port \(port, privacy: .public) has been held across \
+                        \(listenerSightings, privacy: .public) probes by a listener that is not \
+                        this home's model proxy; it is not going to let go
+                        """)
+                    return await mintReplacement(
+                        for: port, refusedBinds: refusedBinds, reason: detail)
+                }
+            case .transient:
+                listenerSightings = 0
+            }
+
+            let routed: Bool
+            if let routedAnswer {
+                routed = routedAnswer
+            } else {
+                routed = await aSessionIsRoutedOrTheTableCannotSay(port: port)
+                routedAnswer = routed
+            }
+            guard routed else {
+                Self.logger.error(
+                    """
+                    port \(port, privacy: .public) is held by something that is not a TBD proxy \
+                    and no session is routed against it, so nothing is stranded; minting a fresh \
+                    port at once
+                    """)
+                return await mintReplacement(
+                    for: port, refusedBinds: refusedBinds,
+                    reason: "no session is routed against it")
+            }
+
+            guard refusedBinds <= portRetryAttempts else {
+                Self.logger.error(
+                    """
+                    port \(port, privacy: .public) did not come free within \
+                    \(self.portRetryAttempts, privacy: .public) attempts; giving up on it
+                    """)
+                return await mintReplacement(
+                    for: port, refusedBinds: refusedBinds,
+                    reason: "it never came free")
+            }
+
+            if permanentlyDown || Task.isCancelled { return false }
+            try? await clock.sleep(for: portRetryInterval)
+            // A cancelled sleep returns instantly, and a cancelled watch must
+            // never mint: the daemon is going away, and the port belongs to the
+            // sessions that outlive it.
+            if Task.isCancelled { return false }
+
+            do {
+                let result = try await spawner.spawn(port: port, home: home)
+                Self.logger.info(
+                    """
+                    port \(port, privacy: .public) came free after \
+                    \(refusedBinds, privacy: .public) refused bind(s); the model proxy is back on it
+                    """)
+                await recordSpawn(
+                    pid: result.pid, port: result.port, requested: port, decision: .keep)
+                return live != nil
+            } catch let error as ModelProxySpawner.Error {
+                guard case .bindFailed = error else {
+                    // Anything but another refused bind is a different question
+                    // and is answered where it already is. It cannot come back
+                    // here: `.bindFailed` is consumed by this loop and never
+                    // reaches `recover` from this call.
+                    return await recover(from: error, requested: port)
+                }
+                refusedBinds += 1
+            } catch {
+                Self.logger.error(
+                    """
+                    could not spawn a model proxy for \(self.home.path, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                return false
+            }
+        }
+    }
+
+    /// The port wait's reading of the gate: **an unanswerable question counts
+    /// as "yes, a session is routed".**
+    ///
+    /// A terminal table too busy to answer is exactly the machine on which a
+    /// contended port is being fought over, so this is the moment the fold
+    /// matters most — and the two mistakes do not cost the same. Waiting out a
+    /// port nothing is routed against delays a boot by thirty seconds; minting
+    /// past one that is strands a live session for the rest of its life. The
+    /// drain-only boot reads the same failure the other way, which is why the
+    /// closure throws rather than deciding for both.
+    private func aSessionIsRoutedOrTheTableCannotSay(port: Int) async -> Bool {
+        do {
+            return try await routedSessionsAlive()
+        } catch {
+            Self.logger.error(
+                """
+                could not read whether a session is still routed against port \
+                \(port, privacy: .public): \(error.localizedDescription, privacy: .public); \
+                assuming one is and waiting, because minting past a routed session is the \
+                failure this wait exists to prevent
+                """)
+            return true
+        }
+    }
+
+    /// Gives the port up: mint a fresh one, overwrite the column, and say
+    /// plainly what that costs.
+    ///
+    /// `reason` is passed in so the two ways of arriving here — a foreign
+    /// listener, and a budget that ran out — share one outcome line naming both
+    /// ports, which is the line an operator needs when a session that was
+    /// working stops being proxied.
+    private func mintReplacement(for old: Int, refusedBinds: Int, reason: String) async -> Bool {
+        let minted = await attemptSpawn(port: 0, decision: .overwrite)
+        guard minted, let replacement = live?.state.port else {
+            Self.logger.error(
+                """
+                gave up on port \(old, privacy: .public) after \
+                \(refusedBinds, privacy: .public) refused bind(s) \
+                (\(reason, privacy: .public)) and could not mint a replacement either; \
+                no session will be proxied until this daemon reconciles again
+                """)
+            return minted
+        }
+        Self.logger.error(
+            """
+            gave up on port \(old, privacy: .public) after \
+            \(refusedBinds, privacy: .public) refused bind(s) (\(reason, privacy: .public)); \
+            minted port \(replacement, privacy: .public) instead — sessions spawned against port \
+            \(old, privacy: .public) keep it for their life and lose the proxy
+            """)
+        return minted
+    }
+
+    /// What is on the port, in the three shapes the wait branches on.
+    private enum Occupant {
+        /// This home's proxy, and it has just been adopted.
+        case ours
+        /// A listener that answered and failed the adoption identity check.
+        case foreignListener(String)
+        /// Nothing is listening, or the probe could not say — either way the
+        /// number may come free, so it is waited on.
+        case transient(String)
+    }
+
+    /// Asks the port who holds it, and lets adoption have the first word.
+    ///
+    /// **Adoption is tried before anything is concluded from an accepted
+    /// connect**, so a proxy that came up between the failed bind and this
+    /// probe is taken over rather than counted against
+    /// `foreignListenerPatience`. `adoptIfMatching` already logs at `.error`
+    /// *why* it refused; this adds only which of the three cases the probe saw,
+    /// at `.debug`, because it is asked once per interval for the whole window.
+    private func classifyOccupant(of port: Int) async -> Occupant {
+        switch await portProbe.occupancy(port: port) {
+        case .refused:
+            Self.logger.debug(
+                """
+                nothing is listening on port \(port, privacy: .public); something transient holds \
+                the number
+                """)
+            return .transient("connect refused")
+        case .undetermined(let detail):
+            // A bounded wait is the conservative answer to an answer we do not
+            // have: waiting out a listener costs a delayed mint, while minting
+            // past a transient strands live sessions.
+            Self.logger.debug(
+                """
+                could not tell who holds port \(port, privacy: .public) \
+                (\(detail, privacy: .public)); waiting it out
+                """)
+            return .transient(detail)
+        case .accepted:
+            if await adoptIfMatching(port: port) { return .ours }
+            Self.logger.debug(
+                """
+                a listener answers on port \(port, privacy: .public) and it is not this home's \
+                model proxy
+                """)
+            return .foreignListener("a listener that is not this home's proxy answers on it")
         }
     }
 

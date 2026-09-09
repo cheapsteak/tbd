@@ -927,8 +927,16 @@ public final class Daemon: Sendable {
                 // that restarts after the flag went off still has to keep that
                 // port answering — and an install that never turned the flag on
                 // must run nothing at all.
+                //
+                // The read is handed over **unfolded**. Its other caller is the
+                // supervisor's port wait, and the two want opposite answers to
+                // an unreadable terminal table: a drain-only boot must start
+                // nothing, while the wait must assume a session is routed and
+                // keep the port. Folding a failure to `false` here would pick
+                // the first for both, and the second is where that strands live
+                // sessions — see `routedSessionsAlive` on the supervisor.
                 routedSessionsAlive: { [database] in
-                    (try? await database.terminals.hasLiveRoutedSession()) ?? false
+                    try await database.terminals.hasLiveRoutedSession()
                 })
             : nil
         self.modelProxySupervisor = modelProxySupervisor
@@ -1286,6 +1294,14 @@ public final class Daemon: Sendable {
         // budget, on a machine where the proxy binds pathologically slowly. It
         // is also flag-gated, so nobody running the shipped default pays any of
         // it.
+        //
+        // One case costs more, deliberately. When a session is still routed
+        // against the persisted port and something transient holds it, the
+        // supervisor's port wait adds up to 30 seconds
+        // (`ModelProxySupervisor.defaultPortRetryAttempts` ×
+        // `defaultPortRetryInterval`) trying to keep that port. It is paid in
+        // exactly the case where minting a fresh one would strand a live
+        // session, and in no other.
 
         await modelProxySupervisor?.startIfEnabled()
 
