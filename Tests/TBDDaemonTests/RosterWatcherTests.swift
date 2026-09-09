@@ -616,13 +616,22 @@ struct RosterWatcherTickTests {
     /// between ticks is announced on the next one.
     ///
     /// The registry is written **after** the loop has armed its first sleep, so
-    /// the opening scan provably cannot be what announced it, and the advancing
-    /// is done by `advanceUntil` rather than by a fixed count — the loop is a
-    /// poll-and-re-arm, which is the exact shape a single advance turns into a
-    /// hang.
+    /// the opening scan provably cannot be what announced it.
+    ///
+    /// **On `EventDrivenTestClock`, because the loop is a scan-then-re-arm.**
+    /// `run()` refreshes and then sleeps, so every arming is the far side of a
+    /// completed scan — which is exactly what makes the ladder below readable:
+    /// the arming this test waits for before writing proves the opening scan
+    /// ran, and the arming it waits for after advancing proves the tick did.
+    /// On `TestClock` those two facts can only be observed by polling
+    /// `checkSuspension()`, whose `megaYield` is 20 serially-awaited
+    /// background-QoS tasks — under the saturated fast pass that probe floods
+    /// the cooperative pool with exactly the low-priority work the roster task
+    /// needs a turn from, and starves the thing it is waiting for. The
+    /// signature is "observed 1 clock advance" against a 45 s budget.
     @Test func theTickRescansOnTheInjectedInterval() async throws {
         try await withRegistry { directory in
-            let clock = TestClock<Duration>()
+            let clock = EventDrivenTestClock()
             let sink = FrameSink()
             let subject = watcher(
                 directory: directory,
@@ -637,17 +646,16 @@ struct RosterWatcherTickTests {
             // interval. Waiting for that arm before writing the record is what
             // makes the tick load-bearing: the session cannot have been picked
             // up by the opening scan.
-            await clock.waitForSuspension()
+            try await clock.requireSleeperArmed()
             #expect(await sink.frames.isEmpty)
 
             try write(registryRecord(), pid: 4242, in: directory)
-            let announced = await clock.advanceUntil(
-                "the roster to announce a session that appeared between ticks", by: .seconds(2)
-            ) {
-                !peers(await sink.frames).isEmpty
-            }
+            try await clock.requireAdvanceWhenArmed(by: .seconds(2))
+            // The re-arm is the proof the scan finished: this clock's `advance`
+            // does no yielding, so it promises only that the sleeper's
+            // continuation was resumed.
+            try await clock.requireSleeperArmed()
 
-            #expect(announced)
             #expect(peers(await sink.frames).map(\.name) == ["laptop:useful-swallow %3541"])
         }
     }

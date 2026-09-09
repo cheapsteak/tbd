@@ -273,6 +273,28 @@ public extension TestClock {
     /// as the code re-arms, which would dissolve that proof. Use the explicit
     /// `advanceWhenSuspended` pair there.
     ///
+    /// **And — the sharper limit — where the loop under test re-arms under a
+    /// saturated fast pass, because this helper starves the re-arm it is
+    /// waiting for.** Each turn probes `isArmed()`, which is
+    /// `checkSuspension()`, which opens with a `megaYield`: twenty
+    /// serially-awaited **background-QoS** tasks. At a 25 ms poll interval that
+    /// is ~1,800 probes and ~36,000 background tasks over the 45 s budget,
+    /// queued on the same cooperative pool the poller needs a turn from — and
+    /// macOS starves background QoS hardest under exactly the load that makes
+    /// the wait necessary. The field signature is this helper's own diagnostic
+    /// reading **"observed 1 clock advance"**: the first tick landed and the
+    /// re-arm after it was never seen. On 2026-09-08 that reddened
+    /// `ModelProxySupervisorTests` on three consecutive CI dispatches of one
+    /// unrelated SHA, over 45–170 s, with nothing wrong with the supervisor.
+    ///
+    /// So this helper is for a **one-shot** wait — something that arms once and
+    /// fires once. A re-arming loop belongs on `EventDrivenTestClock`
+    /// (`Tests/TestSupport/EventDrivenTestClock.swift`), whose arming signal is
+    /// emitted from inside the critical section that registers the sleeper, as
+    /// an explicit ladder of `requireAdvanceWhenArmed` closed by a
+    /// `requireSleeperArmed` — the re-arm being the proof that the tick before
+    /// it finished. `Tests/CLAUDE.md`, "The event-driven alternative".
+    ///
     /// - Parameters:
     ///   - what: names the effect being waited for, for the timeout diagnostic.
     ///   - interval: virtual time per step — normally the pacing the code under

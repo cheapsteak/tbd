@@ -610,6 +610,16 @@ struct TranscriptStreamPollSchedulingTests {
 
     private static let userLine = #"{"type":"user","uuid":"a","timestamp":"2026-08-26T10:00:00.000Z","message":{"role":"user","content":"hello"}}"#
 
+    /// **On `EventDrivenTestClock`, because the poll task is a
+    /// sleep-then-tick loop.** Every advance past the first is a re-arm, and on
+    /// `TestClock` a re-arm can only be observed by polling
+    /// `checkSuspension()`, whose `megaYield` is 20 serially-awaited
+    /// background-QoS tasks — under the saturated fast pass that probe floods
+    /// the cooperative pool with exactly the low-priority work the poll task
+    /// needs a turn from. One tick is enough here (the stream line is written
+    /// before the advance), and the re-arm after it is what proves the tick
+    /// finished: this clock's `advance` does no yielding, so it promises only
+    /// that the sleeper's continuation was resumed.
     @Test("a registered stream file is polled at the tier cadence, and its change alone is news")
     func streamChangeAloneIsNews() async throws {
         let dir = fencedScratchRoot(prefix: "tbdstrsch")
@@ -622,7 +632,7 @@ struct TranscriptStreamPollSchedulingTests {
         try "".write(toFile: streamPath, atomically: true, encoding: .utf8)
 
         let source = TranscriptSource()
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let scheduler = TranscriptPollScheduler(source: source, clock: clock)
         let news = NewsLog()
         await scheduler.setOnChangeIfUnset { sessionID in await news.record(sessionID) }
@@ -645,11 +655,8 @@ struct TranscriptStreamPollSchedulingTests {
         try handle.write(contentsOf: Data((line + "\n").utf8))
         try handle.close()
 
-        let sawNews = await clock.advanceUntil(
-            "the scheduler to report the stream file's change",
-            by: TranscriptPollPolicy.background
-        ) { await news.count > 0 }
-        #expect(sawNews)
+        try await clock.requireAdvanceWhenArmed(by: TranscriptPollPolicy.background)
+        try await clock.requireSleeperArmed()
 
         #expect(await news.sessions == ["s1"],
                 "only the stream file moved, and it moved once")
@@ -659,6 +666,8 @@ struct TranscriptStreamPollSchedulingTests {
 
     /// The off branch: a registration with no stream path touches no second
     /// file and builds no provisional, however long it polls.
+    /// On `EventDrivenTestClock` with the ladder the test above describes: one
+    /// tick, waited for rather than polled for.
     @Test("a registration with no stream path never builds a provisional")
     func noStreamPathBuildsNoProvisional() async throws {
         let dir = fencedScratchRoot(prefix: "tbdstrsch")
@@ -667,7 +676,7 @@ struct TranscriptStreamPollSchedulingTests {
         try (Self.userLine + "\n").write(toFile: transcriptPath, atomically: true, encoding: .utf8)
 
         let source = TranscriptSource()
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let scheduler = TranscriptPollScheduler(source: source, clock: clock)
         let news = NewsLog()
         await scheduler.setOnChangeIfUnset { sessionID in await news.record(sessionID) }
@@ -676,11 +685,9 @@ struct TranscriptStreamPollSchedulingTests {
             sessionID: "s1", path: transcriptPath, tier: .background,
             token: TranscriptPaneToken())
 
-        let sawNews = await clock.advanceUntil(
-            "the scheduler to report the transcript's first read",
-            by: TranscriptPollPolicy.background
-        ) { await news.count > 0 }
-        #expect(sawNews, "the transcript itself must still be polled")
+        try await clock.requireAdvanceWhenArmed(by: TranscriptPollPolicy.background)
+        try await clock.requireSleeperArmed()
+        #expect(await news.count > 0, "the transcript itself must still be polled")
         #expect(await source.provisional(sessionID: "s1") == nil)
         #expect(await source.trackedStreamSessionCount == 0)
     }
