@@ -453,9 +453,14 @@ owns the proxy's life on an injected clock:
   running and the proxy keeps being adopted and respawned. Each tick reads
   `routeCount` off the `/tbd/status` poll it already makes; when it reaches
   zero — every routed terminal having retired its route as it exited — the
-  supervisor retires the proxy, drops it, and stops. Turning the flag back on
+  supervisor retires the proxy and drops it. It does not stop there: a proxy
+  this daemon spawned is its child and goes on draining what is in flight for
+  some seconds after its listener closes, so the watch keeps ticking with
+  nothing to do but wait for that exit, and stops once it has collected it or
+  once the ten minutes a drain may take have passed. Turning the flag back on
   while draining simply leaves the mode: nothing was retired, so there is
-  nothing to restart.
+  nothing to restart — and turning it back on while that last exit is still
+  outstanding returns the same watch to normal service.
 
   At startup with the flag off the supervisor starts in draining mode only when
   a routed terminal is still alive — one query, for a terminal row carrying a

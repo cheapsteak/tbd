@@ -234,6 +234,16 @@ actor ModelProxySupervisor {
     /// as the proxy still serves a route, and retires it when the last one
     /// goes. Cleared by the flag coming back on.
     private var draining = false
+    /// **The drain is over and the corpse is not collected yet.** The proxy has
+    /// been retired and dropped, so there is nothing left to supervise — but a
+    /// proxy this daemon spawned is its child, and it stays a zombie until
+    /// somebody `waitpid`s it. The watch keeps ticking in this mode and each
+    /// tick does nothing but `drainPendingReap()`; it stops itself the moment
+    /// nothing is pending — collected, or given up on once the attempt budget
+    /// is spent, which spans the ten minutes a retired proxy may legitimately
+    /// take to finish draining and exit. Cleared by the flag coming back on,
+    /// which returns this same watch to normal service.
+    private var reapOnly = false
     /// Route registrations that have written their file but have not yet been
     /// told to the live proxy — or, told to it and not yet answered.
     ///
@@ -379,6 +389,12 @@ actor ModelProxySupervisor {
     var canSpawn: Bool { spawner != nil }
 
     var current: State? { live?.state }
+
+    /// Whether this supervisor's watch is running. True while it is supervising
+    /// a proxy, and true through the reap-only idle a drain leaves behind — the
+    /// watch has one job left there, and its ending is the thing that says the
+    /// dropped child is no longer this daemon's to collect.
+    var isWatching: Bool { watchTask != nil }
 
     /// Everything `daemon.capabilities` reports about the proxy, in one hop.
     ///
@@ -534,6 +550,21 @@ actor ModelProxySupervisor {
                 while it was draining; keeping the proxy and resuming normal service
                 """)
         }
+        // An on-flip during the reap-only idle is the same return to normal
+        // service one step later: the proxy is gone, but the watch this
+        // supervisor is about to need is already running, so leaving the mode is
+        // the whole of it. `start()` below returns early on a supervisor that is
+        // already started, and the tick this watch has already armed reconciles
+        // a fresh proxy. Starting a second watch task here would tick this
+        // supervisor twice for the rest of the daemon's life.
+        if reapOnly {
+            reapOnly = false
+            Self.logger.info(
+                """
+                the model proxy was switched back on for \(self.home.path, privacy: .public) while \
+                its retired predecessor was still being collected; resuming normal service
+                """)
+        }
         await start()
     }
 
@@ -564,6 +595,10 @@ actor ModelProxySupervisor {
     func start() async {
         guard !started else { return }
         started = true
+        // A fresh watch never begins in the reap-only idle: that mode belongs to
+        // the watch a drain left running, and this line is reached only when
+        // there is no watch.
+        reapOnly = false
         await drainPendingReap()
         await reconcile()
         watchTask = Task { [weak self] in
@@ -833,7 +868,37 @@ actor ModelProxySupervisor {
             return
         }
         draining = false
-        await stop()
+        await enterReapOnlyIdle()
+    }
+
+    /// The drain retired the proxy; what is left is collecting its corpse.
+    ///
+    /// **The watch is not stopped here, and that is the whole of this method.**
+    /// A proxy this daemon spawned is its child: `retire()` returns once the
+    /// listener is closed, and the process then drains whatever is in flight for
+    /// up to ten minutes before it exits. Stopping the watch on the retire —
+    /// which is a single `waitpid(WNOHANG)` pass and then nothing — leaves that
+    /// exit uncollected, so the pid sits `<defunct>` in the process table until
+    /// something calls `start()` again, which on the toggle path may be never.
+    /// So the watch stays and ticks for one purpose: `tick` collects, and stops
+    /// the watch itself once nothing is pending.
+    ///
+    /// Nothing is reaped here. The proxy was asked to retire a moment ago and
+    /// cannot have exited yet, and the pass the next tick makes is the same one.
+    private func enterReapOnlyIdle() async {
+        guard !pendingReap.isEmpty else {
+            // An adopted proxy is nobody's child here, so there is nothing to
+            // wait for and the watch has no reason to keep running.
+            await stop()
+            return
+        }
+        reapOnly = true
+        Self.logger.info(
+            """
+            the model proxy for \(self.home.path, privacy: .public) is retired; polling until this \
+            daemon has collected the \(self.pendingReap.count, privacy: .public) child pid(s) it \
+            dropped
+            """)
     }
 
     private func watch() async {
@@ -1225,6 +1290,17 @@ actor ModelProxySupervisor {
         // Before anything else, and even when the supervisor is permanently
         // down: a child we dropped is a zombie until somebody collects it.
         await drainPendingReap()
+        if reapOnly {
+            // A drain retired the proxy and this tick exists only for the pass
+            // above. Nothing else is decided in this mode — there is no proxy to
+            // poll, adopt, or respawn — and the watch stops itself as soon as
+            // the pass has nothing left to do, either because every pid was
+            // collected or because `drainPendingReap` gave up on it.
+            guard pendingReap.isEmpty else { return }
+            reapOnly = false
+            await stop()
+            return
+        }
         guard !permanentlyDown else { return }
         guard let live else {
             await reconcile()
