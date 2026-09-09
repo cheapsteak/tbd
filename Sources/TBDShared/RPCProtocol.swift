@@ -2528,7 +2528,7 @@ public struct TerminalSendParams: Codable, Sendable {
     /// An empty string keeps its existing meaning: nothing is pasted, and a
     /// bare `--submit` still presses Enter.
     public let text: String?
-    /// Whitespace-separated tmux key names — `"Escape"`, `"C-c"`,
+    /// Whitespace-separated key names — `"Escape"`, `"C-c"`,
     /// `"Escape Enter"` — sent one at a time, paced. Mutually exclusive with
     /// `text`. Carries no envelope (a key sequence has nowhere to put a line of
     /// text) and cannot be verified (keys reach no transcript).
