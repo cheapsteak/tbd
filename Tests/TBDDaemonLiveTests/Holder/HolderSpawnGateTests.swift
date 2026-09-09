@@ -582,9 +582,12 @@ private final class RoutingRecorder: ModelProxySupervising, @unchecked Sendable 
     func makeRoute(
         terminalID: UUID, upstream: String, streamingEnabled: Bool
     ) async throws -> ModelProxyRoute {
-        lock.lock(); defer { lock.unlock() }
-        madeStorage.append(Made(
-            terminalID: terminalID, upstream: upstream, streamingEnabled: streamingEnabled))
+        // `withLock` rather than `lock()`/`unlock()`: this method is `async`,
+        // where the unscoped pair is unavailable.
+        lock.withLock {
+            madeStorage.append(Made(
+                terminalID: terminalID, upstream: upstream, streamingEnabled: streamingEnabled))
+        }
         return ModelProxyRoute(
             token: token, terminalID: terminalID,
             upstream: upstream, streamingEnabled: streamingEnabled)
@@ -595,8 +598,7 @@ private final class RoutingRecorder: ModelProxySupervising, @unchecked Sendable 
     }
 
     func retireRoute(token: String, terminalID: UUID) async {
-        lock.lock(); defer { lock.unlock() }
-        retiredStorage.append(token)
+        lock.withLock { retiredStorage.append(token) }
     }
 
     func routeToken(forTerminal terminalID: UUID) async -> String? { nil }
