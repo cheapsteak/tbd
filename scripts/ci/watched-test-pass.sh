@@ -138,7 +138,8 @@
 # Both sweeps rebuild the order from a fresh walk rather than reusing an earlier
 # snapshot: sampling several targets takes 20 s or more and the grace window is
 # another 30 s, and the EXIT trap's own cleanup spawns processes during exactly
-# that window.
+# that window. Each order is also written into the ps file before it is acted
+# on, because an ordering nobody can observe is an ordering nobody can check.
 #
 # WHY 30 SECONDS OF GRACE. That is what `scripts/test.sh`'s EXIT trap gets to
 # run its tmux `kill-server` sweep and fence checks — generous against the few
@@ -412,7 +413,23 @@ if kill -0 "$pipeline" 2>/dev/null; then
     done
     kill_order="$deeper_first $direct_others $tee_pids"
   }
+  # The order is written into the artifact as well as acted on. It is the only
+  # way to check after the fact that `tee` really was signalled last and the
+  # deepest descendants first — the property the block above claims — and on a
+  # real stall it also tells a reader which processes each sweep reached.
+  record_kill_order() {
+    local label="$1" pid comm line=""
+    for pid in $kill_order; do
+      comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+      line="$line $pid(${comm##*/})"
+    done
+    {
+      echo
+      echo "=== $label order, deepest first and tee last ===$line"
+    } >> "$stall_ps_file"
+  }
   build_kill_order
+  record_kill_order SIGTERM
   for pid in $kill_order; do
     kill -TERM "$pid" 2>/dev/null || true
   done
@@ -423,6 +440,7 @@ if kill -0 "$pipeline" 2>/dev/null; then
   done
   if kill -0 "$pipeline" 2>/dev/null; then
     build_kill_order
+    record_kill_order SIGKILL
     for pid in $kill_order; do
       kill -KILL "$pid" 2>/dev/null || true
     done

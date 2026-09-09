@@ -71,6 +71,8 @@ where the process stopped producing, and it still names no frame.
 - **Any doubt fails closed.** An unreadable status, an unattributable stall, a
   sampling failure — none of them may pass for success.
 - **Nothing is killed by name.** Signals go to pids the step itself observed.
+- **A red pass does not suppress the verdict of the passes behind it.** One
+  flake must cost one pass, not the whole run's information.
 
 ## Scope
 
@@ -80,10 +82,11 @@ parallel pass wedged on the cooperative pool is exactly the case a per-test
 `.timeLimit` cannot reach, because cancellation cannot reach a blocked thread —
 so the step timeout is the only bound there too, and it records as little.
 
-The two fast-pass wedges above are the evidence for that scope. Before them the
-quiet pass was the only watched step, and it was also the only step that never
-produced an unexplained red: every stall that cost a rerun landed where no
-watchdog was looking.
+The evidence for that scope is where the damage falls. The unexplained reds and
+both stack-less wedges belong to the fast passes; the watched step accounts for
+none of them. A watchdog on one step therefore instruments the passes that fail
+least, which is the wrong way round, and it costs a healthy run nothing to watch
+all four.
 
 ## The mechanism
 
@@ -183,7 +186,10 @@ still alive — a fresh walk, a rebuilt order, SIGKILL to each pid, and SIGKILL 
 the subshell itself. Both sweeps rebuild rather than reuse, because sampling and
 the grace window are each long enough for the tree to change underneath a
 snapshot; the EXIT trap's own cleanup spawns processes during exactly that
-window. The script then waits for the subshell and exits 1.
+window. Each order is written into the ps file before it is acted on, because an
+ordering nobody can observe is an ordering nobody can check — and on a real
+stall it also tells a reader which processes each sweep reached. The script then
+waits for the subshell and exits 1.
 
 ### The verdict path
 
@@ -212,13 +218,51 @@ case rather than evidence of broken wiring.
 
 `scripts/ci/watched-test-pass.test.sh` drives the script against fixture
 directories with a stub `scripts/test.sh` and a stub `sample`: no build, no
-SwiftPM, nothing real touched, about 40 seconds. It covers a green pass handing
+SwiftPM, nothing real touched, about 90 seconds. It covers a green pass handing
 back its count, a 76 and an ordinary red status returned untouched, a run under
 the floor and a run with no summary line at all, a stall through the primary
-argv match and a stall through the fallback selection, and two malformed
-invocations. It runs as the last step of the `test` job, on macOS because
-everything it drives is BSD, and with `!cancelled()` so a harness bug can never
-hide a pass's verdict.
+argv match and a stall through the fallback selection, six candidates against a
+cap of four, a pipeline that outlives the grace window, the sweep order with a
+mutation that reverses it, and two malformed invocations. Most of its runtime is
+the grace window itself, which the escalation case has to wait out to measure.
+It runs as the last step of the `test` job, on macOS because everything it
+drives is BSD, and with `!cancelled()` so a harness bug can never hide a pass's
+verdict.
+
+Two fixture shapes in it are worth knowing, because both were arrived at the
+hard way. A sleeper standing in for a wedged test process must not be named
+`sleep`, or the fallback skips it as plumbing and the case asserts nothing. And
+a pipeline that outlives the grace window cannot be modelled by stopping the pty
+wrapper: a stopped process does not hold a fatal signal pending here, the kernel
+wakes it to die, so the sweep's SIGTERM takes it down and the subshell finishes
+inside the grace like any healthy teardown. Stopping the subshell itself is the
+shape that works, because the sweep signals only that subshell's descendants.
+
+## A red pass does not hide the passes behind it
+
+1b, pass 2 and the quiet pass run whenever pass 1a REPORTED — success or failure
+alike. Each carries
+`if: !cancelled() && (steps.<1a>.outcome == 'success' || steps.<1a>.outcome == 'failure')`
+against 1a's step id.
+
+GitHub's default step semantics skip everything after a failed step, and that
+turns one flake into a blackout: a handshake timeout in the tail of a fast pass
+suppresses every later pass, so the run reports one failure and nothing about
+the state of the rest of the package, and the rerun starts from the same
+ignorance. The quiet pass is the step this hurts most, because it runs last and
+is the one a fast-pass flake most reliably hides — the tier-3 live suites are
+also the ones whose failures a reader most wants to see.
+
+The cost is two to four minutes of runner time on a run that is already red, and
+nothing at all on a green one. The job still fails: these conditions decide
+whether a step *runs*, not what the job concludes.
+
+`always()` would be the wrong condition in two directions. A cancelled job must
+stop, not keep spending a rationed macOS slot on passes nobody is waiting for.
+And a run whose build or setup never reached 1a would fail every later pass on
+the same cause, turning one legible error into four illegible ones. Gating on
+1a's own outcome says exactly what is meant: the passes behind a step that
+reported get to report too.
 
 ## Numbers, and what each rests on
 

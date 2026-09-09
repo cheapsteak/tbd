@@ -668,7 +668,8 @@ jobs:
                --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure
 
       # The watchdog's own harness: fixture directories, a stub `scripts/test.sh`
-      # and a stub `sample`, no build, no real store touched, ~40 s. It lives in
+      # and a stub `sample`, no build, no real store touched, ~90 s — most of it
+      # the 30-second grace window the escalation case exists to measure. It lives in
       # THIS job rather than joining the Linux collection in `plans-guard`
       # because everything it drives is BSD — `script(1)` takes different
       # arguments on Linux, `ps` there is GNU, and `sample` does not exist at
