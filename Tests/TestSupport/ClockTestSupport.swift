@@ -279,13 +279,12 @@ public extension TestClock {
     /// `checkSuspension()`, which opens with a `megaYield`: twenty
     /// serially-awaited **background-QoS** tasks. At a 25 ms poll interval that
     /// is ~1,800 probes and ~36,000 background tasks over the 45 s budget,
-    /// queued on the same cooperative pool the poller needs a turn from — and
-    /// macOS starves background QoS hardest under exactly the load that makes
-    /// the wait necessary. The field signature is this helper's own diagnostic
+    /// queued on the same cooperative pool the poller needs a turn from. The
+    /// field signature is this helper's own diagnostic
     /// reading **"observed 1 clock advance"**: the first tick landed and the
     /// re-arm after it was never seen. On 2026-09-08 that reddened
     /// `ModelProxySupervisorTests` on three consecutive CI dispatches of one
-    /// unrelated SHA, over 45–170 s, with nothing wrong with the supervisor.
+    /// SHA, over 45–170 s, with nothing wrong with the supervisor.
     ///
     /// So this helper is for a **one-shot** wait — something that arms once and
     /// fires once. A re-arming loop belongs on `EventDrivenTestClock`

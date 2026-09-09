@@ -334,12 +334,11 @@ saturated fast pass it starves the very re-arm it is waiting for.** Its loop
 probes `checkSuspension()` every 25 ms, and each of those probes is a
 `megaYield`: twenty serially-awaited **background-QoS** tasks. Forty-five
 seconds of probing therefore floods the cooperative pool with exactly the
-low-priority work a re-arming poller needs a turn from, and macOS starves
-background QoS hardest under precisely the load that makes the wait necessary.
+low-priority work a re-arming poller needs a turn from.
 The field signature is a diagnostic reading **"observed 1 clock advance"** —
 the first tick landed, the second re-arm was never seen — and on 2026-09-08 it
 reddened `ModelProxySupervisorTests` on three consecutive dispatches of one
-unrelated SHA. So a **re-arming** loop belongs on `EventDrivenTestClock`
+SHA. So a **re-arming** loop belongs on `EventDrivenTestClock`
 instead, driven by an explicit ladder of `requireAdvanceWhenArmed` with a
 closing `requireSleeperArmed` — the re-arm being the proof that the tick before
 it finished. See "The event-driven alternative" below.
