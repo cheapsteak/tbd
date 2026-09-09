@@ -299,8 +299,8 @@ are what separate a viewer from a terminal.
 ## Surprises
 
 - **The daemon's refusal rails are considerably more complete than the summary
-  implied.** `recreateWindow`, `attachCommand`, `send` and the in-place profile
-  swap each refuse holder rows with their own named, tested message, and
+  implied.** `recreateWindow`, `send` and the in-place profile swap each
+  refuse holder rows with their own named, tested message, and
   `isManuallyHibernatable` refuses in the shared model. The app being blind is
   survivable precisely because the daemon is not.
 - **`terminal.output` already works end to end for a holder row.** Read-only

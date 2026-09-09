@@ -21,40 +21,6 @@ public enum PaneSendTarget: Sendable, Equatable {
     case live(terminalID: String?)
 }
 
-/// One session on a tmux server, with everything reconcile needs to date its
-/// client-less stretch from a single listing.
-///
-/// The three time fields are what let external-attach reclamation keep no
-/// in-process state at all — see `ExternalAttachReclamation` for which question
-/// each one answers and why `lastAttached` is not the clientless clock.
-public struct TmuxSessionInfo: Sendable, Equatable {
-    public let name: String
-    public let attachedClients: Int
-    /// `#{session_created}`. Always present.
-    public let created: Date
-    /// `#{session_last_attached}`, or `nil` when no client has ever attached.
-    /// tmux reports the field empty in that case (measured on 3.6a), and it
-    /// records the last *attach* — it does not move on detach.
-    public let lastAttached: Date?
-    /// TBD's own `@tbd_ext_clientless_since` session user option, or `nil`
-    /// when unset. Written and read only by external-attach reclamation.
-    public let clientlessSince: Date?
-
-    public init(
-        name: String,
-        attachedClients: Int,
-        created: Date,
-        lastAttached: Date? = nil,
-        clientlessSince: Date? = nil
-    ) {
-        self.name = name
-        self.attachedClients = attachedClients
-        self.created = created
-        self.lastAttached = lastAttached
-        self.clientlessSince = clientlessSince
-    }
-}
-
 /// Serializes tmux resource ownership transitions per server.
 ///
 /// A tmux window becomes externally visible before the database row that owns
@@ -133,11 +99,6 @@ public struct TmuxManager: Sendable {
     /// dryRun reports no windows, which makes reconcile's orphan-window
     /// cleanup pass untestable.
     public let dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])?
-    /// Optional test hook consulted by `listSessions` in dryRun mode:
-    /// `server` → the sessions to report. Without it, dryRun reports no
-    /// sessions, which makes reconcile's external-attach (`tbd-ext-*`)
-    /// reclamation pass untestable.
-    public let dryRunListSessions: (@Sendable (String) -> [TmuxSessionInfo])?
     /// Optional test hook consulted by `paneCurrentCommand` in dryRun mode:
     /// `(server, paneID)` → the command string to report. Without it, dryRun
     /// always reports "zsh" (no claude), which makes the park path's verify-exit
@@ -178,12 +139,6 @@ public struct TmuxManager: Sendable {
     /// "0", which makes the send path's foreground-process rail unreachable from
     /// a test — the same gap `dryRunPaneCurrentCommand` closes for its own query.
     public let dryRunPanePID: (@Sendable (String, String) throws -> String)?
-    /// Optional test hook consulted by `killSessionIfClientless` in dryRun
-    /// mode: `(server, session)` → true when tmux would have *spared* the
-    /// session because a client attached between the listing and the kill.
-    /// Without it, dryRun reports every conditional kill as having happened,
-    /// which is the behavior the pre-existing fixtures assume.
-    public let dryRunSessionSpared: (@Sendable (String, String) -> Bool)?
     /// Optional test hook consulted by `paneSendProbe` in dryRun mode:
     /// `(server, paneID)` → the `#{window_id}` the pane reports it lives in.
     /// Without it, dryRun answers `nil` — "the pane named no window" — which is
@@ -244,7 +199,7 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunListSessions: (@Sendable (String) -> [TmuxSessionInfo])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPanePID: (@Sendable (String, String) throws -> String)? = nil, dryRunSessionSpared: (@Sendable (String, String) -> Bool)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, dryRunServerPresence: (@Sendable (String) -> TmuxPresence)? = nil, dryRunWindowPresence: (@Sendable (String, String) -> TmuxPresence)? = nil, realModeServerPresenceOverride: (@Sendable (String) -> TmuxPresence?)? = nil, realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxPresence?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, dryRunKillWindowError: (@Sendable (String, String) -> Error?)? = nil, dryRunPaneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil, dryRunPanePID: (@Sendable (String, String) throws -> String)? = nil, dryRunPaneWindowID: (@Sendable (String, String) -> String?)? = nil, dryRunPasteBytes: (@Sendable (String, String, Data) -> Void)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, dryRunServerPresence: (@Sendable (String) -> TmuxPresence)? = nil, dryRunWindowPresence: (@Sendable (String, String) -> TmuxPresence)? = nil, realModeServerPresenceOverride: (@Sendable (String) -> TmuxPresence?)? = nil, realModeWindowPresenceOverride: (@Sendable (String, String) -> TmuxPresence?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
@@ -252,7 +207,6 @@ public struct TmuxManager: Sendable {
         self.dryRunRecorder = dryRunRecorder
         self.dryRunWindowIsDead = dryRunWindowIsDead
         self.dryRunListWindows = dryRunListWindows
-        self.dryRunListSessions = dryRunListSessions
         self.dryRunCapturePane = dryRunCapturePane
         self.dryRunPaneCurrentCommand = dryRunPaneCurrentCommand
         self.dryRunCreateWindowError = dryRunCreateWindowError
@@ -260,7 +214,6 @@ public struct TmuxManager: Sendable {
         self.dryRunKillWindowError = dryRunKillWindowError
         self.dryRunPaneSendTarget = dryRunPaneSendTarget
         self.dryRunPanePID = dryRunPanePID
-        self.dryRunSessionSpared = dryRunSessionSpared
         self.dryRunPaneWindowID = dryRunPaneWindowID
         self.dryRunPasteBytes = dryRunPasteBytes
         self.realModeWindowExistsOverride = realModeWindowExistsOverride
@@ -734,167 +687,6 @@ public struct TmuxManager: Sendable {
         ["-L", server, "list-windows", "-t", session, "-F", "#{window_id} #{pane_id}"]
     }
 
-    /// Separator between the five fields of `listSessionsCommand`.
-    ///
-    /// A tab, and the name comes last: a tmux session name may contain a space,
-    /// so a space-separated format with the name anywhere but last would parse
-    /// a session called `my session` as two fields. The parser splits at most
-    /// four times and takes the whole remainder as the name.
-    static let sessionListSeparator: Character = "\t"
-
-    /// TBD's own session user option recording when reconcile first observed a
-    /// `tbd-ext-*` session with no attached client. Stored on the session
-    /// rather than in the daemon so it dies with the resource it describes,
-    /// survives a daemon restart, and cannot be inherited by a later session
-    /// minted under the same terminal-keyed name. See
-    /// `ExternalAttachReclamation`.
-    public static let externalAttachClientlessSinceOption = "@tbd_ext_clientless_since"
-
-    /// Sessions on a server, with the attached-client count and the three
-    /// timestamps external-attach reclamation dates a client-less stretch from.
-    public static func listSessionsCommand(server: String) -> [String] {
-        let separator = sessionListSeparator
-        return ["-L", server, "list-sessions", "-F",
-                "#{session_attached}\(separator)"
-                + "#{session_created}\(separator)"
-                + "#{session_last_attached}\(separator)"
-                + "#{\(externalAttachClientlessSinceOption)}\(separator)"
-                + "#{session_name}"]
-    }
-
-    /// Parse `listSessionsCommand`'s stdout. Pure, so the empty-field cases —
-    /// a never-attached session, an unstamped one — are unit-testable without a
-    /// tmux server.
-    static func parseSessions(_ output: String) -> [TmuxSessionInfo] {
-        output.split(separator: "\n").compactMap { line -> TmuxSessionInfo? in
-            let fields = line.split(
-                separator: sessionListSeparator, maxSplits: 4, omittingEmptySubsequences: false)
-            guard fields.count == 5 else { return nil }
-            guard let attached = Int(fields[0].trimmingCharacters(in: .whitespaces)) else {
-                return nil
-            }
-            guard let created = epochSeconds(fields[1]) else { return nil }
-            let name = String(fields[4])
-            guard !name.isEmpty else { return nil }
-            return TmuxSessionInfo(
-                name: name,
-                attachedClients: attached,
-                created: created,
-                lastAttached: epochSeconds(fields[2]),
-                clientlessSince: epochSeconds(fields[3]))
-        }
-    }
-
-    /// tmux renders an unset time or user option as an empty field, so absence
-    /// and "epoch 0" have to stay distinguishable: this answers nil for both an
-    /// empty field and unparseable text.
-    private static func epochSeconds(_ field: Substring) -> Date? {
-        let trimmed = field.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty, let seconds = TimeInterval(trimmed) else { return nil }
-        return Date(timeIntervalSince1970: seconds)
-    }
-
-    /// A **target-session** pinned to an exact name.
-    ///
-    /// Per tmux(1) TARGETS a bare session target is tried as an exact name,
-    /// then as *the start of* a session name, then as a glob. So a
-    /// `kill-session -t tbd-ext-abcd1234` issued after that session has
-    /// disappeared — a rebuild from a second attach, `destroy-unattached`
-    /// firing, a manual kill between the listing and the kill — prefix-matches
-    /// a person's hand-made `tbd-ext-abcd1234-notes` and destroys it, while
-    /// the daemon logs that it killed `tbd-ext-abcd1234`. The `=` prefix makes
-    /// that a not-found instead (measured on tmux 3.6a).
-    ///
-    /// This is a separate defense from `isGeneratedSessionName`, which decides
-    /// *which* names may be reaped: the filter cannot see that the name it
-    /// approved no longer denotes the session it approved.
-    static func exactSessionTarget(_ session: String) -> String { "=" + session }
-
-    /// The same pin for a **target-pane or target-window** slot — `if-shell
-    /// -t` and `set-option -t` both resolve down that path.
-    ///
-    /// The trailing `:` is load-bearing, not decoration. Without a `:` tmux
-    /// reads the whole word as a window or pane name inside the *current*
-    /// session, so the `=` never reaches session resolution: measured on 3.6a,
-    /// `set-option -t '=name'` fails with `no such session: =name` even when
-    /// `name` exists, and `if-shell -F -t '=name'` silently takes its else
-    /// branch — which for the reaper would mean never killing anything.
-    /// `=name:` resolves correctly and is exact.
-    static func exactPaneTarget(_ session: String) -> String { "=" + session + ":" }
-
-    /// Sentinel `killSessionIfClientlessCommand` prints when it declined to
-    /// kill — because a client is attached, or because the session is already
-    /// gone and the target no longer resolves.
-    static let sessionSparedSentinel = "TBD_SESSION_SPARED"
-
-    /// Kill a session **only if** it still has no attached client, deciding and
-    /// acting inside tmux's own single-threaded command queue.
-    ///
-    /// The listing that selects a session for reaping is a snapshot, and
-    /// `kill-session` does not spare an attached session — so a separate
-    /// `kill-session` subprocess would forcibly disconnect a user who attached
-    /// in between, mid-measurement. Re-reading the client count from the daemon
-    /// first would only narrow that window, not close it; this is the
-    /// "decide from a snapshot, act without re-verifying" shape issue #384 is
-    /// this repo's cautionary tale for. `if-shell -F` evaluates the condition
-    /// and runs the command as one queued unit, so an attach cannot land
-    /// between them.
-    ///
-    /// The else branch prints a sentinel because `if-shell` exits 0 either way:
-    /// without it the caller could not tell a reap from a spare, and would log
-    /// "killed" for a session that is still running. Sentinel on stdout means
-    /// spared; empty stdout means killed.
-    ///
-    /// **The inner command is a string tmux re-parses, and tmux splits a
-    /// command string on `;`.** A session named `tbd-ext-aa ; kill-server`
-    /// would make it `kill-session -t tbd-ext-aa ; kill-server` and kill the
-    /// whole server. Two things keep that impossible, in this order:
-    ///
-    /// 1. The caller (`WorktreeLifecycle.reapExternalAttachSessions`) only
-    ///    ever reaches sessions passing
-    ///    `ExternalAttachCommand.isGeneratedSessionName`, so a name carrying
-    ///    anything but eight lowercase hex digits never gets here. That is the
-    ///    guarantee.
-    /// 2. The target is single-quoted anyway, so a future caller that reached
-    ///    past the filter would still not be handing tmux a second command.
-    ///    Note the quoting alone is not a guarantee — tmux's single quotes
-    ///    have no escape, so a name containing `'` has no faithful encoding;
-    ///    the filter is what makes such a name unreachable.
-    ///
-    /// A separate defect, closed separately: **which session the target
-    /// resolves to.** Both targets carry `=` — see `exactSessionTarget(_:)`
-    /// and `exactPaneTarget(_:)`. Neither the filter nor the quoting touches
-    /// resolution, and a name the filter approved can stop denoting the
-    /// session it approved before the kill lands.
-    public static func killSessionIfClientlessCommand(
-        server: String, session: String
-    ) -> [String] {
-        ["-L", server, "if-shell", "-F", "-t", exactPaneTarget(session),
-         "#{==:#{session_attached},0}",
-         "kill-session -t '\(exactSessionTarget(session))'",
-         "display-message -p \(sessionSparedSentinel)"]
-    }
-
-    /// Set one session user option (`@name value`).
-    ///
-    /// Exact-targeted: stamping the wrong session both litters a stranger's
-    /// session with a TBD option and leaves the intended one unstamped, so it
-    /// never becomes reapable.
-    public static func setSessionOptionCommand(
-        server: String, session: String, option: String, value: String
-    ) -> [String] {
-        ["-L", server, "set-option", "-t", exactPaneTarget(session), option, value]
-    }
-
-    /// Clear one session user option. Exits 0 even when it was never set —
-    /// but non-zero when the exact session does not exist, which is the point
-    /// of the exact target.
-    public static func unsetSessionOptionCommand(
-        server: String, session: String, option: String
-    ) -> [String] {
-        ["-L", server, "set-option", "-t", exactPaneTarget(session), "-u", option]
-    }
-
     public static func capturePaneCommand(server: String, paneID: String) -> [String] {
         ["-L", server, "capture-pane", "-p", "-t", paneID]
     }
@@ -970,10 +762,9 @@ public struct TmuxManager: Sendable {
     /// which is precisely a false refusal. So the line is selected by pane id
     /// rather than by position; see `parsePaneSendTarget`.
     ///
-    /// `#{window_id}` rides along because a caller that goes on to *name* a
-    /// window — `terminal.attachCommand` composes a `link-window -s @N` — must
-    /// verify the window it names, not only the pane. Reading it here costs
-    /// nothing: it is one more field on a query the send path already runs.
+    /// `#{window_id}` rides along so a caller can verify the window a pane
+    /// lives in, not only the pane itself. Reading it here costs nothing: it is
+    /// one more field on a query the send path already runs.
     public static func paneSendTargetQuery(server: String, paneID: String) -> [String] {
         ["-L", server, "list-panes", "-t", paneID, "-F",
          "#{pane_id}\(paneSendTargetSeparator)"
@@ -1610,61 +1401,6 @@ public struct TmuxManager: Sendable {
                 guard parts.count == 2 else { return nil }
                 return (windowID: String(parts[0]), paneID: String(parts[1]))
             }
-    }
-
-    /// Every session on a server, with how many clients are attached to each.
-    ///
-    /// Throws when the server is not running (`list-sessions` fails), which is
-    /// what callers want: "no server" is not the same answer as "no sessions",
-    /// and a caller reclaiming sessions must not read a wedged server as an
-    /// empty one.
-    public func listSessions(server: String) async throws -> [TmuxSessionInfo] {
-        if dryRun { return dryRunListSessions?(server) ?? [] }
-        return Self.parseSessions(try await runTmux(Self.listSessionsCommand(server: server)))
-    }
-
-    /// Kill a session only if it is still client-less, atomically inside tmux.
-    /// Returns whether the kill actually happened — false means a client was
-    /// attached (or the session was already gone), and no reap should be
-    /// claimed. See `killSessionIfClientlessCommand` for why this is not a
-    /// re-check followed by a plain `kill-session`.
-    public func killSessionIfClientless(server: String, session: String) async throws -> Bool {
-        let args = Self.killSessionIfClientlessCommand(server: server, session: session)
-        if dryRun {
-            dryRunRecorder?(args)
-            return dryRunSessionSpared?(server, session) != true
-        }
-        let output = try await runTmux(args)
-        return !output.contains(Self.sessionSparedSentinel)
-    }
-
-    /// Record when reconcile first saw a `tbd-ext-*` session with no client.
-    public func setExternalAttachClientlessSince(
-        server: String, session: String, date: Date
-    ) async throws {
-        let args = Self.setSessionOptionCommand(
-            server: server, session: session,
-            option: Self.externalAttachClientlessSinceOption,
-            value: String(Int(date.timeIntervalSince1970)))
-        if dryRun {
-            dryRunRecorder?(args)
-            return
-        }
-        try await runTmux(args)
-    }
-
-    /// Drop a spent client-less stamp from a session somebody has re-attached.
-    public func clearExternalAttachClientlessSince(
-        server: String, session: String
-    ) async throws {
-        let args = Self.unsetSessionOptionCommand(
-            server: server, session: session,
-            option: Self.externalAttachClientlessSinceOption)
-        if dryRun {
-            dryRunRecorder?(args)
-            return
-        }
-        try await runTmux(args)
     }
 
     /// Check whether a tmux window exists by querying list-panes.

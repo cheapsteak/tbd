@@ -701,7 +701,7 @@ Everything TBD does through tmux today, and its replacement:
 ### Out of scope, structurally
 
 - **External attach from another terminal emulator** is not carried forward.
-  It existed only as a diagnostic and is being unshipped independently of
+  It existed only as a diagnostic and has been removed independently of
   this design.
 - **Remote or ssh attach** cannot exist in this design: the interface is a
   file descriptor, and a file descriptor cannot cross a machine boundary.

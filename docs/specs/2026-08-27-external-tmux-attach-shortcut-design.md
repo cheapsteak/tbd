@@ -1,5 +1,10 @@
 # External tmux attach shortcut
 
+> **Superseded.** This feature was removed in Phase 0 of the tmux removal
+> (issue #851); the pty-holder transport design
+> ([`docs/specs/2026-08-30-pty-holder-session-transport-design.md`](2026-08-30-pty-holder-session-transport-design.md))
+> declares external attach out of scope.
+
 Attach to a TBD terminal's tmux window from a different terminal emulator —
 iTerm2, Terminal.app, Ghostty — without going through TBD's embedded panel.
 TBD hands you the command; your emulator becomes a second client on the same

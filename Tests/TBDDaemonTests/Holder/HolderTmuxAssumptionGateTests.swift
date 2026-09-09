@@ -1442,26 +1442,18 @@ struct HolderTmuxAssumptionGateTests {
                 "the tmux leg must still resize its own window: \(argv)")
     }
 
-    // MARK: - Gate 9: the two verbs that refused for the wrong reason
+    // MARK: - Gate 9: the verb that refused for the wrong reason
 
-    /// `terminal.send` and `terminal.attachCommand` both consult the pane
-    /// before acting, and both got `.missing` for a holder row — `tmuxPaneID`
-    /// is the empty string, so no line in tmux's answer can match it. Neither
-    /// typed or composed anything, so neither was *unsafe*; both told the
-    /// caller a live session's pane "no longer exists", and `attachCommand`
-    /// said it under the `terminalSessionGone` code the app reads as a window
-    /// worth recovering.
+    /// `terminal.send` consults the pane before acting, and got `.missing` for
+    /// a holder row — `tmuxPaneID` is the empty string, so no line in tmux's
+    /// answer can match it. It typed nothing, so it was never *unsafe*; it told
+    /// the caller a live session's pane "no longer exists".
     ///
-    /// `attachCommand` therefore changes no outcome: it replaces a safe lie
-    /// with an accurate refusal, so the message, the error code and the
-    /// actuation record name the transport rather than blaming a coordinate
-    /// that was never stale. A holder session has no tmux session to attach to.
-    ///
-    /// `terminal.send` no longer refuses at all. It delivers, by writing the
-    /// session's pty rather than a pane — the tests below are what the old
-    /// refusal test became — and it keeps a refusal only for the two shapes
-    /// this transport genuinely cannot serve, each naming its own missing
-    /// capability instead of the transport.
+    /// It no longer refuses at all. It delivers, by writing the session's pty
+    /// rather than a pane — the tests below are what the old refusal test
+    /// became — and it keeps a refusal only for the two shapes this transport
+    /// genuinely cannot serve, each naming its own missing capability instead
+    /// of the transport.
 
     /// Records the bytes a holder send reached the pty with, standing in for
     /// the daemon's own descriptor. `viewerAttachment` answers nil, so these
@@ -1911,54 +1903,6 @@ struct HolderTmuxAssumptionGateTests {
         let argv = recorded.snapshot()
         #expect(argv.contains { $0.contains("paste-buffer") },
                 "the tmux leg must still paste: \(argv)")
-    }
-
-    @Test("terminal.attachCommand refuses a holder row by name")
-    func attachCommandRefusesHolderRow() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let recorded = RecordedTmuxArgs()
-        let tmux = deadWindowTmux(recorded)
-        let (wt, dir) = try await seedWorktree(db)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let terminal = try await seedClaudeTerminal(
-            db, worktreeID: wt.id, transport: .holder)
-        let before = RowFingerprint(terminal)
-
-        let response = await router(db, tmux: tmux).handle(try RPCRequest(
-            method: RPCMethod.terminalAttachCommand,
-            params: TerminalAttachCommandParams(
-                worktreeID: wt.id, terminalID: terminal.id)))
-
-        #expect(!response.success)
-        #expect(response.error == RPCRouter.holderAttachRefusal(terminalID: terminal.id))
-        // Not `terminalSessionGone`: that code is the app's cue to recover a
-        // window, and this session has none to recover.
-        #expect(response.errorCode != RPCErrorCode.terminalSessionGone.rawValue)
-        let after = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(RowFingerprint(after) == before)
-        #expect(recorded.snapshot().isEmpty,
-                "attachCommand reached tmux for a holder row: \(recorded.snapshot())")
-    }
-
-    @Test("terminal.attachCommand still composes a command for an identical tmux row")
-    func attachCommandStillActsOnTmuxRow() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let recorded = RecordedTmuxArgs()
-        let tmux = deadWindowTmux(recorded)
-        let (wt, dir) = try await seedWorktree(db)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let terminal = try await seedClaudeTerminal(
-            db, worktreeID: wt.id, transport: .tmux)
-
-        let response = await router(db, tmux: tmux).handle(try RPCRequest(
-            method: RPCMethod.terminalAttachCommand,
-            params: TerminalAttachCommandParams(
-                worktreeID: wt.id, terminalID: terminal.id)))
-
-        #expect(response.success, "error: \(response.error ?? "nil")")
-        let result = try response.decodeResult(TerminalAttachCommandResult.self)
-        #expect(result.paneID == "%7")
-        #expect(result.windowID == "@7")
     }
 
     // MARK: - Gate 8: the other teardowns that delete a row
