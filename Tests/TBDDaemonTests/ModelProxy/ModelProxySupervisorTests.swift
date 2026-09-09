@@ -424,11 +424,16 @@ struct ModelProxySupervisorTests {
     /// finishing — at which point the proxy is retired and the supervisor
     /// stops.
     ///
-    /// The one ladder in this file that cannot end on a re-arm: the tick this
-    /// advance fires ends in `finishDraining`, which calls `stop()` and cancels
-    /// the watch, so no sleeper ever registers again. The proof that the tick
-    /// finished is therefore the observable it produced — a bounded wait on a
-    /// positive fact, in the same shape ``respawnsAfterDeath`` uses.
+    /// The one ladder in this file that cannot end on a re-arm. The proxy here
+    /// is **adopted**, so nothing is pending collection when the drain
+    /// finishes: `enterReapOnlyIdle` takes its empty-`pendingReap` branch and
+    /// stops the watch outright, and no sleeper ever registers again. (A drain
+    /// that retired a child of this daemon's leaves the watch running in the
+    /// reap-only idle instead — that is
+    /// `aDrainedChildIsCollectedByTheWatchThatOutlivesTheRetire`, and it is why
+    /// this comment names the branch rather than the method.) The proof that
+    /// the tick finished is therefore the observable it produced — a bounded
+    /// wait on a positive fact, in the same shape ``respawnsAfterDeath`` uses.
     @Test("the last route retiring retires the proxy and stops the watch")
     func drainingEndsWhenTheLastRouteGoes() async throws {
         let fixture = try SupervisorFixture.make()
