@@ -1,18 +1,25 @@
-# Quiet-pass stall watchdog: making a wedged CI test run name its test
+# Test-pass stall watchdog: making a wedged CI test run name its test
 
-The `test` workflow runs the tier-3 live suites in their own step — serially,
-on an otherwise idle runner, because those suites drive real tmux servers and
-real child processes and contend with each other if run in parallel. That step
-sometimes stalls. GitHub kills it at its 15-minute `timeout-minutes`, and what
-lands in the run log is a truncated list of test names, no failing assertion,
-and nothing that identifies where the run stopped. Each occurrence costs fifteen
-minutes of a rationed macOS runner and reddens a pull request that has nothing
-to do with the defect.
+The `test` workflow runs the package in four passes in one job: three parallel
+fast passes that share a build, and a quiet pass that runs the tier-3 live
+suites serially on an otherwise idle runner, because those suites drive real
+tmux servers and real child processes and contend with each other if run in
+parallel. Any of those passes can stall. GitHub kills the step at its
+`timeout-minutes`, and what lands in the run log is a truncated list of test
+names, no failing assertion, and nothing that identifies where the run stopped.
+Each occurrence costs a rationed macOS runner and reddens a pull request that
+has nothing to do with the defect.
 
-Three stalls are on record. Two sit on trees that predate the
-`Process.waitUntilExit()` cross-thread hang fixed in #789 and are consistent
-with it. The third is on a tree that carries that fix, so it is a different
-site, and no one can say which — the evidence to locate it was never captured.
+The stalls on record come in two shapes. In the quiet pass, three: two sit on
+trees that predate the `Process.waitUntilExit()` cross-thread hang fixed in
+#789 and are consistent with it, and the third is on a tree that carries that
+fix, so it is a different site and no one can say which — the evidence to locate
+it was never captured. In the fast passes, two 30-minute wedges with no stack at
+all (runs 34174344530 and 34176996067), where the process went silent about five
+seconds into the test run with roughly 1,965 tests started, none finishing, zero
+issues recorded and no time limit firing: the cooperative-pool wedge signature
+that `Tests/TestSupport/BoundedGateSupport.swift` describes, where every thread
+the pool has is parked on a gate and nothing can reach a `signal()`.
 
 This design does not fix the stall. It makes the next one hand over the stacks
 of every thread in the process running the tests, plus a picture of the machine
@@ -45,6 +52,11 @@ at which a stalled run's log would stop. A line adjacent to one of those
 boundaries is evidence of nothing; the natural reading — "the last line names
 the hung test" — is wrong by construction.
 
+The fast passes emit roughly 16 KB a second, so their logs look real-time
+whether or not they are buffered. That makes buffering invisible there and it
+makes nothing about a wedge visible: when a fast pass goes silent, the log ends
+where the process stopped producing, and it still names no frame.
+
 ## Requirements
 
 - **The log streams as the run produces it.** A stalled step's last line must
@@ -60,11 +72,39 @@ the hung test" — is wrong by construction.
   sampling failure — none of them may pass for success.
 - **Nothing is killed by name.** Signals go to pids the step itself observed.
 
+## Scope
+
+All four test steps are watched, and each carries its own budget, floor and
+file names. Nothing about the mechanism is specific to the serial pass: a
+parallel pass wedged on the cooperative pool is exactly the case a per-test
+`.timeLimit` cannot reach, because cancellation cannot reach a blocked thread —
+so the step timeout is the only bound there too, and it records as little.
+
+The two fast-pass wedges above are the evidence for that scope. Before them the
+quiet pass was the only watched step, and it was also the only step that never
+produced an unexplained red: every stall that cost a rerun landed where no
+watchdog was looking.
+
 ## The mechanism
+
+One script carries it: `scripts/ci/watched-test-pass.sh`. Each step names a
+pass, a budget, a floor and the floor's explanation, and forwards the rest to
+`scripts/test.sh`:
+
+```
+scripts/ci/watched-test-pass.sh --name <name> --budget-seconds <N> \
+  --floor <N> --floor-message '<text>' [--out-dir <dir>] \
+  -- <arguments forwarded to scripts/test.sh>
+```
+
+`--name` names the log, the status file and the stall files, and names the pass
+in every message, so a reader of the job log knows which pass spoke. `--out-dir`
+defaults to `/tmp`, which is what CI uses; the harness points it at a fixture
+directory.
 
 ### Streaming the log
 
-The step hands `scripts/test.sh` a pty: `TERM=dumb script -q /dev/null …
+The script hands `scripts/test.sh` a pty: `TERM=dumb script -q /dev/null …
 < /dev/null`. C stdio line-buffers a terminal, so each line lands as it is
 produced. Nothing between the pty and SwiftPM re-pipes the stream —
 `scripts/test.sh` invokes `scripts/swift-safe` without a pipe of its own, and
@@ -83,12 +123,12 @@ nor the step's own `grep` over the summary line.
 The pipeline runs in a background subshell that begins with `set +e` — its only
 job is to run the pipeline and record `PIPESTATUS[0]` to a status file, and
 errexit would abort it before the `echo` on exactly the runs whose status
-matters most. The step's foreground shell polls the subshell with `kill -0` in
-5-second steps up to `stall_budget_seconds`.
+matters most. The script's foreground shell polls the subshell with `kill -0` in
+5-second steps up to the budget.
 
 ### Finding what to sample
 
-On expiry the step writes a whole-machine `ps` listing first and
+On expiry the script writes a whole-machine `ps` listing first and
 unconditionally. The runner is single-tenant, so that listing is both the record
 of the fixture's holder, tmux and job processes and the way a reader learns what
 anything is really called.
@@ -143,7 +183,7 @@ still alive — a fresh walk, a rebuilt order, SIGKILL to each pid, and SIGKILL 
 the subshell itself. Both sweeps rebuild rather than reuse, because sampling and
 the grace window are each long enough for the tree to change underneath a
 snapshot; the EXIT trap's own cleanup spawns processes during exactly that
-window. The step then waits for the subshell and exits 1.
+window. The script then waits for the subshell and exits 1.
 
 ### The verdict path
 
@@ -154,32 +194,63 @@ false, which would let a failed run walk on as though it had succeeded. Anything
 unreadable exits 1 with its own message.
 
 The status check comes before the floor check on `Test run with N tests`. A
-build error, an early crash, or swift-safe's 75 and 76 all log fewer than 35
-tests; reporting them through the floor's message would both misdiagnose them
+build error, an early crash, or swift-safe's 75 and 76 all log fewer tests than
+any floor; reporting them through the floor's message would both misdiagnose them
 and flatten them to a generic 1. The floor keeps its own job — catching a run
 that claims success while having executed nothing — for runs that claim success.
 
 ### The artifact
 
-An `if: always()` step uploads `/tmp/quiet-pass-stall-*.txt` as
-`quiet-pass-stall-diagnostics` with `if-no-files-found: ignore`. `ignore` rather
-than the `warn` its neighbours use: a green run deliberately produces no stall
-files, so absence is the normal case rather than evidence of broken wiring.
+An `if: always()` step uploads `/tmp/*-stall-*.txt` as
+`test-stall-diagnostics` with `if-no-files-found: ignore`. One glob collects
+whichever pass wedged, because every pass writes `<name>-stall-ps.txt` and
+`<name>-stall-sample-<pid>.txt`. `ignore` rather than the `warn` its neighbours
+use: a green run deliberately produces no stall files, so absence is the normal
+case rather than evidence of broken wiring.
+
+### The harness
+
+`scripts/ci/watched-test-pass.test.sh` drives the script against fixture
+directories with a stub `scripts/test.sh` and a stub `sample`: no build, no
+SwiftPM, nothing real touched, about 40 seconds. It covers a green pass handing
+back its count, a 76 and an ordinary red status returned untouched, a run under
+the floor and a run with no summary line at all, a stall through the primary
+argv match and a stall through the fallback selection, and two malformed
+invocations. It runs as the last step of the `test` job, on macOS because
+everything it drives is BSD, and with `!cancelled()` so a harness bug can never
+hide a pass's verdict.
 
 ## Numbers, and what each rests on
 
 | Constant | Value | Basis |
 | --- | --- | --- |
-| `stall_budget_seconds` | 720 s | 6 × the 117 s healthy pass |
-| step `timeout-minutes` | 15 min | platform bound |
-| margin left after the budget | 180 s | 42 s used at worst measurement |
+| fast pass 1a budget | 1200 s | cold-cache compile up to ~6 min + ~4 min of tests |
+| fast pass 1a `timeout-minutes` | 25 min | budget + sampling margin |
+| fast pass 1b budget | 600 s | tests only; healthy 3–4 min |
+| fast pass 1b `timeout-minutes` | 15 min | budget + sampling margin |
+| fast pass 2 budget | 600 s | tests only; healthy 3–4 min |
+| fast pass 2 `timeout-minutes` | 15 min | budget + sampling margin |
+| quiet pass budget | 720 s | 6 × the 117 s healthy pass |
+| quiet pass `timeout-minutes` | 15 min | platform bound |
+| margin left after the quiet budget | 180 s | 42 s used at worst measurement |
 | `sample` duration per target | 5 s | ~5000 stacks at 1 ms |
 | SIGTERM → SIGKILL grace | 30 s | cleanup takes a few seconds |
 | sample-target cap (both paths) | 4 | 3 used in the measured probe |
 
-The healthy pass reports `Test run with 179 tests in 37 suites passed after
-116.847 seconds`, so the budget is six times a normal run and still three
+The healthy quiet pass reports `Test run with 179 tests in 37 suites passed
+after 116.847 seconds`, so its budget is six times a normal run and still three
 minutes short of the step timeout.
+
+The fast-pass budgets are sized against what those steps actually spend. Only 1a
+pays the test-target compile: three consecutive warm-cache runs on main measured
+2m22s, 3m33s and 6m02s for it, and a cold cache is slower, so 1a's budget covers
+a slow compile plus a full run of tests. 1b and 2 run against a warm build and
+finish in three to four minutes when healthy, so 600 s is comfortably more than
+double a healthy run while still ending a wedge inside the step's own bound. The
+step timeouts sit above their budgets by the margin the expiry path needs; the
+30-minute bounds the fast passes used to carry existed to let per-test limits
+fire first and name a test, and the watchdog does that job both sooner and with
+a stack.
 
 Five seconds of sampling is what it takes to show a blocked thread
 unambiguously: a parked thread looks identical in every sample, so more buys
@@ -195,14 +266,6 @@ arrive with its own runner timestamp (33803510307), and that a name match finds
 nothing against a live pass, which is what moved target selection to lineage and
 argv (33803510307, then 33805317227 sampling the helper by pid and uploading the
 artifact).
-
-## Scope
-
-Only the quiet pass gets the pty and the watchdog. The two fast passes run the
-parallel, in-process suites; they have never stalled, and they emit output fast
-enough that buffering is invisible. Every stall on record is in the serial live
-target. A fast-pass stall would be a different defect and earns its own
-instrumentation on its own evidence.
 
 ## Who reclaims the orphans
 
@@ -221,23 +284,24 @@ that made it.
   ever daemonised the runner, the tree walk would find nothing sampleable, the
   step would say so, and the whole-machine listing would still show where the
   process went.
-- **`script(1)` propagates the child's non-zero exit status on macOS.** Verified
+- **`script(1)` propagates the child's exit status on macOS.** Verified
   locally (`script -q /dev/null /bin/sh -c 'exit 3'` returns 3) and in Apple's
-  `shell_cmds` source; the success direction is confirmed by a green CI run. The
-  failure direction can be confirmed on demand with a throwaway commit that makes
-  `scripts/test.sh` exit non-zero. If it ever stopped holding, a red run would
-  surface as an unreadable or zero status — and the validation above fails
-  closed, so the failure mode is a spurious red, not a false green.
+  `shell_cmds` source; the success direction is confirmed by a green CI run, and
+  the harness asserts both a 3 and a 76 reaching the caller through the pty. If
+  it ever stopped holding, a red run would surface as an unreadable or zero
+  status — and the validation above fails closed, so the failure mode is a
+  spurious red, not a false green.
 
 ## Reading a stall report
 
-Download the `quiet-pass-stall-diagnostics` artifact from the failed run.
-`quiet-pass-stall-sample-<pid>.txt` carries every thread's stack of the process
+Download the `test-stall-diagnostics` artifact from the failed run.
+`<pass>-stall-sample-<pid>.txt` carries every thread's stack of the process
 that was executing tests; the parked thread's frames name the file and line the
-run is blocked in. `quiet-pass-stall-ps.txt` carries the machine listing, the
+run is blocked in. `<pass>-stall-ps.txt` carries the machine listing, the
 pipeline's descendants and the sampled processes, which is where the fixture's
 holder, tmux and job processes appear and where the cap's skipped-candidate line
-would be. The step log names the budget it waited and the pids it sampled.
+would be. The step log names the pass, the budget it waited and the pids it
+sampled.
 
 ## Rejected alternatives
 
@@ -252,6 +316,15 @@ would be. The step log names the budget it waited and the pids it sampled.
   flush knob. A pty is the mechanism the platform actually offers.
 - **Lowering `timeout-minutes`.** It would end the stall sooner and record
   exactly as much as it does today, which is nothing.
+- **Watching only the serial pass.** The premise was that the parallel passes
+  never stall and emit output fast enough for buffering to be invisible. The
+  second half is true and the first is not: a cooperative-pool wedge parks every
+  thread the pool has, no per-test time limit can reach it, and the two 30-minute
+  fast-pass wedges produced no stack at all. One script watching every pass costs
+  a step nothing on a healthy run.
+- **Inlining the watchdog in each step's YAML.** Four copies of a hundred lines
+  of shell, drifting apart, with no way to test any of them. A script has a
+  harness; a `run:` block does not.
 - **Changing the eight blocking `waitpid(…, 0)` sites in the fixtures.** The
   leading hypothesis was the holder fixture's teardown, and it does not hold on
   the merits: the holder detaches with its own `setsid()`, keeps no controlling

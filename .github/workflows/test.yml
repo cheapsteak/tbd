@@ -229,20 +229,20 @@ jobs:
   test:
     runs-on: macos-26
     # 90, deliberately NOT sized to this job's 15.3-minute observed worst case
-    # (10.7 median). The three test steps below carry `timeout-minutes` of 30, 30
-    # and 15 — a 75-minute step budget — and they exist so that a wedged suite
-    # dies on a step that names which pass hung, with the per-test limits given
-    # room to fire first and attribute the hang to a named test. A job bound at
-    # or below 75 would pre-empt all three and kill the run with the
-    # uninformative message those step bounds were written to avoid. 90 clears
-    # the step budget with room for checkout, `brew install tmux`, the cache
-    # restore and the final build — none of which is individually timed — while
-    # cutting worst-case occupancy of one of the five macOS slots from six hours
-    # to an hour and a half.
+    # (10.7 median). The four test steps below carry `timeout-minutes` of 25, 15,
+    # 15 and 15 — a 70-minute step budget — and they exist so that a wedged suite
+    # dies on a step that names which pass hung, after that step's own watchdog
+    # has captured the stacks. A job bound at or below 70 would pre-empt all four
+    # and kill the run with the uninformative message those step bounds were
+    # written to avoid. 90 clears the step budget with room for checkout,
+    # `brew install tmux`, the cache restore, the watchdog harness and the final
+    # build — none of which is individually timed — while cutting worst-case
+    # occupancy of one of the five macOS slots from six hours to an hour and a
+    # half.
     timeout-minutes: 90
-    # All three test steps below append their `.flaky(issue:)` retry records
+    # All four test steps below append their `.flaky(issue:)` retry records
     # here (docs/specs/2026-07-24-test-hardening-design.md §7), so one run
-    # produces one artifact covering both fast passes and the quiet pass
+    # produces one artifact covering all three fast passes and the quiet pass
     # together. Unset locally, where the trait writes nothing.
     #
     # A LITERAL path, not `${{ runner.temp }}`: the `runner` context is not
@@ -365,14 +365,27 @@ jobs:
       # its own command line rather than repeating the number — one cap, one
       # place to change it.
       #
-      # Three sequential steps, one job (docs/specs/2026-07-24-test-hardening-design.md
+      # Four sequential steps, one job (docs/specs/2026-07-24-test-hardening-design.md
       # §4): the tier-3 live suites live in their own target so they can run
       # serially on an otherwise idle machine instead of contending with the
-      # parallel pass. A second *job* would draw from the 5-concurrent-macOS-job
+      # parallel passes. A second *job* would draw from the 5-concurrent-macOS-job
       # cap and re-pay the build, so all passes share this one.
       #
+      # EVERY ONE OF THEM RUNS THROUGH `scripts/ci/watched-test-pass.sh`. That
+      # script gives the pass a pty so its log streams line by line instead of in
+      # 16 KB blocks, bounds the run with a stall watchdog that captures every
+      # thread's stack of the processes executing the tests before the platform
+      # timeout can destroy the evidence, and turns the outcome into a verdict —
+      # the pass's own exit status first, untouched, and only then the floor. Why
+      # a pty, why lineage rather than names, why the argv match, why the cap of
+      # four, why five seconds of `sample`, why 30 seconds of grace, why `tee`
+      # dies last, why the status file is validated and why status precedes the
+      # floor are all in that script's header, with the design in
+      # docs/specs/2026-09-04-quiet-pass-stall-watchdog-design.md. Its harness is
+      # `scripts/ci/watched-test-pass.test.sh`, run by the last step in this job.
+      #
       # ---------------------------------------------------------------------
-      # Why the fast pass is TWO steps instead of one
+      # Why the fast pass is THREE steps instead of one
       #
       # Swift Testing parallelizes every non-serialized test in ONE process with
       # no concurrency cap. All targets compile into that process, so per-test
@@ -396,61 +409,97 @@ jobs:
       # invocation re-pays SPM's no-op build check and process startup. That is
       # the honest figure: a single iteration showed +6 s and it did not hold up
       # across the run. Set against a step that already spends 139-404 s on the
-      # compile, it is a good trade for halving the tail.
+      # compile, it is a good trade for halving the tail. Splitting again pays
+      # that startup cost a third time for the same reason.
       #
       # This is NOT the "sharding across runners" that §1 considered and
       # rejected and §2 lists as a non-goal. That rejection was about extra
       # *jobs*: the 5-concurrent-macOS-job cap, and each shard re-paying the
-      # ~2 min build. These are two sequential `swift test` invocations in ONE
+      # ~2 min build. These are three sequential `swift test` invocations in ONE
       # job sharing ONE build — the same shape this file already uses for the
       # fast/quiet split. It pays neither the job cap nor a second build.
       #
-      # Why step 2 is a COMPLEMENT (`--skip`) and not an enumeration
+      # What forced the third step. On 2026-09-08 nearly every run of this
+      # workflow reddened at least once on a test unrelated to the change under
+      # review, always in the tail of a fast pass — SocketServerSocketOwnership,
+      # AttachReplayOrchestrator, AppearanceDebounce, ArchivedWorktreeSearch,
+      # TerminalTeardownReap, BoundedGateWait, BoundedProcessRunner,
+      # WorktreeArchiveDeletionQueue, HolderLifecycle, TBDHolder — and one PR
+      # needed seven reruns to land. Twelve feature-branch reds classified by
+      # step: five in pass 1/2 and seven in pass 2/2, two of the latter
+      # 30-minute wedges with no stack at all (runs 34174344530 and
+      # 34176996067), where the process went silent about 5 s into the test run
+      # with ~1,965 tests started, none finishing, zero issues recorded and no
+      # time limit firing — the cooperative-pool wedge signature that
+      # `Tests/TestSupport/BoundedGateSupport.swift` describes. Zero reds landed
+      # in the quiet pass, which was then the only step with a watchdog; and
+      # because a red fast pass skipped the steps after it, a single flake hid
+      # the live verdict for the whole run.
       #
-      # The three passes must partition the package exhaustively, and that has
+      # The populations behind that: pass 1 was running ~5,529 tests and pass 2
+      # ~5,269, up from 4,988 and 4,645 on the 2026-09-04 green run of `main`,
+      # and from the ~4,350 and ~2,800 the deadline triple was originally
+      # derived against. Pass-1 test time was 247 s and 231 s on the red runs
+      # against 153 s and 195 s on the green ones, and every hang-catcher in the
+      # suite is sized per scheduling hop — `TestDeadlines.saturatedPass` 90 s,
+      # `TestGate.deadline` 120 s, the clock guards 45 s, the suite limit
+      # 240 s — so the red runs are simply the slow-runner tail of the same
+      # distribution. Re-splitting is the remedy that follows from "population
+      # is the scheduler" (`Tests/CLAUDE.md`); raising the deadlines instead
+      # re-derives four coupled constants and wants a spec first.
+      #
+      # Why step 1b and step 2 are COMPLEMENTS and not enumerations
+      #
+      # The four passes must partition the package exhaustively, and that has
       # to hold *by construction* rather than by anyone remembering to update a
       # list. The spec makes exactly this point about the target boundary in §3
       # ("Enforcement mechanism = target boundary"): it is "compiler-enforced,
       # cannot silently zero-match like a `--filter` regex". A fast pass
-      # expressed as two `--filter` enumerations gives that
+      # expressed as three `--filter` enumerations gives that
       # property up — `swift test --filter` exits GREEN on zero matches, so a
       # newly added `TBDFooTests` would simply appear in no list, run in NO
       # pass, and nothing would go red.
       #
       # The floors cannot cover that hole, and it is worth being precise about
-      # why: adding a target does not *reduce* any listed step's count, so both
-      # floors still clear and both steps stay green while the new target's
+      # why: adding a target does not *reduce* any listed step's count, so every
+      # floor still clears and every step stays green while the new target's
       # tests execute nowhere. Expressing step 2 as "everything except
       # TBDDaemonTests and TBDDaemonLiveTests" closes it — a new target lands
-      # in step 2 automatically and runs. Step 1 takes TBDDaemonTests, step 2
-      # takes the complement of steps 1+3, the quiet pass takes
+      # in step 2 automatically and runs. Step 1a takes the A–L half of
+      # TBDDaemonTests, step 1b takes the REST of TBDDaemonTests as a complement
+      # of 1a rather than as an `[M-Z]` enumeration (a suite renamed to start
+      # with a digit or an underscore would fall out of both halves otherwise),
+      # step 2 takes the complement of steps 1+3, the quiet pass takes
       # TBDDaemonLiveTests: no gap, no overlap, nothing to maintain.
       #
       # Floors: `swift test --list-tests` on 2026-08-28 reports TBDDaemonTests
       # 4354, TBDAppTests 2790, TBDSharedTests 858, TBDCLITests 306,
       # TBDDaemonLiveTests 85 (8393 total). Those numbers are worth reading
-      # next to the ones this comment carried when the split landed —
-      # TBDDaemonTests 2194, 4605 total — because step 1 alone now runs 95% of
-      # what the whole package ran then, and step 1 is where the tail lives.
-      # Halving the in-flight population is what the split bought, and growth
-      # has since spent it: measured on the 2026-08-28 run of `main`, step 1's
-      # median test reported an 85.8 s span (p90 112.1 s, max 132.8 s) and 47%
-      # of its tests spanned longer than the whole 90 s `ciSafeDeadline` that
-      # bounds the handshake waits among them. Re-splitting step 1 is the
-      # remedy that follows from "population is the scheduler"
-      # (`Tests/CLAUDE.md`); raising the deadlines instead re-derives four
-      # coupled constants and wants a spec first. What actually EXECUTES is
-      # slightly lower for step 2 — 3876 on the 2026-08-27 green run, the
-      # most recent one to reach step 2 at all — because a handful of
-      # tests are conditionally skipped at runtime. The floors are set against
-      # the executed counts (the summary line these steps grep), which is the
-      # only number the check can see; don't "correct" them to the listed
-      # totals.
+      # next to the ones this comment carried when the fast/slow split landed —
+      # TBDDaemonTests 2194, 4605 total — because the daemon target alone now
+      # runs nearly twice what the whole package ran then, and it is where the
+      # tail lives: measured on the 2026-08-28 run of `main`, the undivided
+      # daemon pass had a median test reporting an 85.8 s span (p90 112.1 s,
+      # max 132.8 s) and 47% of its tests spanned longer than the whole 90 s
+      # `ciSafeDeadline` that bounds the handshake waits among them. What
+      # actually EXECUTES is slightly lower for step 2 — 3876 on the 2026-08-27
+      # green run, the most recent one to reach step 2 at all — because a
+      # handful of tests are conditionally skipped at runtime. The floors are
+      # set against the executed counts (the summary line these steps grep),
+      # which is the only number the check can see; don't "correct" them to the
+      # listed totals.
       #
-      # And the executed count is NOT stable run to run: two CI runs on this PR,
+      # The two daemon halves are floored at 1000 and 1500. A local heuristic
+      # count, attributed by declared suite name and undercounting parameterized
+      # tests, puts A–L near 2,100 and M–Z near 3,100; the floors sit
+      # deliberately far below that and will be recalibrated from the counts the
+      # first CI run of this split prints, which is the only source that
+      # measures what actually executes.
+      #
+      # And the executed count is NOT stable run to run: two CI runs on one PR,
       # on commits differing only in doc comments (zero tests added,
-      # `--list-tests` unchanged), executed 2194 and 2204 for step 1. The cause
-      # is not established — it is not conditional skips (the only
+      # `--list-tests` unchanged), executed 2194 and 2204 for the daemon pass.
+      # The cause is not established — it is not conditional skips (the only
       # `.enabled(if:)` here is gated on an env var CI does not set) and not
       # parameterization (all `arguments:` are static literals). Left unexplained
       # rather than guessed at. The practical consequence is the point: pin a
@@ -512,77 +561,71 @@ jobs:
       # puts the failure messages inside it. `scripts/test.sh` forwards
       # unrecognised arguments straight through to `swift test`.
       # ---------------------------------------------------------------------
-      - name: Test (fast parallel pass 1/2 — TBDDaemonTests)
-        # A tier-1 test can still hang indefinitely: an over-long TestClock
-        # advance chain wedged for >10 min and `.clockDriven` did NOT bound it
-        # (the hung work sits where the time limit cannot cancel it). Without
-        # this the job falls back to the 6 h default.
-        #
-        # 30, not 10: this step runs the FIRST `swift test`, so it pays the
-        # whole test-target compile, not just the ~30 s of test runtime. Three
-        # consecutive warm-cache runs on main measured 2m22s / 3m33s / 6m02s —
-        # a 10-minute budget is under 2x the observed worst case and a cold
-        # cache (Package.resolved change, cache eviction) would blow through it
-        # and kill a healthy build. This bounds a hang at 1/12 of the default
-        # while staying far above any legitimate run.
-        timeout-minutes: 30
+      - name: Test (fast parallel pass 1a — TBDDaemonTests A–L)
+        id: fast_pass_daemon_a
+        # 25, not 15 like its neighbours: this step runs the FIRST `swift test`,
+        # so it pays the whole test-target compile on top of its own runtime.
+        # Three consecutive warm-cache runs on main measured 2m22s / 3m33s /
+        # 6m02s for the compile alone, and a cold cache (Package.resolved
+        # change, cache eviction) is slower still. The 1200 s watchdog budget
+        # below is what actually bounds a wedge; this bound is the platform
+        # backstop behind it, sized to clear the budget with room for the
+        # sampling and the kill sweep.
+        timeout-minutes: 25
         run: |
-          set -o pipefail
-          scripts/test.sh --fingerprint --parallel --filter '^TBDDaemonTests\.' \
-            --xunit-output /tmp/xunit-daemon.xml --experimental-xunit-message-failure \
-            2>&1 | tee /tmp/fast-pass-daemon.log
-          # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
-          # with no summary line makes the first `grep` exit 1 and a failing
-          # command substitution in an assignment kills the shell — so the
-          # truncated-run case this floor exists for would die before ever
-          # reaching the `::error::` below.
-          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-daemon.log | grep -oE '[0-9]+' | head -1 || true)
-          # `swift test --filter/--skip` exits GREEN on zero matches, so a bad
-          # regex or a renamed target would silently run nothing and pass.
-          if [ -z "$count" ] || [ "$count" -lt 1800 ]; then
-            echo "::error::Fast pass 1/2 ran ${count:-no} tests (floor 1800) — the --filter regex matched nothing or the target was renamed."
-            exit 1
-          fi
-          echo "Fast pass 1/2 (TBDDaemonTests) executed $count tests."
+          scripts/ci/watched-test-pass.sh \
+            --name fast-pass-daemon-a --budget-seconds 1200 \
+            --floor 1000 \
+            --floor-message 'the --filter regex matched nothing or the target was renamed.' \
+            -- --fingerprint --parallel --filter '^TBDDaemonTests\.[A-L]' \
+               --xunit-output /tmp/xunit-daemon-a.xml --experimental-xunit-message-failure
 
-      - name: Test (fast parallel pass 2/2 — everything except TBDDaemonTests and the live target)
-        # Expressed as a COMPLEMENT, not a list of targets — see the "Why step 2
-        # is a COMPLEMENT" block above. A new test target lands here on its own.
-        #
-        # 30, matching step 1. The earlier 15 was justified by "the previous
-        # step already paid the test-target compile, so this one is warm" — but
-        # compile time is no longer the binding constraint. With `.clockDriven`
-        # raised to 4 minutes the per-test worst case went 60 s -> 240 s, and a
-        # wedged `.clockDriven, .serialized` suite pays that *per test, in
-        # series*: FileWatcherTests (11 tests, in this pass) passes 15 minutes
-        # after only four of them. The step would then die on the GitHub
-        # timeout, which names no suite — precisely the uninformative outcome
-        # this `timeout-minutes` exists to prevent. 30 gives the per-test limits
-        # room to fire first and attribute the hang to a named test. (A suite
-        # wedged in *every* test still overruns 30; the aim is to make the
-        # ordinary case report itself, not to bound the pathological one.)
-        timeout-minutes: 30
+      - name: Test (fast parallel pass 1b — the rest of TBDDaemonTests)
+        id: fast_pass_daemon_b
+        # Runs even when 1a went red, but not when the job was cancelled and not
+        # when the build or setup never reached 1a at all. Until this landed, a
+        # red fast pass skipped every step after it, so one flake in the tail of
+        # pass 1 hid the live verdict for the whole run and the next push learned
+        # nothing new. The job still fails; the cost is the +2–4 min the later
+        # passes take on a run that is already red.
+        if: ${{ !cancelled() && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
+        # 15: the compile is already paid, so this is test runtime plus SPM's
+        # no-op build check. The 600 s budget bounds a wedge; this clears it.
+        timeout-minutes: 15
         run: |
-          set -o pipefail
-          scripts/test.sh --fingerprint --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' \
-            --xunit-output /tmp/xunit-app.xml --experimental-xunit-message-failure \
-            2>&1 | tee /tmp/fast-pass-app.log
-          # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
-          # with no summary line makes the first `grep` exit 1 and a failing
-          # command substitution in an assignment kills the shell — so the
-          # truncated-run case this floor exists for would die before ever
-          # reaching the `::error::` below.
-          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/fast-pass-app.log | grep -oE '[0-9]+' | head -1 || true)
-          # `swift test --filter/--skip` exits GREEN on zero matches, so an
-          # over-broad skip or a renamed target would silently run nothing and
-          # pass.
-          if [ -z "$count" ] || [ "$count" -lt 1900 ]; then
-            echo "::error::Fast pass 2/2 ran ${count:-no} tests (floor 1900) — the --skip regex over-matched or a target was renamed."
-            exit 1
-          fi
-          echo "Fast pass 2/2 (everything except TBDDaemonTests) executed $count tests."
+          scripts/ci/watched-test-pass.sh \
+            --name fast-pass-daemon-b --budget-seconds 600 \
+            --floor 1500 \
+            --floor-message 'the --filter/--skip pair over-matched or the target was renamed.' \
+            -- --fingerprint --parallel --filter '^TBDDaemonTests\.' --skip '^TBDDaemonTests\.[A-L]' \
+               --xunit-output /tmp/xunit-daemon-b.xml --experimental-xunit-message-failure
+
+      - name: Test (fast parallel pass 2 — everything except TBDDaemonTests and the live target)
+        id: fast_pass_app
+        # Expressed as a COMPLEMENT, not a list of targets — see the "Why step 1b
+        # and step 2 are COMPLEMENTS" block above. A new test target lands here
+        # on its own.
+        if: ${{ !cancelled() && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
+        # 15. The 30 this step used to carry existed to let the per-test limits
+        # fire first and attribute a hang to a named test, because being killed
+        # by the platform timeout names nothing. The watchdog now does that job
+        # properly and sooner: it bounds the pass at 600 s and hands back the
+        # stacks of whatever was running, so the platform bound only has to clear
+        # the budget plus the sampling and kill sweep.
+        timeout-minutes: 15
+        run: |
+          scripts/ci/watched-test-pass.sh \
+            --name fast-pass-app --budget-seconds 600 \
+            --floor 1900 \
+            --floor-message 'the --skip regex over-matched or a target was renamed.' \
+            -- --fingerprint --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' \
+               --xunit-output /tmp/xunit-app.xml --experimental-xunit-message-failure
 
       - name: Test (quiet pass — tier-3 live suites, serial, idle machine)
+        id: quiet_pass
+        # Runs on a red fast pass for the same reason 1b and 2 do: the live
+        # suites are the ones a fast-pass flake most often hides.
+        if: ${{ !cancelled() && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
         # `--no-parallel` is REQUIRED and is not the same as omitting
         # `--parallel`. SwiftPM's `--parallel` governs XCTest's process-level
         # sharding; Swift Testing parallelizes suites in-process on its own and
@@ -593,342 +636,46 @@ jobs:
         # flag they run strictly one at a time (24 s). Serial execution on an
         # idle machine IS this step; do not "optimize" the flag away.
         #
-        # The pty (`script -q /dev/null`) is what makes this step's log arrive
-        # in real time. On the serial path SwiftPM relays the test binary's
-        # output through `print($0, terminator: "")` on its own stdout
-        # (`SwiftTestCommand.runTestProducts`). `scripts/test.sh` runs
-        # `scripts/swift-safe` with no pipe of its own and `swift-safe`
-        # `os.execv`s `swift`, so whatever this step hands the script becomes
-        # SwiftPM's stdout directly. Piping into `tee` makes that stdout a pipe,
-        # and C stdio then fully buffers it in 16 KB blocks (a pipe's
-        # `st_blksize` on macOS). This pass emits roughly 16 KB per minute, so
-        # the log lagged the run by about a minute and was cut at an arbitrary
-        # byte boundary: runs 33797806278 (stalled) and 33787142345 (green) both
-        # stopped at exactly byte 16384, mid-way through the same
-        # `keepsTheReaderForAJobThatIsStillRunning()` line. The last line a
-        # wedged step showed was the buffer boundary, not the hung test. The
-        # fast passes only look real-time because they emit 16 KB a second.
-        # A pty makes SwiftPM's stdout a terminal, so C stdio line-buffers it
-        # and every line lands as it is produced. The pty translates `\n` to
-        # `\r\n`, which is harmless both to the runner log and to the
-        # `grep -oE 'Test run with [0-9]+ tests?'` floor check below. `script`
-        # propagates the child's exit status, `< /dev/null` guarantees nothing
-        # ever waits on the pty for input, and `TERM=dumb` keeps SwiftPM's build
-        # progress line-oriented instead of cursor-rewriting animations.
-        #
-        # The watchdog exists because GitHub's step timeout leaves no evidence.
-        # A stall here is a thread blocked somewhere no Swift Testing time limit
-        # can reach, so the step timeout is the only bound, and being killed by
-        # it records nothing about which test or which frame. So the pipeline
-        # runs in the background and a loop watches it: a healthy pass takes
-        # about 2 minutes (`Test run with 179 tests in 37 suites passed after
-        # 116.847 seconds`), the budget is six times that, and it lands three
-        # minutes short of `timeout-minutes` so sampling and artifact upload
-        # have room.
-        #
-        # On expiry the whole machine's process listing is written first and
-        # unconditionally. The runner is single-tenant, so that listing is both
-        # the record of the fixture's holder, tmux and job processes and the way
-        # we learn what anything is really called. The processes to sample are
-        # then found structurally, by descending the pipeline subshell's own
-        # tree with `pgrep -P`, and never by name: a CI probe of this watchdog
-        # matched `pgrep -x TBDPackageTests` against a live pass and
-        # found nothing, because the swift-testing binary does not run under its
-        # bundle name. A name match fails silently — it samples nothing and
-        # reports success at having collected nothing — whereas a tree walk
-        # finds whatever the pipeline actually spawned. The test binary is
-        # picked out of those descendants by matching `swiftpm-testing`,
-        # `xctest` or `TBDPackageTests` anywhere in the full argv from
-        # `ps -o command=`, not against a name: SwiftPM's
-        # `TestRunner.args(forTestAt:)` runs a swift-testing bundle as
-        # `<toolchain>/swiftpm-testing-helper --test-bundle-path <bundle> …
-        # --testing-library swift-testing` and an XCTest bundle as
-        # `<toolchain>/xctest <bundle>`, so the process executing the tests is
-        # the helper and never carries the bundle's own name — and the kernel
-        # truncates `p_comm` to 15 characters, which would render the helper as
-        # `swiftpm-testing` anyway. Matching unanchored against argv — read
-        # with `-ww` so ps never clips the long toolchain path — sidesteps both
-        # the truncation and the path prefix. When no descendant matches, every
-        # descendant that is not known plumbing
-        # (`script`, the shells, `tee`, `sleep`, python, `swift-safe`) is worth
-        # a stack, and the list is short enough that sampling all of them costs
-        # nothing. `/usr/bin/sample` — part of macOS, present on the runner
-        # image — captures every thread's stack of each target, and only then
-        # are those pids killed, by the pid we captured. Five seconds of it, at
-        # sample's 1 ms interval, is what it takes to show a blocked thread's
-        # stack unambiguously: a parked thread looks identical in every sample
-        # so a longer capture buys nothing, while a shorter one risks reading a
-        # scheduler blip as the stall — and symbolicating the ~200 MB debug
-        # helper still finishes well inside the three-minute margin. The 30 s
-        # between SIGTERM and SIGKILL is likewise sized to a job: it is what
-        # `scripts/test.sh`'s EXIT trap gets to run its tmux `kill-server` sweep
-        # and fence checks, generous against the few seconds those take and
-        # still inside that same margin.
-        # timeout-minutes so a wedged tmux test can't eat the job's 6 h default.
+        # A healthy pass reports `Test run with 179 tests in 37 suites passed
+        # after 116.847 seconds`, so the 720 s budget is six times a normal run
+        # and still three minutes short of this bound — room for the sampling and
+        # the artifact upload. The whole expiry path was measured at 42 s.
         timeout-minutes: 15
         run: |
-          set -o pipefail
-          stall_budget_seconds=720
-          rm -f /tmp/quiet-pass.rc
-          (
-            # This subshell's only job is to run the pipeline and record its
-            # status, so errexit is wrong here: on a red run it would abort the
-            # subshell before the `echo` below and discard the very status we
-            # came to capture (a real failure, or swift-safe's 75/76).
-            set +e
-            TERM=dumb script -q /dev/null scripts/test.sh --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel \
-              --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure \
-              < /dev/null 2>&1 | tee /tmp/quiet-pass.log
-            echo "${PIPESTATUS[0]}" > /tmp/quiet-pass.rc
-          ) &
-          pipeline=$!
-          waited=0
-          while kill -0 "$pipeline" 2>/dev/null && [ "$waited" -lt "$stall_budget_seconds" ]; do
-            sleep 5
-            waited=$((waited + 5))
-          done
-          # Collect a process tree by parent pid, so targets are found by
-          # lineage from the pipeline rather than by executable name.
-          descendants() {
-            local parent="$1" child
-            for child in $(pgrep -P "$parent" || true); do
-              echo "$child"
-              descendants "$child"
-            done
-          }
-          if kill -0 "$pipeline" 2>/dev/null; then
-            echo "::error::Quiet pass has been running for ${stall_budget_seconds}s and is being sampled before it is killed."
-            {
-              echo "=== whole-machine process listing at stall (budget ${stall_budget_seconds}s) ==="
-              ps -ww -axo pid,ppid,pgid,stat,%cpu,etime,comm,command || true
-            } > /tmp/quiet-pass-stall-ps.txt
-            kids=$(descendants "$pipeline" || true)
-            {
-              echo
-              echo "=== descendants of the pipeline subshell (pid $pipeline) ==="
-            } >> /tmp/quiet-pass-stall-ps.txt
-            if [ -n "$kids" ]; then
-              kid_list=$(printf '%s\n' "$kids" | paste -sd, -)
-              ps -ww -o pid,ppid,pgid,stat,%cpu,etime,comm,command -p "$kid_list" >> /tmp/quiet-pass-stall-ps.txt || true
-            else
-              echo "(none)" >> /tmp/quiet-pass-stall-ps.txt
-            fi
-            # Both selection paths below take at most `sample_target_cap`
-            # processes, in walk order (parents before children, so SwiftPM's
-            # driver comes ahead of the compiler processes it spawns — in a stall
-            # during compilation the driver's own stack is the more informative
-            # one). A match count is not a process count: during compilation the
-            # bundle path `.build/<triple>/debug/TBDPackageTests.build/…` appears
-            # in the argv of every concurrent compiler process, so the argv match
-            # can select a dozen at once, and at ~5 s of serial sampling each
-            # that would eat the 180 s margin and leave the step to be killed by
-            # `timeout-minutes` after all. Whatever a cap drops is recorded in
-            # the ps file, and the whole-machine listing written above still
-            # names every matching process, so nothing disappears from the
-            # artifact — only from the sampling.
-            #
-            # Measured on a probe of the fallback path with the argv match
-            # disabled (run 33902144920): three of the four slots used —
-            # SwiftPM's `swift-test` driver at 87 KB, `swiftpm-testing-helper` at
-            # 796 KB symbolicated, and a fixture `TBDHolder` that exited
-            # mid-sample and was reported as failed — and the whole expiry path,
-            # from the whole-machine ps through the tree walk, the three serial
-            # samples and the SIGTERM sweep to the step exiting, took 42 s.
-            sample_target_cap=4
-            targets=""
-            primary_taken=0
-            primary_skipped=0
-            for pid in $kids; do
-              argv=$(ps -ww -o command= -p "$pid" 2>/dev/null || true)
-              case "$argv" in
-                *swiftpm-testing*|*xctest*|*TBDPackageTests*) ;;
-                *) continue ;;
-              esac
-              if [ "$primary_taken" -lt "$sample_target_cap" ]; then
-                targets="$targets $pid"
-                primary_taken=$((primary_taken + 1))
-              else
-                primary_skipped=$((primary_skipped + 1))
-              fi
-            done
-            if [ "$primary_skipped" -gt 0 ]; then
-              echo "(primary sampling capped at $sample_target_cap targets; $primary_skipped further candidates skipped)" >> /tmp/quiet-pass-stall-ps.txt
-            fi
-            if [ -z "$targets" ]; then
-              fallback_taken=0
-              fallback_skipped=0
-              for pid in $kids; do
-                comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
-                case "${comm##*/}" in
-                  ""|script|bash|sh|tee|sleep|Python|python3|swift-safe) continue ;;
-                esac
-                if [ "$fallback_taken" -lt "$sample_target_cap" ]; then
-                  targets="$targets $pid"
-                  fallback_taken=$((fallback_taken + 1))
-                else
-                  fallback_skipped=$((fallback_skipped + 1))
-                fi
-              done
-              if [ "$fallback_skipped" -gt 0 ]; then
-                echo "(fallback sampling capped at $sample_target_cap targets; $fallback_skipped further candidates skipped)" >> /tmp/quiet-pass-stall-ps.txt
-              fi
-            fi
-            if [ -z "$targets" ]; then
-              echo "The pipeline has no sampleable descendants — /tmp/quiet-pass-stall-ps.txt carries the whole-machine listing instead."
-            else
-              {
-                echo
-                echo "=== sampled processes ==="
-              } >> /tmp/quiet-pass-stall-ps.txt
-              for pid in $targets; do
-                ps -ww -o pid,comm,command -p "$pid" >> /tmp/quiet-pass-stall-ps.txt || true
-                sample "$pid" 5 -mayDie -file "/tmp/quiet-pass-stall-sample-$pid.txt" || echo "sample $pid failed"
-              done
-              for pid in $targets; do
-                kill -KILL "$pid" 2>/dev/null || true
-              done
-            fi
-            # The sampled targets were SIGKILLed the moment their stacks were
-            # captured — they are wedged, and the sweep below is the graceful
-            # pass, for the plumbing that can still clean up after itself — so
-            # they are filtered out of every order built from here on. Even
-            # though `kill` on a dead pid is harmless, signalling one is inert at
-            # best and reaches whatever reused the number at worst.
-            is_target() {
-              local needle="$1" candidate
-              for candidate in $targets; do
-                if [ "$candidate" = "$needle" ]; then
-                  return 0
-                fi
-              done
-              return 1
-            }
-            is_direct_child() {
-              local needle="$1" child
-              for child in $direct_children; do
-                if [ "$child" = "$needle" ]; then
-                  return 0
-                fi
-              done
-              return 1
-            }
-            # The order is built from a walk taken at the moment it is needed
-            # rather than from any earlier snapshot: sampling several targets
-            # takes 20 s or more and the grace window below is another 30 s, so
-            # a list captured before either would miss whatever the pipeline
-            # spawned in the meantime.
-            #
-            # `tee` is a direct child of the subshell and owns the far end of
-            # the log pipe, so anything still writing when `tee` dies writes to
-            # a closed pipe — and the EXIT trap's cleanup output is exactly what
-            # the log wants. The order is therefore built explicitly rather than
-            # by reversing the walk. The walk is preorder — `script`, then all
-            # of script's subtree, then the sibling `tee` — so a plain reversal
-            # would signal `tee` first, precisely backwards. Instead: everything
-            # below the direct children goes first (that subset reversed, so
-            # deepest-first), then the direct children other than `tee`, then
-            # `tee`.
-            build_kill_order() {
-              local pid comm remaining="" deeper_first="" direct_others="" tee_pids=""
-              kids=$(descendants "$pipeline" || true)
-              for pid in $kids; do
-                if is_target "$pid"; then
-                  continue
-                fi
-                remaining="$remaining $pid"
-              done
-              kids="$remaining"
-              direct_children=$(pgrep -P "$pipeline" || true)
-              for pid in $kids; do
-                if is_direct_child "$pid"; then
-                  continue
-                fi
-                deeper_first="$pid $deeper_first"
-              done
-              for pid in $direct_children; do
-                comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
-                case "${comm##*/}" in
-                  tee) tee_pids="$tee_pids $pid" ;;
-                  *) direct_others="$direct_others $pid" ;;
-                esac
-              done
-              kill_order="$deeper_first $direct_others $tee_pids"
-            }
-            # Take the pipeline down within a bounded 30 s instead of leaving
-            # `wait` to block until `timeout-minutes` fires — the very outcome
-            # this budget exists to avoid. Killing the sampled targets is not
-            # enough on its own: with no targets found nothing has been killed
-            # at all, and even when the helper dies its parents (`script`,
-            # `swift-test`, `scripts/test.sh`) can outlive it. SIGTERM goes
-            # first so `scripts/test.sh`'s EXIT trap still runs its tmux and
-            # fence cleanup.
-            build_kill_order
-            for pid in $kill_order; do
-              kill -TERM "$pid" 2>/dev/null || true
-            done
-            teardown_waited=0
-            while kill -0 "$pipeline" 2>/dev/null && [ "$teardown_waited" -lt 30 ]; do
-              sleep 1
-              teardown_waited=$((teardown_waited + 1))
-            done
-            if kill -0 "$pipeline" 2>/dev/null; then
-              # The escalation rebuilds the order instead of reusing the one the
-              # SIGTERM sweep signalled: that grace window is exactly when the
-              # EXIT trap runs, and its tmux and fence cleanup spawns processes
-              # of its own that the earlier order knows nothing about.
-              build_kill_order
-              for pid in $kill_order; do
-                kill -KILL "$pid" 2>/dev/null || true
-              done
-              kill -KILL "$pipeline" 2>/dev/null || true
-            fi
-            wait "$pipeline" || true
-            exit 1
-          fi
-          wait "$pipeline" || true
-          rc=$(cat /tmp/quiet-pass.rc 2>/dev/null || echo 1)
-          # An unreadable status fails closed, the same way the floor below
-          # guards its own empty `count`: the `|| echo 1` covers only a missing
-          # file, and a writer that died mid-write leaves an empty or
-          # non-numeric one, on which `[ "$rc" -ne 0 ]` errors — and an erroring
-          # `if` condition reads as false, letting a failed run walk on to the
-          # floor check as though it had succeeded.
-          case "$rc" in
-            ''|*[!0-9]*)
-              echo "::error::Quiet pass left no readable exit status (got '$rc'); treating the run as failed."
-              exit 1 ;;
-          esac
-          # The status comes first: it is the pipeline's own verdict and has to
-          # reach the job untouched — a build error, an early crash, or
-          # swift-safe's 75 and 76 all log fewer than 35 tests, and reporting
-          # them through the floor's message would both misdiagnose them and
-          # flatten them to a generic 1. The floor only means anything for a run
-          # that claims to have succeeded.
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::Quiet pass exited $rc"
-            exit "$rc"
-          fi
-          # `|| true`: with `set -o pipefail` (and GitHub's `bash -e`), a log
-          # with no summary line makes the first `grep` exit 1 and a failing
-          # command substitution in an assignment kills the shell — so the
-          # truncated-run case this floor exists for would die before ever
-          # reaching the `::error::` below.
-          count=$(grep -oE 'Test run with [0-9]+ tests?' /tmp/quiet-pass.log | grep -oE '[0-9]+' | head -1 || true)
-          if [ -z "$count" ] || [ "$count" -lt 35 ]; then
-            echo "::error::Quiet pass ran ${count:-no} tests (floor 35) — the --filter regex matched nothing or the target was renamed."
-            exit 1
-          fi
-          echo "Quiet pass executed $count tests."
+          scripts/ci/watched-test-pass.sh \
+            --name quiet-pass --budget-seconds 720 \
+            --floor 35 \
+            --floor-message 'the --filter regex matched nothing or the target was renamed.' \
+            -- --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel \
+               --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure
 
+      # The watchdog's own harness: fixture directories, a stub `scripts/test.sh`
+      # and a stub `sample`, no build, no real store touched, ~40 s. It lives in
+      # THIS job rather than joining the Linux collection in `plans-guard`
+      # because everything it drives is BSD — `script(1)` takes different
+      # arguments on Linux, `ps` there is GNU, and `sample` does not exist at
+      # all. That is the same reason the fence harness sits in `lint`, which is
+      # deliberately left alone.
+      #
+      # It runs LAST, and with `!cancelled()` rather than `always()`, so a bug in
+      # the harness can never pre-empt or hide the verdict of the passes above
+      # it: by the time it runs, every test step has already reported.
+      - name: Test the stall watchdog
+        if: ${{ !cancelled() }}
+        run: /bin/bash scripts/ci/watched-test-pass.test.sh
+
+      # Every watched pass writes its stall files as `<name>-stall-*.txt`, so one
+      # glob collects whichever pass wedged.
+      #
       # `ignore`, not the `warn` its neighbours use: a green run deliberately
       # produces no stall files, so absence here is the normal case rather than
       # a sign that the wiring broke.
-      - name: Upload quiet-pass stall diagnostics
+      - name: Upload stall diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quiet-pass-stall-diagnostics
-          path: /tmp/quiet-pass-stall-*.txt
+          name: test-stall-diagnostics
+          path: /tmp/*-stall-*.txt
           if-no-files-found: ignore
           retention-days: 14
 
@@ -949,6 +696,12 @@ jobs:
       # believe a run happened at all — without it a green remote verdict reads
       # as a truncated suite. `warn` on absence, matching the metrics upload
       # above: a missing file means the wiring broke and that must be visible.
+      #
+      # The glob already covers the fourth file the daemon split added:
+      # `scripts/remote_verify.py` discovers results with `rglob("*.xml")` over
+      # the unpacked artifact (`result_files`) and sums whatever it finds, so
+      # splitting or renaming a pass needs no change there — only that each pass
+      # keeps writing its XML under `/tmp/xunit-*.xml`.
       - name: Upload xUnit results
         if: always()
         uses: actions/upload-artifact@v4

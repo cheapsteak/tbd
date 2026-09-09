@@ -246,29 +246,33 @@ total wall time on green runs as well as red — a trivial test "takes" 16–29 
 because it is mostly suspended waiting for a turn. Population went 3013 → 4536
 in three weeks. Two consequences, both load-bearing.
 
-**The fast pass is two sequential steps in one job.** `test.yml` runs
-`--filter '^TBDDaemonTests\.'` then
-`--skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.'`, sharing one build.
+**The fast pass is three sequential steps in one job.** `test.yml` runs
+`--filter '^TBDDaemonTests\.[A-L]'` (1a), then that filter's complement within
+the daemon target (1b), then
+`--skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.'` (2), all sharing one build.
 Halving the in-flight population halves the tail: measured under induced load
 with arms interleaved, means over 5 iterations, p90 26.4 s → 14.6 s and p50
 8.8 s → 7.6 s, for **+26 s** of wall time (56 s → 82 s — the second invocation
 re-pays SPM's no-op build check and process startup). Quote that figure, not the
-+6 s a single iteration showed; it did not survive the other four. This is not
++6 s a single iteration showed; it did not survive the other four. Splitting the
+daemon target again pays that startup cost a third time and buys the same
+halving on the half where the tail actually lives. This is not
 the "sharding across runners" that
 `docs/specs/2026-07-24-test-hardening-design.md` §1 rejected and §2 lists as a
 non-goal — that was about extra *jobs* paying the 5-concurrent-macOS-job cap and
-a second ~2 min build. **Step 2 is a complement, not an enumeration, and that
-is deliberate.** Two `--filter` lists would have reintroduced the hazard the
-spec's §3 names when it calls the target boundary "compiler-enforced, cannot
+a second ~2 min build. **Steps 1b and 2 are complements, not enumerations, and
+that is deliberate.** Three `--filter` lists would have reintroduced the hazard
+the spec's §3 names when it calls the target boundary "compiler-enforced, cannot
 silently zero-match like a `--filter` regex": `swift test --filter` exits GREEN
-on zero matches, so a new `TBDFooTests` named in neither list would run in
-**neither** pass with nothing going red — and the floors could not catch that,
-because adding a target reduces no existing step's count. Written as a
-complement, step 2 absorbs any new target automatically, and the three passes
-partition the package by construction. The per-step floors have a narrower job:
-catching a target that *is* named in one of these regexes collapsing or being
-renamed, where the regex would zero-match or over-skip its way to a green run
-of nothing. Keep them updated.
+on zero matches, so a new `TBDFooTests` named in no list would run in
+**no** pass with nothing going red — and the floors could not catch that,
+because adding a target reduces no existing step's count. Written as
+complements, 1b absorbs any daemon suite that falls outside `[A-L]` (including
+one renamed to start with a digit) and step 2 absorbs any new target, so the
+four passes partition the package by construction. The per-step floors have a
+narrower job: catching a target that *is* named in one of these regexes
+collapsing or being renamed, where the regex would zero-match or over-skip its
+way to a green run of nothing. Keep them updated.
 
 **Wall-clock handshake deadlines are hang-catchers sized against the population
 of the day.** `ciSafeDeadline` (`Tests/TBDDaemonTests/ControlModeTestSupport.swift`)
