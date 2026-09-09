@@ -2808,33 +2808,28 @@ extension RPCRouter {
             + "input path wired for it. Nothing was typed and its session is unchanged."
     }
 
-    /// The refusal a multi-part or multi-line `terminal.send` gets for a
-    /// holder-backed row, until bracketed-paste wrapping lands there.
+    /// The refusal a multi-part `terminal.send` gets for a holder-backed row.
     ///
     /// It names the missing capability rather than "the holder transport",
-    /// because typing a single-line message into a holder session works and a
-    /// caller told otherwise would stop trying.
+    /// because sending a single body of text — one line or many — into a holder
+    /// session works, and a caller told otherwise would stop trying.
     ///
-    /// The measurement: the holder arm writes body and carriage return in ONE
-    /// delivery with no bracketed-paste wrapping. Against 2.1.261 under a real
-    /// pty, a single unwrapped write of 63 bytes submits and 64 or more does not
-    /// — past that the carriage return is swallowed into the text and the whole
-    /// string sits unsent in Claude's composer. Splitting the message into
-    /// several deliveries instead would reopen the at-least-once and routing
-    /// questions that one delivery avoids, so this refuses rather than guessing.
-    /// It carries one more cause than "composite" suggests: an image-only
-    /// message whose write would also have to carry the dispatch envelope. The
-    /// tmux arm gives the envelope a separate leading paste; this transport has
-    /// no second delivery to give, and the envelope alone is 68 bytes, so the
-    /// combined write lands past the 64-byte cliff too.
-    ///
-    /// PR #816 (child-as-contract-party) wraps in bracketed paste when the
-    /// child's mode is on, in one write, and this refusal lifts with it.
+    /// The holder arm delivers a message in one write to the child's pty, and a
+    /// single text body composes into that write cleanly: wrapped in bracketed
+    /// paste when the child's mode calls for it, so the submitting carriage
+    /// return lands outside the paste. What this refuses is a message that is
+    /// more than one body — several parts, or a lone image whose write would
+    /// also have to carry the dispatch envelope that attributes the turn. The
+    /// tmux arm frames those as separate pastes; this transport has only the one
+    /// write, and how a single write could frame a multi-body message — image
+    /// and envelope included — is deliberately out of scope until a spec settles
+    /// it. Refused rather than guessing at a framing, because a wrong guess
+    /// submits an unintended turn.
     static func holderCompositeRefusal(terminalID: UUID, cause: String) -> String {
         "terminal.send was refused: terminal \(terminalID) runs on the pty-holder transport, "
-            + "which delivers a message in one unwrapped write — and \(cause) cannot submit that "
-            + "way (past 64 bytes the carriage return is swallowed and the text sits unsent). "
-            + "Nothing was typed. Send a single-line message, or move the session to tmux."
+            + "which delivers a message in a single write — and \(cause) cannot be carried in "
+            + "that one write. Nothing was typed. Send the message as a single body of text, "
+            + "or move the session to tmux."
     }
 
     /// The refusal a text `terminal.send` gets for a terminal whose Claude
