@@ -270,10 +270,11 @@ extension ModelProxySuites {
                             ? "nothing is listening on it"
                             : "something is listening on it"
                         Issue.record(
-                            """
-                            the successor did not take the port in \(bindTook): \(bindFailure); \
-                            \(holder)
-                            """)
+                            Failure(
+                                """
+                                the successor did not take the port in \(bindTook): \(bindFailure); \
+                                \(holder)
+                                """))
                     }
                     await successor.stop()
 
@@ -716,6 +717,16 @@ final class ProxyBindOutcomeBox: @unchecked Sendable {
 
     func bound(_ port: Int) { lock.withLock { boundPort = port } }
     func failed(_ error: any Error) { lock.withLock { failure = "\(error)" } }
+}
+
+/// Failure payload for `Issue.record(_: some Error)`, whose primary console
+/// line is `Caught error: <description>`. `Issue.record(String)` and
+/// `#expect(cond, "…")` both demote their message to a trailing `↳` line that
+/// CI summaries drop (`Tests/CLAUDE.md`, assertion-hygiene rule 4) — the
+/// successor-bind timeout diagnosis has to travel as an error to survive.
+private struct Failure: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
 }
 
 /// Carries a still-open `URLSession.AsyncBytes` stream from `withProxy`'s
