@@ -279,13 +279,6 @@ public final class RPCRouter: Sendable {
     /// it is not a general-purpose "what time is it".
     let now: @Sendable () -> Date
 
-    /// Where a named tmux server's socket file lives. Held as an injected
-    /// collaborator rather than read ad hoc, so `terminal.attachCommand` can be
-    /// tested against a pinned `TMUX_TMPDIR` and uid without `setenv` — which
-    /// `Tests/CLAUDE.md` forbids outside `TBDHomeSerialized`. The default reads
-    /// the daemon's own environment, which is the environment the servers it
-    /// spawned were created under.
-    let tmuxSocketPathResolver: TmuxSocketPathResolver
     /// How a session transcript is measured when a prompt is recorded against
     /// it. A seam, not a clock: a file's modification time is data, so it
     /// follows the same rule as `now` rather than the `Clock` rule.
@@ -349,7 +342,6 @@ public final class RPCRouter: Sendable {
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
         prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String, host: String)?)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
-        tmuxSocketPathResolver: TmuxSocketPathResolver = TmuxSocketPathResolver(),
         transcriptFingerprinter: @escaping TranscriptFingerprinter = TranscriptFingerprinting.live,
         transcriptDeltaInspector: @escaping TranscriptDeltaInspector
             = TranscriptDeltaInspection.live,
@@ -364,7 +356,6 @@ public final class RPCRouter: Sendable {
         self.processSignaller = processSignaller
         self.clock = clock
         self.now = now
-        self.tmuxSocketPathResolver = tmuxSocketPathResolver
         self.transcriptFingerprinter = transcriptFingerprinter
         self.transcriptDeltaInspector = transcriptDeltaInspector
         self.paneProcessInspector = paneProcessInspector
@@ -538,8 +529,6 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalContinueInCodex(request.paramsData, actor: request.actor)
             case RPCMethod.terminalList:
                 return try await handleTerminalList(request.paramsData)
-            case RPCMethod.terminalAttachCommand:
-                return try await handleTerminalAttachCommand(request.paramsData)
             case RPCMethod.terminalSend:
                 // The ONE case that is handed the connection, because it is the
                 // one that makes an authorization decision on it.

@@ -46,7 +46,7 @@ current-window pointer.
    aborts the rest of the command chain, and the viewer session is left holding
    a stray `/tmp` shell alongside the window it wanted. `kill-window -a -t
    <session>:@<id>` — kill everything except the target — is base-index
-   independent and is what the external-attach command uses.
+   independent.
 4. **SwiftTerm** spawns `tmux -u attach -t tbd-view-<uuid>` in a native PTY via
    `LocalProcess`
 5. **On hide**: `tmux kill-session -t tbd-view-<uuid>` — the viewer session
@@ -203,9 +203,9 @@ tbd-ext-abcd1234` destroyed `tbd-ext-abcd1234-notes` and exited 0.
 Prefix the target with `=` to demand an exact match. Two target kinds need a
 trailing colon as well — `set-option` and `if-shell` take a *pane* target, so
 `'=<name>'` either errors or silently takes the wrong branch, and `'=<name>:'`
-is required. TBD's external-attach path pins every session target this way;
-`TmuxBridge`'s viewer commands do not, which is safe only because a
-`tbd-view-<8hex>` prefix collision would have to be created by hand.
+is required. `TmuxBridge`'s viewer commands do not pin their targets, which
+is safe only because a `tbd-view-<8hex>` prefix collision would have to be
+created by hand.
 
 ### Linking windows
 
