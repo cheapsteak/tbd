@@ -110,8 +110,13 @@ extension RPCRouter {
             executablePath: preparation.executablePath,
             profileFlag: profileFlag)
 
+        // The transport gate, the same one every other spawn path asks. Codex
+        // is never routed through the model proxy, so there is no attachment
+        // to decide before the command above was composed.
+        let transport = TerminalSpawnTransport.decide(config: config, registry: holderRegistry)
+
         // The import above created Codex state but touched no session; the
-        // tmux calls below are the actuation, so the row goes here.
+        // spawn below is the actuation, so the row goes here.
         let actuationID = try await beginActuation(
             .terminalContinueInCodex, actor: actor,
             target: .local(worktree: worktree.id, terminal: plannedTerminalID),
@@ -122,37 +127,26 @@ extension RPCRouter {
             terminal = try await tmux.withWorktreeServerLock(
                 db: db, worktreeID: worktree.id, allowedStatuses: [worktree.status]
             ) { currentWorktree in
-                _ = try await tmux.ensureServer(
-                    server: currentWorktree.tmuxServer,
-                    session: "main",
-                    cwd: currentWorktree.path,
-                    cols: TmuxManager.defaultCols,
-                    rows: TmuxManager.defaultRows)
-                await self.controlMode?.enableIfGated(
-                    serverName: currentWorktree.tmuxServer)
-                let window = try await tmux.createWindow(
-                    server: currentWorktree.tmuxServer,
-                    session: "main",
-                    cwd: currentWorktree.path,
-                    shellCommand: command,
+                try await prepareTmuxServer(
+                    for: transport, worktree: currentWorktree,
+                    cols: TmuxManager.defaultCols, rows: TmuxManager.defaultRows)
+                return try await lifecycle.spawnTerminal(
+                    id: plannedTerminalID,
+                    worktreeID: currentWorktree.id,
+                    tmuxServer: currentWorktree.tmuxServer,
+                    workingDirectory: currentWorktree.path,
+                    command: command,
                     env: codexEnv,
                     sensitiveEnv: sensitiveEnv,
                     cols: TmuxManager.defaultCols,
-                    rows: TmuxManager.defaultRows)
-                do {
-                    return try await db.terminals.create(
-                        id: plannedTerminalID,
-                        worktreeID: currentWorktree.id,
-                        tmuxWindowID: window.windowID,
-                        tmuxPaneID: window.paneID,
-                        label: TerminalLabel.codex,
-                        kind: .codex)
-                } catch {
-                    try? await tmux.killWindow(
-                        server: currentWorktree.tmuxServer,
-                        windowID: window.windowID)
-                    throw error
-                }
+                    rows: TmuxManager.defaultRows,
+                    label: TerminalLabel.codex,
+                    claudeSessionID: nil,
+                    profileID: nil,
+                    kind: .codex,
+                    transport: transport,
+                    attachment: nil,
+                    modelProxySupervisor: modelProxySupervisor)
             }
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")

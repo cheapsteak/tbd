@@ -922,6 +922,21 @@ flag with a soak and a stated graduation plan.
   and respawn. Live migration (extracting a pty from a running tmux server)
   is rejected; see below.
 
+  The sessions the flag reaches ask it through one gate
+  (`TerminalSpawnTransport.decide`) and spawn through one function
+  (`WorktreeLifecycle.spawnTerminal`): the primary terminal at worktree
+  creation, and the extra terminals `terminal.create` and
+  `terminal.continueInCodex` open — Claude, Codex and shell alike, since the
+  holder runs any command. A wake respawns onto the transport its row
+  recorded. Every other tab still opens on tmux whatever the flag says, and
+  each has its own reason: a profile login tab, because its auto-`/login`
+  pump reads and types through a tmux pane; the setup and pre-session hook
+  tabs, which are hook runners rather than agent surfaces; restored archived
+  sessions, revive-from-history tabs and fork-session tabs, which are not yet
+  ported. Those still spawn through the same function, with the transport
+  pinned to tmux, so the flag reaching them later is a one-line change at
+  each site rather than a second spawn implementation.
+
   The flag therefore gates **spawning, not servicing**: the flag is consulted
   only when a session is created, and both transports' machinery (attach
   paths, the daemon's arbitration and drain, each reconciler's ground-truth
