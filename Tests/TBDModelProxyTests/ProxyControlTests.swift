@@ -210,6 +210,18 @@ extension ModelProxySuites {
                                 Failure(
                                     "the retire handshake could not be observed: \(what)"))
                         }
+                    case .unidentified(let what):
+                        // Failed, not excused: nobody was identified, so a proxy
+                        // that answered before it closed is still one of the
+                        // explanations and excusing this would be the way it got
+                        // through.
+                        Issue.record(
+                            Failure(
+                                """
+                                the port was not free when the retire answered and its holder \
+                                would not identify itself — a proxy that answered before it \
+                                closed is still one explanation: \(what)
+                                """))
                     }
                 },
                 // Everything here used to be the back half of `body`, stacked
@@ -322,7 +334,15 @@ extension ModelProxySuites {
                                     \(holder)
                                     """))
                         }
-                        await successor.stop()
+                        // Its own named deadline like every other blocking step
+                        // in `afterRequest`, and for the reason `withProxy`'s
+                        // teardown wraps the identical call: `ProxyServer.stop()`
+                        // closes a listener and then shuts an event-loop group
+                        // down, and outside "request"'s 60 seconds there is no
+                        // outer bound left to catch a wedge in either.
+                        _ = try await withPhaseDeadline("successor stop", seconds: 20) {
+                            await successor.stop()
+                        }
                     }
 
                     // No stream was cut: every scripted event still arrives. Its
@@ -819,16 +839,28 @@ enum ProxyPortHolder: Sendable, CustomStringConvertible {
     /// say all three, so this is the regression the handshake forbids.
     case theProxyUnderTest(pid: Int32)
 
-    /// Something answered and it is not the proxy under test — a peer test's
-    /// listener holding the number this retire just freed. No claim about the
-    /// handshake survives it, and no bind can take a port a stranger holds.
+    /// Somebody else was **positively identified**: either a proxy status
+    /// naming a different pid, port or home, or a holder that had already let
+    /// go by the time the status leg reached it — which the proxy under test
+    /// cannot have been, since it stays alive until teardown. This is the only
+    /// verdict that excuses the observation, and it is reached by recognising a
+    /// stranger rather than by failing to recognise anybody.
     case aStranger(String)
+
+    /// Something is listening and would not say who. The catch-all deliberately
+    /// does **not** land in `.aStranger`: an excused bucket that swallows every
+    /// unexplained answer is the one route by which a broken handshake could
+    /// pass, and this verdict fails the test rather than take that risk. The
+    /// message carries what was actually seen, so a genuine stranger that turns
+    /// up here can be reclassified on evidence instead of by default.
+    case unidentified(String)
 
     var description: String {
         switch self {
         case .nobody: return "nothing is listening on it"
         case .theProxyUnderTest(let pid): return "the proxy under test (pid \(pid)) is listening on it"
         case .aStranger(let what): return what
+        case .unidentified(let what): return what
         }
     }
 }
@@ -855,7 +887,8 @@ func portHolder(port: Int, home: String) async -> ProxyPortHolder {
             for: controlRequest(port: port, method: "GET", path: "/tbd/status"))
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard code == 200, let reported = try? ModelProxyStatus.decodeStatusResponse(data) else {
-            return .aStranger("something answered HTTP \(code) on \(port), not a proxy status")
+            return .unidentified(
+                "something is listening on \(port) and answered HTTP \(code), not a proxy status")
         }
         // All three, not any one: a peer harness in this same process reports
         // the same pid and the same "test" version, and only its home and the
@@ -869,7 +902,17 @@ func portHolder(port: Int, home: String) async -> ProxyPortHolder {
         }
         return .theProxyUnderTest(pid: reported.pid)
     } catch {
-        return .aStranger("something accepted a connection on \(port) and answered nothing: \(error)")
+        // The two probes are two separate connects, so a holder can let go
+        // between them — and a port that refuses now was not held by the proxy
+        // under test, which stays listening until this test tears it down.
+        // Asking again is what keeps that ordinary race out of the verdict that
+        // fails the build, without widening it into a catch-all.
+        guard !connectRefused(port: port) else {
+            return .aStranger(
+                "something held \(port) for one connect and had let go by the next: \(error)")
+        }
+        return .unidentified(
+            "something is listening on \(port) and answered nothing: \(error)")
     }
 }
 
