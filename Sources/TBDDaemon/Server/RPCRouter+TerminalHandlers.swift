@@ -4004,6 +4004,60 @@ extension RPCRouter {
         if let sessionID, terminal.claudeSessionID != sessionID {
             return .refused(.targetMismatch)
         }
+        // ─── The holder transport's re-delivery ───
+        //
+        // A holder row has no pane to consult and no tmux server to paste
+        // through; it re-injects through the same courier the first send used.
+        // Everything the tmux arm below reaches for — `worktree.tmuxServer`,
+        // `consultPaneBeforeTyping`, `tmux.pasteText` — is meaningless here, so
+        // the retry lives entirely in this branch and returns before that body.
+        if terminal.transport == .holder {
+            // No courier means no input path at all — the same condition
+            // `performHolderSend` turns into `holderInputUnavailable`, which it
+            // classifies as `.notEligible` (via `refuseHolderSend`). The retry
+            // classifies it the same way rather than as a transport failure it
+            // never actually attempted.
+            guard let courier = holderInjectionCourier else {
+                return .refused(.notEligible)
+            }
+            // A child the holder has already reported dead cannot receive a
+            // retry. Only a reported `.exited` refuses — `.alive`,
+            // `.exitedStatusUnknown` and a status never reported (nil) are all
+            // uncertainty, and uncertainty proceeds: the courier's own write is
+            // the authority on whether the pty still takes bytes.
+            if case .exited = await holderRegistry?.lastKnownStatus(for: terminalID) {
+                return .refused(.notEligible)
+            }
+            // Recompose the paste-wrapping from a FRESH reading rather than
+            // replaying the exact bytes the first send wrote. A minute has
+            // passed since the observation, and the child's bracketed-paste
+            // mode can have flipped in it — a viewer attaching or detaching, a
+            // full-screen redraw — so the wrapping the first send baked in may
+            // now be wrong for the pty as it stands. `payload` is the composed
+            // body (envelope and text, before any paste marker), so it is the
+            // `body` argument here and takes no second envelope; only the
+            // wrapping is recomputed, exactly as `deliverHolderText` composes it.
+            let reading = await holderModeReading(terminalID: terminalID)
+            let message = HolderSendComposition.compose(
+                body: payload, submit: submit,
+                bracketedPaste: HolderSendComposition.bracketedPaste(
+                    for: reading, unobservedShouldWrap: Self.carriesDispatchEnvelope(terminal)))
+            // An empty composition has no delivery to redo — `--text "" --submit`
+            // composes to a bare Enter with no body, and a body that was only
+            // paste markers composes to nothing at all. `deliverHolderText`
+            // treats the same emptiness as `.dispatched`; the retry returns the
+            // same, because there is nothing to re-deliver — not because a write
+            // succeeded. Verification is NOT re-armed here: this call IS the
+            // verifier's retry, and re-arming would make it observe its own
+            // re-delivery and retry that in turn.
+            guard !message.isEmpty else { return .dispatched }
+            switch await courier.deliver(terminalID: terminalID, bytes: message) {
+            case .viewerWrote, .daemonWrote:
+                return .dispatched
+            case .notDelivered:
+                return .transportFailed
+            }
+        }
         let outcome: ActuationOutcome
         do {
             outcome = try await terminalSendSerializer.run(terminalID: terminalID) {
