@@ -3733,6 +3733,20 @@ extension RPCRouter {
         // An explicit `--verify` keeps its existing meaning on both transports,
         // suppression included: that combination is the caller's own, it
         // predates this arm, and changing it is not this change's business.
+        //
+        // **`actor.kind` is a declaration, not an authentication**, and this is
+        // the first place in the tree that branches behavior on it rather than
+        // only labeling a row — so the assumption is stated rather than
+        // enforced. Any process on the daemon socket can call itself `daemon`
+        // (see `ActuationActor`'s own doc: "ambient declaration, never
+        // authentication"), and one that does, on a send whose envelope rides,
+        // reaches this branch. What it gets is bounded to what a rail gets: an
+        // observation it did not ask for, and at most one re-delivery of its
+        // own message. Nothing here refuses, deletes, or redirects on the
+        // strength of the claim, so the fail-open shape is the same as
+        // everywhere else this field is read. The envelope-suppression check
+        // the daemon DOES authenticate is `authenticatesEnvelopeSuppression`,
+        // and it stays the one gate that requires proof.
         let envelopeWillRide = envelopeEligible && envelope == .attached
             && Self.carriesDispatchEnvelope(terminal) && !text.isEmpty
         let effectiveVerifyArmed = payload.isVerifyArmed
