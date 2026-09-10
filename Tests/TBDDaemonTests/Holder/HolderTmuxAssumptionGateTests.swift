@@ -1811,8 +1811,15 @@ struct HolderTmuxAssumptionGateTests {
         #expect(outcome["modeAgeMilliseconds"] as? Int == 0)
     }
 
-    @Test("terminal.send --verify refuses a holder row by naming verification")
-    func sendVerifyRefusesHolderRow() async throws {
+    /// **`--verify` is no longer a transport refusal.** It is refused here for
+    /// the reason it is refused on a tmux row with the same config:
+    /// `delivery_verification_enabled` is off, which is the shipped default and
+    /// what an in-memory database seeds. The refusal names the flag and the RPC
+    /// that flips it — never the transport, because a caller told "this
+    /// transport has no delivery observation" would stop asking for one when it
+    /// now works. Nothing is typed, and no tmux command is issued.
+    @Test("terminal.send --verify refuses a holder row by naming the flag, not the transport")
+    func sendVerifyRefusesHolderRowWhileTheFlagIsOff() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxArgs()
         let tmux = deadWindowTmux(recorded)
@@ -1830,10 +1837,13 @@ struct HolderTmuxAssumptionGateTests {
                 terminalID: terminal.id, text: "hello", submit: true, verify: true)))
 
         #expect(!response.success)
-        #expect(response.error == RPCRouter.holderVerifyRefusal(terminalID: terminal.id))
-        // What is missing is the OBSERVATION, not the transport — a caller told
-        // "this transport cannot be typed into" would stop trying.
-        #expect(response.error?.contains("delivery observation") == true)
+        let message = try #require(response.error)
+        #expect(message.contains("delivery verification is disabled"))
+        #expect(message.contains("config.delivery_verification_enabled is off"))
+        #expect(message.contains("config.setDeliveryVerification"))
+        // What is missing is the FLAG, not the transport — a caller told "this
+        // transport has no delivery observation" would stop asking for one.
+        #expect(!message.contains("pty-holder"))
         #expect(writes.all.isEmpty, "a refused verify must type nothing")
         #expect(recorded.snapshot().isEmpty)
     }
