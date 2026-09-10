@@ -3717,9 +3717,28 @@ extension RPCRouter {
         // reaches no transcript for an observation to read. Every precondition
         // the daemon default needs is carried in the term itself — see the
         // gate's comment for why it arms rather than refuses.
+        //
+        // **The envelope is one of those preconditions.** The observation
+        // searches the transcript for this row's dispatch id and for nothing
+        // else (`DeliveryVerifier.envelopeAppears`), so a send that carries no
+        // envelope is one it cannot possibly find: arming that would guarantee
+        // a not-landed verdict at the deadline and spend the single
+        // evidence-bounded retry re-typing the message into the session a
+        // second time. And the queued-prompt rail — the production caller this
+        // default is for — sends `.suppressed` by design, so the operator's own
+        // words arrive byte-identically. It therefore goes unarmed, the same
+        // way a target that cannot be observed does. Spelled exactly as
+        // `deliverHolderText` spells it when it decides whether to compose one.
+        //
+        // An explicit `--verify` keeps its existing meaning on both transports,
+        // suppression included: that combination is the caller's own, it
+        // predates this arm, and changing it is not this change's business.
+        let envelopeWillRide = envelopeEligible && envelope == .attached
+            && Self.carriesDispatchEnvelope(terminal) && !text.isEmpty
         let effectiveVerifyArmed = payload.isVerifyArmed
             || (actor?.kind == ActuationActor.Kind.daemon && verifyEnabled
-                && Self.supportsDeliveryObservation(terminal) && deliveryVerifier != nil)
+                && Self.supportsDeliveryObservation(terminal) && deliveryVerifier != nil
+                && envelopeWillRide)
         return await deliverHolderText(
             text, submit: submit, terminal: terminal, actuationID: actuationID,
             actor: actor, envelope: envelope, envelopeEligible: envelopeEligible,
