@@ -3644,9 +3644,6 @@ extension RPCRouter {
                 return await refuseHolderSend(actuationID, message)
             }
         }
-        let effectiveVerifyArmed = payload.isVerifyArmed
-            || (actor?.kind == ActuationActor.Kind.daemon && verifyEnabled
-                && Self.supportsDeliveryObservation(terminal) && deliveryVerifier != nil)
         let text: String
         let submit: Bool
         // Whether `text` is allowed to carry the dispatch envelope at all,
@@ -3714,6 +3711,15 @@ extension RPCRouter {
                     terminalID: terminal.id, cause: "a message in more than one part"))
         }
 
+        // Resolved HERE rather than beside the gate above, so it cannot outlive
+        // the payload shapes it means anything for: a `.keys` payload has
+        // already returned through `deliverHolderKeys`, and a key sequence
+        // reaches no transcript for an observation to read. Every precondition
+        // the daemon default needs is carried in the term itself — see the
+        // gate's comment for why it arms rather than refuses.
+        let effectiveVerifyArmed = payload.isVerifyArmed
+            || (actor?.kind == ActuationActor.Kind.daemon && verifyEnabled
+                && Self.supportsDeliveryObservation(terminal) && deliveryVerifier != nil)
         return await deliverHolderText(
             text, submit: submit, terminal: terminal, actuationID: actuationID,
             actor: actor, envelope: envelope, envelopeEligible: envelopeEligible,
