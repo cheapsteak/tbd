@@ -3663,8 +3663,8 @@ extension RPCRouter {
                 // So this refuses while an envelope would be attached, and
                 // delivers the bare path when none would be — an authenticated
                 // suppression, or a row that carries no envelope at all.
-                // PR #816's bracketed-paste wrapping lifts it, exactly as it
-                // lifts the composite refusal.
+                // How one write could frame both the image and the envelope
+                // attributing it is deliberately out of scope until a spec settles it.
                 guard envelope != .attached || !Self.carriesDispatchEnvelope(terminal) else {
                     return await refuseHolderSend(
                         actuationID, Self.holderCompositeRefusal(
