@@ -91,8 +91,10 @@ struct HolderVerifiedSendTests {
             == Self.expected(body: armed.deliveredPayload, wrapped: true, submit: true))
     }
 
-    /// The off branch of the same conditional: a send that did not ask for
-    /// verification arms nothing, even with the flag on and a verifier wired.
+    /// The off branch of the same conditional: a send from a person's app that
+    /// did not ask for verification arms nothing, even with the flag on and a
+    /// verifier wired. Only the daemon's own rails get the default (below); a
+    /// person or a script keeps opting in per send.
     @Test("a verify-less send to a holder row arms nothing")
     func aVerifylessHolderSendArmsNothing() async throws {
         let writes = HolderVerifyWriteRecorder()
@@ -111,16 +113,23 @@ struct HolderVerifiedSendTests {
         #expect(armings.armings.isEmpty)
     }
 
-    /// **Arming is the caller's decision on both transports.** A daemon rail's
-    /// own send is not armed behind the caller's back merely because the flag is
-    /// on: that would spend the mechanism's one retry re-injecting input nobody
-    /// asked to have verified, and it would make the two transports disagree
-    /// about what the same rail's send does.
+    /// **The daemon's own rails arm verification by default — on holder only.**
     ///
-    /// Asserted for holder and tmux side by side, because "the two agree" is the
-    /// property, not "holder happens to be quiet".
-    @Test("a daemon rail's unverified send arms nothing on either transport")
-    func aDaemonRailSendArmsNothingOnEitherTransport() async throws {
+    /// The rails are the senders whose silence costs hours: nobody is watching
+    /// the screen when a desk nudges an agent at three in the morning, and the
+    /// record is the only witness. So a rail's send to a holder-backed agent
+    /// session is armed without `--verify` whenever the flag is on. A rail
+    /// sending to a **tmux** session keeps today's per-send opt-in: that arm
+    /// already delivers with explicit bracketing and a separate Enter, so it
+    /// lacks the failure shape that motivates the default, and widening the
+    /// soak to both transports at once widens the blast radius of any
+    /// re-delivery bug to the whole fleet. Both halves are stated in
+    /// `docs/specs/2026-09-05-child-as-contract-party-design.md`, "Delivery
+    /// verification on holder sends" → "What changes".
+    ///
+    /// The asymmetry is the property, so both legs are asserted here.
+    @Test("a daemon rail's send is armed by default on holder and not on tmux")
+    func aDaemonRailSendIsArmedByDefaultOnHolderOnly() async throws {
         let writes = HolderVerifyWriteRecorder()
         let holder = try await SendHarness.make(
             transport: .holder, holderDeliveryRecorder: { writes.record($0) })
@@ -139,13 +148,63 @@ struct HolderVerifiedSendTests {
             TerminalSendParams(terminalID: tmux.terminal.id, text: "nudge", submit: true),
             actor: .daemon(rail: "queued-prompt"))
 
-        // Both delivered, neither armed.
         #expect(holderResponse.success, "error was: \(holderResponse.error ?? "none")")
         #expect(tmuxResponse.success, "error was: \(tmuxResponse.error ?? "none")")
         #expect(writes.writes.count == 1)
         #expect(tmux.tmux.pastedBodies.count == 1)
-        #expect(holderArmings.armings.isEmpty)
+        // Armed on holder, on the same composed body an explicit `--verify`
+        // would have armed.
+        #expect(holderArmings.armings.count == 1)
+        let armed = try #require(holderArmings.armings.first)
+        #expect(armed.deliveredPayload.hasSuffix("\nnudge"))
+        #expect(armed.terminalID == holder.terminal.id)
+        // Not armed on tmux: the per-send opt-in stands there.
         #expect(tmuxArmings.armings.isEmpty)
+    }
+
+    /// **The default does not fire where nothing could be observed, and does not
+    /// refuse there either.** A shell holder row is still served by the oracle
+    /// — bare bytes — so a rail's send to one goes through unarmed rather than
+    /// hitting the "only a Claude session can be observed" refusal, which is
+    /// reachable only from an explicit `--verify`.
+    @Test("a daemon rail's send to a holder shell row proceeds unarmed rather than refusing")
+    func aDaemonRailSendToAHolderShellRowIsUnarmed() async throws {
+        let writes = HolderVerifyWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, kind: .shell,
+            holderDeliveryRecorder: { writes.record($0) })
+        try await harness.db.config.setDeliveryVerification(enabled: true)
+        let armings = ArmingRecorder()
+        harness.router.deliveryVerifier = armings
+
+        let response = try await harness.send(
+            TerminalSendParams(terminalID: harness.terminal.id, text: "nudge", submit: true),
+            actor: .daemon(rail: "queued-prompt"))
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(writes.writes == [Self.expected(body: "nudge", wrapped: false, submit: true)])
+        #expect(armings.armings.isEmpty)
+    }
+
+    /// And the flag is still the switch: with `delivery_verification_enabled`
+    /// off — the shipped default — a rail's holder send arms nothing, so the
+    /// default arming has an off branch and it is the shipped one.
+    @Test("a daemon rail's holder send arms nothing while the flag is off")
+    func aDaemonRailSendArmsNothingWithTheFlagOff() async throws {
+        let writes = HolderVerifyWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { writes.record($0) })
+        #expect(try await harness.db.config.get().deliveryVerificationEnabled == false)
+        let armings = ArmingRecorder()
+        harness.router.deliveryVerifier = armings
+
+        let response = try await harness.send(
+            TerminalSendParams(terminalID: harness.terminal.id, text: "nudge", submit: true),
+            actor: .daemon(rail: "queued-prompt"))
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(writes.writes.count == 1)
+        #expect(armings.armings.isEmpty)
     }
 
     // MARK: - The three states in which no observation could be produced
