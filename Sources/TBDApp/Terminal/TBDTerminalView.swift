@@ -509,6 +509,26 @@ class TBDTerminalView: TerminalView {
         return (col, row)
     }
 
+    /// Converts a window-coordinate point to terminal grid (col, row), clamping
+    /// a point outside the grid to the nearest cell instead of failing.
+    ///
+    /// The view's bounds are a little larger than the grid: there is a slack
+    /// strip below the last row and a sliver right of the last column. A caller
+    /// that must act on every event landing inside the view — the scroll
+    /// monitor, which may not decline an event — needs a cell for those points
+    /// too. `gridPosition(atWindowLocation:)` keeps its `nil` for callers that
+    /// genuinely want "not on a cell".
+    func gridPositionClamped(atWindowLocation windowPoint: CGPoint) -> (col: Int, row: Int) {
+        let dims = terminalDimensions
+        return TerminalWheelRouting.clampedGrid(
+            localPoint: convert(windowPoint, from: nil),
+            boundsHeight: bounds.height,
+            cell: cellDimensions(),
+            cols: dims.cols,
+            rows: dims.rows
+        )
+    }
+
     // MARK: - Mouse click pass-through
     // Track mouseDown position to distinguish clicks from drags.
     // Single clicks are forwarded to tmux for pane switching;

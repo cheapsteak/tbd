@@ -1553,6 +1553,20 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // in TBDTerminalView. Instead, a local event monitor intercepts
             // scroll events and forwards them to tmux as mouse button presses.
             //
+            // The monitor may never hand an event back once it has decided the
+            // event is ours (pointer inside a visible terminal, no overlay).
+            // We turn SwiftTerm's own mouse reporting off (`allowMouseReporting
+            // = false` at attach), and its `scrollWheel` reacts to that by
+            // falling back to alternate-screen scrolling: it synthesizes Up /
+            // Down cursor keys. tmux drives the outer terminal on the alternate
+            // screen, so that fallback fires every time, and the keys land in
+            // the pane as if typed — Claude Code's composer reads Up as prompt
+            // history, so a scroll wipes out whatever draft was in the box.
+            // TerminalWheelRouting therefore classifies every event as forward
+            // (send mouse buttons to tmux) or swallow (drop it); only events
+            // that are not ours pass through. Do not reintroduce a decline path
+            // for events over the terminal.
+            //
             // Visibility filter: the `tv.window != nil` guard inside the
             // closure rejects events when the terminal isn't currently part of
             // the visible UI. This is load-bearing for the worktree keep-alive
@@ -1568,35 +1582,56 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             let ref = WeakTerminalRef(terminalView)
             scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
                 let deltaY = event.deltaY
+                let scrollingDeltaY = event.scrollingDeltaY
                 let location = event.locationInWindow
-                guard deltaY != 0 else { return event }
 
                 let consumed = MainActor.assumeIsolated { [weak self] in
                     guard let self else { return false }
                     guard let tv = ref.view as? TBDTerminalView else { return false }
                     guard tv.window != nil else { return false }
-                    // Short-circuit when a SwiftUI overlay is open on top of this
-                    // terminal — pass the event through so the overlay can handle it.
-                    if self.shouldSuppressEvents() { return false }
-                    let point = tv.convert(location, from: nil)
-                    guard tv.bounds.contains(point) else { return false }
+                    // An overlay on top of this terminal owns the event, and so
+                    // does whatever sits under a pointer outside our bounds.
+                    let overlayOpen = self.shouldSuppressEvents()
+                    let pointerInside = tv.bounds.contains(tv.convert(location, from: nil))
+
+                    // Reject somebody else's event before taking the terminal
+                    // lock. Whether the event passes through never depends on
+                    // mouse reporting, so the placeholder below cannot change
+                    // this answer — it only distinguishes forward from swallow.
+                    guard TerminalWheelRouting.disposition(
+                        deltaY: deltaY,
+                        scrollingDeltaY: scrollingDeltaY,
+                        overlayOpen: overlayOpen,
+                        pointerInside: pointerInside,
+                        mouseReportingOn: false
+                    ) != .passThrough else { return false }
 
                     // Use actual scroll position so tmux routes to the correct pane.
                     // Grid math runs OUTSIDE the lock (view API); the mouseMode
-                    // guard and the sends ride one `withTerminal` block — the
+                    // read and the sends ride one `withTerminal` block — the
                     // same calls, under the same lock, as SwiftTerm's own
-                    // native mouse-reporting path.
-                    guard let (col, row) = tv.gridPosition(atWindowLocation: location) else { return false }
+                    // native mouse-reporting path. The position is clamped
+                    // rather than nil-checked: the slack strip below the last
+                    // row is still inside the terminal, and declining a wheel
+                    // event there would hand it to SwiftTerm's cursor keys.
+                    let (col, row) = tv.gridPositionClamped(atWindowLocation: location)
 
-                    let isUp = deltaY > 0
-                    let lines = max(1, Int(abs(deltaY)))
                     return tv.withTerminal { term -> Bool in
-                        guard term.mouseMode != .off else { return false }
+                        let disposition = TerminalWheelRouting.disposition(
+                            deltaY: deltaY,
+                            scrollingDeltaY: scrollingDeltaY,
+                            overlayOpen: overlayOpen,
+                            pointerInside: pointerInside,
+                            mouseReportingOn: term.mouseMode != .off
+                        )
+                        // Anything that reaches here is ours, so it is consumed
+                        // either way; `.swallow` just has nothing to send.
+                        guard case let .forward(button, count) = disposition else { return true }
                         let buttonFlags = term.encodeButton(
-                            button: isUp ? 4 : 5,
+                            button: button,
                             release: false, shift: false, meta: false, control: false
                         )
-                        for _ in 0..<lines {
+                        for _ in 0..<count {
                             term.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
                         }
                         return true
