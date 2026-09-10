@@ -3497,11 +3497,13 @@ extension RPCRouter {
     /// pane, so it is transport-blind. The daemon's own supervision rails arm
     /// it by default whenever `delivery_verification_enabled` is on — a
     /// holder-transport rule the child-as-contract-party design states
-    /// deliberately. The gate near the top of this function refuses only the
-    /// three states in which no observation could be produced — an explicit
-    /// `--verify` at a target with no transcript, the flag off, or no verifier
-    /// wired — mirroring the tmux arm's gate. `--keys` composes through
-    /// `deliverHolderKeys`, which owns the named-key → bytes mapping.
+    /// deliberately — and it arms opportunistically, never refusing a rail's
+    /// send for a mechanism the rail did not ask for. The gate near the top of
+    /// this function refuses only an EXPLICIT `--verify` in the three states in
+    /// which no observation could be produced — a target with no transcript,
+    /// the flag off, or no verifier wired — mirroring the tmux arm's gate.
+    /// `--keys` composes through `deliverHolderKeys`, which owns the named-key
+    /// → bytes mapping.
     ///
     /// A daemon with no courier has no input path at all, and says so.
     ///
@@ -3589,17 +3591,30 @@ extension RPCRouter {
         // `effectiveVerifyArmed` folds both in, and the arm seam in
         // `deliverHolderText` reads the same value.
         //
-        // The daemon-default term carries `supportsDeliveryObservation` so it
-        // stays false for a shell holder: a shell is still SERVED by the oracle
-        // (bare bytes), it just cannot be observed, so a daemon rail's send to
-        // one proceeds unarmed rather than refusing. Only an explicit `--verify`
-        // on a shell reaches the first refusal below — because only then is
-        // `effectiveVerifyArmed` true while the target cannot be observed.
-        let verifyEnabled = (try? await db.config.get())?.deliveryVerificationEnabled ?? false
-        let effectiveVerifyArmed = payload.isVerifyArmed
-            || (actor?.kind == ActuationActor.Kind.daemon
-                && verifyEnabled && Self.supportsDeliveryObservation(terminal))
-        if effectiveVerifyArmed {
+        // **Only an explicit `--verify` can be REFUSED here; the default arms
+        // opportunistically and never refuses.** The three checks below exist
+        // to keep a caller that asked for evidence from being handed a silence
+        // that reads like confirmation — and a rail that did not ask has no
+        // such expectation to protect. So they gate on `payload.isVerifyArmed`,
+        // and the default term carries every precondition itself: a rail's
+        // ordinary send to a shell holder, or during the window between the
+        // flag going on and the daemon restarting to wire a verifier, proceeds
+        // UNARMED rather than failing closed. A supervision send that refuses
+        // because supervision's own witness is not ready is the exact failure
+        // this design exists to prevent.
+        //
+        // `supportsDeliveryObservation` is one of those preconditions: a shell
+        // is still SERVED by the oracle (bare bytes), it just cannot be
+        // observed.
+        //
+        // The config column is read only when the send could arm — an explicit
+        // `--verify`, or a daemon actor — so an ordinary app or CLI send pays
+        // no read, the same economy the tmux gate keeps.
+        let mayArm = payload.isVerifyArmed || actor?.kind == ActuationActor.Kind.daemon
+        let verifyEnabled = mayArm
+            ? ((try? await db.config.get())?.deliveryVerificationEnabled ?? false)
+            : false
+        if payload.isVerifyArmed {
             if !Self.supportsDeliveryObservation(terminal) {
                 let kindName = (terminal.kind ?? .shell).rawValue
                 let message = """
@@ -3629,6 +3644,9 @@ extension RPCRouter {
                 return await refuseHolderSend(actuationID, message)
             }
         }
+        let effectiveVerifyArmed = payload.isVerifyArmed
+            || (actor?.kind == ActuationActor.Kind.daemon && verifyEnabled
+                && Self.supportsDeliveryObservation(terminal) && deliveryVerifier != nil)
         let text: String
         let submit: Bool
         // Whether `text` is allowed to carry the dispatch envelope at all,
