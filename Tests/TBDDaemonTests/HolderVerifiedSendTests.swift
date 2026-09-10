@@ -211,6 +211,36 @@ struct HolderVerifiedSendTests {
         #expect(writes.writes.count == 1)
     }
 
+    /// **A send that carries no dispatch envelope is never armed by the
+    /// default.** The observation searches the transcript for this row's
+    /// dispatch id and for nothing else, so an envelope-suppressed send is one
+    /// it cannot possibly find: arming it would guarantee a not-landed verdict
+    /// at the deadline and spend the single retry re-typing the message into
+    /// the session a second time.
+    ///
+    /// Driven through `sendQueuedPromptVerbatim` — the real production caller,
+    /// and the only caller of `.suppressed` — rather than through the RPC entry
+    /// point, which resolves the disposition to `.attached` and so would never
+    /// reach this shape.
+    @Test("a queued prompt's envelope-suppressed send is delivered verbatim and arms nothing")
+    func aQueuedPromptSendArmsNothing() async throws {
+        let writes = HolderVerifyWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { writes.record($0) })
+        try await harness.db.config.setDeliveryVerification(enabled: true)
+        let armings = ArmingRecorder()
+        harness.router.deliveryVerifier = armings
+
+        let delivered = await harness.router.sendQueuedPromptVerbatim(
+            terminalID: harness.terminal.id, text: "the operator's own words", submit: true)
+
+        #expect(delivered)
+        // Verbatim: no envelope in the bytes, hence nothing to observe.
+        #expect(writes.writes
+            == [Self.expected(body: "the operator's own words", wrapped: false, submit: true)])
+        #expect(armings.armings.isEmpty)
+    }
+
     /// And the flag is still the switch: with `delivery_verification_enabled`
     /// off — the shipped default — a rail's holder send arms nothing, so the
     /// default arming has an off branch and it is the shipped one.
