@@ -73,10 +73,14 @@ public enum RateLimitDetection {
         timeZone: TimeZone
     ) -> DetectedRateLimit? {
         let text = entry.text ?? ""
+        var structuredLimitType: String? = nil
 
         // 1. Structured first.
         if let info = entry.rateLimitInfo,
            (info["status"] as? String) == "rejected" {
+            // Preserve the structured limitType for use in text-fallback path.
+            structuredLimitType = info["rateLimitType"] as? String
+
             let epoch: Double?
             if let d = info["resetsAt"] as? Double {
                 epoch = d
@@ -88,14 +92,27 @@ public enum RateLimitDetection {
             if let epoch {
                 return DetectedRateLimit(
                     resetsAt: Date(timeIntervalSince1970: epoch),
-                    limitType: (info["rateLimitType"] as? String) ?? "unknown",
+                    limitType: structuredLimitType ?? "unknown",
                     rawMessage: text
                 )
             }
+            // resetsAt was not numeric: fall through to text parsing below.
         }
 
         // 2. Text fallback.
-        return detect(messageText: text, now: now, timeZone: timeZone)
+        if let textLimit = detect(messageText: text, now: now, timeZone: timeZone) {
+            // If we had a structured limitType from a rejected record with a non-numeric
+            // resetsAt, use that type instead of the text-derived one.
+            if let structuredType = structuredLimitType {
+                return DetectedRateLimit(
+                    resetsAt: textLimit.resetsAt,
+                    limitType: structuredType,
+                    rawMessage: text
+                )
+            }
+            return textLimit
+        }
+        return nil
     }
 
     /// Text-only discrimination + parse — the single shared implementation
