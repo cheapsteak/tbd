@@ -5,14 +5,21 @@ import TBDShared
 private let continueInCodexLogger = Logger(
     subsystem: "com.tbd.daemon", category: "continue-in-codex")
 
-private enum ContinueInCodexHandlerError: LocalizedError {
+/// Conforms to `CustomStringConvertible` as well as `LocalizedError` because
+/// `RPCRouter.handle` renders a thrown error with `"\(error)"`. A
+/// `LocalizedError`-only enum would surface as `userFacing("…")` in the app
+/// alert and in `tbd terminal continue-in-codex` output.
+private enum ContinueInCodexHandlerError: Error, CustomStringConvertible,
+    LocalizedError {
     case userFacing(String)
 
-    var errorDescription: String? {
+    var description: String {
         switch self {
         case .userFacing(let message): return message
         }
     }
+
+    var errorDescription: String? { description }
 }
 
 extension RPCRouter {
