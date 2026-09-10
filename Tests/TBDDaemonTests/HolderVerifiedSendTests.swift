@@ -186,6 +186,31 @@ struct HolderVerifiedSendTests {
         #expect(armings.armings.isEmpty)
     }
 
+    /// **The default never refuses.** Between the flag going on and the daemon
+    /// restarting to wire a verifier, there is a window where the column says
+    /// yes and there is nothing to arm. An explicit `--verify` is refused there
+    /// — the caller asked for evidence and must not be handed a silence that
+    /// reads like confirmation. A rail's ordinary send asked for nothing, so it
+    /// is delivered unarmed instead: a supervision send that failed closed
+    /// because supervision's own witness was not ready is the exact failure
+    /// this design exists to prevent.
+    @Test("a daemon rail's send is delivered unarmed when no verifier is wired")
+    func aDaemonRailSendIsNotRefusedWithoutAWiredVerifier() async throws {
+        let writes = HolderVerifyWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { writes.record($0) })
+        try await harness.db.config.setDeliveryVerification(enabled: true)
+        #expect(harness.router.deliveryVerifier == nil)
+
+        let response = try await harness.send(
+            TerminalSendParams(terminalID: harness.terminal.id, text: "nudge", submit: true),
+            actor: .daemon(rail: "queued-prompt"))
+
+        #expect(response.success, "error was: \(response.error ?? "none")")
+        #expect(!(response.error ?? "").contains("Restart the daemon"))
+        #expect(writes.writes.count == 1)
+    }
+
     /// And the flag is still the switch: with `delivery_verification_enabled`
     /// off — the shipped default — a rail's holder send arms nothing, so the
     /// default arming has an off branch and it is the shipped one.
