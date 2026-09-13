@@ -731,6 +731,21 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             appState?.registerTerminalCloseContext(context, for: terminalID)
         }
 
+        /// Whether the tmux-subprocess transport's scroll monitor claims a
+        /// wheel event over this terminal, and how many wheel reports it
+        /// forwards: none unless the terminal is mouse-reporting, else one per
+        /// whole line of `deltaY` with a minimum of one for any non-zero
+        /// delta. A zero delta is still claimed with zero reports, because
+        /// trackpads deliver sub-line events whose `deltaY` is zero, and one
+        /// that passes through reaches SwiftTerm's own `scrollWheel`, which on
+        /// the alternate screen converts the accumulated pixels into Up/Down
+        /// arrow keys.
+        nonisolated static func wheelReports(deltaY: CGFloat, mouseReporting: Bool) -> (claim: Bool, count: Int) {
+            guard mouseReporting else { return (claim: false, count: 0) }
+            guard deltaY != 0 else { return (claim: true, count: 0) }
+            return (claim: true, count: max(1, Int(abs(deltaY))))
+        }
+
         /// The notice to render *instead of* preparing a tmux view session, or
         /// `nil` when this transport is carried by tmux and prepares as usual.
         ///
@@ -1553,6 +1568,27 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // in TBDTerminalView. Instead, a local event monitor intercepts
             // scroll events and forwards them to tmux as mouse button presses.
             //
+            // On this transport (the tmux subprocess attach), every wheel
+            // event over a mouse-reporting terminal is claimed, including one
+            // whose `deltaY` is zero. Trackpads deliver such events (a few
+            // pixels of `scrollingDeltaY`, no whole line), and an unclaimed
+            // one falls through to SwiftTerm's own `scrollWheel`, which on the
+            // alternate screen with mouse reporting off turns accumulated
+            // pixels into Up/Down arrow keys — keystrokes the session never
+            // asked for, interleaved with the real wheel reports.
+            // `Coordinator.wheelReports` decides claim and count; a
+            // zero-report claim drops the event. An in-bounds point with no
+            // grid cell (the sub-cell remainder strip at the view's bottom and
+            // right edges) is likewise claimed and dropped, since there is no
+            // cell to report at.
+            //
+            // The guarantee stops at this transport. `startControlModeClient`
+            // and `startHolderClient` install no scroll monitor and keep
+            // `allowMouseReporting` off on the same view, so on those paths a
+            // wheel event still falls through to SwiftTerm's alternate-screen
+            // arrow-key fallback. Both need the same treatment before they
+            // graduate off their default-off flags.
+            //
             // Visibility filter: the `tv.window != nil` guard inside the
             // closure rejects events when the terminal isn't currently part of
             // the visible UI. This is load-bearing for the worktree keep-alive
@@ -1569,7 +1605,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
                 let deltaY = event.deltaY
                 let location = event.locationInWindow
-                guard deltaY != 0 else { return event }
 
                 let consumed = MainActor.assumeIsolated { [weak self] in
                     guard let self else { return false }
@@ -1586,18 +1621,20 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     // guard and the sends ride one `withTerminal` block — the
                     // same calls, under the same lock, as SwiftTerm's own
                     // native mouse-reporting path.
-                    guard let (col, row) = tv.gridPosition(atWindowLocation: location) else { return false }
+                    let grid = tv.gridPosition(atWindowLocation: location)
 
                     let isUp = deltaY > 0
-                    let lines = max(1, Int(abs(deltaY)))
                     return tv.withTerminal { term -> Bool in
-                        guard term.mouseMode != .off else { return false }
-                        let buttonFlags = term.encodeButton(
-                            button: isUp ? 4 : 5,
-                            release: false, shift: false, meta: false, control: false
-                        )
-                        for _ in 0..<lines {
-                            term.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
+                        let wheel = Self.wheelReports(deltaY: deltaY, mouseReporting: term.mouseMode != .off)
+                        guard wheel.claim else { return false }
+                        if let (col, row) = grid {
+                            let buttonFlags = term.encodeButton(
+                                button: isUp ? 4 : 5,
+                                release: false, shift: false, meta: false, control: false
+                            )
+                            for _ in 0..<wheel.count {
+                                term.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
+                            }
                         }
                         return true
                     }
