@@ -792,10 +792,12 @@ public struct TmuxManager: Sendable {
     static func parsePaneSendProbe(
         _ output: String, paneID: String
     ) -> (target: PaneSendTarget, windowID: String?) {
+        var sawWellFormedLine = false
         for line in output.split(separator: "\n") {
             let fields = line.split(
                 separator: paneSendTargetSeparator, maxSplits: 4, omittingEmptySubsequences: false)
             guard fields.count == 5 else { continue }
+            sawWellFormedLine = true
             guard fields[0].trimmingCharacters(in: .whitespaces) == paneID else { continue }
             let window = fields[1].trimmingCharacters(in: .whitespaces)
             let windowID = window.isEmpty ? nil : window
@@ -808,7 +810,30 @@ public struct TmuxManager: Sendable {
         }
         // rc 0 but no line for this pane (including no output at all): nothing
         // answered for the coordinate the send named.
+        if !sawWellFormedLine {
+            warnIfUnparseable(output, query: "paneSendTargetQuery for \(paneID)")
+        }
         return (.missing, nil)
+    }
+
+    /// Warn when tmux produced output but no line of it splits into the query's
+    /// five fields. The caller's answer stays `.missing`, but that answer is
+    /// then a parse failure rather than an observed fact about tmux. The known
+    /// cause is a client that sanitized the tab separators to `_`; see
+    /// `executionArguments`.
+    ///
+    /// Shape only, never content: `#{pane_start_command}` carries the pane's
+    /// planted `export NAME='value'` prefix, which may hold a secret.
+    private static func warnIfUnparseable(_ output: String, query: String) {
+        guard !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let lines = output.split(separator: "\n").count
+        let hasTab = output.contains("\t")
+        logger.warning("""
+            \(query, privacy: .public) output is unparseable: \(lines, privacy: .public) \
+            line(s), \(output.utf8.count, privacy: .public) bytes, none with five \
+            tab-separated fields (contains a tab: \(hasTab, privacy: .public)); \
+            treating it as empty
+            """)
     }
 
     /// The exact assignment shape `newWindowCommand` and `respawnWindowCommand`
@@ -1497,11 +1522,30 @@ public struct TmuxManager: Sendable {
         ).resolve()?.path
     }
 
+    /// The argv a one-shot tmux client actually runs with: the caller's
+    /// arguments behind `-u`.
+    ///
+    /// A tmux client decides it is UTF-8 from `LC_ALL`/`LC_CTYPE`/`LANG`, and a
+    /// client that is not replaces every non-printable byte of `-F` output with
+    /// `_` — TAB included, and every non-ASCII byte too. A daemon relaunched by
+    /// LaunchServices inherits none of those variables, so without `-u` the
+    /// tab-separated `paneSendTargetQuery` comes back as `%3_@3_0_…`, splits
+    /// into one field, and classifies every live pane as missing while tmux
+    /// exits 0. `-u` sets the client's UTF-8 flag whatever the locale says.
+    ///
+    /// Applied here, at execution, rather than in each command builder, so the
+    /// builders' pinned argv stays the tmux command it names and no new query
+    /// can forget it.
+    static func executionArguments(_ arguments: [String]) -> [String] {
+        ["-u"] + arguments
+    }
+
     @discardableResult
     private func runTmux(
         _ arguments: [String],
         environment: [String: String]? = nil
     ) async throws -> String {
+        let arguments = Self.executionArguments(arguments)
         guard let executable = Self.tmuxPath() else {
             throw TmuxError.commandFailed(
                 command: Self.redactedCommandDescription(label: "tmux", arguments: arguments),
