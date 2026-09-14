@@ -1,5 +1,6 @@
 import Clocks
 import Foundation
+import os
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -68,12 +69,25 @@ struct CodexSessionImporterTests {
         }
     }
 
-    private struct FakeTransport: CodexAppServerTransport {
+    private final class FakeTransport: CodexAppServerTransport, @unchecked Sendable {
         let connection: FakeConnection
+        // Written once by `connect` and read only after `importSession` has
+        // fully awaited, so no lock is needed across the async boundary
+        // (NSLock.lock() is unavailable from async contexts under Swift 6).
+        private let recorder = OSAllocatedUnfairLock<URL?>(initialState: nil)
 
-        func connect(executablePath: String, codexHome: URL) async throws
-            -> any CodexAppServerConnection {
-            connection
+        init(connection: FakeConnection) {
+            self.connection = connection
+        }
+
+        func connect(executablePath: String, codexHome: URL, workingDirectory: URL)
+            async throws -> any CodexAppServerConnection {
+            recorder.withLock { $0 = workingDirectory }
+            return connection
+        }
+
+        var workingDirectory: URL? {
+            recorder.withLock { $0 }
         }
     }
 
@@ -101,10 +115,11 @@ struct CodexSessionImporterTests {
                 ],
             ]),
         ])
+        let transport = FakeTransport(connection: connection)
         let importer = CodexSessionImporter(
             executablePath: "/opt/bin/codex",
             codexHome: URL(fileURLWithPath: "/tmp/codex-home"),
-            transport: FakeTransport(connection: connection))
+            transport: transport)
 
         let target = try await importer.importSession(
             transcriptPath: "/tmp/source.jsonl",
@@ -113,6 +128,8 @@ struct CodexSessionImporterTests {
 
         #expect(target == "thread-123")
         #expect(connection.isClosed)
+        // The child must run in the session worktree, not the daemon's cwd.
+        #expect(transport.workingDirectory?.path == "/tmp/worktree")
         #expect(connection.sentLines.count == 3)
         let methods = try connection.sentLines.map(method(from:))
         #expect(methods == [
@@ -195,6 +212,38 @@ struct CodexSessionImporterTests {
             try await task.value
         }
         #expect(connection.isClosed)
+    }
+
+    @Test("a nonzero exit surfaces the child's stderr tail")
+    func processExitedIncludesStderrTail() {
+        let error = CodexSessionImportError.processExited(
+            status: 1,
+            stderr: """
+            some earlier noise
+            Error: error loading default config after config error: \
+            No such file or directory (os error 2)
+            """)
+        let message = try! #require(error.errorDescription)
+        #expect(message.contains("status 1"))
+        #expect(message.contains("error loading default config"))
+        #expect(message.contains("No such file or directory"))
+    }
+
+    @Test("an empty stderr leaves the exit message unadorned")
+    func processExitedWithoutStderrStaysClean() {
+        let error = CodexSessionImportError.processExited(status: 2, stderr: "   \n\n")
+        let message = try! #require(error.errorDescription)
+        #expect(message.contains("status 2"))
+        #expect(!message.contains("Codex reported:"))
+    }
+
+    @Test("stderr tail keeps the last lines within the cap")
+    func stderrTailKeepsRecentLinesWithinCap() {
+        let tail = CodexSessionImportError.stderrTail(
+            "line-1\nline-2\nline-3\nline-4\nline-5")
+        #expect(tail == "line-3 line-4 line-5")
+        let long = String(repeating: "x", count: 900)
+        #expect(CodexSessionImportError.stderrTail(long).count == 500)
     }
 
     private func json(_ object: [String: Any]) -> Data {
