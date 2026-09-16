@@ -485,7 +485,10 @@ struct RepoSectionView: View {
     /// than defaulted so a new call site cannot silently reintroduce the
     /// duplicate.
     ///
-    /// An adopted lane therefore has exactly one surface, never two.
+    /// A currently remote adopted lane therefore has exactly one sidebar row.
+    /// A local row's retained `origin` is provenance, not evidence that it
+    /// replaces the remote session: landing may fork independent local work.
+    /// Keep the mirror visible unless a currently remote row represents it.
     ///
     /// A session the provider reports as `archived` gets NO surface here: it is
     /// filtered out outright. The contract requires a provider to keep archived

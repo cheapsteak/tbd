@@ -111,6 +111,48 @@ struct SidebarRemoteGroupsTests {
         #expect(groups.remoteWorktreeIDs == [root.id, local.id])
     }
 
+    @Test(arguments: [RemoteProcessState.running, .exited])
+    func localOriginRootRetainsItsReportedRemoteThroughTheRealRemainderFilter(state: RemoteProcessState) {
+        let repo = UUID()
+        var local = SidebarGroupFixtures.row("local copy", repoID: repo)
+        local.origin = WorktreeOrigin(provider: "acme", sessionID: "origin")
+        let mirror = SidebarGroupFixtures.session("origin", state: state, repoID: repo)
+        let remainder = RepoSectionView.matchedRemoteSessions([mirror], repoID: repo, worktrees: [local])
+        let groups = SidebarGroupFixtures.groups(
+            roots: [local], remainder: remainder, rows: [local], sessions: [mirror])
+        #expect(groups.localRoots == [local])
+        #expect(groups.remoteRoots.isEmpty)
+        #expect(groups.exitedRoots.isEmpty)
+        #expect((groups.sessions + groups.exitedSessions).map(\.id) == [mirror.id])
+        let expected: [SidebarRemoteGroups.State: Int] = state == .running ? [.running: 1] : [.exited: 1]
+        #expect(groups.summary.counts == expected)
+        #expect(groups.sessionIDs == [mirror.id])
+    }
+
+    @Test(arguments: [RemoteProcessState.running, .exited])
+    func localOriginDescendantRetainsItsReportedRemoteWithoutCountingLocalWorkTwice(state: RemoteProcessState) {
+        let repo = UUID()
+        let parent = SidebarGroupFixtures.row("remote parent", repoID: repo, remote: "parent")
+        var local = SidebarGroupFixtures.row("local copy", repoID: repo, parent: parent.id)
+        local.origin = WorktreeOrigin(provider: "acme", sessionID: "origin")
+        let parentMirror = SidebarGroupFixtures.session("parent", state: .exited, repoID: repo)
+        let originMirror = SidebarGroupFixtures.session("origin", state: state, repoID: repo)
+        let inventory = [parentMirror, originMirror]
+        let rows = [parent, local]
+        let remainder = RepoSectionView.matchedRemoteSessions(inventory, repoID: repo, worktrees: rows)
+        #expect(remainder.map(\.id) == [originMirror.id])
+        let groups = SidebarGroupFixtures.groups(
+            roots: [parent], remainder: remainder, rows: rows, sessions: inventory)
+        #expect(groups.remoteRoots == [parent])
+        #expect(groups.exitedRoots.isEmpty)
+        #expect(groups.remoteWorktreeIDs == [parent.id, local.id])
+        #expect((groups.sessions + groups.exitedSessions).map(\.id) == [originMirror.id])
+        let expected: [SidebarRemoteGroups.State: Int] = state == .running
+            ? [.exited: 1, .running: 1] : [.exited: 2]
+        #expect(groups.summary.counts == expected)
+        #expect(groups.sessionIDs == Set(inventory.map(\.id)))
+    }
+
     @Test func whollyExitedSubtreeMovesTogetherAndRevealsByDescendant() {
         let root = SidebarGroupFixtures.row("parent", repoID: UUID(), remote: "parent")
         let child = SidebarGroupFixtures.row("child", repoID: UUID(), remote: "child", parent: root.id)

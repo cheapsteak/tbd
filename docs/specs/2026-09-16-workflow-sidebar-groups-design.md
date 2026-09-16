@@ -27,10 +27,18 @@ A remote session can have an adopted `Worktree` row or only a
 tree. Grouping must include them, not just the session rows appended by
 `RepoSectionView.matchedRemoteSessions`.
 
-Join those representations on `(provider, sessionID)`. Preserve existing
-deduplication, archive, dismissal, hidden-repository, and repository-filter
+Join currently remote worktree rows and their mirror rows on
+`(provider, sessionID)`, using the worktree's remote `location`. A local row's
+retained `origin` records provenance; it does not suppress that provider's
+mirror row. The provider contract permits a landing to fork independent local
+work while the remote session continues, so shared origin alone cannot prove
+that two current executions are duplicates. Count the reported remote session
+once and classify the local row using its own local state.
+
+Preserve existing archive, dismissal, hidden-repository, and repository-filter
 rules. The Provider Desk remains the inventory and health surface for each
-provider; unmatched sessions keep their provider context.
+provider; unmatched sessions keep their provider context. This grouping change
+does not implement landing or its fork-versus-continuation policy.
 
 Worktree filing, process liveness, agent attention, and provider freshness are
 independent facts. An active worktree may represent an exited process.
