@@ -410,7 +410,7 @@ struct TerminalHolderTransportGateTests {
     }
 
     @MainActor
-    @Test("startTmuxClient shows the placard when the daemon refuses a holder attach")
+    @Test("startTmuxClient shows the attach-failed placard when the daemon refuses a holder attach")
     func startTmuxClientShowsPlacardWhenAttachRefused() async throws {
         let fixture = try TmuxBridgeFixture()
         defer { fixture.remove() }
@@ -430,15 +430,20 @@ struct TerminalHolderTransportGateTests {
 
         #expect(stub.attaches == 1)
         #expect(stub.readyCalls.isEmpty, "an attach that never happened must not be acked")
-        #expect(didFeed(TerminalPreparationPresentation.holderTransportMessage, panel),
-                "a refused attach must explain itself with the holder notice")
+        #expect(didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel),
+                "a refused attach must explain itself with the attach-failed notice")
+        // The transport notice says TBD cannot display holder sessions, which
+        // is false here: it can, and this panel merely failed to attach to
+        // one. It must not be the copy a refused attach paints.
+        #expect(!didFeed(TerminalPreparationPresentation.holderTransportMessage, panel),
+                "a refused attach must not claim the transport is undisplayable")
         let recorded = await panel.runner.recorded()
         #expect(recorded.isEmpty,
                 "a refused holder attach must not fall back into tmux, ran \(recorded)")
     }
 
     @MainActor
-    @Test("a holder attach whose ready is refused stops reading and shows the placard")
+    @Test("a holder attach whose ready is refused stops reading and shows the attach-failed placard")
     func holderAttachWithRefusedReadyShowsPlacard() async throws {
         let fixture = try TmuxBridgeFixture()
         defer { fixture.remove() }
@@ -459,8 +464,96 @@ struct TerminalHolderTransportGateTests {
         )
 
         #expect(stub.readyCalls.count == 1)
-        #expect(didFeed(TerminalPreparationPresentation.holderTransportMessage, panel),
+        #expect(didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel),
                 "a viewer the daemon has not accounted for must say so")
+        #expect(!didFeed(TerminalPreparationPresentation.holderTransportMessage, panel),
+                "a refused ready must not claim the transport is undisplayable")
+    }
+
+    /// Holds a handback open until the test releases it, standing in for the
+    /// predecessor panel's detach task. Suspension-based, so no thread blocks.
+    private actor HeldHandback {
+        private var continuation: CheckedContinuation<Void, Never>?
+        private var released = false
+
+        func wait() async {
+            if released { return }
+            await withCheckedContinuation { continuation = $0 }
+        }
+
+        func release() {
+            released = true
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
+    @MainActor
+    @Test("a holder attach waits for the predecessor's handback before it asks the daemon")
+    func holderAttachWaitsForPredecessorHandback() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let panel = try makePanel(transport: .holder, fixture: fixture)
+        defer { tearDown(panel) }
+        let pty = try FakePTY()
+        defer { pty.closeWriteEnd() }
+        let stub = attachStub(panel, fd: pty.readEnd)
+
+        // The predecessor's handback, still in flight on the ledger the panel
+        // reads by default — the one on its AppState — for this terminal.
+        let held = HeldHandback()
+        let handback = Task { await held.wait() }
+        panel.state.holderHandbackLedger.register(terminalID: panel.terminalID, task: handback)
+
+        let attaching = Task { @MainActor in
+            await panel.coordinator.startTmuxClient(
+                terminalView: panel.view,
+                bridge: panel.bridge,
+                server: Self.server,
+                windowID: "",
+                panelID: panel.terminalID
+            )
+        }
+        // Give the attach every chance to run ahead of the handback. The
+        // assertion below cannot pass by luck: the only path to `attach` runs
+        // through `awaitSettled`, which cannot return while `held` is closed.
+        for _ in 0..<20 { await Task.yield() }
+        #expect(stub.attaches == 0,
+                "the successor asked the daemon while its predecessor's handback was in flight")
+        #expect(panel.state.holderHandbackLedger.isInFlight(terminalID: panel.terminalID))
+
+        await held.release()
+        await attaching.value
+
+        #expect(stub.attaches == 1, "the attach must proceed once the handback settles")
+        #expect(stub.readyCalls.count == 1)
+        #expect(!panel.state.holderHandbackLedger.isInFlight(terminalID: panel.terminalID))
+        #expect(!didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel),
+                "an attach that waited its turn must not paint the failure placard")
+    }
+
+    @MainActor
+    @Test("a holder attach with no handback in flight does not wait")
+    func holderAttachWithoutHandbackDoesNotWait() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let panel = try makePanel(transport: .holder, fixture: fixture)
+        defer { tearDown(panel) }
+        let pty = try FakePTY()
+        defer { pty.closeWriteEnd() }
+        let stub = attachStub(panel, fd: pty.readEnd)
+        #expect(!panel.state.holderHandbackLedger.isInFlight(terminalID: panel.terminalID))
+
+        await panel.coordinator.startTmuxClient(
+            terminalView: panel.view,
+            bridge: panel.bridge,
+            server: Self.server,
+            windowID: "",
+            panelID: panel.terminalID
+        )
+
+        #expect(stub.attaches == 1)
+        #expect(stub.readyCalls.count == 1)
     }
 
     @MainActor
