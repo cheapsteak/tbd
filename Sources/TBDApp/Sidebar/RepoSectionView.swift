@@ -193,13 +193,9 @@ struct RepoSectionView: View {
         }
     }
 
-    /// The section header row (chevron, name, `+`) and every modifier
-    /// attached to it — extracted out of `body` alongside `expandedContent`,
-    /// and further split into `headerHStack` + its own sub-pieces below, so
-    /// the type checker sees several smaller expressions instead of one
-    /// combining all of them (see the `-warn-long-function-bodies` note on
-    /// this file). Pure restructuring: identical content, order, and
-    /// modifiers.
+    /// The section header row (chevron, name, `+`) and its modifiers.
+    /// Smaller expressions keep type-check time within budget (see the
+    /// `-warn-long-function-bodies` note on this file).
     @ViewBuilder
     private var headerRow: some View {
         headerHStack

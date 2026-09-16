@@ -229,7 +229,6 @@ final class AppState {
     var unreadTerminals: Set<UUID> = []
     var selectedWorktreeIDs: Set<UUID> = [] {
         didSet {
-            sidebarSelectionGeneration &+= 1
             // If the List selected a repo header tag (not a worktree), treat it
             // as a repo selection and remove the ID from the worktree set.
             let repoIDs = Set(repos.map(\.id))
@@ -338,6 +337,9 @@ final class AppState {
 
             // Clear repo selection when a worktree is selected
             if !selectedWorktreeIDs.isEmpty {
+                // Re-selecting a row must reveal a manually collapsed group.
+                // Count only the final worktree selection, after tag routing.
+                sidebarSelectionGeneration &+= 1
                 if let leaving = selectedRepoID { clearRevivingArchived(repoID: leaving) }
                 selectedRepoID = nil
                 selectedScratchSection = false
@@ -418,7 +420,13 @@ final class AppState {
     /// now sit inside a repo's own sidebar section beside local worktrees
     /// (see `selectRemoteSession`'s doc comment).
     var selectedRemoteSession: RemoteSessionSelection? = nil {
-        didSet { sidebarSelectionGeneration &+= 1 }
+        didSet {
+            // Adopted lanes already signal through their worktree selection.
+            // Clearing a target changes the reveal signature without a nonce.
+            if selectedRemoteSession != nil && selectedWorktreeIDs.isEmpty {
+                sidebarSelectionGeneration &+= 1
+            }
+        }
     }
     /// One-shot hint for which tab `RemoteSessionDetailView` should land on,
     /// set when a sidebar context-menu action (e.g. "View Log") jumps

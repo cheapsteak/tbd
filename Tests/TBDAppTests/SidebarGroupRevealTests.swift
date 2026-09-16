@@ -37,9 +37,9 @@ struct SidebarGroupRevealTests {
     @Test func unchangedInventoryDoesNotUndoManualCollapseButReselectionReveals() {
         withState { state, repo in
             state.remoteSessions = [SidebarGroupFixtures.session("worker", repoID: repo)]
-            let key = RemoteSessionSelection(provider: "acme", sessionID: "worker")
-            state.selectedRemoteSession = key
+            state.selectRemoteSession(provider: "acme", sessionID: "worker")
             let first = state.sidebarSelectionReveal
+            let generation = state.sidebarSelectionGeneration
             state.revealSidebarGroups(first)
             let group = SidebarGroupID(owner: .repository(repo), kind: .remote)
             state.toggleSidebarGroup(group)
@@ -47,10 +47,55 @@ struct SidebarGroupRevealTests {
             state.remoteSessions = sameInventory
             #expect(state.sidebarSelectionReveal == first)
             #expect(!state.expandedSidebarGroups.contains(group))
-            state.selectedRemoteSession = key
+            state.selectRemoteSession(provider: "acme", sessionID: "worker")
+            #expect(state.sidebarSelectionGeneration == generation + 1)
             #expect(state.sidebarSelectionReveal != first)
             state.revealSidebarGroups(state.sidebarSelectionReveal)
             #expect(state.expandedSidebarGroups.contains(group))
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func worktreeReselectionRevealsOnceForLocalAndAdoptedRows(adopted: Bool) {
+        withState { state, repo in
+            let parent = SidebarGroupFixtures.row("parent", repoID: repo, remote: "parent")
+            let child = SidebarGroupFixtures.row("child", repoID: repo,
+                                                remote: adopted ? "child" : nil, parent: parent.id)
+            state.worktrees[repo] = [parent, child]
+            state.remoteSessions = [SidebarGroupFixtures.session("parent", repoID: repo),
+                                    SidebarGroupFixtures.session("child", repoID: repo)]
+            state.selectedWorktreeIDs = [child.id]
+            let first = state.sidebarSelectionReveal
+            let generation = state.sidebarSelectionGeneration
+            state.revealSidebarGroups(first)
+            let group = SidebarGroupID(owner: .repository(repo), kind: .remote)
+            #expect(state.expandedSidebarGroups.contains(group))
+            state.toggleSidebarGroup(group)
+            state.selectedWorktreeIDs = [child.id]
+            #expect(state.sidebarSelectionGeneration == generation + 1)
+            #expect(state.sidebarSelectionReveal != first)
+            state.revealSidebarGroups(state.sidebarSelectionReveal)
+            #expect(state.expandedSidebarGroups.contains(group))
+        }
+    }
+
+    @Test func clearingSelectionsChangesTheTargetWithoutIncrementingGeneration() {
+        withState { state, repo in
+            let row = SidebarGroupFixtures.row("local", repoID: repo)
+            state.worktrees[repo] = [row]
+            state.selectedWorktreeIDs = [row.id]
+            let local = state.sidebarSelectionReveal
+            let localGeneration = state.sidebarSelectionGeneration
+            state.selectedWorktreeIDs = []
+            #expect(state.sidebarSelectionGeneration == localGeneration)
+            #expect(state.sidebarSelectionReveal != local)
+
+            state.selectedRemoteSession = .init(provider: "acme", sessionID: "worker")
+            let remote = state.sidebarSelectionReveal
+            let remoteGeneration = state.sidebarSelectionGeneration
+            state.selectedRemoteSession = nil
+            #expect(state.sidebarSelectionGeneration == remoteGeneration)
+            #expect(state.sidebarSelectionReveal != remote)
         }
     }
 

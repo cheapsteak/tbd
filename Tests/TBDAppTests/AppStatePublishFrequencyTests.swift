@@ -862,9 +862,9 @@ struct TerminalPollTickTests {
 // MARK: - Selection
 
 /// Selection is a user gesture, so its frequency is bounded by clicks — but the
-/// `didSet` cascade at `AppState.swift:192` writes five further tracked
-/// properties unconditionally, so one click costs many invalidations, and
-/// re-clicking the already-selected row costs the same as a real move.
+/// `didSet` cascade writes several further tracked properties, so one click
+/// costs multiple invalidations. One intentional notification lets an explicit
+/// re-selection reveal a manually collapsed sidebar group.
 @MainActor
 @Suite("Selection cascade")
 struct SelectionCascadeTests {
@@ -882,10 +882,11 @@ struct SelectionCascadeTests {
                 state.selectedWorktreeIDs = [row.id]
             }
 
-            // KNOWN ISSUE — ideal 0, observed 2: the `recentWorktreeIDs`
-            // `removeAll`/`insert` pair, which rewrites the LRU to the
-            // arrangement it already had. Both are `_modify` writes, so
-            // neither is eligible for the equal-value exemption.
+            // One notification intentionally advances sidebarSelectionGeneration
+            // so re-selecting a hidden row can reveal its group. KNOWN ISSUE —
+            // ideal 1, observed 3: the `recentWorktreeIDs` `removeAll`/`insert`
+            // pair adds two by rewriting the LRU to its existing arrangement.
+            // Both are `_modify` writes, so neither gets the equal-value exemption.
             //
             // Five further unguarded writes on this path cost nothing *here*
             // only because the exemption covers them — `selectedWorktreeIDs`
@@ -897,8 +898,8 @@ struct SelectionCascadeTests {
             // the values do differ.
             // `selectionOrder` contributes nothing for the right reason: its
             // write IS guarded, which is the model the other six should follow.
-            withKnownIssue("re-selecting the current worktree still notifies twice (#667)") {
-                #expect(count == 0)
+            withKnownIssue("re-selecting the current worktree adds two redundant LRU notifications (#667)") {
+                #expect(count == 1)
             }
         }
     }
@@ -906,11 +907,12 @@ struct SelectionCascadeTests {
     /// A real selection change. Not zero, and not one either — the number is the
     /// finding. Pinned as a live assertion so the cascade cannot silently grow.
     ///
-    /// The 5 accounted for in full, because an unattributed total invites a
+    /// The 6 accounted for in full, because an unattributed total invites a
     /// reader to "fix" the wrong line: `selectedWorktreeIDs` (1) +
     /// `selectionOrder` (1) + `canGoBack`, flipped to true by `recordNavigation`
     /// because this is the second entry in the history (1) + the
-    /// `recentWorktreeIDs` `removeAll`/`insert` pair (2).
+    /// `recentWorktreeIDs` `removeAll`/`insert` pair (2) + the intentional
+    /// `sidebarSelectionGeneration` reveal notification (1).
     ///
     /// The four unconditional clears in the `didSet` tail (`selectedRepoID`,
     /// `selectedScratchSection`, `selectedRemoteProvider`,
@@ -932,7 +934,7 @@ struct SelectionCascadeTests {
             }
 
             #expect(state.selectionOrder == [rows[1].id])
-            #expect(count == 5)
+            #expect(count == 6)
         }
     }
 
@@ -941,7 +943,7 @@ struct SelectionCascadeTests {
     /// regression back to the per-id mutation `SelectionOrderWriteCoalescingTests`
     /// removed.
     ///
-    /// 4, one fewer than the test above, and the missing one is `canGoBack`:
+    /// 5, one fewer than the test above, and the missing one is `canGoBack`:
     /// this is the FIRST navigation entry, so there is nothing to go back to
     /// and `updateNavigationFlags` leaves the flag alone. That guard is one of
     /// the few already in the right place.
@@ -958,7 +960,7 @@ struct SelectionCascadeTests {
             }
 
             #expect(state.selectedWorktreeIDs.count == 5)
-            #expect(count == 4)
+            #expect(count == 5)
         }
     }
 }
