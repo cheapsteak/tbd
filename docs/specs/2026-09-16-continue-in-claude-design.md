@@ -33,9 +33,12 @@ submenu contains:
 - Every configured Claude profile — in the same order and with the same compact usage
   labels as the existing **Swap profile** and **Fork Session** menus.
 
-The app disables the choices while the source reports `working` or
-`waitingForUser` and explains that the current turn must finish first. The daemon repeats
-the activity check and every other eligibility check; menu state is never authority.
+The app enables the choices only when the transcript-derived presentation state is
+positively `idle`. A presentation state of `working` or no presentation observation disables
+them. A durable `waitingForUser` or `unknown` state also disables them; a stale durable
+`working` value does not override a newer transcript-derived idle presentation. Disabled
+choices explain that the current turn must finish first. The daemon performs its own stricter
+activity checks and every other eligibility check; menu state is never authority.
 
 After success, the active tab does not move. Its terminal keeps the same ID and window,
 but its provider label, account chip, session identity, and transcript target change to
@@ -81,9 +84,10 @@ whole turn bundles from newest to oldest and restored to chronological order for
 rendering. A bundle is either retained in full, omitted in full, or replaced by a typed
 oversized-turn stub; the builder never emits only one side of a user/assistant turn because
 the byte cap landed between its units. A first task larger than the history budget likewise
-becomes a typed unit stub and remains available through the source pointer. The packet says
-how many middle, earlier, oversized, malformed, and unsupported records it omitted. All
-byte decisions happen after redaction and use valid UTF-8 boundaries.
+becomes a typed unit stub and remains available through the source pointer. The packet
+reports omission counts for earlier and middle history, oversized history and JSONL records,
+malformed records, and unsupported records. All byte decisions happen after redaction and
+use valid UTF-8 boundaries.
 
 The JSONL scanner reads fixed-size chunks and caps one input record at 1 MiB. It discards
 an oversized or unterminated record without accumulating the rest of that record in
@@ -150,14 +154,20 @@ All fallible work that can finish while Codex remains live happens before interr
 1. Load the source row and require a tmux-backed Codex terminal with a session/thread ID,
    an absolute readable regular rollout file, and an active or main worktree whose directory
    exists.
-2. Require a positively idle source. `working` and `waitingForUser` return
-   `terminalBusy`; unknown activity fails closed because it cannot prove the turn finished.
-   There is no force option.
+2. Require the durable observed activity to be `idle` with an ordering watermark. Then read
+   the rollout through the existing bounded `CodexTranscriptActivityTracker`, using the
+   terminal's session generation and transcript boundary. Only an exact authoritative
+   `.idle` result proceeds. A `working` or `waitingForUser` result, or no result because the
+   observation became unavailable or remains behind its one-MiB budget, returns
+   `terminalBusy`. The earlier fingerprint check rejects a rollout that is already missing
+   or unreadable. The tracker does not publish an intermediate state, and Continue does not
+   fall back to the cached row when the authoritative observation is unavailable. There is
+   no force option.
 3. Capture a continuation-specific source snapshot containing
-   `TerminalReplacementSnapshot`, activity value, source, observation time and ordering
-   watermark, and a rollout fingerprint consisting of path, file identity, size, and
-   modification time. This separate type is required because `TerminalReplacementSnapshot`
-   deliberately excludes activity facts.
+   `TerminalReplacementSnapshot`; activity value, source, observation time, and ordering
+   watermark; awaiting-input reason and observation time; and a rollout fingerprint
+   consisting of path, file identity, size, and modification time. This separate type is
+   required because `TerminalReplacementSnapshot` deliberately excludes activity facts.
 4. Resolve the requested profile through `ModelProfileResolver`. Nil means the ambient
    login. An explicit missing or unreadable profile returns `profileMissing`.
 5. Build the continuation packet and git-status section.
@@ -191,7 +201,9 @@ Inside the lock, the handler reloads the row and accepts the prepared action onl
 
 A mismatch returns a stale-replacement or busy error before interruption. This second
 check prevents a queued request from acting on a later session, profile, turn, or reused
-tmux coordinate.
+tmux coordinate. Because preparation fingerprints the rollout before the authoritative
+activity observation, the unchanged fingerprint also proves that no new rollout bytes have
+invalidated that observation before this fence.
 
 ### Stage, launch, and commit
 
@@ -264,16 +276,26 @@ not report an ordinary replacement failure until source readiness and the rolled
 agree. If rollback respawn or readiness fails, the row remains durably pending with its
 original Codex thread and rollout; it never claims Claude.
 
-Startup reconciliation treats every pending Codex-to-Claude row as **restore Codex**, never
-as permission to infer or finalize Claude. Under the same server lock it rebuilds the
-ordinary `codex resume <source-thread-id>` command, replaces any destination, inert, dead,
-or missing pane using the verified/recreated-window path, and supplies a new pending
-recovery incarnation. Exact Codex `SessionStart` readiness promotes that token and clears
-pending state. A failed recovery keeps the Codex row pending for the next reconciliation
-pass instead of clearing the fence or adopting whatever process happens to occupy the
+Startup recovery has two ordered owners. Before the socket binds,
+`Daemon.performStartupReconciliation` runs the ordinary `WorktreeLifecycle` ownership pass.
+That pass preserves every nonparked Codex row with a pending incarnation, even when its
+recorded window is missing or reassigned; it neither disposes of the row nor launches a
+replacement. After the RPC socket starts accepting the `SessionStart` hook,
+`RPCRouter.reconcilePendingContinueInClaude` treats each preserved row as **restore Codex**,
+never as permission to infer or finalize Claude. The same pass runs again with orphan
+maintenance so a transport failure remains retryable.
+
+Under the worktree server lock, the Continue-specific pass rebuilds the ordinary
+`codex resume <source-thread-id>` command and rotates to a new pending recovery incarnation.
+If the recorded pane is live and carries the exact terminal stamp, that pane is the ownership
+fact; the pass adopts its actual window coordinate before respawning Codex. An unstamped or
+foreign live pane fails closed and leaves recovery pending. A missing or dead pane uses the
+inert-window recreation path. Exact Codex `SessionStart` readiness promotes the recovery
+token and clears pending state. A failed recovery keeps the Codex row pending for the next
+post-socket pass instead of clearing the fence or adopting whatever process occupies the
 coordinate. This rule makes the source identity and recovery intent survive a daemon crash
-or repeated transport failure. No failure path reports or persists a live provider
-identity it did not observe.
+or repeated transport failure. No failure path reports or persists a live provider identity
+it did not observe.
 
 ## RPC, CLI, and app contracts
 
@@ -318,59 +340,64 @@ existing alert path.
 
 ### Packet tests
 
-- Stable input and git status produce byte-for-byte identical output.
-- The packet never exceeds 65,536 bytes and always ends on a valid UTF-8 boundary.
-- The mandatory envelope survives maximal metadata and git-status input.
-- Selection reserves the initial user task, retains the newest complete units in
-  chronological order without duplicating that task, and reports every omitted category.
-- Oversized and unterminated JSONL records respect the 1 MiB record cap.
-- User messages and assistant conclusions render; response/event duplicates render once.
-- Tool calls retain names and path-like arguments; tool outputs, commands, reasoning,
-  encrypted content, and binary data do not render.
-- Structured and text secrets are replaced, including authorization headers, credential
-  assignments, private keys, credentialed URLs, and recognized token prefixes.
-- Malformed or content-free rollouts fail preparation without changing a terminal.
+- Identical rollout and git-status input produces identical attributed output. The fixture
+  also proves allowlisted metadata, user and Codex text, the immutable rollout pointer, and
+  the authorship and handoff warnings appear while unknown metadata does not.
+- A long multibyte history stays within 65,536 UTF-8 bytes, retains the initial task and the
+  newest turns in chronological order, and reports omitted middle history.
+- A cap-edge fixture retains both sides of the newest user/Codex turn and omits both sides of
+  the displaced middle turn; no partial turn bundle appears.
+- Maximal metadata and git status keep the envelope within 16,384 bytes and preserve the
+  pointer, status heading and omission marker, safety direction, and authorship disclosure.
+- Oversized and unterminated JSONL records are counted without hiding valid content,
+  and an oversized initial user unit becomes a typed stub.
+- A canonical `response_item` replaces its equivalent `event_msg` fallback without
+  duplication, while distinct fallback content remains visible.
+- Tool-call output proves that only the tool name and path-like arguments survive. The same
+  fixture excludes command, prompt, header, arbitrary secret argument, tool-result, and
+  reasoning content and exercises credential assignments, authorization values, private
+  keys, credentialed URLs, service-token prefixes, and git-status redaction.
+- A content-free rollout and a failed git-status command fail packet preparation.
 
 ### Daemon and transaction tests
 
-- Wrong provider, missing/unreadable rollout, missing worktree, missing profile,
-  holder transport, parked source, and non-idle or unknown activity all refuse before
-  interruption.
-- Explicit and ambient profiles use the existing config-dir, secret, routing, env-override,
-  trust, settings-overlay, plugin, fallback-model, and usage-label paths.
-- A final snapshot, activity, rollout-fingerprint, pane-ownership, or incarnation mismatch
-  refuses the queued operation.
-- The final destructive fence requires one `paneSendProbe` result with the exact pane,
-  window, and terminal-ID stamp; no graceful interrupt runs before it.
-- Success retains exactly one terminal row, terminal ID, worktree, tab, and tmux window;
-  it leaves one live Claude process and no live Codex process.
-- The Claude spawn receives a fresh session ID and the packet as its initial prompt.
-- A preparation failure leaves the original Codex process, row, rollout, and incarnation
-  untouched.
-- A Claude spawn failure, readiness timeout, or finalization failure restores the original
-  Codex thread and rollout under a fresh incarnation before returning an error.
-- Readiness remembers an exact-token event that beats waiter registration, rejects every
-  mismatched token, and never mutates a pending Codex row through `applySessionStart`.
-- A daemon crash at every staged boundary and a failed rollback respawn leave a durable
-  pending Codex row that startup reconciliation restores; reconciliation never adopts the
-  destination Claude process.
-- Delayed source or failed-destination hooks cannot mutate the finalized or rolled-back row.
-- Concurrent Continue, wake, recreate, and profile-swap requests serialize through the
-  server lock and only one can pass the snapshot fence.
-- Server restart and tmux window-ID reuse never kill the newly staged replacement or
-  bootstrap window. The two cleanup inequalities and regression test from commit
-  `30b324d5` land with this work: neither the stale source ID nor bootstrap ID is killed
-  when it equals the freshly created replacement ID.
+- The readiness coordinator remembers an exact-token event and rejects a mismatched token.
+- Store tests prove that staging preserves Codex identity, successful finalization changes
+  the same row to Claude, rollback rotates the token without publishing Claude, and an
+  activity change makes the continuation compare-and-set fail without mutation.
+- The successful RPC test keeps one row and the same terminal, pane, and window IDs; records
+  one `respawn-window`, no `send-keys`, and a full `terminalReplaced` delta; and leaves the
+  row named Codex until the exact destination readiness hook arrives.
+- An unstamped pane and a throwing ownership probe both retract the staged fence without a
+  respawn. Persisted `working`, wrong-provider, unreadable-rollout, and missing-profile
+  fixtures also refuse before respawn and preserve the tested source rows.
+- A rollout `task_started` record overrides a stale persisted idle fact. A scan that remains
+  behind its bounded observation budget also refuses with `terminalBusy`; neither case
+  stages a pending incarnation or respawns the window.
+- Destination launch failure and destination-readiness timeout restore the source Codex
+  thread and rollout under a rotated token. A delayed destination hook cannot mutate the
+  restored row. Repeated respawn failure leaves a durable pending Codex recovery candidate.
+- Continue recovery restores a staged pending row to Codex, adopts the actual window of a
+  live exact-stamped pane, and refuses an unstamped live pane without creating or respawning
+  another window. The ordinary startup ownership test separately proves that pre-bind
+  `WorktreeLifecycle` reconciliation preserves a nonparked pending Codex row for that
+  post-bind pass.
+- The hibernation window-ID-reuse regression proves that wake does not kill a newly created
+  window when tmux reuses the stale window ID. Continue's missing-pane recovery uses the
+  same two stale/bootstrap ID inequality guards; the Continue-specific recovery tests cover
+  its exact-stamped live-pane and fail-closed ambiguous-pane branches.
 
 ### Client tests
 
-- RPC params and the returned `Terminal` round-trip through JSON.
-- CLI parsing covers required `--terminal`, profile name/UUID, ambient omission, and JSON
-  output.
-- The app menu appears only when cached metadata says tmux-backed Codex with a rollout
-  path, uses the existing profile labels and usage summaries, and disables action during
-  an in-flight turn. Readability remains a daemon check.
-- Success updates the existing tab; failure creates no tab and surfaces the daemon error.
+- CLI parsing requires named `--terminal`, accepts ambient omission, profile name or UUID,
+  and `--json`, and plain output reports the unchanged terminal ID and account label.
+- Menu policy tests cover visibility for tmux-backed Codex rows with non-empty rollout
+  paths, transcript-derived idle/working state, missing presentation state, durable waiting
+  and unknown states, and the busy caption. Readability remains a daemon check.
+- `terminalReplaced` replaces the cached row without moving the selected tab or layout,
+  does not append an unknown terminal, preserves a custom tab label while clearing a
+  generated provider label, and fences an overlapping pre-replacement list snapshot while
+  still admitting a later rollback snapshot.
 
 Run focused packet, router, store, CLI, and app tests, then
 `scripts/swift-safe build` and the full `scripts/test.sh` suite.
@@ -400,13 +427,16 @@ Continue creates no new kind of durable resource:
   use existing writers and existing `OrphanGC` coverage.
 - The process remains attached to the existing terminal row and window, so
   `WorktreeLifecycle+Reconcile` and `AgentReaper` retain their current ownership model.
+  The ordinary pre-bind ownership pass preserves pending nonparked Codex rows; it does not
+  try to launch a process before hooks can reach the daemon.
 - Readiness entries are in-memory and bounded by their injected-clock deadlines; durable
   pending row state, not an in-memory waiter, drives recovery after daemon restart.
 
-No new reconciler is required. `WorktreeLifecycle+Reconcile` must recognize the durable
-pending provider replacement and restore the source Codex process by the exact rule above;
-that extends the existing terminal/window reconciler rather than creating a new resource
-owner.
+No new durable resource owner is required. The post-socket
+`RPCRouter.reconcilePendingContinueInClaude` recovery pass consumes the pending state that
+the ordinary lifecycle reconciler preserves and repairs the existing terminal row/window
+ownership. It runs at startup and with existing orphan maintenance; it does not introduce a
+new timer or a new kind of resource.
 
 ## Tradeoffs and rejected alternatives
 
