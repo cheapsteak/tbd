@@ -233,7 +233,7 @@ extension RPCRouter {
         }
         let config = try? await db.config.get()
         let freshClaudeSessionID = UUID().uuidString
-        let profileConfigDir = configDirManager.resolveConfigDir(for: resolvedProfile)
+        let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
         await ClaudeTrustSeeder.ensureTrusted(
             worktree: worktree.worktree,
             autoTrustNonScratch: config?.autoTrustWorktrees ?? true,
