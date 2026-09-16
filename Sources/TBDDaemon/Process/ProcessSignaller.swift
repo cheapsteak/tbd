@@ -58,7 +58,14 @@ public extension ProcessSignaller {
 }
 
 public struct ProductionProcessSignaller: ProcessSignaller {
-    public init() {}
+    /// The environment every `ps` child starts from, before `runPS` pins the
+    /// locale on top of it. Injectable so a test can hand in a day-first locale
+    /// and prove the pin still wins; production passes nothing.
+    private let baseEnvironment: [String: String]
+
+    public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+        self.baseEnvironment = environment
+    }
 
     public func isAlive(_ pid: Int32) -> Bool {
         guard pid > 0 else { return false }
@@ -89,7 +96,7 @@ public struct ProductionProcessSignaller: ProcessSignaller {
     }
 
     public func children(ofServerPID serverPID: Int32) -> [Int32] {
-        guard let out = Self.runPS(["-axo", "pid=,ppid="]) else { return [] }
+        guard let out = runPS(["-axo", "pid=,ppid="]) else { return [] }
         var result: [Int32] = []
         for line in out.split(separator: "\n") {
             let parts = line.split(separator: " ", omittingEmptySubsequences: true)
@@ -104,17 +111,17 @@ public struct ProductionProcessSignaller: ProcessSignaller {
         // versions cap the command column at the terminal/`COLUMNS` width even
         // when stdout is a pipe, clipping the TBD fingerprint markers off the
         // tail of a long `claude`/`codex` invocation.
-        Self.runPS(["-ww", "-o", "command=", "-p", String(pid)])?
+        runPS(["-ww", "-o", "command=", "-p", String(pid)])?
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public func stat(_ pid: Int32) -> String? {
-        Self.runPS(["-o", "stat=", "-p", String(pid)])?
+        runPS(["-o", "stat=", "-p", String(pid)])?
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public func startTime(_ pid: Int32) -> Date? {
-        guard pid > 0, let raw = Self.runPS(["-o", "lstart=", "-p", String(pid)]) else { return nil }
+        guard pid > 0, let raw = runPS(["-o", "lstart=", "-p", String(pid)]) else { return nil }
         return Self.parseLstart(raw)
     }
 
@@ -125,6 +132,12 @@ public struct ProductionProcessSignaller: ProcessSignaller {
     /// run of two spaces for the first nine days of every month. Collapsing all
     /// whitespace before parsing is what keeps this from working for three
     /// weeks and then failing on the first of the month.
+    ///
+    /// The field order is the C locale's, and only because `runPS` pins it:
+    /// under a day-first locale `ps` prints "Wed 16 Sep 13:17:30 2026", which
+    /// this format rejects. Every caller reads nil as "not the same process",
+    /// so a locale-shaped nil silently disables app-liveness reclamation and
+    /// the holder reaper alike.
     static func parseLstart(_ raw: String) -> Date? {
         let normalized = raw.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         guard !normalized.isEmpty else { return nil }
@@ -140,10 +153,17 @@ public struct ProductionProcessSignaller: ProcessSignaller {
         return f
     }()
 
-    private static func runPS(_ args: [String]) -> String? {
+    private func runPS(_ args: [String]) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/ps")
         p.arguments = args
+        // Pin the locale: `lstart` is locale-formatted, and day-first locales
+        // such as en_CA or en_GB reorder it to "Wed 16 Sep ..." — which a
+        // daemon started from a developer shell inherits, and which
+        // `parseLstart` cannot read. `LC_ALL` rather than `LANG`, because
+        // `LC_ALL` overrides every other locale variable. `TZ` stays inherited
+        // on purpose: `parseLstart` reads the field in the local time zone.
+        p.environment = baseEnvironment.merging(["LC_ALL": "C"]) { _, pinned in pinned }
         let pipe = Pipe()
         p.standardOutput = pipe
         // Discard stderr to nullDevice: an undrained Pipe could deadlock if ps

@@ -3,6 +3,7 @@ import Foundation
 import Testing
 
 @testable import TBDDaemonLib
+import TBDShared
 
 /// `AgentReaper`'s holder leg against the kernel's own answers about real pids.
 ///
@@ -679,6 +680,69 @@ struct AgentReaperHolderLegLiveTests {
         #expect(unpadded > padded)
         #expect(ProductionProcessSignaller.parseLstart("") == nil)
         #expect(ProductionProcessSignaller.parseLstart("not a date") == nil)
+    }
+
+    /// The day-first form `ps` prints under a locale such as `en_CA` or
+    /// `en_GB` — the day before the month — and the reason `runPS` pins
+    /// `LC_ALL=C`. The parser is deliberately *not* taught this shape: a second
+    /// format would guess at which locale the daemon inherited, while the pin
+    /// removes the question. Pinned as a nil so nobody "fixes" the parser
+    /// instead of the environment and reintroduces the guess.
+    @Test func lstartRejectsTheDayFirstLocaleForm() {
+        // Measured: `LANG=en_CA.UTF-8 ps -o lstart=` on macOS.
+        #expect(ProductionProcessSignaller.parseLstart("Wed 16 Sep 13:17:30 2026") == nil)
+    }
+
+    /// The pin itself, live. A daemon started from a developer shell inherits
+    /// that shell's locale, and under a day-first one `startTime` returned nil
+    /// for every pid — which `ProcessIdentity.ofPeer` reads as "no identity",
+    /// so a dead app's holder sessions were never reclaimed and the holder
+    /// reaper kept everything. The signaller is handed that environment
+    /// through its seam rather than via `setenv`, which would be process-wide
+    /// across every concurrently running suite.
+    ///
+    /// The control runs the same `ps` **without** the pin and asserts the
+    /// day-first shape, so a green result here proves the pin did the work
+    /// rather than that the machine lacks the locale data to exhibit the bug.
+    @Test func productionStartTimeSurvivesADayFirstLocale() throws {
+        let dayFirst = ProcessInfo.processInfo.environment.merging(
+            ["LANG": "en_CA.UTF-8", "LC_ALL": "en_CA.UTF-8"]) { _, injected in injected }
+        let me = ProcessInfo.processInfo.processIdentifier
+
+        let raw = try Self.rawLstart(of: me, environment: dayFirst)
+        #expect(
+            ProductionProcessSignaller.parseLstart(raw) == nil,
+            "the control did not reorder lstart under en_CA; got \(raw.debugDescription)")
+
+        let signaller = ProductionProcessSignaller(environment: dayFirst)
+        let started = try #require(
+            signaller.startTime(me),
+            "ps -o lstart= must parse under a day-first locale once LC_ALL=C is pinned")
+        let kernel = try #require(ProcessStartTime.startTime(pid: me))
+        #expect(
+            abs(started.timeIntervalSince(kernel)) < 1,
+            "ps reported \(started) but the kernel says \(kernel)")
+    }
+
+    /// `ps -o lstart=` for `pid` under exactly `environment`, unpinned — the
+    /// control's view of what `runPS` would have read without the fix. Waits
+    /// through the bounded teardown rather than `waitUntilExit` (see the note
+    /// at the top of this file).
+    private static func rawLstart(of pid: Int32, environment: [String: String]) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/ps")
+        p.arguments = ["-o", "lstart=", "-p", String(pid)]
+        p.environment = environment
+        let pipe = Pipe()
+        p.standardInput = FileHandle.nullDevice
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        try p.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        if case .unobserved(let stuck, let diagnostic) = BoundedProcessTeardown.awaitExit(p) {
+            throw TeardownBoundExpired(pid: stuck, diagnostic: diagnostic)
+        }
+        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

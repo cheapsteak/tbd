@@ -276,6 +276,15 @@ actor FDVendingServer {
         // Read here, while the socket exists: `LOCAL_PEERPID` is a property of
         // the connection, so after it closes there is nothing left to ask.
         clientIdentity = peerIdentity(fd)
+        if clientIdentity == nil {
+            // Say so now rather than at the disconnect: without an identity the
+            // arbiter cannot tell a dead app from a live one, so the holder
+            // sessions this app owns are never reclaimed on its behalf.
+            logger.error("""
+                FD vending client connected (fd \(fd, privacy: .public)) but its process identity \
+                could not be read; a dead app's holder sessions cannot be reclaimed on this connection
+                """)
+        }
         // The old reader will later call `receiveLoopExited(oldFD)`; its
         // `clientFD == fd` guard ensures that stale signal does NOT clear this
         // freshly-adopted `clientFD` (different fd number). Advancing the epoch
