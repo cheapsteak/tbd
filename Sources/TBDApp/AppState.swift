@@ -113,6 +113,7 @@ final class AppState {
         didSet {
             childrenIndexCache = nil
             allWorktreesCache = nil
+            sidebarRemoteSnapshotCache = nil
         }
     }
     /// Repo-less scratch spaces (`Worktree.isScratch`), surfaced separately
@@ -228,6 +229,7 @@ final class AppState {
     var unreadTerminals: Set<UUID> = []
     var selectedWorktreeIDs: Set<UUID> = [] {
         didSet {
+            sidebarSelectionGeneration &+= 1
             // If the List selected a repo header tag (not a worktree), treat it
             // as a repo selection and remove the ID from the worktree set.
             let repoIDs = Set(repos.map(\.id))
@@ -415,7 +417,9 @@ final class AppState {
     /// records a `.remoteSession` `NavigationEntry` — since remote sessions
     /// now sit inside a repo's own sidebar section beside local worktrees
     /// (see `selectRemoteSession`'s doc comment).
-    var selectedRemoteSession: RemoteSessionSelection? = nil
+    var selectedRemoteSession: RemoteSessionSelection? = nil {
+        didSet { sidebarSelectionGeneration &+= 1 }
+    }
     /// One-shot hint for which tab `RemoteSessionDetailView` should land on,
     /// set when a sidebar context-menu action (e.g. "View Log") jumps
     /// straight to a specific tab instead of the default. Consumed (read AND
@@ -505,10 +509,14 @@ final class AppState {
 
     /// Every registered remote-agent provider's negotiated contract + health,
     /// fetched by `refreshRemote()`. See `AppState+Remote.swift`.
-    var remoteProviders: [RemoteProviderStatus] = []
+    var remoteProviders: [RemoteProviderStatus] = [] {
+        didSet { sidebarRemoteSnapshotCache = nil }
+    }
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
-    var remoteSessions: [RemoteSessionInfo] = []
+    var remoteSessions: [RemoteSessionInfo] = [] {
+        didSet { sidebarRemoteSnapshotCache = nil }
+    }
     /// Every retain/import receipt the daemon holds, fetched by
     /// `refreshRemote()`.
     ///
@@ -562,6 +570,12 @@ final class AppState {
     /// jump menu) lands on an active worktree. `SidebarView` observes this
     /// to scroll the worktree row into view, then clears the value.
     var pendingScrollToWorktreeID: UUID?
+
+    /// Transient disclosures. Polling preserves the user's expansion choices.
+    var expandedSidebarGroups: Set<SidebarGroupID> = []
+    /// An explicit re-selection must reveal a manually collapsed group too.
+    var sidebarSelectionGeneration: UInt64 = 0
+    @ObservationIgnored var sidebarRemoteSnapshotCache: SidebarRemoteGroups.Snapshot?
 
     /// Test seam: when set, replaces the daemon roundtrip for archived
     /// lookups in `navigateToArchivedWorktree(_:)`. Production code leaves

@@ -41,18 +41,45 @@ struct RemoteSectionView: View {
             id: \.config.name
         ) { provider in
             RemoteProviderHeaderRow(provider: provider)
-            ForEach(RemoteSectionView.sessions(in: appState.remoteSessions, forProvider: provider.config.name, knownRepoIDs: knownRepoIDs)) { session in
-                RemoteSessionRowView(session: session)
-                    .listRowInsets(EdgeInsets(
-                        top: 0,
-                        leading: SidebarHeaderMetrics.childRowLeadingInset(
-                            chevronBeforeProjectName: chevronBeforeProjectName),
-                        bottom: 0,
-                        trailing: 0))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                    .tag(session.id)
+            providerSessionGroups(provider.config.name)
+        }
+    }
+
+    private var childInsets: EdgeInsets {
+        EdgeInsets(top: 0, leading: SidebarHeaderMetrics.childRowLeadingInset(
+            chevronBeforeProjectName: chevronBeforeProjectName), bottom: 0, trailing: 0)
+    }
+
+    @ViewBuilder
+    private func providerSessionGroups(_ provider: String) -> some View {
+        let groups = appState.sidebarRemoteGroups(provider: provider)
+        let remoteID = SidebarGroupID(owner: .provider(provider), kind: .remote)
+        let exitedID = SidebarGroupID(owner: .provider(provider), kind: .exited)
+        if !groups.isEmpty {
+            SidebarGroupHeader(id: remoteID, title: "Remote", summary: groups.summary)
+                .listRowInsets(childInsets)
+            if appState.expandedSidebarGroups.contains(remoteID) {
+                sessionRows(groups.sessions, depth: 1)
+                if groups.hasExited {
+                    SidebarGroupHeader(id: exitedID, title: "Exited", summary: groups.exitedSummary)
+                        .padding(.leading, 16)
+                        .listRowInsets(childInsets)
+                    if appState.expandedSidebarGroups.contains(exitedID) {
+                        sessionRows(groups.exitedSessions, depth: 2)
+                    }
+                }
             }
+        }
+    }
+
+    private func sessionRows(_ sessions: [RemoteSessionInfo], depth: Int) -> some View {
+        ForEach(sessions) { session in
+            RemoteSessionRowView(session: session)
+                .padding(.leading, CGFloat(depth) * 16)
+                .listRowInsets(childInsets)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+                .tag(session.id)
         }
     }
 

@@ -390,12 +390,11 @@ struct RepoSectionView: View {
             trailing: 0)
     }
 
-    /// The expanded repo's rows: main worktree, top-level worktree subtree
-    /// (with drag reorder), then matched remote sessions — extracted out of
-    /// `body` alongside `headerRow`. Pure restructuring: identical content,
-    /// order, and modifiers.
+    /// Local roots retain their order; remote roots and unadopted sessions
+    /// share one disclosure without changing their underlying ownership.
     @ViewBuilder
     private var expandedContent: some View {
+        let groups = appState.sidebarRemoteGroups(repoID: repo.id)
         if let main = mainWorktree {
             WorktreeRowView(worktree: main, isMain: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -407,7 +406,7 @@ struct RepoSectionView: View {
                 .listRowBackground(Color.clear)
                 .tag(main.id)
         }
-        ForEach(topLevelWorktrees) { wt in
+        ForEach(groups.localRoots) { wt in
             WorktreeSubtreeView(worktree: wt, depth: 0, sectionRepoID: repo.id)
                 .opacity(isChevronHovered ? 0.7 : 1.0)
                 .onHover { onSectionHoverChange($0) }
@@ -416,17 +415,54 @@ struct RepoSectionView: View {
             appState.reorderTopLevelWorktrees(
                 repoID: repo.id,
                 fromOffsets: source,
-                toOffset: destination
+                toOffset: destination,
+                visibleIDs: groups.localRoots.map(\.id)
             )
         }
-        // Matched remote sessions render AFTER local worktrees, never
-        // interleaved: local worktrees have a user-controlled sort order
-        // (`sortOrder`/drag reorder above) and remote ones have nothing
-        // comparable, so appending is predictable while interleaving
-        // would look arbitrary relative to a manual reorder the user set
-        // up on purpose.
-        ForEach(matchedRemoteSessions) { session in
+        if !groups.isEmpty {
+            remoteGroupContent(groups)
+        }
+    }
+
+    @ViewBuilder
+    private func remoteGroupContent(_ groups: SidebarRemoteGroups) -> some View {
+        let remoteID = SidebarGroupID(owner: .repository(repo.id), kind: .remote)
+        let exitedID = SidebarGroupID(owner: .repository(repo.id), kind: .exited)
+        SidebarGroupHeader(id: remoteID, title: "Remote", summary: groups.summary)
+            .listRowInsets(childRowInsets)
+        if appState.expandedSidebarGroups.contains(remoteID) {
+            remoteWorktreeRows(groups.remoteRoots, depth: 1)
+            remoteSessionRows(groups.sessions, depth: 1)
+            if groups.hasExited {
+                SidebarGroupHeader(id: exitedID, title: "Exited", summary: groups.exitedSummary)
+                    .padding(.leading, 16)
+                    .listRowInsets(childRowInsets)
+                if appState.expandedSidebarGroups.contains(exitedID) {
+                    remoteWorktreeRows(groups.exitedRoots, depth: 2)
+                    remoteSessionRows(groups.exitedSessions, depth: 2)
+                }
+            }
+        }
+    }
+
+    private func remoteWorktreeRows(_ rows: [Worktree], depth: Int) -> some View {
+        ForEach(rows) { worktree in
+            WorktreeSubtreeView(worktree: worktree, depth: 0, sectionRepoID: repo.id)
+                .padding(.leading, CGFloat(depth) * 16)
+                .opacity(isChevronHovered ? 0.7 : 1.0)
+                .onHover { onSectionHoverChange($0) }
+        }
+        .onMove { source, destination in
+            appState.reorderTopLevelWorktrees(
+                repoID: repo.id, fromOffsets: source, toOffset: destination,
+                visibleIDs: rows.map(\.id))
+        }
+    }
+
+    private func remoteSessionRows(_ rows: [RemoteSessionInfo], depth: Int) -> some View {
+        ForEach(rows) { session in
             RemoteSessionRowView(session: session)
+                .padding(.leading, CGFloat(depth) * 16)
                 .opacity(isChevronHovered ? 0.7 : 1.0)
                 .onHover { onSectionHoverChange($0) }
                 .listRowInsets(childRowInsets)

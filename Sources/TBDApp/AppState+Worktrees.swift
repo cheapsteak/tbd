@@ -1294,7 +1294,8 @@ extension AppState {
     /// triggered by SwiftUI `.onMove` whose indices index the top-level ForEach.
     /// Nested children stay attached to their parents — only top-level sortOrders change.
     /// Updates locally first (optimistic), then persists via RPC; rolls back on error.
-    func reorderTopLevelWorktrees(repoID: UUID, fromOffsets source: IndexSet, toOffset destination: Int) {
+    func reorderTopLevelWorktrees(repoID: UUID, fromOffsets source: IndexSet, toOffset destination: Int,
+                                  visibleIDs: [UUID]? = nil) {
         let previous = worktrees[repoID]
         var rows = (worktrees[repoID] ?? [])
         // Snapshot the top-level order BEFORE the move (matches the ForEach).
@@ -1307,8 +1308,15 @@ extension AppState {
             logger.warning("reorderTopLevel skipped: stale indices (topLevel.count=\(topLevel.count, privacy: .public) source=\(Array(source), privacy: .public) destination=\(destination, privacy: .public))")
             return
         }
-        // Apply the swap to derive the new top-level order.
-        topLevel.move(fromOffsets: source, toOffset: destination)
+        if let visibleIDs {
+            guard let orderedIDs = SidebarSubsetOrder.moved(
+                all: topLevel.map(\.id), visible: visibleIDs, source: source, destination: destination
+            ) else { return }
+            let byID = Dictionary(uniqueKeysWithValues: topLevel.map { ($0.id, $0) })
+            topLevel = orderedIDs.compactMap { byID[$0] }
+        } else {
+            topLevel.move(fromOffsets: source, toOffset: destination)
+        }
         logger.debug("reorderTopLevel AFTER: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public)")
 
         // Optimistic local update: reassign sortOrders for the new top-level order.
