@@ -106,7 +106,7 @@ struct ContinueInClaudeReplacementDeltaTests {
             transcriptPath: "/tmp/claude-session.jsonl",
             kind: .claude,
             activityState: .idle)
-        let layout = PaneLayout.split(
+        let layout = LayoutNode.split(
             id: splitID,
             direction: .horizontal,
             children: [
