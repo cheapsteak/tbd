@@ -284,12 +284,32 @@ private struct SelectedHistoryUnit: Sendable {
     var rendered: String
 }
 
+private struct SelectedHistoryTurn: Sendable {
+    let ordinal: Int
+    let rendered: String
+}
+
+private struct PendingHistoryTurn: Sendable {
+    var identifier: String?
+    var firstOrdinal: Int?
+    var userSignature: String?
+    var userIsInitialTask = false
+    var units: [SelectedHistoryUnit] = []
+    var renderedByteCount = 0
+    var isOversized = false
+
+    var hasContent: Bool {
+        firstOrdinal != nil || !units.isEmpty || isOversized
+    }
+}
+
 private struct HistoryAccumulator {
     private let heading = "## Selected history\n\n"
     private let byteLimit: Int
     private var ordinal = 0
     private var initial: SelectedHistoryUnit?
-    private var suffix: [SelectedHistoryUnit] = []
+    private var currentTurn = PendingHistoryTurn()
+    private var suffix: [SelectedHistoryTurn] = []
     private var suffixByteCount = 0
     private(set) var visibleMessageCount = 0
     private(set) var metadata = SourceMetadata()
@@ -326,16 +346,17 @@ private struct HistoryAccumulator {
         case "event_msg":
             consumeEventMessage(payload)
         case "turn_context":
-            break
+            beginTurn(identifier: scalar(payload["turn_id"]))
         default:
             counts.unsupported += 1
         }
     }
 
     mutating func renderHistory() -> String {
-        let selected = ([initial].compactMap { $0 } + suffix)
-            .sorted { $0.unit.ordinal < $1.unit.ordinal }
-        return heading + selected.map(\.rendered).joined()
+        finalizeCurrentTurn()
+        return heading
+            + (initial?.rendered ?? "")
+            + suffix.map(\.rendered).joined()
     }
 
     private mutating func consumeSessionMetadata(_ payload: [String: Any]) {
@@ -412,8 +433,10 @@ private struct HistoryAccumulator {
             let kind: HistoryUnit.Kind = eventType == "user_message"
                 ? .user : .assistant(phase: nil)
             append(unit(kind: kind, text: safeText, canonical: false))
-        case "task_started", "task_complete", "turn_aborted":
-            break
+        case "task_started":
+            beginTurn(identifier: scalar(payload["turn_id"]))
+        case "task_complete", "turn_aborted":
+            finishTurn(identifier: scalar(payload["turn_id"]))
         default:
             counts.unsupported += 1
         }
@@ -443,56 +466,154 @@ private struct HistoryAccumulator {
     }
 
     private mutating func append(_ unit: HistoryUnit) {
-        if let signature = unit.signature {
-            if var current = initial, current.unit.signature == signature {
-                if unit.canonical, !current.unit.canonical {
-                    current.unit = HistoryUnit(
-                        ordinal: current.unit.ordinal,
-                        kind: unit.kind,
-                        text: unit.text,
-                        signature: signature,
-                        canonical: true)
-                    current.rendered = renderedForSelection(current.unit)
-                    initial = current
-                }
-                return
-            }
-            if let index = suffix.firstIndex(where: { $0.unit.signature == signature }) {
-                let existing = suffix[index]
-                if unit.canonical, !existing.unit.canonical {
-                    suffixByteCount -= existing.rendered.utf8.count
-                    var replacement = unit
-                    replacement = HistoryUnit(
-                        ordinal: existing.unit.ordinal,
-                        kind: replacement.kind,
-                        text: replacement.text,
-                        signature: signature,
-                        canonical: true)
-                    let selected = SelectedHistoryUnit(
-                        unit: replacement,
-                        rendered: renderedForSelection(replacement))
-                    suffix[index] = selected
-                    suffixByteCount += selected.rendered.utf8.count
-                    trimSuffix()
-                }
-                return
-            }
+        if unit.isUser {
+            appendUser(unit)
+        } else {
+            appendToCurrentTurn(unit)
+        }
+    }
+
+    private mutating func appendUser(_ unit: HistoryUnit) {
+        if currentTurn.userSignature == unit.signature {
+            replaceEquivalentUnitIfPreferred(unit)
+            return
         }
 
-        let selected = SelectedHistoryUnit(unit: unit, rendered: renderedForSelection(unit))
-        if initial == nil, unit.isUser {
-            initial = selected
+        if currentTurn.hasContent {
+            finalizeCurrentTurn()
+        }
+
+        currentTurn.firstOrdinal = unit.ordinal
+        currentTurn.userSignature = unit.signature
+        if initial == nil {
+            counts.earlier += suffix.count
+            suffix.removeAll(keepingCapacity: false)
+            suffixByteCount = 0
+            initial = SelectedHistoryUnit(
+                unit: unit,
+                rendered: renderedForSelection(unit))
+            currentTurn.userIsInitialTask = true
+            trimSuffix()
+        } else {
+            appendToCurrentTurn(unit)
+        }
+    }
+
+    private mutating func appendToCurrentTurn(_ unit: HistoryUnit) {
+        if currentTurn.firstOrdinal == nil {
+            currentTurn.firstOrdinal = unit.ordinal
+        }
+        guard !currentTurn.isOversized else { return }
+
+        if let signature = unit.signature,
+           currentTurn.units.contains(where: { $0.unit.signature == signature }) {
+            replaceEquivalentUnitIfPreferred(unit)
+            return
+        }
+
+        let selected = SelectedHistoryUnit(unit: unit, rendered: unit.rendered())
+        let nextByteCount = currentTurn.renderedByteCount + selected.rendered.utf8.count
+        guard nextByteCount <= historyContentByteLimit else {
+            currentTurn.units.removeAll(keepingCapacity: false)
+            currentTurn.renderedByteCount = 0
+            currentTurn.isOversized = true
+            return
+        }
+        currentTurn.units.append(selected)
+        currentTurn.renderedByteCount = nextByteCount
+    }
+
+    private mutating func replaceEquivalentUnitIfPreferred(_ unit: HistoryUnit) {
+        guard unit.canonical else { return }
+
+        if currentTurn.userIsInitialTask,
+           let current = initial,
+           current.unit.signature == unit.signature,
+           !current.unit.canonical {
+            let replacement = preservingOrdinal(of: current.unit, with: unit)
+            initial = SelectedHistoryUnit(
+                unit: replacement,
+                rendered: renderedForSelection(replacement))
             trimSuffix()
             return
         }
-        suffix.append(selected)
-        suffixByteCount += selected.rendered.utf8.count
+
+        guard !currentTurn.isOversized,
+              let index = currentTurn.units.firstIndex(where: {
+                  $0.unit.signature == unit.signature
+              }),
+              !currentTurn.units[index].unit.canonical else { return }
+        let existing = currentTurn.units[index]
+        let replacement = preservingOrdinal(of: existing.unit, with: unit)
+        let selected = SelectedHistoryUnit(unit: replacement, rendered: replacement.rendered())
+        let nextByteCount = currentTurn.renderedByteCount
+            - existing.rendered.utf8.count
+            + selected.rendered.utf8.count
+        guard nextByteCount <= historyContentByteLimit else {
+            currentTurn.units.removeAll(keepingCapacity: false)
+            currentTurn.renderedByteCount = 0
+            currentTurn.isOversized = true
+            return
+        }
+        currentTurn.units[index] = selected
+        currentTurn.renderedByteCount = nextByteCount
+    }
+
+    private func preservingOrdinal(
+        of existing: HistoryUnit,
+        with replacement: HistoryUnit
+    ) -> HistoryUnit {
+        HistoryUnit(
+            ordinal: existing.ordinal,
+            kind: replacement.kind,
+            text: replacement.text,
+            signature: replacement.signature,
+            canonical: replacement.canonical)
+    }
+
+    private mutating func beginTurn(identifier: String?) {
+        guard let identifier, !identifier.isEmpty else { return }
+        guard let currentIdentifier = currentTurn.identifier else {
+            currentTurn.identifier = identifier
+            return
+        }
+        guard currentIdentifier != identifier else { return }
+        finalizeCurrentTurn()
+        currentTurn.identifier = identifier
+    }
+
+    private mutating func finishTurn(identifier: String?) {
+        if let identifier,
+           let currentIdentifier = currentTurn.identifier,
+           identifier != currentIdentifier {
+            return
+        }
+        finalizeCurrentTurn()
+    }
+
+    private mutating func finalizeCurrentTurn() {
+        defer { currentTurn = PendingHistoryTurn() }
+        guard currentTurn.hasContent else { return }
+
+        let rendered: String
+        if currentTurn.isOversized {
+            counts.oversizedUnits += 1
+            rendered = "### Turn\n[Oversized turn omitted; inspect the complete rollout.]\n\n"
+        } else {
+            rendered = currentTurn.units.map(\.rendered).joined()
+        }
+        guard !rendered.isEmpty else { return }
+
+        suffix.append(SelectedHistoryTurn(
+            ordinal: currentTurn.firstOrdinal ?? ordinal,
+            rendered: rendered))
+        suffixByteCount += rendered.utf8.count
         trimSuffix()
     }
 
     private mutating func renderedForSelection(_ unit: HistoryUnit) -> String {
         let rendered = unit.rendered()
-        let available = byteLimit - heading.utf8.count
+        let available = historyContentByteLimit
         guard rendered.utf8.count > available else { return rendered }
         counts.oversizedUnits += 1
         let type: String
@@ -506,16 +627,20 @@ private struct HistoryAccumulator {
 
     private mutating func trimSuffix() {
         let initialBytes = initial?.rendered.utf8.count ?? 0
-        let available = max(0, byteLimit - heading.utf8.count - initialBytes)
+        let available = max(0, historyContentByteLimit - initialBytes)
         while suffixByteCount > available, !suffix.isEmpty {
             let removed = suffix.removeFirst()
             suffixByteCount -= removed.rendered.utf8.count
-            if let initial, removed.unit.ordinal > initial.unit.ordinal {
+            if let initial, removed.ordinal > initial.unit.ordinal {
                 counts.middle += 1
             } else {
                 counts.earlier += 1
             }
         }
+    }
+
+    private var historyContentByteLimit: Int {
+        max(0, byteLimit - heading.utf8.count)
     }
 
     private func scalar(_ value: Any?) -> String? {
@@ -679,7 +804,7 @@ private enum SecretRedactor {
             with: "$1" + marker,
             options: [.caseInsensitive])
         result = replacing(
-            #"\b(token|secret|password|credential|api[ _-]?key|private[ _-]?key|cookie|session[ _-]?cookie)(\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"#,
+            #"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9_-]*(?:token|secret|password|credential|authorization|api[ _-]?key|private[ _-]?key|cookie|session[ _-]?cookie)[A-Za-z0-9_-]*)(\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"#,
             in: result,
             with: "$1$2" + marker,
             options: [.caseInsensitive])

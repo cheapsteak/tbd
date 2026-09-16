@@ -71,15 +71,19 @@ full. If status does not fit, the envelope includes a count and an explicit trun
 marker. The pointer, source identity, git-status section, handoff warning, and authorship
 statement always remain present.
 
-History is normalized into semantic units in source order. The first complete user-task
-unit, when present, receives space first so suffix truncation cannot discard the task being
-continued. The builder then walks the remaining units from newest to oldest, retains every
-whole unit that fits, deduplicates the initial task if it already falls in that suffix, and
-restores chronological order for rendering. It never cuts a serialized unit mid-record. A
-single unit larger than the history budget becomes a typed omission stub and remains
-available through the source pointer. The packet says how many middle, earlier, oversized,
-malformed, and unsupported records it omitted. All byte decisions happen after redaction
-and use valid UTF-8 boundaries.
+History is normalized into semantic units in source order and grouped into turn bundles.
+A new user message opens a boundary, while distinct `turn_context` turn IDs and task
+lifecycle records preserve boundaries for rollout variants that do not repeat the user
+record. Repeated context records for the same turn do not split a bundle. The first
+complete user-task unit, when present, is the sole independently reserved unit so suffix
+truncation cannot discard the task being continued. All remaining history is selected as
+whole turn bundles from newest to oldest and restored to chronological order for
+rendering. A bundle is either retained in full, omitted in full, or replaced by a typed
+oversized-turn stub; the builder never emits only one side of a user/assistant turn because
+the byte cap landed between its units. A first task larger than the history budget likewise
+becomes a typed unit stub and remains available through the source pointer. The packet says
+how many middle, earlier, oversized, malformed, and unsupported records it omitted. All
+byte decisions happen after redaction and use valid UTF-8 boundaries.
 
 The JSONL scanner reads fixed-size chunks and caps one input record at 1 MiB. It discards
 an oversized or unterminated record without accumulating the rest of that record in
