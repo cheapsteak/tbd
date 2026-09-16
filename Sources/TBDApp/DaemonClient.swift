@@ -752,6 +752,24 @@ actor DaemonClient {
             resultType: TerminalContinueInCodexResult.self)
     }
 
+    /// Replace one idle Codex process with a fresh Claude session in the same
+    /// terminal row and tmux window. A nil profile selects the ambient login.
+    func continueInClaude(
+        sourceTerminalID: UUID,
+        profileID: UUID?,
+        cols: Int?,
+        rows: Int?
+    ) async throws -> Terminal {
+        try await callAsync(
+            method: RPCMethod.terminalContinueInClaude,
+            params: TerminalContinueInClaudeParams(
+                sourceTerminalID: sourceTerminalID,
+                profileID: profileID,
+                cols: cols,
+                rows: rows),
+            resultType: Terminal.self)
+    }
+
     /// List terminals, optionally filtered by worktree.
     func listTerminals(worktreeID: UUID? = nil) async throws -> [Terminal] {
         return try await callAsync(
