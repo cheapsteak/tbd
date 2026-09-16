@@ -394,9 +394,13 @@ a mutation-verified proof with nothing going red. Those pin their own
 `.timeLimit(.minutes(1))`: `SubprocessTimeoutStarvationTests` (a `sleep 90`
 child must outlive the limit), `GitManagerTimeoutTests` and
 `SubprocessTimeoutTests` (a regressed EOF-waiting drain must outlive it). Don't
-"tidy" them back to `.clockDriven`; the residual — that 45 s makes two chained
-`waitForSuspension`s exceed 60 s — is acceptable only because none of those
-suites chains two and a healthy handshake there returns in milliseconds.
+"tidy" them back to `.clockDriven`; the residual — that a 45 s arming guard makes
+two chained waits exceed 60 s, on either clock — is acceptable only because none
+of those suites chains two and a healthy handshake there returns in
+milliseconds. `GitManagerTimeoutTests` is on `EventDrivenTestClock` for that
+reason too: a guard that fires at 45 s reports a named `NoSleeperArmed` before
+the 60 s limit cuts the test off unattributed, and raising it to
+`TestDeadlines.saturatedPass` would put the diagnostic past the limit.
 
 **No bounded wait in a fast-pass target carries a literal deadline, and no
 fast-pass suite carries a hand-written `.timeLimit`.** A wait takes its deadline
@@ -1027,7 +1031,11 @@ and `SearchQueryDebouncerTests`,
 which reproduced the starvation in a full-suite soak, plus the two poller suites
 `GatedIntervalSleepTests` and `DaywatchRunnerLoopTests`, whose chains on the
 predecessor helpers each paid five wall-clock guards — 225 s of the 240 s
-ceiling, one scheduling excursion from tripping it. Design:
+ceiling, one scheduling excursion from tripping it; and the tier-3
+`GitManagerTimeoutTests`, whose arming sits behind an unstructured task inside
+`runBoundedProcess` and whose polled handshake starved past its own real
+`/bin/sleep 30` child under induced load — the call then returned normally
+instead of throwing, at 1–3 of 10 targeted nightly iterations (#503). Design:
 `docs/specs/2026-08-11-event-driven-test-clock-design.md`.
 
 `PollerClock` is **not** this seam and must not be copied as a template — see

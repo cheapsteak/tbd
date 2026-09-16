@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import Testing
 import TestSupport
@@ -13,8 +12,8 @@ import TestSupport
 /// path; two tests deliberately orphan a backgrounded grandchild. Only the
 /// *deadline* is virtual.
 ///
-/// The deadline runs on an injected `TestClock`, so no test here races a real
-/// timeout on a loaded runner:
+/// The deadline runs on an injected `EventDrivenTestClock`, so no test here
+/// races a real timeout on a loaded runner:
 ///
 /// - Happy-path tests never advance the clock, so the deadline **cannot** fire.
 ///   Previously they asserted success against a real 3–30 s deadline while the
@@ -27,6 +26,28 @@ import TestSupport
 /// parallel; a 600 s timeout is simply unreachable inside the suite's
 /// one-minute limit, so the injected clock is the only armer that can fire here.
 /// `SubprocessTimeoutStarvationTests` covers the watchdog on a real clock.
+///
+/// WHY `EventDrivenTestClock` AND NOT `TestClock`. The clock armer in
+/// `runBoundedProcess` is an unstructured `Task` that has to be given a thread
+/// before it reaches `clock.sleep`. `TestClock`'s `advanceWhenSuspended` could
+/// only observe that arming by polling `checkSuspension()`, each probe a
+/// background-QoS megaYield storm, and under CPU saturation the probes starved
+/// past the 45 s guard while the real `/bin/sleep 30` child finished on its own
+/// — the call then returned `""` instead of throwing, and the test sat at the
+/// suite limit (1–3 of 10 targeted stress iterations, #503). The event-driven
+/// clock signals the waiter from inside the same critical section that registers
+/// the sleeper, so there is no probe to starve: the wait ends the instant the
+/// deadline task reaches its sleep, however long the scheduler took to get it
+/// there.
+///
+/// The timeout-path tests use the **strict** wait, `requireAdvanceWhenArmed`,
+/// rather than the soft `advanceWhenArmed`. The soft form records a missed
+/// arming and then advances an empty ledger, after which the next statement
+/// awaits the call — which is a real `sleep 30` or `exec sleep 120` child, so a
+/// miss would surface as a 30 s stall or a bare suite time limit rather than as
+/// the named `NoSleeperArmed` diagnostic. The strict form throws at the miss
+/// before virtual time moves, and the `defer` cancels the call so the
+/// cancellation relay kills the child instead of leaving it to run out.
 ///
 /// WHY AN EXPLICIT `.timeLimit(.minutes(1))` AND NOT `.clockDriven`. Do not
 /// "tidy" this back to the shared trait — the two halves below are why.
@@ -42,29 +63,33 @@ import TestSupport
 ///    silently disarmed, with nothing going red to tell you.
 /// 2. **It does not need the raised budget.** `.clockDriven` was raised to
 ///    4 minutes to absorb the arming latency of the fast parallel pass, whose
-///    ~4536-test population is what makes a `TestClock` handshake take tens of
+///    ~4536-test population is what makes a clock handshake take tens of
 ///    seconds. This is tier 3: CI runs `Tests/TBDDaemonLiveTests` as
 ///    `--filter '^TBDDaemonLiveTests\.' --no-parallel` on an otherwise-idle
 ///    machine, so real arming latency here is milliseconds.
 ///
-/// One residual, stated rather than glossed: `waitForSuspension`'s default is
-/// now 45 s, so a test that waited **twice** would need 90 s and would trip this
-/// 60 s limit, where at the old 15 s default two waits cost only 30 s. No test
-/// here chains two — the suite's two `advanceWhenSuspended` sites are in
-/// different `@Test`s, one each — and in the quiet pass a healthy handshake
-/// returns in milliseconds, so only a genuine hang ever pays the timeout, which
-/// is exactly what this limit is here to catch.
+/// One residual, stated rather than glossed: the arming hang guard is 45 s, so
+/// a test that waited **twice** would need 90 s and would trip this 60 s limit.
+/// No test here chains two — the suite's two `requireAdvanceWhenArmed` sites
+/// are in different `@Test`s, one each — and in the quiet pass a healthy
+/// handshake returns in milliseconds, so only a genuine miss ever pays the
+/// guard, and it reports as a named diagnostic 15 s before the limit would have
+/// cut it off unattributed. The guard deliberately stays at its 45 s default
+/// rather than `TestDeadlines.saturatedPass` (90 s), which the fast pass uses for
+/// arming behind an unstructured task: here 90 s sits past the suite limit, so
+/// the diagnostic could never be reached, and the latency it is sized for does
+/// not occur in the quiet pass.
 @Suite(.timeLimit(.minutes(1)))
 struct GitManagerTimeoutTests {
 
     /// Far enough out that the real watchdog cannot reach it inside the suite's
-    /// one-minute hang limit, so only the `TestClock` can fire the deadline.
+    /// one-minute hang limit, so only the injected clock can fire the deadline.
     private static let unreachableTimeout: Duration = .seconds(600)
 
     private static var tmp: String { FileManager.default.temporaryDirectory.path }
 
-    @Test func subprocessTimeoutThrowsGitTimeoutError() async {
-        let clock = TestClock()
+    @Test func subprocessTimeoutThrowsGitTimeoutError() async throws {
+        let clock = EventDrivenTestClock()
         let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: clock)
         let call = Task {
             try await git.runForTimeoutTesting(
@@ -73,7 +98,10 @@ struct GitManagerTimeoutTests {
                 at: Self.tmp
             )
         }
-        await clock.advanceWhenSuspended(by: Self.unreachableTimeout)
+        // A no-op once the call has resolved; on a thrown arming miss it fires
+        // the cancellation relay, which kills the child rather than orphaning it.
+        defer { call.cancel() }
+        try await clock.requireAdvanceWhenArmed(by: Self.unreachableTimeout)
         await #expect(throws: GitTimeoutError.self) { try await call.value }
     }
 
@@ -81,7 +109,7 @@ struct GitManagerTimeoutTests {
         // The timeout wrapper must not break the happy path (regression guard
         // for the kill/continuation plumbing). Clock never advances, so the
         // deadline is unreachable no matter how slow the runner is.
-        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: TestClock())
+        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: EventDrivenTestClock())
         let out = try await git.runForTimeoutTesting(
             executable: "/bin/echo",
             arguments: ["ok"],
@@ -101,7 +129,7 @@ struct GitManagerTimeoutTests {
         // trailing chunk). A deadlocked drain now hangs into the suite's time
         // limit rather than being masked as a timeout.
         let bytes = 102_400
-        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: TestClock())
+        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: EventDrivenTestClock())
         let out = try await git.runForTimeoutTesting(
             executable: "/bin/sh",
             arguments: ["-c", "yes x | head -c \(bytes)"],
@@ -115,7 +143,7 @@ struct GitManagerTimeoutTests {
         // diagnostics must exit and surface as GitError (with the full stderr),
         // not wedge on a full pipe until the deadline fires.
         let bytes = 102_400
-        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: TestClock())
+        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: EventDrivenTestClock())
         do {
             _ = try await git.runForTimeoutTesting(
                 executable: "/bin/sh",
@@ -129,7 +157,7 @@ struct GitManagerTimeoutTests {
         }
     }
 
-    @Test func timeoutThrowsPromptlyWhenGrandchildHoldsPipeOpen() async {
+    @Test func timeoutThrowsPromptlyWhenGrandchildHoldsPipeOpen() async throws {
         // The deadline kills only the DIRECT child (SIGTERM→SIGKILL); a
         // backgrounded grandchild inherits the pipe write ends and keeps them
         // open for 120s, so EOF never arrives before it exits. The timeout path
@@ -149,7 +177,7 @@ struct GitManagerTimeoutTests {
         // The plain `sleep 120 &` grandchild is NOT killed and may linger up to
         // 120s after the suite — harmless orphanage locally, irrelevant on
         // ephemeral CI runners.
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: clock)
         let call = Task {
             try await git.runForTimeoutTesting(
@@ -158,7 +186,11 @@ struct GitManagerTimeoutTests {
                 at: Self.tmp
             )
         }
-        await clock.advanceWhenSuspended(by: Self.unreachableTimeout)
+        // Same as above: inert after the call resolves, and on an arming miss it
+        // kills the direct child so a thrown diagnostic does not leave a 120 s
+        // `exec sleep` running under the test process.
+        defer { call.cancel() }
+        try await clock.requireAdvanceWhenArmed(by: Self.unreachableTimeout)
         await #expect(throws: GitTimeoutError.self) { try await call.value }
     }
 
@@ -172,7 +204,7 @@ struct GitManagerTimeoutTests {
         // regression can only present as a hang caught by the suite's limit, and
         // the 3 s margin that a loaded runner could blow is gone. The
         // `sleep 30 &` grandchild may linger up to 30s — tolerable orphanage.
-        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: TestClock())
+        let git = GitManager(subprocessTimeout: Self.unreachableTimeout, clock: EventDrivenTestClock())
         let out = try await git.runForTimeoutTesting(
             executable: "/bin/sh",
             arguments: ["-c", "sleep 30 & echo hi"],
