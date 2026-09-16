@@ -356,6 +356,52 @@ struct TerminalReplacementSnapshot: Sendable {
     }
 }
 
+/// The complete durable fact set that authorizes a Codex-to-Claude provider
+/// replacement. General replacement snapshots deliberately ignore activity;
+/// Continue may interrupt only a positively idle Codex turn, so its CAS must
+/// include the value, provenance, and both observation watermarks.
+struct TerminalContinueInClaudeSnapshot: Sendable {
+    let replacement: TerminalReplacementSnapshot
+    let activityState: TerminalActivityState
+    let activityStateSource: FactSource?
+    let activityStateObservedAt: Date?
+    let activityStateOrderObservedAt: Date?
+    let awaitingInputReason: AwaitingInputReason?
+    let awaitingInputObservedAt: Date?
+
+    init(terminal: Terminal) {
+        replacement = TerminalReplacementSnapshot(terminal: terminal)
+        activityState = terminal.activityState
+        activityStateSource = terminal.activityStateSource
+        activityStateObservedAt = terminal.activityStateObservedAt
+        activityStateOrderObservedAt = terminal.activityStateOrderObservedAt
+        awaitingInputReason = terminal.awaitingInputReason
+        awaitingInputObservedAt = terminal.awaitingInputObservedAt
+    }
+
+    fileprivate func matches(_ record: TerminalRecord) -> Bool {
+        replacement.matches(record)
+            && record.activityState == activityState.rawValue
+            && FactColumnJSON.matches(
+                activityStateSource, encoded: record.activityStateSource)
+            && record.activityStateObservedAt == activityStateObservedAt
+            && record.activityStateOrderObservedAt == activityStateOrderObservedAt
+            && FactColumnJSON.matches(
+                awaitingInputReason, encoded: record.awaitingInputReason)
+            && record.awaitingInputObservedAt == awaitingInputObservedAt
+    }
+
+    func matches(_ terminal: Terminal) -> Bool {
+        replacement.matches(terminal)
+            && terminal.activityState == activityState
+            && terminal.activityStateSource == activityStateSource
+            && terminal.activityStateObservedAt == activityStateObservedAt
+            && terminal.activityStateOrderObservedAt == activityStateOrderObservedAt
+            && terminal.awaitingInputReason == awaitingInputReason
+            && terminal.awaitingInputObservedAt == awaitingInputObservedAt
+    }
+}
+
 /// The complete safety state that authorizes hibernating a live process.
 /// Unlike general replacement snapshots, this includes the activity and
 /// keep-warm rails so a hook or preference change between the final read and
@@ -1141,6 +1187,198 @@ public struct TerminalStore: Sendable {
                 at: date)
             try record.update(db)
             return incarnationID
+        }
+    }
+
+    /// Fence a positively-idle Codex row for Continue-in-Claude without
+    /// changing any provider, session, rollout, profile, or active-process
+    /// identity. The pending token makes every old-process hook stale while
+    /// leaving the source identity durable for rollback and restart recovery.
+    func beginContinueInClaude(
+        id: UUID,
+        expectedState: TerminalContinueInClaudeSnapshot,
+        pendingIncarnationID: UUID
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard expectedState.matches(record),
+                  record.kind == TerminalKind.codex.rawValue,
+                  record.hibernatedAt == nil,
+                  record.suspendedAt == nil,
+                  record.pendingSessionIncarnationID == nil else {
+                return nil
+            }
+            record.pendingSessionIncarnationID = pendingIncarnationID.uuidString
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Retract a staged Continue fence before its first destructive tmux act.
+    /// Exact-token matching means a stale refusal cannot clear another
+    /// transaction's recovery intent.
+    func abortContinueInClaudeBeforeLaunch(
+        id: UUID,
+        pendingIncarnationID: UUID
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                return nil
+            }
+            guard record.kind == TerminalKind.codex.rawValue,
+                  record.pendingSessionIncarnationID == pendingIncarnationID.uuidString else {
+                return nil
+            }
+            record.pendingSessionIncarnationID = nil
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Rotate the failed Claude destination token to a fresh Codex recovery
+    /// token. The row remains entirely Codex; delayed hooks from both dead
+    /// processes become stale in the same write.
+    func rotateContinueInClaudeToCodexRecovery(
+        id: UUID,
+        expectedPendingIncarnationID: UUID,
+        recoveryIncarnationID: UUID
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                return nil
+            }
+            guard record.kind == TerminalKind.codex.rawValue,
+                  record.hibernatedAt == nil,
+                  record.suspendedAt == nil,
+                  record.pendingSessionIncarnationID
+                    == expectedPendingIncarnationID.uuidString else {
+                return nil
+            }
+            record.pendingSessionIncarnationID = recoveryIncarnationID.uuidString
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Persist a recreated inert window under an existing recovery token
+    /// before Codex is launched into it. No session/provider fact changes.
+    func movePendingCodexRecovery(
+        id: UUID,
+        expectedPendingIncarnationID: UUID,
+        windowID: String,
+        paneID: String
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                return nil
+            }
+            guard record.kind == TerminalKind.codex.rawValue,
+                  record.pendingSessionIncarnationID
+                    == expectedPendingIncarnationID.uuidString else {
+                return nil
+            }
+            record.tmuxWindowID = windowID
+            record.tmuxPaneID = paneID
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Atomically publish the Claude destination only after its exact pending
+    /// token produced SessionStart readiness.
+    func finalizeContinueInClaude(
+        id: UUID,
+        expectedPendingIncarnationID: UUID,
+        profileID: UUID?,
+        sessionID: String,
+        transcriptPath: String?,
+        observedAt: Date
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                return nil
+            }
+            guard record.kind == TerminalKind.codex.rawValue,
+                  record.pendingSessionIncarnationID
+                    == expectedPendingIncarnationID.uuidString else {
+                return nil
+            }
+            record.kind = TerminalKind.claude.rawValue
+            record.label = TerminalLabel.claudeCode
+            record.profile_id = profileID?.uuidString
+            record.claudeSessionID = sessionID
+            record.transcriptPath = transcriptPath
+            record.sessionOrderObservedAt = observedAt
+            record.codexTranscriptBoundaryOffset = nil
+            record.sessionIncarnationID = expectedPendingIncarnationID.uuidString
+            record.pendingSessionIncarnationID = nil
+            record.activityState = TerminalActivityState.idle.rawValue
+            record.activityStateSource = FactColumnJSON.encode(
+                FactSource.hookEvent("SessionStart"))
+            record.activityStateObservedAt = observedAt
+            record.activityStateOrderObservedAt = observedAt
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
+            record.pendingResumeAt = nil
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Promote a ready Codex rollback/recovery process while retaining the
+    /// immutable source thread and rollout identity captured before Continue.
+    func finalizePendingCodexRecovery(
+        id: UUID,
+        expectedPendingIncarnationID: UUID,
+        sourceThreadID: String,
+        sourceRolloutPath: String,
+        observedAt: Date
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                return nil
+            }
+            guard record.kind == TerminalKind.codex.rawValue,
+                  record.pendingSessionIncarnationID
+                    == expectedPendingIncarnationID.uuidString else {
+                return nil
+            }
+            record.label = TerminalLabel.codex
+            record.profile_id = nil
+            record.claudeSessionID = sourceThreadID
+            record.transcriptPath = sourceRolloutPath
+            record.sessionOrderObservedAt = observedAt
+            record.codexTranscriptBoundaryOffset = nil
+            record.sessionIncarnationID = expectedPendingIncarnationID.uuidString
+            record.pendingSessionIncarnationID = nil
+            record.activityState = TerminalActivityState.idle.rawValue
+            record.activityStateSource = FactColumnJSON.encode(
+                FactSource.hookEvent("SessionStart"))
+            record.activityStateObservedAt = observedAt
+            record.activityStateOrderObservedAt = observedAt
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
+            record.pendingResumeAt = nil
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Durable recovery candidates: awake Codex rows whose replacement fence
+    /// survived a crash or a failed rollback. Parked pending rows belong to the
+    /// hibernation reconciler and are intentionally excluded.
+    func listPendingCodexContinuations() async throws -> [Terminal] {
+        try await writer.read { db in
+            try TerminalRecord
+                .filter(Column("kind") == TerminalKind.codex.rawValue)
+                .filter(Column("pendingSessionIncarnationID") != nil)
+                .filter(Column("hibernatedAt") == nil)
+                .filter(Column("suspendedAt") == nil)
+                .order(Column("createdAt").asc, Column("id").asc)
+                .fetchAll(db)
+                .compactMap { $0.toModel() }
         }
     }
 
