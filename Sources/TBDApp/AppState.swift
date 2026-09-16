@@ -202,6 +202,12 @@ final class AppState {
     /// so a pushed SessionStart can fence an older list response even in the
     /// brief interval before its activity delta arrives.
     @ObservationIgnored var terminalSessionOrderObservedAt: [UUID: Date] = [:]
+    /// Monotonic app-local generation for provider-replacement observations.
+    /// Each terminal records the generation of its latest `terminalReplaced`
+    /// adoption so an already-running terminal.list response cannot put the
+    /// superseded provider back after the pushed replacement commits.
+    @ObservationIgnored var terminalReplacementObservationGeneration: UInt64 = 0
+    @ObservationIgnored var terminalReplacementObservedGeneration: [UUID: UInt64] = [:]
     /// Polled note METADATA — never content. `note.list` touches no file (see
     /// `NoteStore`); a pane that needs content reads it off disk with
     /// `noteContent(noteID:worktreeID:)`.
@@ -3277,13 +3283,15 @@ final class AppState {
             }
 
             // Single RPC — fetch all terminals, group client-side
+            let terminalSnapshotGeneration = terminalReplacementObservationGeneration
             let allTerminals = try await daemonClient.listTerminals()
             let terminalsByWorktree = Dictionary(grouping: allTerminals, by: { $0.worktreeID })
             let visibleWorktreeIDs = Set(fetched.map(\.id))
             for wtID in visibleWorktreeIDs {
                 adoptTerminalSnapshot(
                     terminalsByWorktree[wtID] ?? [],
-                    worktreeID: wtID
+                    worktreeID: wtID,
+                    startedAtReplacementGeneration: terminalSnapshotGeneration
                 )
             }
 
@@ -3323,8 +3331,12 @@ final class AppState {
     /// Refresh terminals for a specific worktree. Only updates if data changed.
     func refreshTerminals(worktreeID: UUID) async {
         do {
+            let snapshotGeneration = terminalReplacementObservationGeneration
             let fetched = try await daemonClient.listTerminals(worktreeID: worktreeID)
-            adoptTerminalSnapshot(fetched, worktreeID: worktreeID)
+            adoptTerminalSnapshot(
+                fetched,
+                worktreeID: worktreeID,
+                startedAtReplacementGeneration: snapshotGeneration)
         } catch {
             logger.error("Failed to list terminals for worktree \(worktreeID): \(error)")
             handleConnectionError(error)
