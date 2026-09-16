@@ -1029,6 +1029,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             let dimensions = terminalView.terminalDimensions
             setHolderWindowSize(cols: dimensions.cols, rows: dimensions.rows)
             scheduleDaemonResize(cols: dimensions.cols, rows: dimensions.rows)
+            // Wheel events are claimed from here on: the pty is this panel's
+            // to write to, so the reports go out through `holderWriteFD` like
+            // any keystroke.
+            installScrollMonitor(on: terminalView)
             logger.info("holder attach live for terminal \(self.panelID, privacy: .public)")
         }
 
@@ -1431,6 +1435,101 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
         }
 
+        /// Intercept scroll wheel events before they reach TerminalView.
+        /// TerminalView.scrollWheel is not `open`, so we can't override it
+        /// in TBDTerminalView. Instead, a local event monitor intercepts
+        /// scroll events and forwards them to the session as mouse button
+        /// presses.
+        ///
+        /// Every transport installs this — the tmux subprocess attach
+        /// (`startTmuxClient`), the pty holder (`startHolderClient`) and
+        /// control mode (`startControlModeClient`) — and each needs it for
+        /// the same reason: they all render into the one `TBDTerminalView`,
+        /// which keeps `allowMouseReporting` off so click-drag selects text
+        /// locally, and the session sits on the alternate screen. A wheel
+        /// event that reaches SwiftTerm's own `scrollWheel` in that state is
+        /// turned into Up/Down arrow keys — keystrokes the session never
+        /// asked for. So every wheel event over a mouse-reporting terminal is
+        /// claimed here, including one whose `deltaY` is zero: trackpads
+        /// deliver such events (a few pixels of `scrollingDeltaY`, no whole
+        /// line), and an unclaimed one would fall through to that arrow-key
+        /// fallback, interleaving stray keys with the real wheel reports.
+        /// `Coordinator.wheelReports` decides claim and count; a zero-report
+        /// claim drops the event. An in-bounds point with no grid cell (the
+        /// sub-cell remainder strip at the view's bottom and right edges) is
+        /// likewise claimed and dropped, since there is no cell to report at.
+        ///
+        /// The reports leave through `term.sendEvent`, which is SwiftTerm's
+        /// own mouse-reporting path: `Terminal` hands the bytes to the view,
+        /// the view to `send(source:data:)` on this coordinator, and from
+        /// there they take the same route as keystrokes on whichever
+        /// transport this panel is on — `performOutgoingWrite` picks the
+        /// holder pty, the local process, or the sidecar `.input` frame.
+        ///
+        /// Idempotent: a monitor already installed is removed first, so a
+        /// transport that starts after another one on the same coordinator
+        /// never leaves two monitors claiming the same events.
+        ///
+        /// Visibility filter: the `tv.window != nil` guard inside the
+        /// closure rejects events when the terminal isn't currently part of
+        /// the visible UI. This is load-bearing for the worktree keep-alive
+        /// system (see WorktreePager + TerminalContainerView): inactive
+        /// worktrees keep their terminal NSViews alive but detached from the
+        /// window. Without the guard, every kept-alive terminal's monitor
+        /// would still fire for every app-wide scroll-wheel event, and the
+        /// `bounds.contains(point)` check below wouldn't filter them out
+        /// (bounds-space math works fine on detached views) — events would
+        /// be silently consumed and forwarded to hidden terminals' sessions,
+        /// scrolling them invisibly. tv.window == nil ⇒ this terminal isn't
+        /// visible right now ⇒ no-op the monitor.
+        @MainActor
+        private func installScrollMonitor(on terminalView: TerminalView) {
+            if let monitor = scrollMonitor {
+                NSEvent.removeMonitor(monitor)
+                scrollMonitor = nil
+            }
+            let ref = WeakTerminalRef(terminalView)
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+                let deltaY = event.deltaY
+                let location = event.locationInWindow
+
+                let consumed = MainActor.assumeIsolated { [weak self] in
+                    guard let self else { return false }
+                    guard let tv = ref.view as? TBDTerminalView else { return false }
+                    guard tv.window != nil else { return false }
+                    // Short-circuit when a SwiftUI overlay is open on top of this
+                    // terminal — pass the event through so the overlay can handle it.
+                    if self.shouldSuppressEvents() { return false }
+                    let point = tv.convert(location, from: nil)
+                    guard tv.bounds.contains(point) else { return false }
+
+                    // Use actual scroll position so the session routes to the
+                    // correct pane. Grid math runs OUTSIDE the lock (view API);
+                    // the mouseMode guard and the sends ride one `withTerminal`
+                    // block — the same calls, under the same lock, as
+                    // SwiftTerm's own native mouse-reporting path.
+                    let grid = tv.gridPosition(atWindowLocation: location)
+
+                    let isUp = deltaY > 0
+                    return tv.withTerminal { term -> Bool in
+                        let wheel = Self.wheelReports(deltaY: deltaY, mouseReporting: term.mouseMode != .off)
+                        guard wheel.claim else { return false }
+                        if let (col, row) = grid {
+                            let buttonFlags = term.encodeButton(
+                                button: isUp ? 4 : 5,
+                                release: false, shift: false, meta: false, control: false
+                            )
+                            for _ in 0..<wheel.count {
+                                term.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
+                            }
+                        }
+                        return true
+                    }
+                }
+                return consumed ? nil : event
+            }
+        }
+
         @MainActor
         func startTmuxClient(
             terminalView: TerminalView,
@@ -1563,85 +1662,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 self.appState?.focusedTabCloseContext = self.tabCloseContext
             }
 
-            // Intercept scroll wheel events before they reach TerminalView.
-            // TerminalView.scrollWheel is not `open`, so we can't override it
-            // in TBDTerminalView. Instead, a local event monitor intercepts
-            // scroll events and forwards them to tmux as mouse button presses.
-            //
-            // On this transport (the tmux subprocess attach), every wheel
-            // event over a mouse-reporting terminal is claimed, including one
-            // whose `deltaY` is zero. Trackpads deliver such events (a few
-            // pixels of `scrollingDeltaY`, no whole line), and an unclaimed
-            // one falls through to SwiftTerm's own `scrollWheel`, which on the
-            // alternate screen with mouse reporting off turns accumulated
-            // pixels into Up/Down arrow keys — keystrokes the session never
-            // asked for, interleaved with the real wheel reports.
-            // `Coordinator.wheelReports` decides claim and count; a
-            // zero-report claim drops the event. An in-bounds point with no
-            // grid cell (the sub-cell remainder strip at the view's bottom and
-            // right edges) is likewise claimed and dropped, since there is no
-            // cell to report at.
-            //
-            // The guarantee stops at this transport. `startControlModeClient`
-            // and `startHolderClient` install no scroll monitor and keep
-            // `allowMouseReporting` off on the same view, so on those paths a
-            // wheel event still falls through to SwiftTerm's alternate-screen
-            // arrow-key fallback. Both need the same treatment before they
-            // graduate off their default-off flags.
-            //
-            // Visibility filter: the `tv.window != nil` guard inside the
-            // closure rejects events when the terminal isn't currently part of
-            // the visible UI. This is load-bearing for the worktree keep-alive
-            // system (see WorktreePager + TerminalContainerView): inactive
-            // worktrees keep their terminal NSViews alive but detached from the
-            // window. Without the guard, every kept-alive terminal's monitor
-            // would still fire for every app-wide scroll-wheel event, and the
-            // `bounds.contains(point)` check below wouldn't filter them out
-            // (bounds-space math works fine on detached views) — events would
-            // be silently consumed and forwarded to hidden terminals' tmux
-            // sessions, scrolling them invisibly. tv.window == nil ⇒ this
-            // terminal isn't visible right now ⇒ no-op the monitor.
+            installScrollMonitor(on: terminalView)
+
             let ref = WeakTerminalRef(terminalView)
-            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-                let deltaY = event.deltaY
-                let location = event.locationInWindow
-
-                let consumed = MainActor.assumeIsolated { [weak self] in
-                    guard let self else { return false }
-                    guard let tv = ref.view as? TBDTerminalView else { return false }
-                    guard tv.window != nil else { return false }
-                    // Short-circuit when a SwiftUI overlay is open on top of this
-                    // terminal — pass the event through so the overlay can handle it.
-                    if self.shouldSuppressEvents() { return false }
-                    let point = tv.convert(location, from: nil)
-                    guard tv.bounds.contains(point) else { return false }
-
-                    // Use actual scroll position so tmux routes to the correct pane.
-                    // Grid math runs OUTSIDE the lock (view API); the mouseMode
-                    // guard and the sends ride one `withTerminal` block — the
-                    // same calls, under the same lock, as SwiftTerm's own
-                    // native mouse-reporting path.
-                    let grid = tv.gridPosition(atWindowLocation: location)
-
-                    let isUp = deltaY > 0
-                    return tv.withTerminal { term -> Bool in
-                        let wheel = Self.wheelReports(deltaY: deltaY, mouseReporting: term.mouseMode != .off)
-                        guard wheel.claim else { return false }
-                        if let (col, row) = grid {
-                            let buttonFlags = term.encodeButton(
-                                button: isUp ? 4 : 5,
-                                release: false, shift: false, meta: false, control: false
-                            )
-                            for _ in 0..<wheel.count {
-                                term.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
-                            }
-                        }
-                        return true
-                    }
-                }
-                return consumed ? nil : event
-            }
-
             // Intercept clicks: claim first responder on any click (so Cmd+Arrow
             // routes to the focused terminal), and handle Cmd+Click for file paths.
             //
@@ -1946,6 +1969,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                         return true
                     }
                 }
+                // Wheel events are claimed from here on: `controlModeAttach` is
+                // set, so the reports go out as sidecar `.input` frames like
+                // any keystroke.
+                installScrollMonitor(on: terminalView)
                 logger.info("control-mode attach live for pane \(paneID, privacy: .public)")
                 // Gate the input-health indicator open for this pane (#318
                 // polish): failing deltas only surface while attached. The
