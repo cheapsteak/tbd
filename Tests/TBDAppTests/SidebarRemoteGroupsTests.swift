@@ -93,6 +93,24 @@ struct SidebarRemoteGroupsTests {
         }
     }
 
+    @Test func landedLocalDescendantKeepsExitedRemoteParentVisibleWithoutCountingItsOrigin() {
+        let repo = UUID()
+        let root = SidebarGroupFixtures.row("parent", repoID: repo, remote: "parent")
+        var local = SidebarGroupFixtures.row("landed child", repoID: repo, parent: root.id)
+        local.origin = WorktreeOrigin(provider: "acme", sessionID: "landed")
+        let parentSession = SidebarGroupFixtures.session("parent", state: .exited)
+        let originSession = SidebarGroupFixtures.session("landed", state: .exited)
+        let groups = SidebarGroupFixtures.groups(
+            roots: [root], rows: [root, local], sessions: [parentSession, originSession])
+        #expect(local.location.isLocal)
+        #expect(local.providerBinding?.sessionID == "landed")
+        #expect(groups.remoteRoots == [root])
+        #expect(groups.exitedRoots.isEmpty)
+        #expect(groups.summary.counts == [.exited: 1])
+        #expect(groups.sessionIDs == [parentSession.id])
+        #expect(groups.remoteWorktreeIDs == [root.id, local.id])
+    }
+
     @Test func whollyExitedSubtreeMovesTogetherAndRevealsByDescendant() {
         let root = SidebarGroupFixtures.row("parent", repoID: UUID(), remote: "parent")
         let child = SidebarGroupFixtures.row("child", repoID: UUID(), remote: "child", parent: root.id)
@@ -135,6 +153,21 @@ struct SidebarRemoteGroupsTests {
         let error = SidebarGroupFixtures.groups(remainder: sessions,
             unread: [key: UnreadSummary(type: .error, mostRecentAt: Date())])
         #expect(error.summary.attention == .error)
+    }
+
+    @Test func concurrentPlaceholdersCountByRowUntilSessionIdentityExists() {
+        let repo = UUID()
+        let first = SidebarGroupFixtures.row("pending one", repoID: repo, remote: "", status: .creating)
+        let second = SidebarGroupFixtures.row("pending two", repoID: repo, remote: "", status: .creating)
+        let adopted = SidebarGroupFixtures.row("worker", repoID: repo, remote: "worker")
+        let session = SidebarGroupFixtures.session("worker")
+        let groups = SidebarGroupFixtures.groups(
+            roots: [first, second, adopted], remainder: [session], sessions: [session])
+        #expect(groups.remoteRoots.map(\.id) == [first.id, second.id, adopted.id])
+        #expect(groups.summary.counts == [.unknown: 2, .running: 1])
+        #expect(groups.sessions.isEmpty)
+        #expect(groups.sessionIDs == [session.id])
+        #expect(groups.exitedRoots.isEmpty)
     }
 
     @Test func emptyGroupsNeedNoDisclosureAndMirrorSelectionRevealsExited() {

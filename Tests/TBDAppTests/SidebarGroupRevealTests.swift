@@ -99,6 +99,77 @@ struct SidebarGroupRevealTests {
         }
     }
 
+    @Test func siblingExitRevealsInnerGroupWithoutReopeningCollapsedRepository() {
+        withState { state, repo in
+            let root = SidebarGroupFixtures.row("parent", repoID: repo, remote: "parent")
+            let selected = SidebarGroupFixtures.row("selected", repoID: repo, remote: "selected", parent: root.id)
+            let sibling = SidebarGroupFixtures.row("sibling", repoID: repo, remote: "sibling", parent: root.id)
+            state.worktrees[repo] = [root, selected, sibling]
+            state.remoteSessions = [
+                SidebarGroupFixtures.session("parent", state: .exited, repoID: repo),
+                SidebarGroupFixtures.session("selected", state: .exited, repoID: repo),
+                SidebarGroupFixtures.session("sibling", repoID: repo)
+            ]
+            state.selectedWorktreeIDs = [selected.id]
+            let initial = state.sidebarSelectionReveal
+            let remote = SidebarGroupID(owner: .repository(repo), kind: .remote)
+            let exited = SidebarGroupID(owner: .repository(repo), kind: .exited)
+            #expect(initial.groups == [remote])
+            state.revealSidebarGroups(initial)
+            state.repos[0].expanded = false
+
+            // An unrelated state update leaves membership and the observer's
+            // signature unchanged, so it does not trigger any reveal.
+            state.remoteSessions[2] = SidebarGroupFixtures.session("sibling", state: .starting, repoID: repo)
+            #expect(state.sidebarSelectionReveal == initial)
+            #expect(!state.repos[0].expanded)
+
+            // The last continuing sibling exits, moving the selected row's
+            // whole subtree beneath Exited without any navigation gesture.
+            state.remoteSessions[2] = SidebarGroupFixtures.session("sibling", state: .exited, repoID: repo)
+            let moved = state.sidebarSelectionReveal
+            #expect(moved.generation == initial.generation)
+            #expect(moved.groups == [remote, exited])
+            state.revealSidebarGroups(moved, previous: initial)
+            #expect(state.expandedSidebarGroups.contains(exited))
+            #expect(!state.repos[0].expanded)
+
+            // Explicitly re-selecting that same row still reveals its owner.
+            state.selectedWorktreeIDs = [selected.id]
+            state.revealSidebarGroups(state.sidebarSelectionReveal, previous: moved)
+            #expect(state.repos[0].expanded)
+        }
+    }
+
+    @Test func initialAndExplicitScrollRevealsCanExpandTheOwningRepository() {
+        withState { state, repo in
+            state.remoteSessions = [SidebarGroupFixtures.session("worker", repoID: repo)]
+            let reveal = state.sidebarGroupReveal(
+                worktreeIDs: [], selection: .init(provider: "acme", sessionID: "worker"))
+            state.repos[0].expanded = false
+            state.revealSidebarGroups(reveal)
+            #expect(state.repos[0].expanded)
+            state.repos[0].expanded = false
+            state.revealSidebarGroups(reveal, previous: reveal)
+            #expect(!state.repos[0].expanded)
+            state.revealSidebarGroups(reveal)
+            #expect(state.repos[0].expanded)
+        }
+    }
+
+    @Test func targetIdentityChangeRevealsWithoutNeedingAGenerationChange() {
+        withState { state, repo in
+            state.remoteSessions = [SidebarGroupFixtures.session("worker", repoID: repo)]
+            let initial = state.sidebarGroupReveal(worktreeIDs: [], selection: nil)
+            let target = state.sidebarGroupReveal(
+                worktreeIDs: [], selection: .init(provider: "acme", sessionID: "worker"))
+            #expect(initial.generation == target.generation)
+            state.repos[0].expanded = false
+            state.revealSidebarGroups(target, previous: initial)
+            #expect(state.repos[0].expanded)
+        }
+    }
+
     @Test func selectedSessionMovingToExitedRevealsItsNewGroup() {
         withState { state, repo in
             state.remoteSessions = [SidebarGroupFixtures.session("worker", repoID: repo)]

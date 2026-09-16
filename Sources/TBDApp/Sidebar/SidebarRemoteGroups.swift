@@ -91,6 +91,7 @@ struct SidebarRemoteGroups {
         var activeSessions: [RemoteSessionInfo] = [], endedSessions: [RemoteSessionInfo] = []
         var allIDs: Set<UUID> = [], endedIDs: Set<UUID> = []
         var allSessionIDs: Set<UUID> = [], endedSessionIDs: Set<UUID> = []
+        var placeholderIDs: Set<UUID> = []
         var total = Summary(), ended = Summary()
 
         func state(_ session: RemoteSessionInfo?) -> State {
@@ -123,10 +124,19 @@ struct SidebarRemoteGroups {
             var entirelyExited = true
             while let (row, depth) = stack.popLast() {
                 guard depth <= 50, visited.insert(row.id).inserted else { entirelyExited = false; continue }
-                if let binding = row.providerBinding {
-                    let id = RemoteSessionIdentity.uuid(provider: binding.provider, sessionID: binding.sessionID)
-                    bindings[id] = .some(mirror[id])
-                    if row.status != .active || state(mirror[id]) != .exited { entirelyExited = false }
+                // A landed local row retains its provider origin, but its
+                // current work and liveness are local rather than that session's.
+                if !row.location.isLocal, let binding = row.providerBinding {
+                    if binding.sessionID.isEmpty {
+                        // A creation placeholder has row identity, but no session
+                        // identity yet. Never deduplicate separate pending creates.
+                        if placeholderIDs.insert(row.id).inserted { total.counts[.unknown, default: 0] += 1 }
+                        entirelyExited = false
+                    } else {
+                        let id = RemoteSessionIdentity.uuid(provider: binding.provider, sessionID: binding.sessionID)
+                        bindings[id] = .some(mirror[id])
+                        if row.status != .active || state(mirror[id]) != .exited { entirelyExited = false }
+                    }
                 } else {
                     entirelyExited = false
                 }

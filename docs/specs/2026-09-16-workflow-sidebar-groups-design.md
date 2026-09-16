@@ -130,8 +130,11 @@ An explicit navigation to a row reveals its repository and every containing
 group before the existing scroll request runs. Apply this to keyboard
 navigation, history, deep links, and dock selection. A selected row that
 changes process state remains visible; its new containing group opens if
-needed. The user may then collapse that group deliberately without closing
-the selected detail pane. Do not reopen it on every poll.
+needed. Such membership changes open only transient inner disclosures; they
+do not reopen or persist a manually collapsed repository or Scratch section.
+Initial selection restoration, explicit navigation, and scroll requests may
+expand the owning section. The user may then collapse a group deliberately
+without closing the selected detail pane. Do not reopen it on every poll.
 
 Disclosure headers are buttons with accessible expanded state and count
 labels. They are not selectable worktrees, drag targets, or terminal hosts.

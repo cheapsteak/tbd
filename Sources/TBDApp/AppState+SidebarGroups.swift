@@ -71,9 +71,15 @@ extension AppState {
                                   worktreeIDs: worktreeIDs, remoteID: remoteID, groups: groups)
     }
 
-    /// Called on a navigation or membership edge, never simply because a poll ran.
-    func revealSidebarGroups(_ reveal: SidebarGroupReveal) {
+    /// Membership changes reveal transient groups without overriding a collapsed
+    /// repository. Navigation may expand the owning section; a missing previous
+    /// value explicitly requests that behavior for initial mounting and scrolls.
+    func revealSidebarGroups(_ reveal: SidebarGroupReveal, previous: SidebarGroupReveal? = nil) {
         expandedSidebarGroups.formUnion(reveal.groups)
+        if let previous,
+           previous.generation == reveal.generation,
+           previous.worktreeIDs == reveal.worktreeIDs,
+           previous.remoteID == reveal.remoteID { return }
         for group in reveal.groups {
             guard case .repository(let id) = group.owner,
                   let index = repos.firstIndex(where: { $0.id == id }), !repos[index].expanded else { continue }
