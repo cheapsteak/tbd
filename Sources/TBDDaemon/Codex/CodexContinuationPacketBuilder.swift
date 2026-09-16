@@ -804,7 +804,7 @@ private enum SecretRedactor {
             with: "$1" + marker,
             options: [.caseInsensitive])
         result = replacing(
-            #"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9_-]*(?:token|secret|password|credential|authorization|api[ _-]?key|private[ _-]?key|cookie|session[ _-]?cookie)[A-Za-z0-9_-]*)(\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"#,
+            #"(?<![A-Za-z0-9])((?:[A-Za-z][A-Za-z0-9_-]*)?(?:token|secret|password|credential|authorization|api[ _-]?key|private[ _-]?key|cookie|session[ _-]?cookie)[A-Za-z0-9_-]*)(\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"#,
             in: result,
             with: "$1$2" + marker,
             options: [.caseInsensitive])
