@@ -803,6 +803,11 @@ final class AppState {
     /// live, and consulted by the sidecar's injection handler
     /// (`installInjectionHandler`).
     @ObservationIgnored let terminalInjections = TerminalInjectionRouter()
+    /// The holder handbacks in flight, keyed by terminal ID. A panel that is
+    /// replacing another panel for the same holder-backed terminal waits here
+    /// for its predecessor's `pane.detach` before attaching, because the
+    /// daemon refuses an attach while the previous viewer claim stands.
+    @ObservationIgnored let holderHandbackLedger = HolderHandbackLedger()
     /// Tab-close ownership keyed by terminal UUID for views that belong to a
     /// visible tab, used to resolve the currently focused closable tab.
     @ObservationIgnored var terminalTabCloseContexts: [UUID: TabCloseContext] = [:]

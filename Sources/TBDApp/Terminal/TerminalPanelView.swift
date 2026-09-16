@@ -34,6 +34,17 @@ enum TerminalPreparationPresentation {
     /// before touching state, so nothing was parked, killed or lost.
     static let holderTransportMessage =
         "This session runs on the pty-holder transport, which TBD can't display yet. The session is unaffected and keeps running."
+    /// Shown when a holder attach was attempted and did not complete: the
+    /// daemon refused it, `attach.ready` was refused, or the panel could not
+    /// resolve the session it was built for.
+    ///
+    /// Distinct from `holderTransportMessage` because that copy is false here:
+    /// the app renders holder sessions, and this one merely failed to attach
+    /// to one. It names a remedy because there is one — a fresh panel retries
+    /// the attach — and says the session is fine because it is: a refused
+    /// attach leaves the daemon's reader on the pty and the session running.
+    static let holderAttachFailedMessage =
+        "TBD couldn't attach to this session's terminal. The session is unaffected and keeps running. Close and reopen the tab to try again."
 }
 
 enum TerminalRecoveryPresentation {
@@ -588,6 +599,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// test injects a stub so the panel path can be driven without a
         /// daemon.
         var holderAttachClient: (any HolderAttaching)?
+        /// Seam for the handback ledger. Nil means "use the one on AppState",
+        /// which every production coordinator shares; a test may inject its
+        /// own to drive the wait without an AppState.
+        var holderHandbackLedger: HolderHandbackLedger?
         /// Called on the main actor immediately before the holder reader is
         /// started, so the attach's one ordering invariant — the reader is
         /// wired only after the snapshot ingest window has closed — can be
@@ -794,17 +809,24 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             Self.transportPreparationNotice(for: panelTransport())
         }
 
-        /// Renders the transport notice and reports whether it took over.
-        /// `true` means the caller must not prepare or attach anything.
+        /// Renders the attach-failed placard for a holder attach that did not
+        /// complete, and logs why. One place for the copy and the log line so
+        /// every failure in `startHolderClient` tells the same, truthful
+        /// story: the session is fine, this panel is not on it.
         @MainActor
-        private func handleUnsupportedTransport(into terminalView: TerminalView) -> Bool {
-            guard let notice = transportPreparationNoticeForPanel() else { return false }
+        private func feedHolderAttachFailure(reason: String, into terminalView: TerminalView) {
             let worktreeID = worktreeIDForDiagnostics()?.uuidString ?? "unknown"
-            logger.info(
-                "terminal preparation skipped terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) category=unsupportedTransport transport=\(self.panelTransport().rawValue, privacy: .public)"
+            logger.error(
+                "holder attach failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) category=holderAttachFailed reason=\(reason, privacy: .public)"
             )
-            feedPreparationMessage(notice, into: terminalView)
-            return true
+            feedPreparationMessage(
+                TerminalPreparationPresentation.holderAttachFailedMessage, into: terminalView)
+        }
+
+        /// The ledger this panel registers its handback with and waits on.
+        @MainActor
+        private func handbackLedger(_ appState: AppState) -> HolderHandbackLedger {
+            holderHandbackLedger ?? appState.holderHandbackLedger
         }
 
         /// The holder arm of the transport branch both attach entry points
@@ -848,7 +870,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         func startHolderClient(terminalView: TerminalView) async {
             guard !isTornDown else { return }
             guard let appState, let worktreeID = worktreeIDForDiagnostics() else {
-                _ = handleUnsupportedTransport(into: terminalView)
+                feedHolderAttachFailure(
+                    reason: "the panel's terminal is not loaded in AppState", into: terminalView)
                 return
             }
             // Empty by construction on a holder row, and passed anyway: it is
@@ -856,16 +879,31 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // the vend header. `terminalID` is what actually names the session.
             let paneID = ""
             let client = holderAttachClient ?? HolderAttachClient(daemonClient: appState.daemonClient)
+            // **Wait for the predecessor's handback before asking.** When
+            // SwiftUI swaps the view type hosting this terminal — a tab going
+            // from one pane to a split, or back — the old panel's coordinator
+            // is torn down and this one is built in the same update, and the
+            // old one's `pane.detach` is still in flight. The daemon refuses an
+            // attach while that viewer claim stands, and a refusal paints the
+            // placard with no retry. Once the detach RPC has returned, the
+            // daemon has already resumed its reader and cleared the claim, so
+            // an attach issued after the awaited task completes cannot race it.
+            let ledger = handbackLedger(appState)
+            if await ledger.awaitSettled(terminalID: panelID) {
+                logger.info(
+                    "holder attach waited for a predecessor's handback terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) category=holderHandbackWait"
+                )
+            }
+            // Teardown can land across the wait: a panel torn down while its
+            // predecessor was still detaching must not attach at all.
+            guard !isTornDown else { return }
             let attachment: HolderAttachment
             do {
                 attachment = try await client.attach(
                     worktreeID: worktreeID, paneID: paneID, terminalID: panelID)
             } catch {
-                logger.warning("""
-                    holder attach failed for terminal \(self.panelID, privacy: .public): \
-                    \(error.localizedDescription, privacy: .public)
-                    """)
-                _ = handleUnsupportedTransport(into: terminalView)
+                feedHolderAttachFailure(
+                    reason: "attach refused: \(error.localizedDescription)", into: terminalView)
                 return
             }
             // **Close-on-exec, before anything else touches it.** A descriptor
@@ -959,10 +997,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     worktreeID: worktreeID, paneID: paneID, terminalID: panelID,
                     generation: attachment.generation)
             } catch {
-                logger.error("""
-                    holder attach.ready refused for terminal \(self.panelID, privacy: .public): \
-                    \(error.localizedDescription, privacy: .public)
-                    """)
                 // A refused ack means the daemon has not accounted for this
                 // descriptor — stop reading it and say so on the panel. No
                 // detach goes with it: this panel never owned the session, and
@@ -970,7 +1004,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // refused again by its generation check.
                 stopHolderReader()
                 viewHolder.clear()
-                _ = handleUnsupportedTransport(into: terminalView)
+                feedHolderAttachFailure(
+                    reason: "attach.ready refused: \(error.localizedDescription)",
+                    into: terminalView)
                 return
             }
             guard !isTornDown else {
@@ -1153,6 +1189,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
             let client = holderAttachClient ?? HolderAttachClient(daemonClient: appState.daemonClient)
             let panelID = self.panelID
+            let ledger = handbackLedger(appState)
             holderHandbackInFlight = true
             // `self` is captured STRONGLY, unlike every other teardown hop in
             // this file. The handback is the last thing this coordinator owes
@@ -1161,7 +1198,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // SwiftUI released the coordinator inside the poll interval, which
             // is exactly the tab-close case. It is bounded: one poll interval,
             // one main-queue turn, one RPC.
-            Task { @MainActor in
+            //
+            // Registered with the ledger so a successor panel for this same
+            // terminal — the one SwiftUI builds when the tab's layout changes
+            // shape — waits for the detach to return before it attaches,
+            // instead of being refused for a viewer claim this task is about
+            // to release.
+            let handback = Task { @MainActor in
                 await reader?.awaitClosed()
                 var preamble = Data()
                 if let view { preamble = await self.captureHandbackPreamble(from: view) }
@@ -1183,6 +1226,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                         """)
                 }
             }
+            ledger.register(terminalID: panelID, task: handback)
         }
 
         /// Serialize this panel's terminal as the byte stream that reconstructs
