@@ -113,6 +113,7 @@ struct SidebarRemoteGroups {
             let steady: NotificationType? = freshProviders.contains(session.provider)
                 && !session.gone && session.payload.agentState == .waitingInput ? .attentionNeeded : nil
             let candidates = [result.attention, unread[key]?.type, steady].compactMap { $0 }
+                .filter { $0 != .responseComplete && $0 != .taskComplete }
             result.attention = candidates.max { $0.severity < $1.severity }
         }
 
@@ -143,7 +144,8 @@ struct SidebarRemoteGroups {
                 for child in children[row.id] ?? [] { stack.append((child, depth + 1)) }
             }
             allIDs.formUnion(visited)
-            let rowAttention = visited.compactMap { worktreeUnread[$0]?.type }.max { $0.severity < $1.severity }
+            let rowAttention = visited.compactMap { worktreeUnread[$0]?.type }
+                .filter { $0 != .responseComplete && $0 != .taskComplete }.max { $0.severity < $1.severity }
             total.attention = [total.attention, rowAttention].compactMap { $0 }.max { $0.severity < $1.severity }
             if entirelyExited {
                 exited.append(root)
