@@ -98,11 +98,11 @@ struct RemoteAttachPagerWiringTests {
         RemoteSessionSelection(provider: Self.providerName, sessionID: id)
     }
 
-    /// Seeds one attach-capable session and selects it, so it is mounted.
+    /// Seeds one attach-capable session and attaches it, so it is mounted.
     private func attached(_ state: AppState, id: String = "s1") -> RemoteSessionSelection {
         seedProvider(state)
         seedSession(state, id: id)
-        state.selectRemoteSession(provider: Self.providerName, sessionID: id)
+        state.selectRemoteSession(provider: Self.providerName, sessionID: id, reattach: true)
         return sel(id)
     }
 

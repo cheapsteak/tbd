@@ -50,11 +50,11 @@ struct RemoteAttachNetworkRecoveryTests {
         RemoteSessionSelection(provider: provider, sessionID: id)
     }
 
-    /// Seeds one attach-capable session and selects it, so it is mounted.
+    /// Seeds one attach-capable session and attaches it, so it is mounted.
     private func attached(_ state: AppState) -> RemoteSessionSelection {
         seedProvider(state, name: "acme")
         seedSession(state, provider: "acme", id: "s1")
-        state.selectRemoteSession(provider: "acme", sessionID: "s1")
+        state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
         return sel("acme", "s1")
     }
 
@@ -129,9 +129,9 @@ struct RemoteAttachNetworkRecoveryTests {
             seedSession(state, provider: "acme", id: "s1")
             seedSession(state, provider: "acme", id: "s2")
             seedSession(state, provider: "acme", id: "s3")
-            state.selectRemoteSession(provider: "acme", sessionID: "s1")
-            state.selectRemoteSession(provider: "acme", sessionID: "s2")
-            state.selectRemoteSession(provider: "acme", sessionID: "s3")
+            state.selectRemoteSession(provider: "acme", sessionID: "s1", reattach: true)
+            state.selectRemoteSession(provider: "acme", sessionID: "s2", reattach: true)
+            state.selectRemoteSession(provider: "acme", sessionID: "s3", reattach: true)
             let s1 = sel("acme", "s1")
             let s2 = sel("acme", "s2")
             let s3 = sel("acme", "s3")
