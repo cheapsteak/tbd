@@ -961,7 +961,7 @@ extension RPCRouter {
     }
 
     /// The refusal `terminal.delete`'s activity rails return for a busy row
-    /// they will not close. Named beside its verb, like `holderVerifyRefusal`
+    /// they will not close. Named beside its verb, like `holderCompositeRefusal`
     /// and its siblings, so the CLI, the app and this handler's tests name the same
     /// reason rather than three near-misses.
     ///
@@ -2770,22 +2770,6 @@ extension RPCRouter {
         case suppressed
     }
 
-    /// The refusal `terminal.send --verify` returns for a holder-backed row.
-    ///
-    /// It names *verification*, not the transport, and the distinction is the
-    /// whole point: typing into a holder session works, and a caller told
-    /// otherwise would stop trying. What has no holder implementation is the
-    /// delivery *observation* — the verifier re-reads the pane through tmux
-    /// (`redeliverVerifiedPayload` and `consultPaneBeforeTyping` both speak
-    /// tmux), and a holder session has no pane to re-read. Refused rather than
-    /// downgraded to an unverified send, per the rule that a request for
-    /// evidence is never answered with a silence that reads like confirmation.
-    static func holderVerifyRefusal(terminalID: UUID) -> String {
-        "terminal.send --verify was refused: terminal \(terminalID) runs on the pty-holder "
-            + "transport, which has no delivery observation — nothing was sent. Resend without "
-            + "--verify."
-    }
-
     /// The refusal `terminal.send --keys` returns when a name in the sequence
     /// is not one the holder's named-key table knows.
     ///
@@ -2808,33 +2792,28 @@ extension RPCRouter {
             + "input path wired for it. Nothing was typed and its session is unchanged."
     }
 
-    /// The refusal a multi-part or multi-line `terminal.send` gets for a
-    /// holder-backed row, until bracketed-paste wrapping lands there.
+    /// The refusal a multi-part `terminal.send` gets for a holder-backed row.
     ///
     /// It names the missing capability rather than "the holder transport",
-    /// because typing a single-line message into a holder session works and a
-    /// caller told otherwise would stop trying.
+    /// because sending a single body of text — one line or many — into a holder
+    /// session works, and a caller told otherwise would stop trying.
     ///
-    /// The measurement: the holder arm writes body and carriage return in ONE
-    /// delivery with no bracketed-paste wrapping. Against 2.1.261 under a real
-    /// pty, a single unwrapped write of 63 bytes submits and 64 or more does not
-    /// — past that the carriage return is swallowed into the text and the whole
-    /// string sits unsent in Claude's composer. Splitting the message into
-    /// several deliveries instead would reopen the at-least-once and routing
-    /// questions that one delivery avoids, so this refuses rather than guessing.
-    /// It carries one more cause than "composite" suggests: an image-only
-    /// message whose write would also have to carry the dispatch envelope. The
-    /// tmux arm gives the envelope a separate leading paste; this transport has
-    /// no second delivery to give, and the envelope alone is 68 bytes, so the
-    /// combined write lands past the 64-byte cliff too.
-    ///
-    /// PR #816 (child-as-contract-party) wraps in bracketed paste when the
-    /// child's mode is on, in one write, and this refusal lifts with it.
+    /// The holder arm delivers a message in one write to the child's pty, and a
+    /// single text body composes into that write cleanly: wrapped in bracketed
+    /// paste when the child's mode calls for it, so the submitting carriage
+    /// return lands outside the paste. What this refuses is a message that is
+    /// more than one body — several parts, or a lone image whose write would
+    /// also have to carry the dispatch envelope that attributes the turn. The
+    /// tmux arm frames those as separate pastes; this transport has only the one
+    /// write, and how a single write could frame a multi-body message — image
+    /// and envelope included — is deliberately out of scope until a spec settles
+    /// it. Refused rather than guessing at a framing, because a wrong guess
+    /// submits an unintended turn.
     static func holderCompositeRefusal(terminalID: UUID, cause: String) -> String {
         "terminal.send was refused: terminal \(terminalID) runs on the pty-holder transport, "
-            + "which delivers a message in one unwrapped write — and \(cause) cannot submit that "
-            + "way (past 64 bytes the carriage return is swallowed and the text sits unsent). "
-            + "Nothing was typed. Send a single-line message, or move the session to tmux."
+            + "which delivers a message in a single write — and \(cause) cannot be carried in "
+            + "that one write. Nothing was typed. Send the message as a single body of text, "
+            + "or move the session to tmux."
     }
 
     /// The refusal a text `terminal.send` gets for a terminal whose Claude
@@ -3021,23 +3000,20 @@ extension RPCRouter {
         // a row and a refusal outcome, unlike a malformed payload that names
         // no act.
         if terminal.transport == .holder {
-            // ─── What the holder arm cannot carry yet ───
+            // ─── What the holder arm cannot frame in one write ───
             //
             // Computed ahead of the call to `performHolderSend` below so that
-            // function sees only payloads it can deliver, and so nothing
-            // inside that arm changes: PR #816 owns it.
+            // function sees only payloads it can deliver. A single body of
+            // text — one line or many — composes into the holder's one write
+            // cleanly, wrapped in bracketed paste when the child's mode calls
+            // for it. What has no single-write framing yet is a message that is
+            // more than one body: several parts, or a lone image whose write
+            // would also have to carry the dispatch envelope. See
+            // `holderCompositeRefusal`.
             let compositeCause: String?
             switch payload {
             case .parts(let parts, _) where parts.count > 1:
                 compositeCause = "a message in more than one part"
-            case .parts(let parts, _)
-                where parts.contains(where: { part in
-                    if case .text(let value) = part { return value.contains("\n") }
-                    return false
-                }):
-                compositeCause = "a message containing a newline"
-            case .text(let body, _, _) where body.contains("\n"):
-                compositeCause = "a message containing a newline"
             case .parts, .text, .keys:
                 compositeCause = nil
             }
@@ -3498,23 +3474,36 @@ extension RPCRouter {
     /// actuation row, the same dispatch envelope, the same per-terminal
     /// serializer lane (this runs inside it). What changes is the destination —
     /// `HolderInjectionCourier` routes by whether a viewer owns the pty — and
-    /// four things this transport cannot do yet, each refused by name rather
+    /// two things this transport cannot frame yet, each refused by name rather
     /// than by "the holder transport", so a caller learns which capability is
     /// missing:
     ///
-    /// - `--verify` has no delivery observation here.
-    /// - `--keys` has no named-key → bytes mapping here (tmux owns that table).
-    /// - A composite send — more than one part, or a payload containing a
-    ///   newline — has no framing here at all; it is refused ahead of this
-    ///   function, by the composite gate in `performTerminalSend` (see "What
-    ///   the holder arm cannot carry yet" there). The `.parts` case below
-    ///   still turns away a multi-part payload defensively, but that gate
-    ///   means it should never see one.
+    /// - A composite send — more than one part — has no single-write framing
+    ///   here at all; it is refused ahead of this function, by the composite
+    ///   gate in `performTerminalSend` (see "What the holder arm cannot frame
+    ///   in one write" there). The `.parts` case below still turns away a
+    ///   multi-part payload defensively, but that gate means it should never
+    ///   see one.
     /// - An image-only message that would carry the dispatch envelope has
     ///   nowhere to put it: the envelope cannot ride ahead of a path that
     ///   attaches only when the paste is the path and nothing else, and there
     ///   is no second write to give it. Refused in the `.parts` arm below,
     ///   where the disposition is known.
+    ///
+    /// `--verify` flows through, it is not refused as a transport limit: a
+    /// verify-armed send to an observable agent session is composed here,
+    /// delivered by the courier, and armed for observation exactly as the tmux
+    /// arm arms it — the observation reads the child's transcript tail, not a
+    /// pane, so it is transport-blind. The daemon's own supervision rails arm
+    /// it by default whenever `delivery_verification_enabled` is on — a
+    /// holder-transport rule the child-as-contract-party design states
+    /// deliberately — and it arms opportunistically, never refusing a rail's
+    /// send for a mechanism the rail did not ask for. The gate near the top of
+    /// this function refuses only an EXPLICIT `--verify` in the three states in
+    /// which no observation could be produced — a target with no transcript,
+    /// the flag off, or no verifier wired — mirroring the tmux arm's gate.
+    /// `--keys` composes through `deliverHolderKeys`, which owns the named-key
+    /// → bytes mapping.
     ///
     /// A daemon with no courier has no input path at all, and says so.
     ///
@@ -3582,9 +3571,78 @@ extension RPCRouter {
             return await refuseHolderSend(
                 actuationID, Self.holderInputUnavailable(terminalID: terminal.id))
         }
+
+        // ─── Can this send be verified here? ───
+        //
+        // The observation is transport-blind — it reads the child's transcript
+        // tail, not a pane — so the same three preconditions the tmux arm
+        // checks apply on the holder arm too, and the gate below mirrors it
+        // condition for condition, in the same order and the same words.
+        //
+        // What differs is who arms it: an explicit `--verify` from any actor,
+        // or the daemon's own supervision rails by default whenever the flag is
+        // on and the target can be observed. That default is a deliberate
+        // holder-transport rule, not an oversight — the rails are the senders
+        // whose silence costs hours, and the tmux arm keeps its per-send opt-in
+        // because it already delivers with explicit bracketing and a separate
+        // Enter, so it lacks the failure shape that motivates the default. See
+        // `2026-09-05-child-as-contract-party-design.md`, "Delivery
+        // verification on holder sends" → "What changes".
+        // `effectiveVerifyArmed` folds both in, and the arm seam in
+        // `deliverHolderText` reads the same value.
+        //
+        // **Only an explicit `--verify` can be REFUSED here; the default arms
+        // opportunistically and never refuses.** The three checks below exist
+        // to keep a caller that asked for evidence from being handed a silence
+        // that reads like confirmation — and a rail that did not ask has no
+        // such expectation to protect. So they gate on `payload.isVerifyArmed`,
+        // and the default term carries every precondition itself: a rail's
+        // ordinary send to a shell holder, or during the window between the
+        // flag going on and the daemon restarting to wire a verifier, proceeds
+        // UNARMED rather than failing closed. A supervision send that refuses
+        // because supervision's own witness is not ready is the exact failure
+        // this design exists to prevent.
+        //
+        // `supportsDeliveryObservation` is one of those preconditions: a shell
+        // is still SERVED by the oracle (bare bytes), it just cannot be
+        // observed.
+        //
+        // The config column is read only when the send could arm — an explicit
+        // `--verify`, or a daemon actor — so an ordinary app or CLI send pays
+        // no read, the same economy the tmux gate keeps.
+        let mayArm = payload.isVerifyArmed || actor?.kind == ActuationActor.Kind.daemon
+        let verifyEnabled = mayArm
+            ? ((try? await db.config.get())?.deliveryVerificationEnabled ?? false)
+            : false
         if payload.isVerifyArmed {
-            return await refuseHolderSend(
-                actuationID, Self.holderVerifyRefusal(terminalID: terminal.id))
+            if !Self.supportsDeliveryObservation(terminal) {
+                let kindName = (terminal.kind ?? .shell).rawValue
+                let message = """
+                    terminal.send --verify was refused: terminal \
+                    \(terminal.id.uuidString) is a \(kindName) session, and delivery can only \
+                    be observed for a Claude session today — nothing was sent. Resend without \
+                    --verify.
+                    """
+                return await refuseHolderSend(actuationID, message)
+            }
+            if !verifyEnabled {
+                let message = """
+                    terminal.send --verify was refused: delivery verification is disabled \
+                    (config.delivery_verification_enabled is off) — nothing was sent. Enable \
+                    it with the config.setDeliveryVerification RPC and restart the daemon, or \
+                    resend without --verify to accept an unverified send.
+                    """
+                return await refuseHolderSend(actuationID, message)
+            }
+            if deliveryVerifier == nil {
+                let message = """
+                    terminal.send --verify was refused: delivery verification is enabled but \
+                    this daemon has no verifier wired, so the flag was turned on after it \
+                    started — nothing was sent. Restart the daemon to arm the observation, or \
+                    resend without --verify to accept an unverified send.
+                    """
+                return await refuseHolderSend(actuationID, message)
+            }
         }
         let text: String
         let submit: Bool
@@ -3630,8 +3688,8 @@ extension RPCRouter {
                 // So this refuses while an envelope would be attached, and
                 // delivers the bare path when none would be — an authenticated
                 // suppression, or a row that carries no envelope at all.
-                // PR #816's bracketed-paste wrapping lifts it, exactly as it
-                // lifts the composite refusal.
+                // How one write could frame both the image and the envelope
+                // attributing it is deliberately out of scope until a spec settles it.
                 guard envelope != .attached || !Self.carriesDispatchEnvelope(terminal) else {
                     return await refuseHolderSend(
                         actuationID, Self.holderCompositeRefusal(
@@ -3653,9 +3711,52 @@ extension RPCRouter {
                     terminalID: terminal.id, cause: "a message in more than one part"))
         }
 
+        // Resolved HERE rather than beside the gate above, so it cannot outlive
+        // the payload shapes it means anything for: a `.keys` payload has
+        // already returned through `deliverHolderKeys`, and a key sequence
+        // reaches no transcript for an observation to read. Every precondition
+        // the daemon default needs is carried in the term itself — see the
+        // gate's comment for why it arms rather than refuses.
+        //
+        // **The envelope is one of those preconditions.** The observation
+        // searches the transcript for this row's dispatch id and for nothing
+        // else (`DeliveryVerifier.envelopeAppears`), so a send that carries no
+        // envelope is one it cannot possibly find: arming that would guarantee
+        // a not-landed verdict at the deadline and spend the single
+        // evidence-bounded retry re-typing the message into the session a
+        // second time. And the queued-prompt rail — the production caller this
+        // default is for — sends `.suppressed` by design, so the operator's own
+        // words arrive byte-identically. It therefore goes unarmed, the same
+        // way a target that cannot be observed does. Spelled exactly as
+        // `deliverHolderText` spells it when it decides whether to compose one.
+        //
+        // An explicit `--verify` keeps its existing meaning on both transports,
+        // suppression included: that combination is the caller's own, it
+        // predates this arm, and changing it is not this change's business.
+        //
+        // **`actor.kind` is a declaration, not an authentication**, and this is
+        // the first place in the tree that branches behavior on it rather than
+        // only labeling a row — so the assumption is stated rather than
+        // enforced. Any process on the daemon socket can call itself `daemon`
+        // (see `ActuationActor`'s own doc: "ambient declaration, never
+        // authentication"), and one that does, on a send whose envelope rides,
+        // reaches this branch. What it gets is bounded to what a rail gets: an
+        // observation it did not ask for, and at most one re-delivery of its
+        // own message. Nothing here refuses, deletes, or redirects on the
+        // strength of the claim, so the fail-open shape is the same as
+        // everywhere else this field is read. The envelope-suppression check
+        // the daemon DOES authenticate is `authenticatesEnvelopeSuppression`,
+        // and it stays the one gate that requires proof.
+        let envelopeWillRide = envelopeEligible && envelope == .attached
+            && Self.carriesDispatchEnvelope(terminal) && !text.isEmpty
+        let effectiveVerifyArmed = payload.isVerifyArmed
+            || (actor?.kind == ActuationActor.Kind.daemon && verifyEnabled
+                && Self.supportsDeliveryObservation(terminal) && deliveryVerifier != nil
+                && envelopeWillRide)
         return await deliverHolderText(
             text, submit: submit, terminal: terminal, actuationID: actuationID,
-            actor: actor, envelope: envelope, envelopeEligible: envelopeEligible, courier: courier)
+            actor: actor, envelope: envelope, envelopeEligible: envelopeEligible,
+            verifyArmed: effectiveVerifyArmed, courier: courier)
     }
 
     /// Deliver one body of text to a holder-backed session: the same envelope
@@ -3668,10 +3769,18 @@ extension RPCRouter {
     /// ahead of `envelope`'s disposition and `carriesDispatchEnvelope`: a lone
     /// image part passes `false` so the quoted path it built from is never
     /// prefixed, no matter what those two would otherwise decide.
+    ///
+    /// `verifyArmed` is the resolved arming decision from `performHolderSend`'s
+    /// gate — an explicit `--verify` or the daemon rails' default — already
+    /// checked against the three preconditions there. On a successful write it
+    /// hands the composed `body` (envelope and text, before paste-marker
+    /// wrapping) to the verifier, exactly as the tmux arm does. An empty body
+    /// arms nothing: `--text "" --submit` presses Enter and has no delivery to
+    /// observe.
     private func deliverHolderText(
         _ text: String, submit: Bool, terminal: Terminal, actuationID: String,
         actor: ActuationActor?, envelope: DispatchEnvelopeDisposition,
-        envelopeEligible: Bool, courier: HolderInjectionCourier
+        envelopeEligible: Bool, verifyArmed: Bool, courier: HolderInjectionCourier
     ) async -> RPCResponse {
         // Asked BEFORE anything is composed, because the answer decides the
         // bytes. Two sources, in order: the test seam if one is installed, then
@@ -3737,6 +3846,22 @@ extension RPCRouter {
                 actuationID, .dispatched,
                 modeSource: modeSource, modeAgeMilliseconds: modeAge,
                 modesObserved: modesObserved)
+            // Hand off to the observation, exactly as the tmux arm does after
+            // `.dispatched`: reached only on a successful write, only when the
+            // send was verify-armed, and only for a non-empty body — a
+            // verify-less send, a refusal, a transport failure and a bare Enter
+            // all arm nothing. The delivered payload is `body`: the envelope
+            // and text as composed, before paste-marker wrapping, so the
+            // verifier observes the transcript for what the child received, not
+            // for the control bytes that framed it.
+            if verifyArmed, !body.isEmpty {
+                await deliveryVerifier?.armVerification(
+                    actuationID: actuationID,
+                    terminalID: terminal.id,
+                    sessionID: terminal.claudeSessionID,
+                    deliveredPayload: body,
+                    submit: submit)
+            }
             return .ok()
         case .notDelivered(let reason):
             // The transport, not a decision: the daemon tried to write and
@@ -3909,8 +4034,10 @@ extension RPCRouter {
     ///
     /// It runs the same pane consultation the first send ran, through the same
     /// helper: a minute has passed, and the pane may have died or been reused
-    /// since. And it queues in the same per-terminal lane, so a retry can never
-    /// splice itself into a concurrent send's paste.
+    /// since. A holder row has no pane, so its liveness question is the holder's
+    /// last reported child status instead. And both arms queue in the same
+    /// per-terminal lane, so a retry can never splice itself into a concurrent
+    /// send's write.
     func redeliverVerifiedPayload(
         terminalID: UUID, sessionID: String?, payload: String, submit: Bool
     ) async -> ActuationOutcome {
@@ -3945,6 +4072,75 @@ extension RPCRouter {
         // matches is still a stranger, and still refused.
         if let sessionID, terminal.claudeSessionID != sessionID {
             return .refused(.targetMismatch)
+        }
+        // ─── The holder transport's re-delivery ───
+        //
+        // A holder row has no pane to consult and no tmux server to paste
+        // through; it re-injects through the same courier the first send used.
+        // Everything the tmux arm below reaches for — `worktree.tmuxServer`,
+        // `consultPaneBeforeTyping`, `tmux.pasteText` — is meaningless here, so
+        // the retry lives entirely in this branch and returns before that body.
+        if terminal.transport == .holder {
+            // No courier means no input path at all — the same condition
+            // `performHolderSend` turns into `holderInputUnavailable`, which it
+            // classifies as `.notEligible` (via `refuseHolderSend`). The retry
+            // classifies it the same way rather than as a transport failure it
+            // never actually attempted.
+            guard let courier = holderInjectionCourier else {
+                return .refused(.notEligible)
+            }
+            // And it queues in the terminal's own lane, exactly as the tmux
+            // body below does: the retry is a SECOND writer to a pty another
+            // send may be mid-write on, and a write to a tty is not atomic. The
+            // liveness check goes inside the lane for the same reason the tmux
+            // arm consults the pane inside it — the answer must not be
+            // separated from the write it authorizes.
+            let outcome = try? await terminalSendSerializer.run(terminalID: terminalID) {
+                // A child the holder has already reported dead cannot receive a
+                // retry. Only a reported `.exited` refuses — `.alive`,
+                // `.exitedStatusUnknown` and a status never reported (nil) are
+                // all uncertainty, and uncertainty proceeds: the courier's own
+                // write is the authority on whether the pty still takes bytes.
+                if case .exited = await self.holderRegistry?.lastKnownStatus(for: terminalID) {
+                    return ActuationOutcome.refused(.notEligible)
+                }
+                // Recompose the paste-wrapping from a FRESH reading rather than
+                // replaying the exact bytes the first send wrote. A minute has
+                // passed since the observation, and the child's bracketed-paste
+                // mode can have flipped in it — a viewer attaching or
+                // detaching, a full-screen redraw — so the wrapping the first
+                // send baked in may now be wrong for the pty as it stands.
+                // `payload` is the composed body (envelope and text, before any
+                // paste marker), so it is the `body` argument here and takes no
+                // second envelope; only the wrapping is recomputed, exactly as
+                // `deliverHolderText` composes it.
+                let reading = await self.holderModeReading(terminalID: terminalID)
+                let message = HolderSendComposition.compose(
+                    body: payload, submit: submit,
+                    bracketedPaste: HolderSendComposition.bracketedPaste(
+                        for: reading,
+                        unobservedShouldWrap: Self.carriesDispatchEnvelope(terminal)))
+                // An empty composition has no delivery to redo —
+                // `--text "" --submit` composes to a bare Enter with no body,
+                // and a body that was only paste markers composes to nothing at
+                // all. `deliverHolderText` treats the same emptiness as
+                // `.dispatched`; the retry returns the same, because there is
+                // nothing to re-deliver — not because a write succeeded.
+                // Verification is NOT re-armed here: this call IS the verifier's
+                // retry, and re-arming would make it observe its own
+                // re-delivery and retry that in turn.
+                guard !message.isEmpty else { return ActuationOutcome.dispatched }
+                switch await courier.deliver(terminalID: terminalID, bytes: message) {
+                case .viewerWrote, .daemonWrote:
+                    return ActuationOutcome.dispatched
+                case .notDelivered:
+                    return ActuationOutcome.transportFailed
+                }
+            }
+            // The lane rethrows only what the closure threw, and this one
+            // throws nothing — a nil here is cancellation, which reached no
+            // transport and is classified as the failed write it would have been.
+            return outcome ?? .transportFailed
         }
         let outcome: ActuationOutcome
         do {
