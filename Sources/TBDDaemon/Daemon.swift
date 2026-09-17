@@ -1362,6 +1362,14 @@ public final class Daemon: Sendable {
         rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
         try await sock.start()
 
+        // Pending provider replacements recover only after the socket is live:
+        // Codex readiness arrives through the SessionStart hook RPC, so a
+        // pre-bind recovery would always time out despite a healthy process.
+        // The durable row remains Codex throughout this pass.
+        if mockMode == nil {
+            await rpcRouter.reconcilePendingContinueInClaude()
+        }
+
         // 9c. Finish the holder sessions the startup budget did not reach.
         //
         // `adoptAll` is the ONLY caller of `adopt` in the daemon, so a row it
@@ -1563,8 +1571,9 @@ public final class Daemon: Sendable {
             // `orphanGC` is always non-nil here.
             if let orphanGC {
                 let maintenanceLifecycle = lifecycle
-                self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog] in
+                self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog, rpcRouter] in
                     // Sweep once immediately (cold recovery), then every hour.
+                    await rpcRouter.reconcilePendingContinueInClaude()
                     await Self.performOrphanMaintenance(
                         orphanGC: orphanGC,
                         lifecycle: maintenanceLifecycle,
@@ -1574,6 +1583,7 @@ public final class Daemon: Sendable {
                         // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                         try? await Task.sleep(for: .seconds(3600))
                         guard !Task.isCancelled else { break }
+                        await rpcRouter.reconcilePendingContinueInClaude()
                         await Self.performOrphanMaintenance(
                             orphanGC: orphanGC,
                             lifecycle: maintenanceLifecycle,

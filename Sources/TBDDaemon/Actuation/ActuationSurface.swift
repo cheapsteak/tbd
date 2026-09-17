@@ -92,6 +92,7 @@ enum ActuationSurface: CaseIterable, Sendable {
     case terminalRecreateWindow
     case terminalSwapProfile
     case terminalContinueInCodex
+    case terminalContinueInClaude
     case terminalHistoryRevive
     /// Creates a worktree and spawns its primary terminals. The row names the
     /// worktree, not a terminal: those are minted inside the lifecycle phase.
@@ -145,6 +146,7 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .terminalRecreateWindow: return RPCMethod.terminalRecreateWindow
         case .terminalSwapProfile: return RPCMethod.terminalSwapProfile
         case .terminalContinueInCodex: return RPCMethod.terminalContinueInCodex
+        case .terminalContinueInClaude: return RPCMethod.terminalContinueInClaude
         case .terminalHistoryRevive: return RPCMethod.terminalHistoryRevive
         case .worktreeCreate: return RPCMethod.worktreeCreate
         case .scratchCreate: return RPCMethod.scratchCreate
@@ -167,6 +169,7 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .terminalSend, .remoteSend: return .send
         case .terminalCreate, .terminalRecreateWindow, .terminalSwapProfile,
              .terminalContinueInCodex, .terminalHistoryRevive, .worktreeCreate,
+             .terminalContinueInClaude,
              .scratchCreate, .worktreeRevive, .worktreeReviveConversationFresh,
              .worktreeRerunPreSession, .remoteCreate, .remoteUnarchive: return .spawn
         case .terminalDelete, .worktreeArchive, .worktreeForget, .repoRemove,

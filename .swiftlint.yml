@@ -399,6 +399,7 @@ custom_rules:
       - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"       # the terminal.* handlers; each writes its own row before acting
       - "Sources/TBDDaemon/Server/RPCRouter\\+ScratchHandlers\\.swift"        # scratch.create/delete/archive; one scratch-named row per call
       - "Sources/TBDDaemon/Server/RPCRouter\\+ContinueInCodexHandlers\\.swift" # terminal.continueInCodex; spawn row + rollback kill
+      - "Sources/TBDDaemon/Server/RPCRouter\\+ContinueInClaudeHandlers\\.swift" # terminal.continueInClaude; one row covers destination + rollback/recovery
       - "Sources/TBDDaemon/Lifecycle/HibernationCoordinator\\.swift"          # park/wake engine: RPC rows plus the auto-hibernate rail's entry point
       # The shared lifecycle internals and phases. They stay deliberately
       # silent — `worktree.archive` and the reconcile sweep both reach them, and

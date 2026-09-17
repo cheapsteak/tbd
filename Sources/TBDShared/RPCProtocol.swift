@@ -121,6 +121,10 @@ public enum RPCErrorCode: String, Sendable {
     /// `woken: false` no-op, because there is no live session behind the row:
     /// the caller's `prompt` went nowhere and the terminal needs recovery.
     case terminalSessionGone
+    /// An in-place provider continuation was aimed at a terminal whose durable
+    /// provider identity is not the required source provider. This includes a
+    /// repeated Continue-in-Claude request after the row already became Claude.
+    case terminalWrongProvider
 }
 
 // MARK: - RPC Method Names
@@ -142,6 +146,7 @@ public enum RPCMethod {
     public static let worktreeForget = "worktree.forget"
     public static let terminalCreate = "terminal.create"
     public static let terminalContinueInCodex = "terminal.continueInCodex"
+    public static let terminalContinueInClaude = "terminal.continueInClaude"
     public static let terminalList = "terminal.list"
     public static let terminalSend = "terminal.send"
     public static let terminalFocus = "terminal.focus"
@@ -2351,6 +2356,28 @@ public struct TerminalContinueInCodexResult: Codable, Sendable, Equatable {
     public init(terminalID: UUID, threadID: String) {
         self.terminalID = terminalID
         self.threadID = threadID
+    }
+}
+
+/// Replace one tmux-backed Codex process with a fresh Claude process in the
+/// same durable terminal row and window. A nil profile selects Claude's
+/// ambient login.
+public struct TerminalContinueInClaudeParams: Codable, Sendable {
+    public let sourceTerminalID: UUID
+    public let profileID: UUID?
+    public let cols: Int?
+    public let rows: Int?
+
+    public init(
+        sourceTerminalID: UUID,
+        profileID: UUID? = nil,
+        cols: Int? = nil,
+        rows: Int? = nil
+    ) {
+        self.sourceTerminalID = sourceTerminalID
+        self.profileID = profileID
+        self.cols = cols
+        self.rows = rows
     }
 }
 
