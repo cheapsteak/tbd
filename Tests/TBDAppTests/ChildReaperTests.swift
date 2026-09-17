@@ -17,9 +17,10 @@ import TestSupport
 /// or event-source implementation fails `reapsAChildThatIsStillRunning` below.
 ///
 /// HOW THESE TESTS WAIT. The background-reap tests await an **event**, not a
-/// window: `ChildReaper.drainPendingReaps` puts a barrier on the reaper's own
-/// concurrent queue, so when it fires every reap already enqueued has *run to
-/// completion*. A child that still exists after that is a reap that did not
+/// window: `ChildReaper.drainPendingReaps` fires once every reap already
+/// started has *run to completion* (the reaper keeps a ledger of the reaps in
+/// flight and calls back from the thread that finishes the last one the drain
+/// covers). A child that still exists after that is a reap that did not
 /// reap — a contract failure, not a scheduling delay. The single remaining
 /// bounded poll, `waitUntilZombie`, waits for a child to **exit**, which is not
 /// an in-process event and therefore has nothing to be ordered behind; it is
@@ -160,11 +161,19 @@ struct ChildReaperTests {
     /// Runs the blocking reap off the cooperative pool. Parking a concurrency
     /// worker for the child's lifetime would tax every other suite in this
     /// process (Swift Testing runs them all in one).
+    ///
+    /// A `Thread` rather than a global dispatch queue, for the reason
+    /// `ChildReaper` itself gives: a global-queue block parks one of the
+    /// process's ~64 constrained workers, and when other suites have that pool
+    /// full the block never starts — a hang this test would then be reporting
+    /// about libdispatch, not about the reaper.
     private func reapOffPool(_ pid: pid_t) async -> pid_t {
         await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
+            let thread = Thread {
                 continuation.resume(returning: ChildReaper.reapBlocking(pid: pid))
             }
+            thread.name = "com.tbd.tests.reap-off-pool"
+            thread.start()
         }
     }
 
@@ -359,12 +368,125 @@ struct ChildReaperTests {
                 "an observed child must be left for its real waiter, not reaped here")
     }
 
+    // MARK: - The worker pool the reaper must not depend on
+
+    /// Holds libdispatch's constrained (non-overcommit) worker pool full for
+    /// as long as it lives: one block per worker slot, each parked in a `read`
+    /// on a pipe nobody writes to, plus a margin so the pool stays full while
+    /// the kernel is still spinning workers up. `release()` closes the write
+    /// ends, every read returns 0, and the workers go back to the pool.
+    ///
+    /// The cap is `kern.wq_max_constrained_threads` (64 on a stock install),
+    /// read from the kernel so the test exhausts *this* box's pool rather
+    /// than a remembered number. Every `DispatchQueue.global()` block and every
+    /// private concurrent queue draws from that pool, which is what makes it a
+    /// process-wide hazard: while it is full, nothing dispatched to any of
+    /// those queues starts, at any QoS.
+    ///
+    /// Held for milliseconds on the healthy path — the reap and drain it
+    /// brackets — because for that window it also starves any sibling test's
+    /// global-queue work in this process.
+    ///
+    /// `parked` counts the blocks that have actually reached their `read`. The
+    /// kernel spins workers up one at a time over several milliseconds, so a
+    /// caller that reaps the instant this returns races the fill and proves
+    /// nothing — the first revision of the test below passed in 3 ms against
+    /// the very queue it was written to fail on. Give `parked` a moment to
+    /// reach `cap` first: from then on the margin's blocks are queued with no
+    /// worker to run them, which is what "full" means.
+    ///
+    /// `parked` can legitimately stop short of `cap`, and that is the pool
+    /// being full *by somebody else*: in the fast pass, three whole-pass runs
+    /// on a 14-core box each saw only 64–67 of this kernel's 70 slots go to
+    /// these blockers, because sibling suites' subprocess reads already held
+    /// the rest — the very condition the reaper has to survive. So the wait is
+    /// short and its expiry is not a failure; a long wait would hold every
+    /// sibling's global-queue work hostage for its whole duration.
+    private final class ConstrainedPoolExhaustion: @unchecked Sendable {
+        private let lock = NSLock()
+        private var writeEnds: [Int32] = []
+        private var parkedCount = 0
+        /// `kern.wq_max_constrained_threads` as this kernel reports it.
+        let cap: Int
+        let workers: Int
+
+        var parked: Int { lock.lock(); defer { lock.unlock() }; return parkedCount }
+
+        init() {
+            var value: Int32 = 64
+            var size = MemoryLayout<Int32>.size
+            if sysctlbyname("kern.wq_max_constrained_threads", &value, &size, nil, 0) != 0 { value = 64 }
+            cap = Int(value)
+            workers = cap + 16
+            for _ in 0..<workers {
+                var fds: [Int32] = [-1, -1]
+                guard pipe(&fds) == 0 else { break }
+                let readEnd = fds[0]
+                writeEnds.append(fds[1])
+                DispatchQueue.global().async { [self] in
+                    lock.lock(); parkedCount += 1; lock.unlock()
+                    var byte: UInt8 = 0
+                    _ = read(readEnd, &byte, 1)
+                    close(readEnd)
+                }
+            }
+        }
+
+        func release() {
+            lock.lock()
+            let ends = writeEnds
+            writeEnds.removeAll()
+            lock.unlock()
+            for fd in ends { close(fd) }
+        }
+
+        deinit { release() }
+    }
+
+    /// The failure this pins was measured with the reaper on a private
+    /// concurrent queue: once the process had ~64 global-queue workers parked
+    /// (the fast pass parks one per in-flight subprocess read), no reap ever
+    /// started and no drain ever fired, and every drain-awaiting test here and
+    /// in `TerminalTeardownReapTests` went red together with nothing to say
+    /// but "did not fire within 30 s". A reaper on threads of its own is
+    /// indifferent to that pool.
+    ///
+    /// Against the old reaper this fails through the drain's 30 s guard with
+    /// the child "observed an unreaped zombie" — the reap never started — and
+    /// takes every concurrently running drain-awaiting test in the suite down
+    /// with it, which is the ledger's exact shape.
+    @Test("a reap runs and drains while libdispatch's constrained worker pool is full")
+    func reapsWhileTheConstrainedWorkerPoolIsExhausted() async throws {
+        let exhaustion = ConstrainedPoolExhaustion()
+        defer { exhaustion.release() }
+        // Two seconds is ~100x the fill on an idle box and, in the pass, the
+        // pool is already nearly full before this starts. Expiry is not a
+        // failure — see the fixture — so no diagnostic is thrown here.
+        _ = await pollUntilTrue(timeout: .seconds(2), pollInterval: .milliseconds(10)) {
+            exhaustion.parked >= exhaustion.cap
+        }
+
+        let pid = try spawn("/bin/sleep", ["0"])
+        ChildReaper.reap(pid: pid, unless: ChildExitObservation())
+
+        let drain = await drainPendingReaps()
+        if let diagnostic = drain.diagnostic(pid: pid, observedState: { describeState(pid) }) {
+            await disposeChild(pid, observedZombie: isUnreapedZombie(pid))
+            throw diagnostic
+        }
+        if processExists(pid) {
+            let state = describeState(pid)
+            await disposeChild(pid, observedZombie: isUnreapedZombie(pid))
+            Issue.record(StillZombie(pid: pid, state: state))
+        }
+    }
+
     // MARK: - What is deliberately NOT tested here
     //
     // `reap`'s second `shouldReap` check — the one inside the background block
     // — has no dedicated test, and cannot get an honest one. Driving it means
     // recording the claim after `reap` returns but before that block runs, and
-    // the block is already in flight on a concurrent queue: any test that
+    // the block is already in flight on its own thread: any test that
     // appeared to pin it would be winning a race, not asserting a contract, and
     // would flake the first time the machine was busy. An earlier revision did
     // exactly that by holding the main queue, and it cost four 60 s timeouts
