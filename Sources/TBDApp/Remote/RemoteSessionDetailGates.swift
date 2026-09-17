@@ -45,17 +45,19 @@ enum RemoteSessionDetailGates {
     }
 
     /// The tab to show: `requested` when it's one of `available`, otherwise
-    /// `available`'s first tab, otherwise nil (nothing to show — `available`
-    /// is empty, the empty state renders instead). Never returns a tab
+    /// Log for an unattached session, then the first available tab. An attached
+    /// session keeps Attach as its default. Returns nil when `available`
+    /// is empty (the empty state renders instead). Never returns a tab
     /// absent from `available`, so a caller that always renders based on
     /// this result — rather than trusting a separately-tracked `selectedTab`
     /// to already be valid — can't land on a blank pane, regardless of
     /// timing: this is safe to call from the very first `body` evaluation,
     /// not just from `onAppear`/`onChange`.
     static func initialTab(
-        available: [RemoteSessionDetailTab], requested: RemoteSessionDetailTab?
+        available: [RemoteSessionDetailTab], requested: RemoteSessionDetailTab?, isAttached: Bool = false
     ) -> RemoteSessionDetailTab? {
         if let requested, available.contains(requested) { return requested }
+        if !isAttached, available.contains(.log) { return .log }
         return available.first
     }
 

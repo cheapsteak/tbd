@@ -27,12 +27,12 @@ enum RemoteAttachLifecycle {
     /// eligible, always leads).
     ///
     /// Semantics, mirroring `AppState.keepAliveWorktreeIDs`:
-    /// - `selected` (the currently viewed session) is PROTECTED — force
+    /// - `selected` is the currently viewed session with prior attachment
+    ///   intent, filtered by the caller. It is PROTECTED — force
     ///   included when eligible, and does NOT consume `cap`'s budget —
     ///   unless it's ineligible or explicitly detached, in which case it is
-    ///   excluded even though it's selected. This is the rule that makes
-    ///   "select = auto-attach" safe: a session that just detached does not
-    ///   silently respawn merely because its row is still the current
+    ///   excluded even though it's selected. A session that just detached
+    ///   must not silently respawn merely because its row is still the current
     ///   selection (see `explicitlyDetached`).
     /// - Up to `cap` additional entries from `recentlyViewed` (most-recent
     ///   first, excluding whatever `selected` already contributed) stay
