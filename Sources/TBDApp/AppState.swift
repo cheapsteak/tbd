@@ -120,10 +120,11 @@ final class AppState {
     /// Repo-less scratch spaces (`Worktree.isScratch`), surfaced separately
     /// in the sidebar's Scratch section rather than under any repo group.
     var scratchWorktrees: [Worktree] = [] {
-        // `childrenIndex()` is dict-only by design (see `children(of:)`),
-        // so its cache survives scratch churn. The shelf also reads Scratch.
+        // `childrenIndex()` is dict-only because scratch rows cannot be children.
+        // The shelf and ownership snapshot also read Scratch parents.
         didSet {
             allWorktreesCache = nil
+            sidebarRemoteSnapshotCache = nil
             sidebarHibernationCache.removeAll()
         }
     }

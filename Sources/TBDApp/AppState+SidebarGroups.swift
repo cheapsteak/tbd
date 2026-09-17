@@ -12,10 +12,10 @@ extension AppState {
     /// One indexed fleet snapshot shared by every section and reveal pass.
     /// Read tracked inputs even on a cache hit, preserving Observation dependencies.
     var sidebarRemoteSnapshot: SidebarRemoteGroups.Snapshot {
-        let rows = worktrees, sessions = remoteSessions, providers = remoteProviders
+        let rows = worktrees, scratches = scratchWorktrees, sessions = remoteSessions, providers = remoteProviders
         if let cached = sidebarRemoteSnapshotCache { return cached }
         let snapshot = SidebarRemoteGroups.Snapshot(
-            worktrees: rows.values.flatMap { $0 }, sessions: sessions, providers: providers)
+            worktrees: rows.values.flatMap { $0 } + scratches, sessions: sessions, providers: providers)
         sidebarRemoteSnapshotCache = snapshot
         return snapshot
     }
@@ -50,6 +50,13 @@ extension AppState {
                 in: snapshot.sessionsByProvider[provider] ?? [], forProvider: provider, knownRepoIDs: known),
             snapshot: snapshot,
             unread: unreadByRemoteSession)
+    }
+
+    func sidebarRemoteGroups(parentID: UUID) -> SidebarRemoteGroups {
+        let snapshot = sidebarRemoteSnapshot
+        return SidebarRemoteGroups(
+            roots: snapshot.children[parentID] ?? [], remainder: [], snapshot: snapshot,
+            unread: unreadByRemoteSession, worktreeUnread: unreadByWorktree)
     }
 
     /// A cached presentation partition; tracked inputs are read even on a hit
@@ -99,6 +106,9 @@ extension AppState {
         if !sidebarScratchHibernation.hibernatedWorktreeIDs.isDisjoint(with: worktreeIDs) {
             groups.insert(.init(owner: .scratch, kind: .hibernated))
         }
+        let visibleRepoIDs = Set(repos.filter { repoFilter == nil || repoFilter == $0.id }.map(\.id))
+        groups.formUnion(sidebarRemoteSnapshot.parentRevealGroups(
+            worktreeIDs: worktreeIDs, remoteID: remoteID, repoIDs: visibleRepoIDs))
         return SidebarGroupReveal(generation: sidebarSelectionGeneration,
                                   worktreeIDs: worktreeIDs, remoteID: remoteID, groups: groups)
     }
@@ -116,10 +126,16 @@ extension AppState {
             if group.owner == .scratch {
                 userDefaults.set(true, forKey: Self.scratchSectionExpandedKey)
             }
-            guard case .repository(let id) = group.owner,
-                  let index = repos.firstIndex(where: { $0.id == id }), !repos[index].expanded else { continue }
+            let repoID: UUID?
+            switch group.owner {
+            case .repository(let id): repoID = id
+            case .parent(let id): repoID = sidebarRemoteSnapshot.ancestorPath(to: id)?.first?.repoID
+            case .provider, .scratch: repoID = nil
+            }
+            guard let repoID,
+                  let index = repos.firstIndex(where: { $0.id == repoID }), !repos[index].expanded else { continue }
             repos[index].expanded = true
-            Task { try? await daemonClient.setRepoExpanded(id: id, expanded: true) }
+            Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
         }
     }
 }
