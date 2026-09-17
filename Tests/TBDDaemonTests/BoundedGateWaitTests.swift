@@ -78,12 +78,20 @@ struct BoundedGateWaitTests {
         // Ordinary cooperative work still gets a thread while every gate is
         // held. Deliberately not timed: scheduling latency in the parallel
         // pass is tens of seconds under load, so a wall-clock bound here would
-        // go red on a merely busy machine. The default gate deadline clears
-        // that latency with room to spare, which is what keeps the discrimination
-        // one-sided — a healthy run always releases first.
-        #expect(await Task { true }.value)
+        // go red on a merely busy machine. The holders' own deadline is the
+        // only clock, and it is derived to dominate ONE such hop — so the hold
+        // spans exactly this one. The probe releases the holders itself, the
+        // instant it is served: releasing from the test body after `.value`
+        // would put a second cooperative hop — the body's own resumption —
+        // inside the hold, and at pass start each hop costs the pass's
+        // per-test latency, which is how every holder here expired at once
+        // under the nightly's load.
+        let served = await Task {
+            for _ in 0..<holders { gate.signal() }
+            return true
+        }.value
+        #expect(served)
 
-        for _ in 0..<holders { gate.signal() }
         var released = 0
         for task in tasks where await task.value { released += 1 }
         #expect(released == holders, "every holder must be released, not expire")
@@ -108,21 +116,38 @@ struct BoundedGateWaitTests {
         }
         defer { for _ in 0..<holders { gate.signal() } }
 
-        guard await waitUntil({ parked.value == holders }, timeout: ciSafeDeadline) else {
+        // The whole observation — the parked poll, the dispatch probe, the
+        // release — runs OFF the cooperative pool, on the executor the holders
+        // use. Each `waitUntil` is a poll whose every `Task.sleep` resumption
+        // is a scheduling hop; on the pool at pass start a hop costs the
+        // pass's per-test latency, and two chained polls put more of it inside
+        // the hold than the holders' deadline was derived to dominate — every
+        // holder then expires on a merely slow run, 64 identical lines. Here
+        // the preference carries across every resumption (SE-0417), so the
+        // hold spans the dispatch probe alone; the thread-name read after the
+        // last poll pins that, so a language change that returned the loop to
+        // the pool goes red rather than silently reopening the window.
+        let observation = gateHoldingTask { () -> (parked: Bool, dispatched: Bool, offPool: Bool) in
+            guard await waitUntil({ parked.value == holders }, timeout: ciSafeDeadline) else {
+                for _ in 0..<holders { gate.signal() }
+                return (false, false, runningThreadName() == GateExecutor.threadName)
+            }
+            let dispatched = Counter()
+            DispatchQueue.global(qos: .userInitiated).async { dispatched.increment() }
+            let dispatchRan = await waitUntil(
+                { dispatched.value == 1 }, timeout: ciSafeDeadline)
+            let offPool = runningThreadName() == GateExecutor.threadName
             for _ in 0..<holders { gate.signal() }
-            for task in tasks { _ = await task.value }
-            Issue.record("every stress holder must reach its gate")
-            return
+            return (true, dispatchRan, offPool)
         }
-
-        let dispatched = Counter()
-        DispatchQueue.global(qos: .userInitiated).async { dispatched.increment() }
-        let dispatchRan = await waitUntil(
-            { dispatched.value == 1 }, timeout: ciSafeDeadline)
-
-        for _ in 0..<holders { gate.signal() }
+        let outcome = await observation.value
         for task in tasks { _ = await task.value }
-        #expect(dispatchRan, "gate holders must not consume the workers needed by unrelated dispatch work")
+        #expect(outcome.parked, "every stress holder must reach its gate")
+        #expect(outcome.dispatched, "gate holders must not consume the workers needed by unrelated dispatch work")
+        #expect(
+            outcome.offPool,
+            "the observation must stay on the gate executor across its polls; back on the pool, the hold would span the pass's scheduling latency again"
+        )
     }
 
     @Test("the executor preference does not survive an unstructured Task")
