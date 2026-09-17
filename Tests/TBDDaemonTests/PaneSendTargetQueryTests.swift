@@ -27,6 +27,18 @@ struct PaneSendTargetQueryTests {
         ])
     }
 
+    /// Every one-shot tmux client runs UTF-8 whatever the inherited locale, or
+    /// tmux sanitizes this query's tab separators to `_`. The builder's argv is
+    /// left alone; `-u` is added once, in front, at execution.
+    @Test("execution argv puts -u in front exactly once and keeps the rest")
+    func executionArgumentsForceUTF8() {
+        let query = TmuxManager.paneSendTargetQuery(server: "tbd-acme", paneID: "%7")
+        let executed = TmuxManager.executionArguments(query)
+        #expect(executed == ["-u"] + query)
+        #expect(executed.filter { $0 == "-u" }.count == 1)
+        #expect(TmuxManager.executionArguments([]) == ["-u"])
+    }
+
     /// `list-panes -t %N` lists every pane in `%N`'s *window*, not just `%N`.
     /// Without `#{pane_id}` in the format there is no way to tell which line
     /// answered, so the query must keep asking for it.
