@@ -483,6 +483,19 @@ instead of leaving an anonymous job timeout. `BoundedGateWaitTests` reproduces
 the wedge on any machine by deriving its holder count from
 `activeProcessorCount`.
 
+**A hold spans only the hop it exists to observe.** `TestGate.deadline` is
+derived to dominate one saturated-pass observation, and a cooperative-pool hop
+at pass start costs the pass's per-test latency. A test that holds gates across
+a pool-side poll loop — every `Task.sleep` in `pollUntilTrue` is such a hop —
+or releases them only after its own body has been rescheduled has put more of
+that latency inside the hold than the bound covers, and every holder then
+expires on a merely slow run: 64 identical `never signalled within 120 s`
+lines from `BoundedGateWaitTests` on 19 nights of the flake-stress ledger, and
+once on ordinary CI with the observation itself having succeeded. So that
+suite's dispatch test runs its whole observation from a `gateHoldingTask`,
+whose preference survives each resumption inside the polls, and its pool test
+releases from inside the probe task, the instant the probe is served.
+
 **The preference stops at an unstructured task; what moves it is the callee,
 not the call site, and where the test does not own the callee only the bound
 is left.** SE-0417 carries a task executor preference into child
