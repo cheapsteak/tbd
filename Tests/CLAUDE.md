@@ -1024,7 +1024,23 @@ a weaker negative.
 records and returns `nil` — so it does not stop a chain the way a strict arming
 wait does: a `next()` that times out mid-chain leaves every guard after it
 payable in the same run. Put it last, which is what makes the poller chains
-above cost one guard in practice rather than their paper tally. Either clock is
+above cost one guard in practice rather than their paper tally.
+
+**Both guards take `TestDeadlines.saturatedPass` (90 s) where the code under
+test is `@MainActor`.** A `@MainActor` debouncer fires through
+`Task { @MainActor }`, so its timer arms only once that task has had a turn on
+the main actor — a process-wide queue every `@MainActor` test body in the pass
+is waiting on, deepest at pass start — and the fire needs the main actor again
+after `advance`. Measured on a green fast pass 2: the same shape took 84 s to
+arm (`ComposerSendCoordinatorTests.theHoldTimesOutOnTheInjectedClock`), 55% of
+the pass's tests reported over 45 s and none over 90 s; at 45 s the first test
+of both debounce suites went red on ordinary CI with every logic assertion a
+consequence and every sibling test passing in milliseconds. Pass the budget
+through the strict `requireAdvanceWhenArmed(by:timeout:)` and
+`next(timeout:)`, so a missed arming ends the test instead of paying the
+recorder's guard as well — a two-step chain then costs at most two guards,
+180 s, inside the 240 s limit. `AppearanceDebounceTests` and
+`SearchQueryDebouncerTests` are the worked examples. Either clock is
 a legitimate choice for a new clock-driven test. Existing `TestClock` suites
 migrate on field evidence, not wholesale — currently `AppearanceDebounceTests`
 and `SearchQueryDebouncerTests`,

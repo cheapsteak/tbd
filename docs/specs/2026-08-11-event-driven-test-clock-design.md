@@ -93,7 +93,19 @@ the waiter ledger that makes arming observable.
   the waiter — so a later signal cannot resume a dead continuation — then
   records an `Issue` carrying observed state. 45 s carries over from
   `waitForSuspension` so that existing tallies of chained waits against
-  `.clockDriven`'s 240 s limit stay valid.
+  `.clockDriven`'s 240 s limit stay valid — for an arming that is one hop
+  from the test body. Where reaching the sleep costs a main-actor round trip
+  or an unstructured task that has first to be given a thread, the caller
+  passes `TestDeadlines.saturatedPass` (90 s), the budget `Tests/CLAUDE.md`
+  derives for a bounded wait in the saturated pass: a `@MainActor` debouncer
+  fires through `Task { @MainActor }`, so its timer arms only once that task
+  has had a turn on a queue every `@MainActor` test body in the pass is
+  waiting on, and on a green fast pass 2 that measured 84 s while 45 s sat
+  below the pass's median reported per-test latency. The same budget covers
+  the `FireRecorder.next()` that follows, since the fire needs the main actor
+  again after `advance`. The strict `requireAdvanceWhenArmed(by:timeout:)`
+  is where the budget is passed, so a missed arming ends the test rather than
+  paying the recorder's guard as well.
 - **`advanceWhenArmed(by:)`** is `sleeperArmed()` followed by `advance(by:)` —
   the drop-in replacement for `advanceWhenSuspended(by:)`.
 - **`advance(by:)` / `advance(to:)`** step `now` through each due deadline in
@@ -187,11 +199,15 @@ deregister the stranded waiter afterwards.
 
 ## Rejected alternatives
 
-- **Raise the 45 s arming guard.** It does not converge — at a load average in
-  the hundreds no finite number holds. It also violates the rule that
-  `ciSafeDeadline`, `waitForSuspension` and `.clockDriven` are derived together,
-  and it taxes every genuinely wedged test with a longer wait before the failure
-  is attributed.
+- **Raise the polled arming guard instead of removing the poll.** It does not
+  converge — at a load average in the hundreds no finite number holds for a
+  probe that floods the pool with the work it is waiting on. It also violates
+  the rule that `ciSafeDeadline`, `waitForSuspension` and `.clockDriven` are
+  derived together, and it taxes every genuinely wedged test with a longer wait
+  before the failure is attributed. This is not the same as the budget a parked
+  wait takes when its arming sits behind a main-actor round trip (above): that
+  wait costs nothing on a healthy path however long its guard, and the 90 s it
+  takes is the one derived value, not a tuned number.
 - **Wrap `TestClock` in a signalling decorator.** Unsound. Registration happens
   inside `TestClock`'s own lock, so a wrapper can only signal before or after
   that critical section, never within it. Signalling before leaves a window in

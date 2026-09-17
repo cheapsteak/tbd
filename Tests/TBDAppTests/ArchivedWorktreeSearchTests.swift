@@ -410,13 +410,36 @@ struct ArchivedRefreshPlanTests {
 ///
 /// `.serialized` is retained as cheap isolation between four tests that each
 /// build their own debouncer; it is no longer load-bearing for the handshake.
+///
+/// Every wait here takes ``mainActorHop`` as its hang guard, and the arming
+/// waits are the strict form — a missed arming ends the test rather than
+/// paying the recorder's guard as well, so the two-step chain in
+/// `separatedQueriesFireTwice` costs at most two guards (180 s) inside
+/// `.clockDriven`'s 240 s limit.
 @MainActor
 @Suite("Archived search debounce", .clockDriven, .serialized)
 struct SearchQueryDebouncerTests {
     private static let interval = Duration.milliseconds(250)
 
+    /// Hang guard for every arming wait and every `fired.next()` in this
+    /// suite: the fast pass's saturated budget, not the clock's 45 s default,
+    /// because neither hop is one hop from the test body. `SearchQueryDebouncer`
+    /// is `@MainActor` and fires through an unstructured `Task { @MainActor }`,
+    /// so the timer arms only once that task has had a turn on the main actor
+    /// — a process-wide queue every `@MainActor` test body in the pass waits
+    /// on, deepest at pass start when this suite's first test runs — and the
+    /// fire needs the main actor a second time after `advance`. On a green fast
+    /// pass 2 the same shape measured 84 s to arm
+    /// (`ComposerSendCoordinatorTests.theHoldTimesOutOnTheInjectedClock`, which
+    /// takes this budget for the same reason), while 45 s sat below the pass's
+    /// median reported per-test latency and turned the first test here red on
+    /// ordinary CI — every later assertion a consequence, every sibling test
+    /// passing in milliseconds. The rule is the `timeout` note on
+    /// `EventDrivenTestClock.sleeperArmed`.
+    private static let mainActorHop = TestDeadlines.saturatedPass
+
     @Test("a burst within one window collapses to a single fire with the last value")
-    func burstCollapsesToLastValue() async {
+    func burstCollapsesToLastValue() async throws {
         let clock = EventDrivenTestClock()
         let debouncer = SearchQueryDebouncer(interval: Self.interval, clock: clock)
         let fired = FireRecorder<String>()
@@ -425,36 +448,37 @@ struct SearchQueryDebouncerTests {
         debouncer.schedule("wo") { [fired] in fired.record($0) }
         debouncer.schedule("wolv") { [fired] in fired.record($0) }
 
-        await clock.advanceWhenArmed(by: Self.interval)
-        #expect(await fired.next() == "wolv")
+        try await clock.requireAdvanceWhenArmed(by: Self.interval, timeout: Self.mainActorHop)
+        #expect(await fired.next(timeout: Self.mainActorHop) == "wolv")
         #expect(fired.values == ["wolv"])
     }
 
     @Test("nothing fires until the full interval has elapsed")
-    func firesOnTheBoundary() async {
+    func firesOnTheBoundary() async throws {
         let clock = EventDrivenTestClock()
         let debouncer = SearchQueryDebouncer(interval: Self.interval, clock: clock)
         let fired = FireRecorder<String>()
 
         debouncer.schedule("wolv") { [fired] in fired.record($0) }
 
-        await clock.advanceWhenArmed(by: Self.interval - .milliseconds(1))
+        try await clock.requireAdvanceWhenArmed(
+            by: Self.interval - .milliseconds(1), timeout: Self.mainActorHop)
         await settle()
         #expect(fired.values.isEmpty, "one millisecond short of the window must not fire")
 
         await clock.advance(by: .milliseconds(1))
-        #expect(await fired.next() == "wolv")
+        #expect(await fired.next(timeout: Self.mainActorHop) == "wolv")
         #expect(fired.values == ["wolv"], "the boundary must fire once, not twice")
     }
 
     @Test("cancel() drops a pending fire")
-    func cancelDropsPendingFire() async {
+    func cancelDropsPendingFire() async throws {
         let clock = EventDrivenTestClock()
         let debouncer = SearchQueryDebouncer(interval: Self.interval, clock: clock)
         let fired = FireRecorder<String>()
 
         debouncer.schedule("wolv") { [fired] in fired.record($0) }
-        await clock.advanceWhenArmed(by: .milliseconds(100))
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(100), timeout: Self.mainActorHop)
 
         debouncer.cancel()
         await clock.advance(by: Self.interval)
@@ -463,18 +487,18 @@ struct SearchQueryDebouncerTests {
     }
 
     @Test("queries separated by a full window fire twice, in order")
-    func separatedQueriesFireTwice() async {
+    func separatedQueriesFireTwice() async throws {
         let clock = EventDrivenTestClock()
         let debouncer = SearchQueryDebouncer(interval: Self.interval, clock: clock)
         let fired = FireRecorder<String>()
 
         debouncer.schedule("wolv") { [fired] in fired.record($0) }
-        await clock.advanceWhenArmed(by: Self.interval)
-        #expect(await fired.next() == "wolv")
+        try await clock.requireAdvanceWhenArmed(by: Self.interval, timeout: Self.mainActorHop)
+        #expect(await fired.next(timeout: Self.mainActorHop) == "wolv")
 
         debouncer.schedule("otter") { [fired] in fired.record($0) }
-        await clock.advanceWhenArmed(by: Self.interval)
-        #expect(await fired.next() == "otter")
+        try await clock.requireAdvanceWhenArmed(by: Self.interval, timeout: Self.mainActorHop)
+        #expect(await fired.next(timeout: Self.mainActorHop) == "otter")
         #expect(fired.values == ["wolv", "otter"])
     }
 }
