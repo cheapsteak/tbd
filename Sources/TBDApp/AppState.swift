@@ -1046,26 +1046,16 @@ final class AppState {
 
     // MARK: - Remote attach lifecycle (see `AppState+RemoteAttach.swift`)
 
-    /// Raw most-recent-first log of recently-VIEWED remote sessions, the
-    /// recency input to `RemoteAttachLifecycle.attachedSelections`. Mirrors
-    /// `recentlyVisitedWorktreeIDs`'s split from the computed mount set —
-    /// `attachedRemoteSelections` re-merges the current selection (protected)
-    /// and eligibility/detach state on every read, so this log alone doesn't
-    /// say what's actually attached right now.
+    /// Bounded most-recent-first log of explicit attachment requests. Plain
+    /// browsing does not add entries. This records connection intent rather
+    /// than live connections: eligibility, detach and reconnect state still
+    /// determine the mount set, and the selected requested session is protected.
     private(set) var recentlyAttachedRemoteSessions: [RemoteSessionSelection] = []
 
-    /// Sessions whose attach terminal ended (pty exit — clean or not; the
-    /// pane exiting never means the remote session died, only that the
-    /// LOCAL viewer process stopped) and must NOT be silently re-attached
-    /// merely by staying the current selection. Cleared only by an explicit
-    /// user gesture — see `activateRemoteSession`'s doc comment for exactly
-    /// which gestures qualify, and `reattachRemoteSession` for the Reattach
-    /// button's path. This is the state that makes "select = auto-attach"
-    /// safe: without it, a pty exiting while its row is still selected would
-    /// re-enter `attachedRemoteSelections` (still protected) and the pager
-    /// would spawn a fresh process every render, an unbounded respawn loop
-    /// against a resource this codebase must not spam (SSM/ssh concurrency
-    /// and cost — see `RemoteAttachLifecycle`'s doc comment).
+    /// Sessions whose local viewer ended cleanly and must stay detached
+    /// through browsing or history navigation. An explicit Attach or Reattach
+    /// action clears this flag. It also prevents a selected connection from
+    /// respawning indefinitely when its provider attach process exits.
     private(set) var explicitlyDetachedRemoteSessions: [RemoteSessionSelection: RemoteAttachDetachInfo] = [:]
 
     /// Sessions whose attach terminal ended UNEXPECTEDLY (nonzero/unreadable
@@ -1085,9 +1075,9 @@ final class AppState {
     private(set) var pendingReconnectRemoteSessions: [RemoteSessionSelection: RemotePendingReconnect] = [:]
 
     /// Cap on how many WARM BACKGROUND remote sessions may keep a live
-    /// attach terminal around at once. The current selection is separately
-    /// force-protected (see `RemoteAttachLifecycle`) and does NOT consume
-    /// this budget, so the real ceiling on concurrent provider `attach`
+    /// attach terminal around at once. The current selection, if previously
+    /// requested, is separately force-protected (see `RemoteAttachLifecycle`)
+    /// and does NOT consume this budget, so the real ceiling on concurrent provider `attach`
     /// processes is `remoteAttachKeepAliveLimit + 1` — 4 at the constant's
     /// current value of 3 — which matters because this is exactly the
     /// billed, concurrency-limited resource the rest of this comment is
@@ -1188,27 +1178,18 @@ final class AppState {
         }
     }
 
-    /// The explicit "Reattach" affordance shown by `RemoteSessionDetailView`
-    /// once a session has detached. Clears BOTH detach flags AND re-touches
-    /// recency (so a session that had aged toward eviction gets a fresh
-    /// position at the front) — an unambiguous user gesture, always allowed
-    /// to re-attach immediately regardless of the transition/`.attach`-tab
-    /// rule `activateRemoteSession` applies to selection itself, and
-    /// regardless of any still-pending reconnect backoff window.
+    /// Explicit Attach/Reattach button action. Records connection intent and
+    /// clears both clean-detach and pending-reconnect state, bypassing the
+    /// backoff window. Provider eligibility still gates the resulting mount.
     func reattachRemoteSession(_ selection: RemoteSessionSelection) {
         explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
         pendingReconnectRemoteSessions.removeValue(forKey: selection)
         touchAttachedRemoteSession(selection)
     }
 
-    /// Clears a stale explicit-detach flag for `selection`, if present —
-    /// the narrow write `activateRemoteSession` (in
-    /// `AppState+Navigation.swift`) needs for its transition/`.attach`-tab
-    /// rule, kept here (not duplicated) so `explicitlyDetachedRemoteSessions`
-    /// has exactly one file's worth of direct mutators. Deliberately does
-    /// NOT touch `pendingReconnectRemoteSessions` — re-selecting (even via a
-    /// genuine transition) must not bypass provider-health/backoff gating
-    /// the way an explicit Reattach click does; see `reattachRemoteSession`.
+    /// Clears a clean-detach flag for an explicit Attach tab/menu request.
+    /// This path retains pending reconnect backoff; the explicit Reattach
+    /// button above is the existing override for that backoff.
     func clearRemoteSessionDetachedFlag(_ selection: RemoteSessionSelection) {
         explicitlyDetachedRemoteSessions.removeValue(forKey: selection)
     }
