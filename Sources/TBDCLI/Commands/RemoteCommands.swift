@@ -472,6 +472,19 @@ enum RemoteDeletePrecondition {
         }
         return nil
     }
+
+    /// Resolves the tri-state `--retain`/`--no-retain` flag against what the
+    /// provider declares.
+    ///
+    /// `nil` (unspecified) retains wherever the provider can honor it and does
+    /// nothing otherwise — an absent `retain` capability is "no receipt
+    /// available", not a caller mistake, so this branch never errors. `true`
+    /// and `false` pass through unchanged: an explicit `--retain` against a
+    /// provider that cannot honor it is refused elsewhere, by name, and
+    /// `--no-retain` declines even when the provider could have retained.
+    static func resolveRetain(_ requested: Bool?, capabilities: Set<String>) -> Bool {
+        requested ?? capabilities.contains("retain")
+    }
 }
 
 /// What `--json` prints for a delete: the provider's own response shape with
@@ -541,10 +554,12 @@ struct RemoteDelete: AsyncParsableCommand {
             Gated by the daemon's `remote_delete_enabled` flag, which ships off. \
             Turn it on with `tbd remote allow-delete on`.
 
-            With --retain the provider stores the transcript first and the key is \
-            printed, so the conversation survives the session. Without it, \
-            nothing survives. --retain needs the provider to declare `retain` as \
-            well as `delete`.
+            The transcript is retained by default wherever the provider \
+            supports it: the provider stores it first and the key is printed, \
+            so the conversation survives the session. Pass --no-retain to \
+            destroy the transcript along with the session. Passing --retain \
+            explicitly against a provider that has not declared `retain` \
+            alongside `delete` is refused, naming the missing capability.
 
             Refuses without --force when the session is running or reports \
             uncommitted work, naming which.
@@ -556,8 +571,10 @@ struct RemoteDelete: AsyncParsableCommand {
     @Argument(help: "Worktree name, TBD UUID, or <provider>/<session-id>")
     var session: String
 
-    @Flag(name: .long, help: "Retain the transcript before destroying the session")
-    var retain = false
+    @Flag(
+        name: .long, inversion: .prefixedNo,
+        help: "Retain the transcript before destroying the session (default: on wherever the provider supports it; --no-retain destroys it too)")
+    var retain: Bool?
 
     @Flag(name: .long, help: "Destroy a running session, or one with uncommitted work")
     var force = false
@@ -580,13 +597,15 @@ struct RemoteDelete: AsyncParsableCommand {
             throw ExitCode.failure
         }
         // The contract makes --retain valid only where `retain` is declared, so
-        // this is refused here rather than sent and hoped for: a provider that
-        // ignored the flag would destroy a session the caller believed was
-        // being preserved.
-        if retain, !capabilities.contains("retain") {
+        // an explicit request is refused here rather than sent and hoped for: a
+        // provider that ignored the flag would destroy a session the caller
+        // believed was being preserved. Unspecified is not a request — it
+        // resolves below to "no receipt available" instead of an error.
+        if retain == true, !capabilities.contains("retain") {
             remoteNote(remoteMissingCapability("retain", provider: target.provider))
             throw ExitCode.failure
         }
+        let willRetain = RemoteDeletePrecondition.resolveRetain(retain, capabilities: capabilities)
         let mirrored = fleet.sessions.first {
             $0.provider == target.provider && $0.payload.id == target.sessionID
         }
@@ -600,7 +619,7 @@ struct RemoteDelete: AsyncParsableCommand {
         let result = try client.call(
             method: RPCMethod.remoteDelete,
             params: RemoteDeleteParams(
-                provider: target.provider, sessionID: target.sessionID, retain: retain),
+                provider: target.provider, sessionID: target.sessionID, retain: willRetain),
             resultType: RemoteDeleteResult.self)
         if json {
             printJSON(RemoteDeleteOutput(provider: target.provider, result: result))
