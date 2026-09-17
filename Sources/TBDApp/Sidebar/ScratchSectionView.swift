@@ -112,6 +112,7 @@ struct ScratchSectionView: View {
     /// for them while there are none.
     @ViewBuilder
     private var expandedContent: some View {
+        let hibernation = appState.sidebarScratchHibernation
         if appState.scratchWorktrees.isEmpty {
             Button {
                 appState.createScratch()
@@ -134,7 +135,7 @@ struct ScratchSectionView: View {
             .listRowBackground(Color.clear)
         }
 
-        ForEach(appState.scratchWorktrees) { wt in
+        ForEach(hibernation.workingRoots) { wt in
             WorktreeRowView(worktree: wt)   // sectionRepoID nil → no (repo) suffix; repo affordances vanish
                 .frame(maxWidth: .infinity, alignment: .leading)
                 // Dimmed while the chevron is hovered, as a project's rows
@@ -144,6 +145,23 @@ struct ScratchSectionView: View {
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
                 .tag(wt.id)
+        }
+        if !hibernation.hibernatedRoots.isEmpty {
+            let id = SidebarGroupID(owner: .scratch, kind: .hibernated)
+            SidebarGroupHeader(id: id, title: "Hibernated (\(hibernation.hibernatedCount))")
+                .listRowInsets(childRowInsets)
+            if appState.expandedSidebarGroups.contains(id) {
+                ForEach(hibernation.hibernatedRoots) { worktree in
+                    WorktreeRowView(worktree: worktree)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, 16)
+                        .opacity(isChevronHovered ? 0.7 : 1.0)
+                        .listRowInsets(childRowInsets)
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .tag(worktree.id)
+                }
+            }
         }
     }
 }
