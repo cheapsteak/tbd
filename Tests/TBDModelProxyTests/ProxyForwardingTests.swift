@@ -965,13 +965,28 @@ private final class RecordingTeeHandle: TeeSessionHandle, @unchecked Sendable {
 /// `Issue.record(_: some Error)` reaches the primary failure line CI summaries
 /// keep, and a value re-read afterwards describes a moment the wait never saw
 /// (`Tests/CLAUDE.md`, "Timeout errors must report observed state").
-struct ProxyWaitTimeout: LocalizedError {
+struct ProxyWaitTimeout: LocalizedError, CustomStringConvertible {
     let what: String
     let observed: String
     let seconds: Double
+    /// What the caller's `onTimeout` probe found once the budget had expired,
+    /// when it supplied one. Rendered under the signature line, so the facts
+    /// land in the log next to the failure they explain.
+    var diagnostic: String? = nil
 
     var errorDescription: String? {
         "\(what) — last observed \(observed) after polling up to \(seconds) seconds"
+    }
+
+    /// The first line is what Swift's default reflection printed before
+    /// `diagnostic` existed, kept verbatim so the nightly report keeps grouping
+    /// this failure under the signature issue #871 records. The probe's lines
+    /// follow it rather than replacing it.
+    var description: String {
+        let signature =
+            "ProxyWaitTimeout(what: \"\(what)\", observed: \"\(observed)\", seconds: \(seconds))"
+        guard let diagnostic, !diagnostic.isEmpty else { return signature }
+        return signature + "\n" + diagnostic
     }
 }
 
@@ -1003,12 +1018,19 @@ private final class ProxyObservationBox<Observed: Sendable>: @unchecked Sendable
 /// spin over its whole remaining budget on a cooperative thread every other
 /// test in the pass is queued behind. What stays here is the diagnostic, which
 /// is the only part that was ever this helper's own.
+///
+/// `onTimeout` runs once, on the `.timedOut` path only, and what it returns is
+/// attached to the recorded `ProxyWaitTimeout`. It is for probes too expensive
+/// to take on every poll — a `ps`, a `sample` — that are worth taking exactly
+/// once the wait has already failed. A passing wait never calls it, and
+/// neither does a cancelled one.
 @discardableResult
 func waitUntil<Observed: Sendable>(
     _ what: String,
     seconds: Double = 15,
     sample: @escaping @Sendable () -> Observed,
-    isSatisfied: @escaping @Sendable (Observed) -> Bool
+    isSatisfied: @escaping @Sendable (Observed) -> Bool,
+    onTimeout: (@Sendable () async -> String)? = nil
 ) async -> Bool {
     let last = ProxyObservationBox(sample())
     let outcome = await pollUntilTrue(
@@ -1028,7 +1050,10 @@ func waitUntil<Observed: Sendable>(
         // message on it, and a cancelled test is already ending.
         return false
     case .timedOut:
-        Issue.record(ProxyWaitTimeout(what: what, observed: "\(last.value)", seconds: seconds))
+        let diagnostic = await onTimeout?()
+        Issue.record(
+            ProxyWaitTimeout(
+                what: what, observed: "\(last.value)", seconds: seconds, diagnostic: diagnostic))
         return false
     }
 }
