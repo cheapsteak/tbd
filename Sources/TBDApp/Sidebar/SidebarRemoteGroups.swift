@@ -6,8 +6,9 @@ struct SidebarGroupID: Hashable {
     enum Owner: Hashable {
         case repository(UUID)
         case provider(String)
+        case scratch
     }
-    enum Kind: Hashable { case remote, exited }
+    enum Kind: Hashable { case remote, exited, hibernated }
     let owner: Owner
     let kind: Kind
 }

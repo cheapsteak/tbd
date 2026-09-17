@@ -114,14 +114,18 @@ final class AppState {
             childrenIndexCache = nil
             allWorktreesCache = nil
             sidebarRemoteSnapshotCache = nil
+            sidebarHibernationCache.removeAll()
         }
     }
     /// Repo-less scratch spaces (`Worktree.isScratch`), surfaced separately
     /// in the sidebar's Scratch section rather than under any repo group.
     var scratchWorktrees: [Worktree] = [] {
-        // Only `allWorktrees` reads this — `childrenIndex()` is dict-only by
-        // design (see `children(of:)`), so its cache survives scratch churn.
-        didSet { allWorktreesCache = nil }
+        // `childrenIndex()` is dict-only by design (see `children(of:)`),
+        // so its cache survives scratch churn. The shelf also reads Scratch.
+        didSet {
+            allWorktreesCache = nil
+            sidebarHibernationCache.removeAll()
+        }
     }
 
     // MARK: - Derived worktree caches
@@ -192,7 +196,9 @@ final class AppState {
         childrenIndexCache = index
         return index
     }
-    var terminals: [UUID: [Terminal]] = [:]
+    var terminals: [UUID: [Terminal]] = [:] {
+        didSet { sidebarHibernationCache.removeAll() }
+    }
     /// Ordering watermark for transcript presentation snapshots whose value
     /// did not change. Kept outside `Terminal` so a two-second poll confirming
     /// the same state does not publish a different row solely because its
@@ -584,6 +590,7 @@ final class AppState {
     /// An explicit re-selection must reveal a manually collapsed group too.
     var sidebarSelectionGeneration: UInt64 = 0
     @ObservationIgnored var sidebarRemoteSnapshotCache: SidebarRemoteGroups.Snapshot?
+    @ObservationIgnored var sidebarHibernationCache: [SidebarGroupID.Owner: SidebarHibernationPartition] = [:]
 
     /// Test seam: when set, replaces the daemon roundtrip for archived
     /// lookups in `navigateToArchivedWorktree(_:)`. Production code leaves
