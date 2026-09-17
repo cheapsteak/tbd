@@ -1224,11 +1224,18 @@ final class ProxyProcess: @unchecked Sendable {
     /// Reaps the process and returns its exit status, or nil if it never exited
     /// inside the budget. A process killed by a signal reports the negated
     /// signal number, so a crash cannot be mistaken for a clean exit.
+    ///
+    /// On the timeout path — and only there — `ProxyExitDiagnostic` is taken
+    /// and attached to the recorded issue: `observed: "false"` alone cannot
+    /// tell a proxy still running inside `exit(0)` from a corpse some other
+    /// waiter already collected, and issue #871 has been stuck on exactly that
+    /// question.
     @discardableResult
     func awaitExit(seconds: Double = 30) async -> Int32? {
         if let already = lock.withLock({ reapedStatus }) { return already }
         let target = pid
         let observed = TestCounter()
+        let probe = ProxyExitDiagnostic.Box()
         let done = await waitUntil(
             "the proxy to exit", seconds: seconds,
             sample: { () -> Bool in
@@ -1237,8 +1244,22 @@ final class ProxyProcess: @unchecked Sendable {
                 observed.set(Int(ProxyProcess.exitCode(raw: raw)))
                 return true
             },
-            isSatisfied: { $0 })
-        guard done else { return nil }
+            isSatisfied: { $0 },
+            onTimeout: {
+                let finding = await ProxyExitDiagnostic.probe(pid: target)
+                probe.put(finding)
+                return finding.text
+            })
+        guard done else {
+            // The probe's own WNOHANG may have collected the corpse if it
+            // appeared in the instant after the poll's last read. Record what
+            // it saw, so `terminate()` does not spend three seconds polling a
+            // pid that is already free.
+            if let collected = probe.value?.collectedStatus {
+                lock.withLock { reapedStatus = collected }
+            }
+            return nil
+        }
         let status = Int32(observed.value)
         lock.withLock { reapedStatus = status }
         return status
@@ -1280,5 +1301,183 @@ final class ProxyProcess: @unchecked Sendable {
         let (data, response) = try await session.data(from: statusURL)
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
         return try ModelProxyStatus.decodeStatusResponse(data)
+    }
+}
+
+// MARK: - Exit diagnostic
+
+/// What `ProxyProcess.awaitExit` reports when `waitpid` never returns the pid.
+///
+/// Issue #871: the TERMed proxy reclaims its pid file — the last thing
+/// `TBDModelProxyMain.run()` does before `exit(0)` — and the test's
+/// `waitpid(pid, WNOHANG)` still never sees it exit. Reading the tree rules
+/// out every waiter on another pid, and 200 local runs under load never
+/// reproduced it, so the two candidates left — a hang inside `exit(0)`, or a
+/// corpse collected by something outside this tree — can only be told apart
+/// by facts taken at the moment the wait fails. Four of them, in an order that
+/// matters:
+///
+/// 1. The test process's own `SIGCHLD` disposition, because `SIG_IGN` or
+///    `SA_NOCLDWAIT` auto-reaps children and turns every `waitpid` into
+///    `ECHILD` — the cheapest explanation, and the one nothing else reveals.
+/// 2. `kill(pid, 0)`: `0` means the process exists (running or zombie),
+///    `ESRCH` means it is gone and its status went to somebody else.
+/// 3. `ps` for the state letter — `Z` is a zombie nobody reaped — and
+///    `sample`, only while the process exists and is not a zombie, for where
+///    its threads are. Both are bounded: `sample` can be slow, and this path
+///    already runs after a wait has failed.
+/// 4. `waitpid(pid, WNOHANG)` last, with its errno, because a `WNOHANG` that
+///    collects a zombie frees the number and every reading taken after it
+///    could describe a stranger.
+///
+/// `#871` is the one consumer; a pass never gets here.
+enum ProxyExitDiagnostic {
+    struct Finding: Sendable {
+        let text: String
+        /// The exit status, when the closing `waitpid` collected the process.
+        let collectedStatus: Int32?
+    }
+
+    /// Carries a `Finding` out of the `onTimeout` closure that took it.
+    final class Box: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Finding?
+        var value: Finding? { lock.withLock { stored } }
+        func put(_ finding: Finding) { lock.withLock { stored = finding } }
+    }
+
+    /// The most `sample` output kept, so an unusually deep call graph cannot
+    /// flood the log; the threads are reported before their call graphs, so
+    /// the truncated tail is the least informative part.
+    static let sampleOutputCap = 48 * 1024
+
+    static func probe(pid: pid_t) async -> Finding {
+        var lines = ["exit diagnostic for pid \(pid), taken when the wait expired (#871):"]
+        lines.append("  SIGCHLD in the test process: \(sigchldDisposition())")
+
+        // Before anything that could collect the corpse.
+        let exists = kill(pid, 0) == 0
+        let killErrno = errno
+        lines.append(
+            exists
+                ? "  kill(pid, 0): 0 — the process exists (running, or a zombie nobody reaped)"
+                : "  kill(pid, 0): -1, errno \(killErrno) (\(describe(errno: killErrno)))")
+
+        let scratch = proxyScratchRoot(prefix: "pxdiag")
+        try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        let ps = await runBounded(
+            ["/bin/ps", "-o", "pid=,ppid=,stat=,etime=,wchan=,comm=", "-p", "\(pid)"],
+            outputAt: scratch.appendingPathComponent("ps.txt"), budget: .seconds(10))
+        let psRow = ps.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        lines.append("  ps (pid ppid stat etime wchan comm): \(psRow.isEmpty ? "no row" : psRow) [\(ps.verdict)]")
+        let state = psRow.split(separator: " ", omittingEmptySubsequences: true).dropFirst(2).first ?? ""
+        let isZombie = state.hasPrefix("Z")
+
+        if exists && !isZombie {
+            let samplePath = scratch.appendingPathComponent("sample.txt")
+            let sample = await runBounded(
+                ["/usr/bin/sample", "\(pid)", "1", "-mayDie", "-file", samplePath.path],
+                outputAt: scratch.appendingPathComponent("sample.log"), budget: .seconds(20))
+            let report = (try? String(contentsOf: samplePath, encoding: .utf8)) ?? ""
+            lines.append("  sample \(pid) 1 [\(sample.verdict)]:")
+            let body = report.isEmpty ? sample.output : report
+            lines.append(contentsOf: capped(body).split(separator: "\n", omittingEmptySubsequences: false).map { "    " + $0 })
+        } else {
+            lines.append("  sample: skipped — \(exists ? "the process is a zombie" : "the process is gone")")
+        }
+
+        // Last, for the reason in the type comment.
+        var raw: Int32 = 0
+        let reaped = waitpid(pid, &raw, WNOHANG)
+        let waitErrno = errno
+        var collected: Int32?
+        if reaped == pid {
+            collected = ProxyProcess.exitCode(raw: raw)
+            lines.append(
+                "  waitpid(pid, WNOHANG): \(pid) — collected here, raw status \(raw) (exit code \(collected!)); the poll's last read missed it by an instant")
+        } else if reaped == 0 {
+            lines.append("  waitpid(pid, WNOHANG): 0 — still a child, not yet exited")
+        } else {
+            lines.append("  waitpid(pid, WNOHANG): -1, errno \(waitErrno) (\(describe(errno: waitErrno)))")
+        }
+        return Finding(text: lines.joined(separator: "\n"), collectedStatus: collected)
+    }
+
+    /// `SIG_DFL`, `SIG_IGN`, or a handler address, plus `SA_NOCLDWAIT` when
+    /// set — either of the last two would make the kernel discard the child's
+    /// status before any `waitpid` could see it.
+    static func sigchldDisposition() -> String {
+        var action = sigaction()
+        guard sigaction(SIGCHLD, nil, &action) == 0 else {
+            return "unreadable (sigaction errno \(errno))"
+        }
+        let handler = action.__sigaction_u.__sa_handler.map { unsafeBitCast($0, to: Int.self) } ?? 0
+        let noChildWait = (action.sa_flags & SA_NOCLDWAIT) != 0 ? ", SA_NOCLDWAIT set" : ""
+        switch handler {
+        case 0: return "SIG_DFL\(noChildWait)"
+        case 1: return "SIG_IGN\(noChildWait) — children are auto-reaped and waitpid gets ECHILD"
+        default: return "handler at 0x\(String(handler, radix: 16))\(noChildWait)"
+        }
+    }
+
+    static func describe(errno code: Int32) -> String {
+        switch code {
+        case ESRCH: return "ESRCH — no such process"
+        case ECHILD: return "ECHILD — not a child of this process, or already collected"
+        case EPERM: return "EPERM"
+        default: return String(cString: strerror(code))
+        }
+    }
+
+    static func capped(_ text: String) -> String {
+        guard text.utf8.count > sampleOutputCap else { return text }
+        let head = String(decoding: Array(text.utf8.prefix(sampleOutputCap)), as: UTF8.self)
+        return head + "\n    [sample output truncated at \(sampleOutputCap) bytes]"
+    }
+
+    struct BoundedRun {
+        let output: String
+        let verdict: String
+    }
+
+    /// Runs a command with its stdio in a file — never a pipe, so a report
+    /// larger than the pipe buffer cannot wedge the child — and gives up on it
+    /// after `budget`, killing it by the pid Foundation handed back. The wait
+    /// is `pollUntilTrue`, so the budget is a real bound and a cancelled test
+    /// stops polling rather than spinning.
+    static func runBounded(_ command: [String], outputAt path: URL, budget: Duration) async -> BoundedRun {
+        FileManager.default.createFile(atPath: path.path, contents: nil)
+        guard let handle = FileHandle(forWritingAtPath: path.path) else {
+            return BoundedRun(output: "", verdict: "could not open \(path.path) for the output")
+        }
+        defer { try? handle.close() }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: command[0])
+        process.arguments = Array(command.dropFirst())
+        process.environment = ["PATH": "/usr/bin:/bin"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = handle
+        process.standardError = handle
+        do {
+            try process.run()
+        } catch {
+            return BoundedRun(output: "", verdict: "could not run \(command[0]): \(error)")
+        }
+        let outcome = await pollUntilTrue(timeout: budget, pollInterval: .milliseconds(50)) {
+            !process.isRunning
+        }
+        let verdict: String
+        switch outcome {
+        case .satisfied:
+            verdict = "exit \(process.terminationStatus)"
+        case .timedOut, .cancelled:
+            kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
+            verdict = "killed after \(budget)"
+        }
+        let output = (try? String(contentsOf: path, encoding: .utf8)) ?? ""
+        return BoundedRun(output: output, verdict: verdict)
     }
 }
