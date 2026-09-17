@@ -28,10 +28,34 @@ import TestSupport
 /// `.serialized` is retained as cheap isolation between seven tests that each
 /// mint a `UserDefaults` suite and a debouncer; it is no longer load-bearing for
 /// the handshake.
+///
+/// Every wait here takes ``mainActorHop`` as its hang guard, and the arming
+/// waits are the strict form — a missed arming ends the test rather than
+/// paying the recorder's guard as well, so the two-step chain in
+/// `separatedChangesFireTwice` costs at most two guards (180 s) inside
+/// `.clockDriven`'s 240 s limit.
 @MainActor
 @Suite("AppState appearance debounce", .clockDriven, .serialized)
 struct AppearanceDebounceTests {
     private static let interval = Duration.milliseconds(200)
+
+    /// Hang guard for every arming wait and every `fired.next()` in this
+    /// suite: the fast pass's saturated budget, not the clock's 45 s default,
+    /// because neither hop is one hop from the test body.
+    /// `AppearanceBroadcastDebouncer` is `@MainActor` and fires through an
+    /// unstructured `Task { @MainActor }`, so the timer arms only once that
+    /// task has had a turn on the main actor — a process-wide queue every
+    /// `@MainActor` test body in the pass waits on, deepest at pass start when
+    /// this suite's first test runs — and the fire needs the main actor a
+    /// second time after `advance`. On a green fast pass 2 the same shape
+    /// measured 84 s to arm
+    /// (`ComposerSendCoordinatorTests.theHoldTimesOutOnTheInjectedClock`, which
+    /// takes this budget for the same reason), while 45 s sat below the pass's
+    /// median reported per-test latency and turned the first test here red on
+    /// ordinary CI — every later assertion a consequence, every sibling test
+    /// passing in milliseconds. The rule is the `timeout` note on
+    /// `EventDrivenTestClock.sleeperArmed`.
+    private static let mainActorHop = TestDeadlines.saturatedPass
 
     /// Isolated `AppearanceSettings` + debouncer + fired-value recorder.
     /// `UserDefaults.standard` on this unbundled executable is the developer's
@@ -108,53 +132,54 @@ struct AppearanceDebounceTests {
     }
 
     @MainActor
-    private static func withHarness(_ body: (Harness) async -> Void) async {
+    private static func withHarness(_ body: (Harness) async throws -> Void) async rethrows {
         let harness = Harness()
         harness.subscribe()
         // `defer`, not a trailing call: `schemeID`'s `didSet` writes to the
         // suite, so skipping teardown leaks a plist into the developer's real
-        // ~/Library/Preferences. Same length, one less coupling to `body`
-        // never throwing.
+        // ~/Library/Preferences — and a strict arming wait that throws out of
+        // `body` still tears down.
         defer { harness.tearDown() }
-        await body(harness)
+        try await body(harness)
     }
 
     // Tier 1.
     @Test("rapid scheme changes within one window collapse to a single fire")
-    func rapidChangesCollapse() async {
-        await Self.withHarness { h in
+    func rapidChangesCollapse() async throws {
+        try await Self.withHarness { h in
             h.appearance.schemeID = "scheme-a"
             h.appearance.schemeID = "scheme-b"
             h.appearance.schemeID = "scheme-c"
 
-            await h.clock.advanceWhenArmed(by: Self.interval)
-            #expect(await h.fired.next() == "scheme-c")
+            try await h.clock.requireAdvanceWhenArmed(by: Self.interval, timeout: Self.mainActorHop)
+            #expect(await h.fired.next(timeout: Self.mainActorHop) == "scheme-c")
             #expect(h.fired.values == ["scheme-c"])
         }
     }
 
     // Tier 1. The boundary the old wall-clock test structurally could not express.
     @Test("nothing fires until the full interval has elapsed")
-    func firesExactlyOnTheBoundary() async {
-        await Self.withHarness { h in
+    func firesExactlyOnTheBoundary() async throws {
+        try await Self.withHarness { h in
             h.appearance.schemeID = "scheme-a"
 
-            await h.clock.advanceWhenArmed(by: Self.interval - .milliseconds(1))
+            try await h.clock.requireAdvanceWhenArmed(
+                by: Self.interval - .milliseconds(1), timeout: Self.mainActorHop)
             await settle()
             #expect(h.fired.values.isEmpty, "one millisecond short of the window must not fire")
 
             await h.clock.advance(by: .milliseconds(1))
-            #expect(await h.fired.next() == "scheme-a")
+            #expect(await h.fired.next(timeout: Self.mainActorHop) == "scheme-a")
             #expect(h.fired.values == ["scheme-a"], "the boundary must fire once, not twice")
         }
     }
 
     // Tier 1.
     @Test("a late change restarts the quiet window")
-    func lateChangeRestartsWindow() async {
-        await Self.withHarness { h in
+    func lateChangeRestartsWindow() async throws {
+        try await Self.withHarness { h in
             h.appearance.schemeID = "scheme-a"
-            await h.clock.advanceWhenArmed(by: .milliseconds(150))
+            try await h.clock.requireAdvanceWhenArmed(by: .milliseconds(150), timeout: Self.mainActorHop)
             await settle()
             #expect(h.fired.values.isEmpty)
 
@@ -165,35 +190,35 @@ struct AppearanceDebounceTests {
             // ledger entry before `schedule` returns, so the only registration
             // left to signal is the new sleeper's.
             h.appearance.schemeID = "scheme-b"
-            await h.clock.advanceWhenArmed(by: .milliseconds(150))
+            try await h.clock.requireAdvanceWhenArmed(by: .milliseconds(150), timeout: Self.mainActorHop)
             await settle()
             #expect(h.fired.values.isEmpty, "only 150ms since the restart — must not fire yet")
 
             await h.clock.advance(by: .milliseconds(50))
-            #expect(await h.fired.next() == "scheme-b")
+            #expect(await h.fired.next(timeout: Self.mainActorHop) == "scheme-b")
             #expect(h.fired.values == ["scheme-b"])
         }
     }
 
     // Tier 1.
     @Test("changes separated by a full window fire twice, in order")
-    func separatedChangesFireTwice() async {
-        await Self.withHarness { h in
+    func separatedChangesFireTwice() async throws {
+        try await Self.withHarness { h in
             h.appearance.schemeID = "scheme-a"
-            await h.clock.advanceWhenArmed(by: Self.interval)
-            #expect(await h.fired.next() == "scheme-a")
+            try await h.clock.requireAdvanceWhenArmed(by: Self.interval, timeout: Self.mainActorHop)
+            #expect(await h.fired.next(timeout: Self.mainActorHop) == "scheme-a")
 
             h.appearance.schemeID = "scheme-b"
-            await h.clock.advanceWhenArmed(by: Self.interval)
-            #expect(await h.fired.next() == "scheme-b")
+            try await h.clock.requireAdvanceWhenArmed(by: Self.interval, timeout: Self.mainActorHop)
+            #expect(await h.fired.next(timeout: Self.mainActorHop) == "scheme-b")
             #expect(h.fired.values == ["scheme-a", "scheme-b"])
         }
     }
 
     // Tier 1.
     @Test("dropFirst skips the subscriber-time value and removeDuplicates collapses repeats")
-    func dropFirstAndRemoveDuplicates() async {
-        await Self.withHarness { h in
+    func dropFirstAndRemoveDuplicates() async throws {
+        try await Self.withHarness { h in
             // `dropFirst`: `@Published` replayed the current value at
             // subscription time in `subscribe()`. Assert on the SLEEPER, not on
             // `fired`: with no advance yet, `fired` is empty either way, so
@@ -212,11 +237,11 @@ struct AppearanceDebounceTests {
             // `removeDuplicates`: the second assignment is not a distinct value,
             // so it never reaches the timer and cannot restart the window.
             h.appearance.schemeID = "scheme-a"
-            await h.clock.advanceWhenArmed(by: .milliseconds(100))
+            try await h.clock.requireAdvanceWhenArmed(by: .milliseconds(100), timeout: Self.mainActorHop)
             h.appearance.schemeID = "scheme-a"
             await h.clock.advance(by: .milliseconds(100))
 
-            #expect(await h.fired.next() == "scheme-a")
+            #expect(await h.fired.next(timeout: Self.mainActorHop) == "scheme-a")
             #expect(h.fired.values == ["scheme-a"],
                     "a repeated value must neither fire twice nor restart the window")
         }
@@ -232,7 +257,7 @@ struct AppearanceDebounceTests {
     /// one goes red, because `CancelOnResumeClock` lands the cancel in
     /// exactly the window the guard exists for.
     @Test("a cancel landing after the sleep resumes still suppresses the fire")
-    func cancelAfterSleepResumesSuppressesFire() async {
+    func cancelAfterSleepResumesSuppressesFire() async throws {
         let suiteName = "TBDAppTests.AppearanceDebounce.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -254,17 +279,17 @@ struct AppearanceDebounceTests {
         defer { subscription.cancel() }
 
         appearance.schemeID = "scheme-a"
-        await base.advanceWhenArmed(by: Self.interval)
+        try await base.requireAdvanceWhenArmed(by: Self.interval, timeout: Self.mainActorHop)
         await settle()
         #expect(fired.values.isEmpty, "a fire cancelled after its sleep resumed must not land")
     }
 
     // Tier 1.
     @Test("cancel() suppresses a pending fire")
-    func cancelSuppressesPendingFire() async {
-        await Self.withHarness { h in
+    func cancelSuppressesPendingFire() async throws {
+        try await Self.withHarness { h in
             h.appearance.schemeID = "scheme-a"
-            await h.clock.advanceWhenArmed(by: .milliseconds(100))
+            try await h.clock.requireAdvanceWhenArmed(by: .milliseconds(100), timeout: Self.mainActorHop)
 
             h.debouncer.cancel()
             await h.clock.advance(by: Self.interval)
