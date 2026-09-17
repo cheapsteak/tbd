@@ -139,16 +139,6 @@ final class ProxyServer: Sendable {
         let control = self.control
 
         let bootstrap = ServerBootstrap(group: group)
-            .serverChannelOption(.backlog, value: 64)
-            // Load-bearing for the retire handshake, not a habit: NIO does not
-            // set this by default, and on BSD a bind fails with EADDRINUSE
-            // while *any* socket holds that local port — which the connections
-            // carrying a retiring proxy's in-flight streams do. Without it the
-            // successor could not take the port until the last turn finished,
-            // and "the successor binds the moment the answer arrives" (spec,
-            // "Control endpoint") would be false. With it, BSD still refuses a
-            // second *listener*, so two live proxies cannot share a port.
-            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             // Claude aborts a stream that has been silent for 300 seconds and
             // counts SSE pings, so an event must reach the socket when it
             // arrives. Nagle would hold a small write back waiting for company
@@ -166,15 +156,98 @@ final class ProxyServer: Sendable {
                 }
             }
 
-        let bound = try await bootstrap.bind(host: "127.0.0.1", port: requestedPort).get()
+        // The socket is made and bound here rather than by
+        // `bootstrap.bind(host:port:)`, so it can be marked close-on-exec
+        // before anything can inherit it — see `makeCloseOnExecListener`.
+        // NIO adopts the descriptor, listens on it, and closes it with the
+        // channel; a failure past this point is NIO's to clean up, so the
+        // descriptor is deliberately not closed here on that path.
+        let listener = try Self.makeCloseOnExecListener(port: requestedPort)
+        let bound = try await bootstrap.withBoundSocket(listener.descriptor).get()
         channelBox.channel = bound
-        guard let port = bound.localAddress?.port else {
-            try? await bound.close()
-            channelBox.channel = nil
-            throw ProxyServerError.boundAddressUnreadable
+        Self.log.debug("listening on 127.0.0.1:\(listener.port, privacy: .public)")
+        return listener.port
+    }
+
+    /// A loopback stream socket for `port`, bound, `SO_REUSEADDR`, and
+    /// `FD_CLOEXEC` — in that order of importance.
+    ///
+    /// **Why the descriptor is not left to NIO.** Darwin has no `SOCK_CLOEXEC`,
+    /// and NIO's socket creation on Darwin sets only non-blocking mode, so a
+    /// listener it makes is inherited by every child the host process spawns
+    /// without `POSIX_SPAWN_CLOEXEC_DEFAULT`. The proxy binary spawns nothing,
+    /// but this server also runs inside the test bundle, beside suites that
+    /// `posix_spawn` and `forkpty` children of their own. A child holding a
+    /// copy of the listener keeps the port accepting after this process closes
+    /// its descriptor — the kernel completes each handshake into a backlog
+    /// nobody drains — so a retire that had closed the listener still looked,
+    /// from outside, like a proxy that never did: a connect succeeded,
+    /// `GET /tbd/status` answered nothing, and a successor's bind was refused
+    /// with `EADDRINUSE` until that child exited. Marking the descriptor
+    /// close-on-exec before it is bound leaves only the few microseconds
+    /// between `socket()` and `fcntl()`, in which a copy is of a socket that
+    /// is not yet bound.
+    ///
+    /// `SO_REUSEADDR` is load-bearing for the retire handshake, not a habit:
+    /// on BSD a bind fails with `EADDRINUSE` while *any* socket holds that
+    /// local port — which the connections carrying a retiring proxy's
+    /// in-flight streams do. Without it the successor could not take the port
+    /// until the last turn finished, and "the successor binds the moment the
+    /// answer arrives" (spec, "Control endpoint") would be false. With it, BSD
+    /// still refuses a second *listener*, so two live proxies cannot share a
+    /// port. It has to be set before the bind, which is the other reason the
+    /// bind is done here.
+    ///
+    /// The port is read back with `getsockname` because `port` may be zero,
+    /// and the number the kernel picked is the one the pid file and the status
+    /// answer must name.
+    static func makeCloseOnExecListener(port: Int) throws -> (descriptor: CInt, port: Int) {
+        guard let requested = UInt16(exactly: port) else {
+            throw IOError(errnoCode: EINVAL, reason: "port \(port) is not a TCP port")
         }
-        Self.log.debug("listening on 127.0.0.1:\(port, privacy: .public)")
-        return port
+        let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { throw IOError(errnoCode: errno, reason: "socket") }
+        do {
+            guard fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0 else {
+                throw IOError(errnoCode: errno, reason: "fcntl(F_SETFD, FD_CLOEXEC)")
+            }
+            var one: CInt = 1
+            guard
+                setsockopt(
+                    descriptor, SOL_SOCKET, SO_REUSEADDR, &one,
+                    socklen_t(MemoryLayout<CInt>.size)) == 0
+            else {
+                throw IOError(errnoCode: errno, reason: "setsockopt(SO_REUSEADDR)")
+            }
+
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = requested.bigEndian
+            address.sin_addr.s_addr = in_addr_t(INADDR_LOOPBACK).bigEndian
+            let length = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let bound = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                    Darwin.bind(descriptor, generic, length)
+                }
+            }
+            guard bound == 0 else {
+                throw IOError(errnoCode: errno, reason: "bind(127.0.0.1:\(port))")
+            }
+
+            var assigned = sockaddr_in()
+            var assignedLength = length
+            let named = withUnsafeMutablePointer(to: &assigned) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                    getsockname(descriptor, generic, &assignedLength)
+                }
+            }
+            guard named == 0 else { throw IOError(errnoCode: errno, reason: "getsockname") }
+            return (descriptor, Int(UInt16(bigEndian: assigned.sin_port)))
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
     }
 
     /// Stops accepting new connections. In-flight responses keep streaming on

@@ -387,6 +387,34 @@ extension ModelProxySuites {
             )
         }
 
+        @Test("a child spawned while the listener is open cannot keep the retired port accepting")
+        func listenerIsNotInheritedByAChild() async throws {
+            // The failure this pins is the one the retire test above met on
+            // CI: "something is listening on the port and answered nothing".
+            // NIO creates Darwin sockets without `FD_CLOEXEC`, so a child
+            // spawned by any concurrently running suite — `posix_spawn` with
+            // no attributes, `forkpty` — inherited a copy of the listener,
+            // and after the retire closed this process's descriptor the
+            // kernel kept completing handshakes into a backlog nobody
+            // drained. The child here is spawned the way those fixtures spawn
+            // and made to outlive the close; the listener must not reach it.
+            try await withProxy(
+                prefix: "pxfd",
+                script: { _, _ in FakeUpstream.Script(events: []) },
+                body: { harness in
+                    let child = try spawnInheritingEverything("/bin/sleep", ["30"])
+                    defer { endChild(child) }
+
+                    await harness.server.closeListener()
+                    #expect(
+                        connectRefused(port: harness.port),
+                        """
+                        the retired port \(harness.port) still accepted a connect: a child \
+                        (pid \(child)) holds an inherited copy of the listener
+                        """)
+                })
+        }
+
         @Test("the drain gives up at its cap and hands over anyway")
         func retireDrainGivesUpAtItsCap() async throws {
             // A stream that never ends must not leave a retired proxy running
@@ -748,6 +776,29 @@ extension ModelProxySuites {
 let loopbackV4: SocketAddress? = try? SocketAddress(ipAddress: "127.0.0.1", port: 1)
 
 /// One `/tbd/...` request against the proxy under test.
+/// Spawns a child with `posix_spawn` and no attributes at all, which is what
+/// `ChildReaperTests` and the holder fixtures do: every descriptor this process
+/// holds without `FD_CLOEXEC` is inherited. `Foundation.Process` closes them
+/// all in the child and would hide the very leak under test.
+func spawnInheritingEverything(_ path: String, _ arguments: [String]) throws -> pid_t {
+    var pid: pid_t = 0
+    var argv: [UnsafeMutablePointer<CChar>?] = ([path] + arguments).map { strdup($0) }
+    argv.append(nil)
+    defer { for entry in argv { free(entry) } }
+    let code = posix_spawn(&pid, path, nil, nil, &argv, nil)
+    guard code == 0 else { throw ProxyProcess.ProcessError.spawnFailed(code) }
+    return pid
+}
+
+/// Kills and reaps one child by its captured pid — never by name or group
+/// (`Tests/CLAUDE.md`, "The kill hazards"). A `SIGKILL`ed child is reapable
+/// at once, so the blocking `waitpid` is bounded by the kill.
+func endChild(_ pid: pid_t) {
+    kill(pid, SIGKILL)
+    var status: Int32 = 0
+    _ = waitpid(pid, &status, 0)
+}
+
 func controlRequest(port: Int, method: String, path: String, body: String? = nil) -> URLRequest {
     // Force-unwrapped for the same reason `ProxyHarness.url` is: the URL is
     // composed from a literal path and a port the kernel just handed out.
