@@ -12,6 +12,7 @@ struct SidebarView: View {
     /// Measured on the LIST, never on the dock — reading the dock's own
     /// geometry would feed its height back into its own input.
     @State private var sidebarHeight: CGFloat = 0
+    @State private var hasRevealedInitialSelection = false
 
     var filteredRepos: [Repo] {
         let base: [Repo]
@@ -43,12 +44,18 @@ struct SidebarView: View {
             }
             .onChange(of: appState.pendingScrollToWorktreeID) { _, target in
                 guard let target else { return }
+                appState.revealSidebarGroups(appState.sidebarGroupReveal(worktreeIDs: [target], selection: nil))
                 // Defer to the next runloop tick so a freshly-expanded repo's
                 // rows are mounted in the List before we ask to scroll to them.
                 DispatchQueue.main.async {
                     withAnimation { proxy.scrollTo(target, anchor: .center) }
                     appState.pendingScrollToWorktreeID = nil
                 }
+            }
+            .onChange(of: appState.sidebarSelectionReveal, initial: true) { previous, reveal in
+                appState.revealSidebarGroups(
+                    reveal, previous: hasRevealedInitialSelection ? previous : nil)
+                hasRevealedInitialSelection = true
             }
             .overlayPreferenceValue(RowTooltipPreferenceKey.self) { pref in
                 GeometryReader { geo in

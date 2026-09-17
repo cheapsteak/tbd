@@ -170,6 +170,21 @@ struct RepoSectionRemoteSessionsTests {
         #expect(result.map(\.payload.id) == ["s1"])
     }
 
+    @Test func localOriginDoesNotReplaceCurrentRemoteRepresentation() {
+        let repoID = UUID()
+        let mirror = session(id: "worker", resolvedRepoID: repoID)
+        var local = localWorktree()
+        local.origin = WorktreeOrigin(provider: "acme", sessionID: "worker")
+        #expect(RepoSectionView.matchedRemoteSessions(
+            [mirror], repoID: repoID, worktrees: [local]).map(\.id) == [mirror.id])
+
+        // A current remote row still suppresses its mirror even when a local
+        // row also retains the same provenance.
+        let remote = remoteWorktree(sessionID: "worker")
+        #expect(RepoSectionView.matchedRemoteSessions(
+            [mirror], repoID: repoID, worktrees: [local, remote]).isEmpty)
+    }
+
     // MARK: - ordering — ascending creation time
 
     @Test func ordersOldestFirst() {

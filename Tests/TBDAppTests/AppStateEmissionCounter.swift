@@ -132,6 +132,8 @@ final class AppStateEmissionTracker {
         _ = state.worktreeTabOrders
         _ = state.draggingTabID
         _ = state.repoFilter
+        _ = state.expandedSidebarGroups
+        _ = state.sidebarSelectionGeneration
         _ = state.pendingWorktreeIDs
         _ = state.suspendingTerminalIDs
         _ = state.suspendingSnapshots
@@ -245,6 +247,8 @@ final class AppStateEmissionTracker {
         "worktreeTabOrders",
         "draggingTabID",
         "repoFilter",
+        "expandedSidebarGroups",
+        "sidebarSelectionGeneration",
         "pendingWorktreeIDs",
         "suspendingTerminalIDs",
         "suspendingSnapshots",
