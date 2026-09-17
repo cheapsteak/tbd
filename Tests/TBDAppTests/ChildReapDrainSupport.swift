@@ -112,26 +112,63 @@ struct ReapDrainWaitCancelled: Error, CustomStringConvertible {
 /// The guard task is cancelled on the fast path, and cancellation of the caller
 /// resolves the wait immediately rather than waiting the budget out.
 func drainPendingReaps(within budget: Duration = reapDrainHangGuard) async -> ReapDrainOutcome {
-    let started = ContinuousClock.now
-    let signal = DrainSignal()
-    ChildReaper.drainPendingReaps { signal.resolve(.drained) }
-    let hangGuard = Task {
-        // A cancelled sleep means the drain already won — say nothing.
-        do { try await Task.sleep(for: budget) } catch { return }
-        signal.resolve(.stalled)
-    }
-    defer { hangGuard.cancel() }
+    await requestDrain().wait(within: budget)
+}
 
-    let reason = await withTaskCancellationHandler {
-        await signal.wait()
-    } onCancel: {
-        signal.resolve(.cancelled)
+/// Registers a drain with `ChildReaper` **now** and hands back a handle to
+/// await it later.
+///
+/// Almost every caller wants `drainPendingReaps(within:)`, which is this
+/// followed immediately by `wait()`. The two halves are separable for the one
+/// property that cannot be stated without them: that a drain covers the reaps
+/// registered *before* it and no others. Demonstrating that means registering
+/// a further reap after the drain exists but before anything awaits it, and a
+/// single call that registers and awaits in one statement leaves nowhere to
+/// put it. Registration happens inside this function, before it returns, so a
+/// test's program order is the ledger's order and the interleaving is
+/// constructed rather than raced.
+func requestDrain() -> RequestedDrain {
+    let signal = DrainSignal()
+    let requestedAt = ContinuousClock.now
+    ChildReaper.drainPendingReaps { signal.resolve(.drained) }
+    return RequestedDrain(signal: signal, requestedAt: requestedAt)
+}
+
+/// A drain that is already registered, waiting to be awaited.
+///
+/// The budget bounds the `wait`, while the duration the outcome reports is
+/// measured from the *request* — so an interleaving test's figure includes the
+/// setup between the two, which is the number a reader of the diagnostic
+/// wants. For the common case, where `wait()` follows registration
+/// immediately, they are the same instant.
+final class RequestedDrain: Sendable {
+    private let signal: DrainSignal
+    private let requestedAt: ContinuousClock.Instant
+
+    fileprivate init(signal: DrainSignal, requestedAt: ContinuousClock.Instant) {
+        self.signal = signal
+        self.requestedAt = requestedAt
     }
-    let waited = ContinuousClock.now - started
-    switch reason {
-    case .drained: return .drained(waited: waited)
-    case .stalled: return .stalled(waited: waited)
-    case .cancelled: return .cancelled(waited: waited)
+
+    func wait(within budget: Duration = reapDrainHangGuard) async -> ReapDrainOutcome {
+        let hangGuard = Task {
+            // A cancelled sleep means the drain already won — say nothing.
+            do { try await Task.sleep(for: budget) } catch { return }
+            signal.resolve(.stalled)
+        }
+        defer { hangGuard.cancel() }
+
+        let reason = await withTaskCancellationHandler {
+            await signal.wait()
+        } onCancel: {
+            signal.resolve(.cancelled)
+        }
+        let waited = ContinuousClock.now - requestedAt
+        switch reason {
+        case .drained: return .drained(waited: waited)
+        case .stalled: return .stalled(waited: waited)
+        case .cancelled: return .cancelled(waited: waited)
+        }
     }
 }
 

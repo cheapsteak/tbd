@@ -135,6 +135,30 @@ enum ChildReaper {
         var waiters: [(threshold: UInt64, done: @Sendable () -> Void)] = []
 
         /// Waiters whose reaps have all finished; removed from `waiters`.
+        ///
+        /// **`threshold <= lowestInFlight`, and the `=` is the whole
+        /// decision.** A waiter's threshold is `nextSequence` as it stood when
+        /// its drain was requested — one *past* the last reap that drain
+        /// covers. So a reap whose sequence is exactly the threshold was
+        /// registered after the drain, is none of its business, and must not
+        /// hold it open.
+        ///
+        /// Tightening this to `<` is invisible to a sequential test: with
+        /// nothing in flight the minimum is the `UInt64.max` of an empty set,
+        /// which is above every threshold either way. Run one at a time against
+        /// the mutation, `backgroundReapClearsTheZombie` and
+        /// `reapsWhileTheConstrainedWorkerPoolIsExhausted` both still pass.
+        /// What `<` breaks is a drain waiting while a *later* reap is parked on
+        /// a child that has not exited — the drain then waits for a reap it
+        /// does not cover — and
+        /// `ChildReaperTests.drainIgnoresAReapRegisteredAfterIt` constructs
+        /// exactly that and fails on it in isolation. (In the parallel pass the
+        /// mutation reddens every drain-awaiting test, because some sibling's
+        /// reap is usually in flight; that is overlap doing the work, not any
+        /// of those tests asserting this.)
+        ///
+        /// This is the only comparison in the ledger, deliberately — see
+        /// `drainPendingReaps`.
         mutating func takeSatisfiedWaiters() -> [@Sendable () -> Void] {
             let lowestInFlight = inFlight.min() ?? UInt64.max
             let satisfied = waiters.filter { $0.threshold <= lowestInFlight }
@@ -223,9 +247,16 @@ enum ChildReaper {
     /// long-lived child elsewhere in the process pays for it here.
     static func drainPendingReaps(_ done: @escaping @Sendable () -> Void) {
         let alreadyDrained = ledger.withLock { state -> Bool in
-            let threshold = state.nextSequence
-            if (state.inFlight.min() ?? UInt64.max) >= threshold { return true }
-            state.waiters.append((threshold: threshold, done: done))
+            // No comparison here, on purpose. Every sequence ever handed out is
+            // below `nextSequence`, so anything in flight is necessarily a reap
+            // this drain covers: "nothing in flight" is exactly "everything
+            // covered has already finished". Written as a threshold comparison
+            // it would read as a second decision a reader has to check against
+            // the one in `takeSatisfiedWaiters` — and as one no test could
+            // distinguish, since the only value it can ever be compared with is
+            // the `UInt64.max` of an empty set.
+            if state.inFlight.isEmpty { return true }
+            state.waiters.append((threshold: state.nextSequence, done: done))
             return false
         }
         if alreadyDrained { done() }

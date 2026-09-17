@@ -62,9 +62,11 @@ struct ChildReaperTests {
 
     private enum SpawnError: Error, CustomStringConvertible {
         case posixSpawnFailed(Int32)
+        case pipeFailed(Int32)
         var description: String {
             switch self {
             case .posixSpawnFailed(let code): return "posix_spawn failed with code \(code)"
+            case .pipeFailed(let code): return "pipe() failed with errno \(code)"
             }
         }
     }
@@ -134,6 +136,54 @@ struct ChildReaperTests {
         let code = posix_spawn(&pid, path, nil, nil, &argv, nil)
         guard code == 0 else { throw SpawnError.posixSpawnFailed(code) }
         return pid
+    }
+
+    /// Spawns a child that exits exactly when the returned write end is
+    /// closed, and not before: a `/bin/cat` whose stdin is a pipe this test
+    /// owns, which sees EOF and exits when the last copy of the write end is
+    /// gone. `/bin/sleep` cannot serve here — an interleaving test has to
+    /// *schedule* a child's exit rather than race it against a timer.
+    ///
+    /// **Both ends are close-on-exec from the moment they exist**, which is
+    /// load-bearing rather than tidy. A pipe is inheritable by default, this
+    /// target's sibling suites spawn children that close nothing
+    /// (`posix_spawn` with no attributes, SwiftTerm's `forkpty`), and a child
+    /// that inherited a copy of the write end would hold the pipe open after
+    /// this test closed its own — so the `read` would never see EOF, the child
+    /// would never exit, and the reap would never finish. The residual is the
+    /// few microseconds between `pipe` and the two `fcntl`s, the same window
+    /// PR #872 left open between `socket` and its `fcntl` for the same reason:
+    /// there is no atomic `pipe2` with `O_CLOEXEC` on darwin.
+    ///
+    /// The `adddup2` is what deliberately un-sets the flag for the child's own
+    /// stdin: a duplicated descriptor does not carry `FD_CLOEXEC`, so fd 0
+    /// survives the `exec` while the original does not.
+    private func spawnWaitingForEOF() throws -> (pid: pid_t, writeEnd: Int32) {
+        var fds: [Int32] = [-1, -1]
+        guard pipe(&fds) == 0 else { throw SpawnError.pipeFailed(errno) }
+        let readEnd = fds[0]
+        let writeEnd = fds[1]
+        _ = fcntl(readEnd, F_SETFD, FD_CLOEXEC)
+        _ = fcntl(writeEnd, F_SETFD, FD_CLOEXEC)
+
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        posix_spawn_file_actions_adddup2(&actions, readEnd, 0)
+
+        let path = "/bin/cat"
+        var pid: pid_t = 0
+        var argv: [UnsafeMutablePointer<CChar>?] = [strdup(path), nil]
+        defer { for arg in argv { free(arg) } }
+        let code = posix_spawn(&pid, path, &actions, nil, &argv, nil)
+        // The child has its own copy of the read end; ours would keep the pipe
+        // open and defeat the EOF this helper exists to deliver.
+        close(readEnd)
+        guard code == 0 else {
+            close(writeEnd)
+            throw SpawnError.posixSpawnFailed(code)
+        }
+        return (pid, writeEnd)
     }
 
     /// `true` while the pid still names a process this process can signal —
@@ -366,6 +416,77 @@ struct ChildReaperTests {
         }
         #expect(survived,
                 "an observed child must be left for its real waiter, not reaped here")
+    }
+
+    // MARK: - What a drain covers
+
+    /// **The interleaving, and why no other test in either suite constructs
+    /// it.** Every other test here spawns, reaps, and drains in sequence, so by
+    /// the time its drain is decided nothing is in flight — and with nothing in
+    /// flight the ledger's threshold is compared against the `UInt64.max` of an
+    /// empty set, where `<=` and `<` answer alike. The comparison only decides
+    /// anything in the one shape below: a drain is already waiting on a reap
+    /// that has not finished, a *further* reap registers while it waits, and
+    /// then the reap it was waiting for finishes. The drain must fire on that
+    /// last step, because the later reap is not one it covers.
+    ///
+    /// Tightening `Ledger.takeSatisfiedWaiters` to `<` leaves the drain waiting
+    /// for that later reap instead, which here means waiting for a child whose
+    /// pipe this test has not closed yet — so the wait runs out its hang guard
+    /// and this test reddens. Measured one test at a time against that
+    /// mutation, this is the test that catches it: it failed on its 30 s guard
+    /// while `backgroundReapClearsTheZombie` and
+    /// `reapsWhileTheConstrainedWorkerPoolIsExhausted` both passed. Run as a
+    /// whole suite the mutation reddens all of them, because with tests in
+    /// parallel some sibling's reap is nearly always in flight — worth knowing
+    /// when reading such a failure, but it is overlap doing the work rather
+    /// than those tests asserting anything about what a drain covers.
+    ///
+    /// Nothing about the ordering is raced: `reap` registers its sequence
+    /// synchronously before it returns, and so does `requestDrain`, so the
+    /// statements below *are* the ledger's order. What the two children buy is
+    /// control over the one event that is genuinely asynchronous — a child
+    /// exiting — by making each exit wait for a `close` this test performs.
+    @Test("a drain fires when the reaps it covers finish, without waiting for one registered after it")
+    func drainIgnoresAReapRegisteredAfterIt() async throws {
+        let covered = try spawnWaitingForEOF()
+        let later = try spawnWaitingForEOF()
+
+        ChildReaper.reap(pid: covered.pid, unless: ChildExitObservation())
+        let drain = requestDrain()
+        ChildReaper.reap(pid: later.pid, unless: ChildExitObservation())
+
+        // The only reap this drain covers can now finish. The other cannot:
+        // its child's pipe stays open until the disposal below.
+        close(covered.writeEnd)
+        let outcome = await drain.wait()
+        // Read before the disposal, because it is the claim this test makes:
+        // a drain that had waited for the later reap could not have returned
+        // while that reap's child was still running.
+        let laterStillRunning = processExists(later.pid)
+
+        // Dispose before asserting — see the suite comment. Closing the pipe
+        // ends the child, and the reap already parked on it does the `waitpid`;
+        // the second drain is how this test knows that thread finished rather
+        // than outliving the run.
+        close(later.writeEnd)
+        let disposal = await drainPendingReaps()
+
+        // The stalled diagnostic names the later child on purpose: on that
+        // path it is the reap still parked, and therefore the one a reader
+        // needs to see.
+        if let diagnostic = outcome.diagnostic(pid: later.pid, observedState: { describeState(later.pid) }) {
+            throw diagnostic
+        }
+        if let diagnostic = disposal.diagnostic(pid: later.pid, observedState: { describeState(later.pid) }) {
+            throw diagnostic
+        }
+        // Vacuity guard: had the later child already exited, the drain could
+        // have waited for its reap and still returned, and this test would be
+        // asserting nothing about what a drain covers.
+        #expect(laterStillRunning, "the later reap must still have been parked when the drain fired")
+        #expect(!processExists(covered.pid), "the covered reap must have reaped its child")
+        #expect(!processExists(later.pid), "the disposal must have reaped the later child")
     }
 
     // MARK: - The worker pool the reaper must not depend on
