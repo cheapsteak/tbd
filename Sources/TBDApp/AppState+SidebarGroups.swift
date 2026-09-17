@@ -52,11 +52,18 @@ extension AppState {
             unread: unreadByRemoteSession)
     }
 
+    /// Each rendered parent walks its remote descendants once per input change,
+    /// rather than on every row render. Read every tracked input before a hit:
+    /// Observation replaces a view's dependency set on each evaluation.
     func sidebarRemoteGroups(parentID: UUID) -> SidebarRemoteGroups {
         let snapshot = sidebarRemoteSnapshot
-        return SidebarRemoteGroups(
+        let unread = unreadByRemoteSession, worktreeUnread = unreadByWorktree
+        if let cached = sidebarParentRemoteGroupsCache[parentID] { return cached }
+        let groups = SidebarRemoteGroups(
             roots: snapshot.children[parentID] ?? [], remainder: [], snapshot: snapshot,
-            unread: unreadByRemoteSession, worktreeUnread: unreadByWorktree)
+            unread: unread, worktreeUnread: worktreeUnread)
+        sidebarParentRemoteGroupsCache[parentID] = groups
+        return groups
     }
 
     /// A cached presentation partition; tracked inputs are read even on a hit

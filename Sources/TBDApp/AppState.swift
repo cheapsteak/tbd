@@ -114,6 +114,7 @@ final class AppState {
             childrenIndexCache = nil
             allWorktreesCache = nil
             sidebarRemoteSnapshotCache = nil
+            sidebarParentRemoteGroupsCache.removeAll()
             sidebarHibernationCache.removeAll()
         }
     }
@@ -125,6 +126,7 @@ final class AppState {
         didSet {
             allWorktreesCache = nil
             sidebarRemoteSnapshotCache = nil
+            sidebarParentRemoteGroupsCache.removeAll()
             sidebarHibernationCache.removeAll()
         }
     }
@@ -220,14 +222,18 @@ final class AppState {
     /// severity dot. Worktrees the user is currently viewing are excluded
     /// from this dictionary because `refreshNotifications` auto-marks them
     /// read on every poll.
-    var unreadByWorktree: [UUID: UnreadSummary] = [:]
+    var unreadByWorktree: [UUID: UnreadSummary] = [:] {
+        didSet { sidebarParentRemoteGroupsCache.removeAll() }
+    }
     /// Unread notification summaries for remote sessions, keyed by
     /// `RemoteSessionSelection` (provider + provider-minted session id —
     /// remote sessions have no UUID). Mirrors `unreadByWorktree`: written by
     /// `handleRemoteSessionAttentionDelta` when an attention delta arrives,
     /// cleared by `selectRemoteSession`. App-local and in-memory only, same
     /// as `unreadByWorktree` — not persisted across restarts.
-    var unreadByRemoteSession: [RemoteSessionSelection: UnreadSummary] = [:]
+    var unreadByRemoteSession: [RemoteSessionSelection: UnreadSummary] = [:] {
+        didSet { sidebarParentRemoteGroupsCache.removeAll() }
+    }
     /// Terminal IDs that fired a `.responseComplete` notification while their
     /// tab was NOT the active tab of a focused worktree. Drives the bold tab
     /// label in `TabBar`, mirroring the worktree-row bold. App-local and
@@ -525,12 +531,18 @@ final class AppState {
     /// Every registered remote-agent provider's negotiated contract + health,
     /// fetched by `refreshRemote()`. See `AppState+Remote.swift`.
     var remoteProviders: [RemoteProviderStatus] = [] {
-        didSet { sidebarRemoteSnapshotCache = nil }
+        didSet {
+            sidebarRemoteSnapshotCache = nil
+            sidebarParentRemoteGroupsCache.removeAll()
+        }
     }
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
     var remoteSessions: [RemoteSessionInfo] = [] {
-        didSet { sidebarRemoteSnapshotCache = nil }
+        didSet {
+            sidebarRemoteSnapshotCache = nil
+            sidebarParentRemoteGroupsCache.removeAll()
+        }
     }
     /// Every retain/import receipt the daemon holds, fetched by
     /// `refreshRemote()`.
@@ -591,6 +603,8 @@ final class AppState {
     /// An explicit re-selection must reveal a manually collapsed group too.
     var sidebarSelectionGeneration: UInt64 = 0
     @ObservationIgnored var sidebarRemoteSnapshotCache: SidebarRemoteGroups.Snapshot?
+    /// Parent partitions share the snapshot and survive unrelated row renders.
+    @ObservationIgnored var sidebarParentRemoteGroupsCache: [UUID: SidebarRemoteGroups] = [:]
     @ObservationIgnored var sidebarHibernationCache: [SidebarGroupID.Owner: SidebarHibernationPartition] = [:]
 
     /// Test seam: when set, replaces the daemon roundtrip for archived
