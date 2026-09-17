@@ -43,27 +43,31 @@ import TestSupport
 /// thing to keep small — and never wait for main-queue work while occupying
 /// the main queue.
 ///
-/// **How these tests wait: an event, not a window.** `cleanup()` enqueues its
-/// reap synchronously onto `ChildReaper`'s concurrent queue, so a barrier
-/// submitted after `cleanup()` returns is ordered behind it —
-/// `ChildReaper.drainPendingReaps` is that barrier. When it fires, the reap
-/// block has *run to completion*, so "the child still exists" means the reap
-/// did not reap, full stop. There is no poll anywhere in this suite and
-/// therefore no scheduling window to mistake for a bug (nor a bug to mistake
-/// for scheduling: a polling test can only report "still there after N tries").
-/// The barrier's own cost is bounded by the longest-lived child in the
-/// process — see `ChildReaper.drainPendingReaps` for the process-wide caveat.
+/// **How these tests wait: an event, not a window.** `cleanup()` registers its
+/// reap synchronously with `ChildReaper` before it returns, so a drain
+/// requested after `cleanup()` returns covers it —
+/// `ChildReaper.drainPendingReaps` is that drain. When it fires, the reap has
+/// *run to completion*, so "the child still exists" means the reap did not
+/// reap, full stop. There is no poll anywhere in this suite and therefore no
+/// scheduling window to mistake for a bug (nor a bug to mistake for
+/// scheduling: a polling test can only report "still there after N tries").
+/// The drain's own cost is bounded by the longest-lived child in the process
+/// — see `ChildReaper.drainPendingReaps` for the process-wide caveat.
 ///
-/// **The barrier wait is itself bounded, and by its own guard rather than by
-/// the suite limit.** It is ordered behind `waitpid` calls `ChildReaper`
-/// documents as unbounded, and neither a parked `waitpid` nor a
-/// `withCheckedContinuation` awaiting a callback that never runs can be
-/// cancelled by Swift Testing — so an unguarded wait would wedge the run
-/// instead of reddening one test, and (a barrier on a concurrent queue blocking
-/// everything submitted after it) would take the sibling tests down with it.
+/// **The drain wait is itself bounded, and by its own guard rather than by
+/// the suite limit.** It waits on `waitpid` calls `ChildReaper` documents as
+/// unbounded, and neither a parked `waitpid` nor a `withCheckedContinuation`
+/// awaiting a callback that never runs can be cancelled by Swift Testing — so
+/// an unguarded wait would wedge the run instead of reddening one test.
 /// `drainPendingReaps(within:)` in `ChildReapDrainSupport.swift` races the
-/// barrier against a 30 s guard, reports a stuck reap with its observed state,
-/// and each call site SIGKILLs and reaps its own child on that path.
+/// drain against a 30 s guard, reports a stuck reap with its observed state,
+/// and each call site SIGKILLs and reaps its own child on that path. That guard
+/// is what the nightly ledger recorded firing in all four tests here, night
+/// after night, when the reaper still ran on a private concurrent dispatch
+/// queue: with the process's ~64 constrained workers all parked by other
+/// suites' subprocess reads, neither the reap nor the drain could start. The
+/// reaper now runs each reap on a thread of its own and calls back from it, so
+/// nothing on this path waits for a libdispatch worker.
 ///
 /// **Why `.fastPassBounded`.** A coarse outer backstop for the ordinary case of
 /// a merely slow test — not the guard that catches a stuck reap, which it

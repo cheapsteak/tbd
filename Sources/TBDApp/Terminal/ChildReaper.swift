@@ -32,7 +32,7 @@ private let reaperLogger = Logger(subsystem: "com.tbd.app", category: "childReap
 /// `dismantleNSView` convention it used to rest on.
 ///
 /// The lock is still not decorative, on two independent grounds. It is what
-/// makes the flag safe to read from `ChildReaper`'s own background queue, which
+/// makes the flag safe to read from `ChildReaper`'s own reaper thread, which
 /// happens on every reap. And a future call site that passed an explicit
 /// `dispatchQueue:` would move the writer off main, where nothing above would
 /// protect it.
@@ -69,6 +69,21 @@ final class ChildExitObservation: Sendable {
 /// `DispatchSourceProcess` would not be — arming one against a pid that has
 /// already exited is not guaranteed to deliver `NOTE_EXIT`, which is precisely
 /// the failure being fixed.
+///
+/// **Each reap gets a thread of its own, and deliberately not a libdispatch
+/// worker.** A reap parks for the child's whole remaining lifetime — which the
+/// known limitation below says can be forever — and libdispatch's
+/// non-overcommit worker pool, the one every `DispatchQueue.global()` block and
+/// every private *concurrent* queue draws from, is capped per process at
+/// `kern.wq_max_constrained_threads` (64 on a stock macOS install). That pool
+/// is shared with everything else in the app that uses a global queue —
+/// `FileWatcher`, the file viewer, transcript image actions — so a reap that
+/// held one of its workers would be spending a scarce app-wide resource on
+/// waiting, and enough stuck children would freeze all of it. The converse is
+/// the failure that was actually measured: once other work has the pool full,
+/// a reap queued on it never *starts*, and the zombie this type exists to
+/// collect is left exactly where it was. A `Thread` is a plain pthread outside
+/// that cap; it costs a stack and nothing else, and teardowns are rare.
 ///
 /// **Sole-waiter discipline — what is guaranteed, and what is not.** Never
 /// commit a `waitpid` for a pid another waiter may also claim: whoever wins
@@ -110,11 +125,49 @@ final class ChildExitObservation: Sendable {
 /// is a separate change — it needs an injected clock per `CLAUDE.md` and it
 /// changes how the child is asked to die, which this fix deliberately does not.
 enum ChildReaper {
-    /// Concurrent on purpose: each reap parks a thread until its child exits,
-    /// and a child that ignores `SIGHUP` would block every later reap behind it
-    /// on a serial queue. Utility QoS — nothing waits on the result.
-    private static let queue = DispatchQueue(
-        label: "com.tbd.app.child-reaper", qos: .utility, attributes: .concurrent)
+    /// Which reaps are still parked, so `drainPendingReaps` can say when every
+    /// reap started before a given moment has finished. Sequence numbers are
+    /// handed out in `reap` order, so "everything started before this call"
+    /// is "every in-flight sequence below the counter as it stood then".
+    private struct Ledger {
+        var nextSequence: UInt64 = 0
+        var inFlight: Set<UInt64> = []
+        var waiters: [(threshold: UInt64, done: @Sendable () -> Void)] = []
+
+        /// Waiters whose reaps have all finished; removed from `waiters`.
+        ///
+        /// **`threshold <= lowestInFlight`, and the `=` is the whole
+        /// decision.** A waiter's threshold is `nextSequence` as it stood when
+        /// its drain was requested — one *past* the last reap that drain
+        /// covers. So a reap whose sequence is exactly the threshold was
+        /// registered after the drain, is none of its business, and must not
+        /// hold it open.
+        ///
+        /// Tightening this to `<` is invisible to a sequential test: with
+        /// nothing in flight the minimum is the `UInt64.max` of an empty set,
+        /// which is above every threshold either way. Run one at a time against
+        /// the mutation, `backgroundReapClearsTheZombie` and
+        /// `reapsWhileTheConstrainedWorkerPoolIsExhausted` both still pass.
+        /// What `<` breaks is a drain waiting while a *later* reap is parked on
+        /// a child that has not exited — the drain then waits for a reap it
+        /// does not cover — and
+        /// `ChildReaperTests.drainIgnoresAReapRegisteredAfterIt` constructs
+        /// exactly that and fails on it in isolation. (In the parallel pass the
+        /// mutation reddens every drain-awaiting test, because some sibling's
+        /// reap is usually in flight; that is overlap doing the work, not any
+        /// of those tests asserting this.)
+        ///
+        /// This is the only comparison in the ledger, deliberately — see
+        /// `drainPendingReaps`.
+        mutating func takeSatisfiedWaiters() -> [@Sendable () -> Void] {
+            let lowestInFlight = inFlight.min() ?? UInt64.max
+            let satisfied = waiters.filter { $0.threshold <= lowestInFlight }
+            waiters.removeAll { $0.threshold <= lowestInFlight }
+            return satisfied.map(\.done)
+        }
+    }
+
+    private static let ledger = OSAllocatedUnfairLock(initialState: Ledger())
 
     /// The teardown decision, pure so both branches are directly testable.
     ///
@@ -138,38 +191,75 @@ enum ChildReaper {
     /// is one wrong exit code in one terminal message.
     static func reap(pid: pid_t, unless observation: ChildExitObservation) {
         // Cheap early-out, and the only check a control-mode panel (pid 0)
-        // ever reaches — it keeps teardown from enqueuing a pointless block.
+        // ever reaches — it keeps teardown from starting a pointless thread.
         guard shouldReap(pid: pid, alreadyObserved: observation.wasObserved) else { return }
-        queue.async {
-            // Re-checked here because an unbounded amount of time can pass
-            // before this block runs, and the check costs one lock acquisition.
+        // Registered before the thread starts, so a drain requested the
+        // instant `reap` returns already counts this one.
+        let sequence = ledger.withLock { state in
+            let sequence = state.nextSequence
+            state.nextSequence += 1
+            state.inFlight.insert(sequence)
+            return sequence
+        }
+        let thread = Thread {
+            defer { finish(sequence) }
+            // Re-checked here because time can pass before this thread is
+            // scheduled, and the check costs one lock acquisition.
             guard shouldReap(pid: pid, alreadyObserved: observation.wasObserved) else { return }
             reapBlocking(pid: pid)
         }
+        thread.name = "com.tbd.app.child-reaper"
+        // Nothing waits on the result; the same band the old queue ran at.
+        thread.qualityOfService = .utility
+        thread.start()
     }
 
-    /// Test seam: runs `done` once every reap enqueued *before this call*
-    /// has finished. Never used by production code — nothing here waits on a
+    private static func finish(_ sequence: UInt64) {
+        let satisfied = ledger.withLock { state in
+            state.inFlight.remove(sequence)
+            return state.takeSatisfiedWaiters()
+        }
+        for done in satisfied { done() }
+    }
+
+    /// Test seam: runs `done` once every reap started *before this call* has
+    /// finished. Never used by production code — nothing here waits on a
     /// reap, deliberately (see `reap`).
     ///
-    /// Why this exists. `queue` is concurrent and `reap(pid:unless:)` enqueues
-    /// its block **synchronously**, so a barrier submitted after a teardown has
-    /// returned is ordered behind every reap that teardown enqueued. That turns
-    /// "has the reap happened yet?" from a window a test must poll into an
-    /// event it can await — and, unlike polling, it tells the two failures
-    /// apart: once `done` runs, the reap block has *finished*, so a child that
-    /// still exists means the reap did not reap it, not that libdispatch had
-    /// not got round to scheduling it yet. Polling cannot make that distinction
-    /// at all, which is why a polling test can only ever report "still there
-    /// after N tries".
+    /// Why this exists. `reap(pid:unless:)` registers its reap **synchronously**
+    /// before it returns, so a drain requested after a teardown has returned
+    /// covers every reap that teardown started. That turns "has the reap
+    /// happened yet?" from a window a test must poll into an event it can await
+    /// — and, unlike polling, it tells the two failures apart: once `done` runs,
+    /// the reap has *finished*, so a child that still exists means the reap did
+    /// not reap it, not that it had not been scheduled yet. Polling cannot make
+    /// that distinction at all, which is why a polling test can only ever
+    /// report "still there after N tries".
     ///
-    /// **Caveat: the barrier is process-wide, not per-pid.** It also waits on
-    /// reaps enqueued by any concurrently running test, and each reap parks
+    /// `done` runs on the calling thread when nothing is in flight, and
+    /// otherwise on the reaper thread whose completion satisfied the wait —
+    /// never on a libdispatch worker, for the reason the type comment gives.
+    ///
+    /// **Caveat: the drain is process-wide, not per-pid.** It also waits on
+    /// reaps started by any concurrently running test, and each reap parks
     /// until *its* child exits. That is bounded — every child in these suites
     /// exits within a second — but it is not free, and a caller that spawned a
     /// long-lived child elsewhere in the process pays for it here.
     static func drainPendingReaps(_ done: @escaping @Sendable () -> Void) {
-        queue.async(flags: .barrier, execute: done)
+        let alreadyDrained = ledger.withLock { state -> Bool in
+            // No comparison here, on purpose. Every sequence ever handed out is
+            // below `nextSequence`, so anything in flight is necessarily a reap
+            // this drain covers: "nothing in flight" is exactly "everything
+            // covered has already finished". Written as a threshold comparison
+            // it would read as a second decision a reader has to check against
+            // the one in `takeSatisfiedWaiters` — and as one no test could
+            // distinguish, since the only value it can ever be compared with is
+            // the `UInt64.max` of an empty set.
+            if state.inFlight.isEmpty { return true }
+            state.waiters.append((threshold: state.nextSequence, done: done))
+            return false
+        }
+        if alreadyDrained { done() }
     }
 
     /// Blocking `waitpid` for `pid`. Returns `waitpid`'s result: the reaped pid,
