@@ -59,8 +59,12 @@ extension AppState {
         let snapshot = sidebarRemoteSnapshot
         let unread = unreadByRemoteSession, worktreeUnread = unreadByWorktree
         if let cached = sidebarParentRemoteGroupsCache[parentID] { return cached }
+        // Scratch stays in its flat section, even when reparented through the
+        // CLI. Keep it in the snapshot for conservative descendant liveness,
+        // but never offer it as a second rendered row beneath its parent.
+        let roots = (snapshot.children[parentID] ?? []).filter { $0.repoID != nil }
         let groups = SidebarRemoteGroups(
-            roots: snapshot.children[parentID] ?? [], remainder: [], snapshot: snapshot,
+            roots: roots, remainder: [], snapshot: snapshot,
             unread: unread, worktreeUnread: worktreeUnread)
         sidebarParentRemoteGroupsCache[parentID] = groups
         return groups
