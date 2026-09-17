@@ -145,6 +145,53 @@ test_failure_signatures_are_extracted_and_capped() {
   rm -rf "$d"
 }
 
+test_assertion_lines_survive_a_flood_of_failing_suites() {
+  # THE BUG THIS PARTITION EXISTS FOR. `✘ Suite` sorts ahead of `✘ Test`, so a
+  # single `sort -u | head -12` over a run with twelve or more red suites spent
+  # the whole budget on suite summaries and cut every line naming an assertion.
+  # Two flakes were reported on 28 and 24 nights apiece without the ledger ever
+  # naming one.
+  local d; d="$(mktmpd)"
+  : > "$d/floody.log"
+  local i
+  for i in $(seq 1 20); do
+    echo "✘ Suite \"Suite$i\" failed after 4.2 seconds with 2 issues." >> "$d/floody.log"
+  done
+  echo "✘ Test reapsItsPTYChild() recorded an issue at TerminalTests.swift:88:5: Expectation failed: child.isRunning" >> "$d/floody.log"
+
+  local sigs; sigs="$(failing_tests_from "$d/floody.log")"
+  assert_contains "the assertion line survives twenty failing suites" "$sigs" "reapsItsPTYChild()"
+  assert_contains "and carries the expectation text a reader needs" "$sigs" "Expectation failed"
+  # The summary is still worth a few lines — it is bounded, not banished.
+  assert_contains "suite summaries still appear" "$sigs" '✘ Suite'
+  assert_eq "but only up to their own budget" "$SIGNATURE_SUITE_LINES" \
+    "$(printf '%s\n' "$sigs" | grep -c '^✘ Suite ')"
+  assert_eq "and the whole block stays bounded" "$((SIGNATURE_SUITE_LINES + 1))" \
+    "$(printf '%s\n' "$sigs" | grep -c .)"
+
+  # MUTATION: collapse the partition back into the single shared cap it replaced
+  # — one budget, filled in sort order — and the assertion line is gone. That is
+  # the exact loss the ledger suffered, reproduced on demand.
+  local mutant unpartitioned
+  # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
+  mutant="$(mutant_of 's#^  detail=.*#  detail="$(head -12 <<< "$all")"#; s#^  suites=.*#  suites=""#')"
+  unpartitioned="$(bash -c "source '$mutant'; failing_tests_from '$d/floody.log'")"
+  assert_eq "mutation: with one shared cap the assertion line is cut" "0" \
+    "$(printf '%s\n' "$unpartitioned" | grep -c 'reapsItsPTYChild')"
+  assert_eq "mutation: and the whole budget goes to suite summaries" "12" \
+    "$(printf '%s\n' "$unpartitioned" | grep -c '^✘ Suite ')"
+  rm -rf "$d"
+}
+
+test_a_run_with_no_failure_lines_yields_nothing() {
+  # The caller appends the block only when it is non-empty; an all-whitespace
+  # block would indent a blank line into a GitHub comment.
+  local d; d="$(mktmpd)"
+  mk_log "$d/clean.log" "Test run started." "Test run with 42 tests passed after 3.1 seconds."
+  assert_eq "a clean log produces an empty signature block" "" "$(failing_tests_from "$d/clean.log")"
+  rm -rf "$d"
+}
+
 # ---------------------------------------------------------------------------
 # Kill discipline — proven with `sleep`, which costs zero CPU
 # ---------------------------------------------------------------------------

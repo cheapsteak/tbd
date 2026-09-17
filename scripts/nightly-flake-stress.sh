@@ -290,11 +290,36 @@ judge_iteration() {
   echo "PASS $count"
 }
 
+# THE ASSERTION LINES ARE THE PAYLOAD; THE SUITE LINES ARE A SUMMARY. Budget
+# them separately, because a single shared cap filled in sort order discards
+# exactly the wrong half. `✘ Suite` sorts ahead of `✘ Test` lexicographically,
+# so on an iteration with twelve or more failing suites a single `sort -u |
+# head -12` spent the entire budget on `✘ Suite "X" failed after N seconds with
+# K issues` lines and cut every line naming an assertion. That is not
+# hypothetical: two flakes were reported on 28 and 24 nights apiece and the
+# ledger never once named a failing assertion, so the diagnosis had to be
+# reconstructed from issue counts and suite durations. The whole-suite target is
+# the one that hurts most, since it is also the one most likely to have many
+# suites red at once.
+#
+# Bounding the total is the original constraint and it survives: at most
+# SIGNATURE_DETAIL_LINES + SIGNATURE_SUITE_LINES lines reach a GitHub comment.
+SIGNATURE_DETAIL_LINES=12
+SIGNATURE_SUITE_LINES=4
+
 failing_tests_from() {
-  # Swift Testing's failure lines, deduplicated, capped so one bad run cannot
-  # produce a comment nobody will read.
-  grep -E '✘|Expectation failed|Issue recorded|Test .* failed' "$1" 2>/dev/null \
-    | sed 's/^[[:space:]]*//' | sort -u | head -12
+  # Swift Testing's failure lines, deduplicated, partitioned by kind, and each
+  # partition capped so one bad run cannot produce a comment nobody will read.
+  # The priority is stated here rather than inherited from the glyph's sort order.
+  local all detail suites
+  all="$(grep -E '✘|Expectation failed|Issue recorded|Test .* failed' "$1" 2>/dev/null \
+    | sed 's/^[[:space:]]*//' | sort -u)"
+  [[ -n "$all" ]] || return 0
+
+  # Detail first, so a truncated reader still sees the assertions.
+  detail="$(printf '%s\n' "$all" | grep -vE '^✘ Suite ' | head -"$SIGNATURE_DETAIL_LINES")"
+  suites="$(printf '%s\n' "$all" | grep -E '^✘ Suite ' | head -"$SIGNATURE_SUITE_LINES")"
+  printf '%s\n' "$detail" "$suites" | grep -v '^[[:space:]]*$'
 }
 
 # --- one target ---------------------------------------------------------------
