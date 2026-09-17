@@ -25,6 +25,11 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
     var created_at: Date
     var last_used_at: Date?
     var sort_order: Int = 0
+    /// Per-profile opt-out from the balancing pool. NULL and 0 both mean "in
+    /// the pool" (when otherwise eligible), 1 means "never choose this one for
+    /// me". Not a feature flag, nothing to graduate — a standing user
+    /// preference. Nil/absent in the record means the profile is in the pool.
+    var pool_opt_out: Bool?
 
     init(from profile: ModelProfile) {
         self.id = profile.id.uuidString
@@ -40,6 +45,7 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
         self.created_at = profile.createdAt
         self.last_used_at = profile.lastUsedAt
         self.sort_order = profile.sortOrder
+        self.pool_opt_out = profile.poolOptOut ? true : nil
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -62,7 +68,8 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
             envOverrides: EnvOverridesCoding.decode(env_overrides),
             createdAt: created_at,
             lastUsedAt: last_used_at,
-            sortOrder: sort_order
+            sortOrder: sort_order,
+            poolOptOut: pool_opt_out ?? false
         )
     }
 
@@ -216,6 +223,17 @@ public struct ModelProfileStore: Sendable {
             try db.execute(
                 sql: "UPDATE model_profiles SET last_used_at = ? WHERE id = ?",
                 arguments: [date, id.uuidString]
+            )
+        }
+    }
+
+    /// Set whether this profile is excluded from the balancing pool (design
+    /// 2026-09-05 §4). Pass `true` to exclude, `false` to include.
+    public func setPoolOptOut(id: UUID, optOut: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE model_profiles SET pool_opt_out = ? WHERE id = ?",
+                arguments: [optOut ? 1 : 0, id.uuidString]
             )
         }
     }

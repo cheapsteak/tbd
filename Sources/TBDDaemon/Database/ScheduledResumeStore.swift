@@ -53,7 +53,8 @@ struct ScheduledResumeRecord: Codable, FetchableRecord, PersistableRecord, Senda
 public enum ResumeCancelScope: Sendable {
     case all
     case apiErrorOnly     // limitType == ScheduledResume.apiErrorLimitType
-    case limitOnly        // limitType != ScheduledResume.apiErrorLimitType
+    case limitOnly        // reset-time rows: neither api_error nor rotation
+    case rotationOnly     // limitType == ScheduledResume.rotationLimitType
 }
 
 /// CRUD for scheduled session-limit resumes. The single `pending` row per
@@ -222,7 +223,10 @@ public struct ScheduledResumeStore: Sendable {
             case .apiErrorOnly:
                 query = query.filter(Column("limitType") == ScheduledResume.apiErrorLimitType)
             case .limitOnly:
-                query = query.filter(Column("limitType") != ScheduledResume.apiErrorLimitType)
+                query = query.filter(Column("limitType") != ScheduledResume.apiErrorLimitType
+                    && Column("limitType") != ScheduledResume.rotationLimitType)
+            case .rotationOnly:
+                query = query.filter(Column("limitType") == ScheduledResume.rotationLimitType)
             }
             let records = try query.fetchAll(db)
             for var record in records {
