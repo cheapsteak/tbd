@@ -42,6 +42,7 @@ extension TBDHomeSerialized {
         let db: TBDDatabase
         let router: RPCRouter
         let terminal: Terminal
+        let deltas: FireRecorder<StateDelta>
     }
 
     private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
@@ -84,17 +85,26 @@ extension TBDHomeSerialized {
                 id: terminal.id, sessionID: "sess-swap", transcriptPath: transcript)
         }
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorder)
+        let deltas = FireRecorder<StateDelta>()
+        let subscriptions = StateSubscriptionManager()
+        subscriptions.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.record(delta)
+            }
+            return true
+        }
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
             tmux: tmux,
             startTime: Date(),
+            subscriptions: subscriptions,
             configDirManager: isolatedConfigDirManager(),
             actuationLog: makeTestActuationLog(),
             clock: clock)
         let reloaded = try #require(try await db.terminals.get(id: terminal.id))
-        return Fixture(db: db, router: router, terminal: reloaded)
+        return Fixture(db: db, router: router, terminal: reloaded, deltas: deltas)
     }
 
     private func swap(
@@ -167,6 +177,10 @@ extension TBDHomeSerialized {
         #expect(!after.isParked)
         #expect(after.awaitingInputReason == nil)
         #expect(after.awaitingInputObservedAt == nil)
+        #expect(fixture.deltas.values.contains {
+            guard case .terminalAwaitingInputChanged(let delta) = $0 else { return false }
+            return delta.terminalID == predecessor.id && delta.reason == nil
+        }, "successful cleanup must retract the persisted reason for subscribers")
         #expect(after.sessionIncarnationID != predecessor.sessionIncarnationID)
         #expect(after.claudeSessionID == predecessor.claudeSessionID)
         #expect(after.transcriptPath == predecessor.transcriptPath)
@@ -215,6 +229,10 @@ extension TBDHomeSerialized {
         #expect(commands.values.filter { $0.contains("respawn-window") }.count == 1)
         let after = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
         #expect(after.awaitingInputReason != nil, "the injected write failure must have fired")
+        #expect(!fixture.deltas.values.contains {
+            guard case .terminalAwaitingInputChanged(let delta) = $0 else { return false }
+            return delta.terminalID == after.id && delta.reason == nil
+        }, "a failed cleanup must not tell subscribers the persisted reason was cleared")
         #expect(after.sessionIncarnationID != fixture.terminal.sessionIncarnationID)
         #expect(!after.isParked)
     }

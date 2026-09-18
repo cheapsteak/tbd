@@ -2625,22 +2625,16 @@ extension RPCRouter {
         // launching a successor that could raise a legitimate new prompt.
         do {
             try await db.terminals.clearAwaitingInputReason(id: oldTerminal.id)
+            // Subscribers mirror the persisted reason. Only retract it after
+            // the write succeeds, so reconnecting cannot resurrect a reason
+            // that the live delta incorrectly claimed was cleared.
+            broadcastAwaitingInputRetraction(terminal: oldTerminal)
         } catch {
             // The predecessor is already stopped: a metadata cleanup failure
             // must not prevent the replacement process from starting.
             logger.warning("inPlace swap: prompt cleanup failed for terminal \(oldTerminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
 
-        // Step 2 killed the process any recorded prompt was raised on, and this
-        // row survives the swap — so a `permission_prompt` standing here now
-        // describes a dead pane. `SessionStateResolver`'s rung 4 would keep
-        // reporting it as a live wait: `transcriptPath` is unchanged and its
-        // mtime still predates the reason, so the "prompt stands" branch holds
-        // until some later hook happens to write an activity state. Retract it
-        // from TBD's own act rather than waiting for the respawned session's
-        // hooks to arrive — they may be seconds away, or lost to a stale `tbd`
-        // on the pane's PATH.
-        broadcastAwaitingInputRetraction(terminal: oldTerminal)
         subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
             terminalID: prepared.id,
             worktreeID: prepared.worktreeID,
