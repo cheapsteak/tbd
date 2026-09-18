@@ -2598,15 +2598,11 @@ extension RPCRouter {
         let windowID = oldTerminal.tmuxWindowID
         var respawnError: String?
 
-        // 1. Gracefully interrupt the pane's current Claude before respawn.
-        //    `respawn-window -k` will forcibly replace it regardless, but a
-        //    graceful stop lets Claude finish flushing and avoids yanking an
-        //    in-flight generation. Best-effort — never blocks the swap.
-        await gracefullyInterruptPane(server: server, paneID: paneID)
-
-        // 2. Commit the replacement identity and process token before launch,
-        //    so old-process hooks are stale and new-process hooks can attach
-        //    immediately without a launch gate.
+        // 1. Reserve the replacement identity before interrupting the old
+        //    process. Its SessionEnd hook can arrive during the graceful stop:
+        //    fencing that hook first prevents our own interrupt from parking
+        //    the row and invalidating the replacement snapshot. The complete
+        //    snapshot still rejects a competing replacement before any signal.
         let replacementObservedAt = now()
         guard let incarnationID = try await db.terminals.prepareProfileAgentRespawn(
             id: oldTerminal.id,
@@ -2620,16 +2616,25 @@ extension RPCRouter {
         guard let prepared = try await db.terminals.get(id: oldTerminal.id) else {
             return (RPCResponse(error: "Terminal vanished before swap"), nil)
         }
-        // Step 1 killed the process any recorded prompt was raised on, and this
-        // row survives the swap — so a `permission_prompt` standing here now
-        // describes a dead pane. `SessionStateResolver`'s rung 4 would keep
-        // reporting it as a live wait: `transcriptPath` is unchanged and its
-        // mtime still predates the reason, so the "prompt stands" branch holds
-        // until some later hook happens to write an activity state. Retract it
-        // from TBD's own act rather than waiting for the respawned session's
-        // hooks to arrive — they may be seconds away, or lost to a stale `tbd`
-        // on the pane's PATH.
-        broadcastAwaitingInputRetraction(terminal: oldTerminal)
+        // 2. Gracefully interrupt the old process after fencing its hooks.
+        //    `respawn-window -k` remains the termination guarantee; the graceful
+        //    stop gives Claude a chance to flush before the forced replacement.
+        await gracefullyInterruptPane(server: server, paneID: paneID)
+        // Legacy Notification hooks carry no incarnation token. Retract any
+        // wait reason the predecessor recorded during the interrupt, before
+        // launching a successor that could raise a legitimate new prompt.
+        do {
+            try await db.terminals.clearAwaitingInputReason(id: oldTerminal.id)
+            // Subscribers mirror the persisted reason. Only retract it after
+            // the write succeeds, so reconnecting cannot resurrect a reason
+            // that the live delta incorrectly claimed was cleared.
+            broadcastAwaitingInputRetraction(terminal: oldTerminal)
+        } catch {
+            // The predecessor is already stopped: a metadata cleanup failure
+            // must not prevent the replacement process from starting.
+            logger.warning("inPlace swap: prompt cleanup failed for terminal \(oldTerminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+
         subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
             terminalID: prepared.id,
             worktreeID: prepared.worktreeID,
@@ -2713,13 +2718,11 @@ extension RPCRouter {
     private func gracefullyInterruptPane(server: String, paneID: String) async {
         // Escape: ask Claude to stop generating.
         try? await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
-        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-        try? await Task.sleep(for: .milliseconds(150))
+        try? await clock.sleep(for: .milliseconds(150))
         // C-c C-c: interrupt / exit the TUI.
         try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
         try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
-        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-        try? await Task.sleep(for: .milliseconds(150))
+        try? await clock.sleep(for: .milliseconds(150))
         // SIGTERM the pane pid as a backstop (respawn -k is the real guarantee).
         if let pidStr = try? await tmux.panePID(server: server, paneID: paneID),
            let pid = Int32(pidStr), pid > 0 {

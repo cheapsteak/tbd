@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 import TestSupport
 @testable import TBDDaemonLib
@@ -41,6 +42,7 @@ extension TBDHomeSerialized {
         let db: TBDDatabase
         let router: RPCRouter
         let terminal: Terminal
+        let deltas: FireRecorder<StateDelta>
     }
 
     private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
@@ -59,7 +61,9 @@ extension TBDHomeSerialized {
     ///   **resume** branch; when false it takes the **fresh** branch. Both
     ///   branches resolve their own overlay, so both are covered.
     private func makeFixture(
-        _ scratch: Scratch, desk: Bool, withConversation: Bool
+        _ scratch: Scratch, desk: Bool, withConversation: Bool,
+        recorder: (@Sendable ([String]) -> Void)? = nil,
+        clock: any Clock<Duration> = ContinuousClock()
     ) async throws -> Fixture {
         let repoPath = scratch.home.appendingPathComponent("repo", isDirectory: true).path
         try FileManager.default.createDirectory(atPath: repoPath, withIntermediateDirectories: true)
@@ -80,17 +84,27 @@ extension TBDHomeSerialized {
             try await db.terminals.updateSession(
                 id: terminal.id, sessionID: "sess-swap", transcriptPath: transcript)
         }
-        let tmux = TmuxManager(dryRun: true)
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorder)
+        let deltas = FireRecorder<StateDelta>()
+        let subscriptions = StateSubscriptionManager()
+        subscriptions.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.record(delta)
+            }
+            return true
+        }
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
             tmux: tmux,
             startTime: Date(),
+            subscriptions: subscriptions,
             configDirManager: isolatedConfigDirManager(),
-            actuationLog: makeTestActuationLog())
+            actuationLog: makeTestActuationLog(),
+            clock: clock)
         let reloaded = try #require(try await db.terminals.get(id: terminal.id))
-        return Fixture(db: db, router: router, terminal: reloaded)
+        return Fixture(db: db, router: router, terminal: reloaded, deltas: deltas)
     }
 
     private func swap(
@@ -114,6 +128,114 @@ extension TBDHomeSerialized {
     }
 
     // MARK: -
+
+    /// The interrupt itself can deliver SessionEnd before respawn. That hook
+    /// must describe the predecessor, never park the row being replaced.
+    @Test(.clockDriven, arguments: [true, false])
+    func sessionEndDuringInterruptDoesNotAbortSwap(afterEscape: Bool) async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let clock = EventDrivenTestClock()
+        let commands = FireRecorder<[String]>()
+        let fixture = try await makeFixture(
+            scratch, desk: false, withConversation: true,
+            recorder: { commands.record($0) }, clock: clock)
+        let predecessor = fixture.terminal
+        let task = Task { try await swap(fixture, mode: .inPlace) }
+        defer { task.cancel() }
+
+        try await clock.requireSleeperArmed()
+        if !afterEscape {
+            try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
+            try await clock.requireSleeperArmed()
+        }
+        let stamped = try await fixture.db.terminals.stampSessionExited(
+            id: predecessor.id,
+            reportedIncarnationID: predecessor.sessionIncarnationID)
+        #expect(!stamped, "the interrupted predecessor must already be fenced")
+        // Notification predates incarnation tokens. Unlike SessionEnd it can
+        // still write during the interrupt, so the swap must retract its
+        // persisted reason before the successor starts.
+        let notification = try RPCRequest(
+            method: RPCMethod.terminalNotificationEvent,
+            params: TerminalNotificationEventParams(
+                terminalID: predecessor.id,
+                notificationType: afterEscape ? "permission_prompt" : "idle_prompt",
+                message: "Predecessor prompt"))
+        #expect((await fixture.router.handle(notification)).success)
+        let interrupted = try #require(try await fixture.db.terminals.get(id: predecessor.id))
+        #expect(interrupted.awaitingInputReason != nil)
+
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
+        if afterEscape {
+            try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
+        }
+
+        let response = try await task.value
+        #expect(response.error == nil, "swap errored: \(response.error ?? "")")
+        let after = try #require(try await fixture.db.terminals.get(id: predecessor.id))
+        #expect(!after.isParked)
+        #expect(after.awaitingInputReason == nil)
+        #expect(after.awaitingInputObservedAt == nil)
+        #expect(fixture.deltas.values.contains {
+            guard case .terminalAwaitingInputChanged(let delta) = $0 else { return false }
+            return delta.terminalID == predecessor.id && delta.reason == nil
+        }, "successful cleanup must retract the persisted reason for subscribers")
+        #expect(after.sessionIncarnationID != predecessor.sessionIncarnationID)
+        #expect(after.claudeSessionID == predecessor.claudeSessionID)
+        #expect(after.transcriptPath == predecessor.transcriptPath)
+        #expect(after.tmuxWindowID == predecessor.tmuxWindowID)
+        #expect(after.tmuxPaneID == predecessor.tmuxPaneID)
+        #expect(try await fixture.db.terminals.list(worktreeID: after.worktreeID).count == 1)
+        #expect(commands.values.filter { $0.contains("respawn-window") }.count == 1)
+        #expect(!commands.values.contains { $0.contains("new-window") })
+    }
+
+    @Test(.clockDriven)
+    func promptCleanupFailureStillStartsReplacement() async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let clock = EventDrivenTestClock()
+        let commands = FireRecorder<[String]>()
+        let fixture = try await makeFixture(
+            scratch, desk: false, withConversation: true,
+            recorder: { commands.record($0) }, clock: clock)
+        let task = Task { try await swap(fixture, mode: .inPlace) }
+        defer { task.cancel() }
+
+        try await clock.requireSleeperArmed()
+        try await fixture.db.terminals.recordAwaitingInputReason(
+            id: fixture.terminal.id,
+            reason: AwaitingInputReason(message: "Predecessor prompt", hookEventName: "Notification"),
+            observedAt: Date())
+        // Fail only the post-interrupt metadata clear, after the replacement
+        // reservation has already committed. All reads and respawn work remain
+        // available, just as with a transient failure of this one write.
+        try await fixture.db.writerForTests.write { database in
+            try database.execute(sql: """
+                CREATE TRIGGER reject_prompt_cleanup
+                BEFORE UPDATE OF awaitingInputReason ON terminal
+                WHEN OLD.awaitingInputReason IS NOT NULL AND NEW.awaitingInputReason IS NULL
+                BEGIN
+                    SELECT RAISE(FAIL, 'injected prompt cleanup failure');
+                END
+                """)
+        }
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
+
+        let response = try await task.value
+        #expect(response.success, "metadata cleanup must not abort respawn: \(response.error ?? "")")
+        #expect(commands.values.filter { $0.contains("respawn-window") }.count == 1)
+        let after = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(after.awaitingInputReason != nil, "the injected write failure must have fired")
+        #expect(!fixture.deltas.values.contains {
+            guard case .terminalAwaitingInputChanged(let delta) = $0 else { return false }
+            return delta.terminalID == after.id && delta.reason == nil
+        }, "a failed cleanup must not tell subscribers the persisted reason was cleared")
+        #expect(after.sessionIncarnationID != fixture.terminal.sessionIncarnationID)
+        #expect(!after.isParked)
+    }
 
     @Test(arguments: [true, false])
     func anInPlaceSwapOnADeskKeepsTheStatuslineTee(withConversation: Bool) async throws {
