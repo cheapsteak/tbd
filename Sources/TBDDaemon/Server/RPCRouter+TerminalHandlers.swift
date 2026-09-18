@@ -2623,7 +2623,13 @@ extension RPCRouter {
         // Legacy Notification hooks carry no incarnation token. Retract any
         // wait reason the predecessor recorded during the interrupt, before
         // launching a successor that could raise a legitimate new prompt.
-        try await db.terminals.clearAwaitingInputReason(id: oldTerminal.id)
+        do {
+            try await db.terminals.clearAwaitingInputReason(id: oldTerminal.id)
+        } catch {
+            // The predecessor is already stopped: a metadata cleanup failure
+            // must not prevent the replacement process from starting.
+            logger.warning("inPlace swap: prompt cleanup failed for terminal \(oldTerminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
 
         // Step 2 killed the process any recorded prompt was raised on, and this
         // row survives the swap — so a `permission_prompt` standing here now

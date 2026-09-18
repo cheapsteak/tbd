@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 import TestSupport
 @testable import TBDDaemonLib
@@ -174,6 +175,48 @@ extension TBDHomeSerialized {
         #expect(try await fixture.db.terminals.list(worktreeID: after.worktreeID).count == 1)
         #expect(commands.values.filter { $0.contains("respawn-window") }.count == 1)
         #expect(!commands.values.contains { $0.contains("new-window") })
+    }
+
+    @Test(.clockDriven)
+    func promptCleanupFailureStillStartsReplacement() async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let clock = EventDrivenTestClock()
+        let commands = FireRecorder<[String]>()
+        let fixture = try await makeFixture(
+            scratch, desk: false, withConversation: true,
+            recorder: { commands.record($0) }, clock: clock)
+        let task = Task { try await swap(fixture, mode: .inPlace) }
+        defer { task.cancel() }
+
+        try await clock.requireSleeperArmed()
+        try await fixture.db.terminals.recordAwaitingInputReason(
+            id: fixture.terminal.id,
+            reason: AwaitingInputReason(message: "Predecessor prompt", hookEventName: "Notification"),
+            observedAt: Date())
+        // Fail only the post-interrupt metadata clear, after the replacement
+        // reservation has already committed. All reads and respawn work remain
+        // available, just as with a transient failure of this one write.
+        try await fixture.db.writerForTests.write { database in
+            try database.execute(sql: """
+                CREATE TRIGGER reject_prompt_cleanup
+                BEFORE UPDATE OF awaitingInputReason ON terminal
+                WHEN OLD.awaitingInputReason IS NOT NULL AND NEW.awaitingInputReason IS NULL
+                BEGIN
+                    SELECT RAISE(FAIL, 'injected prompt cleanup failure');
+                END
+                """)
+        }
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
+
+        let response = try await task.value
+        #expect(response.success, "metadata cleanup must not abort respawn: \(response.error ?? "")")
+        #expect(commands.values.filter { $0.contains("respawn-window") }.count == 1)
+        let after = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(after.awaitingInputReason != nil, "the injected write failure must have fired")
+        #expect(after.sessionIncarnationID != fixture.terminal.sessionIncarnationID)
+        #expect(!after.isParked)
     }
 
     @Test(arguments: [true, false])
