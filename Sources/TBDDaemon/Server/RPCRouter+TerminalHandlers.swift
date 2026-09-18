@@ -2620,6 +2620,10 @@ extension RPCRouter {
         //    `respawn-window -k` remains the termination guarantee; the graceful
         //    stop gives Claude a chance to flush before the forced replacement.
         await gracefullyInterruptPane(server: server, paneID: paneID)
+        // Legacy Notification hooks carry no incarnation token. Retract any
+        // wait reason the predecessor recorded during the interrupt, before
+        // launching a successor that could raise a legitimate new prompt.
+        try await db.terminals.clearAwaitingInputReason(id: oldTerminal.id)
 
         // Step 2 killed the process any recorded prompt was raised on, and this
         // row survives the swap — so a `permission_prompt` standing here now

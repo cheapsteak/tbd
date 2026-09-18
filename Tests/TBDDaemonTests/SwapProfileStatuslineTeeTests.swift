@@ -142,6 +142,19 @@ extension TBDHomeSerialized {
             id: predecessor.id,
             reportedIncarnationID: predecessor.sessionIncarnationID)
         #expect(!stamped, "the interrupted predecessor must already be fenced")
+        // Notification predates incarnation tokens. Unlike SessionEnd it can
+        // still write during the interrupt, so the swap must retract its
+        // persisted reason before the successor starts.
+        let notification = try RPCRequest(
+            method: RPCMethod.terminalNotificationEvent,
+            params: TerminalNotificationEventParams(
+                terminalID: predecessor.id,
+                notificationType: afterEscape ? "permission_prompt" : "idle_prompt",
+                message: "Predecessor prompt"))
+        #expect((await fixture.router.handle(notification)).success)
+        let interrupted = try #require(try await fixture.db.terminals.get(id: predecessor.id))
+        #expect(interrupted.awaitingInputReason != nil)
+
         try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
         if afterEscape {
             try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
@@ -151,6 +164,8 @@ extension TBDHomeSerialized {
         #expect(response.error == nil, "swap errored: \(response.error ?? "")")
         let after = try #require(try await fixture.db.terminals.get(id: predecessor.id))
         #expect(!after.isParked)
+        #expect(after.awaitingInputReason == nil)
+        #expect(after.awaitingInputObservedAt == nil)
         #expect(after.sessionIncarnationID != predecessor.sessionIncarnationID)
         #expect(after.claudeSessionID == predecessor.claudeSessionID)
         #expect(after.transcriptPath == predecessor.transcriptPath)
