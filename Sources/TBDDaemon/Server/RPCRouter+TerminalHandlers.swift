@@ -2598,15 +2598,11 @@ extension RPCRouter {
         let windowID = oldTerminal.tmuxWindowID
         var respawnError: String?
 
-        // 1. Gracefully interrupt the pane's current Claude before respawn.
-        //    `respawn-window -k` will forcibly replace it regardless, but a
-        //    graceful stop lets Claude finish flushing and avoids yanking an
-        //    in-flight generation. Best-effort — never blocks the swap.
-        await gracefullyInterruptPane(server: server, paneID: paneID)
-
-        // 2. Commit the replacement identity and process token before launch,
-        //    so old-process hooks are stale and new-process hooks can attach
-        //    immediately without a launch gate.
+        // 1. Reserve the replacement identity before interrupting the old
+        //    process. Its SessionEnd hook can arrive during the graceful stop:
+        //    fencing that hook first prevents our own interrupt from parking
+        //    the row and invalidating the replacement snapshot. The complete
+        //    snapshot still rejects a competing replacement before any signal.
         let replacementObservedAt = now()
         guard let incarnationID = try await db.terminals.prepareProfileAgentRespawn(
             id: oldTerminal.id,
@@ -2620,7 +2616,12 @@ extension RPCRouter {
         guard let prepared = try await db.terminals.get(id: oldTerminal.id) else {
             return (RPCResponse(error: "Terminal vanished before swap"), nil)
         }
-        // Step 1 killed the process any recorded prompt was raised on, and this
+        // 2. Gracefully interrupt the old process after fencing its hooks.
+        //    `respawn-window -k` remains the termination guarantee; the graceful
+        //    stop gives Claude a chance to flush before the forced replacement.
+        await gracefullyInterruptPane(server: server, paneID: paneID)
+
+        // Step 2 killed the process any recorded prompt was raised on, and this
         // row survives the swap — so a `permission_prompt` standing here now
         // describes a dead pane. `SessionStateResolver`'s rung 4 would keep
         // reporting it as a live wait: `transcriptPath` is unchanged and its
@@ -2713,13 +2714,11 @@ extension RPCRouter {
     private func gracefullyInterruptPane(server: String, paneID: String) async {
         // Escape: ask Claude to stop generating.
         try? await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
-        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-        try? await Task.sleep(for: .milliseconds(150))
+        try? await clock.sleep(for: .milliseconds(150))
         // C-c C-c: interrupt / exit the TUI.
         try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
         try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
-        // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
-        try? await Task.sleep(for: .milliseconds(150))
+        try? await clock.sleep(for: .milliseconds(150))
         // SIGTERM the pane pid as a backstop (respawn -k is the real guarantee).
         if let pidStr = try? await tmux.panePID(server: server, paneID: paneID),
            let pid = Int32(pidStr), pid > 0 {
