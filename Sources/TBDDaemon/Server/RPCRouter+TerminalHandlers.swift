@@ -339,7 +339,8 @@ extension RPCRouter {
                     // resume keeps the stable pre-balancing resolution.
                     resolvedProfile = try await modelProfileResolver.resolve(
                         repoID: worktree.repoID,
-                        balance: ModelProfileResolver.balances(resumeSessionID: params.resumeSessionID))
+                        balance: ModelProfileResolver.balances(resumeSessionID: params.resumeSessionID),
+                        worktreeID: params.worktreeID)
                 }
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")

@@ -70,7 +70,9 @@ The flag is tri-state: `NULL` (never chosen), `0` (explicit off), or `1` (explic
 
 ## Seeing the load
 
-**Settings** – each profile row now shows live sessions beside usage: "5h 61% · 7d 38% · 2 live".
+**Settings** – each profile row now shows live sessions beside usage: "5h 61% · 7d 38% · 2 live". While balancing is on, a profile balancing skips because its usage reading is stale also carries a "stale — skipped by balancing" badge.
+
+**Stale accounts** – when a balanced pick skips an account that is otherwise in the pool because its usage reading is stale, TBD posts one notification on the worktree the session was spawning in: "Usage for Personal hasn't refreshed in 42 min — balancing is skipping it; check its login" ("has no usage reading yet" when there has never been one). It notifies once per account; the next time a balanced pick sees that account with a fresh reading, a relapse notifies again. A daemon restart also resets it. Only balanced picks notify, so nothing is posted while balancing is off.
 
 **Account picker and swap menu** – live counts appear in the usage summary. When balancing is on, the picker reorders rows to match the balanced pick, and the row TBD would choose carries a "balanced pick" caption.
 
@@ -99,7 +101,7 @@ log stream --level info --predicate 'subsystem == "com.tbd.daemon" AND category 
 ```
 
 **A profile is never chosen** – check:
-- **Is it in the pool?** No fresh reading (not logged in, or usage poller failing) → no pick. Wait 5–15 min, then check `tbd profile list`.
+- **Is it in the pool?** No fresh reading (not logged in, or usage poller failing) → no pick. Settings shows the "stale — skipped by balancing" badge on such a profile, and the first balanced spawn that skips it posts a notification. Check its login, then `tbd profile list`.
 - **Opted out?** Use `tbd profile pool <name> include` or uncheck **Include in balancing**.
 - **At the floor?** A profile at 96%+ headroom is treated as full and passed over.
 - **Balancing off?** `tbd profile balancing on` to enable it.

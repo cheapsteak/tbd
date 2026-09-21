@@ -430,7 +430,9 @@ public final class RPCRouter: Sendable {
             repos: db.repos,
             config: db.config,
             candidateSource: resolvedCandidateSource,
-            reservations: ProfilePickReservations()
+            reservations: ProfilePickReservations(),
+            staleAlerts: StaleAccountAlerts(
+                notify: StaleAccountAlerts.notifier(db: db, subscriptions: subscriptions))
         )
         self.modelProfileResolver = resolvedModelProfileResolver
         self.hibernationCoordinator = HibernationCoordinator(

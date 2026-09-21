@@ -1400,7 +1400,8 @@ extension WorktreeLifecycle {
                     repoID: repo?.id, override: overrideProfileID,
                     balance: ModelProfileResolver.balancesWorktreeSpawn(
                         restoringArchivedSessions: !archivedSessions.isEmpty,
-                        carryingOver: carryover != nil))
+                        carryingOver: carryover != nil),
+                    worktreeID: worktreeID)
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil
