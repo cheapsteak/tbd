@@ -179,12 +179,18 @@ extension HibernationCoordinator {
     /// A `daemon` screen then still has to answer for its content: `source`
     /// says which store is rendering live, and `contentObserved` says whether
     /// that store's grid was ever painted by this child.
+    ///
+    /// The decision itself lives in `HolderScreenEvidence`, so the park, the
+    /// idle sweep and the auto-`/login` pump cannot disagree about which
+    /// screens are judgeable; what this method adds is the hibernation wording
+    /// for each answer.
     static func holderRefusal(
         forScreenSource source: TerminalScreen.Source, contentObserved: Bool
     ) -> String? {
-        switch source {
-        case .staleDaemon, .viewer: return holderViewerAttachedRefusal
-        case .daemon: return contentObserved ? nil : holderContentUnobservedRefusal
+        switch HolderScreenEvidence.refusal(forSource: source, contentObserved: contentObserved) {
+        case .viewerHoldsPty: return holderViewerAttachedRefusal
+        case .contentUnobserved: return holderContentUnobservedRefusal
+        case nil: return nil
         }
     }
 

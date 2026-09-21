@@ -657,7 +657,8 @@ extension RPCRouter {
     /// - **holder** — the daemon's own retained emulator through the typed
     ///   screen, judged only when it is live and fully observed
     ///   (`LoginSessionCoordinator.paneReading(from:)`), and two courier writes
-    ///   for the same two acts.
+    ///   for the same two acts, paced `PacedKeySender.interKeyPause` apart so
+    ///   the body and the submit reach the child as separate reads.
     ///
     /// `server` is the tmux server the spawn ran in, and is consulted on the
     /// tmux arm alone — a holder row has no server behind it.
@@ -711,21 +712,29 @@ extension RPCRouter {
                         logger.warning("auto-login: terminal \(terminalID, privacy: .public) runs on the pty-holder transport and this daemon has no injection path; nothing was typed")
                         return
                     }
-                    // Two writes, as the tmux arm sends two commands. One write
-                    // carrying both would hand the TUI a body and a submitting
-                    // `\r` in the same burst, which its paste heuristic can
-                    // absorb into the text.
+                    // Enter comes through the named-key table, against whatever
+                    // modes the session's store reports, so the login tab
+                    // resolves a key the one way every other holder send does.
+                    // The reading is taken once, before anything is written:
+                    // a submit this daemon cannot spell types nothing at all
+                    // rather than leaving a `/login` sitting in the composer.
+                    let modes = (await self.holderModeReading(terminalID: terminalID))?.modes
+                    guard let enter = HolderNamedKeys.bytes(for: "Enter", modes: modes) else {
+                        logger.warning("auto-login: no holder byte mapping for Enter; nothing was typed into terminal \(terminalID, privacy: .public)")
+                        return
+                    }
+                    // Two writes with a pause between them, which is the shape
+                    // the tmux arm has — `send-keys -l` and then a separate
+                    // `Enter` command — and the shape this pump was proven
+                    // against live. Back-to-back raw writes coalesce into one
+                    // child `read()` on the daemon-write path, and the TUI's
+                    // paste heuristic can absorb the `\r` into the body it
+                    // arrives with. `PacedKeySender.interKeyPause` is the pause
+                    // every other holder key sequence already takes.
                     let bodyLanded = await self.deliverLoginBytes(
                         Data("/login".utf8), terminalID: terminalID, courier: courier)
                     guard bodyLanded else { return }
-                    // Enter through the named-key table, against whatever modes
-                    // the session's store reports, so the login tab resolves a
-                    // key the one way every other holder send does.
-                    let modes = (await self.holderModeReading(terminalID: terminalID))?.modes
-                    guard let enter = HolderNamedKeys.bytes(for: "Enter", modes: modes) else {
-                        logger.warning("auto-login: no holder byte mapping for Enter; terminal \(terminalID, privacy: .public) was typed /login without a submit")
-                        return
-                    }
+                    try? await self.clock.sleep(for: PacedKeySender.interKeyPause)
                     _ = await self.deliverLoginBytes(
                         enter, terminalID: terminalID, courier: courier)
                 }

@@ -13,9 +13,10 @@ import TestSupport
 /// pump branches on and let the assertions be on bytes rather than on counts.
 ///
 /// The pump itself runs on `EventDrivenTestClock`, so every wait in these
-/// tests is an arming handshake: the pump arms its next sleep only after the
-/// iteration before it has finished reading and typing, which is what makes a
-/// synchronous read of the write log sound.
+/// tests is an arming handshake: each sleep arms only after the step before it
+/// has finished, which is what makes a synchronous read of the write log sound.
+/// A `/login` submit takes two of those steps — the body, the paced pause, then
+/// the Enter — so the pause is where the log holds the body alone.
 @Suite("Holder login pump", .clockDriven)
 struct HolderLoginPumpTests {
 
@@ -155,7 +156,12 @@ struct HolderLoginPumpTests {
             tmux: tmux,
             configDirManager: configDirManager,
             loginSessions: LoginSessionCoordinator(delays: delays, clock: clock),
-            actuationLog: makeTestActuationLog())
+            actuationLog: makeTestActuationLog(),
+            // The same clock the coordinator takes: the pump's own waits are
+            // the coordinator's, and the pause between the body and the submit
+            // is the router's, so both have to be on the virtual timeline this
+            // test drives.
+            clock: clock)
         router.holderScreenOracle = { _ in try screens.screen() }
         if wireCourier {
             router.holderInjectionCourier = HolderInjectionCourier(
@@ -239,14 +245,26 @@ struct HolderLoginPumpTests {
     // MARK: - The screen the pump may judge
 
     /// The whole act, in bytes: the body and the submit as two separate
-    /// writes, in that order, and nothing more once the dialog is up.
+    /// writes, paced apart, in that order, and nothing more once the dialog is
+    /// up.
+    ///
+    /// The pacing is asserted rather than assumed. Two raw writes made
+    /// back-to-back coalesce into one child `read()`, where the TUI's paste
+    /// heuristic can absorb the `\r` into the text it arrives with — so the
+    /// body standing alone in the log while the pump waits is the property,
+    /// not an artefact of how the test steps.
     @Test("a live, fully observed ready screen is typed /login then Enter, once")
     func observedReadyScreenIsTypedOnce() async throws {
         let screens = ScreenBox(lines: Self.readyLines)
         let fixture = try await Self.makeFixture(screens: screens)
         await fixture.startPump()
 
-        // The post-send sleep arms only after both writes have been made.
+        // The inter-key pause arms only after the body has been written.
+        try await fixture.clock.requireSleeperArmed()
+        #expect(fixture.writes.writes == [Self.loginBytes])
+
+        // And the post-send sleep only after the submit joins it.
+        try await fixture.clock.requireAdvanceWhenArmed(by: PacedKeySender.interKeyPause)
         try await fixture.clock.requireSleeperArmed()
         #expect(fixture.writes.writes == [Self.loginBytes, Self.enterBytes])
 
@@ -268,11 +286,21 @@ struct HolderLoginPumpTests {
         let fixture = try await Self.makeFixture(screens: ScreenBox(lines: Self.readyLines))
         await fixture.startPump()
 
-        // Each advance waits for the post-send sleep the previous iteration
-        // armed, which is the proof its pair of writes had already been made.
+        // The first send, stepped through its pause, so a retry is shown to
+        // pace its two writes exactly as the first attempt does.
+        try await fixture.clock.requireSleeperArmed()
+        #expect(fixture.writes.writes == [Self.loginBytes])
+        try await fixture.clock.requireAdvanceWhenArmed(by: PacedKeySender.interKeyPause)
+        try await fixture.clock.requireSleeperArmed()
+        #expect(fixture.writes.writes == [Self.loginBytes, Self.enterBytes])
         try await fixture.clock.requireAdvanceWhenArmed(by: Self.delays.pumpPostSendDelay)
-        try await fixture.clock.requireAdvanceWhenArmed(by: Self.delays.pumpPostSendDelay)
-        try await fixture.clock.requireAdvanceWhenArmed(by: Self.delays.pumpPostSendDelay)
+
+        // Two more attempts, each a pause and then the sleep its completed
+        // pair arms — the proof both of its writes had already been made.
+        for _ in 0..<2 {
+            try await fixture.clock.requireAdvanceWhenArmed(by: PacedKeySender.interKeyPause)
+            try await fixture.clock.requireAdvanceWhenArmed(by: Self.delays.pumpPostSendDelay)
+        }
         // The cap is reached, so this iteration takes the poll arm instead.
         try await fixture.clock.requireSleeperArmed()
 

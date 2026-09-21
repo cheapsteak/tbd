@@ -646,6 +646,11 @@ struct HolderSpawnGateTests {
         #expect(
             !issued.contains(where: { $0.contains("new-session") }),
             "the login tab started a tmux server: \(issued)")
+
+        // The pump polls the holder and the identity watcher reads the profile
+        // dir; teardown kills the holder and deletes the home, so stop the pump
+        // before either becomes a read against something that is gone.
+        await fixture.router.loginSessions.cancelPendingAutoLogin(terminalID: row.id)
     }
 
     /// The other arm, unchanged: with the flag off a login tab is a tmux
@@ -671,6 +676,11 @@ struct HolderSpawnGateTests {
         #expect(
             !FileManager.default.fileExists(atPath: socketPath),
             "a holder rendezvous was created for a tmux-transport login tab")
+
+        // The pump polls the pane and the identity watcher reads the profile
+        // dir; teardown kills the session and deletes the home, so stop the
+        // pump before either becomes a read against something that is gone.
+        await fixture.router.loginSessions.cancelPendingAutoLogin(terminalID: row.id)
     }
 
     // MARK: - Fork-session swap
