@@ -11,28 +11,28 @@ struct AccountPickerOrderingTests {
                 profile: ModelProfile(id: UUID(), name: "Profile A", kind: .oauth),
                 loginIdentity: "a@example.com",
                 usageSnapshot: ProfileUsageSnapshot(
-                    organizationID: nil,
-                    statusKind: .ok,
-                    isOK: true,
-                    buckets: [
-                        ClaudeUsageLimitBucket(kind: "session", percent: 50, resetsAt: Date(), severity: nil, modelDisplayName: nil)
+                buckets: [
+                        ClaudeUsageLimitBucket(kind: "session", percent: 50, severity: nil, resetsAt: Date(), modelDisplayName: nil)
                     ],
-                    fetchedAt: Date(),
-                    lastAttemptAt: Date()
+                fetchedAt: Date(),
+                lastAttemptAt: Date(),
+                status: "ok",
+                statusKind: .ok,
+                organizationID: nil
                 )
             ),
             ModelProfileWithUsage(
                 profile: ModelProfile(id: UUID(), name: "Profile B", kind: .oauth),
                 loginIdentity: "b@example.com",
                 usageSnapshot: ProfileUsageSnapshot(
-                    organizationID: nil,
-                    statusKind: .ok,
-                    isOK: true,
-                    buckets: [
-                        ClaudeUsageLimitBucket(kind: "session", percent: 30, resetsAt: Date(), severity: nil, modelDisplayName: nil)
+                buckets: [
+                        ClaudeUsageLimitBucket(kind: "session", percent: 30, severity: nil, resetsAt: Date(), modelDisplayName: nil)
                     ],
-                    fetchedAt: Date(),
-                    lastAttemptAt: Date()
+                fetchedAt: Date(),
+                lastAttemptAt: Date(),
+                status: "ok",
+                statusKind: .ok,
+                organizationID: nil
                 )
             )
         ]
@@ -60,14 +60,14 @@ struct AccountPickerOrderingTests {
                 profile: ModelProfile(id: oauthID, name: "OAuth", kind: .oauth),
                 loginIdentity: "user@example.com",
                 usageSnapshot: ProfileUsageSnapshot(
-                    organizationID: nil,
-                    statusKind: .ok,
-                    isOK: true,
-                    buckets: [
-                        ClaudeUsageLimitBucket(kind: "session", percent: 40, resetsAt: Date(), severity: nil, modelDisplayName: nil)
+                buckets: [
+                        ClaudeUsageLimitBucket(kind: "session", percent: 40, severity: nil, resetsAt: Date(), modelDisplayName: nil)
                     ],
-                    fetchedAt: Date(),
-                    lastAttemptAt: Date()
+                fetchedAt: Date(),
+                lastAttemptAt: Date(),
+                status: "ok",
+                statusKind: .ok,
+                organizationID: nil
                 )
             ),
             ModelProfileWithUsage(
@@ -102,14 +102,14 @@ struct AccountPickerOrderingTests {
                 profile: ModelProfile(id: oauthID, name: "OAuth", kind: .oauth),
                 loginIdentity: "user@example.com",
                 usageSnapshot: ProfileUsageSnapshot(
-                    organizationID: nil,
-                    statusKind: .ok,
-                    isOK: true,
-                    buckets: [
-                        ClaudeUsageLimitBucket(kind: "session", percent: 30, resetsAt: Date(), severity: nil, modelDisplayName: nil)
+                buckets: [
+                        ClaudeUsageLimitBucket(kind: "session", percent: 30, severity: nil, resetsAt: Date(), modelDisplayName: nil)
                     ],
-                    fetchedAt: Date(),
-                    lastAttemptAt: Date()
+                fetchedAt: Date(),
+                lastAttemptAt: Date(),
+                status: "ok",
+                statusKind: .ok,
+                organizationID: nil
                 )
             ),
             ModelProfileWithUsage(

@@ -23,7 +23,9 @@ public final class RPCRouter: Sendable {
     public let actuationLog: ActuationLog
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
-    public let profilePoolCandidateSource: ProfilePoolCandidateSource?
+    /// Injected for the rate-limit handler's rotation suggestion; a seam like
+    /// `limitResumeScheduler` so tests can install one after construction.
+    public nonisolated(unsafe) var profilePoolCandidateSource: ProfilePoolCandidateSource?
     public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     /// Edge-triggered gate in front of the merged-PR fan-out (auto-archive,
