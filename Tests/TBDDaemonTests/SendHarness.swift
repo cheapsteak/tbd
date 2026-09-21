@@ -212,6 +212,44 @@ struct SendHarness {
             clock: clock)
     }
 
+    /// Installs a real `HolderRegistry` on this harness's router and, when
+    /// `status` is non-nil, records it for this harness's terminal as a
+    /// holder's own report would have.
+    ///
+    /// The registry is real rather than a double because `HolderRegistry` is a
+    /// concrete actor with no protocol behind it, and because the production
+    /// read under test is literally `holderRegistry?.lastKnownStatus(for:)` —
+    /// a router-level seam would replace the very expression a wrong `nil`
+    /// registry or a wrong terminal id would show up in. It holds no reader
+    /// and no spawner, so `holderModeReading`'s registry fallback still
+    /// answers nil exactly as it does with no registry at all, and nothing
+    /// here reaches a socket.
+    ///
+    /// Passing `nil` (the default) is the "a holder was adopted but has never
+    /// reported a status" state, which is a different input from leaving
+    /// `router.holderRegistry` unset — the state every other holder suite
+    /// runs in.
+    @discardableResult
+    func installHolderRegistry(reporting status: HolderChildStatus? = nil) async
+        -> HolderRegistry {
+        // Bound to a local rather than captured through `self`: the closure is
+        // `@Sendable` and this harness is not.
+        let row = terminal
+        let registry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            // A rendezvous root with nothing in it, under the run's fenced
+            // scratch dir. Nothing here connects, but a registry that derived
+            // its paths from the real `TBD_HOME` would be one edit away from
+            // doing so.
+            environment: ["TBD_HOME": fencedScratchRoot(prefix: "tbd-send-harness-holder")],
+            listTerminals: { [row] })
+        if let status {
+            await registry.recordStatusForTesting(status, for: row.id)
+        }
+        router.holderRegistry = registry
+        return registry
+    }
+
     /// `connection` is what the daemon would have learned from the socket the
     /// request arrived on. Defaulted to nil — "not established" — which is what
     /// every non-socket caller of the router gets, and the answer that keeps the

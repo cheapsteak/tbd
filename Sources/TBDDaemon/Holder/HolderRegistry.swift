@@ -511,6 +511,26 @@ actor HolderRegistry {
         statuses[terminalID]
     }
 
+    /// Records a status for a session exactly as a holder's own report would
+    /// have. Test-facing; production never calls it.
+    ///
+    /// It exists because `.exited(code:)` is otherwise out of reach of a unit
+    /// test. Production writes this map in three places and each needs a real
+    /// holder on the other end of a socket: the adoption hand-over, the
+    /// startup sweep, and `reclaimIfSessionEnded`'s exit probe. A rendezvous
+    /// with nothing bound at it reaches `.exitedStatusUnknown` without a
+    /// holder — that is how `HolderReconcileInventoryTests` gets its status —
+    /// but a *confirmed* exit code requires a holder that answers, which is a
+    /// live test. So the readers that branch on `.exited` had no way to be
+    /// pinned at this level against the other three answers they must let
+    /// through.
+    ///
+    /// `nil` clears the entry, which is the distinct "no holder ever reported"
+    /// state rather than a fourth status.
+    func recordStatusForTesting(_ status: HolderChildStatus?, for terminalID: UUID) {
+        statuses[terminalID] = status
+    }
+
     // MARK: - Sizing
 
     /// Applies a viewer's desired size to one holder-backed session, and

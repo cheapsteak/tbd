@@ -477,6 +477,149 @@ struct HolderVerifiedSendTests {
         #expect(writes.writes.isEmpty)
     }
 
+    // MARK: - The holder's last reported child status
+
+    // The tests below are one decision seen from each of its inputs — the
+    // three statuses, a status never reported, and a status reported for a
+    // different session. The branch reads:
+    //
+    //     if case .exited = await self.holderRegistry?.lastKnownStatus(for: terminalID)
+    //
+    // and only a reported `.exited` may refuse. `.alive`,
+    // `.exitedStatusUnknown` and a status never reported are all uncertainty,
+    // and uncertainty proceeds: the courier's own write is the authority on
+    // whether the pty still takes bytes.
+    //
+    // All of them install a REAL registry. Without one the expression is
+    // `nil?.lastKnownStatus(...)`, which is `nil` before the case-match is ever
+    // consulted — so a suite that leaves `router.holderRegistry` unset proves
+    // only that the router has no registry, whatever the match says.
+
+    /// A child the holder has already reported dead cannot receive a retry.
+    ///
+    /// Parameterised over the exit code to pin what the refusal turns on: the
+    /// `.exited` case, not a non-zero status. A child that exited cleanly is
+    /// just as unable to read.
+    ///
+    /// Discriminates: this is the only test in the tree that reaches the
+    /// refusal at all. Narrow the match to `.exited(code: let c) where c != 0`
+    /// and the `0` case delivers; drop the branch entirely, or spell the
+    /// registry read with any other terminal id, and both cases deliver.
+    @Test(
+        "a holder that reported its child exited refuses the retry",
+        arguments: [Int32(0), Int32(137)])
+    func aReportedExitRefusesTheRetry(code: Int32) async throws {
+        let writes = HolderVerifyWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { writes.record($0) })
+        await harness.installHolderRegistry(reporting: .exited(code: code))
+
+        let outcome = await harness.router.redeliverVerifiedPayload(
+            terminalID: harness.terminal.id, sessionID: "sess-1", payload: "hi", submit: true)
+
+        #expect(outcome == .refused(.notEligible))
+        #expect(writes.writes.isEmpty,
+                "the retry wrote into a pty the daemon already knows is dead")
+    }
+
+    /// The polarity the refusal is measured against, and the common case: a
+    /// holder still reporting its child alive.
+    ///
+    /// Discriminates: invert the match to refuse on anything but `.exited` —
+    /// the shape a mistyped `if case .exited = ... else` produces — and this
+    /// refuses instead of writing.
+    @Test("a holder still reporting its child alive gets the retry")
+    func aLiveChildGetsTheRetry() async throws {
+        let writes = HolderVerifyWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { writes.record($0) })
+        let bare = Self.reading(bracketedPaste: false)
+        harness.router.holderModeOracle = { _ in bare }
+        await harness.installHolderRegistry(reporting: .alive)
+
+        let outcome = await harness.router.redeliverVerifiedPayload(
+            terminalID: harness.terminal.id, sessionID: "sess-1", payload: "hi", submit: true)
+
+        #expect(outcome == .dispatched)
+        #expect(writes.writes == [Self.expected(body: "hi", wrapped: false, submit: true)])
+    }
+
+    /// An exit the holder could not observe is not an exit it reported. The
+    /// status exists precisely so a failed probe is never read as a successful
+    /// one, and spending the mechanism's one retry on it would throw the
+    /// re-delivery away on an absence that is evidence of nothing.
+    ///
+    /// Discriminates: widen the match to `case .exited, .exitedStatusUnknown`
+    /// — the plausible mistake, since the reclaim path in `HolderRegistry`
+    /// groups exactly those two — and this refuses instead of writing.
+    @Test("a holder that could not observe its child's exit still gets the retry")
+    func anUnobservedExitStillGetsTheRetry() async throws {
+        let writes = HolderVerifyWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { writes.record($0) })
+        let bare = Self.reading(bracketedPaste: false)
+        harness.router.holderModeOracle = { _ in bare }
+        await harness.installHolderRegistry(reporting: .exitedStatusUnknown)
+
+        let outcome = await harness.router.redeliverVerifiedPayload(
+            terminalID: harness.terminal.id, sessionID: "sess-1", payload: "hi", submit: true)
+
+        #expect(outcome == .dispatched)
+        #expect(writes.writes == [Self.expected(body: "hi", wrapped: false, submit: true)])
+    }
+
+    /// A registry holding no status for this session at all — a holder that has
+    /// never reported. Distinct from the unset-registry state every other
+    /// holder test runs in: the read happens and answers nil.
+    ///
+    /// Discriminates: match the *absence* instead of the case — `guard case
+    /// .some(.alive) = ...` or a `case .none` arm added to a switch — and this
+    /// refuses instead of writing. It also pins the terminal id, since a read
+    /// for any other id answers nil here too but would also answer nil in the
+    /// `.exited` test above, where nil is the wrong answer.
+    @Test("a holder that never reported a status gets the retry")
+    func aNeverReportedStatusGetsTheRetry() async throws {
+        let writes = HolderVerifyWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { writes.record($0) })
+        let bare = Self.reading(bracketedPaste: false)
+        harness.router.holderModeOracle = { _ in bare }
+        let registry = await harness.installHolderRegistry()
+        #expect(await registry.lastKnownStatus(for: harness.terminal.id) == nil,
+                "the fixture recorded a status it was meant to leave unreported")
+
+        let outcome = await harness.router.redeliverVerifiedPayload(
+            terminalID: harness.terminal.id, sessionID: "sess-1", payload: "hi", submit: true)
+
+        #expect(outcome == .dispatched)
+        #expect(writes.writes == [Self.expected(body: "hi", wrapped: false, submit: true)])
+    }
+
+    /// One session's exit says nothing about another's, and the registry is
+    /// keyed by terminal id. A `.exited` recorded for a DIFFERENT session must
+    /// not reach this one's retry.
+    ///
+    /// Discriminates: read the registry with any id that is not the terminal's
+    /// — a stale capture, or the worktree id — and either this delivers when it
+    /// should refuse or the `.exited` test above refuses when it should
+    /// deliver. Neither test alone rules that out; together they do.
+    @Test("another session's reported exit does not refuse this one's retry")
+    func anotherSessionsExitDoesNotRefuseThisRetry() async throws {
+        let writes = HolderVerifyWriteRecorder()
+        let harness = try await SendHarness.make(
+            transport: .holder, holderDeliveryRecorder: { writes.record($0) })
+        let bare = Self.reading(bracketedPaste: false)
+        harness.router.holderModeOracle = { _ in bare }
+        let registry = await harness.installHolderRegistry()
+        await registry.recordStatusForTesting(.exited(code: 1), for: UUID())
+
+        let outcome = await harness.router.redeliverVerifiedPayload(
+            terminalID: harness.terminal.id, sessionID: "sess-1", payload: "hi", submit: true)
+
+        #expect(outcome == .dispatched)
+        #expect(writes.writes == [Self.expected(body: "hi", wrapped: false, submit: true)])
+    }
+
     /// **The retry arms nothing.** This call IS the verifier's retry; re-arming
     /// would make it observe its own re-delivery and retry that in turn.
     @Test("a holder retry arms no further verification")
