@@ -2771,6 +2771,8 @@ final class AppState {
             handleRemoteSessionAttentionDelta(d)
         case .remoteSessionReconnectRequested(let d):
             reconnectRemoteSession(RemoteSessionSelection(provider: d.provider, sessionID: d.sessionID))
+        case .terminalLimitHit:
+            break  // wired by the limit banner (app worker)
         default:
             break
         }

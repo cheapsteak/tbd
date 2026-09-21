@@ -15,6 +15,9 @@ struct ProfileCommand: AsyncParsableCommand {
             ProfileList.self,
             ProfileSetDefault.self,
             ProfileLogin.self,
+            ProfileBalancing.self,
+            ProfileRotation.self,
+            ProfilePool.self,
         ]
     )
 }
@@ -340,7 +343,7 @@ struct ProfileList: AsyncParsableCommand {
 
         let header: [(String, Int)] = [
             ("NAME", 24), ("KIND", 6), ("IDENTITY", 26),
-            ("5H", 4), ("RESET", 10), ("WK", 4), ("", 0),
+            ("LIVE", 4), ("5H", 4), ("RESET", 10), ("WK", 4), ("", 0),
         ]
         print(tableRow(header))
         let width = header.reduce(0) { $0 + max($1.1, $1.0.count) + 2 }
@@ -361,6 +364,7 @@ struct ProfileList: AsyncParsableCommand {
                 (entry.profile.name, 24),
                 (entry.profile.kind.rawValue, 6),
                 (identity, 26),
+                (String(entry.liveSessions ?? 0), 4),
                 (usagePercentCell(session), 4),
                 (usageResetCell(session?.resetsAt), 10),
                 (usagePercentCell(weeklyAll), 4),
@@ -492,5 +496,93 @@ struct ProfileLogin: AsyncParsableCommand {
             arguments: [],
             environment: env
         )
+    }
+}
+
+// MARK: - profile balancing
+
+struct ProfileBalancing: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "balancing",
+        abstract: "Enable or disable spreading new sessions across profiles (default off)",
+        discussion: """
+            When on, new sessions land on the eligible profile with the most \
+            room in its usage window, adjusted for how many sessions that \
+            account already carries.
+            """
+    )
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetProfileBalancingEnabled,
+            params: ConfigSetProfileBalancingEnabledParams(enabled: enabled))
+        print("Profile balancing \(enabled ? "enabled" : "disabled").")
+    }
+}
+
+// MARK: - profile rotation
+
+struct ProfileRotation: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rotation",
+        abstract: "Enable or disable automatic handover when a session hits its limit (default off)",
+        discussion: """
+            When on, a session that hits a hard usage limit is automatically \
+            resumed on another account with room, in the same tab, without \
+            losing the conversation.
+            """
+    )
+    @Argument(help: "on | off") var state: String
+    mutating func run() async throws {
+        let enabled: Bool
+        switch state.lowercased() {
+        case "on", "true", "enable": enabled = true
+        case "off", "false", "disable": enabled = false
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        }
+        try SocketClient().callVoid(
+            method: RPCMethod.configSetLimitRotationEnabled,
+            params: ConfigSetLimitRotationEnabledParams(enabled: enabled))
+        print("Limit rotation \(enabled ? "enabled" : "disabled").")
+    }
+}
+
+// MARK: - profile pool
+
+struct ProfilePool: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "pool",
+        abstract: "Include or exclude a profile from automatic balancing",
+        discussion: """
+            By default, all eligible profiles are in the balancing pool. Pass \
+            'exclude' to keep a profile out of automatic balancing — it stays \
+            reachable through explicit picks and overrides.
+            """
+    )
+    @Argument(help: "Profile name or UUID") var name: String
+    @Argument(help: "include | exclude") var action: String
+    mutating func run() async throws {
+        let optOut: Bool
+        switch action.lowercased() {
+        case "include": optOut = false
+        case "exclude": optOut = true
+        default: throw ValidationError("Expected 'include' or 'exclude', got: \(action)")
+        }
+        let client = SocketClient()
+        let list = try client.call(
+            method: RPCMethod.modelProfileList,
+            resultType: ModelProfileListResult.self
+        )
+        let entry = try resolveProfile(named: name, in: list.profiles)
+        try client.callVoid(
+            method: RPCMethod.modelProfileSetPoolOptOut,
+            params: ModelProfileSetPoolOptOutParams(id: entry.profile.id, optOut: optOut))
+        print("Profile '\(entry.profile.name)' is now \(optOut ? "excluded" : "included") in the balancing pool.")
     }
 }
