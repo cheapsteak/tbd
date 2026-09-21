@@ -66,7 +66,14 @@ final class ShutdownLatch: Sendable {
         lock.lock()
         defer { lock.unlock() }
         if let task { return task }
-        let created = Task(executorPreference: executor) { await body() }
+        // Swift 6.2's executor-preference initializer crashes with nil on the
+        // macOS 15 concurrency runtime. The default must use a plain task.
+        let created: Task<Void, Never>
+        if let executor {
+            created = Task(executorPreference: executor) { await body() }
+        } else {
+            created = Task { await body() }
+        }
         task = created
         return created
     }
