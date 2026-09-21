@@ -423,11 +423,13 @@ struct ContinueInClaudeTransactionTests {
                 tmuxPaneID: "%shell",
                 label: TerminalLabel.shell,
                 kind: .shell)
+            let before = try #require(
+                try await fixture.db.terminals.get(id: shell.id))
             let response = await fixture.router.handle(try RPCRequest(
                 method: RPCMethod.terminalContinueInClaude,
                 params: TerminalContinueInClaudeParams(sourceTerminalID: shell.id)))
             #expect(response.errorCode == RPCErrorCode.terminalWrongProvider.rawValue)
-            #expect(try await fixture.db.terminals.get(id: shell.id) == shell)
+            #expect(try await fixture.db.terminals.get(id: shell.id) == before)
         }
         do {
             let fixture = try await makeRPCFixture(ownsPane: true)
