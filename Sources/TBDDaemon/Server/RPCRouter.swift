@@ -345,8 +345,8 @@ public final class RPCRouter: Sendable {
     /// in a test without a process to inspect.
     let processSignaller: any ProcessSignaller
 
-    /// Behavior seam for the one place the send path has to *wait*: the settle
-    /// after an image paste, before whatever the parts arm does next. A
+    /// Behavior seam for send-path settling after an image paste and the
+    /// graceful interrupt before an in-place profile replacement. A
     /// `Duration` is behavior, so this is the `Clock` seam rather than the
     /// `now` date seam beside it, and it is existential (`any Clock<Duration>`)
     /// for the reason every other subsystem here holds one that way — a generic

@@ -682,6 +682,76 @@ func queuedShellRecreationRejectsNewerReplacement() async throws {
 func delayedClaudeReparkRejectsProfileReplacement() async throws {
     let db = try TBDDatabase(inMemory: true)
     let recorded = RecordedCommands()
+    let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorded.append)
+    let (actuationLog, actuationLogPath) = try makeReadableActuationLog()
+    let router = RPCRouter(
+        db: db,
+        lifecycle: WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+        tmux: tmux,
+        actuationLog: actuationLog)
+    let repoPath = "/tmp/fake-repo-repark-profile-race"
+    let worktreePath = "\(repoPath)/wt"
+    try ensureWorktreeDir(worktreePath)
+    let repo = try await db.repos.create(
+        path: repoPath, displayName: "test", defaultBranch: "main")
+    let worktree = try await db.worktrees.create(
+        repoID: repo.id, name: "wt", branch: "main", path: worktreePath,
+        tmuxServer: "tbd-repark-profile-race")
+    let terminal = try await db.terminals.create(
+        worktreeID: worktree.id,
+        tmuxWindowID: "@claude", tmuxPaneID: "%claude",
+        label: TerminalLabel.claudeCode,
+        claudeSessionID: "source-session", kind: .claude)
+    let profile = try await db.modelProfiles.create(name: "Replacement", kind: .oauth)
+
+    // Capture the re-park's predecessor snapshot BEFORE the profile transaction.
+    // Blocking at the graceful interrupt is too late: the swap has already
+    // reserved its replacement identity there, so such a caller is current.
+    let lockGate = ServerLockGate()
+    let holder = lockGate.hold(tmux, server: worktree.tmuxServer)
+    await lockGate.waitUntilHeld()
+    defer { lockGate.unlock() }
+    let recreateRequest = try RPCRequest(
+        method: RPCMethod.terminalRecreateWindow,
+        params: TerminalRecreateWindowParams(terminalID: terminal.id))
+    let repark = gateHoldingTask { await router.handle(recreateRequest) }
+    guard await waitUntil({
+        (try? actuationRows(at: actuationLogPath).contains {
+            $0["method"] as? String == RPCMethod.terminalRecreateWindow
+        }) == true
+    }, timeout: ciSafeDeadline) else {
+        lockGate.unlock()
+        _ = await holder.value
+        _ = await repark.value
+        Issue.record("re-park never reached the held server lock")
+        return
+    }
+
+    _ = try #require(try await db.terminals.prepareProfileAgentRespawn(
+        id: terminal.id,
+        expectedState: TerminalReplacementSnapshot(terminal: terminal),
+        sessionID: "source-session",
+        transcriptPath: terminal.transcriptPath,
+        profileID: profile.id,
+        at: Date(timeIntervalSinceReferenceDate: 10)))
+    let replacement = try #require(try await db.terminals.get(id: terminal.id))
+    let commandCount = recorded.snapshot().count
+    lockGate.unlock()
+    _ = await holder.value
+
+    #expect(!(await repark.value).success)
+    let unchanged = try #require(try await db.terminals.get(id: terminal.id))
+    #expect(unchanged == replacement)
+    #expect(!unchanged.isParked)
+    #expect(recorded.snapshot().count == commandCount,
+            "a stale re-park must issue no kill, create, or respawn")
+}
+
+@Test("a re-park queued during profile interrupt leaves the replacement alive")
+func reparkDuringProfileInterruptLeavesReplacementAlive() async throws {
+    let db = try TBDDatabase(inMemory: true)
+    let recorded = RecordedCommands()
     let profileInterrupt = BlockingProfileInterruptProbe()
     let tmux = TmuxManager(
         dryRun: true,
@@ -730,6 +800,14 @@ func delayedClaudeReparkRejectsProfileReplacement() async throws {
         return
     }
 
+    // The handler snapshots its row before acquiring the server lock. At
+    // this boundary the swap has reserved the replacement identity already,
+    // so the queued re-park is current and must return a harmless live-window
+    // no-op after the swap releases the lock.
+    let reserved = try #require(try await db.terminals.get(id: terminal.id))
+    #expect(reserved.sessionIncarnationID != terminal.sessionIncarnationID)
+    #expect(reserved.profileID == profile.id)
+
     let recreateRequest = try RPCRequest(
         method: RPCMethod.terminalRecreateWindow,
         params: TerminalRecreateWindowParams(terminalID: terminal.id))
@@ -751,9 +829,10 @@ func delayedClaudeReparkRejectsProfileReplacement() async throws {
     #expect(profileResponse.success)
     let replacement = try #require(try await db.terminals.get(id: terminal.id))
 
-    #expect(!(await repark.value).success)
+    #expect((await repark.value).success, "a caller that observed the reserved identity is a current no-op")
     let unchanged = try #require(try await db.terminals.get(id: terminal.id))
-    #expect(unchanged == replacement)
+    #expect(replacement == reserved)
+    #expect(unchanged == reserved)
     #expect(!unchanged.isParked)
     let commands = recorded.snapshot().map { $0.joined(separator: " ") }
     #expect(!commands.contains { $0.contains("kill-window") },
