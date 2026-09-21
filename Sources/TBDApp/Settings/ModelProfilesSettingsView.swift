@@ -45,23 +45,39 @@ struct ModelProfilesSettingsView: View {
     }
 
     private var globalDefaultHeader: some View {
-        HStack {
-            Text("Global default:")
-                .font(.headline)
-            Picker("", selection: Binding(
-                get: { appState.defaultProfileID },
-                set: { newValue in
-                    Task { await appState.setDefaultProfile(id: newValue) }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Global default:")
+                    .font(.headline)
+                Picker("", selection: Binding(
+                    get: { appState.defaultProfileID },
+                    set: { newValue in
+                        Task { await appState.setDefaultProfile(id: newValue) }
+                    }
+                )) {
+                    Text("Default (claude keychain login)").tag(UUID?.none)
+                    ForEach(appState.modelProfiles, id: \.profile.id) { entry in
+                        Text(entry.profile.name).tag(UUID?.some(entry.profile.id))
+                    }
                 }
-            )) {
-                Text("Default (claude keychain login)").tag(UUID?.none)
-                ForEach(appState.modelProfiles, id: \.profile.id) { entry in
-                    Text(entry.profile.name).tag(UUID?.some(entry.profile.id))
-                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                Spacer()
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            Spacer()
+            // Account load balancing toggles (design 2026-09-05 §8.1)
+            let capabilities = appState.daemonCapabilities
+            Toggle("Balance new Claude sessions across accounts", isOn: Binding(
+                get: { capabilities?.profileBalancingEnabled ?? false },
+                set: { newValue in Task { await appState.setProfileBalancingEnabled(newValue) } }
+            ))
+            .font(.caption)
+            .help("When a new session would use the global default, pick the signed-in profile with the most room instead. Repo overrides and explicit picks still win. Off by default (soaking).")
+            Toggle("Switch account when a session hits its limit", isOn: Binding(
+                get: { capabilities?.limitRotationEnabled ?? false },
+                set: { newValue in Task { await appState.setLimitRotationEnabled(newValue) } }
+            ))
+            .font(.caption)
+            .help("When a session hits a hard usage limit, resume it in the same tab on another profile with room and continue the turn. Off by default (soaking).")
         }
     }
 
@@ -238,13 +254,22 @@ struct ModelProfileRow: View {
     /// menus render, so a rate-limited / needs-re-login / stale profile shows an
     /// explicit note rather than a silent blank. `nil` (no line) only when there
     /// is genuinely no snapshot (Bedrock/proxy profiles, or not yet polled).
+    /// Appends the live session count (design 2026-09-05 §8.1).
     private var usageLine: String? {
         // The rejected-token caption above already states the condition AND
         // carries the repair; repeating "token rejected" underneath it would
         // print the same sentence twice.
         guard !tokenRejected else { return nil }
-        return ProfileUsagePresentation.secondaryLine(for: entry.usageSnapshot,
-                                                      kind: profile.kind)
+        let usage = ProfileUsagePresentation.secondaryLine(for: entry.usageSnapshot,
+                                                           kind: profile.kind)
+        let liveCount = appState.liveSessionCount(forProfile: profile.id)
+        let liveCountSuffix = liveCount > 0 ? " · \(liveCount) live" : ""
+        if let usage {
+            return usage + liveCountSuffix
+        } else if liveCount > 0 {
+            return "\(liveCount) live"
+        }
+        return nil
     }
 
     @ViewBuilder
@@ -306,6 +331,15 @@ struct ModelProfileRow: View {
                 }
                 .disabled(isRefreshingUsage)
                 .help(ProfileUsageRefreshPresentation.refreshHelp(kind: profile.kind))
+            }
+            // Pool opt-out for oauth profiles (design 2026-09-05 §8.1)
+            if profile.kind == .oauth || profile.kind == .oauthToken {
+                Toggle("Include in balancing", isOn: Binding(
+                    get: { !profile.poolOptOut },
+                    set: { isIncluded in
+                        Task { await appState.setProfilePoolOptOut(id: profile.id, optOut: !isIncluded) }
+                    }
+                ))
             }
             Divider()
             Button("Delete…", role: .destructive) {
