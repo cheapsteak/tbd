@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import pwd
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -1048,6 +1049,143 @@ class WaitReportingTests(unittest.TestCase):
         first = self.wait_messages()[0]
         self.assertIn("...", first)
         self.assertLess(len(first), 400)
+
+    # --- the holder the record cannot name -------------------------------
+    #
+    # The flock rides on an open file description, not on the process that
+    # wrote the record, so the two come apart: a build killed while its
+    # manifest hung left an orphan holding an inherited descriptor while the
+    # lock file still named the long-dead pid that opened it.  Waiters were
+    # told the recorded pid "is not running", which reads as a harmless stale
+    # file — about a lock nothing was ever going to release.  These cases
+    # inject the openers probe so they assert the wording, not `lsof`;
+    # `LockOpenerProbeTests` drives the real thing.
+
+    def test_a_stale_record_names_the_processes_holding_the_file_open(self):
+        stale = _dead_pid()
+        self.record(f"pid={stale}\ncwd=/somewhere/acme-worktree\n")
+        description = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: ((37731, "tbd-manifest"),)
+        )
+        self.assertIn(f"names pid {stale}, which is not running", description)
+        self.assertIn("the lock is still held", description)
+        self.assertIn("pid 37731 (tbd-manifest)", description)
+        # The reading that misled: a held lock must never be described in
+        # words a reader can mistake for an abandoned file.
+        self.assertNotIn("unidentified", description)
+
+    def test_an_unrecorded_holder_still_names_a_visible_opener(self):
+        self.record("")
+        description = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: ((4242, "swift-frontend"),)
+        )
+        self.assertIn("has not recorded its identity yet", description)
+        self.assertIn("pid 4242 (swift-frontend)", description)
+
+    def test_a_probe_that_sees_nothing_keeps_the_honest_fallback(self):
+        stale = _dead_pid()
+        self.record(f"pid={stale}\n")
+        description = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: ()
+        )
+        self.assertIn(f"names pid {stale}, which is not running", description)
+        self.assertIn("the current holder is unidentified", description)
+
+    def test_a_crowd_of_openers_is_capped_and_counted(self):
+        stale = _dead_pid()
+        self.record(f"pid={stale}\n")
+        crowd = tuple((100 + index, f"proc{index}") for index in range(7))
+        description = swift_safe._holder_description(
+            self.lock_path, openers=lambda _: crowd
+        )
+        self.assertIn("pid 100 (proc0)", description)
+        self.assertIn(f"pid {100 + swift_safe.MAX_REPORTED_LOCK_OPENERS - 1}", description)
+        self.assertNotIn(f"pid {100 + swift_safe.MAX_REPORTED_LOCK_OPENERS} ", description)
+        self.assertIn(f"and {7 - swift_safe.MAX_REPORTED_LOCK_OPENERS} more", description)
+
+    def test_a_named_opener_reaches_the_wait_line_itself(self):
+        """Not just the helper: the line a waiting human actually reads."""
+        stale = _dead_pid()
+        self.record(f"pid={stale}\n")
+        with mock.patch.object(
+            swift_safe, "_lock_file_openers", lambda _: ((37731, "tbd-manifest"),)
+        ):
+            first = self.wait_messages()[0]
+        self.assertIn("waiting for the shared build slot", first)
+        self.assertIn("pid 37731 (tbd-manifest)", first)
+
+
+@unittest.skipIf(shutil.which("lsof") is None, "lsof is not installed here")
+class LockOpenerProbeTests(unittest.TestCase):
+    """`_lock_file_openers` against a real lock file and real processes."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.lock_path = Path(self.temp.name) / "swift-build.lock"
+        self.holder = self.lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(self.holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def tearDown(self):
+        self.holder.close()
+        self.temp.cleanup()
+
+    def record(self, text: str) -> None:
+        self.holder.seek(0)
+        self.holder.truncate()
+        self.holder.write(text)
+        self.holder.flush()
+
+    @contextlib.contextmanager
+    def _orphan_opener(self):
+        """A process holding the lock file open through an INHERITED fd.
+
+        `exec 9< file` and then `exec sleep` collapse shell and sleep into one
+        process carrying a descriptor it never opened itself: the incident's
+        shape, and the reason the recorded pid is not the whole truth.  The
+        block is not entered until `lsof` can actually see it, so a slow probe
+        cannot masquerade as a probe that found nothing.
+        """
+        process = subprocess.Popen(
+            ["/bin/sh", "-c", 'exec 9< "$1"; exec sleep 30', "sh", str(self.lock_path)]
+        )
+        try:
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                found = swift_safe._lock_file_openers(self.lock_path)
+                if any(pid == process.pid for pid, _ in found):
+                    break
+                time.sleep(0.1)
+            yield process
+        finally:
+            process.kill()
+            process.wait(timeout=5)
+
+    def test_a_live_opener_is_found_and_named(self):
+        with self._orphan_opener() as opener:
+            found = dict(swift_safe._lock_file_openers(self.lock_path))
+        self.assertIn(opener.pid, found)
+        self.assertEqual(found[opener.pid], "sleep")
+
+    def test_the_probe_never_reports_this_process(self):
+        # This process holds the lock file open for the whole fixture; naming
+        # it would offer the asker itself as a candidate for what blocks it.
+        with self._orphan_opener():
+            found = dict(swift_safe._lock_file_openers(self.lock_path))
+        self.assertNotIn(os.getpid(), found)
+
+    def test_the_description_names_a_live_holder_the_record_cannot(self):
+        stale = _dead_pid()
+        self.record(f"pid={stale}\ncwd=/somewhere/acme-worktree\n")
+        with self._orphan_opener() as opener:
+            description = swift_safe._holder_description(self.lock_path)
+        self.assertIn(f"names pid {stale}, which is not running", description)
+        self.assertIn(f"pid {opener.pid} (sleep)", description)
+        self.assertNotIn("unidentified", description)
+
+    def test_a_missing_lock_file_probes_to_nothing_without_raising(self):
+        self.holder.close()
+        self.lock_path.unlink()
+        self.assertEqual(swift_safe._lock_file_openers(self.lock_path), ())
 
 
 class AbandonedWaitTests(unittest.TestCase):
