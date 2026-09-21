@@ -350,6 +350,117 @@ struct ModelProxySpawnEnvTests {
             == Self.carriedEnv["EXAMPLE_CARRIED_SECRET"])
     }
 
+    // MARK: - First-party variables
+
+    private static let firstPartyKeys = [
+        "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL", "ENABLE_TOOL_SEARCH",
+    ]
+
+    @Test("a routed spawn is told to stay first-party and to keep tool search on")
+    func routedSpawnCarriesTheFirstPartyVariables() async throws {
+        let outcome = await attach(
+            config: proxyOnConfig(), supervisor: FakeModelProxySupervisor())
+        #expect(outcome.routed, "the fixture must route, or this proves nothing")
+        #expect(outcome.sensitiveEnv["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"] == "1")
+        #expect(outcome.sensitiveEnv["ENABLE_TOOL_SEARCH"] == "true")
+    }
+
+    /// **The invariant the spec's first-request blowup turns on.** A route URL
+    /// without the override is a loopback host Claude Code treats as a
+    /// third-party gateway, so every routed shape this suite can build is
+    /// checked, not just the default one.
+    @Test("no routed outcome sets ANTHROPIC_BASE_URL without both first-party variables")
+    func everyRoutedBaseURLCarriesTheFirstPartyVariables() async throws {
+        let home = fencedScratchRoot(prefix: "tbdmpse")
+        var outcomes = [
+            await attach(config: proxyOnConfig(), supervisor: FakeModelProxySupervisor()),
+            await attach(
+                config: proxyOnConfig(streaming: false), supervisor: FakeModelProxySupervisor()),
+            await attach(
+                config: proxyOnConfig(), profileBaseURL: Self.profileBaseURL,
+                supervisor: FakeModelProxySupervisor()),
+            await attach(
+                config: proxyOnConfig(), envOverrideBaseURL: "https://override.acme.example",
+                sensitiveEnv: ["ANTHROPIC_BASE_URL": "https://override.acme.example"],
+                supervisor: FakeModelProxySupervisor()),
+            await attach(
+                config: proxyOnConfig(), sensitiveEnv: ["NO_PROXY": "corp.example"],
+                supervisor: FakeModelProxySupervisor()),
+        ]
+        outcomes.append(await ModelProxyRouteAttachment.attachIfRoutable(
+            terminalID: Self.terminalID, isHolderSpawn: true, config: proxyOnConfig(),
+            profileKind: .oauth, profileBaseURL: nil, envOverrides: Self.carriedEnv,
+            overlayPath: nil, holderEnvironment: ["TBD_HOME": home],
+            supervisor: FakeModelProxySupervisor()))
+
+        for outcome in outcomes {
+            #expect(outcome.routed, "every fixture here must route, or this proves nothing")
+            guard outcome.sensitiveEnv["ANTHROPIC_BASE_URL"] != nil else { continue }
+            for key in Self.firstPartyKeys {
+                #expect(
+                    outcome.sensitiveEnv[key] != nil,
+                    "a routed outcome set ANTHROPIC_BASE_URL without \(key)")
+            }
+        }
+    }
+
+    /// Every unrouted outcome, one per refusal: none of them talks to a
+    /// loopback route, so none may be told its endpoint is first-party.
+    @Test("no unrouted outcome carries either first-party variable")
+    func unroutedOutcomesCarryNeither() async throws {
+        let throwing = FakeModelProxySupervisor()
+        throwing.throwsOnMakeRoute = true
+        let outcomes: [(String, ModelProxyRouteAttachment.Outcome)] = [
+            ("flag off", await attach(config: Config(), supervisor: FakeModelProxySupervisor())),
+            ("bedrock", await attach(
+                config: proxyOnConfig(), profileKind: .bedrock,
+                supervisor: FakeModelProxySupervisor())),
+            ("no supervisor", await attach(config: proxyOnConfig(), supervisor: nil)),
+            ("overlay sets base URL", await attach(
+                config: proxyOnConfig(), overlaySetsBaseURL: true,
+                supervisor: FakeModelProxySupervisor())),
+            ("makeRoute throws", await attach(config: proxyOnConfig(), supervisor: throwing)),
+            ("no port to name", await attach(
+                config: proxyOnConfig(), supervisor: FakeModelProxySupervisor(port: nil))),
+            ("tmux spawn", await ModelProxyRouteAttachment.attachIfRoutable(
+                terminalID: Self.terminalID, isHolderSpawn: false, config: proxyOnConfig(),
+                profileKind: .oauth, profileBaseURL: nil, envOverrides: Self.carriedEnv,
+                overlayPath: nil, holderEnvironment: ["TBD_HOME": Self.fencedHome],
+                supervisor: FakeModelProxySupervisor())),
+        ]
+
+        for (name, outcome) in outcomes {
+            #expect(!outcome.routed, "\(name) must not route, or this proves nothing")
+            for key in Self.firstPartyKeys {
+                #expect(outcome.sensitiveEnv[key] == nil, "\(name) carries \(key)")
+            }
+        }
+    }
+
+    /// A repo that sets either variable deliberately keeps its value: the
+    /// attachment fills only what the overrides leave unset.
+    @Test("an env-override value for either first-party variable wins")
+    func envOverrideFirstPartyValuesWin() async throws {
+        let outcome = await attach(
+            config: proxyOnConfig(),
+            sensitiveEnv: [
+                "ENABLE_TOOL_SEARCH": "auto",
+                "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "0",
+            ],
+            supervisor: FakeModelProxySupervisor())
+        #expect(outcome.routed)
+        #expect(outcome.sensitiveEnv["ENABLE_TOOL_SEARCH"] == "auto")
+        #expect(outcome.sensitiveEnv["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"] == "0")
+
+        // Each is independent: overriding one still fills the other.
+        let partial = await attach(
+            config: proxyOnConfig(),
+            sensitiveEnv: ["ENABLE_TOOL_SEARCH": "auto"],
+            supervisor: FakeModelProxySupervisor())
+        #expect(partial.sensitiveEnv["ENABLE_TOOL_SEARCH"] == "auto")
+        #expect(partial.sensitiveEnv["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"] == "1")
+    }
+
     // MARK: - NO_PROXY
 
     @Test("NO_PROXY extends an existing list without reordering or duplicating it")
@@ -574,6 +685,22 @@ struct ModelProxySpawnEnvTests {
         #expect(!attachment.routed, "the proxy flag is off, so nothing may be routed")
         #expect(launch.environment["ANTHROPIC_BASE_URL"] == Self.profileBaseURL)
         #expect(commandLine(launch).contains("export ANTHROPIC_BASE_URL="))
+    }
+
+    /// The first-party variables are not routing keys: they ride the process
+    /// environment alone, and the inline export stays reserved for the
+    /// endpoint variables an rc file could clobber.
+    @Test("a routed spawn carries the first-party variables in its environment, not its command line")
+    func firstPartyVariablesStayOutOfTheCommandLine() async throws {
+        let (launch, attachment) = await composeSpawn(
+            config: proxyOnConfig(), supervisor: FakeModelProxySupervisor(port: 51_842))
+
+        #expect(attachment.routed, "the fixture must route, or this proves nothing")
+        #expect(launch.environment["_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"] == "1")
+        #expect(launch.environment["ENABLE_TOOL_SEARCH"] == "true")
+        let command = commandLine(launch)
+        #expect(!command.contains("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"), "\(command)")
+        #expect(!command.contains("ENABLE_TOOL_SEARCH"), "\(command)")
     }
 }
 
