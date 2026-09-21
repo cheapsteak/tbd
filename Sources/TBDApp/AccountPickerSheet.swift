@@ -22,7 +22,26 @@ struct AccountPickerSheet: View {
     @State private var isRefreshing = false
 
     private var sortedEntries: [ModelProfileWithUsage] {
-        ProfileUsagePresentation.sortedForPicker(appState.modelProfiles)
+        // When profile balancing is on, use the picker's ranking; otherwise use the
+        // display-only sortedForPicker order (design 2026-09-05 §8.2).
+        let balancingEnabled = appState.daemonCapabilities?.profileBalancingEnabled ?? false
+        if balancingEnabled {
+            let candidates = ProfilePoolCandidates.fromApp(
+                entries: appState.modelProfiles,
+                liveCounts: { profileID in appState.liveSessionCount(forProfile: profileID) },
+                defaultProfileID: appState.defaultProfileID
+            )
+            let ranked = ProfilePoolPicker.ranked(candidates: candidates, excludingAccountKeys: [], now: Date())
+            return ranked.compactMap { rankedID in
+                appState.modelProfiles.first { $0.profile.id == rankedID }
+            }
+        } else {
+            return ProfileUsagePresentation.sortedForPicker(appState.modelProfiles)
+        }
+    }
+
+    private var isBalancingOn: Bool {
+        appState.daemonCapabilities?.profileBalancingEnabled ?? false
     }
 
     var body: some View {
@@ -38,10 +57,11 @@ struct AccountPickerSheet: View {
             } else {
                 ScrollView {
                     VStack(spacing: 4) {
-                        ForEach(sortedEntries, id: \.profile.id) { entry in
+                        ForEach(Array(sortedEntries.enumerated()), id: \.element.profile.id) { index, entry in
                             AccountPickerRow(
                                 entry: entry,
                                 isDefault: entry.profile.id == appState.defaultProfileID,
+                                isBalancedPick: isBalancingOn && index == 0 && ProfileUsagePresentation.isSelectable(entry),
                                 onPick: {
                                     onPick(entry.profile.id)
                                     dismiss()
@@ -98,10 +118,12 @@ struct AccountPickerSheet: View {
 private struct AccountPickerRow: View {
     let entry: ModelProfileWithUsage
     let isDefault: Bool
+    let isBalancedPick: Bool
     let onPick: () -> Void
 
     @State private var isHovering = false
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(AppState.self) var appState
     @AppStorage(AppState.usageResetTimeStyleKey)
     private var usageResetTimeStyle: ProfileUsagePresentation.ResetTimeStyle = .timeOfReset
 
@@ -117,6 +139,22 @@ private struct AccountPickerRow: View {
         return ProfileLoginPresentation.normalizedIdentity(entry.loginIdentity)
     }
 
+    private var usageCaption: String? {
+        if let snapshot = entry.usageSnapshot, !snapshot.buckets.isEmpty {
+            var parts: [String] = []
+            if let summary = ProfileUsagePresentation.usageSummary(for: snapshot) {
+                parts.append(summary)
+            }
+            let liveCount = appState.liveSessionCount(forProfile: entry.profile.id)
+            if liveCount > 0 {
+                parts.append("\(liveCount) live")
+            }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        }
+        let liveCount = appState.liveSessionCount(forProfile: entry.profile.id)
+        return liveCount > 0 ? "\(liveCount) live" : nil
+    }
+
     var body: some View {
         Button(action: onPick) {
             VStack(alignment: .leading, spacing: 5) {
@@ -130,6 +168,13 @@ private struct AccountPickerRow: View {
                             .padding(.vertical, 1)
                             .background(Capsule().fill(Color.accentColor.opacity(0.18)))
                     }
+                    if isBalancedPick {
+                        Text("balanced pick")
+                            .font(.caption2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.2)))
+                    }
                     if let identityText {
                         Text(identityText)
                             .font(.caption)
@@ -137,6 +182,12 @@ private struct AccountPickerRow: View {
                             .lineLimit(1)
                     }
                     Spacer()
+                }
+
+                if let caption = usageCaption {
+                    Text(caption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 if let snapshot = entry.usageSnapshot, !snapshot.buckets.isEmpty {
