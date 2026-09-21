@@ -134,4 +134,59 @@ struct ProfilePoolCandidatesTests {
             #expect(decision.verdicts[profile.id] == .noFreshReading)
         }
     }
+
+    // MARK: - Stale badge (design 2026-09-05 §6.1)
+
+    @Test
+    func staleBadgeShowsOnlyForNoFreshReadingWhileBalancingIsOn() {
+        #expect(ProfilePoolCandidates.showsStaleBadge(balancingOn: true, verdict: .noFreshReading))
+        #expect(!ProfilePoolCandidates.showsStaleBadge(balancingOn: false, verdict: .noFreshReading))
+        let others: [ProfilePoolVerdict?] = [
+            .optedOut, .wrongKind, .noCredential, .exhausted, .sameAccount,
+            .eligible(score: 1, headroom: 0.5, accountLiveSessions: 0), nil,
+        ]
+        for verdict in others {
+            #expect(!ProfilePoolCandidates.showsStaleBadge(balancingOn: true, verdict: verdict))
+        }
+    }
+
+    @Test
+    func staleBadgeProfileIDsUsesThePickersVerdicts() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        func snapshot(ageMinutes: Double, percent: Double = 10) -> ProfileUsageSnapshot {
+            ProfileUsageSnapshot(
+                buckets: [ClaudeUsageLimitBucket(kind: "session", group: "session", percent: percent)],
+                fetchedAt: now.addingTimeInterval(-ageMinutes * 60),
+                lastAttemptAt: now, status: "ok", statusKind: .ok)
+        }
+        let stale = ModelProfileWithUsage(
+            profile: ModelProfile(id: UUID(), name: "Stale", kind: .oauth),
+            loginIdentity: "a@example.com", usageSnapshot: snapshot(ageMinutes: 42))
+        let neverRead = ModelProfileWithUsage(
+            profile: ModelProfile(id: UUID(), name: "NeverRead", kind: .oauth),
+            loginIdentity: "b@example.com")
+        let fresh = ModelProfileWithUsage(
+            profile: ModelProfile(id: UUID(), name: "Fresh", kind: .oauth),
+            loginIdentity: "c@example.com", usageSnapshot: snapshot(ageMinutes: 1))
+        let exhausted = ModelProfileWithUsage(
+            profile: ModelProfile(id: UUID(), name: "Full", kind: .oauth),
+            loginIdentity: "d@example.com", usageSnapshot: snapshot(ageMinutes: 1, percent: 99))
+        let optedOut = ModelProfileWithUsage(
+            profile: ModelProfile(id: UUID(), name: "Out", kind: .oauth, poolOptOut: true),
+            loginIdentity: "e@example.com", usageSnapshot: snapshot(ageMinutes: 42))
+        let noCredential = ModelProfileWithUsage(
+            profile: ModelProfile(id: UUID(), name: "NoLogin", kind: .oauth),
+            usageSnapshot: snapshot(ageMinutes: 42))
+        let wrongKind = ModelProfileWithUsage(
+            profile: ModelProfile(id: UUID(), name: "Bedrock", kind: .bedrock))
+        let entries = [stale, neverRead, fresh, exhausted, optedOut, noCredential, wrongKind]
+
+        let on = ProfilePoolCandidates.staleBadgeProfileIDs(
+            entries: entries, balancingOn: true, defaultProfileID: nil, now: now)
+        #expect(on == [stale.profile.id, neverRead.profile.id])
+
+        let off = ProfilePoolCandidates.staleBadgeProfileIDs(
+            entries: entries, balancingOn: false, defaultProfileID: nil, now: now)
+        #expect(off.isEmpty)
+    }
 }

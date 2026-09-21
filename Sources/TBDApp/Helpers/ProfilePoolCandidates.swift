@@ -44,4 +44,33 @@ enum ProfilePoolCandidates {
             )
         }
     }
+
+    /// Whether a Settings row shows the "stale — skipped by balancing" badge
+    /// (design 2026-09-05 §6.1): only while balancing is on, and only for a
+    /// profile the picker skips as `noFreshReading` — an account that is
+    /// otherwise in the pool but whose reading balancing cannot use.
+    static func showsStaleBadge(balancingOn: Bool, verdict: ProfilePoolVerdict?) -> Bool {
+        guard balancingOn, let verdict else { return false }
+        if case .noFreshReading = verdict { return true }
+        return false
+    }
+
+    /// The profiles whose Settings rows carry the stale badge, judged by the
+    /// same candidate rule and picker the daemon's balanced pick uses. Empty
+    /// while balancing is off. Live counts only affect scoring, never the
+    /// verdict, so none are needed here.
+    static func staleBadgeProfileIDs(
+        entries: [ModelProfileWithUsage],
+        balancingOn: Bool,
+        defaultProfileID: UUID?,
+        now: Date
+    ) -> Set<UUID> {
+        guard balancingOn else { return [] }
+        let candidates = fromApp(
+            entries: entries, liveCounts: { _ in 0 }, defaultProfileID: defaultProfileID)
+        let verdicts = ProfilePoolPicker.pick(candidates: candidates, now: now).verdicts
+        return Set(verdicts.compactMap { id, verdict in
+            showsStaleBadge(balancingOn: balancingOn, verdict: verdict) ? id : nil
+        })
+    }
 }

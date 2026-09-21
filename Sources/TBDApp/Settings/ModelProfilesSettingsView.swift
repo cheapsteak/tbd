@@ -187,9 +187,14 @@ struct ModelProfileRow: View {
                 }
             }
             if let usageLine {
-                Text(usageLine)
-                    .font(.caption)
-                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                HStack(spacing: 6) {
+                    Text(usageLine)
+                        .font(.caption)
+                        .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                    if showsStaleBadge { staleBadge }
+                }
+            } else if showsStaleBadge {
+                staleBadge
             }
             if let usageRefreshOutcome {
                 // What the last manual refresh did. Load-bearing for the
@@ -229,6 +234,28 @@ struct ModelProfileRow: View {
     }
 
     private var endpointCaption: String? { ProfileLoginPresentation.settingsCaption(for: entry) }
+
+    /// While balancing is on, a profile the picker skips for a stale reading
+    /// carries a badge beside its usage line (design 2026-09-05 §6.1), judged
+    /// by the same candidate rule and picker the daemon uses.
+    private var showsStaleBadge: Bool {
+        ProfilePoolCandidates.staleBadgeProfileIDs(
+            entries: appState.modelProfiles,
+            balancingOn: appState.daemonCapabilities?.profileBalancingEnabled ?? false,
+            defaultProfileID: appState.defaultProfileID,
+            now: Date()
+        ).contains(profile.id)
+    }
+
+    private var staleBadge: some View {
+        Text("stale — skipped by balancing")
+            .font(.caption2)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .foregroundStyle(Color.orange)
+            .background(Capsule().fill(Color.orange.opacity(0.15)))
+            .help("Balancing can't use this account's usage reading, so new sessions skip it. Check its login.")
+    }
 
     /// True for oauth profiles with no detected login — drives the inline
     /// "Open login session" affordance next to the caption.

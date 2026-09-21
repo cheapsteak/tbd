@@ -71,6 +71,10 @@ public struct ModelProfileResolver: Sendable {
     /// straight from the stores, as tests that exercise one spawn at a time
     /// do; the daemon always passes its single shared instance.
     let reservations: ProfilePickReservations?
+    /// Surfaces an account a balanced pick skips for a stale reading (design
+    /// §6.1). Nil surfaces nothing; the daemon always passes its single
+    /// shared instance, so the once-per-profile latch holds across spawns.
+    let staleAlerts: StaleAccountAlerts?
     let now: @Sendable () -> Date
 
     public init(
@@ -80,6 +84,7 @@ public struct ModelProfileResolver: Sendable {
         keychain: @Sendable @escaping (String) throws -> String? = { try ModelProfileKeychain.load(id: $0) },
         candidateSource: ProfilePoolCandidateSource? = nil,
         reservations: ProfilePickReservations? = nil,
+        staleAlerts: StaleAccountAlerts? = nil,
         now: @Sendable @escaping () -> Date = { Date() }
     ) {
         self.profiles = profiles
@@ -88,6 +93,7 @@ public struct ModelProfileResolver: Sendable {
         self.keychain = keychain
         self.candidateSource = candidateSource
         self.reservations = reservations
+        self.staleAlerts = staleAlerts
         self.now = now
     }
 
@@ -187,10 +193,15 @@ public struct ModelProfileResolver: Sendable {
     /// `profileBalancingEnabled` is on: the global-default step returns the
     /// default (or nil), with no pick and no reservation. Spawns that resume
     /// an existing conversation pass it — see `balances(resumeSessionID:)`.
+    ///
+    /// `worktreeID` names the spawning worktree, so a balanced pick that skips
+    /// an account for a stale reading can say so there (design §6.1). Nil
+    /// surfaces nothing.
     public func resolve(
         repoID: UUID?,
         override overrideID: UUID? = nil,
-        balance: Bool = true
+        balance: Bool = true,
+        worktreeID: UUID? = nil
     ) async throws -> ResolvedModelProfile? {
         // Step 0: explicit per-creation override — highest priority. If the
         // row/keychain is missing we log and fall through to the normal chain
@@ -230,6 +241,7 @@ public struct ModelProfileResolver: Sendable {
             do {
                 let candidates: [ProfilePoolCandidate]
                 let decision: ProfilePoolDecision
+                let pickTime = now()
                 if let reservations {
                     // Every read happens first, and then one non-suspending
                     // call picks and reserves, so a concurrent spawn into
@@ -237,7 +249,7 @@ public struct ModelProfileResolver: Sendable {
                     // terminal row exists.
                     let stored = try await source.candidates(defaultProfileID: cfg.defaultProfileID)
                     let outcome = await reservations.pickAndReserve(
-                        candidates: stored, pickTime: now())
+                        candidates: stored, pickTime: pickTime)
                     candidates = outcome.candidates
                     decision = outcome.decision
                     reservationID = outcome.reservationID
@@ -246,8 +258,17 @@ public struct ModelProfileResolver: Sendable {
                     decision = ProfilePoolPicker.pick(
                         candidates: candidates,
                         excludingAccountKeys: [],
-                        now: now()
+                        now: pickTime
                     )
+                }
+
+                // Tell the person about any account skipped for a stale
+                // reading. It never throws, and a failed post only logs.
+                if let staleAlerts {
+                    await staleAlerts.observe(
+                        candidates: candidates, decision: decision,
+                        worktreeID: worktreeID, now: pickTime,
+                        profileName: { [profiles] id in try? await profiles.get(id: id)?.name })
                 }
 
                 if let chosenID = decision.chosen {
