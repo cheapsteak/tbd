@@ -1646,6 +1646,11 @@ extension WorktreeLifecycle {
             transport: transport,
             attachment: primaryAttachment,
             modelProxySupervisor: modelProxySupervisor)
+        // The primary row is in, so its live count now carries a balanced
+        // pick's load; hand the reservation back so it stops counting too.
+        // Archived-session restores below reuse the same resolution; the
+        // first row settles it once.
+        await modelProfileResolver?.settleReservation(resolvedProfile?.reservationID)
         // Recapture reads a tmux pane's screen, so it has nothing to read on a
         // holder session — `paneID` is empty there by construction. Scheduling
         // it anyway would poll a coordinate that can never resolve.

@@ -564,6 +564,9 @@ extension RPCRouter {
                 return (terminal, currentWorktree.tmuxServer)
             }
         }
+        // The row is in, so its live count now carries a balanced pick's
+        // load; hand the reservation back so it stops counting too.
+        await modelProfileResolver.settleReservation(resolvedProfile?.reservationID)
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
