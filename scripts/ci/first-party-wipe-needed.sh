@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 #
-# Decide whether the SPM #7715 first-party library wipe is needed on this run.
+# Decide whether the SPM #7715 first-party library wipe is needed on this run,
+# and record the provenance the next run will decide from.
 #
 #   scripts/ci/first-party-wipe-needed.sh <marker-path>
+#       Prints `wipe` or `skip` on stdout and a one-line reason on stderr, and
+#       exits 0 either way: the answer is the output, never the status, so a
+#       caller reads it with a plain command substitution.
 #
-# Prints `wipe` or `skip` on stdout, a one-line reason on stderr, and exits 0
-# either way: the answer is the output, never the status, so a caller reads it
-# with a plain command substitution.
+#   scripts/ci/first-party-wipe-needed.sh --record <marker-path>
+#       Writes the marker describing the tree the artifacts in `.build/` were
+#       just built from. Writes nothing it cannot back: not when a compared path
+#       does not resolve, and not over a marker that is still there, which is
+#       one the decision step never consumed.
 #
 # ---------------------------------------------------------------------------
 # WHAT IT IS FOR
@@ -19,31 +25,58 @@
 # removing the build artifacts of TBDShared and TBDDaemonLib before any compile,
 # forcing SPM to re-emit them.
 #
-# That defence is not free. On a measured run whose commit touched only
-# `Sources/TBDDaemon` and one test file, the wipe cost about three minutes of a
-# 278-second compile: all 89 TBDShared and 265 TBDDaemonLib files recompiled,
-# TestSupport and TBDDaemonTests re-emitted on top, and a 38-second relink. Most
-# pushes touch neither library, so most runs paid that for nothing.
+# That defence is not free. Measured on a run whose commit touched only
+# `Sources/TBDDaemon` and one test file, the wipe cost about three of the 278
+# seconds the first pass spent compiling: all 89 TBDShared files and 265
+# TBDDaemonLib files recompiled, TestSupport and TBDDaemonTests re-emitted on
+# top, and a 38-second relink. Over the last 40 commits on `main`, 18 touched
+# neither library's sources nor the manifest and paid that for nothing.
 #
 # The bug's precondition is that a library's SOURCES differ from the sources its
 # cached artifacts were built from. When they are identical, the archive and the
-# module are both current and the wipe buys nothing — so the job records the
-# commit its `.build/` was built from inside `.build/` itself, and this script
-# compares that commit's library trees against the ones being built now.
+# module are both current and the wipe buys nothing — so the job records what
+# those sources were inside `.build/` itself, and this script compares that
+# record against the tree being built now.
 #
 # ---------------------------------------------------------------------------
 # THE INVARIANT
 #
-# Every saved cache holds first-party artifacts consistent with its marker
-# commit. A run may therefore skip the wipe exactly when the two library trees
-# are byte-identical between the marker commit and HEAD, and either decision
-# preserves the invariant for the cache this run goes on to save:
+# Every saved cache holds first-party artifacts consistent with its marker. A
+# run may therefore skip the wipe exactly when the recorded sources and the
+# current ones are byte-identical, and either decision preserves the invariant
+# for the cache this run goes on to save:
 #
-#   - on `wipe`, the libraries are re-emitted from HEAD, and the marker the job
-#     writes at the end of the run is HEAD;
-#   - on `skip`, the restored artifacts already match HEAD's library sources —
-#     that is precisely what was just proved — and the marker written at the end
-#     is again HEAD.
+#   - on `wipe`, the libraries are re-emitted from the current sources, and the
+#     marker the job records at the end describes those same sources;
+#   - on `skip`, the restored artifacts already match the current sources — that
+#     is precisely what was just proved — and the marker recorded at the end
+#     describes them too.
+#
+# The workflow keeps its half of that bargain by REMOVING the marker as soon as
+# it has read it, and recording a new one only at the end of the job. A run that
+# dies in between leaves no marker, so the next run wipes. A run that died
+# before ever reading it leaves the restored marker in place, and `--record`
+# refuses to overwrite a marker that is still there for exactly that reason: it
+# was never consumed, so this run took no responsibility for `.build/` and the
+# marker still describes the artifacts sitting in it.
+#
+# ---------------------------------------------------------------------------
+# WHY OBJECT IDS, NOT A COMMIT
+#
+# The marker records one git object id per compared path — the tree id of each
+# library's source directory, the blob id of each file. Comparing ids compares
+# CONTENT, which is what the invariant is about, and it needs nothing from the
+# old commit: on a `pull_request` run `actions/checkout` checks out an ephemeral
+# merge commit that GitHub discards when the next push recomputes the merge ref,
+# so a marker naming that commit would be unresolvable on every subsequent run
+# of the same branch — the mechanism would be inert on the dominant event. An
+# object id stays meaningful because the object is either present, byte for
+# byte, or it is not.
+#
+# Recording the ids also makes a missing path loud. A `git diff` pathspec that
+# matches nothing in either tree exits 0, so a renamed target directory would
+# quietly answer `skip` forever; `git rev-parse HEAD:<path>` fails instead, and
+# every failure here answers `wipe`.
 #
 # ---------------------------------------------------------------------------
 # WHY KEEP-BIASED
@@ -51,25 +84,49 @@
 # Skipping wrongly costs a link flake that a reader has no reason to connect to
 # this script; wiping wrongly costs three minutes. So every uncertainty answers
 # `wipe`: no marker (a cache saved before this mechanism existed, or no cache at
-# all), a marker naming a commit this checkout does not have (a force-push threw
-# it away, or the cache came from unrelated history), a marker that is empty or
-# unreadable, and any `git diff` that does not return a clean 0.
-#
-# ---------------------------------------------------------------------------
-# WHY A MARKER FILE, NOT THE CACHE KEY
-#
-# The restore key that matched is available to the job, but it carries
-# `hashFiles(...)` digests of the source tree rather than a commit, so there is
-# nothing to diff against. A file inside `.build/` rides the same cache entry as
-# the artifacts it describes, is written and read by the same job, and says
-# exactly what the comparison needs: which tree those artifacts came from.
+# all), a marker that is empty or unreadable, a compared path that no longer
+# resolves, and any difference at all between the recorded ids and the current
+# ones.
 set -uo pipefail
 
-# The paths whose contents decide it. The two libraries are the targets whose
-# artifacts get wiped; `Package.swift` and `Package.resolved` are here because a
-# manifest or dependency change can move a library's module boundary without
-# touching a single file under `Sources/`.
-WIPE_PATHS=(Sources/TBDShared Sources/TBDDaemonLib Package.swift Package.resolved)
+# The paths whose CONTENT decides it.
+#
+# `Sources/TBDDaemon` is not a typo for a third target: it is where the
+# TBDDaemonLib *library* lives (`path: "Sources/TBDDaemon"` in `Package.swift`),
+# the `TBDDaemon` executable target beside it being `main.swift` alone. A list
+# naming a `Sources/TBDDaemonLib` directory would match nothing.
+#
+# `Package.swift` and `Package.resolved` are here because a manifest or
+# dependency change can move a library's module boundary without touching a
+# single file under `Sources/`.
+WIPE_PATHS=(Sources/TBDShared Sources/TBDDaemon Package.swift Package.resolved)
+
+MARKER_HEADER_PREFIX='#'
+
+usage() {
+  echo "usage: $(basename "$0") [--record] <marker-path>" >&2
+  exit 64
+}
+
+# One `<path> <object-id>` line per compared path, in list order. Fails, having
+# said which path, if any of them does not resolve at HEAD.
+fingerprint_of_head() {
+  local path oid
+  for path in "${WIPE_PATHS[@]}"; do
+    oid="$(git rev-parse --verify --quiet "HEAD:$path" 2>/dev/null)"
+    if [ -z "$oid" ]; then
+      echo "$path does not resolve at HEAD — renamed, removed, or not a checkout of this repository." >&2
+      return 1
+    fi
+    printf '%s %s\n' "$path" "$oid"
+  done
+}
+
+# The comparable part of a marker: its header line is provenance for a human
+# reading the job log and takes no part in the decision.
+recorded_fingerprint() {
+  grep -v "^$MARKER_HEADER_PREFIX" "$1" 2>/dev/null
+}
 
 decide() {
   printf '%s\n' "$1"
@@ -77,33 +134,78 @@ decide() {
   exit 0
 }
 
+record() {
+  local marker="$1" current
+  # A marker still sitting there means the decision step never ran to consume
+  # it, so this run never took responsibility for what is in `.build/`: the
+  # artifacts are whatever the cache restored, and the marker already describes
+  # them. Overwriting it with the current tree would be a claim this run cannot
+  # back.
+  if [ -f "$marker" ]; then
+    echo "Leaving the marker at $marker alone: it was never read, so it still describes the artifacts in place." >&2
+    exit 0
+  fi
+  if ! current="$(fingerprint_of_head)"; then
+    echo "Recording no marker, so the next run wipes." >&2
+    exit 0
+  fi
+  {
+    printf '%s recorded at %s\n' "$MARKER_HEADER_PREFIX" "$(git rev-parse HEAD 2>/dev/null)"
+    printf '%s\n' "$current"
+  } > "$marker" || {
+    echo "Could not write the marker at $marker, so the next run wipes." >&2
+    rm -f "$marker"
+    exit 0
+  }
+  echo "Recorded the first-party source fingerprint at $marker:" >&2
+  cat "$marker" >&2
+  exit 0
+}
+
+mode=decide
+case "${1:-}" in
+  --record) mode=record; shift ;;
+  --*)      usage ;;
+esac
 marker="${1:-}"
-if [ -z "$marker" ]; then
-  echo "usage: $(basename "$0") <marker-path>" >&2
-  exit 64
+[ -n "$marker" ] || usage
+
+if [ "$mode" = "record" ]; then
+  record "$marker"
 fi
 
 if [ ! -f "$marker" ]; then
-  decide wipe "wipe: no cache-source marker at $marker, so the restored artifacts' provenance is unknown."
+  decide wipe "wipe: no marker at $marker, so the restored artifacts' provenance is unknown."
 fi
 
-sha="$(tr -d '[:space:]' < "$marker" 2>/dev/null)"
-if [ -z "$sha" ]; then
-  decide wipe "wipe: the cache-source marker at $marker is empty or unreadable."
+recorded="$(recorded_fingerprint "$marker")"
+if [ -z "$recorded" ]; then
+  decide wipe "wipe: the marker at $marker is empty or unreadable."
 fi
 
-if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
-  decide wipe "wipe: marker commit $sha is not in this checkout (force-pushed away, or a cache from unrelated history)."
+if ! current="$(fingerprint_of_head)"; then
+  decide wipe "wipe: the comparison could not be made against HEAD (see above)."
 fi
 
-git diff --quiet "$sha" HEAD -- "${WIPE_PATHS[@]}" 2>/dev/null
-rc=$?
-if [ "$rc" -eq 0 ]; then
-  decide skip "skip: ${WIPE_PATHS[*]} are unchanged since $sha, the commit these cached artifacts were built from."
-fi
-if [ "$rc" -ne 1 ]; then
-  decide wipe "wipe: comparing $sha with HEAD failed (git diff exited $rc)."
+if [ "$recorded" = "$current" ]; then
+  decide skip "skip: ${WIPE_PATHS[*]} are byte-identical to what these cached artifacts were built from."
 fi
 
-changed="$(git diff --name-only "$sha" HEAD -- "${WIPE_PATHS[@]}" 2>/dev/null | tr '\n' ' ')"
-decide wipe "wipe: changed since $sha: ${changed:-(unlistable)}"
+# Which of them moved, for a reader of the job log. A recorded line that is
+# absent from the current fingerprint altogether — the compared set itself
+# changed — leaves this empty, and the answer is `wipe` regardless.
+changed=""
+while read -r path oid; do
+  [ -n "$path" ] || continue
+  case "
+$recorded
+" in
+    *"
+$path $oid
+"*) ;;
+    *) changed="$changed $path" ;;
+  esac
+done <<EOF
+$current
+EOF
+decide wipe "wipe: changed since these artifacts were built:${changed:- the compared set itself}"

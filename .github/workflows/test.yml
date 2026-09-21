@@ -462,26 +462,37 @@ jobs:
       # `Sources/TBDDaemon` and one test file, it cost about three of the 278
       # seconds the first pass spent compiling — 89 TBDShared files and 265
       # TBDDaemonLib files recompiled, TestSupport and TBDDaemonTests re-emitted
-      # on top, and a 38-second relink.
+      # on top, and a 38-second relink. Over the last 40 commits on `main`, 18
+      # touched neither library's sources nor the manifest and paid it for
+      # nothing.
       #
       # The bug's precondition is that a library's SOURCES differ from the
       # sources its cached artifacts were built from, so the wipe is conditional
       # on exactly that. A step at the end of this job, after every compile and
-      # just before the cache save, records HEAD in
-      # `.build/tbd-cache-source-commit`, which rides the same cache entry as
-      # the artifacts; `scripts/ci/first-party-wipe-needed.sh` compares that
-      # commit's `Sources/TBDShared`, `Sources/TBDDaemonLib`, `Package.swift`
-      # and `Package.resolved` against HEAD's and answers `wipe` or `skip`.
-      # Every uncertainty answers `wipe` — no marker, a marker naming a commit
-      # this checkout does not have, or a diff that does not come back clean —
-      # because skipping wrongly costs a link flake nobody will trace back here
-      # while wiping wrongly costs three minutes. `|| echo wipe` keeps even a
-      # broken decider on the safe side rather than failing the job.
+      # just before the cache save, records a fingerprint of those sources —
+      # one git object id per compared path — in
+      # `.build/tbd-first-party-fingerprint`, which rides the same cache entry
+      # as the artifacts it describes;
+      # `scripts/ci/first-party-wipe-needed.sh` compares it against the tree
+      # being built now and answers `wipe` or `skip`. Every uncertainty answers
+      # `wipe` — no marker, an unreadable one, a compared path that no longer
+      # resolves, or any difference at all — because skipping wrongly costs a
+      # link flake nobody will trace back here while wiping wrongly costs three
+      # minutes. `|| echo wipe` keeps even a broken decider on the safe side
+      # rather than failing the job.
+      #
+      # The marker is REMOVED the moment it has been read, and a fresh one is
+      # recorded only by that later step. That is what keeps the marker and
+      # the artifacts from drifting apart no matter how this run ends: a job
+      # that dies anywhere after this step leaves no marker at all, so the next
+      # run wipes, while a job that dies before this step leaves the restored
+      # marker untouched, still describing the restored artifacts.
       - name: Force-rebuild first-party libraries (workaround SPM #7715)
         run: |
-          decision="$(bash scripts/ci/first-party-wipe-needed.sh .build/tbd-cache-source-commit || echo wipe)"
+          decision="$(bash scripts/ci/first-party-wipe-needed.sh .build/tbd-first-party-fingerprint || echo wipe)"
+          rm -f .build/tbd-first-party-fingerprint
           if [ "$decision" = "skip" ]; then
-            echo "Keeping the restored first-party artifacts: neither library target's sources changed since the commit this cache was built from (reason above)."
+            echo "Keeping the restored first-party artifacts: neither library target's sources changed since these artifacts were built (reason above)."
             exit 0
           fi
           for module in TBDShared TBDDaemonLib; do
@@ -867,7 +878,7 @@ jobs:
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
         run: swift build -j "$TBD_SWIFT_JOBS"
 
-      # Record which commit produced the artifacts now sitting in `.build/`, so
+      # Record which sources produced the artifacts now sitting in `.build/`, so
       # the next run that restores this cache can tell whether the SPM #7715
       # wipe above is needed at all. It goes after every compile in the job and
       # immediately before the cache-save step below, and writes inside
@@ -875,26 +886,21 @@ jobs:
       # describes.
       #
       # A marker beats reading the cache key: the key is built from
-      # `hashFiles(...)` digests, which identify a tree but cannot be diffed
-      # against another one. A commit can.
+      # `hashFiles(...)` digests, which identify a tree but say nothing that can
+      # be compared path by path against another one. Object ids can, and unlike
+      # a commit they survive the ephemeral merge commit a `pull_request` run is
+      # checked out at.
       #
-      # `if: always()` because the marker's absence and the artifacts' presence
+      # `if: always()` because a marker's absence and the artifacts' presence
       # must never come apart for a cache that gets saved — a saved cache whose
       # marker is missing or stale is one the next run cannot reason about. The
-      # guard below covers the other direction: a job that failed before
-      # anything compiled would otherwise stamp HEAD onto restored artifacts
-      # built elsewhere, which is the one shape that could produce a wrongful
-      # `skip`. No marker simply means the next run wipes.
-      - name: Record the commit these build artifacts came from
+      # wipe step removed the previous marker when it read it, so a run that
+      # reached a compile and then failed still records what it built; a run
+      # that never got that far recorded nothing and left nothing behind, and
+      # the next run wipes.
+      - name: Record the sources these build artifacts came from
         if: always()
-        run: |
-          if ! ls -d .build/*/debug/TBDShared.build >/dev/null 2>&1; then
-            echo "No first-party build artifacts in .build; recording no source commit, so the next run wipes."
-            rm -f .build/tbd-cache-source-commit
-            exit 0
-          fi
-          git rev-parse HEAD > .build/tbd-cache-source-commit
-          echo "Cache source commit: $(cat .build/tbd-cache-source-commit)"
+        run: bash scripts/ci/first-party-wipe-needed.sh --record .build/tbd-first-party-fingerprint
 
       # Saved LAST, after the final writer into `.build`, so the stored entry
       # carries the linked executables as well as the test artifacts. `key:` is
