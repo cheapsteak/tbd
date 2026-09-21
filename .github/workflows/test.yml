@@ -166,8 +166,13 @@ jobs:
       # `test` job's critical path, which is why it runs here.
       #
       # It runs LAST so a bug in it costs the least: every cheap guard in this
-      # job has already reported by the time it starts.
+      # job has already reported by the time it starts. `!cancelled()` rather
+      # than the implicit `success()`, so the harness is still exercised on a
+      # run where an earlier guard in this job went red — a failing SwiftLint
+      # or a failing fence harness must not also cost this one its coverage,
+      # and the author fixing that failure wants both verdicts at once.
       - name: Test the stall watchdog
+        if: ${{ !cancelled() }}
         run: /bin/bash scripts/ci/watched-test-pass.test.sh
 
   plans-guard:
