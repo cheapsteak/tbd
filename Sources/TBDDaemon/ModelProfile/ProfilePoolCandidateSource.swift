@@ -43,9 +43,9 @@ public struct ProfilePoolCandidateSource: Sendable {
     /// Build the candidate list for the pool picker.
     ///
     /// Assembles one candidate per profile row: loads the usage snapshot (if available),
-    /// determines credential presence (for oauth: loginIdentity != nil; for oauthToken:
-    /// snapshot statusKind not in [.needsLogin, .noCredentials], or true if no snapshot
-    /// yet), looks up live session count, and computes the account key (snapshot.organizationID ??
+    /// determines credential presence with the shared
+    /// `ProfilePoolCandidate.hasCredential(kind:hasLoginIdentity:snapshotStatus:)` rule,
+    /// looks up live session count, and computes the account key (snapshot.organizationID ??
     /// loginIdentity ?? profileID.uuidString).
     ///
     /// - Parameters:
@@ -61,26 +61,11 @@ public struct ProfilePoolCandidateSource: Sendable {
         return allProfiles.map { row in
             let snapshot = allSnapshots[row.id]
 
-            // Determine hasCredential per the design:
-            // - .oauth: loginIdentity != nil
-            // - .oauthToken: snapshot statusKind not in [.needsLogin, .noCredentials]
-            //   (or true if no snapshot yet — the token profile carries a credential)
-            // - .apiKey, .bedrock: false (not pool-eligible)
-            let hasCredential: Bool
-            switch row.kind {
-            case .oauth:
-                hasCredential = loginIdentity(row.id) != nil
-            case .oauthToken:
-                if let snapshot = snapshot {
-                    hasCredential = ![ProfileUsageStatusKind.needsLogin, .noCredentials]
-                        .contains(snapshot.statusKind)
-                } else {
-                    // No snapshot yet: assume the token is stored (the profile wouldn't exist without one).
-                    hasCredential = true
-                }
-            case .apiKey, .bedrock:
-                hasCredential = false
-            }
+            let hasCredential = ProfilePoolCandidate.hasCredential(
+                kind: row.kind,
+                hasLoginIdentity: loginIdentity(row.id) != nil,
+                snapshotStatus: snapshot?.statusKind
+            )
 
             // Compute account key: organizationID ?? loginIdentity ?? profileID.uuidString.
             let accountKey: String

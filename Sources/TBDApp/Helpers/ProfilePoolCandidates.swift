@@ -18,21 +18,13 @@ enum ProfilePoolCandidates {
             let profile = entry.profile
             let kind = profile.kind
             let liveCount = liveCounts(profile.id)
-            let hasCredential: Bool
-            if kind == .oauth {
-                hasCredential = entry.loginIdentity != nil
-            } else if kind == .oauthToken {
-                // oauthToken profile has credential if snapshot statusKind is not
-                // .needsLogin or .noCredentials
-                if let snapshot = entry.usageSnapshot {
-                    hasCredential = snapshot.statusKind != .needsLogin
-                        && snapshot.statusKind != .noCredentials
-                } else {
-                    hasCredential = false
-                }
-            } else {
-                hasCredential = false
-            }
+            // The same rule the daemon's candidate source uses, so the
+            // balanced pick shown here matches the one a spawn would make.
+            let hasCredential = ProfilePoolCandidate.hasCredential(
+                kind: kind,
+                hasLoginIdentity: entry.loginIdentity != nil,
+                snapshotStatus: entry.usageSnapshot?.statusKind
+            )
 
             // Account key: snapshot.organizationID ?? loginIdentity ?? profileID string
             let accountKey = entry.usageSnapshot?.organizationID
