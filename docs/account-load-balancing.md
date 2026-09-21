@@ -33,7 +33,7 @@ Or use **Include in balancing** in the ⋯ menu on each profile in Settings. The
 When balancing is on and a new session would land on the global default, TBD builds a score for each eligible profile:
 
 - **Fresh reading** – TBD checks each profile's usage every 90 seconds (signed-in OAuth) or after each turn (setup-token). A reading older than 5 minutes (OAuth) or 15 minutes (setup-token) is too stale to route on, and the profile is skipped.
-- **Headroom** – TBD measures the profile's available space on whichever rate-limit window is closest to full: your 5-hour session window, your weekly-all window, or your weekly per-model window. A profile at 96% or higher on any window is treated as full (the 5% floor) regardless of the others.
+- **Headroom** – TBD measures the profile's available space on whichever rate-limit window is closest to full: your 5-hour session window, your weekly-all window, or your weekly per-model window. A profile at 95% or higher on any window is treated as full (the 5% floor) regardless of the others.
 - **Account load** – the score is `(live sessions on this account + 1) / headroom`. Lower is better. Two accounts at equal usage still score differently if one carries more active sessions, because the live count is exact at decision time and the usage reading is minutes old.
 - **Tie-break** – when scores tie, TBD picks the configured global default first, then the profile's sort order, then the profile ID. The tie-break is deterministic and explainable: nothing random.
 
@@ -103,7 +103,7 @@ log stream --level info --predicate 'subsystem == "com.tbd.daemon" AND category 
 **A profile is never chosen** – check:
 - **Is it in the pool?** No fresh reading (not logged in, or usage poller failing) → no pick. Settings shows the "stale — skipped by balancing" badge on such a profile, and the first balanced spawn that skips it posts a notification. Check its login, then `tbd profile list`.
 - **Opted out?** Use `tbd profile pool <name> include` or uncheck **Include in balancing**.
-- **At the floor?** A profile at 96%+ headroom is treated as full and passed over.
+- **At the floor?** A profile at 95% or more usage on any window is treated as full and passed over.
 - **Balancing off?** `tbd profile balancing on` to enable it.
 
 **No "Switch to" button on the limit banner** – no profile on another account qualified. The same rules as a balanced pick apply (fresh reading, not opted out, below the floor), and every profile on the exhausted account is excluded.
