@@ -167,7 +167,7 @@ why a profile was passed over:
 **Headroom** is `1 − max(percent)/100` over the snapshot's `session`,
 `weekly_all`, and active `weekly_scoped` buckets. The binding window is the
 one that will refuse the next request, whichever it is, so the most-used
-window decides. The floor is 5%: a profile at 96% of any window is treated as
+window decides. The floor is 5%: a profile at 95% or more of any window is treated as
 full rather than ranked last, because a session landing there will die on its
 first long turn.
 
