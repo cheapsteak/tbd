@@ -469,24 +469,23 @@ jobs:
       # The bug's precondition is that a library's SOURCES differ from the
       # sources its cached artifacts were built from, so the wipe is conditional
       # on exactly that. A step at the end of this job, after every compile and
-      # just before the cache save, records a fingerprint of those sources —
-      # one git object id per compared path — in
+      # just before the cache save, records a fingerprint of those sources — one
+      # git object id per compared path — in
       # `.build/tbd-first-party-fingerprint`, which rides the same cache entry
-      # as the artifacts it describes;
-      # `scripts/ci/first-party-wipe-needed.sh` compares it against the tree
-      # being built now and answers `wipe` or `skip`. Every uncertainty answers
-      # `wipe` — no marker, an unreadable one, a compared path that no longer
-      # resolves, or any difference at all — because skipping wrongly costs a
-      # link flake nobody will trace back here while wiping wrongly costs three
-      # minutes. `|| echo wipe` keeps even a broken decider on the safe side
-      # rather than failing the job.
+      # as the artifacts it describes; `scripts/ci/first-party-wipe-needed.sh`
+      # compares it against the tree being built now and answers `wipe` or
+      # `skip`. Every uncertainty answers `wipe` — no marker, an unreadable one,
+      # a compared path that no longer resolves, or any difference at all —
+      # because skipping wrongly costs a link flake nobody will trace back here
+      # while wiping wrongly costs three minutes. `|| echo wipe` keeps even a
+      # broken decider on the safe side rather than failing the job.
       #
       # The marker is REMOVED the moment it has been read, and a fresh one is
-      # recorded only by that later step. That is what keeps the marker and
-      # the artifacts from drifting apart no matter how this run ends: a job
-      # that dies anywhere after this step leaves no marker at all, so the next
-      # run wipes, while a job that dies before this step leaves the restored
-      # marker untouched, still describing the restored artifacts.
+      # recorded only by that later step. That is what keeps the marker and the
+      # artifacts from drifting apart no matter how this run ends: a job that
+      # dies anywhere after this step leaves no marker at all, so the next run
+      # wipes, while a job that dies before this step leaves the restored marker
+      # untouched, still describing the restored artifacts.
       - name: Force-rebuild first-party libraries (workaround SPM #7715)
         run: |
           decision="$(bash scripts/ci/first-party-wipe-needed.sh .build/tbd-first-party-fingerprint || echo wipe)"

@@ -345,8 +345,10 @@ test_record_writes_nothing_when_a_path_does_not_resolve() {
 
 # A marker the decision step never consumed belongs to the artifacts the cache
 # restored, not to this run — overwriting it would claim a consistency this run
-# never established. This is the shape of a job that died before reaching the
-# wipe step, where the end-of-job recording still runs under `if: always()`.
+# never established. The workflow never reaches its recording step in that
+# shape, since that step carries no condition and so runs only after every step
+# before it succeeded; the guard is what makes the script safe to call from
+# anywhere, including by hand on a machine whose `.build/` it did not build.
 test_record_leaves_an_unread_marker_alone() {
   local repo before after; repo="$(mkrepo)"
   record_marker "$repo"
