@@ -838,11 +838,15 @@ public final class Daemon: Sendable {
             terminals: database.terminals,
             loginIdentity: { configDirManager.loginIdentity(forProfileID: $0) }
         )
+        // One reservation ledger for the whole daemon: the lifecycle and the
+        // router hold copies of this resolver, and a balanced pick is only
+        // atomic across spawns that share the same ledger.
         let modelProfileResolver = ModelProfileResolver(
             profiles: database.modelProfiles,
             repos: database.repos,
             config: database.config,
-            candidateSource: profilePoolCandidateSource
+            candidateSource: profilePoolCandidateSource,
+            reservations: ProfilePickReservations()
         )
         let pendingQuestions = PendingQuestionStore()
 

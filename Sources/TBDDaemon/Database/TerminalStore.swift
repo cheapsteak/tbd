@@ -2000,4 +2000,24 @@ public struct TerminalStore: Sendable {
             return result
         }
     }
+
+    /// Live Claude rows created at or after `cutoff`, as (profile, createdAt)
+    /// pairs — the same population `liveSessionCountsByProfile` counts. A
+    /// balanced pick uses these to tell which of its reservations have landed
+    /// (see `ProfilePickReservations`).
+    public func recentLiveSessionSpawns(since cutoff: Date) async throws -> [RecentProfileSpawn] {
+        try await writer.read { db in
+            try TerminalRecord
+                .filter(Column("kind") == "claude" && Column("profile_id") != nil
+                    && Column("hibernatedAt") == nil && Column("suspendedAt") == nil
+                    && Column("createdAt") >= cutoff)
+                .fetchAll(db)
+                .compactMap { record in
+                    guard let profileID = record.profile_id.flatMap(UUID.init(uuidString:)) else {
+                        return nil
+                    }
+                    return RecentProfileSpawn(profileID: profileID, createdAt: record.createdAt)
+                }
+        }
+    }
 }
