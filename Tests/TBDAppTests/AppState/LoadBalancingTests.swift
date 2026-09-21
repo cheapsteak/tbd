@@ -188,7 +188,7 @@ struct LoadBalancingTests {
     private func seedLimitHit(_ appState: AppState, terminalID: UUID) {
         appState.limitHits[terminalID] = TerminalLimitHit(
             profileID: UUID(), resetsAt: Date(), limitType: "session",
-            suggestedProfileID: nil, rotatedToProfileID: nil, receivedAt: Date())
+            suggestedProfileID: nil, receivedAt: Date())
     }
 
     @Test @MainActor
@@ -201,7 +201,6 @@ struct LoadBalancingTests {
                 resetsAt: Date(), limitType: "session", suggestedProfileID: suggested)))
             #expect(appState.limitHits[terminalID]?.limitType == "session")
             #expect(appState.limitHits[terminalID]?.suggestedProfileID == suggested)
-            #expect(appState.limitHits[terminalID]?.rotatedToProfileID == nil)
         }
     }
 
@@ -309,7 +308,6 @@ struct LoadBalancingTests {
             resetsAt: resetTime,
             limitType: "session",
             suggestedProfileID: suggestedID,
-            rotatedToProfileID: nil,
             receivedAt: now
         )
 
@@ -342,32 +340,7 @@ struct LoadBalancingTests {
 
         #expect(model.limitedProfileName == "Limited")
         #expect(model.suggestedProfileName == "Available")
-        #expect(model.isRotated == false)
-    }
-
-    @Test
-    func limitBannerModelForRotatedSession() {
-        let now = Date()
-        let resetTime = now.addingTimeInterval(1800)
-
-        let limitHit = TerminalLimitHit(
-            profileID: UUID(),
-            resetsAt: resetTime,
-            limitType: "weekly_all",
-            suggestedProfileID: nil,
-            rotatedToProfileID: UUID(),
-            receivedAt: now
-        )
-
-        let model = LimitBannerModel.build(
-            limitHit: limitHit,
-            limitedProfile: nil,
-            suggestedProfile: nil,
-            suggestedLiveCount: nil,
-            now: now
-        )
-
-        #expect(model.isRotated == true)
+        #expect(model.switchButtonTitle?.hasPrefix("Switch to Available") == true)
     }
 }
 

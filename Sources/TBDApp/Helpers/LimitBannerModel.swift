@@ -5,8 +5,8 @@ import TBDShared
 ///
 /// Computes the copy and UI state for displaying a limit-hit condition:
 /// the warning banner showing which profile the limit hit on, when it resets,
-/// and optionally a suggested profile to swap to or confirmation that a swap
-/// already happened.
+/// and optionally a suggested profile to switch to. Switching is always the
+/// person's click; the daemon never switches a session on its own.
 struct LimitBannerModel {
     /// The profile name the limit hit on (for display).
     let limitedProfileName: String
@@ -19,16 +19,22 @@ struct LimitBannerModel {
     let suggestedProfileName: String?
 
     /// When `suggestedProfileID` is non-nil and present, the usage summary
-    /// to show on the "Switch to" button, e.g. "5h 12% · 2 live".
+    /// to show on the "Switch to" button, e.g. "5h 12% · 2 live". Nil when
+    /// there is nothing to show, so the button carries no dangling separator.
     let suggestedUsageSummary: String?
 
     /// The number of live sessions on the suggested profile, when present.
     /// Used to construct the button suffix " · 2 live".
     let suggestedLiveSessions: Int?
 
-    /// True when the limit hit has already been rotated to another profile.
-    /// In this case, show "— switched to <name>" instead of the action button.
-    let isRotated: Bool
+    /// The switch button's title — "Switch to <name> — <summary>", or just
+    /// "Switch to <name>" when there is no summary — or nil when there is no
+    /// suggested profile to offer.
+    var switchButtonTitle: String? {
+        guard let name = suggestedProfileName else { return nil }
+        guard let summary = suggestedUsageSummary else { return "Switch to \(name)" }
+        return "Switch to \(name) — \(summary)"
+    }
 
     /// Static helper to build the banner model from state.
     /// - `limitHit`: The `TerminalLimitHit` from `AppState.limitHits[terminalID]`.
@@ -56,26 +62,26 @@ struct LimitBannerModel {
 
         if let suggestedProfile {
             // Build usage summary for the suggested profile
-            let usagePart = ProfileUsagePresentation.usageSummary(for: suggestedProfile.usageSnapshot) ?? ""
+            var parts: [String] = []
+            if let usage = ProfileUsagePresentation.usageSummary(for: suggestedProfile.usageSnapshot),
+               !usage.isEmpty {
+                parts.append(usage)
+            }
             let liveCount = suggestedLiveCount ?? 0
-            let livePart = liveCount > 0 ? " · \(liveCount) live" : ""
-            suggestedUsageSummary = usagePart.isEmpty ? livePart.trimmingCharacters(in: CharacterSet(charactersIn: " ·")) : usagePart + livePart
+            if liveCount > 0 { parts.append("\(liveCount) live") }
+            suggestedUsageSummary = parts.isEmpty ? nil : parts.joined(separator: " · ")
             suggestedLiveSessions = suggestedLiveCount
         } else {
             suggestedUsageSummary = nil
             suggestedLiveSessions = nil
         }
 
-        // Check if already rotated
-        let isRotated = limitHit.rotatedToProfileID != nil
-
         return LimitBannerModel(
             limitedProfileName: limitedProfileName,
             resetsText: resetsText,
             suggestedProfileName: suggestedProfileName,
             suggestedUsageSummary: suggestedUsageSummary,
-            suggestedLiveSessions: suggestedLiveSessions,
-            isRotated: isRotated
+            suggestedLiveSessions: suggestedLiveSessions
         )
     }
 }

@@ -89,8 +89,9 @@ Top level of `tbd profile list --json`:
   "The terminal join").
 - **`balancing`** – object with two boolean fields: `enabled` (whether new
   sessions spread across the available pool; design 2026-09-05 §6) and
-  `rotationEnabled` (whether sessions hitting their limit are automatically
-  resumed on another account; design 2026-09-05 §7). Both default to `false`.
+  `rotationEnabled` (the stored `limit_rotation_enabled` column; no behavior
+  reads it — a session hitting its limit is only ever offered a switch, never
+  moved automatically). Both default to `false`.
 
 The envelope also carries app-oriented configuration mirrors —
 `primaryAgentPreference`, `globalEnvOverrides`, merge-automation defaults, and

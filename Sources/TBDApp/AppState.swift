@@ -45,7 +45,6 @@ struct TerminalLimitHit: Equatable {
     let resetsAt: Date
     let limitType: String
     let suggestedProfileID: UUID?
-    let rotatedToProfileID: UUID?
     let receivedAt: Date
 }
 
@@ -2538,7 +2537,6 @@ final class AppState {
                 resetsAt: d.resetsAt,
                 limitType: d.limitType,
                 suggestedProfileID: d.suggestedProfileID,
-                rotatedToProfileID: d.rotatedToProfileID,
                 receivedAt: Date()
             )
         default:

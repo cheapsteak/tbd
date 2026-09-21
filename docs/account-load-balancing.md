@@ -39,7 +39,7 @@ When balancing is on and a new session would land on the global default, TBD bui
 
 If nothing qualifies, TBD falls back to the old behavior: global default if set, or no profile (ambient).
 
-## Rotation on limit hit
+## Switching accounts on a limit hit
 
 When a session hits a hard usage limit, you see a notification and a banner in the tab:
 
@@ -48,19 +48,13 @@ When a session hits a hard usage limit, you see a notification and a banner in t
 [ Switch to Personal — 5h 12% · 1 live ]  [ Dismiss ]
 ```
 
-Clicking **Switch to** reopens your conversation on Personal in the same tab. The flag `limit_rotation_enabled` lets TBD do this automatically:
+Clicking **Switch to** reopens your conversation on Personal in the same tab. The suggestion is always the best-scoring profile on a different account from the one that hit the limit; ambient sessions get a suggestion too. When no other account has room, the banner shows only the reset time.
 
-```sh
-tbd profile rotation on
-```
-
-or **Switch account when a session hits its limit** in Settings → Model Profiles.
-
-Automatic hand-over only applies to sessions with a stamped profile (not ambient sessions), over tmux transport (not holder-backed sessions), and only when a candidate account exists outside the exhausted account. The system schedules a `continue` keystroke roughly a minute after the limit, so your dead turn resumes on the new account. If the swap fails, you still get the manual banner and the keystroke at reset time.
+TBD never switches accounts on its own and never resumes the dead turn for you after a switch: the button is the only way a session changes account at a limit. Send a message after switching to carry on. The older "auto-resume when the limit resets" toggle still types `continue` at reset time on the original account, and is unaffected by the suggestion.
 
 ## Flags and configuration
 
-Two feature flags, both default **off** and soaking:
+One feature flag, default **off** and soaking:
 
 **`profile_balancing_enabled`** – spreads new sessions across accounts. Enable with:
 
@@ -70,15 +64,9 @@ tbd profile balancing on
 
 or **Balance new Claude sessions across accounts** in Settings → Model Profiles. The help text reminds you that repo overrides and explicit picks still win.
 
-**`limit_rotation_enabled`** – automatically hands over sessions hitting their limit. Enable with:
+A second column, `limit_rotation_enabled` (`tbd profile rotation on|off`), is still stored and reported, but no behavior reads it: a limit hit only ever offers the switch button.
 
-```sh
-tbd profile rotation on
-```
-
-The `continue` TBD types after a hand-over belongs to this flag alone. It does not need the older "auto-resume when the limit resets" toggle to be on, and turning rotation off cancels only the continues a rotation armed, never a reset-time resume.
-
-Each flag is tri-state: `NULL` (never chosen), `0` (explicit off), or `1` (explicit on). The shipped default is `NULL` on every install. Flipping the source default graduates the flag to everyone who hasn't explicitly chosen, while preserving every intentional opt-out. The per-profile pool opt-out is a setting, not a flag, with no graduation.
+The flag is tri-state: `NULL` (never chosen), `0` (explicit off), or `1` (explicit on). The shipped default is `NULL` on every install. Flipping the source default graduates the flag to everyone who hasn't explicitly chosen, while preserving every intentional opt-out. The per-profile pool opt-out is a setting, not a flag, with no graduation.
 
 ## Seeing the load
 
@@ -116,8 +104,4 @@ log stream --level info --predicate 'subsystem == "com.tbd.daemon" AND category 
 - **At the floor?** A profile at 96%+ headroom is treated as full and passed over.
 - **Balancing off?** `tbd profile balancing on` to enable it.
 
-**Rotation didn't fire** – check:
-- **Flag on?** `tbd profile rotation on`.
-- **Stamped session?** Ambient sessions (no profile override at spawn) get the banner only; they are never auto-swapped.
-- **Holder-backed session?** Those get the banner; auto-swap is tmux-only for now.
-- **Candidate exists?** The rotation needs another account with room. If none do, you get the manual banner.
+**No "Switch to" button on the limit banner** – no profile on another account qualified. The same rules as a balanced pick apply (fresh reading, not opted out, below the floor), and every profile on the exhausted account is excluded.

@@ -23,7 +23,7 @@ public final class RPCRouter: Sendable {
     public let actuationLog: ActuationLog
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
-    /// Injected for the rate-limit handler's rotation suggestion; a seam like
+    /// Injected for the rate-limit handler's profile suggestion; a seam like
     /// `limitResumeScheduler` so tests can install one after construction.
     public nonisolated(unsafe) var profilePoolCandidateSource: ProfilePoolCandidateSource?
     public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
@@ -92,11 +92,6 @@ public final class RPCRouter: Sendable {
     /// Session-limit auto-resume scheduler. `nil` in mock mode / tests that
     /// don't need it; set post-construction like `claudeUsagePoller`.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
-    /// Seam for testing profile rotation on limit hit. When nil (production),
-    /// uses the real `handleTerminalSwapProfile`. Tests substitute a mock.
-    public nonisolated(unsafe) var rotationSwapPerformer: (
-        @Sendable (Data, ActuationActor?) async throws -> RPCResponse
-    )?
     /// Periodic comparison of this build against the remote's `main`. `nil`
     /// when nothing wired one (mock mode, unit tests), in which case
     /// `daemon.status` carries no `update` field and `daemon.checkForUpdate`
@@ -417,10 +412,10 @@ public final class RPCRouter: Sendable {
         self.branchTrackingCache = branchCache
         self.prPoller = PRPoller()
         // Default the candidate source from the router's own stores rather
-        // than leaving it nil: the rate-limit handler's suggestion and the
-        // gated rotation both read it, and a caller that forgets to pass one
-        // would otherwise disable both silently (the AI review caught exactly
-        // that gap in the daemon's wiring). Callers that pass one — the
+        // than leaving it nil: the rate-limit handler's suggestion reads it,
+        // and a caller that forgets to pass one would otherwise disable it
+        // silently (the AI review caught exactly that gap in the daemon's
+        // wiring). Callers that pass one — the
         // daemon, so the resolver and the handler share it, and tests that
         // inject fakes — still win.
         let resolvedCandidateSource = profilePoolCandidateSource ?? ProfilePoolCandidateSource(
