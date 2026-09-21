@@ -937,10 +937,24 @@ flag with a soak and a stated graduation plan.
   emulator through the typed screen and types through the injection courier,
   where on tmux it captures a pane and sends keys. It treats only a live,
   fully observed screen as evidence — the same two facts the hibernation
-  pending-input rail refuses on — so a login tab a viewer has open waits,
-  bounded by the pump's own timeout, rather than typing at a grid that can
-  show a caret the session does not have. The loop, the classifier and the
-  send cap are one implementation either transport feeds.
+  pending-input rail refuses on — rather than typing at a grid that can show a
+  caret the session does not have. The loop, the classifier and the send cap
+  are one implementation either transport feeds.
+
+  On the holder that makes waiting the ordinary outcome rather than the
+  exception. The daemon may judge the screen only while it is the session's
+  reader, and the app navigates to a login tab as soon as `terminal.create`
+  returns — which attaches a viewer and suspends that reader, before the
+  pump's initial settle has elapsed. So the usual login tab is attached by the
+  time the pump takes its first reading: it polls out its timeout without
+  typing, and the person runs `/login` themselves from the footer hint the
+  pane already shows, exactly as they would if the pump had never been armed.
+  Auto-typing becomes effective on this transport once the pump can read a
+  screen the viewer itself answers — the pull
+  [`2026-09-05-child-as-contract-party-design.md`](2026-09-05-child-as-contract-party-design.md)
+  carries as an open item — and until then the holder arm's value is
+  that a login tab opens on the same transport as everything else, with the
+  typing ready for the read that makes it usable.
 
   The flag therefore gates **spawning, not servicing**: the flag is consulted
   only when a session is created, and both transports' machinery (attach

@@ -365,9 +365,10 @@ struct LoginSessionCoordinatorTests {
                 == .notEvidence("no live holder reader"))
     }
 
-    /// A viewer holds the pty, so the daemon's grid is frozen at the attach —
-    /// and a frozen grid showing a caret proves nothing about now. Asserted
-    /// against ready-looking text, which is what makes the refusal meaningful.
+    /// A viewer holds the pty, so the daemon's emulator is not the live screen
+    /// — and a grid that is not the live screen proves nothing about now.
+    /// Asserted against ready-looking text, which is what makes the refusal
+    /// meaningful.
     @Test("paneReading: a screen a viewer is behind → not evidence, ready text or not")
     func paneReadingBehindAViewer() throws {
         for source in [TerminalScreen.Source.staleDaemon, .viewer] {
@@ -378,7 +379,7 @@ struct LoginSessionCoordinatorTests {
             #expect(
                 reading
                     == .notEvidence(
-                        "a viewer holds the pty; the daemon's screen is frozen at its attach"),
+                        "a viewer holds the pty, so the daemon's emulator is not the live screen"),
                 "a \(source.rawValue) screen was not refused")
         }
     }

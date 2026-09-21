@@ -31,6 +31,17 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "loginSession
 ///    that policy; `classifyPane` remains the one classifier either transport's
 ///    text goes through.
 ///
+///    **On the holder that makes auto-typing the exception rather than the
+///    rule.** The daemon may judge the screen only while it is the session's
+///    reader, and the app navigates to a login tab as soon as `terminal.create`
+///    returns, which attaches a viewer and suspends that reader — so the
+///    ordinary login tab is already attached by the time the pump takes its
+///    first reading. It then polls out its timeout without typing, and the
+///    person runs `/login` themselves from the footer hint the pane already
+///    shows. Auto-typing becomes effective on this transport once the pump can
+///    read a screen the viewer itself answers, which the child-as-contract-party
+///    design carries as an open item.
+///
 /// 2. **Login-completion watching** — `watchLoginIdentity` polls the
 ///    profile's isolated `.claude.json` for an `oauthAccount` and invokes
 ///    `onLogin` (the caller broadcasts `.modelProfilesChanged`) when it
@@ -124,35 +135,42 @@ public actor LoginSessionCoordinator {
         /// evidence `classifyPane` may judge.
         case text(String)
         /// A screen that is not evidence, with the reason for the log: nobody
-        /// is reading the pty for the daemon, the daemon's emulator is frozen
-        /// behind a viewer's attach, or it was built over an already-running
-        /// child.
+        /// is reading the pty for the daemon, a viewer holds the pty so the
+        /// daemon's emulator is not the live screen, or that emulator was built
+        /// over an already-running child.
         case notEvidence(String)
     }
 
     /// The login pump's reading of a holder session's typed screen. Evidence
     /// only when the daemon rendered it live AND its emulator watched the child
-    /// from the start — the same two facts the hibernation pending-input rail
-    /// refuses on (`HibernationCoordinator.holderRefusal`), for the same
-    /// reason: a frozen or half-painted grid can show a caret the session does
-    /// not have.
+    /// from the start — a frozen or half-painted grid can show a caret the
+    /// session does not have.
     ///
-    /// Restated here rather than borrowed. The rail's refusals name hibernation
-    /// actions a person can take, and a pump that never blocks anything has
-    /// nothing to offer them; what it needs is a line for the log saying why it
-    /// is still waiting.
+    /// The decision is `HolderScreenEvidence`'s, shared with the hibernation
+    /// pending-input rail so the park, the sweep and this pump cannot hold
+    /// different opinions about which screens are judgeable. What differs is
+    /// the wording: the rail's refusals name hibernation actions a person can
+    /// take, and a pump that never blocks anything has nothing to offer them;
+    /// what it needs is a line for the log saying why it is still waiting.
+    ///
+    /// A live screen the daemon is reading answers `.daemon`, and one frozen
+    /// behind a viewer's attach answers `.staleDaemon`; those are the two a
+    /// `HolderReader` can produce, and so the two this pump meets. `.viewer` —
+    /// a screen a viewer answered a pull with — is refused alongside the frozen
+    /// one for completeness, because a source is the question asked here and a
+    /// new source must be answered rather than defaulted.
     public static func paneReading(from screen: TerminalScreen?) -> PaneReading {
         guard let screen else { return .notEvidence("no live holder reader") }
-        switch screen.source {
-        case .staleDaemon, .viewer:
+        switch HolderScreenEvidence.refusal(
+            forSource: screen.source, contentObserved: screen.contentObserved) {
+        case .viewerHoldsPty:
             return .notEvidence(
-                "a viewer holds the pty; the daemon's screen is frozen at its attach")
-        case .daemon:
-            guard screen.contentObserved else {
-                return .notEvidence(
-                    "the daemon's emulator was built over a running child and has not seen "
-                        + "the whole screen")
-            }
+                "a viewer holds the pty, so the daemon's emulator is not the live screen")
+        case .contentUnobserved:
+            return .notEvidence(
+                "the daemon's emulator was built over a running child and has not seen "
+                    + "the whole screen")
+        case nil:
             // `output` is the screen's own joined lines — the type carries no
             // second copy of the text, and joining here would make one.
             return .text(screen.output)
