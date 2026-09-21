@@ -47,8 +47,10 @@ jobs:
     name: Lint
     runs-on: macos-26
     # 20: brew, swiftlint, and harnesses that are pure Python/git/bash — no
-    # SwiftPM build at all. Recent runs sit at 0.6 min median, 0.9 min worst, so
-    # this is over an order of magnitude of headroom on a macOS slot.
+    # SwiftPM build at all. Recent runs sit near 1.7 min, and the stall-watchdog
+    # harness at the end of the job adds about 1.5 min of deliberate waiting on
+    # top, so expect roughly 3 min — still an order of magnitude of headroom on
+    # a macOS slot.
     timeout-minutes: 20
     steps:
       # `fetch-depth: 0` is load-bearing for the migration lint below: its
@@ -148,6 +150,26 @@ jobs:
           bash scripts/restart-bundle-lib.test.sh
           bash scripts/update.test.sh
 
+      # The stall watchdog's own harness: fixture directories, a stub
+      # `scripts/test.sh` and a stub `sample`, no build, no SwiftPM, no real
+      # store touched. It cannot join the Linux collection in `plans-guard`
+      # because everything it drives is BSD — `script(1)` takes different
+      # arguments on Linux, `ps` there is GNU, and `sample` does not exist at
+      # all — the same reason the fence and installer harnesses above it sit
+      # here.
+      #
+      # It is the most expensive step in this job at ~90 s, and almost all of
+      # that is waiting rather than working: the script polls in 5-second steps,
+      # and the escalation case must sit out the whole 30-second grace window
+      # because that window is the thing it measures. Ninety seconds of waiting
+      # on a job that builds nothing is far cheaper than ninety seconds on the
+      # `test` job's critical path, which is why it runs here.
+      #
+      # It runs LAST so a bug in it costs the least: every cheap guard in this
+      # job has already reported by the time it starts.
+      - name: Test the stall watchdog
+        run: /bin/bash scripts/ci/watched-test-pass.test.sh
+
   plans-guard:
     name: No committed implementation plans
     runs-on: ubuntu-latest
@@ -165,9 +187,12 @@ jobs:
       # Every script harness that needs nothing but bash, git and python lives
       # here — a test file no workflow runs is worth nothing, and three of
       # these shipped that way before this step collected them. They are on
-      # `ubuntu-latest` because none of them reads a BSD-only tool; the fence
-      # harness (`scripts/test.test.sh`) is the exception and stays in the
-      # macOS `lint` job because its guards read BSD `stat -f`.
+      # `ubuntu-latest` because none of them reads a BSD-only tool. The
+      # exceptions stay in the macOS `lint` job: the fence harness
+      # (`scripts/test.test.sh`), whose guards read BSD `stat -f`, the three
+      # installer harnesses, and the stall-watchdog harness
+      # (`scripts/ci/watched-test-pass.test.sh`), which drives BSD `ps`,
+      # `script(1)` and `sample`.
       #
       # Nothing here touches the network, a real remote, `~/tbd`, or a real
       # `gh`: each harness builds a fixture repo in a temp dir and puts a stub
@@ -382,7 +407,7 @@ jobs:
       # dies last, why the status file is validated and why status precedes the
       # floor are all in that script's header, with the design in
       # docs/specs/2026-09-04-quiet-pass-stall-watchdog-design.md. Its harness is
-      # `scripts/ci/watched-test-pass.test.sh`, run by the last step in this job.
+      # `scripts/ci/watched-test-pass.test.sh`, run by the `lint` job.
       #
       # ---------------------------------------------------------------------
       # Why the fast pass is THREE steps instead of one
@@ -666,22 +691,6 @@ jobs:
             --floor-message 'the --filter regex matched nothing or the target was renamed.' \
             -- --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel \
                --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure
-
-      # The watchdog's own harness: fixture directories, a stub `scripts/test.sh`
-      # and a stub `sample`, no build, no real store touched, ~90 s — most of it
-      # the 30-second grace window the escalation case exists to measure. It lives in
-      # THIS job rather than joining the Linux collection in `plans-guard`
-      # because everything it drives is BSD — `script(1)` takes different
-      # arguments on Linux, `ps` there is GNU, and `sample` does not exist at
-      # all. That is the same reason the fence harness sits in `lint`, which is
-      # deliberately left alone.
-      #
-      # It runs LAST, and with `!cancelled()` rather than `always()`, so a bug in
-      # the harness can never pre-empt or hide the verdict of the passes above
-      # it: by the time it runs, every test step has already reported.
-      - name: Test the stall watchdog
-        if: ${{ !cancelled() }}
-        run: /bin/bash scripts/ci/watched-test-pass.test.sh
 
       # Every watched pass writes its stall files as `<name>-stall-*.txt`, so one
       # glob collects whichever pass wedged.
