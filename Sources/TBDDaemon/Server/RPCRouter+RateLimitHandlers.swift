@@ -74,6 +74,8 @@ extension RPCRouter {
 
         // §7.2: Gated — attempt automatic rotation if all conditions hold
         var rotationSucceeded = false
+        /// True only when the post-swap `continue` was actually scheduled.
+        var continueArmed = false
         if rotationEnabled, let suggested = suggestedProfileID {
             let eligibility = Self.rotationEligibility(terminal: terminal, flagOn: true, suggested: suggested)
             logger.info("handleRateLimitDetected rotation: \(String(describing: eligibility), privacy: .public)")
@@ -92,14 +94,26 @@ extension RPCRouter {
 
                     if response.success {
                         rotationSucceeded = true
-                        // Schedule a continue at now with limitType "rotation"
+                        // Arm the `continue` at now with limitType "rotation".
+                        // The swap has already happened, so the delta and the
+                        // notification report the new profile either way; what
+                        // they must not do is claim the turn will resume when
+                        // nothing was armed — `schedule` returns nil when a
+                        // pending row already exists (a concurrent duplicate
+                        // report), and there may be no scheduler at all.
+                        var armed = false
                         if let scheduler = limitResumeScheduler {
-                            _ = await scheduler.schedule(
+                            armed = await scheduler.schedule(
                                 terminalID: terminal.id, worktreeID: terminal.worktreeID,
                                 claudeSessionID: terminal.claudeSessionID,
                                 resetsAt: Date(), limitType: "rotation",
                                 rawMessage: params.rawMessage
-                            )
+                            ) != nil
+                        }
+                        continueArmed = armed
+                        if !armed {
+                            let why = limitResumeScheduler == nil ? "no scheduler" : "a resume is already pending"
+                            logger.warning("handleRateLimitDetected: rotated terminal \(terminal.id.uuidString, privacy: .public) but could not arm the continue: \(why, privacy: .public)")
                         }
                     } else {
                         logger.warning("handleRateLimitDetected: swap failed: \(response.error ?? "unknown", privacy: .public)")
@@ -123,6 +137,9 @@ extension RPCRouter {
                 message = "Session limit hit on \(limited) — switched"
             } else {
                 message = "Session limit hit — switched"
+            }
+            if !continueArmed {
+                message.append(" — the turn was not resumed automatically; send a message to continue")
             }
         } else if autoResumeEnabled, let scheduler = limitResumeScheduler {
             guard let scheduled = await scheduler.schedule(
