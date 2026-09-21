@@ -575,6 +575,29 @@ enum ContinueInCodexMenu {
     }
 }
 
+/// Pure policy for the Codex-to-Claude replacement menu. The app uses cached
+/// metadata only to shape the affordance; the daemon repeats every check
+/// before it interrupts the source process.
+enum ContinueInClaudeMenu {
+    static let busyCaption = "Finish the current Codex turn before continuing."
+
+    static func isVisible(for terminal: Terminal?) -> Bool {
+        terminal?.isCodexTerminal == true
+            && terminal?.transport == .tmux
+            && terminal?.transcriptPath?.isEmpty == false
+    }
+
+    /// Only a positively idle cached state enables an account choice. Unknown
+    /// fails closed alongside active and waiting states.
+    static func isEnabled(for terminal: Terminal?) -> Bool {
+        isVisible(for: terminal) && terminal?.activityState == .idle
+    }
+
+    static func caption(for terminal: Terminal?) -> String? {
+        isVisible(for: terminal) && !isEnabled(for: terminal) ? busyCaption : nil
+    }
+}
+
 // MARK: - TabTerminalTarget
 
 /// Pure resolution of the terminal a tab is backed by: the anchor its deep
@@ -901,6 +924,42 @@ private struct TabBarItem: View {
         }
     }
 
+    @ViewBuilder
+    private func continueInClaudeMenuItems() -> some View {
+        let enabled = ContinueInClaudeMenu.isEnabled(for: terminal)
+
+        Button("Default (logged in)") {
+            guard let terminalID = terminal?.id else { return }
+            Task {
+                await appState.continueInClaude(
+                    sourceTerminalID: terminalID,
+                    profileID: nil)
+            }
+        }
+        .disabled(!enabled)
+
+        if !appState.modelProfiles.isEmpty {
+            Divider()
+
+            ForEach(appState.modelProfiles, id: \.profile.id) { entry in
+                Button(formatProfileSubmenuLabel(entry)) {
+                    guard let terminalID = terminal?.id else { return }
+                    Task {
+                        await appState.continueInClaude(
+                            sourceTerminalID: terminalID,
+                            profileID: entry.profile.id)
+                    }
+                }
+                .disabled(!enabled)
+            }
+        }
+
+        if let caption = ContinueInClaudeMenu.caption(for: terminal) {
+            Divider()
+            Text(caption).font(.caption)
+        }
+    }
+
     /// Absolute path on disk for tab content that has a backing file
     /// (codeViewer points at the file directly; liveTranscript points at
     /// the resolved Claude session JSONL via the underlying terminal).
@@ -1014,6 +1073,16 @@ private struct TabBarItem: View {
                 } label: {
                     Label("Cancel Scheduled Resume", systemImage: "clock.badge.xmark")
                 }
+            }
+
+            Divider()
+        }
+
+        if ContinueInClaudeMenu.isVisible(for: terminal) {
+            Menu {
+                continueInClaudeMenuItems()
+            } label: {
+                Label("Continue in Claude", systemImage: "arrow.right.circle")
             }
 
             Divider()

@@ -6,7 +6,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal",
         abstract: "Manage terminals",
-        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self, TerminalContinueInCodex.self, TerminalCompletions.self]
+        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self, TerminalContinueInCodex.self, TerminalContinueInClaude.self, TerminalCompletions.self]
     )
 }
 
@@ -719,6 +719,66 @@ struct TerminalContinueInCodex: AsyncParsableCommand {
             print("  Terminal: \(result.terminalID)")
             print("  Thread:   \(result.threadID)")
         }
+    }
+}
+
+// MARK: - terminal continue-in-claude
+
+struct TerminalContinueInClaude: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "continue-in-claude",
+        abstract: "Replace an idle Codex terminal with Claude in the same tab"
+    )
+
+    @Option(name: .long, help: "Codex terminal ID (UUID)")
+    var terminal: String
+
+    @Option(name: .long, help: "Claude profile name or UUID (defaults to the logged-in account)")
+    var profile: String?
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+
+        let client = SocketClient()
+        var profileID: UUID? = nil
+        var accountLabel = "Default (logged in)"
+        if let profile {
+            let list = try client.call(
+                method: RPCMethod.modelProfileList,
+                resultType: ModelProfileListResult.self
+            )
+            let entry = try resolveProfile(named: profile, in: list.profiles)
+            profileID = entry.profile.id
+            accountLabel = entry.profile.name
+        }
+
+        let updated: Terminal = try client.call(
+            method: RPCMethod.terminalContinueInClaude,
+            params: TerminalContinueInClaudeParams(
+                sourceTerminalID: terminalID,
+                profileID: profileID,
+                cols: nil,
+                rows: nil),
+            resultType: Terminal.self)
+
+        if json {
+            printJSON(updated)
+        } else {
+            print(Self.plainOutput(terminal: updated, accountLabel: accountLabel))
+        }
+    }
+
+    static func plainOutput(terminal: Terminal, accountLabel: String) -> String {
+        """
+        Continued in Claude:
+          Terminal: \(terminal.id)
+          Account:  \(accountLabel)
+        """
     }
 }
 

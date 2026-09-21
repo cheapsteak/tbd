@@ -149,6 +149,31 @@ extension AppState {
         }
     }
 
+    /// Apply an in-place provider replacement without touching the tab or its
+    /// layout. The terminal ID is the tab anchor, so replacing only the cached
+    /// row preserves selection and every split containing that terminal.
+    func applyTerminalReplacedDelta(_ terminal: Terminal) {
+        adoptProviderReplacement(terminal)
+    }
+
+    /// Adopt a provider replacement and clear only the tab's generated Codex
+    /// label. A nil label lets the ordinary Claude/profile label resolver take
+    /// over, while a user-renamed tab survives unchanged.
+    private func adoptProviderReplacement(_ terminal: Terminal) {
+        guard let source = terminals[terminal.worktreeID]?.first(where: {
+            $0.id == terminal.id
+        }) else { return }
+        adoptRecreatedTerminal(terminal)
+
+        guard source.label != terminal.label,
+              let tabIndex = tabs[terminal.worktreeID]?.firstIndex(where: { tab in
+                  let layout = layouts[tab.id] ?? .pane(tab.content)
+                  return layout.allTerminalIDs().contains(terminal.id)
+                      && tab.label == source.label
+              }) else { return }
+        tabs[terminal.worktreeID]?[tabIndex].label = nil
+    }
+
     private func worktreeIDRepresentingTerminal(_ terminalID: UUID) -> UUID? {
         if let worktreeID = terminals.first(where: { _, terminals in
             terminals.contains { $0.id == terminalID }
@@ -813,6 +838,40 @@ extension AppState {
                 "Continue in Codex failed: \(error.localizedDescription, privacy: .public)")
             showAlert(
                 "Couldn't continue in Codex: \(error.localizedDescription)",
+                isError: true)
+            handleConnectionError(error)
+        }
+    }
+
+    /// Replace an idle Codex process with Claude in the same terminal row and
+    /// tmux window. The daemon owns eligibility and rollback; this layer keeps
+    /// the UI on the existing tab and adopts the returned replacement row.
+    func continueInClaude(sourceTerminalID: UUID, profileID: UUID?) async {
+        guard let source = terminals.values
+            .flatMap({ $0 })
+            .first(where: { $0.id == sourceTerminalID }) else {
+            showAlert("Couldn't continue in Claude: source terminal not found.", isError: true)
+            return
+        }
+
+        do {
+            let size = mainAreaTerminalSize()
+            let updated = try await daemonClient.continueInClaude(
+                sourceTerminalID: sourceTerminalID,
+                profileID: profileID,
+                cols: size.cols,
+                rows: size.rows)
+            guard updated.id == source.id,
+                  updated.worktreeID == source.worktreeID,
+                  updated.tmuxWindowID == source.tmuxWindowID else {
+                throw DaemonClientError.invalidResponse
+            }
+            adoptProviderReplacement(updated)
+        } catch {
+            logger.error(
+                "Continue in Claude failed: \(error.localizedDescription, privacy: .public)")
+            showAlert(
+                "Couldn't continue in Claude: \(error.localizedDescription)",
                 isError: true)
             handleConnectionError(error)
         }

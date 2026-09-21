@@ -2462,6 +2462,8 @@ final class AppState {
             applyTerminalSessionDelta(d)
         case .terminalCreated(let d):
             applyTerminalCreatedDelta(d)
+        case .terminalReplaced(let terminal):
+            applyTerminalReplacedDelta(terminal)
         case .terminalRemoved(let d):
             applyTerminalRemovedDelta(d)
         case .terminalActivityUpdated(let d):
