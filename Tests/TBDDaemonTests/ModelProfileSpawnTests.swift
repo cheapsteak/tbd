@@ -598,6 +598,115 @@ struct ModelProfileSpawnTests {
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 
+    // MARK: - Spawn: per-create Codex model override (branch-test rule)
+
+    /// A Codex primary created with `codexModelOverride` launches with
+    /// `-c 'model="<id>"'` between the profile selection and the bypass flag.
+    @Test("spawn: Codex primary with a model override passes -c model=<id>")
+    func codexPrimaryReceivesModelOverride() async throws {
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
+        let priorCodexHome = setCodexTestHome(codexHome.path)
+        defer {
+            restoreCodexTestHome(priorCodexHome)
+            try? FileManager.default.removeItem(at: codexHome)
+        }
+
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.codex)
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: repo, skipClaude: false, preSessionTerminalID: nil,
+            codexModelOverride: "acme-model"
+        )
+
+        #expect(recorder.shellBodies.contains(
+            #"tbd -c 'model="acme-model"' --dangerously-bypass-approvals-and-sandbox"#))
+    }
+
+    /// Without an override the Codex primary command carries no `-c` at all.
+    @Test("spawn: Codex primary without a model override passes no -c")
+    func codexPrimaryWithoutModelOverrideIsUnchanged() async throws {
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
+        let priorCodexHome = setCodexTestHome(codexHome.path)
+        defer {
+            restoreCodexTestHome(priorCodexHome)
+            try? FileManager.default.removeItem(at: codexHome)
+        }
+
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.codex)
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: repo, skipClaude: false, preSessionTerminalID: nil
+        )
+
+        #expect(recorder.shellBodies.contains(
+            " tbd --dangerously-bypass-approvals-and-sandbox"))
+        #expect(!recorder.shellBodies.contains("model="))
+    }
+
+    /// The override is scoped to the Codex arm: a Claude primary ignores it
+    /// rather than treating it as a second agent-selection mechanism.
+    @Test("spawn: Claude primary ignores a Codex model override")
+    func claudePrimaryIgnoresCodexModelOverride() async throws {
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.claude)
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: repo, skipClaude: false, preSessionTerminalID: nil,
+            codexModelOverride: "acme-model"
+        )
+
+        #expect(!recorder.calls.isEmpty)
+        #expect(!recorder.joinedAll.contains("acme-model"))
+    }
+
+    @Test("terminal.create passes a Codex model override to the Codex launch")
+    func terminalCreateCodexModelOverride() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        router.codexExecutableResolver = { "/opt/test/bin/codex" }
+        router.codexHomeEnsurer = {
+            FileManager.default.temporaryDirectory.appendingPathComponent(
+                "tbd-test-codex-home-\(UUID().uuidString)", isDirectory: true)
+        }
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .codex, model: "acme-model")))
+
+        #expect(response.success)
+        #expect(recorder.shellBodies.contains(
+            #"tbd -c 'model="acme-model"' --dangerously-bypass-approvals-and-sandbox"#))
+    }
+
+    @Test("terminal.create refuses a model override for non-Codex terminals",
+          arguments: [TerminalCreateType?.none, .claude, .shell])
+    func terminalCreateRefusesModelForNonCodex(type: TerminalCreateType?) async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: type, model: "acme-model")))
+
+        #expect(!response.success)
+        #expect(response.error == TerminalCreateParams.modelRequiresCodexMessage)
+        #expect(recorder.calls.isEmpty)
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+    }
+
     // MARK: - Spawn: Claude free-form env overrides (branch-test rule)
 
     /// Claude's primary spawn carries the merged free-form env overrides from

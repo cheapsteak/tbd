@@ -137,6 +137,13 @@ extension RPCRouter {
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalCreateParams.self, from: paramsData)
 
+        // A model override is a Codex launch argument. Refuse it for every
+        // other kind rather than silently dropping it: Claude models come from
+        // TBD model profiles, and a shell has no model.
+        if params.model != nil, params.type != .codex {
+            return RPCResponse(error: TerminalCreateParams.modelRequiresCodexMessage)
+        }
+
         // Look up the worktree to get tmux server and path
         guard let worktree = try await db.worktrees.getLocal(id: params.worktreeID) else {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
@@ -295,7 +302,8 @@ extension RPCRouter {
                         workingDirectory: currentWorktree.path,
                         command: CodexSpawnCommandBuilder.build(
                             initialPrompt: params.prompt,
-                            executablePath: codexPreparation.executablePath),
+                            executablePath: codexPreparation.executablePath,
+                            model: params.model),
                         env: codexSpawnEnv,
                         sensitiveEnv: codexEnvOverrides,
                         cols: resolvedCols,

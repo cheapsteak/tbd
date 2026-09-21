@@ -1389,7 +1389,13 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// Optional/defaulted for backward compatibility (old daemons ignore the
     /// unknown key; old clients omit it).
     public let autoArchiveOnMerge: Bool?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil) {
+    /// Codex model for the new worktree's primary terminal when that primary
+    /// resolves to Codex, passed as `-c model=<id>`. Ignored for Claude and
+    /// shell primaries; it never selects the agent kind. Distinct from the
+    /// Claude-only `model`. Not persisted. Optional/defaulted for backward
+    /// compatibility.
+    public let codexModel: String?
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil, codexModel: String? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
@@ -1404,6 +1410,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
         self.prNumber = prNumber
         self.checkoutPRHead = checkoutPRHead
         self.autoArchiveOnMerge = autoArchiveOnMerge
+        self.codexModel = codexModel
     }
 }
 
@@ -2351,12 +2358,24 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// passthrough — TBD does not interpret the contents. Optional/defaulted for
     /// backward compatibility (old daemons ignore the unknown key; old clients omit it).
     public let claudeSettingsOverlay: String?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil) {
+    /// Codex model for this fresh Codex terminal, passed to Codex as
+    /// `-c model=<id>`. An opaque identifier: Codex owns the vocabulary and
+    /// reports unsupported values. Honored only for `type == .codex`; not
+    /// persisted, so a later recreate falls back to the profile's model.
+    /// Optional/defaulted for backward compatibility.
+    public let model: String?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
         self.loginSession = loginSession
         self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
         self.claudeSettingsOverlay = claudeSettingsOverlay
+        self.model = model
     }
+
+    /// Shared by the CLI's argument validation and the daemon's refusal so a
+    /// caller sees the same explanation whichever layer stops it.
+    public static let modelRequiresCodexMessage =
+        "--model requires --type codex: Claude models come from TBD model profiles, and shell terminals have no model."
 }
 
 public struct TerminalContinueInCodexParams: Codable, Sendable {

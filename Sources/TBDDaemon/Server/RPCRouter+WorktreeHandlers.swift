@@ -99,6 +99,8 @@ extension RPCRouter {
         // Per-spawn Claude model override (picker model buttons). Initial
         // spawn only — respawns fall back to the profile default.
         let modelOverride = params.model
+        // Per-spawn Codex model, applied only if the primary resolves to Codex.
+        let codexModelOverride = params.codexModel
         // Explicit primary agent for this creation. nil preserves the global
         // preference resolved by the lifecycle.
         let primaryAgentPreference = params.primaryAgentPreference
@@ -115,7 +117,7 @@ extension RPCRouter {
                 // fetch from phase 1.5, or is a no-op if cached within the 60s TTL.
                 await fetchCache.fetchIfNeeded(repoPath: repoPath, branch: defaultBranch)
 
-                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, modelOverride: modelOverride, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay)
+                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, modelOverride: modelOverride, codexModelOverride: codexModelOverride, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay)
                 switch completion {
                 case .ready:
                     subs.broadcast(delta: .worktreeCreated(WorktreeDelta(

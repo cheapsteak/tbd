@@ -338,6 +338,59 @@ struct CodexSpawnCommandBuilderTests {
         #expect(explicitNil == ordinary)
     }
 
+    @Test("no model override is byte-identical to the existing launch command")
+    func nilModelIsByteIdentical() {
+        let help = "  -p, --profile <CONFIG_PROFILE_V2>"
+        let expected = "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --dangerously-bypass-approvals-and-sandbox 'ship it'"
+        #expect(CodexSpawnCommandBuilder.build(
+            initialPrompt: "ship it", codexHelpOutput: help,
+            executablePath: "/opt/bin/codex") == expected)
+        #expect(CodexSpawnCommandBuilder.build(
+            initialPrompt: "ship it", codexHelpOutput: help,
+            executablePath: "/opt/bin/codex", model: nil) == expected)
+        // An empty identifier is no override, never `-c 'model=""'`.
+        #expect(CodexSpawnCommandBuilder.build(
+            initialPrompt: "ship it", codexHelpOutput: help,
+            executablePath: "/opt/bin/codex", model: "") == expected)
+    }
+
+    @Test("a model override sits between the profile and the bypass flag, before the prompt")
+    func modelOverridePlacement() {
+        #expect(
+            CodexSpawnCommandBuilder.build(
+                initialPrompt: "ship it",
+                codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
+                executablePath: "/opt/bin/codex",
+                model: "acme-model"
+            )
+                == #"unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd -c 'model="acme-model"' --dangerously-bypass-approvals-and-sandbox 'ship it'"#
+        )
+        #expect(
+            CodexSpawnCommandBuilder.build(
+                initialPrompt: nil,
+                codexHelpOutput: "      --profile-v2 <CONFIG_PROFILE_V2>",
+                resumeThreadID: "thread-123",
+                executablePath: "/opt/bin/codex",
+                model: "acme-model"
+            )
+                == #"unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile-v2 tbd -c 'model="acme-model"' --dangerously-bypass-approvals-and-sandbox resume 'thread-123'"#
+        )
+    }
+
+    @Test("a model override is one shell argument holding a TOML string, whatever it contains")
+    func modelOverrideEscaping() {
+        // A single quote must not end the shell argument; a double quote or
+        // backslash must not end the TOML string.
+        #expect(
+            CodexSpawnCommandBuilder.modelOverrideArgument(#"acme's "x"\y"#)
+                == #"'model="acme'\''s \"x\"\\y"'"#
+        )
+        // A numeric-looking identifier stays a string rather than a TOML float.
+        #expect(CodexSpawnCommandBuilder.modelOverrideArgument("1.5") == #"'model="1.5"'"#)
+        #expect(CodexSpawnCommandBuilder.modelOverrideArgument("a\u{1}b") == #"'model="a\u0001b"'"#)
+        #expect(CodexSpawnCommandBuilder.modelOverrideArgument(nil) == nil)
+    }
+
     @Test("command output helper returns stdout and stderr")
     func commandOutputCapturesStdoutAndStderr() {
         let output = CodexSpawnCommandBuilder.commandOutput(
