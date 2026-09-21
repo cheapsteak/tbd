@@ -492,9 +492,12 @@ jobs:
           decision="$(bash scripts/ci/first-party-wipe-needed.sh .build/tbd-first-party-fingerprint || echo wipe)"
           rm -f .build/tbd-first-party-fingerprint
           if [ "$decision" = "skip" ]; then
-            echo "Keeping the restored first-party artifacts: neither library target's sources changed since these artifacts were built (reason above)."
+            echo "Keeping the restored first-party artifacts: nothing either library target is built from changed since these artifacts were built (reason above)."
             exit 0
           fi
+          # Adding a module here means adding its sources — and the sources of
+          # every first-party target it depends on — to `WIPE_PATHS` in the
+          # script above, or its wipe becomes conditional on unrelated files.
           for module in TBDShared TBDDaemonLib; do
             echo "=== $module artifacts before wipe ==="
             ls -la .build/*/debug/"$module".build 2>/dev/null || echo "(absent)"
@@ -891,13 +894,14 @@ jobs:
       # a commit they survive the ephemeral merge commit a `pull_request` run is
       # checked out at.
       #
-      # `if: always()` because a marker's absence and the artifacts' presence
-      # must never come apart for a cache that gets saved — a saved cache whose
-      # marker is missing or stale is one the next run cannot reason about. The
-      # wipe step removed the previous marker when it read it, so a run that
-      # reached a compile and then failed still records what it built; a run
-      # that never got that far recorded nothing and left nothing behind, and
-      # the next run wipes.
+      # `if: always()` so that what `.build/` says about itself never depends on
+      # how the job ended, and the design never depends on knowing when the
+      # cache is saved. The wipe step removed the previous marker when it read
+      # it, so a run that reached a compile and then failed still records what
+      # it built, and a run that never got that far leaves the restored marker
+      # in place — the recording refuses to overwrite one that was never
+      # consumed, because that marker belongs to the restored artifacts rather
+      # than to this run.
       - name: Record the sources these build artifacts came from
         if: always()
         run: bash scripts/ci/first-party-wipe-needed.sh --record .build/tbd-first-party-fingerprint

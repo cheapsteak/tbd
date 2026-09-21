@@ -89,17 +89,32 @@
 # ones.
 set -uo pipefail
 
-# The paths whose CONTENT decides it.
+# The paths whose CONTENT decides it. Keep this list in step with the modules
+# the wipe step removes in `.github/workflows/test.yml`: it must cover their
+# sources AND the sources of every first-party target they depend on, because a
+# library is recompiled when its own files change or when a module it imports
+# is re-emitted — and either way its cached archive is the one that can go
+# stale underneath a fresh `.swiftmodule`.
 #
 # `Sources/TBDDaemon` is not a typo for a third target: it is where the
 # TBDDaemonLib *library* lives (`path: "Sources/TBDDaemon"` in `Package.swift`),
 # the `TBDDaemon` executable target beside it being `main.swift` alone. A list
 # naming a `Sources/TBDDaemonLib` directory would match nothing.
 #
+# `Sources/TBDTerminalSerialization` is TBDDaemonLib's one first-party
+# dependency beyond TBDShared, so a commit touching only that target still
+# recompiles TBDDaemonLib and still needs the wipe.
+#
 # `Package.swift` and `Package.resolved` are here because a manifest or
 # dependency change can move a library's module boundary without touching a
 # single file under `Sources/`.
-WIPE_PATHS=(Sources/TBDShared Sources/TBDDaemon Package.swift Package.resolved)
+WIPE_PATHS=(
+  Sources/TBDShared
+  Sources/TBDDaemon
+  Sources/TBDTerminalSerialization
+  Package.swift
+  Package.resolved
+)
 
 MARKER_HEADER_PREFIX='#'
 

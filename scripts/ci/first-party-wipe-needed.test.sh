@@ -65,9 +65,11 @@ mkrepo() {
   local d; d="$(mktmpd)"
   echo "$d" >> "$FIXTURE_LIST"
   mkdir -p "$d/Sources/TBDShared" "$d/Sources/TBDDaemon/Server" \
-           "$d/Sources/TBDApp" "$d/Tests/TBDDaemonTests"
+           "$d/Sources/TBDTerminalSerialization" "$d/Sources/TBDApp" \
+           "$d/Tests/TBDDaemonTests"
   echo "public struct Shared {}"      > "$d/Sources/TBDShared/Shared.swift"
   echo "struct Router {}"             > "$d/Sources/TBDDaemon/Server/Router.swift"
+  echo "struct Frame {}"              > "$d/Sources/TBDTerminalSerialization/Frame.swift"
   echo "// entry point"               > "$d/Sources/TBDDaemon/main.swift"
   echo "struct App {}"                > "$d/Sources/TBDApp/App.swift"
   echo "import Testing"               > "$d/Tests/TBDDaemonTests/DaemonTests.swift"
@@ -138,12 +140,28 @@ test_header_only_marker_wipes() {
   assert_eq "a marker with no fingerprint lines wipes" "wipe" "$RUN_OUT"
 }
 
-test_garbled_marker_wipes() {
+# One corrupted id inside an otherwise intact fingerprint — every other line
+# still matching, so only the single differing id can decide it.
+test_one_corrupted_id_wipes() {
   local repo; repo="$(mkrepo)"
   record_marker "$repo"
-  echo "Sources/TBDShared 0000000000000000000000000000000000000000" > "$repo/marker"
+  sed 's|^Sources/TBDShared .*|Sources/TBDShared 0000000000000000000000000000000000000000|' \
+    "$repo/marker" > "$repo/marker.tmp"
+  mv "$repo/marker.tmp" "$repo/marker"
   run_decider "$repo"
-  assert_eq "a marker naming an object that is not there wipes" "wipe" "$RUN_OUT"
+  assert_eq "a single differing id wipes" "wipe" "$RUN_OUT"
+  assert_contains "the reason names the one path that differs" "$RUN_ERR" "Sources/TBDShared"
+}
+
+# A marker recorded under a different compared set — what an upgrade across a
+# change to the list looks like from the next run's side.
+test_marker_from_a_different_path_set_wipes() {
+  local repo; repo="$(mkrepo)"
+  record_marker "$repo"
+  grep -v "^Package.resolved" "$repo/marker" > "$repo/marker.tmp"
+  mv "$repo/marker.tmp" "$repo/marker"
+  run_decider "$repo"
+  assert_eq "a marker recorded under a different path set wipes" "wipe" "$RUN_OUT"
 }
 
 # ---------------------------------------------------------------------------
@@ -169,6 +187,17 @@ test_tbddaemonlib_change_wipes() {
   run_decider "$repo"
   assert_eq "a TBDDaemonLib source change wipes" "wipe" "$RUN_OUT"
   assert_contains "the reason names the changed path" "$RUN_ERR" "Sources/TBDDaemon"
+}
+
+# TBDDaemonLib imports TBDTerminalSerialization, so a commit touching only that
+# target still recompiles the library and still needs its archive re-emitted.
+test_first_party_dependency_change_wipes() {
+  local repo; repo="$(mkrepo)"
+  record_marker "$repo"
+  commit_change "$repo" "Sources/TBDTerminalSerialization/Frame.swift"
+  run_decider "$repo"
+  assert_eq "a first-party dependency change wipes" "wipe" "$RUN_OUT"
+  assert_contains "the reason names the dependency" "$RUN_ERR" "Sources/TBDTerminalSerialization"
 }
 
 # A manifest change can move a library's module boundary without touching a
@@ -275,7 +304,7 @@ test_record_writes_every_compared_path() {
   local repo lines; repo="$(mkrepo)"
   record_marker "$repo"
   lines="$(grep -c -v '^#' "$repo/marker" | tr -d ' ')"
-  assert_eq "the marker carries one line per compared path" "4" "$lines"
+  assert_eq "the marker carries one line per compared path" "5" "$lines"
   assert_contains "the marker names TBDDaemonLib's source directory" \
     "$(cat "$repo/marker")" "Sources/TBDDaemon "
 }
