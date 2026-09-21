@@ -91,10 +91,10 @@ struct HolderVerifiedSendTests {
             == Self.expected(body: armed.deliveredPayload, wrapped: true, submit: true))
     }
 
-    /// The off branch of the same conditional: a send from a person's app that
-    /// did not ask for verification arms nothing, even with the flag on and a
-    /// verifier wired. Only the daemon's own rails get the default (below); a
-    /// person or a script keeps opting in per send.
+    /// The off branch of the same conditional: a send that did not ask for
+    /// verification arms nothing, even with the flag on and a verifier wired.
+    /// `--verify` is the only input that arms — every caller opts in per send,
+    /// on this transport as on tmux.
     @Test("a verify-less send to a holder row arms nothing")
     func aVerifylessHolderSendArmsNothing() async throws {
         let writes = HolderVerifyWriteRecorder()
@@ -113,60 +113,12 @@ struct HolderVerifiedSendTests {
         #expect(armings.armings.isEmpty)
     }
 
-    /// **The daemon's own rails arm verification by default — on holder only.**
-    ///
-    /// The rails are the senders whose silence costs hours: nobody is watching
-    /// the screen when a desk nudges an agent at three in the morning, and the
-    /// record is the only witness. So a rail's send to a holder-backed agent
-    /// session is armed without `--verify` whenever the flag is on. A rail
-    /// sending to a **tmux** session keeps today's per-send opt-in: that arm
-    /// already delivers with explicit bracketing and a separate Enter, so it
-    /// lacks the failure shape that motivates the default, and widening the
-    /// soak to both transports at once widens the blast radius of any
-    /// re-delivery bug to the whole fleet. Both halves are stated in
-    /// `docs/specs/2026-09-05-child-as-contract-party-design.md`, "Delivery
-    /// verification on holder sends" → "What changes".
-    ///
-    /// The asymmetry is the property, so both legs are asserted here.
-    @Test("a daemon rail's send is armed by default on holder and not on tmux")
-    func aDaemonRailSendIsArmedByDefaultOnHolderOnly() async throws {
-        let writes = HolderVerifyWriteRecorder()
-        let holder = try await SendHarness.make(
-            transport: .holder, holderDeliveryRecorder: { writes.record($0) })
-        try await holder.db.config.setDeliveryVerification(enabled: true)
-        let holderArmings = ArmingRecorder()
-        holder.router.deliveryVerifier = holderArmings
-        let holderResponse = try await holder.send(
-            TerminalSendParams(terminalID: holder.terminal.id, text: "nudge", submit: true),
-            actor: .daemon(rail: "queued-prompt"))
-
-        let tmux = try await SendHarness.make(transport: .tmux)
-        try await tmux.db.config.setDeliveryVerification(enabled: true)
-        let tmuxArmings = ArmingRecorder()
-        tmux.router.deliveryVerifier = tmuxArmings
-        let tmuxResponse = try await tmux.send(
-            TerminalSendParams(terminalID: tmux.terminal.id, text: "nudge", submit: true),
-            actor: .daemon(rail: "queued-prompt"))
-
-        #expect(holderResponse.success, "error was: \(holderResponse.error ?? "none")")
-        #expect(tmuxResponse.success, "error was: \(tmuxResponse.error ?? "none")")
-        #expect(writes.writes.count == 1)
-        #expect(tmux.tmux.pastedBodies.count == 1)
-        // Armed on holder, on the same composed body an explicit `--verify`
-        // would have armed.
-        #expect(holderArmings.armings.count == 1)
-        let armed = try #require(holderArmings.armings.first)
-        #expect(armed.deliveredPayload.hasSuffix("\nnudge"))
-        #expect(armed.terminalID == holder.terminal.id)
-        // Not armed on tmux: the per-send opt-in stands there.
-        #expect(tmuxArmings.armings.isEmpty)
-    }
-
-    /// **The default does not fire where nothing could be observed, and does not
-    /// refuse there either.** A shell holder row is still served by the oracle
-    /// — bare bytes — so a rail's send to one goes through unarmed rather than
-    /// hitting the "only a Claude session can be observed" refusal, which is
-    /// reachable only from an explicit `--verify`.
+    /// **The unobservable-target refusal is reachable only from an explicit
+    /// `--verify`.** A shell holder row is still served by the oracle — bare
+    /// bytes — so a send that did not ask for an observation goes through
+    /// unarmed rather than hitting the "only a Claude session can be observed"
+    /// refusal. Asserted with a daemon rail as the sender, the caller whose
+    /// silence would cost the most if the gate ever widened to it.
     @Test("a daemon rail's send to a holder shell row proceeds unarmed rather than refusing")
     func aDaemonRailSendToAHolderShellRowIsUnarmed() async throws {
         let writes = HolderVerifyWriteRecorder()
@@ -186,14 +138,14 @@ struct HolderVerifiedSendTests {
         #expect(armings.armings.isEmpty)
     }
 
-    /// **The default never refuses.** Between the flag going on and the daemon
-    /// restarting to wire a verifier, there is a window where the column says
-    /// yes and there is nothing to arm. An explicit `--verify` is refused there
-    /// — the caller asked for evidence and must not be handed a silence that
-    /// reads like confirmation. A rail's ordinary send asked for nothing, so it
-    /// is delivered unarmed instead: a supervision send that failed closed
-    /// because supervision's own witness was not ready is the exact failure
-    /// this design exists to prevent.
+    /// **A send that did not ask for an observation is never refused for one.**
+    /// Between the flag going on and the daemon restarting to wire a verifier,
+    /// there is a window where the column says yes and there is nothing to arm.
+    /// An explicit `--verify` is refused there — the caller asked for evidence
+    /// and must not be handed a silence that reads like confirmation. Every
+    /// other send is delivered: a supervision send that failed closed because
+    /// supervision's own witness was not ready is the exact failure the design
+    /// exists to prevent.
     @Test("a daemon rail's send is delivered unarmed when no verifier is wired")
     func aDaemonRailSendIsNotRefusedWithoutAWiredVerifier() async throws {
         let writes = HolderVerifyWriteRecorder()
@@ -211,12 +163,12 @@ struct HolderVerifiedSendTests {
         #expect(writes.writes.count == 1)
     }
 
-    /// **A send that carries no dispatch envelope is never armed by the
-    /// default.** The observation searches the transcript for this row's
+    /// **The queued prompt's verbatim send arms nothing and carries no
+    /// envelope.** The observation searches the transcript for this row's
     /// dispatch id and for nothing else, so an envelope-suppressed send is one
-    /// it cannot possibly find: arming it would guarantee a not-landed verdict
-    /// at the deadline and spend the single retry re-typing the message into
-    /// the session a second time.
+    /// it could not possibly be observed by — which is why arming a rail is not
+    /// a term in the send path but a question of routing a rail through it with
+    /// an envelope attached.
     ///
     /// Driven through `sendQueuedPromptVerbatim` — the real production caller,
     /// and the only caller of `.suppressed` — rather than through the RPC entry
@@ -241,9 +193,10 @@ struct HolderVerifiedSendTests {
         #expect(armings.armings.isEmpty)
     }
 
-    /// And the flag is still the switch: with `delivery_verification_enabled`
-    /// off — the shipped default — a rail's holder send arms nothing, so the
-    /// default arming has an off branch and it is the shipped one.
+    /// The flag's shipped state, from the other side: with
+    /// `delivery_verification_enabled` off, a send that did not ask for an
+    /// observation is delivered and arms nothing — and the config column is not
+    /// even read, since only `--verify` can reach it.
     @Test("a daemon rail's holder send arms nothing while the flag is off")
     func aDaemonRailSendArmsNothingWithTheFlagOff() async throws {
         let writes = HolderVerifyWriteRecorder()

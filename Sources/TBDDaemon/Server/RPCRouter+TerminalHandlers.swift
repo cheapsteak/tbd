@@ -3494,14 +3494,12 @@ extension RPCRouter {
     /// verify-armed send to an observable agent session is composed here,
     /// delivered by the courier, and armed for observation exactly as the tmux
     /// arm arms it — the observation reads the child's transcript tail, not a
-    /// pane, so it is transport-blind. The daemon's own supervision rails arm
-    /// it by default whenever `delivery_verification_enabled` is on — a
-    /// holder-transport rule the child-as-contract-party design states
-    /// deliberately — and it arms opportunistically, never refusing a rail's
-    /// send for a mechanism the rail did not ask for. The gate near the top of
-    /// this function refuses only an EXPLICIT `--verify` in the three states in
-    /// which no observation could be produced — a target with no transcript,
-    /// the flag off, or no verifier wired — mirroring the tmux arm's gate.
+    /// pane, so it is transport-blind. **`--verify` is the only thing that
+    /// arms an observation**, on this transport as on tmux; nothing about the
+    /// caller arms one on its behalf. The gate near the top of this function
+    /// refuses a `--verify` in the three states in which no observation could
+    /// be produced — a target with no transcript, the flag off, or no verifier
+    /// wired — mirroring the tmux arm's gate.
     /// `--keys` composes through `deliverHolderKeys`, which owns the named-key
     /// → bytes mapping.
     ///
@@ -3579,42 +3577,34 @@ extension RPCRouter {
         // checks apply on the holder arm too, and the gate below mirrors it
         // condition for condition, in the same order and the same words.
         //
-        // What differs is who arms it: an explicit `--verify` from any actor,
-        // or the daemon's own supervision rails by default whenever the flag is
-        // on and the target can be observed. That default is a deliberate
-        // holder-transport rule, not an oversight — the rails are the senders
-        // whose silence costs hours, and the tmux arm keeps its per-send opt-in
-        // because it already delivers with explicit bracketing and a separate
-        // Enter, so it lacks the failure shape that motivates the default. See
-        // `2026-09-05-child-as-contract-party-design.md`, "Delivery
-        // verification on holder sends" → "What changes".
-        // `effectiveVerifyArmed` folds both in, and the arm seam in
-        // `deliverHolderText` reads the same value.
+        // **An explicit `--verify` is the only thing that arms an observation**,
+        // here as on tmux. Arming on the sender's behalf — giving the daemon's
+        // own supervision rails an observation they did not ask for — is a
+        // separate change, and one this transport cannot make on its own: the
+        // rails that would benefit do not pass through this handler at all.
+        // `DeskSessionManager.nudgeDeskSession` and `postShiftWrapUp` reach
+        // tmux directly with no transport branch, `LimitResumeActuator`'s
+        // holder path writes to `HolderInjectionCourier` itself, and
+        // `sendQueuedPromptVerbatim` — the one rail that does route through
+        // here — sends `.suppressed` so the operator's words arrive
+        // byte-identically, and an envelope-less send is one the observation
+        // structurally cannot find (`DeliveryVerifier.envelopeAppears` searches
+        // the transcript for this row's dispatch id and nothing else). Arming
+        // for a rail therefore begins with routing that rail through this
+        // handler with its envelope attached, not with a term here.
         //
-        // **Only an explicit `--verify` can be REFUSED here; the default arms
-        // opportunistically and never refuses.** The three checks below exist
-        // to keep a caller that asked for evidence from being handed a silence
-        // that reads like confirmation — and a rail that did not ask has no
-        // such expectation to protect. So they gate on `payload.isVerifyArmed`,
-        // and the default term carries every precondition itself: a rail's
-        // ordinary send to a shell holder, or during the window between the
-        // flag going on and the daemon restarting to wire a verifier, proceeds
-        // UNARMED rather than failing closed. A supervision send that refuses
-        // because supervision's own witness is not ready is the exact failure
-        // this design exists to prevent.
+        // The three checks below exist to keep a caller that asked for evidence
+        // from being handed a silence that reads like confirmation, so they
+        // gate on `payload.isVerifyArmed` — the only input that arms.
+        // `supportsDeliveryObservation` is one of them: a shell is still SERVED
+        // by the oracle (bare bytes), it just cannot be observed.
         //
-        // `supportsDeliveryObservation` is one of those preconditions: a shell
-        // is still SERVED by the oracle (bare bytes), it just cannot be
-        // observed.
-        //
-        // The config column is read only when the send could arm — an explicit
-        // `--verify`, or a daemon actor — so an ordinary app or CLI send pays
-        // no read, the same economy the tmux gate keeps.
-        let mayArm = payload.isVerifyArmed || actor?.kind == ActuationActor.Kind.daemon
-        let verifyEnabled = mayArm
-            ? ((try? await db.config.get())?.deliveryVerificationEnabled ?? false)
-            : false
         if payload.isVerifyArmed {
+            // The config column is read inside this branch, so a send that did
+            // not ask for an observation pays no read — the same economy the
+            // tmux gate keeps.
+            let verifyEnabled =
+                (try? await db.config.get())?.deliveryVerificationEnabled ?? false
             if !Self.supportsDeliveryObservation(terminal) {
                 let kindName = (terminal.kind ?? .shell).rawValue
                 let message = """
@@ -3711,52 +3701,10 @@ extension RPCRouter {
                     terminalID: terminal.id, cause: "a message in more than one part"))
         }
 
-        // Resolved HERE rather than beside the gate above, so it cannot outlive
-        // the payload shapes it means anything for: a `.keys` payload has
-        // already returned through `deliverHolderKeys`, and a key sequence
-        // reaches no transcript for an observation to read. Every precondition
-        // the daemon default needs is carried in the term itself — see the
-        // gate's comment for why it arms rather than refuses.
-        //
-        // **The envelope is one of those preconditions.** The observation
-        // searches the transcript for this row's dispatch id and for nothing
-        // else (`DeliveryVerifier.envelopeAppears`), so a send that carries no
-        // envelope is one it cannot possibly find: arming that would guarantee
-        // a not-landed verdict at the deadline and spend the single
-        // evidence-bounded retry re-typing the message into the session a
-        // second time. And the queued-prompt rail — the production caller this
-        // default is for — sends `.suppressed` by design, so the operator's own
-        // words arrive byte-identically. It therefore goes unarmed, the same
-        // way a target that cannot be observed does. Spelled exactly as
-        // `deliverHolderText` spells it when it decides whether to compose one.
-        //
-        // An explicit `--verify` keeps its existing meaning on both transports,
-        // suppression included: that combination is the caller's own, it
-        // predates this arm, and changing it is not this change's business.
-        //
-        // **`actor.kind` is a declaration, not an authentication**, and this is
-        // the first place in the tree that branches behavior on it rather than
-        // only labeling a row — so the assumption is stated rather than
-        // enforced. Any process on the daemon socket can call itself `daemon`
-        // (see `ActuationActor`'s own doc: "ambient declaration, never
-        // authentication"), and one that does, on a send whose envelope rides,
-        // reaches this branch. What it gets is bounded to what a rail gets: an
-        // observation it did not ask for, and at most one re-delivery of its
-        // own message. Nothing here refuses, deletes, or redirects on the
-        // strength of the claim, so the fail-open shape is the same as
-        // everywhere else this field is read. The envelope-suppression check
-        // the daemon DOES authenticate is `authenticatesEnvelopeSuppression`,
-        // and it stays the one gate that requires proof.
-        let envelopeWillRide = envelopeEligible && envelope == .attached
-            && Self.carriesDispatchEnvelope(terminal) && !text.isEmpty
-        let effectiveVerifyArmed = payload.isVerifyArmed
-            || (actor?.kind == ActuationActor.Kind.daemon && verifyEnabled
-                && Self.supportsDeliveryObservation(terminal) && deliveryVerifier != nil
-                && envelopeWillRide)
         return await deliverHolderText(
             text, submit: submit, terminal: terminal, actuationID: actuationID,
             actor: actor, envelope: envelope, envelopeEligible: envelopeEligible,
-            verifyArmed: effectiveVerifyArmed, courier: courier)
+            verifyArmed: payload.isVerifyArmed, courier: courier)
     }
 
     /// Deliver one body of text to a holder-backed session: the same envelope
@@ -3770,13 +3718,13 @@ extension RPCRouter {
     /// image part passes `false` so the quoted path it built from is never
     /// prefixed, no matter what those two would otherwise decide.
     ///
-    /// `verifyArmed` is the resolved arming decision from `performHolderSend`'s
-    /// gate — an explicit `--verify` or the daemon rails' default — already
-    /// checked against the three preconditions there. On a successful write it
-    /// hands the composed `body` (envelope and text, before paste-marker
-    /// wrapping) to the verifier, exactly as the tmux arm does. An empty body
-    /// arms nothing: `--text "" --submit` presses Enter and has no delivery to
-    /// observe.
+    /// `verifyArmed` is the caller's explicit `--verify`, already checked
+    /// against the three preconditions in `performHolderSend`'s gate — a send
+    /// that did not ask for an observation never gets one. On a successful
+    /// write it hands the composed `body` (envelope and text, before
+    /// paste-marker wrapping) to the verifier, exactly as the tmux arm does. An
+    /// empty body arms nothing: `--text "" --submit` presses Enter and has no
+    /// delivery to observe.
     private func deliverHolderText(
         _ text: String, submit: Bool, terminal: Terminal, actuationID: String,
         actor: ActuationActor?, envelope: DispatchEnvelopeDisposition,

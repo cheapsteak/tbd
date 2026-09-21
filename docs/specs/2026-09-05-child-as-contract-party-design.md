@@ -43,10 +43,10 @@ each useful alone and complete only together:
   path what modes the child is in — so it closes the read gap and the two
   input gaps (a submitting Enter absorbed by a paste heuristic; named keys
   refused) with one type.
-- **Delivery verification on holder sends**, armed by default for the daemon's
-  own supervision rails. The verifier reads the transcript, not a pane, and is
-  therefore transport-independent by construction; the refusal that keeps it
-  off the holder transport rests on a misdescription of what it reads.
+- **Delivery verification on holder sends**, armed by `--verify` exactly as on
+  tmux. The verifier reads the transcript, not a pane, and is therefore
+  transport-independent by construction; the refusal that keeps it off the
+  holder transport rests on a misdescription of what it reads.
 
 The two halves are the two directions of one claim. The mode oracle makes the
 daemon's *composition* correct for the child it is typing into; verification
@@ -472,20 +472,22 @@ routes the same way every other send does.
   immutable provenance and nothing is overwritten. A reader of the record
   sees two dispatches, each with the modes it was composed against, and the
   observation between them.
-- **The daemon's own rails arm verification by default.** Sends originated by
-  a daemon rail — fleet supervision nudges, queued prompts, the limit-resume
-  actuator — are verify-armed on holder sessions whenever
-  `delivery_verification_enabled` is on, without the caller passing
-  `--verify`. A person or a script keeps opting in per send. The rails are the
-  senders whose silence costs hours: nobody is looking at the screen when a
-  desk nudges an agent at three in the morning, and the record is the only
-  witness.
-- **Default arming is a holder-transport rule.** Rails sending to a tmux
-  session keep today's per-send opt-in. The tmux arm already delivers with
-  explicit bracketing and a separate Enter, so it lacks the failure shape that
-  motivates the default, and widening the soak to both transports at once
-  widens the blast radius of any re-delivery bug to the whole fleet. Extending
-  the default to tmux is cheap to do later on evidence and is not done here.
+- **Verification is armed explicitly, by `--verify`.** A caller that wants an
+  observation asks for one, on the holder transport exactly as on tmux, and a
+  send that did not ask is never refused for a mechanism it did not invoke.
+  The senders whose silence costs hours are the daemon's own rails — nobody is
+  looking at the screen when a desk nudges an agent at three in the morning —
+  but arming on their behalf is not a term the send path can add by itself,
+  because those rails do not pass through it. Fleet-supervision nudges reach
+  tmux directly with no transport branch; the limit-resume actuator's holder
+  path writes to the injection courier itself; and the one rail that does route
+  through the handler, the queued prompt, sends with the dispatch envelope
+  suppressed so the operator's words arrive byte-identically, which leaves an
+  observation nothing to find — `DeliveryVerifier.envelopeAppears` searches the
+  transcript for that row's dispatch id and for nothing else. Covering a rail
+  therefore begins with routing that rail through the send path with its
+  envelope attached. Until that is done, a default keyed on the sender would
+  arm nothing.
 - **Nothing about the ladder changes.** Requested, dispatched, landed
   (`2026-07-26-fleet-supervision-design.md` §12) stays the record's shape; the
   third rung simply becomes reachable on the transport where it is needed
@@ -549,8 +551,8 @@ exists, under a query-time delivery rule that leaves nothing stale.
   is known to stall agents.
 - **Verification on holder sends** rides `delivery_verification_enabled`,
   the existing default-off soak flag for the observation machinery. Lifting
-  the holder refusal adds no reachable behavior while that flag is off, and
-  default arming for daemon rails is gated on it.
+  the holder refusal adds no reachable behavior while that flag is off: a
+  `--verify` on a holder row is gated on it exactly as one on a tmux row is.
 
 ## Testing
 
@@ -574,8 +576,8 @@ exists, under a query-time delivery rule that leaves nothing stale.
 - **Verification on the holder arm.** A verify-armed holder send is armed
   rather than refused; an observation finding the envelope records landed;
   one not finding it records not landed and re-delivers through the courier,
-  not through tmux; a daemon-rail send is armed without `--verify` when the
-  flag is on and not when it is off.
+  not through tmux; a send that did not pass `--verify` arms nothing and is
+  refused for nothing, whatever the sender declares itself to be.
 - **The stale-source policies.** The hibernation check refuses on
   `staleDaemon`; the oracle proceeds, and the actuation row carries
   `modeSource: staleDaemon` with an age, asserted on the row rather than on a
@@ -658,7 +660,7 @@ two entries struck.
 - **Arm verification on every send by default.** A person typing
   `tbd terminal send` at a session they are watching does not need a
   transcript read a minute later, and at-least-once re-delivery is a decision
-  a person should make per send. Rails have no person; they get the default.
+  a person should make per send.
 - **Refuse a send when the oracle cannot answer.** Never mis-pastes, and
   that is its whole case. Its cost is that every supervision send fails
   closed whenever the app naps, wedges or is busy — the moments that
@@ -684,14 +686,13 @@ two entries struck.
 - **Keep the holder `--verify` refusal.** Keeps the record's third rung
   unreachable on the transport that needs it most, on the strength of a
   comment that misdescribes what the verifier reads.
-- **Lift the refusal but leave rails on per-send opt-in.** The rails that
-  stall for hours keep sending unverified unless every rail author remembers
-  a flag; the whole point of the default is that a rail has no person to
-  remember it.
-- **Default arming on tmux sessions too, for symmetry.** The tmux arm lacks
-  the failure shape that motivates the default, and widening a soak to both
-  transports at once doubles the blast radius of any re-delivery bug.
-  Cheap to revisit on evidence.
+- **Arm on the sender's declared identity.** A term that armed whenever
+  `ActuationActor.kind` reads `daemon` would arm nothing, because no rail
+  reaches the send path with an envelope attached for an observation to find —
+  while adding a behavioral branch on a field `ActuationActor` itself documents
+  as "ambient declaration, never authentication". Routing a rail through the
+  send path is the work that makes rail coverage real; a term keyed on a claim
+  only makes it look real.
 - **Ship the holder `write` verb first.** A faster path to the same stall,
   with the composer moved further from the modes it needs and no witness for
   the verb's own soak. See "Sequencing against single-typist".
