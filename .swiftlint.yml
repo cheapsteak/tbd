@@ -331,6 +331,8 @@ custom_rules:
     excluded:
       # Sanctioned scrapers, exempt with refactor-later intent — see CLAUDE.md "No TUI screen-scraping".
       # Drives the interactive `claude /login` TUI; no machine interface exists pre-login.
+      # One classifier serves BOTH transports — a captured tmux pane and the holder's typed
+      # screen — so a login tab on either reads through this file and no second scraper exists.
       - "Sources/TBDDaemon/Claude/LoginSessionCoordinator\\.swift"
       # Typed-but-unsent-input hibernation safety rail; no machine signal for composer state.
       - "Sources/TBDDaemon/Lifecycle/HibernationSafetyChecks\\.swift"
