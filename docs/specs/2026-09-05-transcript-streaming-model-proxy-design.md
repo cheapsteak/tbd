@@ -429,7 +429,11 @@ resolved upstream: the profile's base URL, else an env-override base URL, else
 the public API. The spawn's process environment gains
 `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/r/<token>` and a `NO_PROXY`
 extended with `127.0.0.1,localhost`. `NO_PROXY` travels in `sensitiveEnv`
-alone. The route URL travels **both** in `sensitiveEnv` and as an inline export
+alone. So do `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` and
+`ENABLE_TOOL_SEARCH=true`, because Claude Code treats any host other than
+`api.anthropic.com` as a third-party gateway and would otherwise turn off tool
+search, the model catalog, and the other first-party behaviors
+(`docs/specs/2026-09-21-model-proxy-tool-search-design.md`). The route URL travels **both** in `sensitiveEnv` and as an inline export
 in the command string, from one field so the two cannot disagree, because the
 inline export runs after the shell's rc files: a user whose `.zshrc` sets
 `ANTHROPIC_BASE_URL` would otherwise have it clobber whatever the process
@@ -785,7 +789,10 @@ SSE shape and costs zero tokens.
 - On a proxied holder session, assistant text appears in the pane within the
   foreground poll interval of its generation, rather than at message end.
 - A session behind the proxy is byte-for-byte as correct as one without it:
-  same responses, same retries, same prompt-cache hits.
+  same responses, same retries, same prompt-cache hits, same deferred tools
+  and context window. Remote Control is the one exception: it reads the base
+  URL through a check the first-party override does not reach, so a proxied
+  session does not offer it.
 - With both flags off, on an install with no routed session alive, no code path
   introduced here runs: the supervisor is not started, no proxy is spawned or
   probed, and no spawn is routed.
