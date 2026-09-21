@@ -16,6 +16,27 @@ enum ModelProxyEnv {
     /// The entries a proxied session must never send through an outbound proxy.
     static let loopbackEntries = ["127.0.0.1", "localhost"]
 
+    /// The variables that keep a proxied session first-party, set beside the
+    /// route URL on every routed spawn whose upstream is the public API
+    /// (`docs/specs/2026-09-21-model-proxy-tool-search-design.md`).
+    ///
+    /// Claude Code treats any base URL whose host is not `api.anthropic.com`
+    /// as a third-party gateway and switches off deferred tool loading and the
+    /// model catalog, so a loopback route would otherwise send every tool
+    /// schema in its first request and size its window at 200k. The first
+    /// variable restores everything that host check gates except Remote
+    /// Control. The second keeps tool search on should a future Claude Code
+    /// stop honoring the first, which is the one failure that is catastrophic
+    /// rather than costly.
+    ///
+    /// Process environment only, never inline exports: they are not routing
+    /// keys, and the inline export exists to defend endpoint variables against
+    /// rc files that set them.
+    static let firstPartyEnv: [String: String] = [
+        "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "1",
+        "ENABLE_TOOL_SEARCH": "true",
+    ]
+
     /// `existing` with `127.0.0.1,localhost` appended, without duplicates and
     /// without reordering what was already there.
     ///
@@ -351,6 +372,17 @@ enum ModelProxyRouteAttachment {
         env["ANTHROPIC_BASE_URL"] = baseURL
         env["NO_PROXY"] = ModelProxyEnv.noProxy(
             extending: sensitiveEnv["NO_PROXY"] ?? baseEnvironment["NO_PROXY"])
+        // Only an upstream that would have been first-party unproxied: a
+        // gateway ran third-party without the proxy, and telling Claude Code
+        // otherwise would send it tool-search fields and first-party fetches
+        // the gateway never promised to accept. A repo that sets either
+        // variable deliberately keeps its value: the override is the user's,
+        // and only its absence is ours to fill.
+        if ModelProxyRoute.isFirstPartyUpstream(upstream) {
+            for (key, value) in ModelProxyEnv.firstPartyEnv where sensitiveEnv[key] == nil {
+                env[key] = value
+            }
+        }
         return Outcome(
             sensitiveEnv: env,
             baseURL: baseURL,

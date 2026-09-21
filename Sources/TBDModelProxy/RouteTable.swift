@@ -81,11 +81,18 @@ actor RouteTable {
     /// Tokens whose file has already been reported bad, so a directory that
     /// holds one unreadable file does not log once per `loadAll`.
     private var reportedBad: Set<String> = []
+    /// The once-per-route first-party check. Held here because the table is
+    /// what drops a route, and the probe's latch has to go with it.
+    nonisolated let firstPartyProbe: FirstPartyProbe
 
-    init(routesDir: URL, streamsDir: URL, fileManager: FileManager = .default) {
+    init(
+        routesDir: URL, streamsDir: URL, fileManager: FileManager = .default,
+        firstPartyProbe: FirstPartyProbe = FirstPartyProbe()
+    ) {
         self.routesDir = routesDir
         self.streamsDir = streamsDir
         self.fileManager = fileManager
+        self.firstPartyProbe = firstPartyProbe
     }
 
     var count: Int { routes.count }
@@ -196,13 +203,14 @@ actor RouteTable {
         return String(trimmed)
     }
 
-    /// Drops a route and reclaims the two files it owns.
+    /// Drops a route, reclaims the two files it owns, and forgets its
+    /// first-party latch.
     ///
     /// Unlinking here is the creation-path half of the guarantee; the standing
     /// one is the `OrphanGC` leg the design names, because a proxy that is
     /// killed between the daemon's decision and this call leaves both files
     /// behind and no call site can be made to cover that.
-    func remove(token: String) {
+    func remove(token: String) async {
         guard ModelProxyRoute.isValidToken(token) else { return }
         let route = routes.removeValue(forKey: token)
         liveCount.value = routes.count
@@ -216,6 +224,10 @@ actor RouteTable {
                 at: streamsDir.appendingPathComponent(
                     TBDConstants.streamFileName(terminalID: terminalID)))
         }
+        // Last, after the table has let go of the route: the await suspends
+        // this actor, and a request resolving in between must already find
+        // nothing to forward to.
+        await firstPartyProbe.forget(token: token)
     }
 
     func route(for token: String) -> ModelProxyRoute? {

@@ -492,6 +492,10 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
             allocator: context.channel.allocator)
         let requestHeaders = head.headers.map { ($0.name, $0.value) }
         let method = head.method
+        // Decided here, from the head alone: the probe never sees the body,
+        // and a request it does not apply to never costs an actor hop.
+        let firstParty = FirstPartyProbe.verdict(
+            method: method.rawValue, uri: head.uri, headerNames: requestHeaders.map { $0.0 })
         let routes = self.routes
         let tee = self.tee
         let forwarder = self.forwarder
@@ -503,6 +507,18 @@ private final class ProxyRequestHandler: ChannelInboundHandler, @unchecked Senda
                     on: boxed, status: .notFound,
                     body: ProxyServer.unknownRouteBody, keepAlive: keepAlive)
                 return
+            }
+            if firstParty != .notApplicable,
+                ModelProxyRoute.isFirstPartyUpstream(route.upstream)
+            {
+                // Only a route to the public API: a gateway route is spawned
+                // without the override, so the header's absence there is the
+                // expected state, not a degraded one. One hop onto the probe
+                // and back, which logs rather than waits on anything;
+                // forwarding is neither delayed further nor altered by what
+                // it finds.
+                await routes.firstPartyProbe.examine(
+                    token: target.token, terminalID: route.terminalID, verdict: firstParty)
             }
             guard let url = URL(string: route.upstream + target.suffix) else {
                 ProxyRequestHandler.respondJSON(
