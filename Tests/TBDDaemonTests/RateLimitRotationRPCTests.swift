@@ -320,4 +320,140 @@ import TestSupport
         #expect(notifs.count == 1)
         #expect(notifs[0].message?.contains("Different") == true)
     }
+
+    // MARK: - Seam tests: rotation swap behavior
+
+    @Test func rotationSeamSuccessSchedulesContinueAndBroadcastsDelta() async throws {
+        try await db.config.setLimitRotationEnabled(true)
+        try await db.config.setAutoResumeOnLimitReset(false)
+
+        // Setup: limited and eligible profiles
+        let limitedProfileID = try await makeProfile(name: "Limited", kind: .oauth)
+        let eligibleProfileID = try await makeProfile(name: "Eligible", kind: .oauth)
+        try await makeSnapshot(for: limitedProfileID, percent: 90, organizationID: "org-123")
+        try await makeSnapshot(for: eligibleProfileID, percent: 30, organizationID: "org-456")
+
+        try await setTerminalProfile(limitedProfileID)
+        try await setTerminalSessionID(UUID())
+
+        let source = ProfilePoolCandidateSource(
+            profiles: db.modelProfiles,
+            snapshots: db.oauthUsageSnapshots,
+            terminals: db.terminals,
+            loginIdentity: { _ in nil }
+        )
+        router.profilePoolCandidateSource = source
+
+        // Setup swap seam to return success
+        var receivedParams: TerminalSwapProfileParams? = nil
+        router.rotationSwapPerformer = { paramsData, actor in
+            let decoder = JSONDecoder()
+            receivedParams = try decoder.decode(TerminalSwapProfileParams.self, from: paramsData)
+            return .ok()
+        }
+
+        let response = await detect()
+        #expect(response.success)
+
+        // Verify seam was called with correct params
+        #expect(receivedParams?.terminalID == terminalID)
+        #expect(receivedParams?.newProfileID == eligibleProfileID)
+        #expect(receivedParams?.mode == .inPlace)
+
+        // Check for rotation pending row, no reset-time row
+        let pending = try await db.scheduledResumes.pending(terminalID: terminalID)
+        #expect(pending != nil)
+        #expect(pending?.limitType == "rotation")
+
+        // Check notification says "switched to"
+        let notifs = try await db.notifications.unread(worktreeID: worktreeID)
+        #expect(notifs.count == 1)
+        #expect(notifs[0].message?.contains("switched to") == true)
+        #expect(notifs[0].message?.contains("Eligible") == true)
+    }
+
+    @Test func rotationSeamFailureReturnsAuditRowAndSuggestion() async throws {
+        try await db.config.setLimitRotationEnabled(true)
+        try await db.config.setAutoResumeOnLimitReset(false)
+
+        let limitedProfileID = try await makeProfile(name: "Limited", kind: .oauth)
+        let eligibleProfileID = try await makeProfile(name: "Eligible", kind: .oauth)
+        try await makeSnapshot(for: limitedProfileID, percent: 90, organizationID: "org-123")
+        try await makeSnapshot(for: eligibleProfileID, percent: 30, organizationID: "org-456")
+
+        try await setTerminalProfile(limitedProfileID)
+        try await setTerminalSessionID(UUID())
+
+        let source = ProfilePoolCandidateSource(
+            profiles: db.modelProfiles,
+            snapshots: db.oauthUsageSnapshots,
+            terminals: db.terminals,
+            loginIdentity: { _ in nil }
+        )
+        router.profilePoolCandidateSource = source
+
+        // Setup swap seam to return error
+        router.rotationSwapPerformer = { _, _ in
+            return try RPCResponse(error: "boom")
+        }
+
+        let response = await detect()
+        #expect(response.success)
+
+        // Check no rotation pending row, but audit row present
+        let pending = try await db.scheduledResumes.pending(terminalID: terminalID)
+        #expect(pending == nil)
+
+        let all = try await db.scheduledResumes.all(terminalID: terminalID)
+        #expect(all.count == 1)
+        #expect(all[0].status == .cancelled)
+
+        // Check notification carries suggestion
+        let notifs = try await db.notifications.unread(worktreeID: worktreeID)
+        #expect(notifs.count == 1)
+        #expect(notifs[0].message?.contains("has room") == true)
+        #expect(notifs[0].message?.contains("Eligible") == true)
+    }
+
+    @Test func rotationSeamThrowingFallsThroughToResetTime() async throws {
+        try await db.config.setLimitRotationEnabled(true)
+        try await db.config.setAutoResumeOnLimitReset(false)
+
+        let limitedProfileID = try await makeProfile(name: "Limited", kind: .oauth)
+        let eligibleProfileID = try await makeProfile(name: "Eligible", kind: .oauth)
+        try await makeSnapshot(for: limitedProfileID, percent: 90, organizationID: "org-123")
+        try await makeSnapshot(for: eligibleProfileID, percent: 30, organizationID: "org-456")
+
+        try await setTerminalProfile(limitedProfileID)
+        try await setTerminalSessionID(UUID())
+
+        let source = ProfilePoolCandidateSource(
+            profiles: db.modelProfiles,
+            snapshots: db.oauthUsageSnapshots,
+            terminals: db.terminals,
+            loginIdentity: { _ in nil }
+        )
+        router.profilePoolCandidateSource = source
+
+        // Setup swap seam to throw
+        router.rotationSwapPerformer = { _, _ in
+            throw NSError(domain: "test", code: 1)
+        }
+
+        let response = await detect()
+        #expect(response.success)
+
+        // Check no rotation pending row, but audit row present (reset-time behavior)
+        let pending = try await db.scheduledResumes.pending(terminalID: terminalID)
+        #expect(pending == nil)
+
+        let all = try await db.scheduledResumes.all(terminalID: terminalID)
+        #expect(all.count == 1)
+        #expect(all[0].status == .cancelled)
+
+        // Check notification carries suggestion
+        let notifs = try await db.notifications.unread(worktreeID: worktreeID)
+        #expect(notifs.count == 1)
+        #expect(notifs[0].message?.contains("has room") == true)
+    }
 }
