@@ -198,8 +198,10 @@ struct TranscriptPastedContentTests {
         let blocks = TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: nil, linkResolver: nil)
         #expect(blocks.count == 1)
         let all = allText(blocks)
-        #expect(all.contains("<pasted_content id=\"62f5\">"))
-        #expect(all.contains("</pasted_content id=\"62f5\">"))
+        // Markdown typesets the tags' straight quotes as curly ones, so match up
+        // to the id's opening quote.
+        #expect(all.contains("<pasted_content id="))
+        #expect(all.contains("</pasted_content id="))
         #expect(!all.contains("pasted\n/Users"))
         // And the renderer's own default is off.
         let direct = allText(MarkdownAttributedRenderer.renderBlocks(Self.realShape, linkResolver: nil))
