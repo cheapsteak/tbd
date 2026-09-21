@@ -64,6 +64,13 @@ class TBDTerminalView: TerminalView {
         self.appearanceSettings = appearance
         super.init(frame: frame, font: font)
 
+        // SwiftTerm draws OSC 9;4 progress reports as a bar across the top of
+        // the view. Claude Code emits those while it works, and TBD already
+        // surfaces working state in the sidebar and the tab indicators — with
+        // its own 15-second expiry, the bar is a second, disagreeing answer to
+        // the same question. Off, with no preference: one source of truth.
+        showsProgressBar = false
+
         // Apply current values once so first render uses user settings.
         applyAll()
 

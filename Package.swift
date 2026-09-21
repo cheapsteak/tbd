@@ -45,11 +45,17 @@ let package = Package(
         // the public surface without giving view embedders any public route
         // to the `Terminal` — `TerminalView.withTerminal(_:caller:)`, the
         // self-locking accessor TBD needs for OSC state reads and mouse
-        // encoding, is internal upstream. The pinned revision is upstream
-        // `9c2518e` plus one commit (branch `tbd/public-with-terminal`)
-        // making `withTerminal` public. Once upstream merges an equivalent
-        // accessor, re-pin to upstream and delete the fork; once a tagged
-        // release contains both, switch back to `from:`.
+        // encoding, is internal upstream. The second fork commit adds a
+        // public `showsProgressBar` knob to `TerminalView`: upstream draws
+        // OSC 9;4 progress reports as a bar across the top of the view,
+        // installed unconditionally and routed through a `public` (not
+        // `open`) delegate method, so a subclass cannot suppress it. TBD
+        // already surfaces working state in the sidebar and tab indicators.
+        // The pinned revision is upstream `9c2518e` plus two commits (branch
+        // `tbd/public-with-terminal`): one making `withTerminal` public, one
+        // adding `showsProgressBar`. Once upstream merges equivalents, re-pin
+        // to upstream and delete the fork; once a tagged release contains
+        // them all, switch back to `from:`.
         //
         // A frame loop that does not run on the main thread may never call
         // `viewWillDraw()`, which TBD's terminal diagnostics hook. Diagnostics
@@ -75,7 +81,7 @@ let package = Package(
         // revision reaps its own children, `ChildReaper` becomes a competing
         // waiter on a pid the OS may have recycled, which is worse than the
         // leak it fixes. Its doc comment names the exact lines to re-read.
-        .package(url: "https://github.com/cheapsteak/SwiftTerm", revision: "62d0be6d4c9641a4b27f311c55e1489b024271c3"),
+        .package(url: "https://github.com/cheapsteak/SwiftTerm", revision: "6cfb57278b0bc1906040094576db95e3dbef1be2"),
         .package(url: "https://github.com/raspu/Highlightr", from: "2.2.1"),
         .package(url: "https://github.com/siteline/swiftui-introspect", from: "1.0.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
