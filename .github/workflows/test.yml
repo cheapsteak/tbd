@@ -265,10 +265,9 @@ jobs:
     # watchdog has captured the stacks. A job bound at or below 80 would pre-empt
     # all four and kill the run with the uninformative message those step bounds
     # were written to avoid. 100 clears the step budget with room for checkout,
-    # `brew install tmux`, the cache restore, the watchdog harness and the final
-    # build — none of which is individually timed — while cutting worst-case
-    # occupancy of one of the five macOS slots from six hours to about an hour
-    # and forty minutes.
+    # `brew install tmux`, the cache restore and the final build — none of which
+    # is individually timed — while cutting worst-case occupancy of one of the
+    # five macOS slots from six hours to about an hour and forty minutes.
     timeout-minutes: 100
     # All four test steps below append their `.flaky(issue:)` retry records
     # here (docs/specs/2026-07-24-test-hardening-design.md §7), so one run
