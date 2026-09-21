@@ -68,6 +68,14 @@ before parsing history:
 - **49,152 bytes for history** — user messages, assistant conclusions, and tool-call
   summaries.
 
+The 64 KiB ceiling bounds the handoff's contribution to Claude's first prompt and keeps
+packet construction predictable while retaining room for useful task context. TBD
+reserves one quarter of that budget (16 KiB) for the envelope because provenance, safety
+guidance, and the immutable pointer must not compete with optional transcript history. The
+remaining three quarters (48 KiB) favor the conversation being continued. This fixed split
+makes truncation deterministic and prevents history from crowding out the information
+needed to understand and audit the handoff.
+
 The envelope is mandatory. Source-controlled values such as IDs and paths are capped at
 valid UTF-8 boundaries, and git status yields whole lines until the envelope budget is
 full. If status does not fit, the envelope includes a count and an explicit truncation
@@ -89,10 +97,13 @@ reports omission counts for earlier and middle history, oversized history and JS
 malformed records, and unsupported records. All byte decisions happen after redaction and
 use valid UTF-8 boundaries.
 
-The JSONL scanner reads fixed-size chunks and caps one input record at 1 MiB. It discards
-an oversized or unterminated record without accumulating the rest of that record in
-memory. Thus both packet size and parser working memory remain bounded even when a tool
-result writes a very large line.
+The JSONL scanner reads fixed-size chunks and caps one input record at 1 MiB. At sixteen
+times the total packet budget, this input limit leaves room to parse structured records
+whose JSON overhead or redactable content exceeds what can ultimately be selected, while
+still preventing one bulky record from forcing unbounded buffering. Raising the limit
+would increase worst-case scanner memory without increasing packet capacity; lowering it
+would discard potentially useful records sooner. The scanner discards an oversized or
+unterminated record without accumulating the rest of that record in memory.
 
 ### Envelope
 
@@ -246,7 +257,12 @@ The ordered transition is:
 Readiness uses `SessionStart`, never terminal screen text. The waiter has an injected
 `Clock<Duration>` and a 15-second default deadline. Holding the server lock through
 readiness and finalization serializes the full provider transition against other in-place
-replacement paths.
+replacement paths. Fifteen seconds gives process launch and hook delivery a finite window
+while bounding how long the destructive transaction can hold that lock with the row still
+pending. A shorter deadline leaves less tolerance for launch scheduling; a longer or
+unbounded wait delays rollback and other same-server replacements. Silence never counts
+as readiness: the deadline requires an exact incarnation-keyed `SessionStart`; on timeout,
+the daemon begins rollback instead of adopting the process.
 
 ### Rollback
 
